@@ -15,6 +15,12 @@ struct exec_handoff {
   const char *operation, *kind;
   int value, files_cleanup, attributes_cleanup;
 };
+/* Private version-one probe receipt. A returned POSIX status is distinct from
+ * setup, settlement and ambient errno; refusal never changes the final handoff. */
+struct exec_probe {
+  unsigned version, prepared;
+  int status, files_cleanup, attributes_cleanup;
+};
 static bool exec_handoff_check(struct exec_handoff *handoff, bool ok, const char *operation, const char *kind, int value) {
   if (!ok && !handoff->operation) {
     handoff->operation = operation; handoff->kind = kind; handoff->value = value;
@@ -47,6 +53,22 @@ static void exec_handoff_destroy(struct exec_handoff *handoff) {
     handoff->attributes_owned = false;
     handoff->attributes_cleanup = posix_spawnattr_destroy(&handoff->attributes);
   }
+}
+static struct exec_probe exec_handoff_attempt(struct exec_handoff *probe, const char *image, char **argv, char **environment) {
+  struct exec_probe result = {.version = 1, .status = -1};
+  result.prepared = probe->attributes_owned && probe->files_owned && !probe->operation;
+  if (result.prepared) result.status = posix_spawn(NULL, image, &probe->files, &probe->attributes, argv, environment);
+  /* Success replaces this process while suspended. Neither EOF nor a returned
+   * zero grants refusal authority. Destroy each initialized object once. */
+  exec_handoff_destroy(probe);
+  result.files_cleanup = probe->files_cleanup;
+  result.attributes_cleanup = probe->attributes_cleanup;
+  return result;
+}
+static bool exec_handoff_refused(struct exec_probe result) {
+  return result.version == 1 && result.prepared == 1 &&
+    (result.status == EPERM || result.status == EACCES) &&
+    !result.files_cleanup && !result.attributes_cleanup;
 }
 static bool exec_handoff_byte(struct exec_handoff *handoff, int fd, bool sending, char expected) {
   char byte = expected;

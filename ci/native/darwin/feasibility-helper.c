@@ -581,12 +581,12 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_FEASIBILITY_COMMAND
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-admission") || !strcmp(argv[1], "fault-parent") || !strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
+  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-control-verify") || !strcmp(argv[1], "fault-admission") || !strcmp(argv[1], "fault-parent") || !strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
   /* These execs continue an acquired fault domain; reset globals cannot prove
    * that its original effects never started, even when startup now fails. */
   admitted_effects = (argc >= 2 && !strcmp(argv[1], "fault-custody")) || getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
   if (domain && !strcmp(argv[1], "fault-custody")) {
-    invariant(argc == 10, "fault-start-input"); domain_fault_bootstrap_entry();
+    invariant(argc == 11, "fault-start-input"); domain_fault_bootstrap_entry();
   }
   bool observer = startup_observer_request(argc, argv) || domain;
   if (observer) invariant(getuid() == 0 && geteuid() == 0, "startup-observer-identity");
@@ -606,6 +606,7 @@ int main(int argc, char **argv) {
     invariant(feasibility_sandbox_available(sandbox_binding), "sandbox-binding");
     if (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody")) domain_start(argc, argv);
     else if (!strcmp(argv[1], "fault-parent")) { need(argc == 4 && !strcmp(argv[3], "-")); domain_parent_verify(argv[2]); }
+    else if (!strcmp(argv[1], "fault-control-verify")) { need(argc == 4); domain_control_verify(argv[2], argv[3]); }
     else if (!strcmp(argv[1], "fault-admission")) { need(argc == 4); domain_admission_verify(argv[2], argv[3]); }
     else { need(argc == 4); domain_verify(!strcmp(argv[1], "fault-closed"), argv[2], argv[3]); }
     return 0;

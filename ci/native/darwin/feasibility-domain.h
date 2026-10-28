@@ -45,8 +45,17 @@ struct fault_record {
   unsigned execution, continuation;
   uint64_t deadline;
   char observations[65], cdhash[41], root[4096];
+  /* Version five keeps the complete version-four ABI as a recovery prefix. */
+  _Alignas(uint64_t) unsigned control;
+  unsigned control_retired, probe_consumed;
+  struct identity control_creator, control_target;
+  char control_hash[65], control_cdhash[41], control_observations[65], control_output[65];
+  struct stat control_file, control_parent;
+  struct exec_probe probe;
 };
 static struct fault_record domain_record;
+static unsigned char domain_control_bytes[4096];
+static size_t domain_control_used;
 /* Historical receipts are read using their original ABI, never upgraded in place. */
 struct fault_record_legacy {
   unsigned version, stage, members, emergency;
@@ -59,17 +68,25 @@ struct fault_record_legacy {
 };
 #define DOMAIN_LEGACY_SIZE offsetof(struct fault_record, creator)
 _Static_assert(DOMAIN_LEGACY_SIZE == sizeof(struct fault_record_legacy), "fault recovery ABI");
-static bool domain_legacy;
+#define DOMAIN_V4_SIZE offsetof(struct fault_record, control)
+static bool domain_legacy, domain_historical;
+static size_t domain_record_size(void) { return domain_legacy ? DOMAIN_LEGACY_SIZE : domain_historical ? DOMAIN_V4_SIZE : sizeof(domain_record); }
+
 static unsigned domain_image_phase;
 static struct image_closure domain_inherited, domain_inspected;
-static struct exec_handoff *domain_handoff;
-static char domain_path[4096], domain_helper[4096], domain_policy[4096];
+static struct exec_handoff *domain_handoff, *domain_probe_handoff;
+static char domain_path[4096], domain_helper[4096], domain_policy[4096], domain_control_asset[4096];
 static int domain_root = -1, domain_journal = -1;
 static mach_port_t domain_pin;
 static bool domain_fenced;
 /* Each successful getter acquisition owns one release, including aliases. */
 static mach_port_t domain_bootstrap_local;
 static void domain_port_cleanup(void) {
+  if (domain_probe_handoff) {
+    struct exec_handoff *probe = domain_probe_handoff; domain_probe_handoff = NULL; exec_handoff_destroy(probe);
+    if (probe->files_cleanup) remember_cleanup("fault-image-cleanup", "errno", probe->files_cleanup);
+    if (probe->attributes_cleanup) remember_cleanup("fault-image-cleanup", "errno", probe->attributes_cleanup);
+  }
   if (domain_handoff) {
     struct exec_handoff *handoff = domain_handoff; domain_handoff = NULL;
     exec_handoff_destroy(handoff);
@@ -113,6 +130,10 @@ static pid_t domain_fault_fork(void) {
   return outcome.child;
 }
 static bool domain_stream(const unsigned char *bytes, ssize_t size, const char *stream) {
+  if (domain_record.control && !strcmp(stream, "stdout")) {
+    if (size < 0 || (size_t)size > sizeof(domain_control_bytes) - domain_control_used) return false;
+    memcpy(domain_control_bytes + domain_control_used, bytes, (size_t)size); domain_control_used += (size_t)size;
+  }
   printf("{\"stream\":\"%s\",\"hex\":\"", stream);
   for (ssize_t at = 0; at < size; at++) printf("%02x", bytes[at]); puts("\"}");
   if (!ferror(stdout)) return true;
@@ -252,16 +273,17 @@ static void domain_location(const char *nonce) {
   need(snprintf(domain_path, sizeof(domain_path), "/private/var/run/native-feasibility-%s", nonce) < sizeof(domain_path));
   snprintf(domain_helper, sizeof(domain_helper), "%s/helper", domain_path);
   snprintf(domain_policy, sizeof(domain_policy), "%s/policy", domain_path);
+  snprintf(domain_control_asset, sizeof(domain_control_asset), "%s/exec-control", domain_path);
 }
 static void domain_store(unsigned stage) {
-  need(!domain_legacy && domain_record.version == 4);
+  need(!domain_legacy && domain_record.version == 5);
   domain_record.stage = stage;
   domain_io(pwrite(domain_journal, &domain_record, sizeof(domain_record), 0), sizeof(domain_record), "fault-journal-write");
   posix_check(fsync(domain_journal), "fault-journal-sync");
   posix_check(fsync(domain_root), "fault-root-sync");
 }
 static void domain_emit(void) {
-  char pin[65]; domain_hex(&domain_record, domain_legacy ? DOMAIN_LEGACY_SIZE : sizeof(domain_record), pin);
+  char pin[65]; domain_hex(&domain_record, domain_record_size(), pin);
   printf("{\"candidateSha\":\"%s\",\"caseId\":\"%s\",\"asid\":%u,\"stage\":%u,\"emergency\":%s,\"receiptSha256\":\"%s\",\"intentSha256\":\"%s\",\"helperSha256\":\"%s\",\"policySha256\":\"%s\",\"custodian\":",
     domain_record.candidate, domain_record.case_id, domain_record.asid, domain_record.stage, domain_record.emergency ? "true" : "false", pin, domain_record.intent, domain_record.helper_hash, domain_record.policy_hash);
   emit_identity(domain_record.custodian); fputs(",\"owner\":", stdout); emit_identity(domain_record.owner);
@@ -271,10 +293,16 @@ static void domain_emit(void) {
   printf("],\"creatorReceiptSha256\":\"%s\",\"constructorProgramSha256\":\"%s\",\"constructorCaptureSha256\":\"%s\"",
     creator, domain_record.constructor_program, domain_record.constructor_capture);
   if (!domain_legacy) {
-    printf(",\"version\":4,\"execution\":%u,\"continuation\":%u,\"observationsSha256\":\"%s\",\"imageCdhash\":\"%s\",\"creator\":",
-      domain_record.execution, domain_record.continuation, domain_record.observations, domain_record.cdhash);
+    printf(",\"version\":%u,\"execution\":%u,\"continuation\":%u,\"observationsSha256\":\"%s\",\"imageCdhash\":\"%s\",\"creator\":",
+      domain_record.version, domain_record.execution, domain_record.continuation, domain_record.observations, domain_record.cdhash);
     emit_identity(domain_record.creator); fputs(",\"target\":", stdout);
     if (domain_record.target.token.val[5]) emit_identity(domain_record.target); else fputs("null", stdout);
+  }
+  if (!domain_legacy && !domain_historical) {
+    printf(",\"control\":%s,\"controlRetired\":%s,\"controlSha256\":\"%s\",\"probeConsumed\":%s,\"probeStatus\":%d,\"controlCreator\":", domain_record.control ? "true" : "false", domain_record.control_retired ? "true" : "false", domain_record.control_hash, domain_record.probe_consumed ? "true" : "false", domain_record.probe.status);
+    if (domain_record.control_creator.token.val[5]) emit_identity(domain_record.control_creator); else fputs("null", stdout);
+    fputs(",\"controlTarget\":", stdout); if (domain_record.control_target.token.val[5]) emit_identity(domain_record.control_target); else fputs("null", stdout);
+    printf(",\"controlCdhash\":\"%s\",\"controlObservationsSha256\":\"%s\",\"controlOutputSha256\":\"%s\"", domain_record.control_cdhash, domain_record.control_observations, domain_record.control_output);
   }
   putchar('}');
 }
@@ -294,13 +322,18 @@ static void domain_copy(const char *source, const char *leaf, const char *pin, m
   posix_check(fsync(target), "fault-copy-sync"); posix_check(close(target), "fault-copy-close"); free(bytes);
 }
 static void domain_image(struct identity value) {
-  char image[4096]; need(proc_pidpath(value.token.val[5], image, sizeof(image)) > 0 && !strcmp(image, domain_helper));
-  int fd = openat(domain_root, "helper", O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after, named;
+  char image[4096]; need(proc_pidpath(value.token.val[5], image, sizeof(image)) > 0);
+  bool control = (domain_record.control && domain_record.target.token.val[5] == value.token.val[5]) ||
+    (!domain_legacy && !domain_historical && domain_fenced && !domain_record.target.token.val[5] &&
+      value.token.val[5] == domain_record.creator.token.val[5] && (domain_record.control || domain_record.probe_consumed) && !strcmp(image, domain_control_asset));
+  const char *leaf = control ? "exec-control" : "helper", *expected = control ? domain_control_asset : domain_helper;
+  need(!strcmp(image, expected));
+  int fd = openat(domain_root, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after, named;
   need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && !before.st_uid && !before.st_gid &&
     before.st_nlink == 1 && (before.st_mode & 07777) == 0555 && before.st_size > 0 && before.st_size <= 16777216);
   no_acl(fd, &before); unsigned char *bytes = malloc(before.st_size); need(bytes && pread(fd, bytes, before.st_size, 0) == before.st_size);
   char hash[65]; domain_hex(bytes, before.st_size, hash); free(bytes);
-  need(!strcmp(hash, domain_record.helper_hash) && !fstat(fd, &after) && !fstatat(domain_root, "helper", &named, AT_SYMLINK_NOFOLLOW) &&
+  need(!strcmp(hash, control ? domain_record.control_hash : domain_record.helper_hash) && !fstat(fd, &after) && !fstatat(domain_root, leaf, &named, AT_SYMLINK_NOFOLLOW) &&
     domain_file_same(&before, &after) && domain_file_same(&before, &named) && !close(fd) && audit_identity_same(value, fault_inspect(value.token.val[5])));
 }
 static void domain_policy_check(void) {
@@ -317,6 +350,7 @@ static uint64_t domain_image_now(void) {
   return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 static void domain_creator_check(struct identity creator, au_asid_t parent_asid) {
+  if (!domain_record.control && domain_record.version == 5) need(creator.token.val[6] != domain_record.control_target.token.val[6]);
   invariant(creator.token.val[0] == domain_record.uid && creator.token.val[1] == domain_record.uid &&
     creator.token.val[2] == domain_record.gid && creator.token.val[3] == domain_record.uid &&
     creator.token.val[4] == domain_record.gid && creator.bsd.pbi_svuid == domain_record.uid &&
@@ -325,7 +359,7 @@ static void domain_creator_check(struct identity creator, au_asid_t parent_asid)
     "fault-image-credentials");
 }
 static void domain_image_bound(void) {
-  need(!domain_legacy && domain_record.version == 4 && !domain_fenced && domain_record.stage == 1 &&
+  need(!domain_legacy && domain_record.version == 5 && !domain_fenced && domain_record.stage == 1 &&
     domain_record.deadline && domain_image_now() <= domain_record.deadline);
 }
 static void domain_image_inputs(struct image_closure *value, struct identity expected) {
@@ -355,7 +389,8 @@ static void domain_image_inputs(struct image_closure *value, struct identity exp
   need(audit_identity_same(expected, fault_inspect(expected.token.val[5])));
 }
 static void domain_signature(char hash[41]) {
-  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)domain_helper, strlen(domain_helper), false);
+  const char *path = domain_record.control ? domain_control_asset : domain_helper;
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
   bool ok = url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess && code &&
     SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess &&
@@ -370,6 +405,16 @@ static void domain_signature(char hash[41]) {
   if (info) CFRelease(info); if (code) CFRelease(code); if (url) CFRelease(url);
   invariant(ok, "fault-image-signature");
 }
+static void domain_control_asset_check(void) {
+  struct stat held, parent, named; int fd = openat(domain_root, "exec-control", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  need(fd >= 0 && !fstat(fd, &held) && !fstat(domain_root, &parent) && !fstatat(domain_root, "exec-control", &named, AT_SYMLINK_NOFOLLOW));
+  need(domain_file_same(&held, &domain_record.control_file) && domain_file_same(&held, &named) && same_file_stat(&parent, &domain_record.control_parent));
+  no_acl(fd, &held); no_acl(domain_root, &parent);
+  unsigned char *bytes = malloc(held.st_size); need(bytes && pread(fd, bytes, held.st_size, 0) == held.st_size);
+  char hash[65]; domain_hex(bytes, held.st_size, hash);
+  need(held.st_size >= 32 && ((uint32_t *)bytes)[0] == 0xfeedfacf && ((uint32_t *)bytes)[1] == 0x01000007 && ((uint32_t *)bytes)[3] == 2 && !strcmp(hash, domain_record.control_hash));
+  free(bytes); need(!fstat(fd, &named) && domain_file_same(&held, &named) && !close(fd));
+}
 /* Advisory only: row -1 selects the fork query; errno is an observation, not an interpretation. */
 static void domain_effective_diagnostic(struct identity target, int row, const char *operation, int expected, int actual, int observed_errno) {
   int saved = errno;
@@ -382,15 +427,18 @@ static void domain_effective(struct identity target) {
   char paths[4][4096]; const char *names[] = {"build/helper", "build/argv-fixture", "build/git", "workspace"};
   for (unsigned i = 0; i < 4; i++) need(snprintf(paths[i], sizeof(paths[i]), "%s/%s", domain_record.root, names[i]) < sizeof(paths[i]));
   const char *objects[] = {domain_helper, paths[0], paths[1], paths[2], paths[3], "/usr/lib/libSystem.B.dylib", "/dev/null", "/", domain_policy};
-  const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "file-map-executable", "process-exec"};
-  for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 6; j++) {
-    bool read = i != 8, write = i == 6, executable = i < 4 || i == 5, exec = i < 4;
-    int expected = j == 0 ? !read : j < 4 ? !write : j == 4 ? !executable : !exec;
+  const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "file-map-executable"};
+  need(!domain_record.control && domain_record.control_retired && exec_handoff_refused(domain_record.probe));
+  for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 5; j++) {
+    bool read = i != 8, write = i == 6, executable = i < 4 || i == 5;
+    int expected = j == 0 ? !read : j < 4 ? !write : !executable;
     int actual = feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]);
     int observed_errno = errno;
     if (actual != expected) domain_effective_diagnostic(target, i, operations[j], expected, actual, observed_errno);
     invariant(actual == expected, "fault-image-policy");
   }
+  need(feasibility_sandbox_path(sandbox_binding, target.token.val[5], "file-read-data", domain_control_asset) == 0 &&
+    feasibility_sandbox_path(sandbox_binding, target.token.val[5], "file-map-executable", domain_control_asset) == 0);
   int actual = sandbox_binding.check(target.token.val[5], "process-fork", *sandbox_binding.no_report);
   int observed_errno = errno;
   if (actual != 0) domain_effective_diagnostic(target, -1, "process-fork", 0, actual, observed_errno);
@@ -400,7 +448,7 @@ static void domain_image_observe(bool inheritance) {
   domain_image_bound(); need(domain_record.target.token.val[5]);
   struct identity target = fault_inspect(domain_record.creator.token.val[5]);
   need(exec_handoff_identity(domain_record.creator, target) && audit_identity_same(target, domain_record.target));
-  domain_image(target); domain_policy_check(); char signature[41]; domain_signature(signature);
+  domain_control_asset_check(); domain_image(target); domain_policy_check(); char signature[41]; domain_signature(signature);
   if (*domain_record.cdhash) need(!strcmp(signature, domain_record.cdhash)); else strcpy(domain_record.cdhash, signature);
   struct proc_vnodepathinfo cwd; struct stat root;
   need(!fstat(domain_root, &root) && proc_pidinfo(target.token.val[5], PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd));
@@ -408,8 +456,8 @@ static void domain_image_observe(bool inheritance) {
   struct proc_fdinfo descriptors[4]; int size = proc_pidinfo(target.token.val[5], PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
   need(size == 3 * sizeof(*descriptors)); unsigned mask = 0;
   for (unsigned i = 0; i < 3; i++) { need(descriptors[i].proc_fd >= 0 && descriptors[i].proc_fd <= 2); mask |= 1u << descriptors[i].proc_fd; }
-  need(mask == 7 && feasibility_sandbox_active(sandbox_binding, target.token.val[5]) == 1);
-  domain_effective(target);
+  need(mask == 7 && feasibility_sandbox_active(sandbox_binding, target.token.val[5]) == (domain_record.control ? 0 : 1));
+  if (!domain_record.control) domain_effective(target);
   memset(&domain_inspected, 0, sizeof(domain_inspected)); domain_image_inputs(&domain_inspected, target);
   bool same = !inheritance || (domain_inspected.host == domain_inherited.host && domain_inspected.access == domain_inherited.access &&
     domain_inspected.resource_unsupported == domain_inherited.resource_unsupported);
@@ -420,8 +468,25 @@ static void domain_image_observe(bool inheritance) {
   if (inheritance) domain_image_phase = 3;
 }
 static void domain_known(struct identity value);
+static void domain_probe(void) {
+  domain_image_bound(); need(!domain_record.control && domain_record.control_retired && !domain_record.probe_consumed && domain_image_phase == 1);
+  struct identity creator = fault_inspect(domain_record.creator.token.val[5]); need(audit_identity_same(creator, domain_record.creator));
+  domain_control_asset_check(); domain_policy_check(); need(feasibility_sandbox_active(sandbox_binding, creator.token.val[5]) == 1 &&
+    feasibility_sandbox_path(sandbox_binding, creator.token.val[5], "file-read-data", domain_control_asset) == 0 &&
+    feasibility_sandbox_path(sandbox_binding, creator.token.val[5], "file-map-executable", domain_control_asset) == 0);
+  uint64_t before[8][4], after[8][4]; need(image_descriptors(creator.token.val[5], before));
+  domain_record.probe_consumed = 1; domain_store(1);
+  struct exec_handoff channel = {0}; need(exec_handoff_byte(&channel, domain_pipes[4][1], true, 'T'));
+  domain_io(read(domain_pipes[3][0], &domain_record.probe, sizeof(domain_record.probe)), sizeof(domain_record.probe), "fault-probe-read");
+  need(exec_handoff_refused(domain_record.probe) && exec_handoff_receive(&channel, domain_pipes[3][0], false));
+  need(audit_identity_same(creator, fault_inspect(creator.token.val[5])) &&
+    image_descriptors(creator.token.val[5], after) && !memcmp(before, after, sizeof(before))); domain_image(creator);
+  memset(&domain_inspected, 0, sizeof(domain_inspected)); domain_image_inputs(&domain_inspected, creator);
+  bool same = domain_inspected.host == domain_inherited.host && domain_inspected.access == domain_inherited.access && domain_inspected.resource_unsupported == domain_inherited.resource_unsupported;
+  bool settled = image_closure_release(&domain_inspected); need(same && settled); domain_control_asset_check(); domain_policy_check(); domain_image_bound(); domain_store(1);
+}
 static void domain_image_exec(void) {
-  domain_image_bound(); need(domain_image_phase == 1 && domain_pin != MACH_PORT_NULL);
+  domain_image_bound(); need(domain_image_phase == 1 && domain_pin != MACH_PORT_NULL && (domain_record.control || (domain_record.control_retired && exec_handoff_refused(domain_record.probe))));
   need(audit_identity_same(domain_record.creator, fault_inspect(domain_record.creator.token.val[5])));
   domain_store(1); domain_image_phase = 2; domain_released = true; /* consume before uncertain X */
   int *ready = domain_pipes[3], *release = domain_pipes[4]; struct exec_handoff handoff = {0};
@@ -578,14 +643,14 @@ static void domain_open(const char *nonce, const char *pin) {
   domain_journal = openat(domain_root, "receipt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   posix_check(domain_journal, "fault-journal-open"); posix_check(fstat(domain_journal, &st), "fault-journal-stat");
   domain_shape(S_ISREG(st.st_mode) && !st.st_uid && !st.st_gid &&
-    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && (st.st_size == sizeof(domain_record) || st.st_size == DOMAIN_LEGACY_SIZE), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
-  domain_legacy = st.st_size == DOMAIN_LEGACY_SIZE; memset(&domain_record, 0, sizeof(domain_record));
+    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && (st.st_size == sizeof(domain_record) || st.st_size == DOMAIN_V4_SIZE || st.st_size == DOMAIN_LEGACY_SIZE), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
+  domain_legacy = st.st_size == DOMAIN_LEGACY_SIZE; domain_historical = st.st_size == DOMAIN_V4_SIZE; memset(&domain_record, 0, sizeof(domain_record));
   domain_io(pread(domain_journal, &domain_record, st.st_size, 0), st.st_size, "fault-journal-read");
   struct stat after, named;
   need(!fstat(domain_journal, &after) && !fstatat(domain_root, "receipt", &named, AT_SYMLINK_NOFOLLOW) &&
     domain_file_same(&st, &after) && domain_file_same(&st, &named));
   char hash[65]; domain_hex(&domain_record, st.st_size, hash);
-  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == (domain_legacy ? 3 : 4), "fault-journal-binding");
+  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == (domain_legacy ? 3 : domain_historical ? 4 : 5), "fault-journal-binding");
 }
 static void domain_transfer(void) {
   struct stat inherited, held;
@@ -615,8 +680,15 @@ static void domain_verify(bool closed, const char *nonce, const char *pin) {
   fputs("{\"independent\":true,\"complete\":true,\"held\":", stdout); fputs(closed ? "false" : "true", stdout);
   fputs(",\"verifier\":", stdout); emit_identity(verifier); fputs(",\"record\":", stdout); domain_emit(); puts("}");
 }
+static void domain_control_verify(const char *nonce, const char *pin) {
+  domain_open(nonce, pin); need(domain_record.version == 5 && domain_record.control && domain_record.control_retired && domain_record.stage == 1);
+  struct identity custodian = fault_inspect(domain_record.custodian.token.val[5]); need(audit_identity_same(custodian, domain_record.custodian)); domain_image(custodian);
+  struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); need(!view.nl && !view.nd); domain_control_asset_check(); domain_policy_check();
+  struct identity verifier = fault_inspect(getpid()); need(verifier.token.val[5] != custodian.token.val[5] && verifier.token.val[6] != domain_record.asid);
+  fputs("{\"independent\":true,\"verifier\":", stdout); emit_identity(verifier); fputs(",\"record\":", stdout); domain_emit(); puts("}");
+}
 static void domain_admission_verify(const char *nonce, const char *pin) {
-  domain_open(nonce, pin); need(!domain_legacy && domain_record.version == 4 && domain_record.stage == 1);
+  domain_open(nonce, pin); need(!domain_legacy && domain_record.version == 5 && domain_record.stage == 1);
   struct identity custodian = fault_inspect(domain_record.custodian.token.val[5]);
   need(audit_identity_same(custodian, domain_record.custodian)); domain_image(custodian);
   if (domain_record.target.token.val[5]) domain_image_observe(false);
@@ -676,8 +748,8 @@ static void domain_reexec(char **argv) {
   failure(126);
 }
 static void domain_start(int argc, char **argv) {
-  invariant(argc == 10 && strlen(argv[3]) == 40 && strspn(argv[3], "0123456789abcdef") == 40 &&
-    (!strcmp(argv[4], "cancel") || !strcmp(argv[4], "owner-loss")) && domain_hash(argv[6]) && domain_hash(argv[7]), "fault-start-input");
+  invariant(argc == 11 && strlen(argv[3]) == 40 && strspn(argv[3], "0123456789abcdef") == 40 &&
+    (!strcmp(argv[4], "cancel") || !strcmp(argv[4], "owner-loss")) && domain_hash(argv[6]) && domain_hash(argv[7]) && domain_hash(argv[10]), "fault-start-input");
   uid_t uid = number(argv[8]); gid_t gid = number(argv[9]); invariant(uid > 500 && gid > 0, "fault-start-input");
   char canonical[4096]; struct stat root;
   errno = 0; char *resolved = realpath(argv[2], canonical); int resolve_error = errno;
@@ -688,7 +760,7 @@ static void domain_start(int argc, char **argv) {
   domain_location(argv[5]);
   if (!strcmp(argv[1], "fault-custody")) {
     domain_open(argv[5], NULL);
-    invariant(!domain_legacy && domain_record.version == 4 && !domain_record.stage && !strcmp(domain_record.root, canonical) && !strcmp(domain_record.candidate, argv[3]) && !strcmp(domain_record.case_id, argv[4]) &&
+    invariant(!domain_legacy && domain_record.version == 5 && !domain_record.stage && !strcmp(domain_record.root, canonical) && !strcmp(domain_record.candidate, argv[3]) && !strcmp(domain_record.case_id, argv[4]) &&
       !strcmp(domain_record.helper_hash, argv[6]) && !strcmp(domain_record.policy_hash, argv[7]) && domain_record.uid == 90001 && domain_record.gid == 90002, "fault-reexec-binding");
     domain_transfer();
   } else {
@@ -698,11 +770,13 @@ static void domain_start(int argc, char **argv) {
   domain_initialize(domain_root, true);
   domain_journal = openat(domain_root, "receipt", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); posix_check(domain_journal, "fault-journal-open");
   domain_initialize(domain_journal, false);
-  domain_record.version = 4; domain_record.uid = 90001; domain_record.gid = 90002;
+  domain_record.version = 5; domain_record.uid = 90001; domain_record.gid = 90002;
+  strcpy(domain_record.control_hash, argv[10]);
   domain_record.deadline = domain_image_now() + 12000;
   strcpy(domain_record.root, canonical); strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
   domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   char source[4096]; snprintf(source, sizeof(source), "%s/build/helper", canonical); domain_copy(source, "helper", argv[6], 0555, uid, gid);
+  snprintf(source, sizeof(source), "%s/build/argv-fixture", canonical); domain_copy(source, "exec-control", argv[10], 0555, uid, gid);
   snprintf(source, sizeof(source), "%s/evidence/%s.sb", canonical, argv[4]); domain_copy(source, "policy", argv[7], 0444, uid, gid);
   struct stat held, traversable, journal;
   posix_check(fstat(domain_root, &held), "fault-root-stat");
@@ -713,6 +787,8 @@ static void domain_start(int argc, char **argv) {
   posix_check(fstat(domain_journal, &journal), "fault-journal-stat");
   domain_shape(S_ISREG(journal.st_mode) && !journal.st_uid && !journal.st_gid && journal.st_nlink == 1 &&
     (journal.st_mode & 07777) == 0400 && journal.st_size == sizeof(domain_record), &journal, "fault-journal-shape"); no_acl(domain_journal, &journal);
+  need(!fstatat(domain_root, "exec-control", &domain_record.control_file, AT_SYMLINK_NOFOLLOW) && !fstat(domain_root, &domain_record.control_parent));
+  domain_store(0);
   posix_check(fsync(domain_root), "fault-root-sync");
   posix_check(dup2(domain_journal, 3), "fault-journal-duplicate"); posix_check(fcntl(3, F_SETFD, 0), "fault-journal-flags");
   argv[0] = domain_helper; argv[1] = "fault-custody"; domain_reexec(argv);
@@ -750,6 +826,15 @@ static void domain_start(int argc, char **argv) {
   struct audit_domain_view absent = audit_census(domain_record.uid, 0); invariant(!absent.nl && !absent.nd, "fault-uid-empty");
   domain_controller = getpid();
   invariant(signal(SIGPIPE, SIG_IGN) != SIG_ERR, "fault-signal");
+  unsigned expected_sequence = 0;
+  for (unsigned round = 0; round < 2; round++) {
+  if (round) need(domain_record.control_retired && domain_image_now() <= domain_record.deadline);
+  domain_record.control = round == 0; domain_record.probe_consumed = 0; domain_record.probe = (struct exec_probe){0};
+  domain_record.creator = domain_record.target = domain_record.owner = (struct identity){0};
+  domain_record.members = domain_record.continuation = 0;
+  memset(&domain_inherited, 0, sizeof(domain_inherited)); memset(&domain_inspected, 0, sizeof(domain_inspected)); *domain_record.observations = *domain_record.cdhash = 0;
+  domain_control_used = 0;
+  domain_exit_reported = domain_released = false; domain_image_phase = 0; domain_store(0);
   int *in = domain_pipes[0], *out = domain_pipes[1], *err = domain_pipes[2], *ready = domain_pipes[3], *release = domain_pipes[4];
   posix_check(pipe(in), "fault-pipe"); posix_check(pipe(out), "fault-pipe"); posix_check(pipe(err), "fault-pipe");
   posix_check(pipe(ready), "fault-pipe"); posix_check(pipe(release), "fault-pipe");
@@ -772,23 +857,33 @@ static void domain_start(int argc, char **argv) {
     char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
     posix_check(setenv("NATIVE_FAULT_PARENT_ASID", parent, 1), "fault-environment"); posix_check(unsetenv("NATIVE_STARTUP_CUSTODY"), "fault-environment");
     char *arguments[] = {domain_helper, "fault", NULL}; extern char **environ;
+    char *control_arguments[] = {domain_control_asset, "", "space value", "λ雪", "'\"", "$(false); & | < > *", NULL};
+    posix_check(setenv("NATIVE_OWNERSHIP_CUSTODY", "true", 1), "fault-environment");
+    struct exec_handoff probe = {0};
     struct exec_handoff handoff = {0}; domain_handoff = &handoff; const int descriptors[] = {0, 1, 2};
     if (!exec_handoff_prepare(&handoff, descriptors, 3)) {
       remember("fault-image-prepare", handoff.kind, handoff.value); failure(126);
     }
+    if (!domain_record.control) { domain_probe_handoff = &probe; need(exec_handoff_prepare(&probe, descriptors, 3) && image_spawn_inputs(&probe)); }
     audit_fresh(domain_record.uid);
     struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}, observed;
     posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
     posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");
     gid_t group; invariant(getgroups(1, &group) == 1 && group == domain_record.gid &&
       !getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32, "fault-image-credentials");
-    policy(domain_policy);
-    invariant(feasibility_sandbox_active(sandbox_binding, getpid()) == 1, "fault-image-policy");
+    if (!domain_record.control) policy(domain_policy);
+    invariant(feasibility_sandbox_active(sandbox_binding, getpid()) == (domain_record.control ? 0 : 1), "fault-image-policy");
     mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local);
     struct identity birth = fault_inspect(getpid());
     domain_io(write(3, &birth, sizeof(birth)), sizeof(birth), "fault-birth-write");
-    exec_handoff_execute(&handoff, 4, 3, domain_helper, arguments, environ);
+    if (!domain_record.control) {
+      need(exec_handoff_byte(&handoff, 3, true, 'B') && exec_handoff_byte(&handoff, 4, false, 'T'));
+      struct exec_probe result = exec_handoff_attempt(&probe, domain_control_asset, control_arguments, environ); domain_probe_handoff = NULL;
+      domain_io(write(3, &result, sizeof(result)), sizeof(result), "fault-probe-write"); need(exec_handoff_refused(result));
+    }
+    exec_handoff_execute(&handoff, 4, 3, domain_record.control ? domain_control_asset : domain_helper,
+      domain_record.control ? control_arguments : arguments, environ);
     remember("fault-image-exec", handoff.kind ? handoff.kind : "invariant", handoff.value);
     failure(126);
   }
@@ -802,8 +897,7 @@ static void domain_start(int argc, char **argv) {
   domain_record.execution = 1; domain_known(creator); domain_store(1); domain_pin = audit_hold(domain_record.asid);
   domain_image_inputs(&domain_inherited, creator);
   domain_image_bound(); domain_store(1); domain_image_phase = 1;
-  fputs("{\"creator\":{\"version\":4,\"phase\":1,\"record\":", stdout); domain_emit(); puts("}}"); fflush(stdout);
-  unsigned expected_sequence = 0;
+  fputs("{\"creator\":{\"version\":5,\"phase\":1,\"record\":", stdout); domain_emit(); puts("}}"); fflush(stdout);
   for (;;) {
     struct pollfd streams[] = {{0,POLLIN,0}, {out[0],POLLIN,0}, {err[0],POLLIN,0}};
     bool closing = out[0] < 0 && err[0] < 0 && !domain_exit_reported;
@@ -827,13 +921,30 @@ static void domain_start(int argc, char **argv) {
       domain_output(&out[0], "stdout"); domain_output(&err[0], "stderr"); invariant(domain_exited(), "fault-child-status");
     }
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strcmp(fields[1], "image-exec")) { need(count == 2); domain_image_exec(); domain_emit();
+    if (!strcmp(fields[1], "image-probe")) {
+      need(count == 2); domain_probe(); domain_emit();
+    } else if (!strcmp(fields[1], "control-settle")) {
+      need(count == 2 && domain_record.control && domain_record.continuation == 2 && domain_child < 0 && WIFEXITED(domain_status) && !WEXITSTATUS(domain_status));
+      struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); need(!view.nl && !view.nd);
+      const char expected[] = "{\"phase\":\"armed\"}\n[\"\",\"space value\",\"λ雪\",\"'\\\"\",\"$(false); & | < > *\"]\n";
+      need(domain_control_used == sizeof(expected) - 1 && !memcmp(domain_control_bytes, expected, sizeof(expected) - 1));
+      domain_hex(domain_control_bytes, domain_control_used, domain_record.control_output);
+      strcpy(domain_record.control_cdhash, domain_record.cdhash); strcpy(domain_record.control_observations, domain_record.observations);
+      domain_record.control_creator = domain_record.creator; domain_record.control_target = domain_record.target;
+      domain_record.control_retired = 1; domain_store(1); domain_emit();
+    } else if (!strcmp(fields[1], "control-next")) {
+      need(count == 3 && domain_record.control && domain_record.control_retired); domain_image_readback(fields[2]);
+      struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); need(!view.nl && !view.nd);
+      need(mach_port_deallocate(mach_task_self(), domain_pin) == KERN_SUCCESS); domain_pin = MACH_PORT_NULL;
+      domain_close(&in[1]); domain_close(&out[0]); domain_close(&err[0]);
+      puts("null}"); break;
+    } else if (!strcmp(fields[1], "image-exec")) { need(count == 2); domain_image_exec(); domain_emit();
     } else if (!strcmp(fields[1], "image-read")) { need(count == 2); domain_image_observe(true); domain_emit();
     } else if (!strcmp(fields[1], "image-seal")) {
       need(count == 3 && domain_image_phase == 3 && !domain_fenced && domain_hash(fields[2]) && !domain_record.continuation);
       strcpy(domain_record.observations, fields[2]); domain_record.continuation = 1; domain_store(1); domain_emit();
     } else if (!strcmp(fields[1], "image-continue")) { need(count == 3); domain_image_continue(fields[2]); domain_emit();
-    } else if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
+    } else if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && ((domain_record.control && domain_record.continuation == 2 && *fields[2] == 'A') || (domain_record.stage >= 2 && domain_record.stage < 4))); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
     } else if (!strcmp(fields[1], "identity")) {
       need(count == 4); pid_t pid = number(fields[2]); struct identity value = fault_inspect(pid);
       need(value.bsd.pbi_ppid == number(fields[3]) && (pid == child || value.bsd.pbi_ppid == child) && value.token.val[6] == domain_record.asid &&
@@ -870,5 +981,6 @@ static void domain_start(int argc, char **argv) {
       domain_store(6); need(!fchmod(domain_root,0700) && mach_port_deallocate(mach_task_self(),domain_pin) == KERN_SUCCESS); domain_emit(); puts("}"); return;
     } else need(false);
     puts("}");
+  }
   }
 }

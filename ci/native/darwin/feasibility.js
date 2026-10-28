@@ -49,6 +49,7 @@ import {
   digest,
   normalizeDarwinIdentity,
   sameDarwinIdentity,
+  DARWIN_LITERAL_ARGUMENTS,
 } from "./protocol.js";
 import {
   openDarwinFaultDomain,
@@ -242,12 +243,63 @@ export function darwinFeasibilityIdentityArguments(input) {
 function assertDarwinFaultRetirement(evidence, completeFault = true) {
   const { record, fresh, settled } = evidence;
   if (completeFault) {
+    const control = evidence.controlVerification,
+      verifier = normalizeDarwinIdentity(control?.verifier);
     need(
-      record.version === 4 &&
+      control.independent === true &&
+        control.record.control === true &&
+        control.record.controlRetired === true &&
+        control.record.stage === 1 &&
+        verifier.pid !== record.custodian.pid &&
+        verifier.asid !== record.controlCreator.asid &&
+        ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+          (key) => verifier[key] === 0,
+        ) &&
+        [
+          "candidateSha",
+          "caseId",
+          "helperSha256",
+          "policySha256",
+          "controlSha256",
+          "controlCreator",
+          "controlTarget",
+          "controlCdhash",
+          "controlObservationsSha256",
+          "controlOutputSha256",
+        ].every(
+          (key) =>
+            JSON.stringify(control.record[key]) === JSON.stringify(record[key]),
+        ),
+    );
+    need(
+      record.version === 5 &&
+        record.control === false &&
+        record.controlRetired === true &&
+        record.probeConsumed === true &&
+        [1, 13].includes(record.probeStatus) &&
+        /^[a-f0-9]{64}$/u.test(record.controlSha256) &&
+        /^[a-f0-9]{40}$/u.test(record.controlCdhash) &&
+        /^[a-f0-9]{64}$/u.test(record.controlObservationsSha256) &&
+        record.controlOutputSha256 ===
+          digest(
+            '{"phase":"armed"}\n' +
+              JSON.stringify(DARWIN_LITERAL_ARGUMENTS) +
+              "\n",
+          ) &&
         record.execution === 1 &&
         record.continuation === 2 &&
         /^[a-f0-9]{64}$/u.test(record.observationsSha256) &&
         /^[a-f0-9]{40}$/u.test(record.imageCdhash),
+    );
+    assertDarwinImageTransition(
+      normalizeDarwinIdentity(record.controlCreator),
+      normalizeDarwinIdentity(record.controlTarget),
+    );
+    need(
+      record.controlCreator.asid !== record.creator.asid &&
+        ["auid", "uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+          (key) => record.controlCreator[key] === record.creator[key],
+        ),
     );
     assertDarwinImageTransition(
       normalizeDarwinIdentity(record.creator),
@@ -267,6 +319,16 @@ function assertDarwinFaultRetirement(evidence, completeFault = true) {
       "continuation",
       "observationsSha256",
       "imageCdhash",
+      "control",
+      "controlRetired",
+      "controlSha256",
+      "controlCreator",
+      "controlTarget",
+      "controlCdhash",
+      "controlObservationsSha256",
+      "controlOutputSha256",
+      "probeConsumed",
+      "probeStatus",
     ])
       need(JSON.stringify(settled.record[key]) === JSON.stringify(record[key]));
   }
@@ -2849,20 +2911,23 @@ async function storageEntry(root, components, baseline, substitution) {
 }
 async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
   const nonce = randomBytes(16).toString("hex"),
-    helper = feasibilityDomainPath(nonce) + "/helper";
-  const policyBytes = darwinFeasibilityPolicy(root)
-    .replace(
-      "(allow process-exec ",
-      `(allow process-exec (literal ${JSON.stringify(helper)}) `,
-    )
-    .replace(
-      "(allow file-map-executable ",
-      `(allow file-map-executable (literal ${JSON.stringify(helper)}) `,
-    )
-    .replace(
-      "(allow file-read* ",
-      `(allow file-read* (literal ${JSON.stringify(helper)}) `,
-    );
+    helper = feasibilityDomainPath(nonce) + "/helper",
+    control = feasibilityDomainPath(nonce) + "/exec-control";
+  const policyBytes =
+    darwinFeasibilityPolicy(root)
+      .replace(
+        "(allow process-exec ",
+        `(allow process-exec (literal ${JSON.stringify(helper)}) `,
+      )
+      .replace(
+        "(allow file-map-executable ",
+        `(allow file-map-executable (literal ${JSON.stringify(helper)}) `,
+      )
+      .replace(
+        "(allow file-read* ",
+        `(allow file-read* (literal ${JSON.stringify(helper)}) `,
+      ) +
+    `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(control)}))\n`;
   const policy = path.join(root, "evidence", `${caseId}.sb`);
   await writeFile(policy, policyBytes, {
     flag: "wx",
@@ -2880,6 +2945,11 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
     digest(policyBytes),
     ENV,
     openDarwinFeasibilitySession,
+    {
+      controlHash: components.find(
+        ({ role, name }) => role === "helper" && name === "argv-fixture",
+      )?.sha256,
+    },
   );
   return runDarwinFeasibilityFault(
     root,
@@ -3032,6 +3102,10 @@ export async function runDarwinFeasibilityFault(
           held.asid === custody.owner.asid &&
           held.helperSha256 === helperHash &&
           held.policySha256 === digest(policyBytes) &&
+          held.controlSha256 ===
+            components.find(
+              ({ role, name }) => role === "helper" && name === "argv-fixture",
+            )?.sha256 &&
           sameDarwinIdentity(held.owner, custody.owner) &&
           sameDarwinIdentity(held.descendant, custody.child) &&
           normalizeDarwinIdentity(held.custodian).uid === 0 &&

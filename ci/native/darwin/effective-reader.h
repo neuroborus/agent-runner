@@ -82,18 +82,31 @@ static void effective_authority(pid_t pid, struct entry *entry) {
   need(active == 1); /* Query errors cannot stand in for acknowledged installation. */
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "process-exec"};
   char path_hex[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), path_hex);
-  printf("{\"subject\":"); emit(before); printf(",\"sandboxed\":true,\"path\":\"%s\",\"object\":", path_hex); identity(entry);
+  putchar('{');
+#ifdef NATIVE_CI_EXPERIMENT
+  if (case_mode && experiment_exec) fputs("\"version\":2,", stdout);
+#endif
+  fputs("\"subject\":", stdout); emit(before); printf(",\"sandboxed\":true,\"path\":\"%s\",\"object\":", path_hex); identity(entry);
   stable(entry); char hash[65];
   bool hosted = experiment_installed_path(entry->path) && S_ISREG(entry->stat.st_mode) && strcmp(entry->kind, "authority");
   custody_acl(entry->fd, hash, !hosted);
   printf(",\"aclSha256\":\"%s\",\"decisions\":[", hash);
-  for (unsigned i = 0; i < 5; i++) {
+#ifdef NATIVE_CI_EXPERIMENT
+  unsigned decisions = case_mode && experiment_exec ? 4 : 5;
+#else
+  unsigned decisions = 5;
+#endif
+  for (unsigned i = 0; i < decisions; i++) {
     int result = feasibility_sandbox_path(sandbox_binding, pid, operations[i], entry->path);
     need(result == 0 || result == 1); printf("%s%d", i ? "," : "", result);
   }
   struct identity after = inspect(pid);
   need(!memcmp(&before.token, &after.token, sizeof(before.token)) && before.bsd.pbi_start_tvsec == after.bsd.pbi_start_tvsec && before.bsd.pbi_start_tvusec == after.bsd.pbi_start_tvusec);
-  stable(entry); fputs("]}", stdout);
+  stable(entry); putchar(']');
+#ifdef NATIVE_CI_EXPERIMENT
+  if (case_mode && experiment_exec) { fputs(",\"exec\":", stdout); image_exec_evidence(pid); }
+#endif
+  putchar('}');
 }
 static void effective_socket(pid_t pid, int descriptor) {
   struct identity before = inspect(pid); struct socket_fdinfo socket;

@@ -73,6 +73,8 @@ export function normalizeDarwinAuthorityRead(
   subject,
   held,
   purpose = "reviewed",
+  witness,
+  hostedPurpose = purpose,
 ) {
   observationObject(value, [
     "subject",
@@ -81,6 +83,7 @@ export function normalizeDarwinAuthorityRead(
     "object",
     "aclSha256",
     "decisions",
+    ...(purpose === "experiment" ? ["version", "exec"] : []),
   ]);
   requireDarwin(
     ["reviewed", "experiment"].includes(purpose) &&
@@ -88,7 +91,7 @@ export function normalizeDarwinAuthorityRead(
       /^(?:[a-f0-9]{2}){1,4095}$/u.test(value.path),
   );
   const hosted =
-    purpose === "experiment" &&
+    hostedPurpose === "experiment" &&
     isDarwinInstalledPath(plainText(Buffer.from(value.path, "hex")));
   requireDarwin(
     sameDarwinIdentity(normalizeDarwinIdentity(value.subject), subject) &&
@@ -97,9 +100,61 @@ export function normalizeDarwinAuthorityRead(
       hash(value.aclSha256),
   );
   requireDarwin(
-    observationList(value.decisions, 5).length === 5 &&
+    observationList(value.decisions, 5).length ===
+      (purpose === "experiment" ? 4 : 5) &&
       value.decisions.every((decision) => [0, 1].includes(decision)),
   );
+  if (purpose === "experiment") {
+    const proof = value.exec;
+    observationObject(proof, [
+      "version",
+      "subject",
+      "creator",
+      "target",
+      "controlCreator",
+      "controlTarget",
+      "controlRetired",
+      "parent",
+      "policySha256",
+      "assetSha256",
+      "imageSha256",
+      "inheritance",
+      "status",
+    ]);
+    requireDarwin(
+      value.version === 2 &&
+        witness &&
+        witness.target &&
+        witness.control &&
+        proof.version === 1 &&
+        sameDarwinIdentity(proof.subject, subject) &&
+        sameDarwinIdentity(proof.creator, witness.subject) &&
+        sameDarwinIdentity(proof.target, witness.target) &&
+        sameDarwinIdentity(proof.controlCreator, witness.control.creator) &&
+        sameDarwinIdentity(proof.controlTarget, witness.control.target) &&
+        proof.controlRetired === true &&
+        proof.policySha256 === witness.policySha256 &&
+        proof.assetSha256 === witness.assetSha256 &&
+        [1, 13].includes(proof.status) &&
+        proof.status === witness.status &&
+        hash(proof.policySha256) &&
+        hash(proof.assetSha256) &&
+        hash(proof.imageSha256),
+    );
+    const primary = sameDarwinIdentity(subject, proof.target);
+    requireDarwin(
+      primary
+        ? proof.parent === null &&
+            proof.inheritance === null &&
+            proof.imageSha256 === witness.imageSha256
+        : proof.parent !== null &&
+            sameDarwinIdentity(proof.parent, proof.target) &&
+            proof.inheritance === "posix-spawn-inherit-v1" &&
+            proof.imageSha256 === witness.gitSha256 &&
+            subject.pid !== proof.target.pid &&
+            subject.asid === proof.target.asid,
+    );
+  }
   return structuredClone(value);
 }
 /** Expected ABI digests must come from the admitted template/materializer,

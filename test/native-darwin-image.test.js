@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Script } from "node:vm";
 import { admitDarwinImage } from "../ci/native/darwin/image-admission.js";
+import { DARWIN_LITERAL_ARGUMENTS } from "../ci/native/darwin/protocol.js";
 
 const creator = {
   pid: 123,
@@ -208,7 +209,7 @@ test("creator stderr observations preserve native results, errno and SIGPIPE sta
     }
   }
   const dispatch =
-    /\} else if \(!strcmp\(tokens\[0\], "image-creator"\)\) \{([\s\S]*?)\n    \} else if \(!strcmp\(tokens\[0\], "image-exec"/u.exec(
+    /\} else if \(!strcmp\(tokens\[0\], "image-creator"\)\) \{([\s\S]*?)\n    \} else if \(!strcmp\(tokens\[0\], "image-probe"/u.exec(
       source,
     )[1];
   const events = [],
@@ -366,7 +367,33 @@ function fixture(fault) {
   const reader = {
     imageCreator: async () => {
       events.push("creator");
-      return { version: 2, creator, closed: fault !== "creator-closure" };
+      return {
+        version: 3,
+        control: false,
+        creator,
+        closed: fault !== "creator-closure",
+      };
+    },
+    imageProbe: async () => {
+      events.push("probe");
+      const value = {
+        version: 1,
+        subject: creator,
+        policySha256: "e".repeat(64),
+        assetSha256: executable.sha256,
+        status: 1,
+        prepared: true,
+        filesCleanup: 0,
+        attributesCleanup: 0,
+        read: 0,
+        map: 0,
+        unchanged: true,
+      };
+      if (fault === "query-error") value.status = -1;
+      if (fault === "wrong-policy") value.policySha256 = "0".repeat(64);
+      if (fault === "cleanup") value.filesCleanup = 22;
+      if (fault === "map") value.map = -1;
+      return value;
     },
     imageExec: async () => {
       events.push("exec");
@@ -375,7 +402,8 @@ function fixture(fault) {
       events.push("inspect");
       reads++;
       return {
-        version: 2,
+        version: 3,
+        control: false,
         creator,
         target: fault === "stale" ? creator : target,
         closed: fault !== "closure",
@@ -403,13 +431,40 @@ function fixture(fault) {
       creator,
       helper,
       executable,
+      asset: executable,
+      execControl: {
+        retired: true,
+        outputSha256: hash(JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n"),
+        image: {
+          version: 3,
+          control: true,
+          execControl: null,
+          probe: null,
+          witness: {
+            version: 3,
+            control: true,
+            creator: { ...creator, pid: 122, asid: 3 },
+            target: { ...target, pid: 122, asid: 3 },
+            closed: true,
+            stopped: true,
+            imageSha256: executable.sha256,
+            cdhash: executable.cdhash,
+            policySha256: "e".repeat(64),
+          },
+          creator: { ...creator, pid: 122, asid: 3 },
+          target: { ...target, pid: 122, asid: 3 },
+          execution: "possible",
+          continuation: "possible",
+          observationsSha256: hash("control"),
+        },
+      },
       policySha256: "e".repeat(64),
       now: () => clock,
       guard() {},
       next: async () => {
         events.push("replacement");
         return {
-          version: 2,
+          version: 3,
           phase: "image",
           helper,
           controls: true,
@@ -449,6 +504,11 @@ test("ordinary stopped-image admission persists original ownership, repeats poli
     "creator",
     "publish",
     "readback",
+    "publish",
+    "readback",
+    "probe",
+    "publish",
+    "readback",
     "exec",
     "replacement",
     "publish",
@@ -479,6 +539,10 @@ test("missing closure, substituted provenance, stale epochs, drift and receipt f
     "readback",
     "drift",
     "expired",
+    "query-error",
+    "wrong-policy",
+    "cleanup",
+    "map",
   ]) {
     const f = fixture(fault);
     await assert.rejects(f.run(), undefined, fault);
@@ -607,6 +671,9 @@ test("native one-shot exec consumes authority before an uncertain write and refu
     const writes = [],
       api = {
         image_phase: 1,
+        image_control: false,
+        image_probed: true,
+        image_control_retired: true,
         case_fenced: false,
         image_creator: { token: { val: [0, 0, 0, 0, 0, creator.pid] } },
         operation_mode: false,
@@ -993,6 +1060,7 @@ test("JavaScript admission refusals settle held native references before fenced 
           file_pid: 0,
           case_socket_count: 0,
           count: 0,
+          CASE_BASE_COUNT: 13,
           operation_mode: false,
           n: 2,
           reservation_guard() {},
@@ -1401,6 +1469,10 @@ test("native sanitation preserves the paired resource selector rule without any 
     .replaceAll("&handoff.attributes", "handoff.attributes")
     .replaceAll("&previous", "{set value(v){previous=v}}")
     .replace(/\b(?:bool|unsigned|mach_port_t|kern_return_t) /gu, "let ");
+  const spawn = /static bool image_spawn_inputs[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replaceAll("->", ".")
+    .replaceAll("&handoff.attributes", "handoff.attributes");
   for (const [get, set, accepted] of [
     [0, 0, true],
     [4, 4, true],
@@ -1470,6 +1542,9 @@ test("native sanitation preserves the paired resource selector rule without any 
       domain_bootstrap_check: check,
       image_closure_require: (_, ok) => assert.ok(ok),
     };
+    api.image_spawn_inputs = new Script(
+      `(handoff) => {${spawn}}`,
+    ).runInNewContext(api);
     if (accepted) new Script(body).runInNewContext(api);
     else assert.throws(() => new Script(body).runInNewContext(api));
     assert.deepEqual(setters, [1, 2, 3]);
@@ -1819,4 +1894,187 @@ test("native control inspection binds the audit epoch before thread access and s
     } else if (fault) assert.deepEqual(releases, [99, 55]);
     else assert.deepEqual(value.copies, [99, 55]);
   }
+});
+
+test("native descriptor snapshots distinguish object substitution from unchanged descriptor numbers", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/image-closure.h", import.meta.url),
+    "utf8",
+  );
+  const body = /static bool image_descriptors[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("struct proc_fdinfo fds[8];", "let fds = [];")
+    .replaceAll(/\b(?:int|unsigned) /gu, "let ")
+    .replaceAll("(unsigned)", "")
+    .replaceAll("sizeof(fds)", "8")
+    .replaceAll("sizeof(*fds)", "1")
+    .replaceAll(
+      /struct (?:pipe_fdinfo|socket_fdinfo|vnode_fdinfowithpath) value = \{0\};/gu,
+      "let value = {};",
+    )
+    .replaceAll("sizeof(value)", "1")
+    .replaceAll("&value", "value")
+    .replaceAll("sizeof(uint64_t)", "1");
+  const read = (fault) => {
+    const state = Array.from({ length: 8 }, () => Array(4).fill(0));
+    const api = {
+      pid: 42,
+      state,
+      PROX_FDTYPE_PIPE: 1,
+      PROX_FDTYPE_SOCKET: 2,
+      PROX_FDTYPE_VNODE: 3,
+      PROC_PIDLISTFDS: 1,
+      PROC_PIDFDPIPEINFO: 2,
+      PROC_PIDFDSOCKETINFO: 3,
+      PROC_PIDFDVNODEPATHINFO: 4,
+      memset() {},
+      proc_pidinfo(_pid, _op, _arg, fds) {
+        fds.push(
+          { proc_fd: 0, proc_fdtype: 1 },
+          { proc_fd: 1, proc_fdtype: 2 },
+          {
+            proc_fd: fault === "duplicate" ? 1 : 2,
+            proc_fdtype: fault === "unknown" ? 4 : 3,
+          },
+        );
+        return fault === "full" ? 8 : 3;
+      },
+      proc_pidfdinfo(_pid, fd, _op, value) {
+        Object.assign(value, {
+          pfi: { fi_openflags: fault === "flags" ? 3 : 1 },
+          pipeinfo: {
+            pipe_handle: fault === "pipe" ? 22 : 11,
+            pipe_peerhandle: 12,
+          },
+          psi: { soi_so: fault === "socket" ? 22 : 11 },
+          pvip: {
+            vip_vi: {
+              vi_stat: { vst_dev: 1, vst_ino: fault === "vnode" ? 22 : 11 },
+            },
+          },
+        });
+        return fault === "query" && fd === 1 ? 0 : 1;
+      },
+    };
+    return {
+      valid: new Script(`(() => {${body}})()`).runInNewContext(api),
+      state,
+    };
+  };
+  const original = read(null);
+  assert.equal(original.valid, true);
+  for (const fault of ["duplicate", "unknown", "full", "query"])
+    assert.equal(read(fault).valid, false, fault);
+  for (const fault of ["flags", "pipe", "socket", "vnode"]) {
+    const changed = read(fault);
+    assert.equal(changed.valid, true);
+    assert.notDeepEqual(changed.state, original.state, fault);
+  }
+});
+
+test("native exec probes preserve the final handoff and settle separate spawn objects using direct POSIX status", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/exec-handoff.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(`static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`, "u")
+      .exec(source)[1]
+      .replaceAll("->", ".")
+      .replaceAll("&probe.files", "probe.files")
+      .replaceAll("&probe.attributes", "probe.attributes")
+      .replaceAll("&handoff.files", "handoff.files")
+      .replaceAll("&handoff.attributes", "handoff.attributes")
+      .replace(
+        "struct exec_probe result = {.version = 1, .status = -1};",
+        "let result = {version:1,status:-1};",
+      )
+      .replaceAll(/\b(?:int|char|ssize_t) /gu, "let ")
+      .replaceAll("*gate", "gate.value")
+      .replaceAll(
+        "&byte",
+        "{get value(){return byte},set value(value){byte=value}}",
+      );
+  for (const status of [1, 13, 0, -1, 2, 8, 95])
+    for (const cleanup of [0, 22])
+      for (const prepared of [true, false]) {
+        const events = [],
+          final = { operation: null },
+          probe = {
+            attributes_owned: prepared,
+            files_owned: true,
+            operation: null,
+            files: "probe-files",
+            attributes: "probe-attributes",
+          };
+        const api = {
+          probe,
+          final,
+          image: "/sealed/control",
+          argv: ["/sealed/control"],
+          environment: [],
+          NULL: null,
+          EPERM: 1,
+          EACCES: 13,
+          errno: 13,
+          posix_spawn(_pid, image, files, attributes) {
+            events.push("attempt");
+            assert.equal(files, "probe-files");
+            assert.equal(attributes, "probe-attributes");
+            return status;
+          },
+          posix_spawn_file_actions_destroy(value) {
+            events.push("files");
+            assert.equal(value, "probe-files");
+            return cleanup;
+          },
+          posix_spawnattr_destroy(value) {
+            events.push("attributes");
+            assert.equal(value, "probe-attributes");
+            return 0;
+          },
+          write(fd, byte) {
+            assert.equal(fd, 9);
+            assert.equal(byte.value, "X");
+            events.push("X");
+            return 1;
+          },
+          close(fd) {
+            assert.equal(fd, 9);
+            events.push("close");
+            return 0;
+          },
+        };
+        const run =
+          new Script(`function exec_handoff_destroy(handoff) {${body("exec_handoff_destroy")}}
+      function exec_handoff_attempt(probe, image, argv, environment) {${body("exec_handoff_attempt")}}
+      function exec_handoff_refused(result) {${body("exec_handoff_refused")}}
+      const result = exec_handoff_attempt(probe, image, argv, environment);
+      const refused = exec_handoff_refused(result); exec_handoff_destroy(probe); ({result, refused});`);
+        const value = run.runInNewContext(api);
+        assert.equal(value.result.status, prepared ? status : -1);
+        assert.equal(
+          value.refused,
+          prepared && [1, 13].includes(status) && cleanup === 0,
+        );
+        assert.deepEqual(
+          events,
+          prepared ? ["attempt", "files", "attributes"] : ["files"],
+        );
+        assert.equal(final.operation, null);
+        assert.equal(probe.files_owned || probe.attributes_owned, false);
+        if (value.refused) {
+          const gate = { value: 9 };
+          const release =
+            new Script(`function exec_handoff_check(handoff,ok,operation,kind,value) {${body("exec_handoff_check")}}
+        function exec_handoff_byte(handoff,fd,sending,expected) {${body("exec_handoff_byte")}}
+        function exec_handoff_close(handoff,fd) {${body("exec_handoff_close")}}
+        (handoff,gate) => {${body("exec_handoff_release")}};`).runInNewContext(
+              api,
+            );
+          assert.equal(release(final, gate), true);
+          assert.equal(gate.value, -1);
+          assert.deepEqual(events.slice(-2), ["X", "close"]);
+        }
+      }
 });

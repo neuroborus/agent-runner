@@ -285,6 +285,14 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         "probe-created",
         "probe-retired",
         "open",
+        ...(declared.bindings.execControl
+          ? [
+              "exec-control-asset",
+              "image-probe",
+              "image-control-next",
+              "case-session-retired",
+            ]
+          : []),
         "reserve",
         "case-directory",
         "case-copy",
@@ -305,7 +313,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
               "case-start",
               ...(declared.custody.purpose === "experiment"
                 ? [
+                    "exec-control-asset",
                     "image-creator",
+                    "image-probe",
+                    "image-control-next",
                     "image-exec",
                     "image-read",
                     "image-continue",
@@ -491,7 +502,9 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
       await native.fenceOwnership();
       const rejoined = new Set();
       for (const { request } of objects.filter(({ request }) =>
-        [0, 1, 4, 5].includes(request.index),
+        [0, 1, 4, 5, ...(declared.bindings.execControl ? [12] : [])].includes(
+          request.index,
+        ),
       )) {
         requireObservation(
           same(await native.rejoinCaseObject(request.index), request.object),
@@ -638,8 +651,12 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             domains.push(identity);
         const heldImages = imageCustodies.filter((value) => value.held);
         requireObservation(heldImages.length <= 1);
-        if (heldImages.length) {
-          const session = heldImages[0],
+        if (
+          heldImages.length ||
+          (declared.bindings.execControl &&
+            imageCustodies.some((value) => value.closed))
+        ) {
+          const session = heldImages[0] ?? { asid: 0 },
             now = state.now ?? (() => performance.now()),
             deadline = now() + 30000,
             bounded = () =>
@@ -670,7 +687,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             observationDigest(declared.custody.context).slice(0, 32),
           );
           recoveryReserved = true;
-          for (let pass = 0; pass < 32; pass++) {
+          for (let pass = 0; session.asid && pass < 32; pass++) {
             bounded();
             const members = assessDarwinEnumeration(
               await native.ownershipMembers(session.asid),
@@ -694,7 +711,9 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             verified.enumeration,
             declared.bindings.input.request,
             session.asid,
-            known.filter((value) => value.asid === session.asid),
+            session.asid
+              ? known.filter((value) => value.asid === session.asid)
+              : [],
           );
           requireObservation(
             !verified.enumeration.live.length &&
@@ -808,7 +827,9 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           );
         requireObservation(
           (access || latest) &&
-            (access || (snapshots.length === 1 && objects.length === 7)),
+            (access ||
+              (snapshots.length === 1 &&
+                objects.length === (declared.bindings.execControl ? 8 : 7))),
         );
         const history = [];
         for (const { record } of possible) {
@@ -1011,7 +1032,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           state,
           declared.bindings,
           binding,
-          rawPlan.slice(0, 12),
+          rawPlan.slice(0, declared.bindings.execControl ? 13 : 12),
           declared.id,
         );
         requireObservation(
@@ -1030,7 +1051,13 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         );
         const copied = new Set(objects.map(({ request }) => request.index));
         for (let i = 7; i < rawPlan.length; i++)
-          if (i !== 10 && i !== 11 && !copied.has(i)) await native.open(i);
+          if (
+            i !== 10 &&
+            i !== 11 &&
+            !(i === 12 && declared.bindings.execControl) &&
+            !copied.has(i)
+          )
+            await native.open(i);
         const input = structuredClone(declared.bindings.input);
         if (declared.id.startsWith("files.")) {
           input.base = (
@@ -1073,7 +1100,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           state,
           declared.bindings,
           binding,
-          rawPlan.slice(0, 12),
+          rawPlan.slice(0, declared.bindings.execControl ? 13 : 12),
           { recovery: true },
         );
         const entriesOf = (list) =>
@@ -1083,7 +1110,12 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         );
         const copied = new Set(objects.map(({ request }) => request.index));
         for (let i = 7; i < rawPlan.length; i++)
-          if (i !== 10 && i !== 11 && !copied.has(i)) {
+          if (
+            i !== 10 &&
+            i !== 11 &&
+            !(i === 12 && declared.bindings.execControl) &&
+            !copied.has(i)
+          ) {
             if (rawPlan[i].path === declared.bindings.input.pointer) {
               if (custody.some((record) => record.phase === "access-provision"))
                 await native.rejoinCaseObject(i);
@@ -1168,7 +1200,9 @@ async function recoverDarwinAccess(
       specification.pf[
         binding.purpose === "experiment" ? "bindings" : "approval"
       ],
-    plan = buildDarwinPolicy(current.input),
+    plan = buildDarwinPolicy(current.input, {
+      execWitnessVersion: current.declared.bindings.execControl ? 1 : 0,
+    }),
     { request } = plan.value,
     history = recovered.history,
     owner = createDarwinCaseEffects(state, current, save, {

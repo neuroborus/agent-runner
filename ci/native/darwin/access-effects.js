@@ -69,9 +69,17 @@ export async function darwinAccessPreparation(
   { recovery = false } = {},
 ) {
   const key = binding.purpose === "experiment" ? "binding" : "approval";
+  const execWitnessVersion =
+    binding.purpose === "experiment" && setup.execControl ? 1 : 0;
+  requireObservation(
+    base.length === 12 + execWitnessVersion &&
+      (binding.purpose !== "experiment" ||
+        recovery ||
+        execWitnessVersion === 1),
+  );
   observationObject(setup.access, [key]);
   observationObject(setup.access[key], ["path", "sha256"]);
-  const plan = buildDarwinPolicy(setup.input),
+  const plan = buildDarwinPolicy(setup.input, { execWitnessVersion }),
     bytes = await state.read(setup.access[key].path, setup.access[key].sha256),
     value = JSON.parse(bytes);
   requireObservation(
@@ -154,7 +162,7 @@ export async function darwinAccessPreparation(
     return entries[index];
   };
   if (value.purpose === "experiment" && value.schemaVersion === 2) {
-    assertDarwinMachRecord(value);
+    assertDarwinMachRecord(value, undefined, base.length);
   }
   observationObject(value.pf.tool, ["index", "cdhash"]);
   observationObject(value.audit.helper, ["index", "cdhash"]);
@@ -191,7 +199,7 @@ export async function darwinAccessPreparation(
     at(object.index);
     requireObservation(
       Array.isArray(object.decisions) &&
-        object.decisions.length === 5 &&
+        object.decisions.length === (execWitnessVersion === 1 ? 4 : 5) &&
         object.decisions.every((decision) => [0, 1].includes(decision)) &&
         (hash(object.aclSha256) ||
           (binding.purpose === "experiment" && object.aclSha256 === null)),

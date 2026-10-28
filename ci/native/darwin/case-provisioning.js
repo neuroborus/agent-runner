@@ -107,6 +107,9 @@ export function darwinExperimentCaseDeclarations(
       "gid",
       "input",
       "assets",
+      ...(!recovery || Object.hasOwn(setup, "execControl")
+        ? ["execControl"]
+        : []),
       ...(recipe.id.startsWith("access.") ? ["access"] : []),
       ...(["files", "release"].includes(recipe.group) ||
       recipe.id.startsWith("git.")
@@ -142,8 +145,9 @@ export function darwinExperimentCaseDeclarations(
   const policyBindings = cases.map((declared) => {
     const setup = declared.bindings,
       request = setup.input.request ?? setup.input,
+      policyVersion = { execWitnessVersion: setup.execControl ? 1 : 0 },
       access = declared.id.startsWith("access.")
-        ? buildDarwinPolicy(setup.input)
+        ? buildDarwinPolicy(setup.input, policyVersion)
         : null,
       args = declared.id.startsWith("ownership.")
         ? darwinOwnershipArguments(declared.id, request)
@@ -170,7 +174,7 @@ export function darwinExperimentCaseDeclarations(
                   authority: { uid: 0, gid: 0, sandboxed: false },
                   profiles:
                     declared.id === "git.ordinary"
-                      ? darwinGitPolicies(setup.input).map(
+                      ? darwinGitPolicies(setup.input, policyVersion).map(
                           ({ profile, bytes }) => ({
                             profile,
                             seatbeltSha256: digest(bytes),
@@ -185,7 +189,9 @@ export function darwinExperimentCaseDeclarations(
                   }
                 : {
                     kind: "darwin-ownership",
-                    seatbeltSha256: digest(darwinOwnershipPolicy(request)),
+                    seatbeltSha256: digest(
+                      darwinOwnershipPolicy(request, policyVersion),
+                    ),
                     processLimit: 32,
                   },
       },
@@ -472,6 +478,7 @@ export function createDarwinCaseProvisioning(state, options) {
         "gid",
         "input",
         "assets",
+        ...(binding.purpose === "experiment" ? ["execControl"] : []),
         ...(Object.hasOwn(setup, "access") ? ["access"] : []),
         ...(Object.hasOwn(setup, "operations") ? ["operations"] : []),
       ]);
@@ -567,6 +574,19 @@ export function createDarwinCaseProvisioning(state, options) {
         },
         { kind: "directory", path: state.output, sha256: null },
       );
+      if (binding.purpose === "experiment") {
+        observationObject(setup.execControl, ["path", "sha256", "cdhash"]);
+        requireObservation(
+          setup.execControl.path === path.join(state.output, "argv-fixture") &&
+            hash(setup.execControl.sha256) &&
+            /^[a-f0-9]{40}$/u.test(setup.execControl.cdhash),
+        );
+        entries.push({
+          kind: "image",
+          path: request.storage + "/exec-control",
+          sha256: setup.execControl.sha256,
+        });
+      }
       const access = setup.access
         ? await darwinAccessPreparation(state, setup, binding, entries)
         : null;
@@ -583,6 +603,7 @@ export function createDarwinCaseProvisioning(state, options) {
       if (access) entries.push(...access.entries.slice(entries.length));
       if (operations) entries.push(...operations.entries.slice(entries.length));
       const planBytes = encodeDarwinCustodyPlan({
+        ...(binding.purpose === "experiment" ? { execWitnessVersion: 1 } : {}),
         ...purposeData(binding),
         candidateSha: state.job.candidateSha,
         uid: setup.uid,
@@ -633,6 +654,7 @@ export function createDarwinCaseProvisioning(state, options) {
       const reader = state.createReader(declared.custody, {
         ...options.readerOptions,
         entries,
+        ...(binding.purpose === "experiment" ? { execWitnessVersion: 1 } : {}),
         caseContextSha256: observationDigest(binding.context),
         persist: (record) => persist({ phase: "custody", record }),
       });
@@ -689,6 +711,8 @@ export function createDarwinCaseProvisioning(state, options) {
                     ? 0o400
                     : 0o550),
         );
+      if (experiment)
+        await reader.provisionExecControl(setup.execControl.cdhash);
       const values = {
         ...provisionalValues,
         "launch.request.uid": actual.uid,
@@ -702,7 +726,7 @@ export function createDarwinCaseProvisioning(state, options) {
       });
       if (operations) {
         for (const [i, asset] of operations.assets.entries()) {
-          const index = i + 12;
+          const index = i + (binding.purpose === "experiment" ? 13 : 12);
           if (asset.source !== null)
             await reader.copyCaseAsset(index, asset.source);
           else if (
@@ -754,7 +778,7 @@ export function createDarwinCaseProvisioning(state, options) {
       });
       if (access) {
         for (const [i, asset] of access.assets.entries()) {
-          const index = i + 12;
+          const index = i + (binding.purpose === "experiment" ? 13 : 12);
           if (asset.source !== null)
             await reader.copyCaseAsset(index, asset.source);
           else if (
@@ -774,7 +798,9 @@ export function createDarwinCaseProvisioning(state, options) {
             (asset.path.startsWith(input.metadata + "/") ||
               asset.path.includes("/storage/control/"))
           )
-            await reader.closeHeld(i + 12);
+            await reader.closeHeld(
+              i + (binding.purpose === "experiment" ? 13 : 12),
+            );
       }
       return {
         ...(operations ? { operations } : {}),

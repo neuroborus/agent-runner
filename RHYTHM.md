@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-28 — Bind Darwin exec refusal to actual controlled attempts
+
+Experimental custody now requires a sealed unchanged argv control, actual
+same-credential outside-policy execution and independent control retirement before
+the primary domain. A separate direct-status SETEXEC probe preserves the final X
+handoff, with checked spawn settlement and unchanged creator/image/input custody.
+Versioned receipts join refusal and admitted payload to the installed policy;
+ordinary Git retains actual child-image/file reads and direct-parent inheritance
+proof. Four experimental file decisions stay separate from exec evidence, while
+the fault matrix retains all 45 file/map comparisons, fork and control read/map
+checks. Missing proof fences admission; unexpected replacement stays suspended
+for owned recovery, and historical records grant recovery authority only. Portable
+regressions establish implementation behavior, not native acceptance or a repair
+for independent Darwin host-loss/Windows failures. All original controls remain.
+
 ## 2026-10-27 — Bind both Darwin faults to stopped replacement images
 
 Cancellation and owner-loss now install the final policy during trusted setup and

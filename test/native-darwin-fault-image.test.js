@@ -7,6 +7,7 @@ import test from "node:test";
 import { Script } from "node:vm";
 import { openDarwinFaultDomain } from "../ci/native/darwin/feasibility-domain.js";
 import { openDarwinFeasibilitySession } from "../ci/native/darwin/feasibility.js";
+import { DARWIN_LITERAL_ARGUMENTS } from "../ci/native/darwin/protocol.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const candidate = "a".repeat(40),
@@ -26,6 +27,7 @@ const creator = {
   startMicroseconds: 1,
 };
 const target = { ...creator, pidVersion: 7 };
+const controlCreator = { ...creator, pid: 41, asid: 54 };
 const custodian = {
   ...creator,
   pid: 9000,
@@ -61,7 +63,7 @@ function fixture(caseId, fault) {
   let record = {
     candidateSha: candidate,
     caseId,
-    asid: creator.asid,
+    asid: controlCreator.asid,
     stage: 0,
     emergency: false,
     receiptSha256: pin,
@@ -69,14 +71,24 @@ function fixture(caseId, fault) {
     helperSha256: pin,
     policySha256: pin,
     custodian,
-    owner: creator,
+    owner: controlCreator,
     descendant: {},
-    members: [creator],
+    members: [controlCreator],
     creatorReceiptSha256: "",
     constructorProgramSha256: "",
     constructorCaptureSha256: "",
-    version: 4,
-    creator,
+    version: 5,
+    control: true,
+    controlRetired: false,
+    controlSha256: pin,
+    probeConsumed: false,
+    probeStatus: 0,
+    controlCreator: null,
+    controlTarget: null,
+    controlCdhash: "",
+    controlObservationsSha256: "",
+    controlOutputSha256: "",
+    creator: controlCreator,
     target: null,
     execution: 1,
     continuation: 0,
@@ -109,16 +121,62 @@ function fixture(caseId, fault) {
         "stderr",
         "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\n",
       );
-      send({ creator: { version: 4, phase: 1, record: refresh() } });
+      send({ creator: { version: 5, phase: 1, record: refresh() } });
       return;
     }
     const [sequence, operation, ...args] = text.trim().split(" ");
     events.push(operation);
     let value;
-    if (operation === "image-exec") {
-      record.target = { ...target };
-      if (fault === "epoch") record.target.pidVersion = creator.pidVersion;
-      if (fault === "birth") record.target.startMicroseconds++;
+    if (operation === "image-probe") {
+      record.probeConsumed = true;
+      record.probeStatus = fault === "probe-query-error" ? -1 : 1;
+      if (fault === "control-identity-substitution") {
+        record.controlCreator = {
+          ...record.controlCreator,
+          pid: record.controlCreator.pid + 1,
+        };
+        record.controlTarget = {
+          ...record.controlTarget,
+          pid: record.controlTarget.pid + 1,
+        };
+      }
+      if (fault === "control-signature-substitution")
+        record.controlCdhash = "d".repeat(40);
+      if (fault === "control-observations-substitution")
+        record.controlObservationsSha256 = "d".repeat(64);
+      if (fault === "control-output-substitution")
+        record.controlOutputSha256 = "d".repeat(64);
+      value = refresh();
+    } else if (operation === "payload" && record.control) {
+      stream(
+        "stdout",
+        JSON.stringify(
+          fault === "control-output" ? [] : DARWIN_LITERAL_ARGUMENTS,
+        ) + "\n",
+      );
+      send({ exit: { code: 0, signal: 0 } });
+      value = null;
+    } else if (operation === "control-settle") {
+      record.controlRetired = true;
+      record.controlCreator = record.creator;
+      record.controlTarget = record.target;
+      record.controlCdhash = record.imageCdhash;
+      record.controlObservationsSha256 = record.observationsSha256;
+      record.controlOutputSha256 = hash(
+        '{"phase":"armed"}\n' + JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n",
+      );
+      value = refresh();
+    } else if (operation === "control-next") {
+      value = null;
+    } else if (operation === "image-exec") {
+      record.target = {
+        ...record.creator,
+        pidVersion: record.creator.pidVersion + 1,
+      };
+      if (!record.control && fault === "epoch")
+        record.target.pidVersion = creator.pidVersion;
+      if (!record.control && fault === "birth")
+        record.target.startMicroseconds++;
       record.owner = record.target;
       record.imageCdhash = "c".repeat(40);
       record.members.push(record.target);
@@ -126,21 +184,22 @@ function fixture(caseId, fault) {
     } else if (operation === "image-read") {
       inspected++;
       value = structuredClone(record);
-      if (fault === "drift" && inspected === 2)
+      if (!record.control && fault === "drift" && inspected === 2)
         value.imageCdhash = "d".repeat(40);
     } else if (operation === "image-seal") {
       record.continuation = 1;
       record.observationsSha256 = args[0];
-      if (fault === "seal-substitution") record.imageCdhash = "d".repeat(40);
+      if (!record.control && fault === "seal-substitution")
+        record.imageCdhash = "d".repeat(40);
       value = refresh();
-      if (fault === "expired") clock = 12001;
+      if (!record.control && fault === "expired") clock = 12001;
     } else if (operation === "image-continue") {
       assert.equal(args[0], record.receiptSha256);
       record.continuation = 2;
-      if (fault === "continue-substitution")
+      if (!record.control && fault === "continue-substitution")
         record.imageCdhash = "d".repeat(40);
       value = refresh();
-      if (fault === "uncertain") {
+      if (!record.control && fault === "uncertain") {
         child.stdout.emit("error", new Error("Uncertain continuation"));
         return;
       }
@@ -161,12 +220,37 @@ function fixture(caseId, fault) {
       child.emit("close", 78, null);
       return;
     } else value = null;
-    if (fault === "persistence" && operation === "image-seal" && !failed) {
+    if (
+      !record.control &&
+      fault === "persistence" &&
+      operation === "image-seal" &&
+      !failed
+    ) {
       failed = true;
       child.stdout.emit("error", new Error("Receipt publication failed"));
       return;
     }
     send({ sequence: Number(sequence), value });
+    if (operation === "image-continue" && record.control)
+      stream("stdout", '{"phase":"armed"}\n');
+    if (operation === "control-next") {
+      record = {
+        ...record,
+        asid: creator.asid,
+        control: false,
+        creator,
+        target: null,
+        owner: creator,
+        members: [creator],
+        continuation: 0,
+        observationsSha256: "",
+        imageCdhash: "",
+        probeConsumed: false,
+        probeStatus: 0,
+      };
+      inspected = 0;
+      send({ creator: { version: 5, phase: 1, record: refresh() } });
+    }
     // Reply delivery and process exit are distinct events.
     if (operation === "close") setImmediate(close);
   });
@@ -187,6 +271,7 @@ function fixture(caseId, fault) {
         return { failure: () => null, closeInput() {}, finish: async () => {} };
       },
       {
+        controlHash: pin,
         uid: 501,
         gid: 20,
         now: () => clock,
@@ -200,14 +285,28 @@ function fixture(caseId, fault) {
         execute: async (_file, args) => {
           if (args.includes("fault-parent"))
             return { stdout: JSON.stringify({ parent: custodian }) };
+          if (args.includes("fault-control-verify")) {
+            events.push("verify-control");
+            return {
+              stdout: JSON.stringify({
+                independent: fault !== "control-retirement",
+                verifier: { ...custodian, pid: 9050 },
+                record,
+              }),
+            };
+          }
           if (args.includes("fault-admission")) {
             events.push("readback");
             const value = structuredClone(record);
-            if (["readback", "verifier"].includes(fault) && record.target)
+            if (
+              !record.control &&
+              ["readback", "verifier"].includes(fault) &&
+              record.target
+            )
               value.policySha256 = "f".repeat(64);
             return {
               stdout: JSON.stringify({
-                independent: fault !== "independent",
+                independent: record.control || fault !== "independent",
                 record: value,
               }),
             };
@@ -257,7 +356,7 @@ test("both Darwin faults read back stopped-image evidence before exactly one con
       const domain = await f.open();
       assert.deepEqual(domain.initial.creator, creator);
       assert.deepEqual(domain.initial.target, target);
-      assert.equal(domain.imageEvidence.version, 4);
+      assert.equal(domain.imageEvidence.version, 5);
       assert.deepEqual(f.events.slice(0, 9), [
         "readback",
         "image-exec",
@@ -269,14 +368,17 @@ test("both Darwin faults read back stopped-image evidence before exactly one con
         "readback",
         "image-continue",
       ]);
+      assert.ok(
+        f.events.indexOf("verify-control") < f.events.indexOf("image-probe"),
+      );
       await domain.recover();
       assert.equal(
         f.events.filter((value) => value === "image-exec").length,
-        1,
+        2,
       );
       assert.equal(
         f.events.filter((value) => value === "image-continue").length,
-        1,
+        2,
       );
       assert.ok(f.events.indexOf("verify-empty") < f.events.indexOf("close"));
       assert.ok(f.events.indexOf("close") < f.events.indexOf("verify-closed"));
@@ -307,11 +409,11 @@ test("fault admission failures retain both epochs and retire without replaying e
         assert.equal(f.acquired().recovery.complete, true, fault);
         assert.equal(
           f.events.filter((value) => value === "image-exec").length,
-          fault === "independent" ? 0 : 1,
+          fault === "independent" ? 1 : 2,
         );
         assert.equal(
           f.events.filter((value) => value === "image-continue").length,
-          ["uncertain", "continue-substitution"].includes(fault) ? 1 : 0,
+          ["uncertain", "continue-substitution"].includes(fault) ? 2 : 1,
         );
       } finally {
         f.dispose();
@@ -470,7 +572,12 @@ test("native fault exec persists original ownership before consuming X and keeps
   for (const fault of [null, "persist", "write", "receipt", "observe"]) {
     const events = [],
       api = {
-        domain_record: { creator: { token: { val: [0, 0, 0, 0, 0, 42] } } },
+        domain_record: {
+          creator: { token: { val: [0, 0, 0, 0, 0, 42] } },
+          control_retired: true,
+          probe: {},
+        },
+        exec_handoff_refused: () => true,
         domain_image_phase: 1,
         domain_pin: 200,
         MACH_PORT_NULL: 0,
@@ -533,6 +640,59 @@ test("fault recovery admits an unpublished replacement only through original bir
     new URL("../ci/native/darwin/feasibility-domain.h", import.meta.url),
     "utf8",
   );
+  const selector = source
+    .slice(
+      source.indexOf("static void domain_image(struct identity"),
+      source.indexOf("static void domain_policy_check"),
+    )
+    .split("  int fd = openat")[0]
+    .split("\n")
+    .slice(1)
+    .join("\n")
+    .replace("char image[4096];", "let image = {};")
+    .replace("sizeof(image)", "4096")
+    .replace("bool control", "let control")
+    .replace("const char *leaf", "let leaf")
+    .replace(", *expected", ", expected");
+  for (const fault of [
+    null,
+    "unfenced",
+    "legacy",
+    "historical",
+    "unattempted",
+    "published",
+    "foreign",
+  ]) {
+    const api = {
+      value: { token: { val: [0, 0, 0, 0, 0, 42] } },
+      domain_record: {
+        control: false,
+        probe_consumed: fault !== "unattempted",
+        creator: { token: { val: [0, 0, 0, 0, 0, 42] } },
+        target: {
+          token: { val: [0, 0, 0, 0, 0, fault === "published" ? 42 : 0] },
+        },
+      },
+      domain_legacy: fault === "legacy",
+      domain_historical: fault === "historical",
+      domain_fenced: fault !== "unfenced",
+      domain_control_asset: "/sealed/exec-control",
+      domain_helper: "/sealed/helper",
+      proc_pidpath(_pid, out) {
+        out.value =
+          fault === "foreign" ? "/other/image" : "/sealed/exec-control";
+        return 20;
+      },
+      strcmp(a, b) {
+        return (a.value ?? a) === b ? 0 : 1;
+      },
+      need: (ok) => assert.ok(ok),
+    };
+    const select = () =>
+      new Script(`(() => {${selector}; return leaf;})()`).runInNewContext(api);
+    if (fault) assert.throws(select, undefined, fault);
+    else assert.equal(select(), "exec-control");
+  }
   const body = /static void domain_recheck\(void\) \{([\s\S]*?)\n\}/u
     .exec(source)[1]
     .replaceAll(/\b(?:unsigned|int) /gu, "let ")
@@ -643,7 +803,6 @@ test("fault policy queries retain exact decisions and errno before the first unc
     "file-write-create",
     "file-write-unlink",
     "file-map-executable",
-    "process-exec",
   ];
   const decisions = [
     [0, 1, 1, 1, 0, 0],
@@ -664,14 +823,28 @@ test("fault policy queries retain exact decisions and errno before the first unc
       expected: decisions[row][column],
     })),
   );
-  queries.push({ row: -1, operation: "process-fork", expected: 0 });
+  queries.push(
+    {
+      row: 9,
+      object: "/sealed/exec-control",
+      operation: "file-read-data",
+      expected: 0,
+    },
+    {
+      row: 9,
+      object: "/sealed/exec-control",
+      operation: "file-map-executable",
+      expected: 0,
+    },
+    { row: -1, operation: "process-fork", expected: 0 },
+  );
   for (const fault of [
     null,
     { at: 0, actual: 1, errno: 71 },
     { at: 1, actual: 0, errno: 72 },
     { at: 10, actual: -1, errno: 13 },
     { at: 7, actual: 2, errno: 0 },
-    { at: 54, actual: 1, errno: 74 },
+    { at: 47, actual: 1, errno: 74 },
   ]) {
     const calls = [],
       records = [];
@@ -699,7 +872,14 @@ test("fault policy queries retain exact decisions and errno before the first unc
       stderr: {},
       domain_helper: objects[0],
       domain_policy: objects[8],
-      domain_record: { root: "/sealed/root" },
+      domain_record: {
+        root: "/sealed/root",
+        control: false,
+        control_retired: true,
+        probe: {},
+      },
+      domain_control_asset: "/sealed/exec-control",
+      exec_handoff_refused: () => true,
       sandbox_binding: {
         no_report: 256,
         check(pid, operation, filter) {
@@ -755,9 +935,12 @@ test("fault policy queries retain exact decisions and errno before the first unc
     };
     if (fault) assert.throws(run, (error) => error === refusal);
     else run();
-    const count = fault ? fault.at + 1 : 55;
+    const count = fault ? fault.at + 1 : 48;
     assert.deepEqual(calls, queries.slice(0, count));
-    assert.equal(comparisons, count);
+    assert.equal(
+      comparisons,
+      count - (count > 45 ? Math.min(2, count - 45) : 0),
+    );
     assert.equal(advanced, fault === null);
     assert.equal(flushes, fault ? 1 : 0);
     const expected = fault && queries[fault.at];
@@ -871,6 +1054,16 @@ test("fault trusted setup applies policy and complete closure before the direct 
       'let arguments_ = [domain_helper, "fault", null];',
     )
     .replace(
+      /char \*control_arguments\[\] = \{([^\n]+)\};/u,
+      "let control_arguments = [$1];",
+    )
+    .replace("struct exec_handoff probe = {0};", "let probe = {};")
+    .replace("struct exec_probe result =", "let result =")
+    .replaceAll("&probe", "probe")
+    .replaceAll("&result", "result")
+    .replaceAll("sizeof(result)", "20")
+    .replace("sizeof(result)", "20")
+    .replace(
       "struct exec_handoff handoff = {0}; domain_handoff = &handoff; const int descriptors[] = {0, 1, 2};",
       "let handoff = {}; domain_handoff = handoff; const descriptors = [0, 1, 2];",
     )
@@ -888,7 +1081,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
     .replace("sizeof(birth)", "128")
     .replace("sizeof(birth)", "128")
     .replace("&group", "{set value(v){group=v}}")
-    .replace("arguments, environ", "arguments_, environ");
+    .replaceAll(/\barguments, environ/gu, "arguments_, environ");
   for (const fault of [
     null,
     "missing-directory",
@@ -907,7 +1100,14 @@ test("fault trusted setup applies policy and complete closure before the direct 
       api = {
         domain_helper: "/sealed/helper",
         domain_policy: "/sealed/policy",
-        domain_record: { uid: 90001, gid: 90002 },
+        domain_record: { uid: 90001, gid: 90002, control: false },
+        domain_control_asset: "/sealed/exec-control",
+        image_spawn_inputs: () => true,
+        setenv: () => 0,
+        exec_handoff_byte: () => true,
+        exec_handoff_attempt: () => ({}),
+        exec_handoff_refused: () => true,
+        need: (ok) => assert.ok(ok),
         domain_bootstrap_local: 200,
         MACH_PORT_NULL: 0,
         NULL: null,
@@ -977,7 +1177,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
         },
         fault_inspect: () => creator,
         getpid: () => 42,
-        write: () => 128,
+        write: (_fd, value) => (value === creator ? 128 : 20),
         domain_io: (size, expected) => assert.equal(size, expected),
         exec_handoff_execute(_handoff, gate, receipt, image, args) {
           assert.equal(api.domain_handoff, _handoff);
@@ -1075,5 +1275,33 @@ test("fault creator admission rejects unexpected real, effective or saved creden
     const changed = structuredClone(admitted);
     changed.token.val[6] = asid;
     assert.throws(() => check(changed, 77), /fault-image-credentials/u);
+  }
+});
+
+test("invalid outside controls and query-like probe statuses fence the primary without replay", async () => {
+  for (const fault of [
+    "control-output",
+    "control-retirement",
+    "probe-query-error",
+    "control-identity-substitution",
+    "control-signature-substitution",
+    "control-observations-substitution",
+    "control-output-substitution",
+  ]) {
+    const f = fixture("cancel", fault);
+    try {
+      await assert.rejects(f.open());
+      assert.equal(f.acquired().recovery.complete, true);
+      assert.equal(
+        f.events.filter((event) => event === "image-exec").length,
+        1,
+      );
+      assert.equal(
+        f.events.filter((event) => event === "image-probe").length,
+        ["control-output", "control-retirement"].includes(fault) ? 0 : 1,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });

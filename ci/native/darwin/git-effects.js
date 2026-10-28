@@ -33,7 +33,8 @@ const root = (identity) => {
 };
 
 /** The ordinary Git probes retain all three fixed access profiles. */
-export function darwinGitPolicies(input) {
+export function darwinGitPolicies(input, { execWitnessVersion = 1 } = {}) {
+  requireObservation([0, 1].includes(execWitnessVersion));
   const { request, git, metadata } = input;
   return ["read-only", "workspace-write", "trusted-command"].map((profile) => ({
     profile,
@@ -45,6 +46,9 @@ export function darwinGitPolicies(input) {
         `(allow file-read* (subpath ${JSON.stringify(request.workspace)}) (subpath ${JSON.stringify(metadata)}))`,
         ...[
           request.executable.path,
+          ...(request.purpose === "experiment" && execWitnessVersion === 1
+            ? [request.storage + "/exec-control"]
+            : []),
           git.path,
           "/usr/lib/dyld",
           "/usr/lib/libSystem.B.dylib",
@@ -340,80 +344,130 @@ export function createDarwinGitEffects(core) {
     requireObservation(hello.payload === null);
     await born(hello.helper, input.request.launcher);
     await reader.operation("git-ordinary-release", 0, "P");
-    const parked = await reader.operation("git-event");
+    let parked = await reader.operation("git-event");
     let payload, result;
     if (current.binding.purpose === "experiment") {
-      payload = darwinImageFrame(parked, "creator", hello.helper);
-      core.subjects.push(payload);
-      await persist({
-        kind: "ordinary-created",
-        version: 2,
-        payload,
-        source: hello.helper,
-      });
-      const sessionCustody = await reader.holdOwnershipSession(
-        payload,
-        hello.helper,
-      );
-      await persist({
-        kind: "ordinary-admitted",
-        version: 2,
-        payload,
-        sessionCustody,
-        controls: true,
-      });
-      result = await admitDarwinImage({
-        reader,
-        creator: payload,
-        helper: hello.helper,
-        next: () => reader.operation("git-event"),
-        executable: input.request.executable,
-        policySha256: specification.entries[profile.policy].sha256,
-        guard: () => core.state.guard(current.signal),
-        now: core.state.now,
-        publish: (image) =>
-          core.publishImage({
-            kind: "ordinary-image",
-            version: 2,
-            payload,
-            sessionCustody,
-            image,
-          }),
-        observe: async (target) => {
-          if (!core.subjects.some((value) => sameDarwinIdentity(value, target)))
-            core.subjects.push(target);
-          const fixture = await reader.operationSubject(target);
-          requireObservation(
-            fixture.subject.sha256 === input.request.executable.sha256 &&
-              fixture.subject.signature.cdhash ===
-                input.request.executable.cdhash,
-          );
-          const values = [];
-          for (const slot of [
-            slots.git,
-            slots.metadata,
-            slots.hooks,
-            3,
-            5,
-            profile.policy,
-          ]) {
-            const value = await reader.authority(target, slot);
-            const executable = slot === slots.git || slot === 5;
-            const workspace = slot === 3;
-            const readable = executable || workspace || slot === slots.metadata;
-            const writable = workspace && profile.profile !== "read-only";
+      let execControl = null;
+      for (const control of [true, false]) {
+        payload = darwinImageFrame(
+          parked,
+          control ? "control-creator" : "creator",
+          hello.helper,
+        );
+        core.subjects.push(payload);
+        await persist({
+          kind: "ordinary-created",
+          version: 2,
+          payload,
+          source: hello.helper,
+        });
+        const sessionCustody = await reader.holdOwnershipSession(
+          payload,
+          hello.helper,
+        );
+        await persist({
+          kind: "ordinary-admitted",
+          version: 2,
+          payload,
+          sessionCustody,
+          controls: true,
+        });
+        result = await admitDarwinImage({
+          reader,
+          creator: payload,
+          helper: hello.helper,
+          next: () => reader.operation("git-event"),
+          control,
+          execControl,
+          asset: current.declared.bindings.execControl,
+          executable: control
+            ? current.declared.bindings.execControl
+            : input.request.executable,
+          policySha256: specification.entries[profile.policy].sha256,
+          guard: () => core.state.guard(current.signal),
+          now: core.state.now,
+          publish: (image) =>
+            core.publishImage({
+              kind: "ordinary-image",
+              version: 2,
+              payload,
+              sessionCustody,
+              image,
+            }),
+          observe: async (target) => {
+            if (control) return [];
+            if (
+              !core.subjects.some((value) => sameDarwinIdentity(value, target))
+            )
+              core.subjects.push(target);
+            const fixture = await reader.operationSubject(target);
             requireObservation(
-              same(value.decisions, [
-                readable ? 0 : 1,
-                ...Array(3).fill(writable ? 0 : 1),
-                executable ? 0 : 1,
-              ]),
+              fixture.subject.sha256 === input.request.executable.sha256 &&
+                fixture.subject.signature.cdhash ===
+                  input.request.executable.cdhash,
             );
-            values.push(value);
-          }
-          return values;
-        },
-      });
+            const values = [];
+            for (const slot of [
+              slots.git,
+              slots.metadata,
+              slots.hooks,
+              3,
+              5,
+              profile.policy,
+            ]) {
+              const value = await reader.authority(target, slot);
+              const executable = slot === slots.git || slot === 5;
+              const workspace = slot === 3;
+              const readable =
+                executable || workspace || slot === slots.metadata;
+              const writable = workspace && profile.profile !== "read-only";
+              requireObservation(
+                same(value.decisions, [
+                  readable ? 0 : 1,
+                  ...Array(3).fill(writable ? 0 : 1),
+                  ...(current.binding.purpose === "experiment"
+                    ? []
+                    : [executable ? 0 : 1]),
+                ]),
+              );
+              values.push(value);
+            }
+            return values;
+          },
+        });
+        if (control) {
+          requireObservation(
+            (await reader.operation("git-event", 1)).phase === "armed",
+          );
+          await reader.operation("git-ordinary-release", 1, "A");
+          requireObservation(
+            same(
+              await reader.operation("git-event", 1),
+              DARWIN_LITERAL_ARGUMENTS,
+            ),
+          );
+          requireObservation(
+            same(await reader.operation("git-event"), {
+              exitCode: 0,
+              signal: null,
+            }),
+          );
+          await reader.finishOwnershipSession(payload.asid);
+          execControl = {
+            image: result.image,
+            retired: true,
+            outputSha256: digest(
+              JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n",
+            ),
+          };
+          await persist({
+            kind: "ordinary-control-retired",
+            image: result.image,
+          });
+          await reader.imageControlNext();
+          parked = await reader.operation("git-event");
+        }
+      }
       if (
         !core.subjects.some((value) => sameDarwinIdentity(value, result.target))
       )

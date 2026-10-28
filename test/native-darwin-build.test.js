@@ -1265,10 +1265,11 @@ test("Darwin empty entry checks precede scoped setup and retain possible effects
     "fault-verify",
     "fault-closed",
     "fault-parent",
+    "fault-control-verify",
     "prerequisites",
   ]) {
     const api = {
-      argc: 10,
+      argc: 11,
       argv: ["helper", mode],
       admitted_effects: false,
       NULL: null,
@@ -6000,10 +6001,48 @@ test("Darwin audit custody binds all-UID census, native controls and recoverable
   );
   assert.doesNotMatch(recovery, /fork\(|O_CREAT/u);
   assert.match(recovery, /audit_identity_same\(holder, expected\)/u);
-  assert.match(
-    reader,
-    /case_audit\.version && \(reservation_fd < 0 \|\| operation_domain_finished\(\)\)/u,
-  );
+  const closeBody =
+    /static void case_session_closed\(void\) \{([\s\S]*?)\n\}/u.exec(reader)[1];
+  for (const experiment of [false, true]) {
+    const guard = closeBody
+      .slice(0, closeBody.indexOf("struct audit_domain_view"))
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu,
+        (_match, body) => (experiment ? body : ""),
+      );
+    const close = new Script(guard);
+    for (const [fenced, finished, control, phase, reservation, allowed] of [
+      [true, false, false, 0, -1, true],
+      [false, true, false, 0, 7, true],
+      [false, false, true, 4, 7, experiment],
+      [false, false, true, 3, 7, false],
+      [false, false, false, 4, 7, false],
+      [true, false, false, 0, 7, false],
+    ]) {
+      let checked = false;
+      const context = {
+        case_mode: true,
+        case_fenced: fenced,
+        operation_domain_finished: () => finished,
+        case_audit: { version: 1 },
+        image_control: control,
+        image_phase: phase,
+        reservation_fd: reservation,
+        need: (ok) => assert.ok(ok),
+        no_subjects() {
+          checked = true;
+        },
+      };
+      if (allowed) close.runInNewContext(context);
+      else assert.throws(() => close.runInNewContext(context));
+      assert.equal(checked, allowed);
+      for (const absent of [
+        { case_mode: false },
+        { case_audit: { version: 0 } },
+      ])
+        assert.throws(() => close.runInNewContext({ ...context, ...absent }));
+    }
+  }
   assert.match(reader, /case_fenced = true/u);
   assert.match(reader, /need\(!case_fenced\)/u);
   const gitFinish = reader.slice(
@@ -6885,7 +6924,12 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       .replace("&domain_status", "{set value(v) {domain_status = v;}}")
       .replaceAll("&stream", "stream")
       .replaceAll("sizeof(bytes)", "bytes.length")
-      .replace(/\((?:void|unsigned)\)/gu, "");
+      .replaceAll("sizeof(domain_control_bytes)", "domain_control_bytes.length")
+      .replaceAll(
+        "domain_control_bytes + domain_control_used",
+        "domain_control_bytes.subarray(domain_control_used)",
+      )
+      .replace(/\((?:void|unsigned|size_t)\)/gu, "");
   const helpers = ["domain_stream", "domain_exited"].map((name) => {
     const native = new RegExp(
       `static bool ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
@@ -6896,6 +6940,8 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
   const script = new Script(`${helpers.join("\n")} () => {${translate(body)}}`);
   for (const fault of [
     null,
+    "control",
+    "control-overflow",
     "partial",
     "child",
     "released",
@@ -6923,6 +6969,11 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
     let waits = 0;
     const context = {
       domain_controller: 9000,
+      domain_record: {
+        control: fault === "control" || fault === "control-overflow",
+      },
+      domain_control_bytes: new Uint8Array(4096),
+      domain_control_used: fault === "control-overflow" ? 4095 : 0,
       domain_child: 42,
       domain_status: 0,
       domain_pipes: pipes,
@@ -6931,6 +6982,8 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       domain_port_cleanup() {},
       domain_failure_retire() {},
       remember() {},
+      strcmp: (left, right) => Number(left !== right),
+      memcpy: (out, bytes, size) => out.set(bytes.subarray(0, size)),
       getpid: () => (fault === "child" ? 42 : 9000),
       errno: fault === "eintr" ? 4 : 10,
       EINTR: 4,
@@ -7034,6 +7087,18 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       .split("\n")
       .filter(Boolean)
       .map(JSON.parse);
+    if (fault === "control") {
+      assert.equal(context.domain_control_used, 3);
+      assert.equal(
+        Buffer.from(context.domain_control_bytes.subarray(0, 3)).toString(),
+        "out",
+      );
+    }
+    if (fault === "control-overflow") {
+      assert.equal(context.domain_control_used, 4095);
+      assert.ok(context.domain_control_bytes.every((byte) => byte === 0));
+      assert.ok(!frames.some((frame) => frame.stream === "stdout"));
+    }
     const exit = frames.find((frame) => frame.exit)?.exit;
     assert.equal(
       exit?.code,

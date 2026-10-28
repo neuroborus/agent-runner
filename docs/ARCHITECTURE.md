@@ -2118,7 +2118,7 @@ tool runs on development hosts, policy is unchanged, and tracing cannot grant
 denial evidence, readiness or acceptance. Observer uncertainty fences progress.
 This enables startup attribution without a new policy grant; a matching native
 cause and source-supported startup correction remain external prerequisites.
-Ordinary Darwin ownership/access/Git launch uses version-two creation-bound
+Ordinary experimental Darwin ownership/access/Git launch uses version-three creation-bound
 suspended SETEXEC admission. The private `image-closure.h` owner clears and reads
 inheritable inputs without admitting arbitrary old namespace entries. The bound
 root reader holds control/getter references for the trusted creator and actual
@@ -2130,21 +2130,38 @@ and one identity-bound continuation. Both epochs and original audit custody rema
 recoverable across publication or continuation uncertainty; recovery never replays
 work. Ordinary host-inherited service trust is unchanged and establishes no raw
 service-message safety. Reviewed/protected null-service refusals stay distinct.
+The explicit version-two experimental custody plan seals unchanged argv-fixture
+bytes as a fixed read/map-only control asset. A same-credential outside-policy
+suspended execution and independently retired control domain precede primary
+creation. A separate one-shot `T` SETEXEC probe must return direct `EPERM`/`EACCES`
+with clean spawn settlement and unchanged creator/image/descriptor/port state;
+it preserves the allowed payload's original `X` gate. Version-two authority reads
+carry four actual file decisions and separately bound exec witnesses, selected by
+the admitted plan rather than query results or installed-path classification.
+Ordinary Git workers join their actual stopped image and native direct parent to
+the fixed spawn/inherited-sandbox contract and retain fresh file reads. A copied
+primary witness or equal UID/ASID cannot admit a worker. Missing native proof
+blocks admission; unexpected successful forbidden exec stays suspended in recovery.
 Both feasibility fault recipes now use the same closure and suspended handoff.
 The trusted child installs the final policy before directly replacing itself with
 the sealed fault image. The root custodian retains its original writable journal
-through sealed reexec. Version-four records durably bind original ownership,
+through sealed reexec. Version-five records durably bind original ownership,
 possible execution, creator/replacement epochs, image signature, repeated
 observations and one-shot continuation. Held getter references are compared only
 inside that custodian; a fresh independent root reader verifies the stopped image
 and protected receipt without adopting cross-process names. Receipt readback and
 handle settlement precede identity-bound continuation; post-exec controls,
 acknowledgements, detached descendants and original stdio remain required.
+The protected record also retains control identity/image/output/retirement and
+probe delivery/status. Its separate control session retires before the primary
+domain, preserving original process-limit/census bounds. The original 45 file/map
+comparisons and fork check remain, plus control read/map checks; actual bound
+attempts replace only the nine exec pre-evaluations.
 
 Fenced recovery retains original audit custody across unpublished epochs,
 persistence failures and uncertain continuation. Complete censuses, journal-before-
 signal ordering, direct-child reaping and independent empty-domain verification
-before and after custody closure remain mandatory. Legacy version-three receipts
+before and after custody closure remain mandatory. Legacy version-three/four receipts
 are recover-only under their original ABI and bindings; they cannot authorize a
 new launch or continuation. Constructor/census admission producers and unused
 exports are removed; historical diagnostic/refusal decoding and observer retirement

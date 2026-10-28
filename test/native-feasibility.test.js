@@ -3592,7 +3592,29 @@ function darwinFaultFixture(
         intent: async (pin) => {
           events.push("protected-intent");
           admission = {
-            version: 4,
+            version: 5,
+            control: false,
+            controlRetired: true,
+            probeConsumed: true,
+            probeStatus: 1,
+            controlSha256: DIGEST,
+            controlCdhash: "a".repeat(40),
+            controlObservationsSha256: DIGEST,
+            controlOutputSha256: createHash("sha256")
+              .update(
+                '{"phase":"armed"}\n' +
+                  JSON.stringify([
+                    "",
+                    "space value",
+                    "λ雪",
+                    "'\"",
+                    "$(false); & | < > *",
+                  ]) +
+                  "\n",
+              )
+              .digest("hex"),
+            controlCreator: { ...owner, pid: 41, asid: 1, pidVersion: 5 },
+            controlTarget: { ...owner, pid: 41, asid: 1, pidVersion: 6 },
             execution: 1,
             continuation: 2,
             creator: { ...owner, pidVersion: owner.pidVersion - 1 },
@@ -3640,6 +3662,11 @@ function darwinFaultFixture(
             "stale-policy": ["policySha256", "f".repeat(64)],
           }[fault];
           if (changed) record[changed[0]] = changed[1];
+          if (fault === "exec-query-error") record.probeStatus = -1;
+          if (fault === "missing-exec-control") delete record.controlTarget;
+          if (fault === "control-output") record.controlOutputSha256 = DIGEST;
+          if (fault === "control-identity")
+            record.controlCreator = { ...record.controlCreator, uid: 502 };
           const fresh = {
             independent: true,
             complete: fault !== "partial-census",
@@ -3660,6 +3687,11 @@ function darwinFaultFixture(
             complete: true,
             independent: true,
             nonEmergency: fault !== "emergency",
+            controlVerification: {
+              independent: true,
+              verifier: { ...custodian, pid: 9050 },
+              record: { ...record, control: true, stage: 1 },
+            },
             record,
             fresh,
             settled,
@@ -3682,7 +3714,11 @@ function darwinFaultFixture(
       runDarwinFeasibilityFault(
         "/fixture",
         running,
-        [{ role: "helper", name: "helper", sha256: DIGEST }],
+        ["helper", "argv-fixture"].map((name) => ({
+          role: "helper",
+          name,
+          sha256: DIGEST,
+        })),
         {},
         caseId,
         SHA,
@@ -3779,6 +3815,10 @@ test("Darwin original faults pass only with protected complete independent domai
     "stale-case",
     "stale-helper",
     "stale-policy",
+    "exec-query-error",
+    "missing-exec-control",
+    "control-output",
+    "control-identity",
     "unheld",
     "emergency",
     "intent-drift",

@@ -3,7 +3,12 @@ import {
   observationObject,
   requireObservation,
 } from "../index.js";
-import { normalizeDarwinIdentity, sameDarwinIdentity } from "./protocol.js";
+import {
+  digest,
+  DARWIN_LITERAL_ARGUMENTS,
+  normalizeDarwinIdentity,
+  sameDarwinIdentity,
+} from "./protocol.js";
 
 export function darwinImageFrame(value, phase, helper) {
   observationObject(value, [
@@ -14,9 +19,9 @@ export function darwinImageFrame(value, phase, helper) {
     "controls",
   ]);
   requireObservation(
-    value.version === 2 &&
+    value.version === 3 &&
       value.phase === phase &&
-      value.controls === true &&
+      value.controls === !phase.startsWith("control-") &&
       sameDarwinIdentity(value.helper, helper),
   );
   return normalizeDarwinIdentity(value.payload);
@@ -36,10 +41,13 @@ export function assertDarwinImageRecord(value) {
     "target",
     "execution",
     "continuation",
+    ...(value.version === 3
+      ? ["control", "execControl", "probe", "witness"]
+      : []),
     ...(value.continuation === "possible" ? ["observationsSha256"] : []),
   ]);
   requireObservation(
-    value.version === 2 &&
+    [2, 3].includes(value.version) &&
       value.execution === "possible" &&
       ["not-started", "possible"].includes(value.continuation),
   );
@@ -50,6 +58,115 @@ export function assertDarwinImageRecord(value) {
     requireObservation(
       value.target !== null && /^[a-f0-9]{64}$/u.test(value.observationsSha256),
     );
+  if (value.version === 3) {
+    requireObservation(typeof value.control === "boolean");
+    if (value.witness !== null) {
+      observationObject(value.witness, [
+        "version",
+        "control",
+        "creator",
+        "target",
+        "closed",
+        "stopped",
+        "imageSha256",
+        "cdhash",
+        "policySha256",
+      ]);
+      requireObservation(
+        value.witness.version === 3 &&
+          value.witness.control === value.control &&
+          value.witness.closed === true &&
+          value.witness.stopped === true &&
+          sameDarwinIdentity(value.witness.creator, creator) &&
+          sameDarwinIdentity(value.witness.target, value.target) &&
+          /^[a-f0-9]{64}$/u.test(value.witness.imageSha256) &&
+          /^[a-f0-9]{64}$/u.test(value.witness.policySha256) &&
+          /^[a-f0-9]{40}$/u.test(value.witness.cdhash),
+      );
+    }
+    if (value.continuation === "possible")
+      requireObservation(value.witness !== null);
+    if (value.control)
+      requireObservation(value.execControl === null && value.probe === null);
+    else {
+      observationObject(value.execControl, [
+        "retired",
+        "image",
+        "outputSha256",
+      ]);
+      requireObservation(
+        value.execControl?.retired === true &&
+          value.execControl.image?.version === 3 &&
+          value.execControl.image.control === true,
+      );
+      assertDarwinImageRecord(value.execControl.image);
+      requireObservation(
+        value.execControl.image.creator.asid !== creator.asid &&
+          ["auid", "uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+            (key) => value.execControl.image.creator[key] === creator[key],
+          ),
+      );
+      requireObservation(
+        value.execControl.image.target !== null &&
+          value.execControl.image.continuation === "possible" &&
+          value.execControl.outputSha256 ===
+            digest(JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n"),
+      );
+      if (value.probe !== null) {
+        if (value.probe.state === "possible")
+          observationObject(value.probe, ["state"]);
+        else assertDarwinExecProbe(value.probe, creator);
+      }
+      if (value.target !== null)
+        assertDarwinExecProbe(
+          value.probe,
+          creator,
+          value.execControl.image.witness.policySha256,
+          value.execControl.image.witness.imageSha256,
+        );
+      if (value.witness !== null)
+        requireObservation(
+          value.witness.policySha256 === value.probe.policySha256,
+        );
+    }
+  }
+  return value;
+}
+
+export function assertDarwinExecProbe(
+  value,
+  creator,
+  policySha256,
+  assetSha256,
+) {
+  observationObject(value, [
+    "version",
+    "subject",
+    "policySha256",
+    "assetSha256",
+    "status",
+    "prepared",
+    "filesCleanup",
+    "attributesCleanup",
+    "read",
+    "map",
+    "unchanged",
+  ]);
+  requireObservation(
+    value.version === 1 &&
+      sameDarwinIdentity(value.subject, creator) &&
+      [1, 13].includes(value.status) &&
+      value.prepared === true &&
+      value.filesCleanup === 0 &&
+      value.attributesCleanup === 0 &&
+      value.read === 0 &&
+      value.map === 0 &&
+      value.unchanged === true &&
+      /^[a-f0-9]{64}$/u.test(value.policySha256) &&
+      /^[a-f0-9]{64}$/u.test(value.assetSha256) &&
+      (policySha256 === undefined || value.policySha256 === policySha256) &&
+      (assetSha256 === undefined || value.assetSha256 === assetSha256),
+  );
   return value;
 }
 
@@ -65,6 +182,9 @@ export async function admitDarwinImage({
   observe,
   executable,
   policySha256,
+  control = false,
+  execControl = null,
+  asset,
   guard,
   now = () => performance.now(),
 }) {
@@ -74,7 +194,11 @@ export async function admitDarwinImage({
     requireObservation(now() <= deadline);
   };
   const image = {
-    version: 2,
+    version: 3,
+    control,
+    execControl,
+    probe: null,
+    witness: null,
     creator,
     target: null,
     execution: "possible",
@@ -92,16 +216,38 @@ export async function admitDarwinImage({
   };
   bounded();
   const bound = await reader.imageCreator();
-  observationObject(bound, ["version", "creator", "closed"]);
+  observationObject(bound, ["version", "control", "creator", "closed"]);
   requireObservation(
-    bound.version === 2 &&
+    bound.version === 3 &&
+      bound.control === control &&
       bound.closed === true &&
       sameDarwinIdentity(bound.creator, creator),
   );
   await persist(); // original identity and possible exec precede the one-shot X
+  if (!control) {
+    requireObservation(
+      execControl?.retired === true &&
+        execControl.image.witness.policySha256 === policySha256 &&
+        execControl.image.witness.imageSha256 === asset.sha256 &&
+        execControl.image.witness.cdhash === asset.cdhash,
+    );
+    image.probe = { state: "possible" };
+    await persist(); // consume uncertainty before the distinct T operation
+    image.probe = assertDarwinExecProbe(
+      await reader.imageProbe(),
+      creator,
+      policySha256,
+      asset.sha256,
+    );
+    await persist();
+  }
   await reader.imageExec();
   bounded();
-  const target = darwinImageFrame(await next(), "image", helper);
+  const target = darwinImageFrame(
+    await next(),
+    control ? "control-image" : "image",
+    helper,
+  );
   assertDarwinImageTransition(creator, target);
   image.target = target;
   await persist(); // unpublished epochs are still recoverable from the creator domain
@@ -110,6 +256,7 @@ export async function admitDarwinImage({
     const actual = await reader.imageRead();
     observationObject(actual, [
       "version",
+      "control",
       "creator",
       "target",
       "closed",
@@ -119,7 +266,8 @@ export async function admitDarwinImage({
       "policySha256",
     ]);
     requireObservation(
-      actual.version === 2 &&
+      actual.version === 3 &&
+        actual.control === control &&
         actual.closed === true &&
         actual.stopped === true &&
         sameDarwinIdentity(actual.creator, creator) &&
@@ -133,6 +281,7 @@ export async function admitDarwinImage({
     return { actual, policy };
   };
   const first = await read();
+  image.witness = first.actual;
   image.observationsSha256 = observationDigest(first);
   image.continuation = "possible";
   const pin = await persist();

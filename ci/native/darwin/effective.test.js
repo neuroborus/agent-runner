@@ -441,6 +441,119 @@ test("effective reads reject truncated graphs, substituted bytes and changed sub
       object,
     ),
   );
+  const target = { ...identity, pidVersion: 2 },
+    control = {
+      creator: { ...identity, pid: 19, asid: 29 },
+      target: { ...target, pid: 19, asid: 29 },
+    },
+    witness = {
+      subject: identity,
+      target,
+      control,
+      policySha256: hash,
+      assetSha256: hash,
+      imageSha256: hash,
+      gitSha256: "b".repeat(64),
+      status: 1,
+    },
+    exec = {
+      version: 1,
+      subject: target,
+      creator: identity,
+      target,
+      controlCreator: control.creator,
+      controlTarget: control.target,
+      controlRetired: true,
+      parent: null,
+      policySha256: hash,
+      assetSha256: hash,
+      imageSha256: hash,
+      inheritance: null,
+      status: 1,
+    },
+    experimental = {
+      ...authority,
+      version: 2,
+      subject: target,
+      decisions: [0, 1, 1, 1],
+      exec,
+    };
+  assert.deepEqual(
+    normalizeDarwinAuthorityRead(
+      experimental,
+      target,
+      object,
+      "experiment",
+      witness,
+    ),
+    experimental,
+  );
+  for (const changed of [
+    { ...experimental, decisions: [0, 1, 1, 1, 1] },
+    { ...experimental, decisions: [-1, 1, 1, 1] },
+    { ...experimental, exec: { ...exec, status: -1 } },
+    { ...experimental, exec: { ...exec, policySha256: "b".repeat(64) } },
+    { ...experimental, exec: { ...exec, assetSha256: "b".repeat(64) } },
+    { ...experimental, exec: { ...exec, subject: identity } },
+    { ...experimental, exec: { ...exec, controlTarget: target } },
+  ])
+    assert.throws(() =>
+      normalizeDarwinAuthorityRead(
+        changed,
+        target,
+        object,
+        "experiment",
+        witness,
+      ),
+    );
+  assert.throws(() =>
+    normalizeDarwinAuthorityRead(experimental, target, object, "experiment"),
+  );
+  assert.throws(() =>
+    normalizeDarwinAuthorityRead(
+      { ...experimental, exec: { ...exec, status: -1 } },
+      target,
+      object,
+      "experiment",
+      { ...witness, status: -1 },
+    ),
+  );
+  const worker = { ...target, pid: 21 },
+    inherited = {
+      ...experimental,
+      subject: worker,
+      exec: {
+        ...exec,
+        subject: worker,
+        parent: target,
+        inheritance: "posix-spawn-inherit-v1",
+        imageSha256: witness.gitSha256,
+      },
+    };
+  assert.deepEqual(
+    normalizeDarwinAuthorityRead(
+      inherited,
+      worker,
+      object,
+      "experiment",
+      witness,
+    ),
+    inherited,
+  );
+  for (const proof of [
+    exec,
+    { ...inherited.exec, parent: identity },
+    { ...inherited.exec, inheritance: null },
+  ])
+    assert.throws(() =>
+      normalizeDarwinAuthorityRead(
+        { ...inherited, exec: proof },
+        worker,
+        object,
+        "experiment",
+        witness,
+      ),
+    );
   const hosted = { ...object, uid: 501, mode: 0o777 },
     installed = {
       ...authority,
@@ -448,7 +561,14 @@ test("effective reads reject truncated graphs, substituted bytes and changed sub
       path: Buffer.from("/usr/lib/dyld").toString("hex"),
     };
   assert.deepEqual(
-    normalizeDarwinAuthorityRead(installed, identity, hosted, "experiment"),
+    normalizeDarwinAuthorityRead(
+      installed,
+      identity,
+      hosted,
+      "reviewed",
+      undefined,
+      "experiment",
+    ),
     installed,
   );
   assert.throws(() =>
@@ -459,6 +579,8 @@ test("effective reads reject truncated graphs, substituted bytes and changed sub
       { ...installed, path: authority.path },
       identity,
       hosted,
+      "reviewed",
+      undefined,
       "experiment",
     ),
   );

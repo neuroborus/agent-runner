@@ -3534,6 +3534,8 @@ function buildTranscripts(experiment = false, complete = false) {
       payload,
       imageCreator,
       imagePhase = 0,
+      imageControl = false,
+      controlImages,
       pfHelper,
       pfWorker,
       pfOperation,
@@ -4143,9 +4145,25 @@ function buildTranscripts(experiment = false, complete = false) {
           if (caseFault === "after-controls-close")
             throw new Error("Lost controls result");
           value = null;
+        } else if (name === "exec-control-asset") {
+          const file = planEntries[12].path;
+          put(file, image, 0o550);
+          files.get(file).gid = gid;
+          const object = snapshot(file);
+          held.set("12", { file, object });
+          const macho = {
+            headerSha256: hash,
+            dependencies: [],
+            rpaths: [],
+            sdk: 1,
+            minimum: 1,
+            uuid: "d".repeat(32),
+          };
+          value = { object, sourceMacho: macho, macho };
         } else if (name === "case-start") {
           assert.ok(caseMode);
           ownershipMode = args[0];
+          imageControl = experiment;
           assert.ok(
             [
               "literal",
@@ -4164,21 +4182,61 @@ function buildTranscripts(experiment = false, complete = false) {
           imageCreator = structuredClone(payload);
           imagePhase = 1;
           value = {
-            version: 2,
+            version: 3,
+            control: imageControl,
             creator: imageCreator,
             closed: caseFault !== "image-closure",
           };
+        } else if (name === "image-probe") {
+          assert.equal(imageControl, false);
+          assert.ok(controlImages);
+          value = {
+            version: 1,
+            subject: imageCreator,
+            policySha256: planEntries[6].pin,
+            assetSha256: planEntries[12].pin,
+            status: 1,
+            prepared: true,
+            filesCleanup: 0,
+            attributesCleanup: 0,
+            read: 0,
+            map: 0,
+            unchanged: true,
+          };
+        } else if (name === "image-control-next") {
+          assert.ok(auditCustodies.get(auditKey).closed);
+          controlImages = { creator: imageCreator, target: payload };
+          imageControl = false;
+          payload = {
+            ...subject(nextPid + 200),
+            uid,
+            ruid: uid,
+            svuid: uid,
+            gid,
+            rgid: gid,
+            svgid: gid,
+            auid: uid,
+          };
+          live(payload, planEntries[4].path);
+          control.push({
+            version: 3,
+            phase: "creator",
+            helper: launcher,
+            payload,
+            controls: true,
+          });
+          value = { retired: true };
         } else if (name === "image-exec") {
           assert.equal(imagePhase, 1);
           imagePhase = 2;
           payload = { ...payload, pidVersion: payload.pidVersion + 1 };
-          live(payload, planEntries[5].path);
+          live(payload, planEntries[imageControl ? 12 : 5].path);
           control.push({
-            version: 2,
-            phase: "image",
+            version: 3,
+            phase: imageControl ? "control-image" : "image",
             helper: launcher,
             payload,
-            controls: true,
+            controls: !imageControl,
           });
           value = null;
         } else if (name === "image-read") {
@@ -4190,12 +4248,13 @@ function buildTranscripts(experiment = false, complete = false) {
               startMicroseconds: payload.startMicroseconds + 1,
             };
           value = {
-            version: 2,
+            version: 3,
+            control: imageControl,
             creator: imageCreator,
             target: payload,
             closed: true,
             stopped: true,
-            imageSha256: planEntries[5].pin,
+            imageSha256: planEntries[imageControl ? 12 : 5].pin,
             cdhash,
             policySha256: planEntries[6].pin,
           };
@@ -4210,7 +4269,8 @@ function buildTranscripts(experiment = false, complete = false) {
           if (caseFault === "image-publication")
             throw new Error("Image continuation unavailable");
           data.push(
-            ["literal", "storage", "access"].includes(ownershipMode)
+            imageControl ||
+              ["literal", "storage", "access"].includes(ownershipMode)
               ? '{"phase":"armed"}\n'
               : JSON.stringify({
                   nonce: argsForCase.slice(0, 32),
@@ -4247,6 +4307,21 @@ function buildTranscripts(experiment = false, complete = false) {
                   i === 5 ? 0 : 1,
                 ],
           };
+          if (experiment)
+            value = {
+              ...value,
+              version: 2,
+              decisions: value.decisions.slice(0, 4),
+              exec: boundExecEvidence(
+                value.subject,
+                imageCreator,
+                payload,
+                controlImages,
+                planEntries[6].pin,
+                planEntries[12].pin,
+                planEntries[5].pin,
+              ),
+            };
         } else if (name === "case-output") {
           assert.ok(data.length);
           value = { hex: Buffer.from(data.shift()).toString("hex") };
@@ -4275,11 +4350,11 @@ function buildTranscripts(experiment = false, complete = false) {
             control.push(
               experiment
                 ? {
-                    version: 2,
-                    phase: "creator",
+                    version: 3,
+                    phase: "control-creator",
                     helper: launcher,
                     payload,
-                    controls: true,
+                    controls: false,
                   }
                 : { helper: launcher, payload, controls: true },
             );
@@ -4292,7 +4367,10 @@ function buildTranscripts(experiment = false, complete = false) {
                 : event("armed", payload.pid, 0),
             );
           } else if (args[0] === "1" && args[1] === "A") {
-            if (["literal", "storage"].includes(ownershipMode)) {
+            if (
+              imageControl ||
+              ["literal", "storage"].includes(ownershipMode)
+            ) {
               data.push(JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n");
               control.push({ exitCode: 0, signal: null });
               processes.delete(payload.pid);
@@ -4438,6 +4516,8 @@ function buildTranscripts(experiment = false, complete = false) {
           assert.ok(!processes.has(original.custodian.pid));
           original.closed = true;
           original.held = false;
+          if (caseFault === "control-close-result")
+            throw new Error("Lost control close reply");
           value = { closed: true };
         } else if (
           name === "case-receipt" ||
@@ -4449,9 +4529,29 @@ function buildTranscripts(experiment = false, complete = false) {
             assert.ok(!files.has(file));
             const bytes = Buffer.from(args[2], "hex"),
               record = JSON.parse(bytes);
+            if (record.schemaVersion === 2 && record.creatorChild) {
+              if (record.image)
+                assert.ok(
+                  sameDarwinIdentity(record.image.creator, record.creatorChild),
+                );
+              if (record.payload)
+                assert.equal(record.payload.asid, record.creatorChild.asid);
+              if (record.sessionCustody)
+                assert.equal(
+                  record.sessionCustody.asid,
+                  record.creatorChild.asid,
+                );
+            }
             if (record.image?.target && caseFault === "image-receipt-before")
               throw new Error("Image receipt unavailable");
             put(file, bytes, 0o400);
+            if (
+              caseFault === "primary-creator-publication" &&
+              !imageControl &&
+              record.creatorChild &&
+              !record.image
+            )
+              throw new Error("Primary creator receipt reply lost");
             if (record.image?.target && caseFault === "image-receipt-after")
               throw new Error("Image receipt readback lost");
           }
@@ -4610,7 +4710,11 @@ function buildTranscripts(experiment = false, complete = false) {
           held.set(args[0], { file, object: value });
         } else if (name === "case-rejoin") {
           assert.ok(
-            reserved || (fenced && [0, 1, 4, 5].includes(Number(args[0]))),
+            reserved ||
+              (fenced &&
+                [0, 1, 4, 5, ...(experiment ? [12] : [])].includes(
+                  Number(args[0]),
+                )),
           );
           const file = planEntries[Number(args[0])].path;
           value = snapshot(file, directories.has(file));
@@ -4675,6 +4779,7 @@ function buildTranscripts(experiment = false, complete = false) {
               .filter(
                 ([i]) =>
                   Number(i) < 7 ||
+                  (experiment && Number(i) === 12) ||
                   (accessSpec &&
                     planEntries[Number(i)].path.startsWith(
                       planEntries[0].path + "/",
@@ -5780,11 +5885,38 @@ function buildBinding(f) {
     context: context("build"),
   };
 }
+function boundExecEvidence(
+  subject,
+  creator,
+  target,
+  control,
+  policySha256,
+  assetSha256,
+  imageSha256,
+  inherited = false,
+) {
+  return {
+    version: 1,
+    subject,
+    creator,
+    target,
+    controlCreator: control.creator,
+    controlTarget: control.target,
+    controlRetired: true,
+    parent: inherited ? target : null,
+    policySha256,
+    assetSha256,
+    imageSha256,
+    inheritance: inherited ? "posix-spawn-inherit-v1" : null,
+    status: 1,
+  };
+}
+
 function caseBinding(
   f,
   id = "ownership.literal",
   ownershipEffects = false,
-  { generated = false } = {},
+  { generated = false, execWitnessVersion = 1 } = {},
 ) {
   const experiment = f.manifest.purpose === "experiment",
     bindingContext = context(id),
@@ -5849,7 +5981,7 @@ function caseBinding(
       ),
       ...(experiment ? { bindingSha256: hash } : { reviewSha256: hash }),
     };
-    const native = buildDarwinPolicy(input);
+    const native = buildDarwinPolicy(input, { execWitnessVersion });
     request.policy.sha256 = native.seatbeltSha256;
     request.bindings.policy = native.compositionSha256;
     const { request: ignored, ...rest } = native.value;
@@ -5872,6 +6004,9 @@ function caseBinding(
         `(allow file-read-metadata (literal ${JSON.stringify(request.storage)}))`,
         ...[
           request.executable.path,
+          ...(experiment && execWitnessVersion === 1
+            ? [request.storage + "/exec-control"]
+            : []),
           "/usr/lib/dyld",
           "/usr/lib/libSystem.B.dylib",
         ].map(
@@ -5976,6 +6111,15 @@ function caseBinding(
       sha256: digest(Buffer.from("native-poc-pf-lease-v1\n")),
     },
     { kind: "directory", path: output, sha256: null },
+    ...(experiment && execWitnessVersion === 1
+      ? [
+          {
+            kind: "image",
+            path: request.storage + "/exec-control",
+            sha256: digest(f.image),
+          },
+        ]
+      : []),
   ];
   f.put(entries[10].path, Buffer.from("native-poc-pf-lease-v1\n"), 0o400);
   const declared = f.manifest.darwinPreparation.cases.find(
@@ -5983,6 +6127,9 @@ function caseBinding(
     ),
     plan = encodeDarwinCustodyPlan({
       ...(experiment ? { purpose: "experiment" } : {}),
+      ...(experiment && execWitnessVersion === 1
+        ? { execWitnessVersion: 1 }
+        : {}),
       candidateSha,
       uid: 90001,
       gid: 90002,
@@ -5993,6 +6140,15 @@ function caseBinding(
   f.put(declared.custody.plan.path, plan, 0o400);
   declared.bindings = {
     schemaVersion: 1,
+    ...(experiment && execWitnessVersion === 1
+      ? {
+          execControl: {
+            path: output + "/argv-fixture",
+            sha256: digest(f.image),
+            cdhash,
+          },
+        }
+      : {}),
     ...(experiment ? { bindingSha256: hash } : { authoritySha256: hash }),
     uid: 90001,
     gid: 90002,
@@ -6014,10 +6170,17 @@ function caseBinding(
     context: bindingContext,
   };
 }
-function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
+function accessBinding(
+  f,
+  profile,
+  observedPins = false,
+  mach,
+  scopedTarget,
+  { execWitnessVersion = 1 } = {},
+) {
   const experiment = f.manifest.purpose === "experiment",
     id = "access." + profile,
-    binding = caseBinding(f, id),
+    binding = caseBinding(f, id, false, { execWitnessVersion }),
     declared = f.manifest.darwinPreparation.cases.find(
       (entry) => entry.id === id,
     ),
@@ -6027,7 +6190,7 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
   input.checkout = root + "/checkout";
   input.configuration = root + "/configuration";
   input.credentials = root + "/credentials";
-  const native = buildDarwinPolicy(input),
+  const native = buildDarwinPolicy(input, { execWitnessVersion }),
     plan = f.files
       .get(declared.custody.plan.path)
       .bytes.toString()
@@ -6044,7 +6207,7 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
       }),
     assets = [];
   const add = (kind, file, bytes, source = null) => {
-    const index = 12 + assets.length,
+    const index = plan.length + assets.length,
       sha256 = kind === "authority" ? null : digest(bytes);
     assets.push({ kind, path: file, sha256, source });
     if (source === null && kind !== "authority")
@@ -6198,7 +6361,7 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
   input.runtime[1].sha256 = hash;
   // The pointer is exclusively created by the sealed resource owner after the
   // separately pinned bank is read, then joined by its held identity.
-  const pointer = 12 + assets.length;
+  const pointer = plan.length + assets.length;
   assets.push({
     kind: "data",
     path: input.pointer,
@@ -6224,7 +6387,7 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
     ],
     objects = required.map((file) => ({
       index: entryList.findIndex(({ path }) => path === file),
-      decisions: [1, 1, 1, 1, 1],
+      decisions: Array(experiment && execWitnessVersion === 1 ? 4 : 5).fill(1),
       aclSha256: observedPins ? null : hash,
     })),
     rootRules = [
@@ -6323,7 +6486,7 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
     };
   f.put(approval.path, approvalBytes, 0o400);
   input[experiment ? "bindingSha256" : "reviewSha256"] = approval.sha256;
-  const policy = buildDarwinPolicy(input);
+  const policy = buildDarwinPolicy(input, { execWitnessVersion });
   request.policy.sha256 = policy.seatbeltSha256;
   request.bindings.policy = policy.compositionSha256;
   f.put(declared.bindings.assets[2].path, Buffer.from(policy.seatbelt));
@@ -6354,6 +6517,9 @@ function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
     );
   const custody = encodeDarwinCustodyPlan({
     ...(experiment ? { purpose: "experiment" } : {}),
+    ...(experiment && execWitnessVersion === 1
+      ? { execWitnessVersion: 1 }
+      : {}),
     candidateSha,
     uid: request.uid,
     gid: request.gid,
@@ -6456,14 +6622,16 @@ test("Darwin experiment declarations retain every ownership fault and access pro
       await effects.literal(prepared);
     }
     work.abort();
+    const retirement = settled(
+      await effects.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    );
     assert.equal(
-      settled(
-        await effects.settle(recipe, prepared, {
-          signal: new AbortController().signal,
-          execution: execution(recipe),
-        }),
-      ).status,
+      retirement.status,
       "RETIRED",
+      recipe.id + ": " + JSON.stringify(retirement),
     );
     assert.equal(f.processes.size, 0);
     assert.ok(f.events.includes("experiment-build-read"));
@@ -6489,6 +6657,8 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     "image-publication",
     "image-receipt-before",
     "image-receipt-after",
+    "control-close-result",
+    "primary-creator-publication",
   ]) {
     const access = ["tcp-deadline", "mach-control-timeout"].includes(fault),
       id = access ? "access.read-only" : "ownership.cancel",
@@ -6503,6 +6673,8 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "image-publication",
         "image-receipt-before",
         "image-receipt-after",
+        "control-close-result",
+        "primary-creator-publication",
       ].includes(fault)
     ) {
       await effects.bootstrap();
@@ -6524,12 +6696,15 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "primary-group",
         "gid-alias",
         "subject-authority",
+        "fresh-members-missing",
         "mach-control-timeout",
         "image-closure",
         "image-drift",
         "image-publication",
         "image-receipt-before",
         "image-receipt-after",
+        "control-close-result",
+        "primary-creator-publication",
       ].includes(fault)
     )
       await assert.rejects(
@@ -6567,6 +6742,8 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "image-publication",
         "image-receipt-before",
         "image-receipt-after",
+        "control-close-result",
+        "primary-creator-publication",
       ].includes(fault)
     ) {
       f.caseFault(null);
@@ -7946,7 +8123,7 @@ function operationBinding(f, id) {
       };
     const plan = [...entries, ...assets.map(({ source, ...value }) => value)];
     const bytes = encodeDarwinCustodyPlan({
-      ...(experiment ? { purpose: "experiment" } : {}),
+      ...(experiment ? { purpose: "experiment", execWitnessVersion: 1 } : {}),
       candidateSha,
       uid: 90001,
       gid: 90002,
@@ -8531,7 +8708,9 @@ function gitBinding(f, id, fault, generatedInput) {
   result.dynamic("git-hooks", [["policy", "hooks", "identitySha256"]]);
   result.approve();
   const input = generatedInput ?? syntheticInput;
-  let ordinaryCreator,
+  let controlRun = false,
+    controlImages,
+    ordinaryCreator,
     ordinaryPolicy,
     owner,
     worker,
@@ -8652,6 +8831,7 @@ function gitBinding(f, id, fault, generatedInput) {
     }
     if (name === "git-ordinary-start") {
       ordinary = true;
+      controlRun = f.manifest.purpose === "experiment";
       mode = args[4];
       ordinaryPolicy = Number(args[3]);
       stage = "root";
@@ -8663,12 +8843,23 @@ function gitBinding(f, id, fault, generatedInput) {
       if (stage === "payload" || stage === "image")
         return {
           ...(f.manifest.purpose === "experiment"
-            ? { version: 2, phase: stage === "payload" ? "creator" : "image" }
+            ? {
+                version: 3,
+                phase:
+                  (controlRun ? "control-" : "") +
+                  (stage === "payload" ? "creator" : "image"),
+              }
             : {}),
           helper: owner,
           payload,
-          controls: true,
+          controls: !controlRun,
         };
+      if (stage === "control-ready") return { phase: "armed" };
+      if (stage === "control-output") {
+        stage = "exit";
+        f.processes.delete(payload.pid);
+        return DARWIN_LITERAL_ARGUMENTS;
+      }
       if (stage === "ready")
         return { nonce: request.nonce, parked: true, pid: payload.pid };
       if (stage === "worker") return { worker };
@@ -8686,8 +8877,34 @@ function gitBinding(f, id, fault, generatedInput) {
       ctx.imageCreator = structuredClone(payload);
       // Retain on the fixture closure across independent protocol commands.
       ordinaryCreator = structuredClone(payload);
-      return { version: 2, creator: ordinaryCreator, closed: true };
+      return {
+        version: 3,
+        control: controlRun,
+        creator: ordinaryCreator,
+        closed: true,
+      };
     }
+    if (name === "image-control-next" && ordinary) {
+      controlImages = { creator: ordinaryCreator, target: payload };
+      controlRun = false;
+      payload = spawn(ctx, request.executable.path, 27000 + auditCount, true);
+      stage = "payload";
+      return { retired: true };
+    }
+    if (name === "image-probe" && ordinary)
+      return {
+        version: 1,
+        subject: ordinaryCreator,
+        policySha256: ctx.planEntries[ordinaryPolicy].pin,
+        assetSha256: ctx.planEntries[12].pin,
+        status: 1,
+        prepared: true,
+        filesCleanup: 0,
+        attributesCleanup: 0,
+        read: 0,
+        map: 0,
+        unchanged: true,
+      };
     if (name === "image-exec" && ordinary) {
       payload = {
         ...payload,
@@ -8702,17 +8919,20 @@ function gitBinding(f, id, fault, generatedInput) {
     }
     if (name === "image-read" && ordinary)
       return {
-        version: 2,
+        version: 3,
+        control: controlRun,
         creator: ordinaryCreator,
         target: payload,
         closed: true,
         stopped: true,
-        imageSha256: request.executable.sha256,
+        imageSha256: controlRun
+          ? ctx.planEntries[12].pin
+          : request.executable.sha256,
         cdhash: request.executable.cdhash,
         policySha256: ctx.planEntries[ordinaryPolicy].pin,
       };
     if (name === "image-continue" && ordinary) {
-      stage = "ready";
+      stage = controlRun ? "control-ready" : "ready";
       return { continued: true };
     }
     if (name === "git-ordinary-release") {
@@ -8729,6 +8949,8 @@ function gitBinding(f, id, fault, generatedInput) {
         if (fault === "epoch-credentials") payload.svuid = 0;
         ctx.live(payload, request.executable.path);
         stage = "ready";
+      } else if (args[1] === "A" && controlRun) {
+        stage = "control-output";
       } else if (args[1] === "P") {
         worker = spawn(ctx, input.git.path, payload.asid, true);
         stage = "worker";
@@ -8791,6 +9013,23 @@ function gitBinding(f, id, fault, generatedInput) {
           .bytes.toString()
           .includes("(allow file-write*");
       return {
+        ...(f.manifest.purpose === "experiment"
+          ? {
+              version: 2,
+              exec: boundExecEvidence(
+                subject,
+                ordinaryCreator,
+                payload,
+                controlImages,
+                ctx.planEntries[ordinaryPolicy].pin,
+                ctx.planEntries[12].pin,
+                subject.pid === payload.pid
+                  ? request.executable.sha256
+                  : input.git.sha256,
+                subject.pid !== payload.pid,
+              ),
+            }
+          : {}),
         subject,
         object: target,
         path: Buffer.from(ctx.planEntries[Number(args[1])].path).toString(
@@ -8800,12 +9039,10 @@ function gitBinding(f, id, fault, generatedInput) {
         sandboxed: true,
         decisions:
           subject.pid === payload?.pid && f.manifest.purpose === "experiment"
-            ? [
-                readable ? 0 : 1,
-                ...Array(3).fill(writable ? 0 : 1),
-                executable ? 0 : 1,
-              ]
-            : [0, 1, 1, 1, 1],
+            ? [readable ? 0 : 1, ...Array(3).fill(writable ? 0 : 1)]
+            : f.manifest.purpose === "experiment"
+              ? [0, 1, 1, 1]
+              : [0, 1, 1, 1, 1],
       };
     }
     if (name === "git-ordinary-finish") {
@@ -9930,6 +10167,7 @@ test("interrupted ordinary Darwin Git recovers live original domains without rep
     "session-publication",
     "image-receipt-before",
     "image-receipt-after",
+    "control-close-result",
     "continuation-loss",
     "members-missing",
     "unknown-zombie",
@@ -10425,7 +10663,7 @@ test("Darwin access cold reads retain numeric scope and refuse legacy, mixed or 
       .bytes.toString()
       .trim()
       .split("\n")
-      .slice(1, 13)
+      .slice(1, 14)
       .map((line) => {
         const [kind, sha256, encoded] = line.split(" ");
         return {
@@ -10499,6 +10737,63 @@ test("Darwin access cold reads retain numeric scope and refuse legacy, mixed or 
     if (mutate) await assert.rejects(load);
     else assert.equal((await load()).attempts.length, 39);
   }
+});
+
+test("historical experimental access keeps its admitted policy and five decisions for recovery only", async () => {
+  const f = buildTranscripts(true),
+    id = "access.read-only";
+  experimentCase(f, id);
+  const binding = accessBinding(f, "read-only", false, undefined, undefined, {
+      execWitnessVersion: 0,
+    }),
+    declared = f.manifest.darwinPreparation.cases.find(
+      (entry) => entry.id === id,
+    ),
+    setup = declared.bindings,
+    plan = f.files.get(declared.custody.plan.path).bytes.toString(),
+    base = plan
+      .trim()
+      .split("\n")
+      .slice(1, 13)
+      .map((line) => {
+        const [kind, pin, encoded] = line.split(" ");
+        return {
+          kind,
+          sha256: pin === "-" ? null : pin,
+          path: Buffer.from(encoded, "hex").toString(),
+        };
+      }),
+    load = (recovery) =>
+      darwinAccessPreparation(
+        { manifest: f.manifest, read: async (file) => f.files.get(file).bytes },
+        setup,
+        binding,
+        base,
+        { recovery },
+      );
+  assert.match(plan, /^native-experiment-custody-v1 /u);
+  assert.ok(
+    (await load(true)).objects.every(({ decisions }) => decisions.length === 5),
+  );
+  const historical = buildDarwinPolicy(setup.input, { execWitnessVersion: 0 });
+  assert.equal(historical.seatbeltSha256, setup.input.request.policy.sha256);
+  assert.equal(
+    historical.compositionSha256,
+    setup.input.request.bindings.policy,
+  );
+  assert.notEqual(
+    buildDarwinPolicy(setup.input).seatbeltSha256,
+    historical.seatbeltSha256,
+  );
+  assert.ok(
+    darwinExperimentCaseDeclarations(f.manifest.darwinPreparation.cases, {
+      recovery: true,
+    }),
+  );
+  assert.throws(() =>
+    darwinExperimentCaseDeclarations(f.manifest.darwinPreparation.cases),
+  );
+  await assert.rejects(load(false));
 });
 
 test("Darwin experiment input journals await real receipt admission and stay outside retirement inventories", async () => {
@@ -12218,7 +12513,7 @@ async function installedCaseAcquisition(format) {
     assert.equal(record.schemaVersion, 2);
     assert.equal(record.mach.source, acquired.inputs.mach.source);
     assert.equal(
-      record.assets[record.mach.tool.index - 12].sha256,
+      record.assets[record.mach.tool.index - 13].sha256,
       acquired.inputs.mach.tool.sha256,
     );
     assert.equal(record.attempts[13].event, null);

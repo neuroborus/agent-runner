@@ -37,7 +37,7 @@ extern mach_port_t bootstrap_port;
 #undef NATIVE_CREATION_INPUTS
 #ifdef NATIVE_CI_EXPERIMENT
 #include "image-closure.h"
-struct image_frame { unsigned version; struct identity identity; };
+struct image_frame { unsigned version, control; struct identity identity; };
 #endif
 #ifdef NATIVE_CI_EXPERIMENT
 static void launch_need_at(bool ok, const char *file, unsigned line);
@@ -86,7 +86,7 @@ static void launch_failure(const char *operation, long result, int error, int re
 #ifdef NATIVE_CI_EXPERIMENT
 static pid_t launch_reply_owner;
 static mach_port_t launch_bootstrap_local;
-static struct exec_handoff *launch_handoff;
+static struct exec_handoff *launch_handoff, *launch_probe;
 static void launch_replies_begin(void);
 static void launch_bootstrap_entry(void) {
   struct domain_bootstrap_fork entry = {0}; domain_bootstrap_entry(&entry);
@@ -117,6 +117,11 @@ static pid_t launch_bootstrap_fork(void) {
 static void launch_need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
     int error = errno;
+    if (launch_probe) {
+      exec_handoff_destroy(launch_probe);
+      fprintf(stderr, "native-darwin-probe-cleanup: files=%d attributes=%d\n", launch_probe->files_cleanup, launch_probe->attributes_cleanup);
+      launch_probe = NULL;
+    }
     if (launch_handoff) {
       exec_handoff_destroy(launch_handoff);
       fprintf(stderr, "native-darwin-image-cleanup: files=%d attributes=%d\n", launch_handoff->files_cleanup, launch_handoff->attributes_cleanup);
@@ -517,6 +522,18 @@ int main(int argc, char **argv) {
   unsigned char *policy = file(argv[9], 0, 0400, 1048576, argv[10], &policyIdentity);
   need(!memchr(policy, 0, (size_t)policyIdentity.st_size));
   claim(custody, "uid", uid, argv[11]); claim(custody, "gid", gid, argv[11]);
+#ifdef NATIVE_CI_EXPERIMENT
+  char control_path[PATH_MAX];
+  need(snprintf(control_path, sizeof(control_path), "%s/exec-control", argv[4]) < sizeof(control_path));
+  need(getenv("NATIVE_EXEC_CONTROL") && !strcmp(getenv("NATIVE_EXEC_CONTROL"), control_path));
+  const char *control_hash = getenv("NATIVE_EXEC_CONTROL_SHA256");
+  need(control_hash && strlen(control_hash) == 64 && strspn(control_hash, "0123456789abcdef") == 64);
+  struct stat control_identity; free(file(control_path, gid, 0550, imageMaximum, control_hash, &control_identity));
+  for (unsigned round = 0; round < 2; round++) {
+  bool control = round == 0;
+#else
+  {
+#endif
   int ready[2], release[2]; need(!pipe(ready) && !pipe(release));
   /* No directory-service or Security framework call precedes this fork.
    * Reject an unexpected multithreaded launcher instead of forking it. */
@@ -543,10 +560,13 @@ int main(int argc, char **argv) {
     char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
-      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
-    struct exec_handoff handoff = {0}; const int inherited[] = {0, 1, 1};
+      "CI=true", "GITHUB_ACTIONS=true", "NATIVE_OWNERSHIP_CUSTODY=true", access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
+    char *control_argv[] = {control_path, "", "space value", "λ雪", "'\"", "$(false); & | < > *", NULL};
+    struct exec_handoff probe = {0};
+    struct exec_handoff handoff = {0}; const int inherited[] = {0, 1, 2};
     launch_handoff = &handoff;
     need(exec_handoff_prepare(&handoff, inherited, 3));
+    if (!control) { launch_probe = &probe; need(exec_handoff_prepare(&probe, inherited, 3) && image_spawn_inputs(&probe)); }
 #endif
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
@@ -562,7 +582,11 @@ int main(int argc, char **argv) {
     gid_t only; need(getgroups(1, &only) == 1 && only == gid);
     need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
     launch_stage("sandbox", NULL, 0, 0);
-    char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
+    char *error = NULL;
+#ifdef NATIVE_CI_EXPERIMENT
+    if (!control)
+#endif
+    need(!sandbox_init((const char *)policy, 0, &error));
 #ifdef NATIVE_CI_EXPERIMENT
     mach_port_t local_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local_bootstrap);
@@ -570,7 +594,12 @@ int main(int argc, char **argv) {
     mach_rights();
 #endif
     launch_stage("domain-controls", NULL, 0, 0);
-    descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
+    descriptors();
+#ifdef NATIVE_CI_EXPERIMENT
+    if (!control)
+#endif
+    domain_controls(parent_asid, getppid());
+    struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
          identity.bsd.pbi_gid == gid && identity.bsd.pbi_rgid == gid && identity.bsd.pbi_svgid == gid &&
          identity.token.val[0] == uid && identity.token.val[6] == (unsigned)audit.ai_asid);
@@ -583,10 +612,16 @@ int main(int argc, char **argv) {
 #endif
     launch_stage("parked-publication", NULL, 0, 0);
 #ifdef NATIVE_CI_EXPERIMENT
-    struct image_frame frame = {.version = 2, .identity = identity};
+    struct image_frame frame = {.version = 3, .control = control, .identity = identity};
     need(write(3, &frame, sizeof(frame)) == sizeof(frame));
     argv[12] = argv[6];
-    exec_handoff_execute(&handoff, 4, 3, argv[6], &argv[12], env);
+    if (!control) {
+      need(exec_handoff_byte(&handoff, 3, true, 'B') && exec_handoff_byte(&handoff, 4, false, 'T'));
+      struct exec_probe refused = exec_handoff_attempt(&probe, control_path, control_argv, env); launch_probe = NULL;
+      need(write(3, &refused, sizeof(refused)) == sizeof(refused));
+      need(exec_handoff_refused(refused));
+    }
+    exec_handoff_execute(&handoff, 4, 3, control ? control_path : argv[6], control ? control_argv : &argv[12], env);
     exec_handoff_destroy(&handoff); launch_handoff = NULL;
     (void)signal(SIGPIPE, SIG_IGN);
     dprintf(launch_diagnostic, "native-darwin-image: operation=%s value=%d files-cleanup=%d attributes-cleanup=%d\n",
@@ -608,15 +643,25 @@ int main(int argc, char **argv) {
     argv[12] = argv[6]; child_exec(argv, provider ? providerEnv : env, provider);
   }
   if (provider) { close(4); close(5); }
-  free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
+  close(ready[1]); close(release[0]);
+#ifndef NATIVE_CI_EXPERIMENT
+  free(policy); close(3); close(workspace); close(storage); close(custody);
+#endif
 #ifdef NATIVE_CI_EXPERIMENT
   struct image_frame frame; struct exec_handoff handoff = {0};
-  need(read(ready[0], &frame, sizeof(frame)) == sizeof(frame) && frame.version == 2 && frame.identity.token.val[5] == (unsigned)child);
+  need(read(ready[0], &frame, sizeof(frame)) == sizeof(frame) && frame.version == 3 && frame.control == control && frame.identity.token.val[5] == (unsigned)child);
   struct identity parked = inspect(child); need(audit_identity_same(parked, frame.identity));
-  (void)audit_hold(parked.token.val[6]);
+  mach_port_t control_pin = audit_hold(parked.token.val[6]);
   need(exec_handoff_receive(&handoff, ready[0], false) && audit_identity_same(parked, inspect(child)));
-  printf("{\"version\":2,\"phase\":\"creator\",\"helper\":"); emit(inspect(getpid()));
-  fputs(",\"payload\":", stdout); emit(parked); puts(",\"controls\":true}"); fflush(stdout);
+  printf("{\"version\":3,\"phase\":\"%s\",\"helper\":", control ? "control-creator" : "creator"); emit(inspect(getpid()));
+  fputs(",\"payload\":", stdout); emit(parked); printf(",\"controls\":%s}\n", control ? "false" : "true"); fflush(stdout);
+  if (!control) {
+    need(command(0, 30000) == 'T' && exec_handoff_byte(&handoff, release[1], true, 'T'));
+    struct exec_probe refused;
+    need(read(ready[0], &refused, sizeof(refused)) == sizeof(refused) && exec_handoff_refused(refused));
+    need(audit_identity_same(parked, inspect(child)) && exec_handoff_receive(&handoff, ready[0], false));
+    need(write(1, &refused, sizeof(refused)) == sizeof(refused));
+  }
   need(command(0, 30000) == 'X' && exec_handoff_release(&handoff, &release[1]));
   need(exec_handoff_receive(&handoff, ready[0], true) && !close(ready[0]));
   struct timespec started, now; need(!clock_gettime(CLOCK_MONOTONIC, &started)); struct identity live;
@@ -625,8 +670,8 @@ int main(int argc, char **argv) {
     need(!clock_gettime(CLOCK_MONOTONIC, &now) && now.tv_sec - started.tv_sec < 30);
     (void)poll(NULL, 0, 1);
   }
-  printf("{\"version\":2,\"phase\":\"image\",\"helper\":"); emit(inspect(getpid()));
-  fputs(",\"payload\":", stdout); emit(live); puts(",\"controls\":true}"); fflush(stdout);
+  printf("{\"version\":3,\"phase\":\"%s\",\"helper\":", control ? "control-image" : "image"); emit(inspect(getpid()));
+  fputs(",\"payload\":", stdout); emit(live); printf(",\"controls\":%s}\n", control ? "false" : "true"); fflush(stdout);
   /* Only the bound independent root reader continues the stopped replacement. */
   need(command(0, 30000) == 'C');
 #else
@@ -638,11 +683,28 @@ int main(int argc, char **argv) {
   char value = command(0, 30000); need(value == 'R' && write(release[1], &value, 1) == 1 && !close(release[1]));
 #endif
   int status; while (waitpid(child, &status, 0) < 0) need(errno == EINTR);
-  if (ownership) {
+  if (ownership
+#ifdef NATIVE_CI_EXPERIMENT
+      || control
+#endif
+      ) {
     printf("{\"exitCode\":");
     if (WIFEXITED(status)) printf("%d", WEXITSTATUS(status)); else fputs("null", stdout);
     printf(",\"signal\":%s}\n", WIFSIGNALED(status) ? "\"signal\"" : "null"); fflush(stdout);
   }
+#ifdef NATIVE_CI_EXPERIMENT
+  if (control) {
+    need(WIFEXITED(status) && WEXITSTATUS(status) == 0 && mach_port_deallocate(mach_task_self(), control_pin) == KERN_SUCCESS);
+    launch_child = 0;
+    /* No primary fork until independent whole-domain retirement and custody
+     * settlement have been recorded by the protected reader. */
+    need(command(0, 30000) == 'N'); continue;
+  }
+#endif
+  }
+#ifdef NATIVE_CI_EXPERIMENT
+  free(policy); close(3); close(workspace); close(storage); close(custody);
+#endif
   /* Direct-child exit is not domain retirement. Retain this session reference
    * until the protected retirement owner stops this exact native identity,
    * after admitting separate recovered audit custody. */

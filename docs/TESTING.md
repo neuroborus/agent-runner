@@ -388,7 +388,7 @@ or native PASS; existing native builds and matching system/fault controls retain
 that obligation.
 The native ownership/Git/recovery fixtures exercise the migrated private protocol;
 shared command-handoff and reviewed/protected null-only controls remain required.
-Both fault recipes use `test/native-darwin-fault-image.test.js` for version-four
+Both fault recipes use `test/native-darwin-fault-image.test.js` for version-five
 creator/replacement records, durable independent readback, repeated observations,
 one-shot continuation, expiry, failed publication, uncertain continuation and
 recovery without gate replay. Executed native bodies protect write-ahead X and
@@ -398,7 +398,7 @@ retain original native refusal/exit facts separately from custodian diagnostics;
 suspended sessions retain policy markers, gated acknowledgements and original
 stdout/stderr.
 The same suite executes the actual effective-policy and advisory writer bodies:
-all 54 file/process decisions and the fork query run once on success, while
+all 45 original file/map decisions, two control-asset reads and the fork query remain, while
 decision mismatches, query errors, unexpected returns and fork refusal stop at
 the original predicate without advancement. Exact closed selectors, caller/target,
 returns and raw errno survive failed advisory writes/flushes without changing
@@ -411,6 +411,22 @@ inherited audit sessions. Refusal cleanup validates its independent root verifie
 before custody closure, then observes custodian exit before final verification.
 Their acknowledgement/signal cases replace the obsolete intermediate self-exec
 fault-session exception; generic startup exec still requires its fixture-main marker.
+
+Bound exec regressions use the existing image, fault, authority and preparation
+fixtures. They require the same-credential outside-policy control and its complete
+independent retirement before primary creation, then a direct `EPERM`/`EACCES`
+probe with separate checked spawn-object cleanup and the final `X` gate preserved.
+Query-like statuses, stale errno, invalid literal controls, missing/replayed or
+substituted witnesses, policy/image/identity drift and unrelated Git-worker
+evidence refuse admission. Interrupted control-to-primary publication and uncertain continuation
+retain original domain custody without replay. New experimental authority replies
+have four file decisions and separate exec evidence; historical/reviewed shapes
+cannot silently select that contract. Historical policy bytes and five-decision
+formats remain recoverable without new admission authority. Injected native bodies
+and acknowledged barriers verify ordering and recovery, never native PASS. Both original workflows
+at one final SHA must still establish all 69 actual controls, supported sandbox
+inheritance and independent complete cleanup; Darwin host-loss and Windows
+startup failures remain separate unresolved native limitations.
 The fault setup body also models the cited SDK declaration rule from the real
 helper preamble: a missing directory record with the correct actual process group
 must pass, while failed/empty/wrong/additional groups, failed NPROC reads and either
@@ -428,7 +444,7 @@ The removed constructor/cache/census fixtures have these executable replacements
 | Fork/CR1 provenance, sequence fences and namespace substitution        | Actual creator/replacement epoch and birth checks, held same-reader endpoint comparison and independent receipt reads in the image and fault-image suites                                   |
 | Reply/cache aliases, unknown namespace entries and census completeness | Fresh IPC-space creation, complete inheritable-input closure and actual access/exception bodies in `test/native-darwin-image.test.js`; arbitrary old names are never allowed or destroyed   |
 | Getter aliases, rejected-name ownership and primary/cleanup failures   | Executed closure release, access-type and fenced-retirement bodies in the image suite, plus retained fork/exception/lifecycle fixtures in `test/native-darwin-build.test.js`                |
-| CR1 import, seal/R and raw exec failure                                | Version-four fault channel, repeated readback/drift/persistence failures and executed one-shot handoff/continuation bodies                                                                  |
+| CR1 import, seal/R and raw exec failure                                | Version-five fault channel, repeated readback/drift/persistence failures and executed one-shot handoff/continuation bodies                                                                  |
 | Constructor observer cancellation and incomplete capture               | No constructor observer is started; startup/command tracing retain independent observer retirement tests, and fault recovery retains original-domain custody and direct-child reaping tests |
 | Complete original fault controls and settlement                        | Both recipes in `test/native-feasibility.test.js`, native fault retirement bodies and image/fault-image transport coverage                                                                  |
 

@@ -271,7 +271,8 @@ const subtree = (name) => `(subpath ${quote(name)})`;
  * compilation, operation/filter semantics and the immutable image closure must
  * all be independently verified before admission; reviewed bindings additionally
  * require their independent approval. */
-export function buildDarwinPolicy(input) {
+export function buildDarwinPolicy(input, { execWitnessVersion = 1 } = {}) {
+  requireDarwin([0, 1].includes(execWitnessVersion));
   const value = normalizeDarwinPolicy(input, input.purpose ?? "reviewed"),
     { request } = value;
   const forbidden = [
@@ -289,6 +290,14 @@ export function buildDarwinPolicy(input) {
     "(allow process-fork)",
     "(allow process-info* (target same-sandbox))",
   ];
+  if (
+    value.purpose === "experiment" &&
+    !request.execution &&
+    execWitnessVersion === 1
+  )
+    lines.push(
+      `(allow file-read-data file-read-metadata file-map-executable ${literal(request.storage + "/exec-control")})`,
+    );
   for (const entry of value.runtime) {
     lines.push(
       `(allow file-read-data file-read-metadata ${literal(entry.path)})`,

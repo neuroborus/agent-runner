@@ -115,7 +115,11 @@ function systemInput(job, preparation, { recovery = false } = {}) {
         ),
         bytes = Buffer.from(upload.hex, "hex");
       requireObservation(digest(bytes) === pin.sha256);
-      assertDarwinMachRecord(JSON.parse(bytes), preparation.inputs.mach);
+      assertDarwinMachRecord(
+        JSON.parse(bytes),
+        preparation.inputs.mach,
+        declared.bindings.execControl ? 13 : 12,
+      );
     }
   }
   const canonical = darwinExperimentCaseDeclarations(preparation.system.cases, {

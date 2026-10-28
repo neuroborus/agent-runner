@@ -23,6 +23,28 @@ struct image_closure {
   unsigned count;
   bool resource_unsupported;
 };
+/* Compare held descriptor objects across a refused SETEXEC, not just numbers.
+ * Mutable offsets, pipe byte counts and socket traffic are intentionally absent. */
+static bool image_descriptors(pid_t pid, uint64_t state[8][4]) {
+  struct proc_fdinfo fds[8]; int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+  if (size <= 0 || size >= sizeof(fds) || size % sizeof(*fds)) return false;
+  memset(state, 0, sizeof(uint64_t) * 8 * 4);
+  for (unsigned i = 0; i < (unsigned)size / sizeof(*fds); i++) {
+    int fd = fds[i].proc_fd; if (fd < 0 || fd >= 8 || state[fd][0]) return false;
+    state[fd][0] = fds[i].proc_fdtype;
+    if (fds[i].proc_fdtype == PROX_FDTYPE_PIPE) {
+      struct pipe_fdinfo value = {0}; if (proc_pidfdinfo(pid, fd, PROC_PIDFDPIPEINFO, &value, sizeof(value)) != sizeof(value) || !value.pipeinfo.pipe_handle) return false;
+      state[fd][1] = value.pfi.fi_openflags; state[fd][2] = value.pipeinfo.pipe_handle; state[fd][3] = value.pipeinfo.pipe_peerhandle;
+    } else if (fds[i].proc_fdtype == PROX_FDTYPE_SOCKET) {
+      struct socket_fdinfo value = {0}; if (proc_pidfdinfo(pid, fd, PROC_PIDFDSOCKETINFO, &value, sizeof(value)) != sizeof(value) || !value.psi.soi_so) return false;
+      state[fd][1] = value.pfi.fi_openflags; state[fd][2] = value.psi.soi_so;
+    } else if (fds[i].proc_fdtype == PROX_FDTYPE_VNODE) {
+      struct vnode_fdinfowithpath value = {0}; if (proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, &value, sizeof(value)) != sizeof(value)) return false;
+      state[fd][1] = value.pfi.fi_openflags; state[fd][2] = value.pvip.vip_vi.vi_stat.vst_dev; state[fd][3] = value.pvip.vip_vi.vi_stat.vst_ino;
+    } else return false;
+  }
+  return true;
+}
 static bool image_mach(struct image_closure *value, kern_return_t result, const char *operation) {
   return domain_bootstrap_check(&value->outcome, result == KERN_SUCCESS, operation, "mach", result, false);
 }
@@ -142,6 +164,11 @@ static void image_closure_require(struct image_closure *value, bool ok) {
 }
 /* Mutate only the owned trusted child. Never rewrite parent exception metadata.
  * Access is immutable: no setter, including an attempted NULL overwrite. */
+static bool image_spawn_inputs(struct exec_handoff *handoff) {
+  return exec_handoff_posix(handoff, posix_spawnattr_setspecialport_np(&handoff->attributes, MACH_PORT_NULL, TASK_BOOTSTRAP_PORT), "image-spawn-bootstrap") &&
+    exec_handoff_posix(handoff, posix_spawnattr_setspecialport_np(&handoff->attributes, MACH_PORT_NULL, TASK_DEBUG_CONTROL_PORT), "image-spawn-debug") &&
+    exec_handoff_posix(handoff, posix_spawnattr_setexceptionports_np(&handoff->attributes, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "image-spawn-exceptions");
+}
 static void image_closure_prepare(struct exec_handoff *handoff, mach_port_t local_bootstrap) {
   struct image_closure value = {0}; task_t task = mach_task_self(); thread_t thread = mach_thread_self();
   image_copy(&value, thread); image_copy(&value, local_bootstrap);
@@ -160,9 +187,7 @@ static void image_closure_prepare(struct exec_handoff *handoff, mach_port_t loca
   ok = image_mach(&value, thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "image-thread-exceptions-clear") && ok;
   ok = image_closure_read(&value, task, thread) && ok;
   if (ok) {
-    ok = exec_handoff_posix(handoff, posix_spawnattr_setspecialport_np(&handoff->attributes, MACH_PORT_NULL, TASK_BOOTSTRAP_PORT), "image-spawn-bootstrap") &&
-      exec_handoff_posix(handoff, posix_spawnattr_setspecialport_np(&handoff->attributes, MACH_PORT_NULL, TASK_DEBUG_CONTROL_PORT), "image-spawn-debug") &&
-      exec_handoff_posix(handoff, posix_spawnattr_setexceptionports_np(&handoff->attributes, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "image-spawn-exceptions");
+    ok = image_spawn_inputs(handoff);
   }
   if (!ok && handoff->operation) domain_bootstrap_check(&value.outcome, false, handoff->operation, handoff->kind, handoff->value, false);
   bool released = image_closure_release(&value);

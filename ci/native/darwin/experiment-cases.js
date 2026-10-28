@@ -199,6 +199,11 @@ export async function prepareDarwinExperimentCases(
           sha256: digest("native-poc-pf-lease-v1\n"),
         },
         { kind: "directory", path: prepared.output, sha256: null },
+        {
+          kind: "image",
+          path: request.storage + "/exec-control",
+          sha256: helper("argv-fixture").sha256,
+        },
       ],
       add = (kind, file, pin = null, source = null) => {
         const prior = [...entries, ...assets].findIndex(
@@ -208,7 +213,7 @@ export async function prepareDarwinExperimentCases(
           requireObservation([...entries, ...assets][prior].sha256 === pin);
           return prior;
         }
-        const index = 12 + assets.length;
+        const index = 13 + assets.length;
         assets.push({ kind, path: file, sha256: pin, source });
         return index;
       },
@@ -478,6 +483,7 @@ export async function prepareDarwinExperimentCases(
     entries[6].sha256 = policy.sha256;
     entries[9] = { kind: "data", ...policy };
     const planBytes = encodeDarwinCustodyPlan({
+        execWitnessVersion: 1,
         purpose: "experiment",
         candidateSha: prepared.job.candidateSha,
         uid,
@@ -502,6 +508,7 @@ export async function prepareDarwinExperimentCases(
       },
       bindings: {
         schemaVersion: access ? 2 : 1,
+        execControl: helper("argv-fixture"),
         bindingSha256: prepared.bootstrap.bindingSha256,
         uid,
         gid,
@@ -535,7 +542,7 @@ function decisions(input, file) {
       file === input.pointer ||
       file === input.metadata ||
       !!runtime;
-  return [read ? 0 : 1, 1, 1, 1, runtime?.executable ? 0 : 1];
+  return [read ? 0 : 1, 1, 1, 1];
 }
 function accessAttempts(plan, root, inputs) {
   const { request } = plan.value,

@@ -9,7 +9,7 @@ const requireMach = (value, reason) => {
 
 /** Experiment admission only; recovery may inspect older selectors solely to
  * retire their original owners, never to manufacture current access evidence. */
-export function assertDarwinMachRecord(value, input) {
+export function assertDarwinMachRecord(value, input, baseCount = 12) {
   requireMach(
     value.purpose === "experiment" && value.schemaVersion === 2,
     "record version",
@@ -17,11 +17,12 @@ export function assertDarwinMachRecord(value, input) {
   observationObject(value.mach, ["source", "tool"]);
   observationObject(value.mach.tool, ["index", "cdhash"]);
   const { tool } = value.mach,
-    asset = value.assets[tool.index - 12];
+    asset = value.assets[tool.index - baseCount];
   requireMach(
     value.mach.source === "unified-log-mach-v1" &&
       Number.isSafeInteger(tool.index) &&
-      tool.index >= 12 &&
+      [12, 13].includes(baseCount) &&
+      tool.index >= baseCount &&
       asset?.kind === "helper" &&
       asset.path === "/usr/bin/log" &&
       /^[a-f0-9]{64}$/u.test(asset.sha256) &&

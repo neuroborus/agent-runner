@@ -152,7 +152,14 @@ export function encodeDarwinCustodyPlan(input) {
     "uid",
     "gid",
     "entries",
+    ...(Object.hasOwn(input, "execWitnessVersion")
+      ? ["execWitnessVersion"]
+      : []),
   ]);
+  requireDarwin(
+    input.execWitnessVersion === undefined ||
+      (input.purpose === "experiment" && input.execWitnessVersion === 1),
+  );
   const { candidateSha, uid, gid } = input,
     entries = observationList(input.entries, 128);
   requireDarwin(
@@ -182,7 +189,7 @@ export function encodeDarwinCustodyPlan(input) {
   );
   const bytes = Buffer.from(
     [
-      `${input.purpose === "experiment" ? "native-experiment-custody-v1" : "native-custody-v1"} ${candidateSha} ${uid} ${gid}`,
+      `${input.purpose === "experiment" ? (input.execWitnessVersion === 1 ? "native-experiment-custody-v2" : "native-experiment-custody-v1") : "native-custody-v1"} ${candidateSha} ${uid} ${gid}`,
       ...lines,
       "",
     ].join("\n"),
@@ -628,6 +635,7 @@ export function createDarwinCustodyReader(value, options = {}) {
   };
   // Cleanup cannot reopen admission after the work deadline. It only reads
   // existing custody, restores the fixed PF baseline, and closes owned resources.
+  let execWitness, execControl;
   const cleanupCommands = new Set([
     "process",
     "inspect",
@@ -1198,6 +1206,24 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       return actual;
     },
+    async provisionExecControl(cdhash) {
+      requireDarwin(
+        input.purpose === "experiment" && /^[a-f0-9]{40}$/u.test(cdhash),
+      );
+      const value = await command("exec-control-asset", cdhash);
+      observationObject(value, ["object", "sourceMacho", "macho"]);
+      const actual = snapshot(value.object, domain);
+      requireDarwin(
+        !actual.directory &&
+          actual.mode === 0o550 &&
+          actual.uid === 0 &&
+          JSON.stringify(macho(value.sourceMacho)) ===
+            JSON.stringify(macho(value.macho)),
+      );
+      held.set(12, actual);
+      await save("case-object", { index: 12, object: actual });
+      return actual;
+    },
     async startOwnership(caseId, cdhash) {
       requireDarwin(
         options.caseContextSha256 && /^[a-f0-9]{40}$/u.test(cdhash),
@@ -1217,13 +1243,53 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       return command("image-creator");
     },
+    async imageProbe() {
+      const value = await command("image-probe");
+      requireDarwin(
+        value.version === 1 &&
+          [1, 13].includes(value.status) &&
+          value.prepared === true &&
+          value.filesCleanup === 0 &&
+          value.attributesCleanup === 0 &&
+          value.read === 0 &&
+          value.map === 0 &&
+          value.unchanged === true,
+      );
+      execWitness = { ...value, control: execControl };
+      return value;
+    },
+    async imageControlNext() {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          (await command("image-control-next")).retired === true,
+      );
+    },
     async imageExec() {
       requireDarwin(
         input.purpose === "experiment" &&
           (await command("image-exec")) === null,
       );
     },
-    imageRead: () => command("image-read"),
+    async imageRead() {
+      const value = await command("image-read");
+      if (value.version === 3 && value.control === true)
+        execControl = { creator: value.creator, target: value.target };
+      else {
+        requireDarwin(
+          execWitness &&
+            value.version === 3 &&
+            value.control === false &&
+            sameDarwinIdentity(value.creator, execWitness.subject) &&
+            value.policySha256 === execWitness.policySha256,
+        );
+        execWitness.target = value.target;
+        execWitness.imageSha256 = value.imageSha256;
+        execWitness.gitSha256 = options.entries.find((entry) =>
+          entry.path.endsWith("/storage/git"),
+        )?.sha256;
+      }
+      return value;
+    },
     async imageContinue(pin) {
       requireDarwin(
         input.purpose === "experiment" &&
@@ -1399,6 +1465,11 @@ export function createDarwinCustodyReader(value, options = {}) {
       const closed = await command("case-session-close");
       requireDarwin(closed.closed === true);
       const completed = { ...custody, held: false, closed: true };
+      if (options.execWitnessVersion === 1)
+        await save("case-session-retired", {
+          custody: completed,
+          verification: fresh,
+        });
       ownershipSessions.set(asid, completed);
       return structuredClone(completed);
     },
@@ -1908,7 +1979,11 @@ export function createDarwinCustodyReader(value, options = {}) {
           actual,
           subject,
           held.get(index),
-          hostedSlots.has(index) ? "experiment" : "reviewed",
+          input.purpose === "experiment" && options.execWitnessVersion === 1
+            ? "experiment"
+            : "reviewed",
+          execWitness,
+          input.purpose ?? "reviewed",
         ),
       );
     },

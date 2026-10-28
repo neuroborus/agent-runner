@@ -11,6 +11,7 @@ import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
   darwinIdentityArguments,
+  DARWIN_LITERAL_ARGUMENTS,
 } from "./protocol.js";
 
 const PRIVILEGED_ENV = [
@@ -49,10 +50,11 @@ export async function openDarwinFaultDomain(
     uid = process.getuid(),
     gid = process.getgid(),
     retain = () => {},
+    controlHash,
     now = () => performance.now(),
   } = {},
 ) {
-  need(typeof retain === "function");
+  need(typeof retain === "function" && /^[a-f0-9]{64}$/u.test(controlHash));
   const deadline = now() + 12000;
   const bounded = () => need(now() <= deadline);
   const directory = feasibilityDomainPath(nonce),
@@ -75,6 +77,7 @@ export async function openDarwinFaultDomain(
       policyHash,
       String(uid),
       String(gid),
+      controlHash,
     ],
     { cwd: root, env, stdio: ["pipe", "pipe", "pipe"] },
   );
@@ -91,6 +94,9 @@ export async function openDarwinFaultDomain(
     payloadExit,
     parent,
     creator,
+    controlVerification,
+    controlWait,
+    controlOutput = Buffer.alloc(0),
     acquiring = Promise.resolve();
   // Keep the original acquisition reachable even when admission never completes.
   const acquired = { owner, directory };
@@ -130,6 +136,8 @@ export async function openDarwinFaultDomain(
   };
   const fail = (error) => {
     failed ??= error;
+    controlWait?.arm(false);
+    controlWait?.exit(false);
     if (error.exitCode !== undefined) failed.exitCode ??= error.exitCode;
     if (error.signal !== undefined) failed.signal ??= error.signal;
     retainFailure(failed);
@@ -228,7 +236,7 @@ export async function openDarwinFaultDomain(
   owner.stderr.on("error", fail);
   const imageRecord = (record, original) => {
     need(
-      record?.version === 4 &&
+      record?.version === 5 &&
         record.stage === 1 &&
         record.emergency === false &&
         record.candidateSha === candidate &&
@@ -236,6 +244,10 @@ export async function openDarwinFaultDomain(
         record.helperSha256 === helperHash &&
         record.policySha256 === policyHash &&
         record.execution === 1 &&
+        record.controlSha256 === controlHash &&
+        typeof record.control === "boolean" &&
+        typeof record.controlRetired === "boolean" &&
+        typeof record.probeConsumed === "boolean" &&
         /^[a-f0-9]{64}$/u.test(record.receiptSha256) &&
         record.intentSha256 === "" &&
         record.creatorReceiptSha256 === "" &&
@@ -243,9 +255,53 @@ export async function openDarwinFaultDomain(
         record.constructorCaptureSha256 === "" &&
         sameDarwinIdentity(record.custodian, parent),
     );
+    if (record.controlRetired)
+      need(
+        /^[a-f0-9]{40}$/u.test(record.controlCdhash) &&
+          /^[a-f0-9]{64}$/u.test(record.controlObservationsSha256) &&
+          /^[a-f0-9]{64}$/u.test(record.controlOutputSha256),
+      );
+    if (!record.control) {
+      const control = controlVerification?.record;
+      need(
+        control &&
+          record.controlRetired &&
+          [
+            "controlCreator",
+            "controlTarget",
+            "controlCdhash",
+            "controlObservationsSha256",
+            "controlOutputSha256",
+          ].every(
+            (key) =>
+              JSON.stringify(record[key]) === JSON.stringify(control[key]),
+          ),
+      );
+    }
     normalizeDarwinIdentity(record.creator);
     need(record.creator.asid === record.asid);
-    if (original) need(sameDarwinIdentity(record.creator, original.creator));
+    if (original)
+      need(
+        record.control === original.control &&
+          sameDarwinIdentity(record.creator, original.creator),
+      );
+    if (!record.control && record.target !== null) {
+      need(
+        record.controlRetired &&
+          record.probeConsumed &&
+          [1, 13].includes(record.probeStatus),
+      );
+      assertDarwinImageTransition(
+        normalizeDarwinIdentity(record.controlCreator),
+        normalizeDarwinIdentity(record.controlTarget),
+      );
+      need(
+        record.controlCreator.asid !== record.creator.asid &&
+          ["auid", "uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+            (key) => record.controlCreator[key] === record.creator[key],
+          ),
+      );
+    }
     if (record.target !== null) {
       assertDarwinImageTransition(
         record.creator,
@@ -366,7 +422,7 @@ export async function openDarwinFaultDomain(
           need(!parent);
           parent = normalizeDarwinIdentity(value.hello.custodian);
           need(
-            value.hello.version === 4 &&
+            value.hello.version === 5 &&
               value.hello.candidateSha === candidate &&
               value.hello.caseId === caseId &&
               value.hello.stage === 0 &&
@@ -383,8 +439,8 @@ export async function openDarwinFaultDomain(
           need(
             Object.keys(value).length === 1 &&
               parent &&
-              !creator &&
-              value.creator.version === 4 &&
+              (!creator || (creator.control && creator.controlRetired)) &&
+              value.creator.version === 5 &&
               value.creator.phase === 1,
           );
           creator = imageRecord(value.creator.record);
@@ -393,6 +449,29 @@ export async function openDarwinFaultDomain(
           retain(acquired);
           acquire(async () => {
             await readAdmission(creator); // original ownership and possible X are durable first
+            if (creator.control) {
+              let arm, exit;
+              const armed = new Promise((resolve) => {
+                  arm = resolve;
+                }),
+                exited = new Promise((resolve) => {
+                  exit = resolve;
+                });
+              controlWait = { armed, exited, arm, exit };
+              controlOutput = Buffer.alloc(0);
+            } else {
+              need(
+                creator.controlRetired &&
+                  creator.controlCreator &&
+                  creator.controlTarget,
+              );
+              const refused = imageRecord(await rpc("image-probe"), creator);
+              need(
+                refused.probeConsumed && [1, 13].includes(refused.probeStatus),
+              );
+              await readAdmission(refused);
+              creator = refused;
+            }
             const image = imageRecord(await rpc("image-exec"), creator);
             need(image.target !== null && image.continuation === 0);
             acquired.image = structuredClone(image);
@@ -428,6 +507,60 @@ export async function openDarwinFaultDomain(
             acquired.image = structuredClone(continued);
             retain(acquired);
             bounded();
+            if (creator.control) {
+              need(await controlWait.armed);
+              await rpc("payload", "A");
+              need(await controlWait.exited);
+              const lines = controlOutput
+                .toString("utf8")
+                .trimEnd()
+                .split("\n");
+              need(
+                lines.length === 2 &&
+                  JSON.parse(lines[0]).phase === "armed" &&
+                  JSON.stringify(JSON.parse(lines[1])) ===
+                    JSON.stringify(DARWIN_LITERAL_ARGUMENTS),
+              );
+              const retired = imageRecord(await rpc("control-settle"), creator);
+              need(
+                retired.controlRetired &&
+                  retired.controlOutputSha256 === digest(controlOutput),
+              );
+              const { stdout } = await execute(
+                "/usr/bin/sudo",
+                [
+                  "-n",
+                  "--",
+                  "/usr/bin/env",
+                  "-i",
+                  ...PRIVILEGED_ENV,
+                  helper,
+                  "fault-control-verify",
+                  nonce,
+                  retired.receiptSha256,
+                ],
+                { cwd: root, env, timeout: 12000, maxBuffer: 65536 },
+              );
+              const proof = JSON.parse(stdout),
+                verifier = normalizeDarwinIdentity(proof.verifier);
+              need(
+                proof.independent === true &&
+                  JSON.stringify(proof.record) === JSON.stringify(retired) &&
+                  verifier.pid !== parent.pid &&
+                  verifier.asid !== retired.asid &&
+                  ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+                    (key) => verifier[key] === 0,
+                  ),
+              );
+              controlVerification = structuredClone(proof);
+              creator = retired;
+              acquired.control = structuredClone(retired);
+              acquired.controlVerification = controlVerification;
+              retain(acquired);
+              await rpc("control-next", retired.receiptSha256);
+              controlWait = null;
+              return;
+            }
             need(ready);
             const done = ready;
             ready = null;
@@ -439,6 +572,21 @@ export async function openDarwinFaultDomain(
               /^(?:[a-f0-9]{2})*$/u.test(value.hex),
           );
           const chunk = Buffer.from(value.hex, "hex");
+          if (creator?.control && controlWait) {
+            if (value.stream === "stdout") {
+              controlOutput = Buffer.concat([controlOutput, chunk]);
+              need(controlOutput.length <= 65536);
+              const end = controlOutput.indexOf(10);
+              if (end >= 0) {
+                need(
+                  JSON.parse(controlOutput.subarray(0, end).toString("utf8"))
+                    .phase === "armed",
+                );
+                controlWait.arm(true);
+              }
+            }
+            continue;
+          }
           if (!running && value.stream === "stderr") {
             const length = childStderr.length + chunk.length;
             childStderr = Buffer.concat([
@@ -465,7 +613,11 @@ export async function openDarwinFaultDomain(
               ((code >= 0 && signal === 0) ||
                 (code === -1 && signalName !== undefined)),
           );
-          closePayload(code >= 0 ? code : null, signal ? signalName : null);
+          if (creator?.control && controlWait) {
+            need(code === 0 && signal === 0);
+            controlWait.exit(true);
+          } else
+            closePayload(code >= 0 ? code : null, signal ? signalName : null);
         } else {
           need(pending && value.sequence === pending.id);
           const request = pending;
@@ -503,7 +655,7 @@ export async function openDarwinFaultDomain(
       try {
         const record = await rpc("recover");
         need(
-          record.version === 4 &&
+          record.version === 5 &&
             record.execution === 1 &&
             record.stage === 5 &&
             record.emergency === false &&
@@ -604,7 +756,7 @@ export async function openDarwinFaultDomain(
         initial.policySha256 === policyHash &&
         initial.asid > 0 &&
         initial.asid === creator.asid &&
-        initial.version === 4 &&
+        initial.version === 5 &&
         initial.continuation === 2 &&
         initial.target !== null &&
         sameDarwinIdentity(initial.creator, creator.creator) &&
@@ -665,6 +817,16 @@ export async function openDarwinFaultDomain(
       "continuation",
       "observationsSha256",
       "imageCdhash",
+      "control",
+      "controlRetired",
+      "controlSha256",
+      "controlCreator",
+      "controlTarget",
+      "controlCdhash",
+      "controlObservationsSha256",
+      "controlOutputSha256",
+      "probeConsumed",
+      "probeStatus",
     ];
     need(
       record.stage === 5 &&
@@ -705,6 +867,7 @@ export async function openDarwinFaultDomain(
       complete: true,
       independent: true,
       nonEmergency: true,
+      controlVerification,
       record,
       fresh,
       settled,
@@ -726,8 +889,14 @@ export async function openDarwinFaultDomain(
     policyHash,
     initial: structuredClone(initial),
     imageEvidence: {
-      version: 4,
+      version: 5,
+      controlVerification,
       creator: creator.creator,
+      controlCreator: initial.controlCreator,
+      controlTarget: initial.controlTarget,
+      controlRetired: initial.controlRetired,
+      controlSha256: initial.controlSha256,
+      probeStatus: initial.probeStatus,
       target: initial.target,
       observationsSha256: initial.observationsSha256,
       receiptSha256: initial.receiptSha256,
@@ -758,7 +927,7 @@ export async function openDarwinFaultDomain(
         record.stage === 2 &&
           record.intentSha256 === pin &&
           record.asid === initial.asid &&
-          record.version === 4 &&
+          record.version === 5 &&
           record.continuation === 2 &&
           sameDarwinIdentity(record.creator, initial.creator) &&
           sameDarwinIdentity(record.owner, initial.owner) &&

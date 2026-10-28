@@ -57,7 +57,11 @@ export function darwinOwnershipArguments(id, request) {
 
 // This fixture policy has no network, IPC, credential or foreign-process grants.
 // Its complete bytes, rather than selected successful queries, bound authority.
-export function darwinOwnershipPolicy(request) {
+export function darwinOwnershipPolicy(
+  request,
+  { execWitnessVersion = 1 } = {},
+) {
+  requireObservation([0, 1].includes(execWitnessVersion));
   const quote = JSON.stringify;
   return [
     "(version 1)",
@@ -68,6 +72,9 @@ export function darwinOwnershipPolicy(request) {
     `(allow file-read-metadata (literal ${quote(request.storage)}))`,
     ...[
       request.executable.path,
+      ...(request.purpose === "experiment" && execWitnessVersion === 1
+        ? [request.storage + "/exec-control"]
+        : []),
       "/usr/lib/dyld",
       "/usr/lib/libSystem.B.dylib",
     ].map(
@@ -163,19 +170,23 @@ export async function retireDarwinConstructorHistory(reader, recovered) {
  * purpose-bound expectations remain data, including the complete policy. */
 export function createDarwinCaseEffects(state, current, save, recovered) {
   const { reader, binding, declared, provisioned, recipe } = current,
+    execWitnessVersion = declared.bindings.execControl ? 1 : 0,
     request = normalizeDarwinLaunch(
       current.input.request ?? current.input,
       binding.purpose ?? "reviewed",
     ),
     access =
-      recipe.group === "access" ? buildDarwinPolicy(current.input) : null,
+      recipe.group === "access"
+        ? buildDarwinPolicy(current.input, { execWitnessVersion })
+        : null,
     args = access
       ? [...DARWIN_LITERAL_ARGUMENTS]
       : darwinOwnershipArguments(recipe.id, request),
     mode = access ? "access" : recipe.id.slice(10),
     requestSha256 = darwinLaunchDigest(request, args),
     expectedBytes = Buffer.from(
-      access?.seatbelt ?? darwinOwnershipPolicy(request),
+      access?.seatbelt ??
+        darwinOwnershipPolicy(request, { execWitnessVersion }),
     );
   let failure,
     admitted = recovered?.admitted,
@@ -246,8 +257,11 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         record.admission === "possible" &&
         (!record.payload ||
           (record.controls === true &&
-            assertDarwinSessionCustody(record.sessionCustody, record.payload)
-              .held)),
+            (assertDarwinSessionCustody(record.sessionCustody, record.payload)
+              .held ||
+              (record.sessionCustody.closed &&
+                record.execControl?.retired === true &&
+                record.image?.control === true)))),
     );
     if (record.schemaVersion === 2 && record.image) {
       assertDarwinImageRecord(record.image);
@@ -286,7 +300,9 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   const snapshot = async () => {
     const setup = await reader.readCase();
     requireObservation(
-      (access ? setup.objects.length >= 7 : setup.objects.length === 7) &&
+      (access
+        ? setup.objects.length >= 7 + execWitnessVersion
+        : setup.objects.length === 7 + execWitnessVersion) &&
         setup.endpoints.length ===
           (access && !recovered?.accessRetired ? 8 : 0),
     );
@@ -438,12 +454,13 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         );
         if (sessionCustody.closed)
           requireObservation(
-            recovered.history.some(
-              ({ kind, record }) =>
-                kind === "retirement" &&
-                record.status === "RETIRED" &&
-                record.requestSha256 === requestSha256,
-            ),
+            (record.image?.version === 3 && record.image.control) ||
+              recovered.history.some(
+                ({ kind, record }) =>
+                  kind === "retirement" &&
+                  record.status === "RETIRED" &&
+                  record.requestSha256 === requestSha256,
+              ),
           );
       }
       await persist("retirement", {
@@ -621,7 +638,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       (await reader.helper(helper)).sha256 === request.launcher.sha256,
     );
     await reader.sendOwnership(false, "P");
-    const parked = await reader.ownershipControl();
+    let parked = await reader.ownershipControl();
     const authorities = [];
     const policy = async (target) => {
       const values = [];
@@ -636,7 +653,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
                 : [1, 1, 1, 1, 1];
           requireObservation(
             binding.purpose === "experiment"
-              ? same(value.decisions, expected)
+              ? same(value.decisions, expected.slice(0, 4))
               : value.decisions[1] === expected[1] &&
                   value.decisions[4] === expected[4],
           );
@@ -690,38 +707,88 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       return values;
     };
     if (binding.purpose === "experiment") {
-      const creator = darwinImageFrame(parked, "creator", helper);
-      admitted.creatorChild = creator;
-      known.push(creator);
-      await persist("admission", admitted); // birth precedes fallible custody acquisition
-      admitted.creatorSessionCustody = assertDarwinSessionCustody(
-        await reader.holdOwnershipSession(creator, helper),
-        creator,
-      );
-      const result = await admitDarwinImage({
-        reader,
-        creator,
-        helper,
-        next: () => reader.ownershipControl(),
-        executable: request.executable,
-        policySha256: request.policy.sha256,
-        guard,
-        now,
-        observe: policy,
-        publish: async (image) => {
-          admitted.image = image;
-          admitted.controls = true;
-          admitted.sessionCustody = admitted.creatorSessionCustody;
-          if (image.target) {
-            admitted.payload = image.target;
-            if (!known.some((value) => sameDarwinIdentity(value, image.target)))
-              known.push(image.target);
-          }
-          const pin = await persist("admission", admitted);
-          return { pin, bytes: Buffer.from(JSON.stringify(admitted) + "\n") };
-        },
-      });
-      authorities.push(...result.policy);
+      let execControl = null;
+      for (const control of [true, false]) {
+        const creator = darwinImageFrame(
+          parked,
+          control ? "control-creator" : "creator",
+          helper,
+        );
+        admitted.creatorChild = creator;
+        admitted.payload = null;
+        admitted.controls = false;
+        delete admitted.image;
+        delete admitted.creatorSessionCustody;
+        delete admitted.sessionCustody;
+        known.push(creator);
+        await persist("admission", admitted); // birth precedes fallible custody acquisition
+        admitted.creatorSessionCustody = assertDarwinSessionCustody(
+          await reader.holdOwnershipSession(creator, helper),
+          creator,
+        );
+        const result = await admitDarwinImage({
+          reader,
+          creator,
+          helper,
+          next: () => reader.ownershipControl(),
+          control,
+          execControl,
+          asset: declared.bindings.execControl,
+          executable: control
+            ? declared.bindings.execControl
+            : request.executable,
+          policySha256: request.policy.sha256,
+          guard,
+          now,
+          observe: control ? async () => [] : policy,
+          publish: async (image) => {
+            admitted.image = image;
+            admitted.controls = true;
+            admitted.sessionCustody = admitted.creatorSessionCustody;
+            if (image.target) {
+              admitted.payload = image.target;
+              if (
+                !known.some((value) => sameDarwinIdentity(value, image.target))
+              )
+                known.push(image.target);
+            }
+            const pin = await persist("admission", admitted);
+            return { pin, bytes: Buffer.from(JSON.stringify(admitted) + "\n") };
+          },
+        });
+        if (control) {
+          requireObservation(
+            JSON.parse(await reader.ownershipOutput()).phase === "armed",
+          );
+          await reader.sendOwnership(true, "A");
+          const output = await reader.ownershipOutput();
+          requireObservation(
+            output === JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n",
+          );
+          requireObservation(
+            same(await reader.ownershipControl(), {
+              exitCode: 0,
+              signal: null,
+            }),
+          );
+          admitted.sessionCustody = admitted.creatorSessionCustody =
+            await reader.finishOwnershipSession(creator.asid);
+          execControl = {
+            image: result.image,
+            retired: true,
+            outputSha256: digest(output),
+          };
+          admitted.execControl = execControl;
+          known.splice(
+            0,
+            known.length,
+            ...known.filter((identity) => identity.asid !== creator.asid),
+          );
+          await persist("admission", admitted);
+          await reader.imageControlNext();
+          parked = await reader.ownershipControl();
+        } else authorities.push(...result.policy);
+      }
     } else {
       observationObject(parked, ["helper", "payload", "controls"]);
       requireObservation(

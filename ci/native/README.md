@@ -423,7 +423,7 @@ Historical Darwin fault and launcher census evidence may contain phase-3 refusal
 requests, diagnostic `D` acknowledgements and CR1/DR1/DS1 constructor bindings.
 Those producers are removed. Current ordinary admission uses the
 [stopped replacement](#ordinary-darwin-task-access) and
-[version-four fault records](#suspended-fault-images-and-original-domain-recovery).
+[version-five fault records](#suspended-fault-images-and-original-domain-recovery).
 Retained historical decoders still bind candidate, parent/original identities,
 receipt and observer PID/birth; missing, changed, replayed or additional children
 and uncertain settlement refuse the join. Protected recovery requires the same
@@ -4554,7 +4554,7 @@ or query refusal. Releasing a getter copy neither
 clears the slot nor establishes confinement, and no slot setter or service message
 is introduced.
 
-Ordinary ownership, access and Git launch now use a version-two creation-bound
+Ordinary experimental ownership, access and Git launch use version-three creation-bound
 admission. The trusted child prepares stdio/argv/environment, installs the final
 credentials, audit session, limits and policy, and clears/readbacks registered,
 bootstrap, debug, resource-notify and the complete public task/thread exception
@@ -4562,6 +4562,47 @@ inputs. `image-closure.h` uses selected-SDK spawn special/exception attributes a
 `exec-handoff.h` for SETEXEC/START_SUSPENDED/CLOEXEC_DEFAULT. The resource-notify
 exception remains exactly the paired unsupported getter/setter result. Parent
 exception metadata is never rewritten. No access-slot setter is attempted.
+
+The explicit version-two experimental custody plan requires bound actual exec
+evidence. Publication copies unchanged signed `argv-fixture` bytes to the fixed
+root-owned, single-link `storage/exec-control`, outside writable workspace and
+Git metadata. Held source/file/parent, ACL, mode, hash, signature and Mach-O reads
+precede use. Only exact read/map grants are added; the executable allowlist stays
+closed. First, a separate outside-policy creator uses the primary's reserved
+credentials, sole group, limits, literal argv, environment, spawn actions/flags
+and special-port settings to execute this exact asset while suspended. Independent
+image admission, acknowledged literal output, reaping and fresh complete domain
+retirement precede primary creation. The startup different-policy negative remains
+a separate calibration.
+
+After installing the final policy once, the admitted primary accepts one fixed
+`T` probe through the existing private gate. Separate spawn objects report direct
+POSIX status and independently checked cleanup. Only `EPERM` or `EACCES`, with
+successful setup/settlement, live read/map decisions, stable asset/parents and
+unchanged creator epoch/image/descriptors/inherited inputs, can establish refusal.
+The original `X` handoff remains unconsumed until this proof is persisted. Query
+errors, ambient errno, invalid controls, unsupported operations and EOF cannot
+establish denial. An unexpected replacement stays suspended and enters owned
+recovery; a damaged creator/channel cannot attempt the final handoff.
+
+Version-two experimental authority replies contain four actual file decisions
+and separate subject/policy/image/control-bound exec evidence. The admitted plan
+selects this shape before any query; installed-path ACL classification is separate.
+Each access profile and ordinary Git policy receives its own control and primary
+witness. Ordinary Git children retain actual suspended Git-image admission and
+fresh file reads. Native direct-parent/birth/image observations join the fixed
+`git-fixture.c` plain `posix_spawn` contract to the witnessed parent policy: no
+RESETIDS, persona or alternate sandbox attributes are supplied. This relies on
+the inherited restrictions described by Apple's
+[sandbox_init(3)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/sandbox_init.3.html)
+and matching-family XNU
+[process creation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_fork.c).
+UID/ASID equality alone supplies no inheritance proof. Missing supported native
+inheritance or same-policy execution proof blocks admission. Historical formats
+remain readable for verification/recovery, without new admission authority;
+reviewed/provider contracts and all original system controls remain required.
+Recovery selects historical policy bytes and the five-decision shape from the
+saved custody contract; it cannot downgrade new admission.
 
 The shared registered-port reader preserves the inspected task and calls
 `_kernelrpc_mach_ports_lookup3` with three initialized, caller-owned `mach_port_t`
@@ -4685,7 +4726,7 @@ There is no later policy-installing intermediate payload exec. The sealed root
 custodian still reexecs with its original writable journal description on FD3;
 only the fault image's explicit stdio survives its suspended replacement.
 
-Version-four protected fault records retain the original creator and replacement
+Version-five protected fault records retain the original creator and replacement
 epochs, original audit-domain ownership, possible execution, observation digest,
 image signature and one-shot continuation state. Original ownership and possible
 replacement are durable before X. The root custodian binds control handles to the
@@ -4694,10 +4735,15 @@ actual stopped replacement's host/access endpoints in that same IPC namespace.
 A separate root reader freshly joins the protected receipt and independently
 checks the stopped identity/image/closure/effective-policy binding. Persisted port
 numbers and equally classified endpoints cannot replace held provenance.
+The same unchanged control asset executes outside policy and retires before the
+primary fault domain. Its distinct refused probe runs in the admitted primary
+creator. Control identities, stopped-image proof,
+literal-output digest, retirement and possible probe delivery remain in the
+protected record; control settlement uses its own session and census bounds.
 
 Receipt publication and readback, repeated observations and checked handle
 settlement precede exactly one identity-bound SIGCONT within the admission bound.
-The fixed policy bytes and effective file/process decisions are rechecked along
+The fixed policy bytes and effective file decisions are rechecked along
 with the signature, executable hash, cwd and stdio. Unsupported APIs, missing
 closure, stale epochs, drift, failed persistence or uncertain cleanup refuse
 continuation. Both fault recipes retain their original post-exec privilege,
@@ -4706,7 +4752,10 @@ descendants and original stdout/stderr. No new service message, access-slot sett
 privilege, acquisition/delegation grant or raw-message safety claim is introduced.
 Reviewed/protected/provider null-service refusals remain distinct.
 
-Each existing effective-policy query executes once. Its first mismatching exact
+The 45 original file/read/write/map comparisons and strict fork query remain,
+with two additional control-asset read/map checks. Actual bound exec evidence
+replaces the nine `process-exec` pre-evaluations; no query error selects a fallback.
+Each retained effective-policy query executes once. Its first mismatching exact
 comparison emits one advisory `native-darwin-fault-policy` stderr record before
 the unchanged `fault-image-policy` refusal. Closed selectors identify the
 zero-based path row and existing operation, with row `-1` for `process-fork`;
@@ -4732,9 +4781,9 @@ session disappear. The original 32-pass retirement bound and child alarm remain;
 backstop termination and emergency intervention never supply successful proof.
 A failure remains a failure even when its separate cleanup is proved.
 
-Version-three records retain their exact protected ABI and original bindings for
+Version-three and version-four records retain their exact protected ABI and original bindings for
 historical verification and recovery only. They cannot resume admission, publish
-new version-four state, replay work or authorize continuation. Historical refusal
+new version-five state, replay work or authorize continuation. Historical refusal
 bindings, finite diagnostic decoding and observer retirement stay readable for
 live recovery consumers. Superseded constructor capture, CR1 production/import,
 cache/census admission and their unused exports are removed. Useful startup
