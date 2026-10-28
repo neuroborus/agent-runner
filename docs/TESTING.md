@@ -397,6 +397,15 @@ binding of unpublished epochs and exact published-epoch matching. Channel fixtur
 retain original native refusal/exit facts separately from custodian diagnostics;
 suspended sessions retain policy markers, gated acknowledgements and original
 stdout/stderr.
+The same suite executes the actual effective-policy and advisory writer bodies:
+all 54 file/process decisions and the fork query run once on success, while
+decision mismatches, query errors, unexpected returns and fork refusal stop at
+the original predicate without advancement. Exact closed selectors, caller/target,
+returns and raw errno survive failed advisory writes/flushes without changing
+errno or the refusal. Its custody-channel fixture retains the observation,
+payload stderr and cleanup failure separately. Focused coverage is
+`node --test test/native-darwin-fault-image.test.js`; these portable regressions
+establish no native policy success, host health or independent retirement.
 Creator readbacks reject unexpected real, effective or saved credentials and
 inherited audit sessions. Refusal cleanup validates its independent root verifier
 before custody closure, then observes custodian exit before final verification.

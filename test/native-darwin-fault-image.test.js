@@ -39,6 +39,10 @@ const custodian = {
   svuid: 0,
   svgid: 0,
 };
+const policyObservation =
+  "native-darwin-fault-policy: caller=9000 target=42 row=0 operation=file-read-data expected=0 actual=1 observed_errno=71\n";
+const cleanupRefusal =
+  "native-darwin-cleanup: operation=fault-journal-write domain=errno value=5 effects=possible settlement=unsettled\n";
 
 function fixture(caseId, fault) {
   const child = Object.assign(new EventEmitter(), {
@@ -151,6 +155,8 @@ function fixture(caseId, fault) {
         "stderr",
         "native-darwin: operation=fault-image-policy domain=invariant value=0 effects=possible settlement=unsettled\n",
       );
+      child.stderr.write(policyObservation);
+      child.stderr.write(cleanupRefusal);
       child.stderr.write("native custody failure\n");
       child.emit("close", 78, null);
       return;
@@ -595,6 +601,178 @@ test("fault recovery admits an unpublished replacement only through original bir
   }
 });
 
+test("fault policy queries retain exact decisions and errno before the first unchanged refusal", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/feasibility-domain.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const diagnostic = body("domain_effective_diagnostic").replaceAll(
+    "int ",
+    "let ",
+  );
+  const effective = body("domain_effective")
+    .replace("char paths[4][4096];", "const paths = Array(4);")
+    .replaceAll(
+      /const char \*(names|objects|operations)\[\] = \{([^\n]+)\};/gu,
+      "const $1 = [$2];",
+    )
+    .replaceAll("sizeof(paths[i])", "4096")
+    .replace("snprintf(paths[i],", "snprintf(paths, i,")
+    .replace(/int expected = ([^\n]+);/u, "let expected = Number($1);")
+    .replaceAll(/\b(?:unsigned|bool|int) /gu, "let ")
+    .replace("*sandbox_binding.no_report", "sandbox_binding.no_report");
+  const objects = [
+    "/sealed/helper",
+    "/sealed/root/build/helper",
+    "/sealed/root/build/argv-fixture",
+    "/sealed/root/build/git",
+    "/sealed/root/workspace",
+    "/usr/lib/libSystem.B.dylib",
+    "/dev/null",
+    "/",
+    "/sealed/policy",
+  ];
+  const operations = [
+    "file-read-data",
+    "file-write-data",
+    "file-write-create",
+    "file-write-unlink",
+    "file-map-executable",
+    "process-exec",
+  ];
+  const decisions = [
+    [0, 1, 1, 1, 0, 0],
+    [0, 1, 1, 1, 0, 0],
+    [0, 1, 1, 1, 0, 0],
+    [0, 1, 1, 1, 0, 0],
+    [0, 1, 1, 1, 1, 1],
+    [0, 1, 1, 1, 0, 1],
+    [0, 0, 0, 0, 1, 1],
+    [0, 1, 1, 1, 1, 1],
+    [1, 1, 1, 1, 1, 1],
+  ];
+  const queries = objects.flatMap((object, row) =>
+    operations.map((operation, column) => ({
+      object,
+      row,
+      operation,
+      expected: decisions[row][column],
+    })),
+  );
+  queries.push({ row: -1, operation: "process-fork", expected: 0 });
+  for (const fault of [
+    null,
+    { at: 0, actual: 1, errno: 71 },
+    { at: 1, actual: 0, errno: 72 },
+    { at: 10, actual: -1, errno: 13 },
+    { at: 7, actual: 2, errno: 0 },
+    { at: 54, actual: 1, errno: 74 },
+  ]) {
+    const calls = [],
+      records = [];
+    let comparisons = 0,
+      flushes = 0,
+      advanced = false;
+    const refusal = new Error("fault-image-policy");
+    const query = (pid, operation, object) => {
+      assert.equal(pid, 42);
+      const expected = queries[calls.length];
+      assert.deepEqual(
+        { operation, object },
+        {
+          operation: expected.operation,
+          object: expected.object,
+        },
+      );
+      const failing = calls.length === fault?.at;
+      calls.push(expected);
+      api.errno = failing ? fault.errno : 79;
+      return failing ? fault.actual : expected.expected;
+    };
+    const api = {
+      errno: 0,
+      stderr: {},
+      domain_helper: objects[0],
+      domain_policy: objects[8],
+      domain_record: { root: "/sealed/root" },
+      sandbox_binding: {
+        no_report: 256,
+        check(pid, operation, filter) {
+          assert.equal(filter, 256);
+          return query(pid, operation);
+        },
+      },
+      feasibility_sandbox_path(binding, pid, operation, object) {
+        assert.equal(binding, api.sandbox_binding);
+        return query(pid, operation, object);
+      },
+      snprintf(paths, index, size, format, root, name) {
+        assert.equal(size, 4096);
+        assert.equal(format, "%s/%s");
+        paths[index] = `${root}/${name}`;
+        return paths[index].length;
+      },
+      need: (ok) => assert.ok(ok),
+      invariant(ok, operation) {
+        comparisons++;
+        assert.equal(operation, "fault-image-policy");
+        assert.equal(
+          api.errno,
+          fault?.at === calls.length - 1 ? fault.errno : 79,
+        );
+        if (!ok) throw refusal;
+      },
+      getpid() {
+        api.errno = 95;
+        return 9000;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, api.stderr);
+        records.push(format.replace(/%[dus]/gu, () => String(values.shift())));
+        assert.equal(values.length, 0);
+        api.errno = 5;
+        return -1;
+      },
+      fflush(stream) {
+        assert.equal(stream, api.stderr);
+        flushes++;
+        api.errno = 28;
+        return -1;
+      },
+    };
+    const evaluate = new Script(`
+      function domain_effective_diagnostic(target, row, operation, expected, actual, observed_errno) {${diagnostic}}
+      (target) => {${effective}}
+    `).runInNewContext(api);
+    const run = () => {
+      evaluate({ token: { val: [0, 0, 0, 0, 0, 42] } });
+      advanced = true;
+    };
+    if (fault) assert.throws(run, (error) => error === refusal);
+    else run();
+    const count = fault ? fault.at + 1 : 55;
+    assert.deepEqual(calls, queries.slice(0, count));
+    assert.equal(comparisons, count);
+    assert.equal(advanced, fault === null);
+    assert.equal(flushes, fault ? 1 : 0);
+    const expected = fault && queries[fault.at];
+    assert.deepEqual(
+      records,
+      fault
+        ? [
+            `native-darwin-fault-policy: caller=9000 target=42 row=${expected.row} operation=${expected.operation} expected=${expected.expected} actual=${fault.actual} observed_errno=${fault.errno}\n`,
+          ]
+        : [],
+    );
+    if (fault?.at === 0) assert.equal(records[0], policyObservation);
+  }
+});
+
 test("fault custody diagnostics retain the original native refusal and separate control stderr", async () => {
   const f = fixture("cancel", "native-error");
   try {
@@ -603,12 +781,22 @@ test("fault custody diagnostics retain the original native refusal and separate 
       domain.inspect("/fixture", "identity", 42, 9000),
       (error) => {
         assert.equal(error.exitCode, 78);
-        assert.match(
+        assert.equal(error.custodyError.exitCode, 78);
+        assert.equal(
           error.custodyError.stderr.toString(),
-          /native custody failure/u,
+          policyObservation + cleanupRefusal + "native custody failure\n",
         );
         return true;
       },
+    );
+    const original = f.current().stderr.read().toString();
+    assert.match(
+      original,
+      /native-darwin: operation=fault-image-policy domain=invariant value=0/u,
+    );
+    assert.doesNotMatch(
+      original,
+      /native-darwin-fault-policy|native-darwin-cleanup/u,
     );
   } finally {
     f.dispose();

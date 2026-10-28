@@ -370,6 +370,13 @@ static void domain_signature(char hash[41]) {
   if (info) CFRelease(info); if (code) CFRelease(code); if (url) CFRelease(url);
   invariant(ok, "fault-image-signature");
 }
+/* Advisory only: row -1 selects the fork query; errno is an observation, not an interpretation. */
+static void domain_effective_diagnostic(struct identity target, int row, const char *operation, int expected, int actual, int observed_errno) {
+  int saved = errno;
+  fprintf(stderr, "native-darwin-fault-policy: caller=%d target=%u row=%d operation=%s expected=%d actual=%d observed_errno=%d\n",
+    getpid(), target.token.val[5], row, operation, expected, actual, observed_errno);
+  fflush(stderr); errno = saved;
+}
 /* The fixed policy's complete file/process decision matrix, not an active bit. */
 static void domain_effective(struct identity target) {
   char paths[4][4096]; const char *names[] = {"build/helper", "build/argv-fixture", "build/git", "workspace"};
@@ -379,9 +386,15 @@ static void domain_effective(struct identity target) {
   for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 6; j++) {
     bool read = i != 8, write = i == 6, executable = i < 4 || i == 5, exec = i < 4;
     int expected = j == 0 ? !read : j < 4 ? !write : j == 4 ? !executable : !exec;
-    invariant(feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]) == expected, "fault-image-policy");
+    int actual = feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]);
+    int observed_errno = errno;
+    if (actual != expected) domain_effective_diagnostic(target, i, operations[j], expected, actual, observed_errno);
+    invariant(actual == expected, "fault-image-policy");
   }
-  invariant(sandbox_binding.check(target.token.val[5], "process-fork", *sandbox_binding.no_report) == 0, "fault-image-policy");
+  int actual = sandbox_binding.check(target.token.val[5], "process-fork", *sandbox_binding.no_report);
+  int observed_errno = errno;
+  if (actual != 0) domain_effective_diagnostic(target, -1, "process-fork", 0, actual, observed_errno);
+  invariant(actual == 0, "fault-image-policy");
 }
 static void domain_image_observe(bool inheritance) {
   domain_image_bound(); need(domain_record.target.token.val[5]);

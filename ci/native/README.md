@@ -4706,6 +4706,19 @@ descendants and original stdout/stderr. No new service message, access-slot sett
 privilege, acquisition/delegation grant or raw-message safety claim is introduced.
 Reviewed/protected/provider null-service refusals remain distinct.
 
+Each existing effective-policy query executes once. Its first mismatching exact
+comparison emits one advisory `native-darwin-fault-policy` stderr record before
+the unchanged `fault-image-policy` refusal. Closed selectors identify the
+zero-based path row and existing operation, with row `-1` for `process-fork`;
+numeric caller/target PIDs locate the query without publishing paths or policy
+contents. Expected/actual returns and immediately observed raw `observed_errno`
+are retained, and diagnostic output preserves errno. The errno snapshot may be
+stale or zero and supplies no documented interpretation of a query result.
+Existing custodian stderr capture and ordinary CI publication retain this record
+separately from payload output and cleanup failures. Missing or failed output
+does not change refusal, admission or retirement, and the observation establishes
+no policy success, host-health explanation, native PASS or functional correction.
+
 Recovery fences new admissions and settles inspection references before retiring
 the complete original held audit domain. Interrupted pre-replacement setup,
 unpublished replacement epochs, failed receipts and uncertain continuation never
