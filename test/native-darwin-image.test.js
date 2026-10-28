@@ -1032,6 +1032,280 @@ test("JavaScript admission refusals settle held native references before fenced 
       }
 });
 
+test("native registered reads preserve the remote target and settle only successful caller-local acquisitions", async (t) => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/image-closure.h", import.meta.url),
+    "utf8",
+  );
+  const translate = (body) =>
+    body
+      .replaceAll("->", ".")
+      .replace(
+        /mach_port_t registered\[3\] = \{([^;]+)\};/u,
+        "const registered=[$1];",
+      )
+      .replace(/const int slots\[\] = \{([^;]+)\};/u, "const slots=[$1];")
+      .replaceAll("&value.outcome", "value.outcome")
+      .replace(
+        /&value\.(host|access)/gu,
+        (_, key) =>
+          `{get value(){return value.${key}},set value(v){value.${key}=v}}`,
+      )
+      .replace(
+        /&(registered(?:\[[0-2]\])?|port|type|kind|object|count)(?=[,)])/gu,
+        (_, key) => `{get value(){return ${key}},set value(v){${key}=v}}`,
+      )
+      .replaceAll("*port", "port.value")
+      .replaceAll("const char *", "const ")
+      .replaceAll("(mach_vm_address_t)", "")
+      .replaceAll("sizeof(*registered)", "4")
+      .replace(/([0-9])U\b/gu, "$1")
+      .replace(
+        /\b(?:bool|unsigned|natural_t|mach_port_t|mach_port_type_t|mach_msg_type_number_t|mach_vm_address_t|mach_port_array_t|kern_return_t) /gu,
+        "let ",
+      );
+  const functions = {
+    image_mach: "value,result,operation",
+    image_assert: "value,ok,operation",
+    image_copy: "value,port",
+    image_special: "value,task,slot,port",
+    image_access: "value",
+    image_closure_read: "value,task,thread",
+    image_closure_release: "value",
+  };
+  const definitions = Object.entries(functions)
+    .map(([name, parameters]) => {
+      const body = new RegExp(
+        `static (?:bool|void) ${name}[^\\n]+\\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1];
+      return `function ${name}(${parameters}){${translate(body)}}`;
+    })
+    .join("\n");
+  const script = new Script(`${definitions}
+    const accepted=image_closure_read(value,task,thread);
+    const held=value.copies.slice(0,value.count);
+    const released=image_closure_release(value);
+    ({accepted,held,released});`);
+  const caller = 41,
+    remote = 97,
+    thread = 63,
+    dead = 0xffffffff;
+  const valid = (port) => port !== 0 && port !== dead;
+  const cases = [
+    { name: "empty", ports: [0, 0, 0] },
+    ...[0, 1, 2].map((slot) => ({
+      name: `nonnull slot ${slot}`,
+      ports: [0, 0, 0].map((port, index) => (index === slot ? 30 : port)),
+    })),
+    ...[0, 1, 2].map((slot) => ({
+      name: `dead sentinel in slot ${slot}`,
+      ports: [0, 0, 0].map((port, index) => (index === slot ? dead : port)),
+    })),
+    { name: "mixed sentinels and valid reference", ports: [0, dead, 31] },
+    { name: "aliases across slots and other getters", ports: [8, 8, 9] },
+    { name: "dirty failed getter", ports: [8, 8, 9], get: 5 },
+    { name: "failed getter with sentinels", ports: [dead, 0, 31], get: 5 },
+    {
+      name: "every registered release fails independently",
+      ports: [8, 30, 31],
+      releaseErrors: [17, 19, 23],
+    },
+    {
+      name: "aliased registered and held release failures",
+      ports: [8, 8, 9],
+      releaseErrors: [17, 0, 19, 23, 29],
+    },
+    {
+      name: "earlier primary refusal and subsequent exception failure survive cleanup",
+      ports: [8, 8, 9],
+      special: 6,
+      exceptionError: 33,
+      releaseErrors: [17, 0, 19],
+    },
+    {
+      name: "dirty getter aliases confer no ownership despite held release failures",
+      ports: [8, 8, 9],
+      get: 5,
+      releaseErrors: [23, 29],
+    },
+  ];
+  for (const scenario of cases)
+    await t.test(scenario.name, () => {
+      const events = [],
+        releases = [],
+        value = {
+          copies: Array(16).fill(0),
+          count: 0,
+          host: 0,
+          access: 0,
+          outcome: { issues: [] },
+        };
+      const issue = (operation, kind, result, cleanup) => ({
+        operation,
+        kind,
+        value: result,
+        cleanup,
+      });
+      const check = (out, ok, operation, kind, result, cleanup) => {
+        if (!ok) out.issues.push(issue(operation, kind, result, cleanup));
+        return Boolean(ok);
+      };
+      const lookup = (target, ...outputs) => {
+        assert.equal(target, remote);
+        assert.equal(outputs.length, 3);
+        assert.equal(new Set(outputs).size, 3);
+        assert.deepEqual(
+          outputs.map((out) => out.value),
+          [0, 0, 0],
+        );
+        events.push("registered");
+        outputs.forEach((out, index) => {
+          out.value = scenario.ports[index];
+        });
+        return scenario.get ?? 0;
+      };
+      const noVm = () =>
+        assert.fail("registered reads must not allocate or release VM");
+      const api = {
+        value,
+        task: remote,
+        thread,
+        NULL: null,
+        KERN_SUCCESS: 0,
+        KERN_INVALID_ARGUMENT: 4,
+        MACH_PORT_NULL: 0,
+        MACH_PORT_TYPE_NONE: 0,
+        MACH_PORT_TYPE_SEND: 1,
+        MACH_PORT_TYPE_SEND_ONCE: 2,
+        MACH_PORT_TYPE_DEAD_NAME: 4,
+        TASK_HOST_PORT: 1,
+        TASK_ACCESS_PORT: 2,
+        TASK_BOOTSTRAP_PORT: 3,
+        TASK_DEBUG_CONTROL_PORT: 4,
+        TASK_RESOURCE_NOTIFY_PORT: 5,
+        MACH_PORT_VALID: valid,
+        need: (ok) => assert.ok(ok),
+        mach_task_self: () => caller,
+        task_get_special_port: (target, slot, out) => {
+          assert.equal(target, remote);
+          out.value =
+            slot === 1
+              ? 8
+              : slot === 2
+                ? 9
+                : slot === 3
+                  ? (scenario.special ?? 0)
+                  : 0;
+          return 0;
+        },
+        mach_port_type: (owner, port, out) => {
+          assert.equal(owner, caller);
+          assert.ok([8, 9].includes(port));
+          out.value = 1;
+          return 0;
+        },
+        mach_port_kobject: (owner, port, kind, object) => {
+          assert.equal(owner, caller);
+          kind.value = port === 8 ? 3 : 0;
+          object.value = 0;
+          return 0;
+        },
+        _kernelrpc_mach_ports_lookup3: lookup,
+        // Model task.c's old target allocation: its outputs cannot be read or
+        // written in the caller's address space when the inspected task differs.
+        mach_ports_lookup: (target, out, count) => {
+          const storage = Array(3).fill(0);
+          const outputs = storage.map((_, index) => ({
+            get value() {
+              assert.equal(
+                target,
+                caller,
+                "wrapper output storage belongs to the remote task",
+              );
+              return storage[index];
+            },
+            set value(port) {
+              assert.equal(target, caller, "RPC output must be caller-local");
+              storage[index] = port;
+            },
+          }));
+          const result = lookup(target, ...outputs);
+          if (result === 0) {
+            out.value = storage;
+            count.value = 3;
+          }
+          return result;
+        },
+        mach_port_deallocate: (owner, port) => {
+          assert.equal(owner, caller);
+          assert.ok(valid(port));
+          events.push(`release:${port}`);
+          releases.push(port);
+          return scenario.releaseErrors?.[releases.length - 1] ?? 0;
+        },
+        image_exceptions: (closure, target, actualThread) => {
+          assert.equal(closure, value);
+          assert.deepEqual([target, actualThread], [remote, thread]);
+          events.push("exceptions");
+          return check(
+            value.outcome,
+            !scenario.exceptionError,
+            "image-exceptions-get",
+            "mach",
+            scenario.exceptionError ?? 0,
+            false,
+          );
+        },
+        vm_allocate: noVm,
+        vm_deallocate: noVm,
+        mach_vm_allocate: noVm,
+        mach_vm_deallocate: noVm,
+        domain_bootstrap_check: check,
+      };
+      const result = script.runInNewContext(passiveObservations(api));
+      const registered = scenario.get ? [] : scenario.ports.filter(valid);
+      const held = [8, 9, ...(scenario.special ? [scenario.special] : [])];
+      assert.deepEqual(Array.from(result.held), held);
+      assert.deepEqual(releases, [...registered, ...held]);
+      assert.deepEqual(events, [
+        "registered",
+        ...registered.map((port) => `release:${port}`),
+        "exceptions",
+        ...held.map((port) => `release:${port}`),
+      ]);
+      const expected = [];
+      if (scenario.special)
+        expected.push(issue("image-special-empty", "invariant", 0, false));
+      if (scenario.get)
+        expected.push(
+          issue("image-registered-get", "mach", scenario.get, false),
+        );
+      else if (scenario.ports.some((port) => port !== 0))
+        expected.push(issue("image-registered-empty", "invariant", 0, false));
+      const releaseIssues = (ports, offset, operation) =>
+        ports.flatMap((_, index) => {
+          const error = scenario.releaseErrors?.[offset + index] ?? 0;
+          return error ? [issue(operation, "mach", error, true)] : [];
+        });
+      expected.push(
+        ...releaseIssues(registered, 0, "image-registered-release"),
+      );
+      if (scenario.exceptionError)
+        expected.push(
+          issue("image-exceptions-get", "mach", scenario.exceptionError, false),
+        );
+      const readIssues = expected.length;
+      expected.push(
+        ...releaseIssues(held, registered.length, "image-copy-release"),
+      );
+      assert.deepEqual(value.outcome.issues, expected);
+      assert.equal(result.accepted, readIssues === 0);
+      assert.equal(result.released, expected.length === readIssues);
+      assert.equal(value.count, 0);
+    });
+});
+
 test("native closure requires complete nonoverlapping public exception masks and settles both getters", async () => {
   const source = await readFile(
     new URL("../ci/native/darwin/image-closure.h", import.meta.url),

@@ -4563,6 +4563,29 @@ inputs. `image-closure.h` uses selected-SDK spawn special/exception attributes a
 exception remains exactly the paired unsupported getter/setter result. Parent
 exception metadata is never rewritten. No access-slot setter is attempted.
 
+The shared registered-port reader preserves the inspected task and calls
+`_kernelrpc_mach_ports_lookup3` with three initialized, caller-owned `mach_port_t`
+outputs. Matching-family XNU
+[`task.defs`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/mach/task.defs)
+defines that target-plus-three-output contract, and
+[`ipc_tt.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ipc_tt.c)
+copies each registered send independently. All three slots must be null. Every
+valid reference acquired by a successful getter receives one caller-local release
+attempt, including aliases between slots or with other getters. An emptiness
+refusal or release failure cannot interrupt settlement or subsequent exception
+inspection; primary and independent cleanup causes remain separate. Failed RPC
+outputs confer no ownership, even when dirty. This bounded read neither allocates
+nor releases VM. The separate self-task fork snapshot/restoration remains unchanged.
+
+The native owner includes the SDK's private MIG header when exposed and confines
+the matching declaration and compile-time function-type check to this reader.
+The direct symbol reference must strongly link in existing system and both
+feasibility helper builds. Incompatible declarations, unavailable exports and load
+failures refuse through existing native diagnostics, without dynamic lookup,
+another RPC or fallback. Public source, a compatible C declaration and successful
+linking alone do not establish the selected SDK/runtime ABI or corrected native
+inspection; matching hosted builds, execution and independent cleanup remain required.
+
 The replacement creates a fresh IPC space and image/thread state. Arbitrary old
 namespace entries, reply caches, vouchers and old mappings supply no inherited
 namespace authority; no namespace allowlist or destructive cleanup admits them.
@@ -4614,15 +4637,18 @@ errno and the caller's SIGPIPE disposition/mask/pending state, and cannot replac
 primary failures or interrupt independent cleanup. No handler or new channel is
 installed, and native admission and call order remain unchanged.
 
-The retained helper SIGSEGV after creator custody has no established failing API;
-launcher command-read EOF and child handoff-read are secondary. Usable paired
-observations joined to that original helper's termination can locate the immediate
-in-flight call for source inspection, but a missing return alone establishes no
-causal attribution. Failed, truncated, exhausted or ambiguous capture remains
-inconclusive. A returned refusal retains its own failure and cleanup evidence.
-Complete return or non-reproduction establishes no crash repair; a disproved
-hypothesis stops here. A functional correction requires source-supported causality
-and a new bounded repair plan. These diagnostics supply no native PASS.
+The completed system-helper trace places `registered/get` in flight before the
+original SIGSEGV; launcher command-read EOF and child handoff-read are secondary.
+Matching-family
+[`task.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/task.c)
+allocates the wrapper's array in `target_task`, then supplies those addresses as
+caller-local RPC outputs. That source-level mismatch supports the remote-reader
+correction above; the missing return alone proves neither causality nor exact
+hosted library bytes. The feasibility crash remains only plausibly related,
+without a same-call trace. Failed, truncated, exhausted or ambiguous capture
+remains inconclusive. A returned refusal retains its own failure and cleanup
+evidence. Complete return or non-reproduction establishes no crash repair, and
+these diagnostics and portable regressions supply no native PASS.
 
 #### Suspended fault images and original-domain recovery
 

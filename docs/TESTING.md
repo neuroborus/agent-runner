@@ -374,6 +374,18 @@ Ordinary stopped-image admission uses `test/native-darwin-image.test.js` for
 durable original ownership, exact epoch/birth binding, receipt failures, repeated
 policy drift, expiry and uncertain continuation. Injected C bodies retain exact
 service alternatives, rejected-name ownership and one-shot gate consumption.
+The actual shared registered-reader body uses distinct caller/remote task handles
+and three initialized caller-local outputs. Its wrapper model reproduces the
+target-allocation mismatch with the old implementation. Cases cover an empty
+successful result, a nonnull value and dead sentinel in every slot, mixed
+sentinels, aliases within registered slots and across other getter acquisitions,
+dirty failed outputs and independent release failures. Assertions require the
+unchanged target, complete slot checking, one release attempt per successful
+valid acquisition, no VM allocation/deallocation, subsequent exception inspection
+and distinct primary/cleanup causes. Failed outputs own no references. These
+portable bodies establish no selected-SDK declaration/export/runtime availability
+or native PASS; existing native builds and matching system/fault controls retain
+that obligation.
 The native ownership/Git/recovery fixtures exercise the migrated private protocol;
 shared command-handoff and reviewed/protected null-only controls remain required.
 Both fault recipes use `test/native-darwin-fault-image.test.js` for version-four

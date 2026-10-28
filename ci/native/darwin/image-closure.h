@@ -3,7 +3,20 @@
 #ifndef NATIVE_DARWIN_IMAGE_CLOSURE_H
 #define NATIVE_DARWIN_IMAGE_CLOSURE_H
 #include <signal.h>
+#include <mach/task.h>
+#if __has_include(<mach/task_internal.h>)
+#include <mach/task_internal.h>
+#endif
 #include "exec-handoff.h"
+/* XNU task.defs supplies three caller-local outputs, unlike task.c's wrapper
+ * which allocates in the target task. SDKs may omit the private MIG declaration;
+ * this matching redeclaration also rejects incompatible exposed SDK types.
+ * Keep a direct, strong symbol reference; there is no alternate read path. */
+extern kern_return_t _kernelrpc_mach_ports_lookup3(task_t target_task,
+  mach_port_t *port1, mach_port_t *port2, mach_port_t *port3);
+_Static_assert(_Generic(&_kernelrpc_mach_ports_lookup3,
+  kern_return_t (*)(task_t, mach_port_t *, mach_port_t *, mach_port_t *): 1, default: 0),
+  "registered-port RPC must match the task.defs prototype");
 struct image_closure {
   struct domain_bootstrap_fork outcome;
   mach_port_t copies[16], host, access;
@@ -98,16 +111,16 @@ static bool image_closure_read(struct image_closure *value, task_t task, thread_
     ok = got && ok;
     if (got) ok = image_assert(value, port == MACH_PORT_NULL, "image-special-empty") && ok;
   }
-  mach_port_array_t registered = NULL; mach_msg_type_number_t count = 0;
-  kern_return_t got = IMAGE_CALL("registered/get", mach_ports_lookup(task, &registered, &count));
+  mach_port_t registered[3] = {MACH_PORT_NULL, MACH_PORT_NULL, MACH_PORT_NULL};
+  kern_return_t got = IMAGE_CALL("registered/get", _kernelrpc_mach_ports_lookup3(task, &registered[0], &registered[1], &registered[2]));
   if (image_mach(value, got, "image-registered-get")) {
-    bool empty = count <= 32 && (!count || registered);
-    for (unsigned i = 0; registered && i < count; i++) if (registered[i] != MACH_PORT_NULL) empty = false;
+    bool empty = true;
+    for (unsigned i = 0; i < 3; i++) if (registered[i] != MACH_PORT_NULL) empty = false;
     ok = image_assert(value, empty, "image-registered-empty") && ok;
     kern_return_t settlement = KERN_SUCCESS;
     IMAGE_NOTE("mach_port_deallocate/registered-copies", true, 0, 0);
     /* Each successful getter copy owns a reference, even with aliases. */
-    for (unsigned i = 0; registered && i < count; i++) {
+    for (unsigned i = 0; i < 3; i++) {
       if (MACH_PORT_VALID(registered[i])) {
         kern_return_t release = mach_port_deallocate(mach_task_self(), registered[i]);
         if (release != KERN_SUCCESS) settlement = release;
@@ -115,10 +128,6 @@ static bool image_closure_read(struct image_closure *value, task_t task, thread_
       }
     }
     IMAGE_NOTE("mach_port_deallocate/registered-copies", false, settlement, errno);
-    if (registered) {
-      kern_return_t release = IMAGE_CALL("registered/array-release", mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)registered, count * sizeof(*registered)));
-      ok = domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-registered-array-release", "mach", release, true) && ok;
-    }
   } else ok = false;
   return image_exceptions(value, task, thread) && ok;
 }
