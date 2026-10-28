@@ -775,13 +775,18 @@ static void case_copy(struct entry *target, struct entry *source) {
     (!strcmp(suffix, "/custody/darwin-pf.conf") || !strcmp(suffix, "/custody/darwin-pf-before.conf") || !strcmp(suffix, "/custody/access-cases") || !strncmp(suffix, "/custody/git-policy-", 19))), executable = !strcmp(suffix, "/custody/launcher") || !strcmp(suffix, "/storage/payload") ||
 #ifdef NATIVE_CI_EXPERIMENT
     !strcmp(suffix, "/storage/exec-control") ||
+    (experiment_exec && target == &entries[count - 1] && !strcmp(suffix, "/storage/work/map-fixture") && source == &entries[12]) ||
 #endif
     (count > CASE_BASE_COUNT && (!strcmp(suffix, "/custody/pfctl") || !strcmp(suffix, "/custody/observer") || !strcmp(suffix, "/custody/git-executor") || !strcmp(suffix, "/storage/git")));
   bool git_data = !strcmp(suffix, "/outside/sentinel") || git_path(suffix, false) || !strcmp(suffix, "/storage/work/.git") || !strcmp(suffix, "/storage/work/content.txt") || !strcmp(suffix, "/storage/control-work/.git") || !strcmp(suffix, "/storage/control-work/content.txt");
   need(((policy || git_data) && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
     (executable && (!strcmp(target->kind, "image") || !strcmp(target->kind, "helper")) && (!strcmp(source->kind, "image") || !strcmp(source->kind, "helper"))));
   need(strcmp(source->path, target->path) && !strncmp(source->pin, target->pin, 65) &&
-    (experiment_installed_path(source->path) || (source->stat.st_uid == 0 && source->stat.st_gid == 0 && !(source->stat.st_mode & 022))) && S_ISREG(source->stat.st_mode) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
+    (experiment_installed_path(source->path) || (source->stat.st_uid == 0 && !(source->stat.st_mode & 022) && (source->stat.st_gid == 0
+#ifdef NATIVE_CI_EXPERIMENT
+      || (experiment_exec && source == &entries[12] && target == &entries[count - 1] && !strcmp(suffix, "/storage/work/map-fixture"))
+#endif
+    ))) && S_ISREG(source->stat.st_mode) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
   char parent[PATH_MAX]; strcpy(parent, target->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
   struct entry *base = NULL; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strcmp(entries[i].path, parent)) base = &entries[i];
   need(base); stable(base); int writer = openat(base->fd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(writer >= 0);
@@ -812,6 +817,20 @@ static void case_exec_control(const char *cdhash) {
   fputs(",\"macho\":", stdout); image(target); putchar('}');
   stable(base); stable(&source); need(!close(source.fd));
   memcpy(image_control_cdhash, cdhash, 41); image_control = true; image_control_retired = image_probed = false;
+}
+static bool case_has_mapping(void) {
+  char expected[PATH_MAX];
+  return experiment_exec && count > 13 && snprintf(expected, sizeof(expected), "%s/storage/work/map-fixture", case_path) < sizeof(expected) &&
+    !strcmp(entries[count - 1].path, expected) && !strcmp(entries[count - 1].kind, "image") && !strcmp(entries[count - 1].pin, entries[12].pin);
+}
+static void case_mapping_guard(pid_t holder) {
+  need(case_has_mapping()); struct entry *fixture = &entries[count - 1];
+  stable(fixture); stable(&entries[3]); stable(&entries[12]); stable(&entries[11]);
+  struct stat st, work; need(!fstat(entries[3].fd, &work));
+  free(file(fixture->path, subject_gid, 0550, 16777216, fixture->pin, &st)); same_stat(st, fixture->stat);
+  signature(fixture->path, image_control_cdhash);
+  if (holder) need(exec_mapping_held(holder, fixture->stat) && exec_mapping_held(holder, entries[12].stat) && exec_mapping_held(holder, work));
+  stable(fixture); stable(&entries[3]);
 }
 #endif
 static void case_rejoin(struct entry *entry) {
@@ -1197,7 +1216,11 @@ static void case_spawn_refuse(struct domain_bootstrap_fork *out, pid_t child) {
 #endif
 static void case_start(const char *mode, const char *cdhash) {
   need(!case_fenced);
-  need(case_mode && case_started && !case_pid && !case_recovery && (count == CASE_BASE_COUNT || !strcmp(mode, "access")));
+  need(case_mode && case_started && !case_pid && !case_recovery && (count == CASE_BASE_COUNT
+#ifdef NATIVE_CI_EXPERIMENT
+    || (count == CASE_BASE_COUNT + 1 && case_has_mapping())
+#endif
+    || !strcmp(mode, "access")));
   reservation_guard(); no_subjects(); case_account();
   const char *fixed[] = {"literal", "storage", "fork-exec", "double-fork", "reparent", "cancel", "owner-loss", "helper-loss", "receipt-recovery", "stale-identity", "process-limit"};
   bool allowed = count > CASE_BASE_COUNT && !strcmp(mode, "access"); for (unsigned i = 0; i < 11; i++) if (!strcmp(mode, fixed[i])) allowed = true; need(allowed);
@@ -1206,6 +1229,7 @@ static void case_start(const char *mode, const char *cdhash) {
   signature(payload->path, cdhash);
 #ifdef NATIVE_CI_EXPERIMENT
   need(experiment_exec); memcpy(image_cdhash, cdhash, 41); image_policy_index = 6;
+  case_mapping_guard(0);
 #endif
   /* The launcher copy is joined to the independently approved final build pin
    * by the controller before this command; native validity is checked again. */
@@ -1607,7 +1631,11 @@ static void case_retire(void) {
 #ifdef NATIVE_CI_EXPERIMENT
   need(image_settle());
 #endif
-  if (count == CASE_BASE_COUNT || (operation_mode && operations_retired())) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
+  if (count == CASE_BASE_COUNT
+#ifdef NATIVE_CI_EXPERIMENT
+      || (count == CASE_BASE_COUNT + 1 && case_has_mapping())
+#endif
+      || (operation_mode && operations_retired())) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
   fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
 }
 /* Only a directory in the independently pinned plan may be created/resealed.
@@ -2666,6 +2694,7 @@ static void git_ordinary_start(struct entry *git, struct entry *metadata, struct
   struct entry *launcher = &entries[4], *payload = &entries[5]; signature(payload->path, cdhash);
 #ifdef NATIVE_CI_EXPERIMENT
   need(experiment_exec); memcpy(image_cdhash, cdhash, 41); image_policy_index = (unsigned)(policy - entries);
+  case_mapping_guard(0);
 #endif
   stable(git); stable(metadata); stable(hooks); stable(policy);
   int in[2], out[2], data[2]; need(!pipe(in) && !pipe(out) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
@@ -2855,6 +2884,7 @@ static void image_begin(void) {
   reservation_guard();
   IMAGE_NOTE("creator/reservation", false, 1, errno);
   image_creator = case_audit.subject;
+  case_mapping_guard(case_audit.source.token.val[5]);
   need(case_audit.source.token.val[5] == (unsigned)(operation_mode ? git_pid : case_pid));
   IMAGE_NOTE("creator/identities", true, 0, 0);
   need(audit_identity_same(case_audit.source, inspect(case_audit.source.token.val[5])) &&
@@ -2881,6 +2911,9 @@ static void image_observe(void) {
   struct identity target = inspect(image_creator.token.val[5]); need(exec_handoff_identity(image_creator, target));
   if (image_phase == 3) need(audit_identity_same(target, image_target));
   image_target = target;
+  need(audit_identity_same(case_audit.source, inspect(case_audit.source.token.val[5])));
+  case_mapping_guard(case_audit.source.token.val[5]);
+  need(audit_identity_same(case_audit.source, inspect(case_audit.source.token.val[5])));
   struct entry *payload = &entries[image_control ? 12 : 5], *work = &entries[3]; stable(payload); stable(work);
   char path[PATH_MAX]; need(proc_pidpath(target.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, payload->path));
   struct stat st; free(file(path, payload->stat.st_gid, payload->stat.st_mode & 07777, 134217728, payload->pin, &st)); same_stat(st, payload->stat);

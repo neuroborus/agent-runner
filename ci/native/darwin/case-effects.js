@@ -301,8 +301,10 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     const setup = await reader.readCase();
     requireObservation(
       (access
-        ? setup.objects.length >= 7 + execWitnessVersion
-        : setup.objects.length === 7 + execWitnessVersion) &&
+        ? setup.objects.length >=
+          7 + execWitnessVersion + Number(!!declared.bindings.mapFixture)
+        : setup.objects.length ===
+          7 + execWitnessVersion + Number(!!declared.bindings.mapFixture)) &&
         setup.endpoints.length ===
           (access && !recovered?.accessRetired ? 8 : 0),
     );

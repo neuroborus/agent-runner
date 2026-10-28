@@ -1662,6 +1662,13 @@ export function createDarwinCustodyReader(value, options = {}) {
         domain,
       );
       requireDarwin(!actual.directory && actual.bytes > 0);
+      if (options.entries?.[index]?.path.endsWith("/work/map-fixture"))
+        requireDarwin(
+          source === 12 &&
+            actual.uid === 0 &&
+            actual.mode === 0o550 &&
+            actual.bytes === held.get(12).bytes,
+        );
       held.set(index, actual);
       await save("case-object", { index, object: actual });
       return actual;

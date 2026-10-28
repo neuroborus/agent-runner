@@ -38,6 +38,7 @@ extern mach_port_t bootstrap_port;
 #ifdef NATIVE_CI_EXPERIMENT
 #include "image-closure.h"
 struct image_frame { unsigned version, control; struct identity identity; };
+static struct exec_mapping launch_mapping = {.fd = -1}, launch_map_control = {.fd = -1};
 #endif
 #ifdef NATIVE_CI_EXPERIMENT
 static void launch_need_at(bool ok, const char *file, unsigned line);
@@ -50,12 +51,23 @@ static void descriptors(void) {
   int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   need(size > 0 && size < (int)sizeof(fds) && size % sizeof(fds[0]) == 0);
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++)
-    if (fds[i].proc_fd >= 5 && fds[i].proc_fd != launch_diagnostic) need(!close(fds[i].proc_fd));
+    if (fds[i].proc_fd >= 5 && fds[i].proc_fd != launch_diagnostic
+#ifdef NATIVE_CI_EXPERIMENT
+        && fds[i].proc_fd != launch_mapping.fd && fds[i].proc_fd != launch_map_control.fd
+#endif
+       ) need(!close(fds[i].proc_fd));
   size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   unsigned expected = launch_diagnostic == 5 ? 6 : 5;
-  need(size == expected * (int)sizeof(fds[0]));
+  unsigned probes = 0;
+#ifdef NATIVE_CI_EXPERIMENT
+  probes = (launch_mapping.fd >= 0) + (launch_map_control.fd >= 0);
+#endif
+  need(size == (expected + probes) * (int)sizeof(fds[0]));
   unsigned mask = 0;
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++) {
+#ifdef NATIVE_CI_EXPERIMENT
+    if (fds[i].proc_fd == launch_mapping.fd || fds[i].proc_fd == launch_map_control.fd) continue;
+#endif
     need(fds[i].proc_fd >= 0 && fds[i].proc_fd < expected); mask |= 1U << fds[i].proc_fd;
   }
   need(mask == (1U << expected) - 1);
@@ -529,7 +541,15 @@ int main(int argc, char **argv) {
   const char *control_hash = getenv("NATIVE_EXEC_CONTROL_SHA256");
   need(control_hash && strlen(control_hash) == 64 && strspn(control_hash, "0123456789abcdef") == 64);
   struct stat control_identity; free(file(control_path, gid, 0550, imageMaximum, control_hash, &control_identity));
+  char mapping_path[PATH_MAX]; struct stat mapping_parent;
+  need(snprintf(mapping_path, sizeof(mapping_path), "%s/map-fixture", argv[5]) < sizeof(mapping_path) &&
+    !fstat(workspace, &mapping_parent) && exec_mapping_open(&launch_mapping, mapping_path, control_hash) &&
+    exec_mapping_open(&launch_map_control, control_path, control_hash));
   for (unsigned round = 0; round < 2; round++) {
+  struct stat mapping_named, parent_named, control_named;
+  need(!lstat(mapping_path, &mapping_named) && exec_mapping_same(mapping_named, launch_mapping.object) &&
+    !lstat(control_path, &control_named) && exec_mapping_same(control_named, launch_map_control.object) &&
+    !lstat(argv[5], &parent_named) && exec_mapping_same(parent_named, mapping_parent));
   bool control = round == 0;
 #else
   {
@@ -588,6 +608,10 @@ int main(int argc, char **argv) {
 #endif
     need(!sandbox_init((const char *)policy, 0, &error));
 #ifdef NATIVE_CI_EXPERIMENT
+    bool mapped = exec_mapping_check(&launch_mapping, !control);
+    mapped = exec_mapping_check(&launch_map_control, false) && mapped;
+    bool map_closed = exec_mapping_close(&launch_mapping); map_closed = exec_mapping_close(&launch_map_control) && map_closed;
+    need(mapped && map_closed);
     mach_port_t local_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local_bootstrap);
 #else
@@ -703,6 +727,7 @@ int main(int argc, char **argv) {
 #endif
   }
 #ifdef NATIVE_CI_EXPERIMENT
+  bool maps_closed = exec_mapping_close(&launch_mapping); maps_closed = exec_mapping_close(&launch_map_control) && maps_closed; need(maps_closed);
   free(policy); close(3); close(workspace); close(storage); close(custody);
 #endif
   /* Direct-child exit is not domain retirement. Retain this session reference

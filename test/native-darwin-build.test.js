@@ -6126,7 +6126,7 @@ test("Darwin feasibility fault custody keeps privileged effects behind sealed re
     /audit_identity_same\(holder, domain_record.custodian\)/u,
   );
   assert.match(domain, /domain_recheck\(\); need\(!view.nl && !view.nd\)/u);
-  assert.match(domain, /domain_store\(6\).*mach_port_deallocate/u);
+  assert.match(domain, /domain_store\(6\).*?mach_port_deallocate/su);
   const verifier = domain.slice(
     domain.indexOf("static void domain_verify("),
     domain.indexOf("static void domain_start("),

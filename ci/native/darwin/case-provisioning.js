@@ -110,6 +110,13 @@ export function darwinExperimentCaseDeclarations(
       ...(!recovery || Object.hasOwn(setup, "execControl")
         ? ["execControl"]
         : []),
+      ...((
+        recovery
+          ? Object.hasOwn(setup, "mapFixture")
+          : recipe.id !== "git.fixed"
+      )
+        ? ["mapFixture"]
+        : []),
       ...(recipe.id.startsWith("access.") ? ["access"] : []),
       ...(["files", "release"].includes(recipe.group) ||
       recipe.id.startsWith("git.")
@@ -120,6 +127,14 @@ export function darwinExperimentCaseDeclarations(
       setup.input.request ?? setup.input,
       "experiment",
     );
+    if (Object.hasOwn(setup, "mapFixture")) {
+      observationObject(setup.mapFixture, ["kind", "path", "sha256"]);
+      requireObservation(
+        setup.mapFixture.kind === "image" &&
+          setup.mapFixture.path === request.workspace + "/map-fixture" &&
+          setup.mapFixture.sha256 === setup.execControl?.sha256,
+      );
+    }
     requireObservation(
       (setup.schemaVersion === (recipe.id.startsWith("access.") ? 2 : 1) ||
         (recovery && setup.schemaVersion === 1)) &&
@@ -479,6 +494,9 @@ export function createDarwinCaseProvisioning(state, options) {
         "input",
         "assets",
         ...(binding.purpose === "experiment" ? ["execControl"] : []),
+        ...(binding.purpose === "experiment" && declared.id !== "git.fixed"
+          ? ["mapFixture"]
+          : []),
         ...(Object.hasOwn(setup, "access") ? ["access"] : []),
         ...(Object.hasOwn(setup, "operations") ? ["operations"] : []),
       ]);
@@ -602,6 +620,15 @@ export function createDarwinCaseProvisioning(state, options) {
       requireObservation(!(access && operations));
       if (access) entries.push(...access.entries.slice(entries.length));
       if (operations) entries.push(...operations.entries.slice(entries.length));
+      if (binding.purpose === "experiment" && declared.id !== "git.fixed") {
+        observationObject(setup.mapFixture, ["kind", "path", "sha256"]);
+        requireObservation(
+          setup.mapFixture.kind === "image" &&
+            setup.mapFixture.path === request.workspace + "/map-fixture" &&
+            setup.mapFixture.sha256 === setup.execControl.sha256,
+        );
+        entries.push({ ...setup.mapFixture });
+      }
       const planBytes = encodeDarwinCustodyPlan({
         ...(binding.purpose === "experiment" ? { execWitnessVersion: 1 } : {}),
         ...purposeData(binding),
@@ -714,6 +741,8 @@ export function createDarwinCaseProvisioning(state, options) {
       if (experiment) {
         await reader.open(11);
         await reader.provisionExecControl(setup.execControl.cdhash);
+        if (setup.mapFixture)
+          await reader.copyCaseAsset(entries.length - 1, 12);
       }
       const values = {
         ...provisionalValues,

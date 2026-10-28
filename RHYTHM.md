@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-28 — Bind Darwin mapping isolation to regular files
+
+The existing handoff/custody owners now require outside executable mapping,
+primary reading and authorized mapping positives before accepting workspace
+mapping EPERM/EACCES on the same held signed bytes and arguments. Probe handles
+close before ready/closure; independent readers rejoin original held vnodes.
+All path/read/write obligations remain, with native non-file types and these
+witnesses replacing inferred directory/device map comparisons. Query errors and
+intrinsic non-file failures supply no denial proof. Existing asset indices,
+receipt sizes, separate exec gates and recovery without replay remain intact.
+Portable regressions establish no native PASS or repair of separate Darwin
+deadline/cleanup or Windows startup failures.
+
 ## 2026-10-28 — Bind Darwin exec refusal to actual controlled attempts
 
 Experimental custody now requires a sealed unchanged argv control, actual

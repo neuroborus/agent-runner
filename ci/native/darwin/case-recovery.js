@@ -829,7 +829,9 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           (access || latest) &&
             (access ||
               (snapshots.length === 1 &&
-                objects.length === (declared.bindings.execControl ? 8 : 7))),
+                objects.length ===
+                  (declared.bindings.execControl ? 8 : 7) +
+                    Number(!!declared.bindings.mapFixture))),
         );
         const history = [];
         for (const { record } of possible) {
@@ -1035,6 +1037,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           rawPlan.slice(0, declared.bindings.execControl ? 13 : 12),
           declared.id,
         );
+        if (declared.bindings.mapFixture)
+          specification.entries.push({ ...declared.bindings.mapFixture });
         requireObservation(
           same(
             specification.entries.map(({ kind, path, sha256 }) => ({
@@ -1103,6 +1107,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           rawPlan.slice(0, declared.bindings.execControl ? 13 : 12),
           { recovery: true },
         );
+        if (declared.bindings.mapFixture)
+          specification.entries.push({ ...declared.bindings.mapFixture });
         const entriesOf = (list) =>
           list.map(({ kind, path, sha256 }) => ({ kind, path, sha256 }));
         requireObservation(

@@ -482,13 +482,25 @@ export async function prepareDarwinExperimentCases(
     request.policy.sha256 = policy.sha256;
     entries[6].sha256 = policy.sha256;
     entries[9] = { kind: "data", ...policy };
-    const planBytes = encodeDarwinCustodyPlan({
+    const mapFixture =
+        recipe.id === "git.fixed"
+          ? null
+          : {
+              kind: "image",
+              path: request.workspace + "/map-fixture",
+              sha256: helper("argv-fixture").sha256,
+            },
+      planBytes = encodeDarwinCustodyPlan({
         execWitnessVersion: 1,
         purpose: "experiment",
         candidateSha: prepared.job.candidateSha,
         uid,
         gid,
-        entries: [...entries, ...assets.map(({ source, ...entry }) => entry)],
+        entries: [
+          ...entries,
+          ...assets.map(({ source, ...entry }) => entry),
+          ...(mapFixture ? [mapFixture] : []),
+        ],
       }),
       plan = asset(planBytes);
     if (record?.slots) {
@@ -509,6 +521,7 @@ export async function prepareDarwinExperimentCases(
       bindings: {
         schemaVersion: access ? 2 : 1,
         execControl: helper("argv-fixture"),
+        ...(mapFixture ? { mapFixture } : {}),
         bindingSha256: prepared.bootstrap.bindingSha256,
         uid,
         gid,

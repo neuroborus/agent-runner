@@ -4134,6 +4134,7 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
         /#ifdef NATIVE_CI_EXPERIMENT[\s\S]*?#else\n([\s\S]*?)#endif/gu,
         "$1",
       )
+      .replace(/#ifdef NATIVE_CI_EXPERIMENT\n[\s\S]*?#endif/gu, "")
       .replace("sizeof(domain_runtime_replies)", "8")
       .replace(
         "memset(domain_runtime_replies, 0, 8);",

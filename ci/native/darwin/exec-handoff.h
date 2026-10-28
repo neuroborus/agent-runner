@@ -7,6 +7,76 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/mman.h>
+
+/* Read-only custody survives both rounds; only the child releases its copies.
+ * Callers additionally bind the signed source, parent, policy and creator. */
+struct exec_mapping { int fd; struct stat object; char hash[65]; };
+static bool exec_mapping_same(struct stat a, struct stat b) {
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
+    a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
+    a.st_birthtimespec.tv_sec == b.st_birthtimespec.tv_sec && a.st_birthtimespec.tv_nsec == b.st_birthtimespec.tv_nsec &&
+    a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+    a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
+}
+static bool exec_mapping_close(struct exec_mapping *value) {
+  int fd = value->fd; value->fd = -1;
+  return fd < 0 || close(fd) == 0;
+}
+static bool exec_mapping_read(struct exec_mapping *value, unsigned char *bytes) {
+  struct stat before, after; unsigned char sum[32]; char hash[65];
+  if (fstat(value->fd, &before) || !exec_mapping_same(before, value->object) ||
+      pread(value->fd, bytes, before.st_size, 0) != before.st_size ||
+      !CC_SHA256(bytes, (CC_LONG)before.st_size, sum) || fstat(value->fd, &after) ||
+      !exec_mapping_same(before, after)) return false;
+  for (unsigned i = 0; i < 32; i++) snprintf(hash + 2*i, 3, "%02x", sum[i]);
+  return !strcmp(hash, value->hash);
+}
+static bool exec_mapping_open(struct exec_mapping *value, const char *path, const char *hash) {
+  int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return false;
+  /* Never collide with stdio, ready/release or the diagnostic copy. */
+  value->fd = fcntl(fd, F_DUPFD_CLOEXEC, 64); int closed = close(fd);
+  if (value->fd < 0 || closed || fstat(value->fd, &value->object)) return false;
+  struct stat st = value->object, named;
+  if (!S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_size <= 0 || st.st_size > 16777216 ||
+      (st.st_mode & 022) || (fcntl(value->fd, F_GETFL) & O_ACCMODE) != O_RDONLY ||
+      lstat(path, &named) || !exec_mapping_same(st, named) || strlen(hash) != 64) return false;
+  memcpy(value->hash, hash, 65);
+  unsigned char *bytes = malloc((size_t)st.st_size);
+  bool ok = bytes && exec_mapping_read(value, bytes); free(bytes); return ok;
+}
+static bool exec_mapping_check(struct exec_mapping *value, bool denied) {
+  size_t size = (size_t)value->object.st_size;
+  /* One fixed prefix; the outside control must prove executable applicability. */
+  size_t range = size < 4096 ? size : 4096;
+  unsigned char *bytes = malloc(size);
+  bool ok = bytes && exec_mapping_read(value, bytes);
+  if (ok) {
+    void *mapped = mmap(NULL, range, PROT_READ | PROT_EXEC, MAP_PRIVATE, value->fd, 0);
+    if (mapped == MAP_FAILED) { int error = errno; ok = denied && (error == EPERM || error == EACCES); }
+    else {
+      ok = !denied && !memcmp(mapped, bytes, range);
+      int unmapped = munmap(mapped, range); ok = !unmapped && ok;
+    }
+    struct stat after; ok = !fstat(value->fd, &after) && exec_mapping_same(value->object, after) && ok;
+  }
+  free(bytes); return ok;
+}
+/* Independent readers join named bytes to the original live custodian's held
+ * vnode, not a ready bit or a freshly opened substitute. */
+static bool exec_mapping_held(pid_t pid, struct stat object) {
+  struct proc_fdinfo fds[512]; int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+  if (size <= 0 || size >= sizeof(fds) || size % sizeof(fds[0])) return false;
+  for (unsigned i = 0; i < (unsigned)size / sizeof(fds[0]); i++) if (fds[i].proc_fdtype == PROX_FDTYPE_VNODE) {
+    struct vnode_fdinfowithpath info;
+    if (proc_pidfdinfo(pid, fds[i].proc_fd, PROC_PIDFDVNODEPATHINFO, &info, sizeof(info)) != sizeof(info)) return false;
+    struct vinfo_stat *st = &info.pvip.vip_vi.vi_stat;
+    if (st->vst_dev == object.st_dev && st->vst_ino == object.st_ino && st->vst_mode == object.st_mode &&
+        st->vst_uid == object.st_uid && st->vst_gid == object.st_gid && st->vst_nlink == object.st_nlink && st->vst_size == object.st_size) return true;
+  }
+  return false;
+}
 
 struct exec_handoff {
   posix_spawnattr_t attributes;

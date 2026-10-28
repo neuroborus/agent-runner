@@ -2161,9 +2161,23 @@ handle settlement precede identity-bound continuation; post-exec controls,
 acknowledgements, detached descendants and original stdio remain required.
 The protected record also retains control identity/image/output/retirement and
 probe delivery/status. Its separate control session retires before the primary
-domain, preserving original process-limit/census bounds. The original 45 file/map
-comparisons and fork check remain, plus control read/map checks; actual bound
-attempts replace only the nine exec pre-evaluations.
+domain, preserving original process-limit/census bounds. All nine file rows and
+read/write comparisons remain. Regular-file map queries stay strict; workspace
+and root directory slots and the null-device slot instead require their native
+types plus a held regular-file mapping witness. The existing handoff owner runs
+identical bounded read/executable-map operations on signed argv bytes outside
+policy and under the final primary credentials. Outside mapping, primary reading
+and authorized-control mapping must succeed; workspace mapping requires immediate
+EPERM/EACCES from MAP_FAILED. Probe descriptors survive only setup sanitation and
+are checked closed, with mappings removed, before ready and closure barriers.
+Existing per-object custody and fresh live-custodian vnode joins bind the fixture,
+source, parent, signature, policy and inherited replacement without changing
+receipt sizes or replaying work in recovery. System declarations append the
+fixture without moving existing asset indices. The fixed Git executor has no
+mapping control rounds and retains its original workspace and status contract;
+ordinary Git snapshots retain the fixture. Intrinsic non-file errors and query
+returns cannot prove mapping isolation. Fork/control queries and separate T/X
+gates remain; matching native evidence is still required for acceptance.
 
 Fenced recovery retains original audit custody across unpublished epochs,
 persistence failures and uncertain continuation. Complete censuses, journal-before-

@@ -4755,8 +4755,36 @@ descendants and original stdout/stderr. No new service message, access-slot sett
 privilege, acquisition/delegation grant or raw-message safety claim is introduced.
 Reviewed/protected/provider null-service refusals remain distinct.
 
-The 45 original file/read/write/map comparisons and strict fork query remain,
-with two additional control-asset read/map checks. Actual bound exec evidence
+All nine original path rows and 45 obligations remain, with every read/write
+comparison, applicable regular-file map query, strict fork query and the two
+control-asset read/map queries. Rows 0–3 (sealed/build images) and 5 (libSystem)
+retain map-allow queries; row 8 (policy) retains map-denial. Rows 4 (workspace)
+and 7 (root) require native directory types, and row 6 (null) a character-device
+type. Their executable-file mapping slots are inapplicable, discharged by those
+types together with the bound regular-file controls below, never by an intrinsic
+non-file mmap failure. In particular, the workspace directory query returning 0
+and observed errno 2 establish neither regular-file mapping permission nor denial.
+
+The existing signed argv bytes also supply one held workspace map fixture.
+Experimental declarations append it after existing assets, preserving the fixed
+prefix, entry11/12 and historical receipt sizes. Existing per-object copy/read
+and recovery custody bind it to its source, parent, inode, size, hash and signature.
+The fixed Git executor has no mapping control rounds and retains its original
+two-file workspace and full status expectation without this fixture.
+The trusted custodian retains it unchanged across both rounds. Under final
+credentials, outside-policy read/map and primary-policy read must succeed;
+primary executable mmap must fail specifically with immediate EPERM/EACCES.
+The explicitly map-authorized control must map successfully under policy with
+the same signed prefix (at most 4096 bytes), offset zero and
+PROT_READ|PROT_EXEC/MAP_PRIVATE arguments; complete held bytes are read and hashed.
+The child preserves only these acquired probe descriptors through sanitation,
+unmaps/closes before closure/ready, and never executes mapped bytes. Parent and
+independent readers join named signed bytes to the live custodian's held vnodes
+and creator/replacement/policy bindings; a ready flag alone grants no admission.
+Unexpected success, setup, substitution, query or settlement errors remain
+blocking. Matching native execution must establish the controls; portable
+injections establish no native PASS or repair of separate deadline/cleanup faults.
+Actual bound exec evidence
 replaces the nine `process-exec` pre-evaluations; no query error selects a fallback.
 Each retained effective-policy query executes once. Its first mismatching exact
 comparison emits one advisory `native-darwin-fault-policy` stderr record before

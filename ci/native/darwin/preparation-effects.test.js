@@ -4800,6 +4800,10 @@ function buildTranscripts(experiment = false, complete = false) {
                 ([i]) =>
                   Number(i) < 7 ||
                   (experiment && Number(i) === 12) ||
+                  (experiment &&
+                    planEntries[Number(i)].path.endsWith(
+                      "/work/map-fixture",
+                    )) ||
                   (accessSpec &&
                     planEntries[Number(i)].path.startsWith(
                       planEntries[0].path + "/",
@@ -6107,6 +6111,14 @@ function caseBinding(
       return { path, sha256: digest(data) };
     },
   );
+  const mapFixture =
+    experiment && execWitnessVersion === 1 && id !== "git.fixed"
+      ? {
+          kind: "image",
+          path: request.workspace + "/map-fixture",
+          sha256: digest(f.image),
+        }
+      : null;
   const entries = [
     { kind: "directory", path: root, sha256: null },
     ...[request.custody, request.storage, request.workspace].map((path) => ({
@@ -6140,6 +6152,7 @@ function caseBinding(
           },
         ]
       : []),
+    ...(mapFixture ? [mapFixture] : []),
   ];
   f.put(entries[10].path, Buffer.from("native-poc-pf-lease-v1\n"), 0o400);
   const declared = f.manifest.darwinPreparation.cases.find(
@@ -6169,6 +6182,7 @@ function caseBinding(
           },
         }
       : {}),
+    ...(mapFixture ? { mapFixture } : {}),
     ...(experiment ? { bindingSha256: hash } : { authoritySha256: hash }),
     uid: 90001,
     gid: 90002,
@@ -6226,6 +6240,7 @@ function accessBinding(
         };
       }),
     assets = [];
+  if (declared.bindings.mapFixture) plan.pop();
   const add = (kind, file, bytes, source = null) => {
     const index = plan.length + assets.length,
       sha256 = kind === "authority" ? null : digest(bytes);
@@ -6392,7 +6407,11 @@ function accessBinding(
   const machTool = experiment
     ? add("helper", mach?.tool.path ?? "/usr/bin/log", f.image)
     : null;
-  const entryList = [...plan, ...assets.map(({ source, ...entry }) => entry)],
+  const entryList = [
+      ...plan,
+      ...assets.map(({ source, ...entry }) => entry),
+      ...(declared.bindings.mapFixture ? [declared.bindings.mapFixture] : []),
+    ],
     required = [
       request.custody,
       request.storage,
@@ -8122,6 +8141,7 @@ function operationBinding(f, id) {
         path: Buffer.from(hex, "hex").toString(),
       };
     });
+  if (declared.bindings.mapFixture) entries.pop();
   const add = (kind, file, data = null, source = null) => {
     const index = entries.length + assets.length,
       sha256 = kind === "authority" ? null : digest(data);
@@ -8187,7 +8207,11 @@ function operationBinding(f, id) {
       binding.template.policy.launch.request[rule.paths[0][2]] = {
         binding: rule.id,
       };
-    const plan = [...entries, ...assets.map(({ source, ...value }) => value)];
+    const plan = [
+      ...entries,
+      ...assets.map(({ source, ...value }) => value),
+      ...(declared.bindings.mapFixture ? [declared.bindings.mapFixture] : []),
+    ];
     const bytes = encodeDarwinCustodyPlan({
       ...(experiment ? { purpose: "experiment", execWitnessVersion: 1 } : {}),
       candidateSha,
@@ -10354,6 +10378,11 @@ test("complete Darwin experiments retain all file and Git native owners and orig
         policyBinding: setup.binding,
         recordPolicy() {},
       });
+    if (id === "git.fixed")
+      assert.equal(
+        f.files.has(prepared.input.request.workspace + "/map-fixture"),
+        false,
+      );
     const diagnostics = [],
       result = await withNativeDiagnostics(
         () =>

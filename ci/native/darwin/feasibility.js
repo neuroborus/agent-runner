@@ -1962,6 +1962,7 @@ async function snapshots(root) {
   const files = [
     "workspace/.git/index",
     "workspace/.git/refs/heads/fixture",
+    "workspace/map-fixture",
     "control/sentinel",
     "outside/sentinel",
   ];
@@ -3555,6 +3556,11 @@ async function prepareFixture(root, nonce) {
   ])
     await writeFile(path.join(root, name), nonce, { flag: "wx", mode: 0o600 });
   const workspace = path.join(root, "workspace");
+  await writeFile(
+    path.join(workspace, "map-fixture"),
+    await readFile(path.join(root, "build/argv-fixture")),
+    { flag: "wx", mode: 0o444 },
+  );
   for (const args of [
     ["init", "--initial-branch=fixture"],
     ["add", "inspection.txt"],

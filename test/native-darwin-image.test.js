@@ -2145,6 +2145,426 @@ test("native descriptor snapshots distinguish object substitution from unchanged
   }
 });
 
+test("bound native mapping uses the same readable bytes and arguments and refuses invalid objects, results and settlement", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/exec-handoff.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(`static bool ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`, "u")
+      .exec(source)[1]
+      .replaceAll("->", ".")
+      .replace(
+        "struct stat before, after; unsigned char sum[32]; char hash[65];",
+        "let before={},after={},sum=Buffer.alloc(32),hash=Buffer.alloc(65);",
+      )
+      .replace(
+        "struct stat st = value.object, named;",
+        "let st=value.object,named={};",
+      )
+      .replace("struct stat after;", "let after={};")
+      .replace("struct proc_fdinfo fds[512];", "let fds=[];")
+      .replace("struct vnode_fdinfowithpath info;", "let info={};")
+      .replace(
+        "struct vinfo_stat *st = &info.pvip.vip_vi.vi_stat;",
+        "let st=info.pvip.vip_vi.vi_stat;",
+      )
+      .replaceAll("st->", "st.")
+      .replaceAll("sizeof(fds[0])", "8")
+      .replaceAll("sizeof(fds)", "4096")
+      .replaceAll("sizeof(info)", "128")
+      .replace("&info", "info")
+      .replace("void *mapped", "let mapped")
+      .replace("unsigned char *bytes", "let bytes")
+      .replaceAll(/&(before|after|named|value\.object)\b/gu, "$1")
+      .replaceAll(/\((?:size_t|CC_LONG|unsigned)\)/gu, "")
+      .replace(
+        'snprintf(hash + 2*i, 3, "%02x", sum[i]);',
+        'hash.write(sum[i].toString(16).padStart(2,"0"),2*i);',
+      )
+      .replaceAll(/\b(?:unsigned|bool|int|size_t) /gu, "let ");
+  const functions = ["same", "close", "read", "open", "check", "held"]
+    .map((name) => {
+      const args = {
+        same: "a,b",
+        close: "value",
+        read: "value,bytes",
+        open: "value,path,hash",
+        check: "value,denied",
+        held: "pid,object",
+      }[name];
+      return `function exec_mapping_${name}(${args}) {${body("exec_mapping_" + name)}}`;
+    })
+    .join("\n");
+  for (const fault of [
+    null,
+    "open",
+    "dup",
+    "directory",
+    "links",
+    "empty",
+    "oversize",
+    "writable",
+    "access",
+    "substitution",
+    "read",
+    "digest",
+    "drift",
+    "malloc",
+    "unmap",
+    "close",
+    "setup-close",
+  ])
+    for (const denied of [false, true]) {
+      const bytes = fault
+          ? Buffer.from("fixed signed image bytes")
+          : Buffer.alloc(8192, 42),
+        events = [],
+        pin = createHash("sha256").update(bytes).digest("hex"),
+        value = { fd: -1, object: {}, hash: Buffer.alloc(65) },
+        st = {
+          st_dev: 1,
+          st_ino: 42,
+          st_mode:
+            fault === "directory"
+              ? 0o40550
+              : fault === "writable"
+                ? 0o100666
+                : 0o100550,
+          st_uid: 0,
+          st_gid: 90002,
+          st_nlink: fault === "links" ? 2 : 1,
+          st_size:
+            fault === "empty"
+              ? 0
+              : fault === "oversize"
+                ? 16777217
+                : bytes.length,
+        };
+      for (const key of ["st_birthtimespec", "st_mtimespec", "st_ctimespec"])
+        st[key] = { tv_sec: 1, tv_nsec: 2 };
+      let attempt = false,
+        statCalls = 0;
+      const api = {
+        Buffer,
+        NULL: null,
+        MAP_FAILED: -1,
+        PROT_READ: 1,
+        PROT_EXEC: 4,
+        MAP_PRIVATE: 2,
+        EPERM: 1,
+        EACCES: 13,
+        O_RDONLY: 0,
+        O_NONBLOCK: 4,
+        O_NOFOLLOW: 8,
+        O_CLOEXEC: 16,
+        O_ACCMODE: 3,
+        F_DUPFD_CLOEXEC: 1,
+        F_GETFL: 2,
+        errno: 13,
+        malloc: (size) => (fault === "malloc" ? null : Buffer.alloc(size)),
+        free() {},
+        strlen: (text) => text.length,
+        memcpy: (out, text) => out.write(text),
+        strcmp: (a, b) =>
+          String(a).replaceAll("\0", "") === String(b).replaceAll("\0", "")
+            ? 0
+            : 1,
+        memcmp: (a, b, size) =>
+          Buffer.compare(a.subarray(0, size), b.subarray(0, size)),
+        S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+        open(path, flags) {
+          assert.equal(path, "/bound/map-fixture");
+          assert.equal(flags, 28);
+          events.push("open");
+          return fault === "open" ? -1 : 7;
+        },
+        fcntl(fd, operation, minimum) {
+          if (operation === 1) {
+            assert.equal(fd, 7);
+            assert.equal(minimum, 64);
+            events.push("dup");
+            return fault === "dup" ? -1 : 64;
+          }
+          return fault === "access" ? 1 : 0;
+        },
+        close(fd) {
+          events.push("close:" + fd);
+          return (fault === "close" && fd === 64) ||
+            (fault === "setup-close" && fd === 7)
+            ? -1
+            : 0;
+        },
+        fstat(fd, out) {
+          assert.equal(fd, 64);
+          Object.assign(out, st);
+          if (fault === "drift" && ++statCalls > 1) out.st_ino++;
+          return 0;
+        },
+        lstat(_path, out) {
+          Object.assign(out, st);
+          if (fault === "substitution") out.st_ino++;
+          return 0;
+        },
+        pread(fd, out, size, offset) {
+          assert.equal(fd, 64);
+          assert.equal(offset, 0);
+          assert.equal(size, bytes.length);
+          events.push("read");
+          bytes.copy(out);
+          return fault === "read" ? -1 : bytes.length;
+        },
+        CC_SHA256(input, size, out) {
+          createHash("sha256")
+            .update(fault === "digest" ? Buffer.alloc(size) : input)
+            .digest()
+            .copy(out);
+          return out;
+        },
+        mmap(address, size, protection, flags, fd, offset) {
+          events.push("mmap");
+          assert.deepEqual(
+            [address, size, protection, flags, fd, offset],
+            [null, Math.min(bytes.length, 4096), 5, 2, 64, 0],
+          );
+          api.errno = denied ? 1 : 13;
+          return denied ? -1 : Buffer.from(bytes.subarray(0, size));
+        },
+        munmap(mapped, size) {
+          events.push("unmap");
+          assert.deepEqual(mapped, bytes.subarray(0, size));
+          assert.equal(size, Math.min(bytes.length, 4096));
+          return fault === "unmap" ? -1 : 0;
+        },
+      };
+      const native = new Script(
+        functions +
+          ";({exec_mapping_open,exec_mapping_check,exec_mapping_close,exec_mapping_held})",
+      ).runInNewContext(api);
+      const opened = native.exec_mapping_open(value, "/bound/map-fixture", pin);
+      const valid = !fault || ["unmap", "close"].includes(fault);
+      assert.equal(!!opened, valid, fault);
+      if (opened) {
+        attempt = native.exec_mapping_check(value, denied);
+        assert.equal(attempt, fault !== "unmap" || denied, fault);
+        // A successful outside control never turns an unrelated primary error
+        // or unexpected mapping success into denial. Ambient errno is stale.
+        for (const error of [1, 13, 2, 12, 22]) {
+          api.mmap = () => {
+            api.errno = error;
+            return -1;
+          };
+          assert.equal(
+            native.exec_mapping_check(value, true),
+            [1, 13].includes(error),
+          );
+          assert.equal(native.exec_mapping_check(value, false), false);
+        }
+        api.mmap = () =>
+          Buffer.from(bytes.subarray(0, Math.min(bytes.length, 4096)));
+        assert.equal(native.exec_mapping_check(value, true), false);
+        if (!fault) {
+          api.PROX_FDTYPE_VNODE = 1;
+          api.PROC_PIDLISTFDS = 2;
+          api.PROC_PIDFDVNODEPATHINFO = 3;
+          const fields = ["dev", "ino", "mode", "uid", "gid", "nlink", "size"],
+            held = {};
+          for (const key of fields) held["vst_" + key] = st["st_" + key];
+          api.proc_pidinfo = (pid, _selector, _arg, out) => {
+            assert.equal(pid, 9000);
+            out.push({ proc_fd: 64, proc_fdtype: 1 });
+            return 8;
+          };
+          api.proc_pidfdinfo = (_pid, _fd, _selector, out) => {
+            out.pvip = { vip_vi: { vi_stat: held } };
+            return 128;
+          };
+          assert.equal(native.exec_mapping_held(9000, st), true);
+          for (const key of fields) {
+            held["vst_" + key]++;
+            assert.equal(native.exec_mapping_held(9000, st), false);
+            held["vst_" + key]--;
+          }
+          api.proc_pidfdinfo = () => 0;
+          assert.equal(native.exec_mapping_held(9000, st), false);
+          api.proc_pidinfo = () => 4096;
+          assert.equal(native.exec_mapping_held(9000, st), false);
+          st.st_ino++;
+          assert.equal(native.exec_mapping_check(value, true), false);
+          st.st_ino--;
+        }
+      }
+      assert.equal(
+        native.exec_mapping_close(value),
+        !(fault === "close" && opened),
+      );
+      assert.equal(value.fd, -1);
+      if (!valid) assert.equal(events.includes("mmap"), false);
+      assert.ok(events.filter((event) => event === "close:64").length <= 1);
+    }
+});
+
+test("experimental descriptor sweep retains only the acquired probes until their checked closure", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/launcher.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void descriptors\(void\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(/^#.*$/gmu, "")
+    .replace("struct proc_fdinfo fds[4096];", "let fds=[];")
+    .replaceAll("sizeof(fds[0])", "8")
+    .replaceAll("sizeof(fds)", "32768")
+    .replaceAll(/\((?:size_t|int)\)/gu, "")
+    .replaceAll(/\b(?:unsigned|int|size_t) /gu, "let ")
+    .replaceAll("1U", "1");
+  for (const fail of [false, true]) {
+    const held = new Set([0, 1, 2, 3, 4, 5, 64, 65, 77]),
+      closed = [];
+    const api = {
+      launch_diagnostic: 5,
+      launch_mapping: { fd: 64 },
+      launch_map_control: { fd: 65 },
+      PROC_PIDLISTFDS: 1,
+      F_SETFD: 2,
+      FD_CLOEXEC: 1,
+      getpid: () => 42,
+      need: (ok) => assert.ok(ok),
+      proc_pidinfo(_pid, _selector, _arg, out) {
+        out.length = 0;
+        for (const fd of held) out.push({ proc_fd: fd });
+        return held.size * 8;
+      },
+      close(fd) {
+        closed.push(fd);
+        if (fail) return -1;
+        held.delete(fd);
+        return 0;
+      },
+      fcntl: (fd) => {
+        assert.ok([3, 4].includes(fd));
+        return 0;
+      },
+    };
+    const sweep = new Script(`()=>{${body}}`).runInNewContext(api);
+    if (fail) assert.throws(sweep);
+    else {
+      sweep();
+      assert.deepEqual(closed, [77]);
+      assert.ok(held.has(64) && held.has(65));
+      for (const probe of [api.launch_mapping, api.launch_map_control]) {
+        held.delete(probe.fd);
+        probe.fd = -1;
+      }
+      sweep();
+      assert.deepEqual([...held], [0, 1, 2, 3, 4, 5]);
+    }
+  }
+});
+
+test("the experimental mapping guard binds only its declared extension and freshly held parent", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const mapping = /static bool case_has_mapping\(void\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("char expected[PATH_MAX];", "let expected={};")
+    .replaceAll("sizeof(expected)", "4096");
+  const start = source.slice(source.indexOf("static void case_start("));
+  const guard = start
+    .slice(
+      start.indexOf("  need(case_mode"),
+      start.indexOf("  reservation_guard();"),
+    )
+    .replace(/^#.*$/gmu, "");
+  const mappingGuard =
+    /static void case_mapping_guard\(pid_t holder\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "struct entry *fixture = &entries[count - 1];",
+        "const fixture=entries[count-1];",
+      )
+      .replaceAll("->", ".")
+      .replaceAll(/&entries\[([^\]]+)\]/gu, "entries[$1]")
+      .replace("struct stat st, work;", "let st={},work={};")
+      .replaceAll(/&(st|work)\b/gu, "$1");
+  const mappingCall = /case_mapping_guard\(0\);/u.exec(start)[0];
+  for (const fault of [
+    null,
+    "missing",
+    "extra",
+    "path",
+    "kind",
+    "pin",
+    "lost-parent",
+  ]) {
+    const root = "/bound/case",
+      entries = Array.from(
+        { length: fault === "missing" ? 13 : fault === "extra" ? 15 : 14 },
+        (_, index) => ({
+          pin: "a",
+          fd: index,
+          stat: { st_ino: index, st_size: index === 3 ? 0 : 17 },
+        }),
+      );
+    Object.assign(entries.at(-1), {
+      kind: fault === "kind" ? "data" : "image",
+      path:
+        root + "/storage/work/" + (fault === "path" ? "other" : "map-fixture"),
+      pin: fault === "pin" ? "b" : "a",
+    });
+    const api = {
+      entries,
+      count: entries.length,
+      case_path: root,
+      case_mode: true,
+      case_started: true,
+      case_pid: 0,
+      case_recovery: false,
+      experiment_exec: true,
+      CASE_BASE_COUNT: 13,
+      PATH_MAX: 4096,
+      mode: "literal",
+      subject_gid: 90002,
+      image_control_cdhash: "signed-control",
+      stable: (entry) => assert.ok(entry),
+      free() {},
+      signature() {},
+      file(_path, _gid, _mode, _limit, _pin, out) {
+        Object.assign(out, entries.at(-1).stat);
+      },
+      same_stat: (a, b) => assert.deepEqual({ ...a }, { ...b }),
+      fstat(fd, out) {
+        assert.equal(fd, 3);
+        Object.assign(out, entries[3].stat, { st_size: 128 });
+        return 0;
+      },
+      exec_mapping_held(pid, object) {
+        assert.equal(pid, 9000);
+        // Provisioning grew the directory after its creation snapshot. Its
+        // held vnode must join a fresh size, while inode/ownership stay bound.
+        return (
+          object.st_ino !== 3 ||
+          (object.st_size === 128 && fault !== "lost-parent")
+        );
+      },
+      need: (ok) => assert.ok(ok),
+      snprintf: (out, _size, _format, root) => {
+        out.value = root + "/storage/work/map-fixture";
+        return out.value.length;
+      },
+    };
+    api.strcmp = (a, b) =>
+      String(a?.value ?? a) === String(b?.value ?? b) ? 0 : 1;
+    const admit = new Script(
+      `function case_has_mapping(){${mapping}};function case_mapping_guard(holder){${mappingGuard}};()=>{${guard}${mappingCall}case_mapping_guard(9000);}`,
+    ).runInNewContext(api);
+    if (fault) assert.throws(admit);
+    else admit();
+  }
+});
+
 test("native exec probes preserve the final handoff and settle separate spawn objects using direct POSIX status", async () => {
   const source = await readFile(
     new URL("../ci/native/darwin/exec-handoff.h", import.meta.url),

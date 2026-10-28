@@ -75,6 +75,9 @@ static size_t domain_record_size(void) { return domain_legacy ? DOMAIN_LEGACY_SI
 static unsigned domain_image_phase;
 static struct image_closure domain_inherited, domain_inspected;
 static struct exec_handoff *domain_handoff, *domain_probe_handoff;
+static struct exec_mapping domain_mapping = {.fd = -1}, domain_map_control = {.fd = -1};
+static int domain_map_parent = -1;
+static struct stat domain_map_directory;
 static char domain_path[4096], domain_helper[4096], domain_policy[4096], domain_control_asset[4096];
 static int domain_root = -1, domain_journal = -1;
 static mach_port_t domain_pin;
@@ -82,6 +85,9 @@ static bool domain_fenced;
 /* Each successful getter acquisition owns one release, including aliases. */
 static mach_port_t domain_bootstrap_local;
 static void domain_port_cleanup(void) {
+  if (!exec_mapping_close(&domain_mapping)) remember_cleanup("fault-map-close", "errno", errno);
+  if (!exec_mapping_close(&domain_map_control)) remember_cleanup("fault-map-close", "errno", errno);
+  if (domain_map_parent >= 0) { int fd = domain_map_parent; domain_map_parent = -1; if (close(fd)) remember_cleanup("fault-map-parent-close", "errno", errno); }
   if (domain_probe_handoff) {
     struct exec_handoff *probe = domain_probe_handoff; domain_probe_handoff = NULL; exec_handoff_destroy(probe);
     if (probe->files_cleanup) remember_cleanup("fault-image-cleanup", "errno", probe->files_cleanup);
@@ -388,8 +394,7 @@ static void domain_image_inputs(struct image_closure *value, struct identity exp
   if (!ok) { domain_port_cleanup(); failure(126); }
   need(audit_identity_same(expected, fault_inspect(expected.token.val[5])));
 }
-static void domain_signature(char hash[41]) {
-  const char *path = domain_record.control ? domain_control_asset : domain_helper;
+static void domain_signature_at(const char *path, char hash[41]) {
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
   bool ok = url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess && code &&
@@ -405,7 +410,26 @@ static void domain_signature(char hash[41]) {
   if (info) CFRelease(info); if (code) CFRelease(code); if (url) CFRelease(url);
   invariant(ok, "fault-image-signature");
 }
+static void domain_signature(char hash[41]) { domain_signature_at(domain_record.control ? domain_control_asset : domain_helper, hash); }
+static void domain_mapping_observe(void) {
+  char path[4096], parent[4096], signature[41], control[41]; struct stat directory;
+  need(audit_identity_same(domain_record.custodian, fault_inspect(domain_record.custodian.token.val[5])));
+  need(snprintf(parent, sizeof(parent), "%s/workspace", domain_record.root) < sizeof(parent) &&
+    snprintf(path, sizeof(path), "%s/map-fixture", parent) < sizeof(path) && !lstat(parent, &directory) && S_ISDIR(directory.st_mode));
+  struct exec_mapping value = {.fd = -1};
+  bool ok = exec_mapping_open(&value, path, domain_record.control_hash) &&
+    exec_mapping_held(domain_record.custodian.token.val[5], value.object) && exec_mapping_held(domain_record.custodian.token.val[5], directory);
+  if (domain_mapping.fd >= 0) ok = ok && exec_mapping_same(value.object, domain_mapping.object) && exec_mapping_same(directory, domain_map_directory);
+  bool closed = exec_mapping_close(&value); need(ok && closed);
+  if (getpid() != domain_record.custodian.token.val[5]) {
+    domain_signature_at(path, signature); domain_signature_at(domain_control_asset, control); need(!strcmp(signature, control));
+  }
+  struct stat named, parent_after;
+  need(!lstat(path, &named) && exec_mapping_same(named, value.object) && !lstat(parent, &parent_after) && exec_mapping_same(directory, parent_after) &&
+    audit_identity_same(domain_record.custodian, fault_inspect(domain_record.custodian.token.val[5])));
+}
 static void domain_control_asset_check(void) {
+  domain_mapping_observe();
   struct stat held, parent, named; int fd = openat(domain_root, "exec-control", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   need(fd >= 0 && !fstat(fd, &held) && !fstat(domain_root, &parent) && !fstatat(domain_root, "exec-control", &named, AT_SYMLINK_NOFOLLOW));
   need(domain_file_same(&held, &domain_record.control_file) && domain_file_same(&held, &named) && same_file_stat(&parent, &domain_record.control_parent));
@@ -430,6 +454,12 @@ static void domain_effective(struct identity target) {
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "file-map-executable"};
   need(!domain_record.control && domain_record.control_retired && exec_handoff_refused(domain_record.probe));
   for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 5; j++) {
+    /* Directories (workspace/root) and the null character device have no
+     * regular-file map slot. The held workspace denial plus authorized image
+     * positive discharges those slots; every read/write and regular query stays. */
+    if (j == 4 && (i == 4 || i == 6 || i == 7)) {
+      struct stat type; need(!lstat(objects[i], &type) && (i == 6 ? S_ISCHR(type.st_mode) : S_ISDIR(type.st_mode))); continue;
+    }
     bool read = i != 8, write = i == 6, executable = i < 4 || i == 5;
     int expected = j == 0 ? !read : j < 4 ? !write : !executable;
     int actual = feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]);
@@ -691,6 +721,7 @@ static void domain_admission_verify(const char *nonce, const char *pin) {
   domain_open(nonce, pin); need(!domain_legacy && domain_record.version == 5 && domain_record.stage == 1);
   struct identity custodian = fault_inspect(domain_record.custodian.token.val[5]);
   need(audit_identity_same(custodian, domain_record.custodian)); domain_image(custodian);
+  domain_mapping_observe();
   if (domain_record.target.token.val[5]) domain_image_observe(false);
   else need(audit_identity_same(domain_record.creator, fault_inspect(domain_record.creator.token.val[5])));
   fputs("{\"independent\":true,\"record\":", stdout); domain_emit(); puts("}");
@@ -796,6 +827,13 @@ static void domain_start(int argc, char **argv) {
   au_asid_t parent_asid = audit_fresh(0); domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   fputs("{\"hello\":", stdout); domain_emit(); puts("}"); fflush(stdout);
   domain_parent_gate();
+  char mapping_path[4096], mapping_parent[4096];
+  need(snprintf(mapping_parent, sizeof(mapping_parent), "%s/workspace", canonical) < sizeof(mapping_parent) &&
+    snprintf(mapping_path, sizeof(mapping_path), "%s/map-fixture", mapping_parent) < sizeof(mapping_path));
+  domain_map_parent = open(mapping_parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  need(domain_map_parent >= 0 && !fstat(domain_map_parent, &domain_map_directory) &&
+    exec_mapping_open(&domain_mapping, mapping_path, domain_record.control_hash) &&
+    exec_mapping_open(&domain_map_control, domain_control_asset, domain_record.control_hash));
   const char *lease_path = "/private/var/run/native-feasibility-fault.lock";
   int lease = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
   bool lease_created = lease >= 0;
@@ -828,6 +866,7 @@ static void domain_start(int argc, char **argv) {
   invariant(signal(SIGPIPE, SIG_IGN) != SIG_ERR, "fault-signal");
   unsigned expected_sequence = 0;
   for (unsigned round = 0; round < 2; round++) {
+  domain_mapping_observe();
   if (round) need(domain_record.control_retired && domain_image_now() <= domain_record.deadline);
   domain_record.control = round == 0; domain_record.probe_consumed = 0; domain_record.probe = (struct exec_probe){0};
   domain_record.creator = domain_record.target = domain_record.owner = (struct identity){0};
@@ -853,7 +892,8 @@ static void domain_start(int argc, char **argv) {
     domain_check(descriptors_ready, "fault-creator-descriptors", "errno", descriptor_error);
     struct proc_fdinfo fds[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
     invariant(size > 0 && size < sizeof(fds) && !(size % sizeof(fds[0])), "fault-fd-count");
-    for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 4) posix_check(close(fds[i].proc_fd), "fault-close");
+    for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 4 && fds[i].proc_fd != domain_mapping.fd && fds[i].proc_fd != domain_map_control.fd) posix_check(close(fds[i].proc_fd), "fault-close");
+    domain_map_parent = -1; /* The sweep closed this parent-only description. */
     char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
     posix_check(setenv("NATIVE_FAULT_PARENT_ASID", parent, 1), "fault-environment"); posix_check(unsetenv("NATIVE_STARTUP_CUSTODY"), "fault-environment");
     char *arguments[] = {domain_helper, "fault", NULL}; extern char **environ;
@@ -873,6 +913,10 @@ static void domain_start(int argc, char **argv) {
       !getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32, "fault-image-credentials");
     if (!domain_record.control) policy(domain_policy);
     invariant(feasibility_sandbox_active(sandbox_binding, getpid()) == (domain_record.control ? 0 : 1), "fault-image-policy");
+    bool mapped = exec_mapping_check(&domain_mapping, !domain_record.control);
+    mapped = exec_mapping_check(&domain_map_control, false) && mapped;
+    bool map_closed = exec_mapping_close(&domain_mapping); map_closed = exec_mapping_close(&domain_map_control) && map_closed;
+    invariant(mapped && map_closed, "fault-image-mapping");
     mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local);
     struct identity birth = fault_inspect(getpid());
@@ -978,7 +1022,9 @@ static void domain_start(int argc, char **argv) {
       domain_child = -1; domain_retire(); domain_emit();
     } else if (!strcmp(fields[1], "close")) {
       need(count == 2 && domain_record.stage == 5); domain_recheck(); struct audit_domain_view view = audit_census(domain_record.uid,domain_record.asid); need(!view.nl && !view.nd);
-      domain_store(6); need(!fchmod(domain_root,0700) && mach_port_deallocate(mach_task_self(),domain_pin) == KERN_SUCCESS); domain_emit(); puts("}"); return;
+      domain_store(6); bool maps_closed = exec_mapping_close(&domain_mapping); maps_closed = exec_mapping_close(&domain_map_control) && maps_closed;
+      domain_close(&domain_map_parent); need(maps_closed);
+      need(!fchmod(domain_root,0700) && mach_port_deallocate(mach_task_self(),domain_pin) == KERN_SUCCESS); domain_emit(); puts("}"); return;
     } else need(false);
     puts("}");
   }

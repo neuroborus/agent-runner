@@ -398,7 +398,8 @@ retain original native refusal/exit facts separately from custodian diagnostics;
 suspended sessions retain policy markers, gated acknowledgements and original
 stdout/stderr.
 The same suite executes the actual effective-policy and advisory writer bodies:
-all 45 original file/map decisions, two control-asset reads and the fork query remain, while
+all nine path rows, read/write and applicable regular-file map queries, two
+control-asset reads and the fork query remain, while
 decision mismatches, query errors, unexpected returns and fork refusal stop at
 the original predicate without advancement. Exact closed selectors, caller/target,
 returns and raw errno survive failed advisory writes/flushes without changing
@@ -406,6 +407,16 @@ errno or the refusal. Its custody-channel fixture retains the observation,
 payload stderr and cleanup failure separately. Focused coverage is
 `node --test test/native-darwin-fault-image.test.js`; these portable regressions
 establish no native policy success, host health or independent retirement.
+Mapping regressions execute the shared handoff bodies with injected effects:
+outside read/map, primary read, authorized mapping and workspace permission
+denial are distinct requirements. They reject setup/type/link/size/identity/hash
+errors, non-permission failures, unexpected success and failed unmap/close.
+Directory-query 0 supplies no mapping evidence; declared directory/character
+types discharge non-file slots only alongside the bound regular-file controls.
+Existing image and preparation fixtures cover probe descriptor preservation and
+closure, fixed-entry guards, unchanged custody across rounds and interrupted
+recovery without publication/probe replay. Tier ownership stays unchanged;
+matching macOS CI must independently establish actual mapping and retirement.
 Creator readbacks reject unexpected real, effective or saved credentials and
 inherited audit sessions. Refusal cleanup validates its independent root verifier
 before custody closure, then observes custodian exit before final verification.

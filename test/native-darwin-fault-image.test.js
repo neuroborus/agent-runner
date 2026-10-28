@@ -785,6 +785,8 @@ test("fault policy queries retain exact decisions and errno before the first unc
     .replace("snprintf(paths[i],", "snprintf(paths, i,")
     .replace(/int expected = ([^\n]+);/u, "let expected = Number($1);")
     .replaceAll(/\b(?:unsigned|bool|int) /gu, "let ")
+    .replace("struct stat type;", "let type = {};")
+    .replace("&type", "type")
     .replace("*sandbox_binding.no_report", "sandbox_binding.no_report");
   const objects = [
     "/sealed/helper",
@@ -816,12 +818,18 @@ test("fault policy queries retain exact decisions and errno before the first unc
     [1, 1, 1, 1, 1, 1],
   ];
   const queries = objects.flatMap((object, row) =>
-    operations.map((operation, column) => ({
-      object,
-      row,
-      operation,
-      expected: decisions[row][column],
-    })),
+    operations.flatMap((operation, column) =>
+      column === 4 && [4, 6, 7].includes(row)
+        ? []
+        : [
+            {
+              object,
+              row,
+              operation,
+              expected: decisions[row][column],
+            },
+          ],
+    ),
   );
   queries.push(
     {
@@ -842,9 +850,10 @@ test("fault policy queries retain exact decisions and errno before the first unc
     null,
     { at: 0, actual: 1, errno: 71 },
     { at: 1, actual: 0, errno: 72 },
+    { at: 4, actual: -1, errno: 13 },
     { at: 10, actual: -1, errno: 13 },
     { at: 7, actual: 2, errno: 0 },
-    { at: 47, actual: 1, errno: 74 },
+    { at: 44, actual: 1, errno: 74 },
   ]) {
     const calls = [],
       records = [];
@@ -880,6 +889,12 @@ test("fault policy queries retain exact decisions and errno before the first unc
       },
       domain_control_asset: "/sealed/exec-control",
       exec_handoff_refused: () => true,
+      lstat(path, type) {
+        type.st_mode = path === "/dev/null" ? "character" : "directory";
+        return 0;
+      },
+      S_ISCHR: (mode) => mode === "character",
+      S_ISDIR: (mode) => mode === "directory",
       sandbox_binding: {
         no_report: 256,
         check(pid, operation, filter) {
@@ -935,11 +950,11 @@ test("fault policy queries retain exact decisions and errno before the first unc
     };
     if (fault) assert.throws(run, (error) => error === refusal);
     else run();
-    const count = fault ? fault.at + 1 : 48;
+    const count = fault ? fault.at + 1 : 45;
     assert.deepEqual(calls, queries.slice(0, count));
     assert.equal(
       comparisons,
-      count - (count > 45 ? Math.min(2, count - 45) : 0),
+      count - (count > 42 ? Math.min(2, count - 42) : 0),
     );
     assert.equal(advanced, fault === null);
     assert.equal(flushes, fault ? 1 : 0);
@@ -953,6 +968,22 @@ test("fault policy queries retain exact decisions and errno before the first unc
         : [],
     );
     if (fault?.at === 0) assert.equal(records[0], policyObservation);
+    if (!fault) {
+      // The observed directory-map return 0 is not queried as regular-file
+      // mapping evidence. Native type substitution still refuses admission.
+      assert.ok(
+        !calls.some(
+          ({ object, operation }) =>
+            object === objects[4] && operation === "file-map-executable",
+        ),
+      );
+      api.lstat = (_path, type) => {
+        type.st_mode = "regular";
+        return 0;
+      };
+      calls.length = 0;
+      assert.throws(() => evaluate({ token: { val: [0, 0, 0, 0, 0, 42] } }));
+    }
   }
 });
 
@@ -1081,6 +1112,9 @@ test("fault trusted setup applies policy and complete closure before the direct 
     .replace("sizeof(birth)", "128")
     .replace("sizeof(birth)", "128")
     .replace("&group", "{set value(v){group=v}}")
+    .replaceAll(/\bbool /gu, "let ")
+    .replaceAll("&domain_mapping", "domain_mapping")
+    .replaceAll("&domain_map_control", "domain_map_control")
     .replaceAll(/\barguments, environ/gu, "arguments_, environ");
   for (const fault of [
     null,
@@ -1088,6 +1122,8 @@ test("fault trusted setup applies policy and complete closure before the direct 
     "prepare",
     "policy",
     "closure",
+    "mapping",
+    "map-close",
     "groups-failed",
     "groups-empty",
     "groups-wrong",
@@ -1107,6 +1143,16 @@ test("fault trusted setup applies policy and complete closure before the direct 
         exec_handoff_byte: () => true,
         exec_handoff_attempt: () => ({}),
         exec_handoff_refused: () => true,
+        domain_mapping: {},
+        domain_map_control: {},
+        exec_mapping_check(_value, denied) {
+          events.push(denied ? "map-deny" : "map-allow");
+          return fault !== "mapping";
+        },
+        exec_mapping_close() {
+          events.push("map-close");
+          return fault !== "map-close";
+        },
         need: (ok) => assert.ok(ok),
         domain_bootstrap_local: 200,
         MACH_PORT_NULL: 0,
@@ -1197,9 +1243,20 @@ test("fault trusted setup applies policy and complete closure before the direct 
       );
     else {
       run();
-      assert.deepEqual(events, ["audit", "policy", "closure", "X"]);
+      assert.deepEqual(events, [
+        "audit",
+        "policy",
+        "map-deny",
+        "map-allow",
+        "map-close",
+        "map-close",
+        "closure",
+        "X",
+      ]);
     }
     if (refused) assert.ok(!events.includes("X"));
+    if (["mapping", "map-close"].includes(fault))
+      assert.equal(events.filter((event) => event === "map-close").length, 2);
   }
 });
 
