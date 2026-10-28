@@ -3748,7 +3748,8 @@ function buildTranscripts(experiment = false, complete = false) {
     let auditKey,
       reserved = false,
       fenced = false,
-      reportRoot;
+      reportRoot,
+      reportSource;
     return {
       receive: async () => {
         assert.ok(queue.length);
@@ -3769,6 +3770,7 @@ function buildTranscripts(experiment = false, complete = false) {
               0o700,
             );
             reportRoot = snapshot(report.path, true);
+            reportSource = snapshot(output + "/argv-fixture");
             directoryOwners.set(helper.pid, [
               path.dirname(report.path),
               report.path,
@@ -4146,6 +4148,22 @@ function buildTranscripts(experiment = false, complete = false) {
             throw new Error("Lost controls result");
           value = null;
         } else if (name === "exec-control-asset") {
+          const source = output + "/argv-fixture";
+          assert.ok(
+            held.has("11"),
+            "Exec-control source parent was not acquired",
+          );
+          assert.deepEqual(held.get("11").object, reportRoot);
+          assert.deepEqual(snapshot(output, true), reportRoot);
+          if (caseFault === "exec-source-absent") files.delete(source);
+          if (caseFault === "exec-source-substituted") files.get(source).ino++;
+          assert.ok(files.has(source), "Exec-control source is absent");
+          assert.deepEqual(
+            snapshot(source),
+            reportSource,
+            "Exec-control source was substituted",
+          );
+          assert.equal(digest(files.get(source).bytes), planEntries[12].pin);
           const file = planEntries[12].path;
           put(file, image, 0o550);
           files.get(file).gid = gid;
@@ -4668,6 +4686,7 @@ function buildTranscripts(experiment = false, complete = false) {
             value.descriptors.push({ fd: 3, type: "socket" });
         } else if (name === "open") {
           const file = planEntries[Number(args[0])].path;
+          if (caseMode && args[0] === "11") events.push("exec-source-acquired");
           if (path.dirname(file) === output) {
             assert.deepEqual(snapshot(output, true), reportRoot);
             assert.equal(reportRoot.mode, 0o555);
@@ -4678,11 +4697,12 @@ function buildTranscripts(experiment = false, complete = false) {
             events.push("bound-source:" + file);
           }
           value = snapshot(file, directories.has(file));
-          held.set(args[0], {
-            file,
-            data: files.get(file)?.bytes,
-            object: value,
-          });
+          if (args[0] !== "11" || caseFault !== "exec-source-unacquired")
+            held.set(args[0], {
+              file,
+              data: files.get(file)?.bytes,
+              object: value,
+            });
         } else if (name === "reserve") {
           assert.ok(
             !leaseHolder ||
@@ -6557,6 +6577,44 @@ function experimentCase(f, id) {
   );
 }
 
+test("Darwin exec-control publication requires acquired unchanged source objects", async () => {
+  for (const fault of [
+    "exec-source-unacquired",
+    "exec-source-absent",
+    "exec-source-substituted",
+  ]) {
+    const f = buildTranscripts(true),
+      binding = experimentCase(f, "ownership.literal"),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.caseFault(fault);
+    await assert.rejects(
+      effects.provision(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+      fault === "exec-source-unacquired"
+        ? /not acquired/u
+        : fault === "exec-source-absent"
+          ? /source is absent/u
+          : /source was substituted/u,
+    );
+    assert.ok(!f.events.includes("case-start"));
+    assert.ok(
+      ![...f.files.keys()].some((file) =>
+        file.endsWith("/storage/exec-control"),
+      ),
+    );
+    assert.ok(
+      ![...f.files.values()].some((entry) =>
+        entry.bytes.toString().includes('"phase":"provisioned"'),
+      ),
+    );
+  }
+});
+
 test("Darwin experiment declarations retain every ownership fault and access profile through existing native owners", async () => {
   const recipes = darwinSystemRecipes().filter(
     (recipe) => recipe.group === "ownership" || recipe.id.startsWith("access."),
@@ -6583,6 +6641,14 @@ test("Darwin experiment declarations retain every ownership fault and access pro
     });
     if (recipe.id === "ownership.literal") recipe.group = "ownership";
     assert.equal(prepared.purpose, "experiment");
+    assert.equal(
+      f.events.filter((name) => name === "exec-source-acquired").length,
+      1,
+    );
+    assert.ok(
+      f.events.indexOf("exec-source-acquired") <
+        f.events.indexOf("exec-control-asset"),
+    );
     assert.equal(prepared.reviewSha256, undefined);
     assert.equal(
       proof.provisioning.bindingSha256,

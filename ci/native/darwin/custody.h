@@ -74,7 +74,7 @@ static bool domain_exception_settle(struct domain_bootstrap_fork *out, mach_port
 static bool domain_exception_readback(struct domain_bootstrap_fork *out, task_t self, thread_t thread) {
   bool ok = true;
   for (unsigned which = 0; which < 2; which++) {
-    exception_mask_t masks[EXC_TYPES_COUNT] = {0}; mach_port_t handlers[EXC_TYPES_COUNT] = {0};
+    exception_mask_t masks[EXC_TYPES_COUNT] = {0}, seen = 0; mach_port_t handlers[EXC_TYPES_COUNT] = {0};
     exception_behavior_t behaviors[EXC_TYPES_COUNT] = {0}; thread_state_flavor_t flavors[EXC_TYPES_COUNT] = {0};
     mach_msg_type_number_t count = EXC_TYPES_COUNT; int releases[EXC_TYPES_COUNT];
     const char *operation = which ? "thread-exception-read" : "task-exception-read";
@@ -82,10 +82,14 @@ static bool domain_exception_readback(struct domain_bootstrap_fork *out, task_t 
       ? thread_get_exception_ports(thread, DOMAIN_EXCEPTION_MASK, masks, &count, handlers, behaviors, flavors)
       : task_get_exception_ports(self, DOMAIN_EXCEPTION_MASK, masks, &count, handlers, behaviors, flavors);
     if (!domain_bootstrap_check(out, got == KERN_SUCCESS, operation, "mach", got, false)) { ok = false; continue; }
-    bool empty = count > 0 && count <= EXC_TYPES_COUNT;
-    for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++)
-      if (handlers[i] != MACH_PORT_NULL) empty = false;
-    ok = domain_bootstrap_check(out, empty, operation, "invariant", 0, false) && ok;
+    /* XNU 43a9088 returns thread count0 when tro_exc_actions is absent.
+     * The independently queried task table must still cover every class. */
+    bool empty = count <= EXC_TYPES_COUNT && (which || count > 0);
+    for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
+      if (!masks[i] || handlers[i] != MACH_PORT_NULL || (seen & masks[i]) || (masks[i] & ~DOMAIN_EXCEPTION_MASK)) empty = false;
+      seen |= masks[i];
+    }
+    ok = domain_bootstrap_check(out, empty && ((which && !count) || seen == DOMAIN_EXCEPTION_MASK), operation, "invariant", 0, false) && ok;
     ok = domain_exception_settle(out, handlers, count, releases) && ok;
   }
   return ok;

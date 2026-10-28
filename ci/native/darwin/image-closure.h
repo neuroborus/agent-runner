@@ -97,21 +97,53 @@ static bool image_access(struct image_closure *value) {
     image_assert(value, kind == 0, "image-access-service");
 }
 static bool image_exceptions(struct image_closure *value, task_t task, thread_t thread) {
-  bool ok = true;
+  bool ok = true, noted = false;
   for (unsigned which = 0; which < 2; which++) {
-    exception_mask_t masks[EXC_TYPES_COUNT] = {0}, seen = 0;
+    exception_mask_t masks[EXC_TYPES_COUNT] = {0}, seen = 0, invalid = 0;
     mach_port_t ports[EXC_TYPES_COUNT] = {0}; exception_behavior_t behaviors[EXC_TYPES_COUNT];
     thread_state_flavor_t flavors[EXC_TYPES_COUNT]; mach_msg_type_number_t count = EXC_TYPES_COUNT;
     kern_return_t got = which
       ? IMAGE_CALL("exceptions/thread", thread_get_exception_ports(thread, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors))
       : IMAGE_CALL("exceptions/task", task_get_exception_ports(task, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors));
-    if (!image_mach(value, got, "image-exceptions-get")) { ok = false; continue; }
-    bool empty = count > 0 && count <= EXC_TYPES_COUNT;
-    for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
-      if (ports[i] != MACH_PORT_NULL || (seen & masks[i]) || (masks[i] & ~DOMAIN_EXCEPTION_MASK)) empty = false;
+    bool queried = image_mach(value, got, "image-exceptions-get");
+    bool empty = queried && count <= EXC_TYPES_COUNT && (which || count > 0);
+    unsigned first_invalid = EXC_TYPES_COUNT;
+    for (unsigned i = 0; queried && i < count && i < EXC_TYPES_COUNT; i++) {
+      if (!masks[i] || ports[i] != MACH_PORT_NULL || (seen & masks[i]) || (masks[i] & ~DOMAIN_EXCEPTION_MASK)) {
+        empty = false;
+        if (first_invalid == EXC_TYPES_COUNT) { first_invalid = i; invalid = masks[i]; }
+      }
       seen |= masks[i];
     }
-    ok = image_assert(value, empty && seen == DOMAIN_EXCEPTION_MASK, "image-exceptions-empty") && ok;
+    /* Only a successful absent thread table is empty without mask coverage. */
+    empty = empty && ((which && !count) || seen == DOMAIN_EXCEPTION_MASK);
+    if (queried) ok = image_assert(value, empty, "image-exceptions-empty") && ok;
+    else ok = false;
+    if (!empty && !noted) {
+      noted = true;
+      /* One bounded failure-only record for custody and both fault consumers.
+       * Capture grants no authority and cannot interrupt independent cleanup. */
+      int saved = errno; char bytes[256];
+      int length = queried
+        ? snprintf(bytes, sizeof(bytes), "native-darwin-image-exception: scope=%s return=%d count=%u requested=%#x observed=%#x first-invalid=%u/%#x\n",
+          which ? "thread" : "task", got, count, DOMAIN_EXCEPTION_MASK, seen, first_invalid, invalid)
+        : snprintf(bytes, sizeof(bytes), "native-darwin-image-exception: scope=%s return=%d count=unavailable requested=%#x observed=unavailable first-invalid=unavailable\n",
+          which ? "thread" : "task", got, DOMAIN_EXCEPTION_MASK);
+      sigset_t blocked, previous, pending;
+      if (length > 0 && length < (int)sizeof(bytes) && !sigemptyset(&blocked) && !sigaddset(&blocked, SIGPIPE) &&
+          !sigprocmask(SIG_BLOCK, &blocked, &previous)) {
+        if (!sigpending(&pending)) {
+          bool was_pending = sigismember(&pending, SIGPIPE) == 1;
+          ssize_t written = write(STDERR_FILENO, bytes, (size_t)length); int error = errno;
+          if (written < 0 && error == EPIPE && !was_pending && !sigpending(&pending) && sigismember(&pending, SIGPIPE) == 1) {
+            int received; (void)sigwait(&blocked, &received);
+          }
+        }
+        (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+      }
+      errno = saved;
+    }
+    if (!queried) continue; /* Failed getter outputs own nothing. */
     int releases[EXC_TYPES_COUNT];
     ok = domain_exception_settle(&value->outcome, ports, count, releases) && ok;
   }

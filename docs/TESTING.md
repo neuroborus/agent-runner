@@ -450,7 +450,12 @@ The removed constructor/cache/census fixtures have these executable replacements
 
 The retained build suite executes registered/bootstrap fork fencing, exact parent
 restoration, ownership before fallible queries, complete public exception masks,
-selected-SDK spawn attributes and independent destroy failures. The writable
+selected-SDK spawn attributes and independent destroy failures. Exception
+fixtures retain successful absent thread tables with complete task
+coverage, populated replies, task0, malformed counts/masks, failed getters,
+nonnull/dead handlers, aliased copies and independent release failures. Actual
+image bodies verify one bounded first-refusal record, unavailable failed-query
+outputs and errno/SIGPIPE preservation on failed capture. The writable
 journal handoff, sealed custodian reexec, audit-session creation, partial pipes,
 original direct-child capture, whole-domain census, zombie birth/credential checks
 and non-emergency independent retirement remain executable regressions. Lifecycle
@@ -2534,6 +2539,10 @@ Darwin's existing custody and preparation-effects fixtures carry the native
 case producer's directory frames through normal completion and fresh recovery.
 The actual-body native guard distinguishes the prepared UID/GID mode-0700
 workspace from the root-owned mode-0555 build root without metadata repair.
+Exec-control transport refuses an unacquired entry11 and absent/substituted
+sources before publication. Actual open/stability bodies accept the joined sealed
+directory and reject unrelated `0555` directories and parent/root identity,
+ACL or mode drift, retaining existing fast/native-harness tier ownership.
 Independent probes reject missing, duplicate, swapped, aliased or changed
 descriptors and device/inode/metadata substitutions. Recovery must rejoin the
 original sealed role bindings even when fresh owner and probe observations

@@ -1374,80 +1374,253 @@ test("native registered reads preserve the remote target and settle only success
     });
 });
 
-test("native closure requires complete nonoverlapping public exception masks and settles both getters", async () => {
+test("native closure admits absent thread tables, bounds refusal facts and settles both getters", async () => {
   const source = await readFile(
-    new URL("../ci/native/darwin/image-closure.h", import.meta.url),
-    "utf8",
-  );
-  const body = /static bool image_exceptions[^\n]+\{([\s\S]*?)\n\}/u
-    .exec(source)[1]
-    .replaceAll("->", ".")
-    .replace(
-      "exception_mask_t masks[EXC_TYPES_COUNT] = {0}, seen = 0;",
-      "const masks=Array(4).fill(0);let seen=0;",
-    )
-    .replace(
-      "mach_port_t ports[EXC_TYPES_COUNT] = {0}; exception_behavior_t behaviors[EXC_TYPES_COUNT];",
-      "const ports=Array(4).fill(0),behaviors=[];",
-    )
-    .replace(
-      "thread_state_flavor_t flavors[EXC_TYPES_COUNT]; mach_msg_type_number_t count = EXC_TYPES_COUNT;",
-      "const flavors=[];let count=EXC_TYPES_COUNT;",
-    )
-    .replace("int releases[EXC_TYPES_COUNT];", "const releases=[];")
-    .replaceAll("&count", "{set value(v){count=v}}")
-    .replaceAll("&value.outcome", "value.outcome")
-    .replace(/\b(?:bool|unsigned|kern_return_t) /gu, "let ");
+      new URL("../ci/native/darwin/image-closure.h", import.meta.url),
+      "utf8",
+    ),
+    header = await readFile(
+      new URL("../ci/native/darwin/custody.h", import.meta.url),
+      "utf8",
+    );
+  const project = (body) =>
+    body
+      .replaceAll("->", ".")
+      .replace(
+        /(?:exception_mask_t|mach_port_t|exception_behavior_t|thread_state_flavor_t|int) (\w+)\[EXC_TYPES_COUNT\](?: = \{0\})?/gu,
+        "let $1=Array(EXC_TYPES_COUNT).fill(0)",
+      )
+      .replace("char bytes[256];", "const bytes={};")
+      .replace(
+        "sigset_t blocked, previous, pending;",
+        "const blocked={},previous={},pending={};",
+      )
+      .replaceAll("sizeof(bytes)", "256")
+      .replaceAll("&value.outcome", "value.outcome")
+      .replaceAll("&count", "{get value(){return count},set value(v){count=v}}")
+      .replace(/&(blocked|previous|pending)\b/gu, "$1")
+      .replace("&received", "{set value(v){received=v}}")
+      .replace(/\((?:int|size_t|void)\)/gu, "")
+      .replace(/\bNULL\b/gu, "null")
+      .replace(
+        /\b(?:bool|unsigned|kern_return_t|mach_msg_type_number_t|int|ssize_t) /gu,
+        "let ",
+      );
+  const body = project(
+      /static bool image_exceptions[^\n]+\{([\s\S]*?)\n\}/u.exec(source)[1],
+    ),
+    settle = project(
+      /static bool domain_exception_settle[^\n]+\{([\s\S]*?)\n\}/u.exec(
+        header,
+      )[1],
+    ),
+    script = new Script(
+      `function domain_exception_settle(out,handlers,count,releases){${settle}} (()=>{${body}})()`,
+    );
   for (const fault of [
     null,
+    "thread0",
+    "task0",
+    "overflow",
+    "zero",
     "missing",
     "overlap",
     "unknown",
     "handler",
+    "dead",
     "query",
+    "thread-query",
     "release",
+    "capture",
+    "pending-pipe",
+    "blocked",
+    "short",
+    "format",
   ]) {
     const getters = [],
-      settled = [];
-    const get = (owner, _, mask, masks, count, ports) => {
+      acquired = [],
+      released = [],
+      issues = [],
+      facts = [];
+    const originallyBlocked = fault === "pending-pipe" || fault === "blocked";
+    let pending = fault === "pending-pipe",
+      blocked = originallyBlocked,
+      waits = 0,
+      captures = 0;
+    const get = (owner, target, mask, masks, count, ports) => {
       getters.push(owner);
-      assert.equal(mask, 7);
-      masks[0] = 1;
-      masks[1] =
-        fault === "missing"
-          ? 2
-          : fault === "overlap"
-            ? 7
-            : fault === "unknown"
-              ? 14
-              : 6;
-      count.value = 2;
-      if (fault === "handler") ports[0] = ports[1] = 8;
-      return fault === "query" && owner === "task" ? 5 : 0;
+      assert.deepEqual(
+        [target, mask, api.errno],
+        [owner === "task" ? 1 : 2, 7, 77],
+      );
+      const failed =
+        (fault === "query" && owner === "task") ||
+        (fault === "thread-query" && owner === "thread");
+      [masks[0], masks[1]] = {
+        zero: [0, 7],
+        missing: [1, 2],
+        overlap: [1, 7],
+        unknown: [1, 14],
+      }[fault] ?? [1, 6];
+      count.value =
+        failed || fault === "overflow" ? 9 : fault === owner + "0" ? 0 : 2;
+      if (
+        failed ||
+        [
+          "handler",
+          "release",
+          "capture",
+          "pending-pipe",
+          "blocked",
+          "short",
+          "format",
+          "query",
+        ].includes(fault)
+      )
+        ports[0] = ports[1] = 8;
+      if (fault === "dead") ports[0] = 0xffffffff;
+      if (!failed)
+        for (let i = 0; i < Math.min(count.value, 4); i++)
+          if (ports[i] && ports[i] !== 0xffffffff) acquired.push(ports[i]);
+      return failed ? 5 : 0;
     };
-    const api = {
+    const api = passiveObservations({
       value: { outcome: {} },
       task: 1,
       thread: 2,
       EXC_TYPES_COUNT: 4,
       DOMAIN_EXCEPTION_MASK: 7,
       MACH_PORT_NULL: 0,
+      KERN_SUCCESS: 0,
+      MACH_PORT_VALID: (port) => port !== 0 && port !== 0xffffffff,
       task_get_exception_ports: (...args) => get("task", ...args),
       thread_get_exception_ports: (...args) => get("thread", ...args),
-      image_mach: (_, result) => result === 0,
-      image_assert: (_, ok) => ok,
-      domain_exception_settle: (_, ports, count) => {
-        settled.push(ports.slice(0, count));
-        return fault !== "release";
+      domain_bootstrap_check(_, ok, operation, kind, value, cleanup) {
+        if (!ok) issues.push({ operation, kind, value, cleanup });
+        return ok;
       },
-    };
+      image_mach: (_, result, operation) =>
+        api.domain_bootstrap_check(
+          null,
+          result === 0,
+          operation,
+          "mach",
+          result,
+          false,
+        ),
+      image_assert: (_, ok, operation) =>
+        api.domain_bootstrap_check(null, ok, operation, "invariant", 0, false),
+      mach_task_self: () => 1,
+      mach_port_deallocate(self, port) {
+        assert.equal(self, 1);
+        assert.equal(port, acquired[released.length]);
+        assert.equal(api.errno, 77);
+        released.push(port);
+        return ["release", "query", "capture"].includes(fault)
+          ? released.length + 10
+          : 0;
+      },
+      errno: 77,
+      SIGPIPE: 13,
+      SIG_BLOCK: 1,
+      SIG_SETMASK: 2,
+      STDERR_FILENO: 2,
+      EPIPE: 32,
+      snprintf(out, size, format, ...values) {
+        assert.equal(size, 256);
+        facts.push({ format, values });
+        out.bytes = "bounded exception refusal";
+        return fault === "format" ? size : out.bytes.length;
+      },
+      sigemptyset: () => 0,
+      sigaddset: () => 0,
+      sigpending: () => 0,
+      sigismember: () => Number(pending),
+      sigprocmask(how, mask, previous) {
+        if (how === 1) {
+          previous.blocked = blocked;
+          blocked = true;
+        } else blocked = mask.blocked;
+        return 0;
+      },
+      write(fd) {
+        captures++;
+        assert.equal(fd, 2);
+        assert.equal(blocked, true);
+        if (fault === "capture" || fault === "pending-pipe") {
+          api.errno = 32;
+          pending = true;
+          return -1;
+        }
+        return fault === "short" ? 24 : 25;
+      },
+      sigwait() {
+        waits++;
+        pending = false;
+        return 0;
+      },
+    });
+    const accepted = script.runInNewContext(api);
     assert.equal(
-      new Script(`(()=>{${body}})()`).runInNewContext(passiveObservations(api)),
-      fault === null,
+      accepted,
+      fault === null || fault === "thread0",
+      String(fault),
     );
     assert.deepEqual(getters, ["task", "thread"]);
-    assert.equal(settled.length, fault === "query" ? 1 : 2);
-    if (fault === "handler") assert.deepEqual(settled.flat(), [8, 8, 8, 8]);
+    assert.deepEqual(released, acquired);
+    assert.equal(api.errno, 77);
+    assert.equal(blocked, originallyBlocked);
+    assert.equal(pending, fault === "pending-pipe");
+    assert.equal(waits, Number(fault === "capture"));
+    assert.equal(facts.length, Number(!accepted));
+    assert.equal(captures, Number(!accepted && fault !== "format"));
+    if (!accepted) {
+      const { format, values } = facts[0];
+      assert.equal(values[0], fault === "thread-query" ? "thread" : "task");
+      assert.equal(
+        values[1],
+        fault === "query" || fault === "thread-query" ? 5 : 0,
+      );
+      if (fault === "query" || fault === "thread-query") {
+        assert.match(
+          format,
+          /count=unavailable.*observed=unavailable.*first-invalid=unavailable/u,
+        );
+        assert.deepEqual(values.slice(2), [7]);
+      } else {
+        assert.equal(
+          values[2],
+          fault === "task0" ? 0 : fault === "overflow" ? 9 : 2,
+        );
+        assert.equal(values[3], 7);
+        assert.equal(
+          values[4],
+          { task0: 0, missing: 3, unknown: 15 }[fault] ?? 7,
+        );
+        assert.deepEqual(
+          values.slice(5),
+          {
+            zero: [0, 0],
+            overlap: [1, 7],
+            unknown: [1, 14],
+            overflow: [2, 0],
+            task0: [4, 0],
+            missing: [4, 0],
+          }[fault] ?? [0, 1],
+        );
+      }
+      assert.equal(issues[0].cleanup, false);
+      assert.equal(
+        issues[0].operation,
+        values[1] ? "image-exceptions-get" : "image-exceptions-empty",
+      );
+      assert.equal(issues[0].value, values[1]);
+    }
+    if (["release", "query", "capture"].includes(fault))
+      assert.deepEqual(
+        issues.filter(({ cleanup }) => cleanup).map(({ value }) => value),
+        released.map((_, i) => i + 11),
+      );
   }
 });
 

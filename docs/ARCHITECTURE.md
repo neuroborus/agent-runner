@@ -2120,7 +2120,14 @@ This enables startup attribution without a new policy grant; a matching native
 cause and source-supported startup correction remain external prerequisites.
 Ordinary experimental Darwin ownership/access/Git launch uses version-three creation-bound
 suspended SETEXEC admission. The private `image-closure.h` owner clears and reads
-inheritable inputs without admitting arbitrary old namespace entries. The bound
+inheritable inputs without admitting arbitrary old namespace entries. The
+exec-control producer first acquires its declared sealed build parent through
+the held build-root/report-parent join; mode `0555` alone grants no admission.
+Exception readback permits successful absent thread tables, independently requires
+complete task coverage, and checks every populated reply for bounded count,
+nonempty disjoint complete masks and null handlers. One bounded exception
+first-refusal stderr record preserves unavailable-query distinctions, errno and
+independent reference settlement even when capture fails. The bound
 root reader holds control/getter references for the trusted creator and actual
 stopped replacement, compares inherited host/access endpoints only in its own
 namespace, and verifies the new epoch, unchanged birth/session/credentials,

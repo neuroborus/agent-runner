@@ -3201,7 +3201,8 @@ int main(int argc, char **argv) {
       bool ok = entry->fd >= 0 && (predicate = "stat", sampled = fstat(entry->fd, &entry->stat) == 0) &&
         (predicate = "eligibility", hosted || ((entry->stat.st_uid == 0 || (authority && entry->stat.st_uid == subject_uid)) && (entry->stat.st_gid == 0 || (authority && entry->stat.st_gid == subject_gid)) && !(entry->stat.st_mode & 022))) &&
         (predicate = "kind", (directory_entry = dir || (authority && S_ISDIR(entry->stat.st_mode))) ? S_ISDIR(entry->stat.st_mode) : S_ISREG(entry->stat.st_mode)) &&
-        (predicate = "directory-mode", !directory_entry || (entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) &&
+        (predicate = "directory-mode", !directory_entry || (entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710) ||
+          (dir && (entry->stat.st_mode & 07777) == 0555 && build_entry(entry))) &&
         (predicate = "links", directory_entry || (entry->stat.st_nlink > 0 && (hosted || entry->stat.st_nlink == 1 || (!authority && strcmp(entry->kind, "helper") && installed_input(entry->path, &entry->stat))))) &&
         (predicate = "size", directory_entry || (entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
       if (!ok) input_refusal(entry->path, predicate, sampled ? &entry->stat : NULL);

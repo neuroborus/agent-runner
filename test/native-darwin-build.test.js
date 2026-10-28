@@ -883,6 +883,19 @@ test("Darwin exception readback requires every public class and settles independ
   ];
   for (const [options, expected] of [
     [{}, []],
+    [{ thread: { ports: [] } }, []],
+    [
+      {
+        task: {
+          ports: [
+            { mask: 63, handler: 0 },
+            { mask: 64, handler: 0 },
+            { mask: 128, handler: 0 },
+          ],
+        },
+      },
+      [],
+    ],
     ...["task", "thread"].flatMap((owner) => [
       [
         { [owner]: { get: 5, ports: live, count: 0xffffffff } },
@@ -898,6 +911,24 @@ test("Darwin exception readback requires every public class and settles independ
       ],
       ...[0, 15].map((count) => [
         { [owner]: { count } },
+        owner === "thread" && count === 0
+          ? []
+          : [[`${owner}-exception-read`, "invariant", 0]],
+      ]),
+      ...[
+        [{ mask: 0, handler: 0 }],
+        [
+          { mask: 0, handler: 0 },
+          { mask: 255, handler: 0 },
+        ],
+        [{ mask: 127, handler: 0 }],
+        [
+          { mask: 255, handler: 0 },
+          { mask: 1, handler: 0 },
+        ],
+        [{ mask: 511, handler: 0 }],
+      ].map((ports) => [
+        { [owner]: { ports } },
         [[`${owner}-exception-read`, "invariant", 0]],
       ]),
     ]),
@@ -962,9 +993,7 @@ test("Darwin exception readback requires every public class and settles independ
         [owner === "task" ? 1 : 2, 255, 14],
       );
       const config = options[owner] ?? {};
-      const ports = (config.ports ?? [{ mask: 255, handler: 0 }]).filter(
-        (port) => port.mask & requested,
-      );
+      const ports = config.ports ?? [{ mask: 255, handler: 0 }];
       for (const [i, port] of ports.entries()) {
         masks[i] = port.mask;
         handlers[i] = port.handler;

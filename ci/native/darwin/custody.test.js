@@ -1673,7 +1673,9 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       preparation_mode: false,
       case_path: "/private/var/run/native-poc/cases/fixture",
       count: 1,
-      entries: [{ kind: "directory", path: output, pin: "-", fd: -1 }],
+      entries: [
+        { kind: "directory", path: output, pin: "-", fd: -1, stat: {} },
+      ],
       n: 3,
       tokens: ["open", "1", "0"],
       encoded: output,
@@ -1919,6 +1921,65 @@ test("Darwin native case directory frames retain held roles without resealing me
     assert.ok(
       !changed.events.some((name) => ["chown", "chmod"].includes(name)),
     );
+  }
+});
+
+test("Darwin sealed directory acquisition requires the declared held root and unchanged report parent", async () => {
+  const { fixture, output } = await boundCustodyFixture();
+  for (const fault of [
+    null,
+    "unrelated",
+    "root",
+    "parent",
+    "root-mode",
+    "parent-mode",
+    "root-acl",
+    "parent-acl",
+    "owner",
+    "group",
+  ]) {
+    const f = fixture();
+    f.native.admitPlan();
+    f.env.tokens = ["open", "1", "1"];
+    assert.throws(
+      () => f.native.stable(f.env.entries[1]),
+      /Native bound custody refused/u,
+    );
+    if (fault === "unrelated") {
+      f.env.entries[1].path = "/fixture/unrelated";
+      f.nodes.set(f.env.entries[1].path, {
+        stat: { ...f.root.stat, st_ino: 99 },
+      });
+    } else if (fault === "root") {
+      const replacement = { ...f.root, stat: { ...f.root.stat, st_ino: 99 } };
+      f.nodes.set(output, replacement);
+      f.parent.children.set("platform-build", replacement);
+    } else if (fault === "parent") f.parent.stat.st_ino++;
+    else if (fault === "root-mode") f.root.stat.st_mode = 0o40700;
+    else if (fault === "parent-mode") f.parent.stat.st_mode = 0o40710;
+    else if (fault === "root-acl") f.root.acl = true;
+    else if (fault === "parent-acl") f.parent.acl = true;
+    else if (fault === "owner") f.root.stat.st_uid++;
+    else if (fault === "group") f.root.stat.st_gid++;
+    if (fault)
+      assert.throws(
+        () => f.native.openEntry(),
+        /Native bound custody refused/u,
+        fault,
+      );
+    else {
+      f.native.openEntry();
+      assert.equal(f.native.slot("1").path, output);
+      for (const target of [f.root, f.parent]) {
+        target.acl = true;
+        assert.throws(
+          () => f.native.slot("1"),
+          /Native bound custody refused/u,
+        );
+        target.acl = false;
+      }
+    }
+    assert.ok(!f.events.some((name) => ["chown", "chmod"].includes(name)));
   }
 });
 

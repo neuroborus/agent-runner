@@ -4566,8 +4566,11 @@ exception metadata is never rewritten. No access-slot setter is attempted.
 The explicit version-two experimental custody plan requires bound actual exec
 evidence. Publication copies unchanged signed `argv-fixture` bytes to the fixed
 root-owned, single-link `storage/exec-control`, outside writable workspace and
-Git metadata. Held source/file/parent, ACL, mode, hash, signature and Mach-O reads
-precede use. Only exact read/map grants are added; the executable allowlist stays
+Git metadata. Provisioning acquires declared entry11 before publication. Its
+root:wheel mode-`0555` directory is admitted only through the existing held
+build-root/report-parent join; unrelated `0555` directories remain refused.
+Held source/file/parent, ACL, mode, hash, signature and Mach-O reads precede use.
+Only exact read/map grants are added; the executable allowlist stays
 closed. First, a separate outside-policy creator uses the primary's reserved
 credentials, sole group, limits, literal argv, environment, spawn actions/flags
 and special-port settings to execute this exact asset while suspended. Independent
@@ -9301,13 +9304,25 @@ the remaining Mach names. The shared public exception mask is
 latter two classes. Both launcher branches and fault sanitation clear task and
 thread slots with that complete
 mask, then require both bounded getters over the same mask to return only null
-handlers before census or admission. Setter success alone is insufficient:
+handlers before census or admission. The pinned XNU
+[`ipc_tt.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/ipc_tt.c)
+supports successful thread count0 when its per-thread action table is absent.
+The task reply must independently be nonempty. Every populated reply requires
+nonempty, valid, disjoint masks covering exactly the complete requested mask.
+Source semantics do not establish any particular hosted run's getter counts.
+Setter success alone is insufficient:
 XNU's per-action MAC checks can leave individual handlers installed. Failed
 getters, invalid counts and nonnull or dead handlers refuse. Every successful
 valid getter acquisition receives one release attempt, including repeated names;
 failed getter outputs grant no ownership. Independent releases and the other
 required getter still run after a refusal or failed release, preserving the first
 failure and separate cleanup failures without retrying a release.
+Existing image stderr diagnostics emit at most one exception first-refusal record
+per inspection: scope, native return, successful count, requested/observed masks
+and first-invalid index/mask (`EXC_TYPES_COUNT` means no invalid row). Failed-query
+outputs are unavailable. Capture failure preserves errno, the original refusal,
+independent getter attempts and cleanup outcomes. A different predicate/query
+refusal requires reassessment rather than another indistinguishable experiment.
 Reviewed/protected and provider builds replace the cached MIG reply port
 and retain the fresh local receive-only reply needed by sanitation RPCs, together
 with self task/thread rights. Those builds require the inherited

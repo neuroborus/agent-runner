@@ -711,8 +711,10 @@ export function createDarwinCaseProvisioning(state, options) {
                     ? 0o400
                     : 0o550),
         );
-      if (experiment)
+      if (experiment) {
+        await reader.open(11);
         await reader.provisionExecControl(setup.execControl.cdhash);
+      }
       const values = {
         ...provisionalValues,
         "launch.request.uid": actual.uid,
