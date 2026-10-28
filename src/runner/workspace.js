@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { spawnOwnedProcess } from "../agents/index.js";
 import { deepFreeze } from "../state/index.js";
+import { WorkspaceSafetyError } from "../workspace/index.js";
 import { RunnerError, rejectUnknownFields } from "./input.js";
 
 const PATH_FIELDS = [
@@ -21,6 +23,45 @@ const within = (root, path) => {
     (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
   );
 };
+
+// Node's directory rename can replace an arriving empty root. GNU mv's
+// no-clobber/no-copy contract supplies a no-replace move, never an EXDEV copy.
+export async function publishOutputDirectory(
+  request,
+  { signal, onProcess, cwd, spawn = spawnOwnedProcess },
+) {
+  const child = spawn(
+    "/usr/bin/mv",
+    [
+      "--no-clobber",
+      "--no-copy",
+      "--no-target-directory",
+      "--",
+      `/proc/self/fd/3/${request.sourceName}`,
+      `/proc/self/fd/4/${request.destinationName}`,
+    ],
+    {
+      cwd,
+      signal,
+      onProcess,
+      stdio: [
+        "ignore",
+        "ignore",
+        "ignore",
+        request.sourceParent,
+        request.destinationParent,
+      ],
+    },
+  );
+  const { outcome } = await child.ownedCompletion;
+  if (outcome?.type !== "close" || outcome.exitCode !== 0)
+    throw new WorkspaceSafetyError(
+      "Output directory publication is unavailable or incomplete.",
+      {
+        code: "ERR_WORKSPACE_OUTPUT_AMBIGUOUS",
+      },
+    );
+}
 
 function assertArtifactSeparation(artifacts, protectedPaths) {
   if (
@@ -297,5 +338,17 @@ export function directorySafety(binding, workspace) {
       });
     },
     inspectPath: (request) => workspace.inspectPath(request),
+    async inspectOutputDirectory(path) {
+      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      return workspace.inspectOutputDirectory({ inspection, path });
+    },
+    async prepareOutputDirectory(intent, options = {}) {
+      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      return workspace.prepareOutputDirectory({
+        inspection,
+        intent,
+        ...options,
+      });
+    },
   });
 }

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { planKindPolicy } from "./step-policy.js";
+import { assertCustomOutputPreparation } from "./custom-results.js";
 import {
   COMMIT_SIZE_DEFAULTS,
   commitSizeThreshold,
@@ -1473,11 +1474,17 @@ export function migratePlanExecutionStateV32(run) {
   return Object.freeze({ ...run.pipelineState, planKind: "commit" });
 }
 
+export function migratePlanExecutionStateV33(run) {
+  // Existing runs have no accepted custom results or output preparation intent.
+  return Object.freeze({ ...run.pipelineState, customResults: null });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
+  assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 33,
+  stateVersion: 34,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1516,6 +1523,7 @@ export const planExecutionPipeline = Object.freeze({
     30: migratePlanExecutionStateV30,
     31: migratePlanExecutionStateV31,
     32: migratePlanExecutionStateV32,
+    33: migratePlanExecutionStateV33,
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

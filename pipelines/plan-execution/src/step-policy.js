@@ -69,8 +69,7 @@ const COMMIT = Object.freeze({
   },
 });
 
-// This private policy defines the differences only. Result publication and
-// accepted-step settlement must exist before any custom workflow can run.
+// Checkpoint support remains private until the complete custom workflow lands.
 const CUSTOM = Object.freeze({
   kind: "custom",
   parse: parseCustomPlan,

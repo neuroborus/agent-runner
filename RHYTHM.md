@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-28
+
+- **Custom result settlement is a separate durable checkpoint.** Private
+  execution support binds frozen criteria, inspected inputs and permissions,
+  bounded analysis/evidence and exact outputs to a receipt-chained ledger.
+  Runner gate verification and journaled intent precede settlement; provider
+  success cannot complete a step. Output-root preparation publishes only an
+  explicitly authorized directory from a journaled private-state allocation
+  pinned before owned no-clobber publication under an existing parent. This
+  preserves even empty arriving or substituted directories and Claude mount
+  confinement without workspace sibling allocations. Missing-root publication
+  requires same-filesystem state and the supported GNU move utility; unsupported
+  moves fail closed without copying. Fresh cancellation checks guard allocation
+  and publication after preflight.
+  Accepted outputs bind symlink resolution dependencies as well as lexical
+  content. Recovery retains ambiguous creation, stops and drift
+  rather than replaying effects or discarding prior acceptance. State version 34
+  initializes existing runs with no custom authority; public execution stays
+  inactive until its complete workflow lands.
+
 ## 2026-10-27
 
 - **Execution separates plan-kind differences from review policy.** Private

@@ -25,6 +25,7 @@ import {
   recoverClaudeStorage,
 } from "../src/agents/claude/index.js";
 import { createRunner } from "../src/runner/index.js";
+import { publishOutputDirectory } from "../src/runner/workspace.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunStore } from "../src/state/index.js";
 import { normalizeRunState } from "../src/state/validation.js";
@@ -88,7 +89,10 @@ async function fixture(t, { contained = false, storeOptions = {} } = {}) {
     },
   };
   const store = createRunStore({ stateRoot, ...storeOptions });
-  function runner(workflow, { selection, loadConfiguration, ...options } = {}) {
+  function runner(
+    workflow,
+    { selection, loadConfiguration, assertOutputPreparation, ...options } = {},
+  ) {
     const pipeline = {
       ...planAuthoringPipeline,
       stateVersion: 1,
@@ -101,6 +105,7 @@ async function fixture(t, { contained = false, storeOptions = {} } = {}) {
         artifactPaths: [join(taskPath, "clarifications.md")],
       },
       resolveWorkspace: selection,
+      assertOutputPreparation,
       resolveTaskInputs: undefined,
       roleAccess: { planner: ["read-only", "workspace-write"] },
       projections: { status: () => ({}), pause: () => null },
@@ -845,6 +850,178 @@ test("directory stop reconciliation preserves the checkpoint and resumes without
     (await runner.resume({ runId: run.runId })).run.pipelineState.workflowState,
     "COMPLETED",
   );
+});
+
+test("a stop accepted during output preflight prevents allocation and publication", async (t) => {
+  const f = await fixture(t);
+  let stopping = false;
+  let runId;
+  let creations = 0;
+  const workspace = createWorkspaceService({
+    fileSystem: {
+      ...filesystem,
+      async lstat(path, options) {
+        const stat = await lstat(path, options);
+        if (stopping && path === f.projectPath) {
+          stopping = false;
+          const current = await f.store.loadRun(runId);
+          await f.store.requestOperatorStop({
+            runId,
+            kind: "pause_requested",
+            expectedRevision: current.revision,
+            idempotencyKey: "stop-output-preflight",
+          });
+        }
+        return stat;
+      },
+      async mkdir(...args) {
+        creations += 1;
+        return mkdir(...args);
+      },
+    },
+  });
+  const runner = f.runner(
+    async ({ run, runtime, operatorStop }) => {
+      if (operatorStop) return run;
+      runId = run.runId;
+      const intent = await runtime.workspace.inspectOutputDirectory(
+        join(f.projectPath, "out"),
+      );
+      stopping = true;
+      await runtime.workspace.prepareOutputDirectory(intent);
+      assert.fail("Preparation must observe the accepted stop.");
+    },
+    { workspace, assertOutputPreparation() {} },
+  );
+  const { run } = await runner.run(f.input);
+  assert.equal(run.pause.reason, "operator_paused");
+  assert.equal(creations, 0);
+  await assert.rejects(lstat(join(f.projectPath, "out")), { code: "ENOENT" });
+  assert.equal(f.calls.length, 0);
+});
+
+test("output publication uses owned no-clobber moves without copying or retaining output", async () => {
+  const signal = new AbortController().signal;
+  const onProcess = async () => {};
+  for (const exitCode of [0, 1]) {
+    const result = publishOutputDirectory(
+      {
+        sourceParent: 7,
+        sourceName: "allocation",
+        destinationParent: 8,
+        destinationName: "reports",
+      },
+      {
+        signal,
+        onProcess,
+        cwd: "/project",
+        spawn(file, args, options) {
+          assert.equal(file, "/usr/bin/mv");
+          assert.deepEqual(args, [
+            "--no-clobber",
+            "--no-copy",
+            "--no-target-directory",
+            "--",
+            "/proc/self/fd/3/allocation",
+            "/proc/self/fd/4/reports",
+          ]);
+          assert.equal(options.signal, signal);
+          assert.equal(options.onProcess, onProcess);
+          assert.deepEqual(options.stdio, ["ignore", "ignore", "ignore", 7, 8]);
+          return {
+            ownedCompletion: Promise.resolve({
+              outcome: { type: "close", exitCode },
+            }),
+          };
+        },
+      },
+    );
+    if (exitCode === 0) await result;
+    else
+      await assert.rejects(result, { code: "ERR_WORKSPACE_OUTPUT_AMBIGUOUS" });
+  }
+});
+
+test("directory output publication returns retired process revisions and preserves arriving roots", async (t) => {
+  for (const arriving of [false, true]) {
+    await t.test(
+      arriving ? "arriving empty root" : "absent root",
+      async (t) => {
+        const f = await fixture(t);
+        const path = join(f.projectPath, "out");
+        let inode;
+        let runId;
+        let intent;
+        let registrations = 0;
+        const store = {
+          ...f.store,
+          async recordExecutionProcess(lease, pid, proof) {
+            const next = await f.store.recordExecutionProcess(
+              lease,
+              pid,
+              proof,
+            );
+            if (pid !== null) {
+              registrations += 1;
+              assert.deepEqual(next.pipelineState.outputIntent, intent);
+              await assert.rejects(lstat(path), { code: "ENOENT" });
+              inode = (await lstat(intent.staging.path)).ino;
+              if (arriving) {
+                await mkdir(path);
+                inode = (await lstat(path)).ino;
+              }
+            }
+            return next;
+          },
+        };
+        const runner = f.runner(
+          async ({ run, runtime }) => {
+            runId = run.runId;
+            intent = await runtime.workspace.inspectOutputDirectory(path);
+            const journaled = await runtime.transition({
+              pipelineState: { ...run.pipelineState, outputIntent: intent },
+            });
+            const response =
+              await runtime.workspace.prepareOutputDirectory(intent);
+            assert.equal(response.run.executionProcess, null);
+            assert.ok(response.run.revision > journaled.revision);
+            assert.equal(response.prepared.identity.inode, String(inode));
+            return runtime.transition(
+              {
+                pipelineState: {
+                  ...response.run.pipelineState,
+                  workflowState: "COMPLETED",
+                },
+              },
+              { expectedRevision: response.run.revision },
+            );
+          },
+          {
+            runStore: store,
+            assertOutputPreparation(run, supplied) {
+              assert.deepEqual(run.pipelineState.outputIntent, supplied);
+            },
+          },
+        );
+        if (arriving) {
+          await assert.rejects(runner.run(f.input), {
+            code: "ERR_WORKSPACE_OUTPUT_AMBIGUOUS",
+          });
+          assert.equal((await lstat(intent.staging.path)).isDirectory(), true);
+        } else {
+          assert.equal(
+            (await runner.run(f.input)).run.pipelineState.workflowState,
+            "COMPLETED",
+          );
+          await assert.rejects(lstat(intent.staging.path), { code: "ENOENT" });
+        }
+        assert.equal(registrations, 1);
+        assert.equal((await lstat(path)).ino, inode);
+        assert.equal((await f.store.loadRun(runId)).executionProcess, null);
+        assert.equal(f.calls.length, 0);
+      },
+    );
+  }
 });
 
 test("directory project configuration is protected without an ignore prerequisite", async (t) => {

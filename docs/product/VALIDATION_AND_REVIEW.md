@@ -11,8 +11,13 @@ requires plan revision before convergence or finalization. Unchanged corrections
 and confirmations remain valid. Legacy runs without reconstructable original
 evidence pause before further writable work; already-consumed commits still
 settle through verification. The private custom step policy permits analysis
-without a file diff; it provides no result acceptance or Git effect authority.
-Custom execution remains inactive until its separate acceptance lifecycle exists.
+without a file diff. Its private accepted-result checkpoint requires the same
+mode-specific candidate, finalization and terminal-confirmation gates over
+analysis/evidence and inspected output fingerprints. Provider completion cannot
+settle it; pending publication must reconcile before acceptance. Frozen criteria
+and inputs, earlier accepted outputs and exact permissions remain binding;
+invalidated earlier results require a revised plan and a new run. This checkpoint
+grants no Git effects, and public custom execution remains inactive.
 
 ## Authoring review
 

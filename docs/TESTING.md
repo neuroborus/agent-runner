@@ -296,6 +296,20 @@ verification without another provider turn or renewed accounting. Existing
 stale-plan, implementation-evidence, refinement and commit-safety suites retain
 their distinct behavioral coverage. Persisted kind changes also require the
 affected runner and legacy-migration slow coverage listed above.
+The fast execution `custom-results.test.js` owns criterion-bound analysis and
+output acceptance, receipt chaining, all-mode gates, interrupted publication,
+input/output drift, accepted symlink target/intermediate-link drift and stops.
+Real leased journal cases verify interruption during private allocation and before and after prepared-root
+identity publication and output settlement without Git; other cases use lightweight
+effects. `test/workspace/output-directory.test.js` owns exact-root preparation,
+existing-content preservation, absent-parent rejection, ambiguous creation,
+substitution before first root inspection, competing empty-directory publication,
+owner loss before identity publication without sibling drift and
+descriptor-confined effects under parent replacement. Runner directory coverage
+owns cancellation during output preflight and the supervised no-copy publication
+contract. Persisted checkpoint and
+workspace-effect changes retain the affected runner, state-stop, integration
+and legacy-migration slow coverage above; focused tests replace none of it.
 The fast execution `bounded-bootstrap.test.js` uses lightweight effects to cover
 multi-step discovery and batch acceptance, persisted interruption and reload,
 role isolation in all modes, output subdivision, migration exhaustion pauses,

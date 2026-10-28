@@ -116,7 +116,10 @@ ancestors may connect those trees without granting reads of their other
 children, supporting `.claude/skills` links to protected `.agents/skills`.
 Unbound intermediate hops, escaping, dangling and cyclic links fail.
 Resolution dependencies participate in snapshot
-race checks. Links cannot cross writable boundaries in either direction, including
+race checks; snapshots return sorted `linkResolutions` alongside entries so
+output consumers can bind readable dependencies outside a selected subtree.
+Existing entry and input fingerprints remain unchanged.
+Links cannot cross writable boundaries in either direction, including
 through intermediate resolution hops.
 
 `snapshot({inspection})` rechecks pinned ancestors and control bindings and
@@ -4292,6 +4295,37 @@ CLI/MCP/configuration and persisted execution state. Execution state version 33
 requires `planKind`; version-32 migration adds `commit` without changing any
 gate, consumed effect, accounting or refinement eligibility. Current execution
 still consumes only commit plans and preserves its existing session context.
+
+Execution state version 34 adds nullable `customResults`; version-33 migration
+sets it to `null` without inventing acceptance or output authority. Commit runs
+reject non-null custom ledgers. Custom entry points and persisted custom
+execution remain inactive. The private pipeline-owned checkpoint validates a
+bounded, receipt-chained ledger over frozen criteria/inputs/permissions,
+analysis/evidence and exact output fingerprints, including link resolution hops
+and readable target trees. It consumes the shared mode-specific gate predicate
+but never obtains Git effects or advances workflow
+progress from a provider success claim. Revision-bound state transitions journal
+pending acceptance before verifying and settling the same record on recovery.
+
+The workspace capability owns exact output-directory inspection and preparation.
+The runner's bound directory facade checks frozen controls and configuration,
+and the existing stop monitor guards effects. The pipeline descriptor authorizes
+creation only against the exact persisted root and private-state allocation
+intent. Preparation pins the new directory in private durable state before
+publishing it through an owned, no-clobber move. Missing roots require state
+storage on the same filesystem and `/usr/bin/mv` supporting GNU coreutils 9.4's
+`--no-clobber --no-copy --no-target-directory`; unsupported moves fail closed,
+without copying or replacing an arriving directory. Existing roots need no move.
+The directory descriptor stays open through identity verification and parent
+synchronization. No workspace siblings or parents are created, and provider
+mount authority stays unchanged. The runner returns refreshed state after
+process retirement so the identity transition retains revision checking.
+Cancellation is checked immediately before allocation and publication. Lost
+creation proof, substitutions, drift and pending
+stops preserve unfinished evidence and fail closed. Earlier accepted outputs
+are verified on reconstruction; invalidated acceptance requires a revised plan
+and new run. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
+owns ledger bounds and the dormant completion contract.
 
 ## Global Safety Policy
 

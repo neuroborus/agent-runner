@@ -55,6 +55,7 @@ import {
   bindWorkspace,
   directorySafety,
   inspectBoundWorkspace,
+  publishOutputDirectory,
   workspaceSelection,
 } from "./workspace.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
@@ -737,6 +738,40 @@ export function createRunner(options = {}) {
         snapshot: (...args) => safety.snapshot(...args),
         assertUnchanged: (...args) => safety.assertUnchanged(...args),
         inspectPath: (...args) => safety.inspectPath(...args),
+        ...(run.workspace?.kind === "directory"
+          ? {
+              inspectOutputDirectory: (path) =>
+                safety.inspectOutputDirectory(path),
+              async prepareOutputDirectory(intent) {
+                await monitor?.check();
+                await checkConfiguration();
+                if (typeof pipeline.assertOutputPreparation !== "function")
+                  throw new RunnerError(
+                    "This pipeline cannot prepare output roots.",
+                    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                  );
+                const current = await runStore.loadRun(run.runId);
+                pipeline.assertOutputPreparation(current, intent);
+                const prepared = await (monitor === undefined
+                  ? safety.prepareOutputDirectory(intent)
+                  : monitor.invoke(
+                      ({ signal, onProcess }) =>
+                        safety.prepareOutputDirectory(intent, {
+                          signal,
+                          beforeCreate: () => monitor.check(),
+                          publishDirectory: (request) =>
+                            publishOutputDirectory(request, {
+                              signal,
+                              onProcess,
+                              cwd: run.projectPath,
+                            }),
+                        }),
+                      {},
+                    ));
+                return { prepared, run: await runStore.loadRun(run.runId) };
+              },
+            }
+          : {}),
       }),
       git:
         run.workspace?.kind === "directory"

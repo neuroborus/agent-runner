@@ -112,6 +112,7 @@ export async function capture(
   outputPaths,
   protectedPaths,
   verifyBindings,
+  linkResolutions = [],
 ) {
   const entries = new Map();
   const observed = new Map();
@@ -133,6 +134,7 @@ export async function capture(
     let current = dirname(path);
     let pending = [basename(path)];
     let links = 0;
+    const dependencies = new Set();
     while (pending.length) {
       const component = pending.shift();
       if (component === "" || component === ".") continue;
@@ -152,6 +154,7 @@ export async function capture(
       );
       const stat = await metadata(fs, current);
       observe(current, stat);
+      dependencies.add(current);
       assertSafe(
         stat && (stat.isDirectory() || stat.isFile() || stat.isSymbolicLink()),
         "Workspace snapshot links must resolve to ordinary content.",
@@ -198,7 +201,7 @@ export async function capture(
       "Workspace link changed during resolution.",
       RACE,
     );
-    return current;
+    return { target: current, paths: [...dependencies].sort() };
   }
   async function visit(path, sourcePath, root) {
     const before = await metadata(fs, sourcePath);
@@ -220,7 +223,7 @@ export async function capture(
     let contentHash = null;
     if (before.isSymbolicLink()) {
       const target = await fs.readlink(sourcePath, { encoding: "buffer" });
-      const resolved = await resolveLink(path, root);
+      const resolution = await resolveLink(path, root);
       assertSafe(
         before.nlink === 1n,
         "Workspace snapshot link escapes its declared tree.",
@@ -228,12 +231,13 @@ export async function capture(
       assertSafe(
         outputPaths.every((output) =>
           within(output, path)
-            ? within(output, resolved)
-            : !overlaps(output, resolved),
+            ? within(output, resolution.target)
+            : !overlaps(output, resolution.target),
         ),
         "A workspace link crosses a writable boundary.",
       );
       contentHash = hash(target);
+      linkResolutions.push({ path, ...resolution });
     } else if (before.isFile()) {
       const result = await readRegularFile(
         fs,

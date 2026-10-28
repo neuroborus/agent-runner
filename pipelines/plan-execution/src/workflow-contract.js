@@ -72,6 +72,7 @@ export const WORKFLOW_STATES = Object.freeze([
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
   "planKind",
+  "customResults",
   "planContextVersion",
   "stepImplementation",
   "implementationEvidenceLegacy",
@@ -4110,6 +4111,10 @@ export function normalizePipelineState(value) {
   // No persisted custom state may reach commit-shaped recovery before its
   // accepted-result lifecycle is implemented and explicitly exposed.
   stepPolicy.assertExecutable();
+  if (value.planKind === "commit" && value.customResults !== null)
+    throw workflowError(
+      "Commit execution cannot carry custom result authority.",
+    );
   if (
     typeof value.artifactRoot !== "string" ||
     value.artifactRoot.includes("\\") ||
@@ -5500,6 +5505,7 @@ export function createPlanExecutionState({
     normalizePipelineState({
       workflowState: "CLARIFY",
       planKind,
+      customResults: null,
       artifactRoot,
       preflightComplete: false,
       planContextVersion: 1,
@@ -5736,7 +5742,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 33 ||
+    run.pipelineStateVersion !== 34 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

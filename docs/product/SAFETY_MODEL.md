@@ -414,6 +414,24 @@ common contracts and never enter role prompts or run state.
 
 ## Effect reconciliation
 
+The private custom-result checkpoint persists acceptance intent before
+settlement and verifies exact inspected outputs on reconstruction without Git
+effects or provider replay. Output-directory preparation publishes only an
+explicitly authorized root under an already existing pinned parent. A journaled
+private-state allocation is pinned before owned no-clobber publication, preserving
+even empty arriving or substituted roots without workspace sibling allocations.
+The move never falls back to copying; missing-root preparation requires private
+state storage on the same filesystem and the supported GNU move utility.
+The no-follow descriptor stays open through identity verification. Accepted-output
+fingerprints include symlink resolution hops and readable target trees.
+A directory appearing after an absent intent without a published identity
+remains ambiguous; recovery preserves it, its private allocation and the pending
+evidence. Fresh cancellation checks after preflight prevent new allocation and
+publication effects. Stops prevent new effects and
+acceptance, and cancellation never disposes of output content. Frozen input or
+earlier accepted-output drift requires revised planning and a new execution run.
+Public custom execution remains inactive.
+
 Legacy terminal-confirmation recovery is gated by complete journal provenance,
 current inputs and Git controls, unchanged finalized content, and valid
 validation infrastructure and check evidence. Missing, discontinuous,

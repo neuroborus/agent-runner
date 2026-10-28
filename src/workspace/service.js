@@ -16,6 +16,10 @@ import {
 } from "./paths.js";
 import { CONTROL_NAMES, discoverControls } from "./controls.js";
 import { capture, fingerprints, readTextFile } from "./snapshot.js";
+import {
+  inspectOutputDirectory,
+  prepareOutputDirectory,
+} from "./output-directory.js";
 
 const DECLARATIONS = [
   "workspacePath",
@@ -37,7 +41,7 @@ function freeze(value) {
   return value;
 }
 
-/** Filesystem-only inspection; this service grants no provider or write authority. */
+/** Filesystem inspection and confined output preparation; no provider authority. */
 export function createWorkspaceService({ fileSystem = filesystem } = {}) {
   const fs = fileSystem;
   async function boundary(action) {
@@ -287,6 +291,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         current.workspacePath,
         ...current.protectedPaths,
       ]);
+      const linkResolutions = [];
       const entries = await capture(
         fs,
         roots,
@@ -303,12 +308,16 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
             "ERR_WORKSPACE_SNAPSHOT_RACE",
           );
         },
+        linkResolutions,
       );
       return freeze({
         schemaVersion: 1,
         workspacePath: inspection.workspacePath,
         outputPaths: current.outputPaths,
         entries,
+        linkResolutions: linkResolutions.sort((left, right) =>
+          left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+        ),
         ...fingerprints(entries),
       });
     });
@@ -380,5 +389,27 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     snapshot,
     snapshotInputs,
     assertUnchanged,
+    inspectOutputDirectory: ({ inspection, path }) =>
+      boundary(async () => {
+        await snapshot({ inspection });
+        return freeze(await inspectOutputDirectory(fs, inspection, path));
+      }),
+    prepareOutputDirectory: ({
+      inspection,
+      intent,
+      signal,
+      beforeCreate,
+      publishDirectory,
+    }) =>
+      boundary(async () => {
+        await snapshot({ inspection });
+        const result = await prepareOutputDirectory(fs, inspection, intent, {
+          signal,
+          beforeCreate,
+          publishDirectory,
+        });
+        await snapshot({ inspection });
+        return freeze(result);
+      }),
   });
 }

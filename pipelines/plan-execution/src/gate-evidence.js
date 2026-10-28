@@ -113,7 +113,7 @@ function terminalConfirmationGatePassed(
   );
 }
 
-export function commitGatePassed(
+export function stepGatePassed(
   state,
   fingerprint = state.finalizedFingerprint,
 ) {
@@ -124,6 +124,8 @@ export function commitGatePassed(
     state.reviewReconsideration.length === 0
   );
 }
+
+export const commitGatePassed = stepGatePassed;
 
 export function clearedConfirmationGate() {
   return {

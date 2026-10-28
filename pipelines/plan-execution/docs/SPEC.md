@@ -183,10 +183,10 @@ The private custom policy consumes `@agent-runner/custom-plan`, carries each
 step's referenced observable conditions, work, expected results and frozen
 declarations, and permits analysis without an artificial file diff. It selects
 directory inspection through the root-supplied bound capability, grants neither
-retrieval nor paths from plan declarations, and has no `local-commit` access,
-Git effect service or implemented terminal checkpoint. Analysis eligibility is
-not result acceptance. Custom publication and accepted-step settlement are not
-implemented here; no CLI/MCP/configuration selector exposes custom execution,
+retrieval nor paths from plan declarations, and has no `local-commit` access or
+Git effect service. Analysis eligibility is not result acceptance. Private
+`custom-results.js` supplies accepted-result checkpoints; no
+CLI/MCP/configuration selector exposes custom execution,
 and both state creation and persisted validation reject custom execution before
 runtime effects.
 
@@ -196,12 +196,70 @@ within this pipeline. Commit-specific effective revisions, validation rebinding,
 replacement execution and derived progress retain their existing contracts and
 eligibility rules. There is no second runner or cross-pipeline dependency.
 
+### Private custom result checkpoints
+
+The dormant custom checkpoint uses the existing leased, revision-bound,
+write-ahead pipeline transition capability. Its ledger binds the canonical plan,
+agreed criteria, inspected input hashes, protected workspace fingerprint and
+exact frozen permissions. References grant neither retrieval nor writes.
+Each contiguous accepted record chains its predecessor receipt and contains
+bounded analysis, criterion observations, exact selected output fingerprints,
+the inspected snapshot and candidate/finalization/terminal-confirmation bindings.
+Analysis is limited to 32 KiB, each observation to 4,000 bytes, each result to
+128 KiB and the complete ledger to 1 MiB. Unknown fields, missing/unknown
+criteria, unbound outputs and inconsistent receipts are rejected.
+Selected output fingerprints also bind each symlink's inspected resolution
+hops and readable target tree, recursively including links reached through
+directories. Unrelated output siblings remain available to subsequent steps.
+
+Worker success cannot accept a result. The runner must observe every
+mode-required candidate gate, passing finalization and distinct terminal
+confirmation for the result fingerprint, which includes analysis and evidence
+as well as workspace content. Pending acceptance is journaled before settlement.
+Reconstruction verifies the exact inspected content, output identities and gate
+bindings before accepting that same record; it never asks a provider to replay
+publication. The checkpoint alone advances no workflow cursor and invokes no
+Git operation. Earlier accepted outputs remain immutable; changed frozen
+criteria/inputs or invalidated earlier results require revised planning and a
+new execution run.
+
+Output-directory preparation journals the exact declared root, its prior state,
+real parent and a unique allocation path in private durable state before
+creation. It pins the empty allocation with a no-follow descriptor before
+publication, then journals the prepared identity before settlement. An owned
+GNU no-clobber, no-copy move refuses even an empty concurrently appearing root;
+no workspace siblings are allocated. Missing roots require private state storage
+on the same filesystem and `/usr/bin/mv` with GNU coreutils 9.4's
+`--no-clobber --no-copy --no-target-directory` support. Unsupported publication
+fails closed without a copy fallback; existing roots need no utility.
+The descriptor remains open through synchronization and final identity checks,
+rejecting empty replacements before the first public-path identity read.
+An interrupted allocation or publication without a recorded identity stays
+ambiguous; its exact journaled allocation and root are preserved. Only an explicitly
+authorized output directory can be published; its parent must already exist.
+A file output never grants its parent as a
+writable mount. This preserves Claude's existing-root requirement without
+broadening authority. Descriptor-anchored effects reject aliases, substitutions
+and protected overlaps. Recovery verifies a published directory identity;
+an existing directory after an absent intent without that proof is ambiguous
+and remains preserved. Stops admit no new preparation or acceptance; pending
+intent survives for reconciliation after authorized resume. The monitor's signal
+and a fresh stop check guard allocation and publication after preflight. Owned
+process retirement returns the current run revision before identity publication.
+There is no cleanup
+or rollback of unrelated content.
+
 Pipeline state version 33 persists required `planKind`. New execution states use
 `commit`; the ordered version-32 migration assigns explicit legacy commit
 semantics without changing counters, sessions, saved mode, refinement eligibility,
 validation evidence, completed commits or pending one-shot authorizations.
 Prepared and consumed commits keep their original recovery contract; migration
 never manufactures new effect authority.
+
+State version 34 adds `customResults`, initially `null`. Its version-33
+migration initializes no acceptance or preparation evidence and changes no
+existing gates, counters, effects or eligibility. Commit runs reject a non-null
+custom ledger; custom execution remains inactive even with a valid private ledger.
 
 ---
 
@@ -4220,7 +4278,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 33, preserving
+74. every supported legacy version migrates through state version 34, preserving
     its saved mode and defaulting missing modes to `independent`, without
     fabricating effective-revision approval, reviving terminal runs or replaying
     completed or pending commit effects; unfinished work freezes guidance and repeats

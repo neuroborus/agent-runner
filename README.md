@@ -881,8 +881,9 @@ nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 33, and polishing version 16. Execution now persists explicit commit
-plan kind; custom execution remains unavailable. Their ordered migrations resolve missing
+version 34, and polishing version 16. Execution persists explicit commit
+plan kind and a null custom-result ledger for existing runs; custom execution
+remains unavailable. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
