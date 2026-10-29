@@ -2959,7 +2959,8 @@ async function storageEntry(root, components, baseline, substitution) {
 async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
   const nonce = randomBytes(16).toString("hex"),
     helper = feasibilityDomainPath(nonce) + "/helper",
-    control = feasibilityDomainPath(nonce) + "/exec-control";
+    control = feasibilityDomainPath(nonce) + "/exec-control",
+    copiedPolicy = feasibilityDomainPath(nonce) + "/policy";
   const policyBytes =
     darwinFeasibilityPolicy(root)
       .replace(
@@ -2974,7 +2975,8 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
         "(allow file-read* ",
         `(allow file-read* (literal ${JSON.stringify(helper)}) `,
       ) +
-    `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(control)}))\n`;
+    `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(control)}))\n` +
+    `(deny file-map-executable (literal ${JSON.stringify(copiedPolicy)}))\n`;
   const policy = path.join(root, "evidence", `${caseId}.sb`);
   await writeFile(policy, policyBytes, {
     flag: "wx",

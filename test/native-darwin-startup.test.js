@@ -14,6 +14,7 @@ import {
   openDarwinStartupTrace,
 } from "../ci/native/darwin/startup-trace.js";
 import { darwinSignatureDiagnostics } from "../ci/native/darwin/signature-logs.js";
+import { feasibilityDomainPath } from "../ci/native/darwin/feasibility-domain.js";
 import { startupObserver } from "../ci/native/darwin/feasibility.js";
 import { darwinCustodyChannel } from "../ci/native/darwin/channel.js";
 import {
@@ -2577,45 +2578,113 @@ test("Darwin runtime policy and actual source retain narrow grants and finite fl
       "utf8",
     ),
   ]);
-  const policyStart = feasibility.indexOf(
-      "  const policyBytes =",
-      feasibility.indexOf("async function ownershipEntry("),
-    ),
-    policyEnd = feasibility.indexOf("  const policy =", policyStart),
-    ownedPolicy = new Script(
-      feasibility.slice(policyStart, policyEnd) + "\npolicyBytes;",
-    ).runInNewContext({
+  const ownershipStart = feasibility.indexOf("async function ownershipEntry("),
+    ownershipEnd = feasibility.indexOf("\n}\n", ownershipStart) + 2;
+  assert.ok(ownershipStart > 0 && ownershipEnd > ownershipStart);
+  const ownership = new Script(
+    feasibility.slice(ownershipStart, ownershipEnd) + "\nownershipEntry;",
+  );
+  for (const [caseId, nonce] of [
+    ["cancel", "1".repeat(32)],
+    ["owner-loss", "2".repeat(32)],
+  ]) {
+    const directory = feasibilityDomainPath(nonce),
+      copiedPolicy = directory + "/policy",
+      stagedPolicy = `/fixture/evidence/${caseId}.sb`,
+      components = [
+        { role: "helper", name: "helper", sha256: SHA },
+        { role: "helper", name: "argv-fixture", sha256: FIXTURE_SHA },
+      ],
+      baseline = {},
+      domain = { running: {} },
+      environment = {},
+      openSession = () => {},
+      result = {},
+      events = [],
+      digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    let ownedPolicy, admittedHash;
+    const entry = ownership.runInNewContext({
+      path,
       darwinFeasibilityPolicy,
-      root: "/fixture",
-      helper: "/custody/helper",
-      control: "/custody/exec-control",
+      feasibilityDomainPath,
+      digest,
+      ENV: environment,
+      openDarwinFeasibilitySession: openSession,
+      randomBytes(size) {
+        assert.equal(size, 16);
+        return Buffer.from(nonce, "hex");
+      },
+      async writeFile(filename, bytes, options) {
+        assert.equal(filename, stagedPolicy);
+        assert.deepEqual({ ...options }, { flag: "wx", mode: 0o600 });
+        ownedPolicy = bytes;
+        events.push("stage");
+      },
+      async openDarwinFaultDomain(...args) {
+        assert.deepEqual(events, ["stage"]);
+        assert.deepEqual(args.slice(0, 8), [
+          "/fixture",
+          "a".repeat(40),
+          caseId,
+          nonce,
+          SHA,
+          digest(ownedPolicy),
+          environment,
+          openSession,
+        ]);
+        assert.deepEqual({ ...args[8] }, { controlHash: FIXTURE_SHA });
+        admittedHash = args[5];
+        events.push("admit");
+        return domain;
+      },
+      runDarwinFeasibilityFault(...args) {
+        assert.deepEqual(args.slice(0, 6), [
+          "/fixture",
+          domain.running,
+          components,
+          baseline,
+          caseId,
+          "a".repeat(40),
+        ]);
+        assert.equal(args[6].domain, domain);
+        assert.equal(args[6].policyBytes, ownedPolicy);
+        assert.equal(digest(args[6].policyBytes), admittedHash);
+        events.push("run");
+        return result;
+      },
     });
-  assert.ok(policyStart > 0 && policyEnd > policyStart);
-  assert.ok(
-    ownedPolicy.includes(
-      '(allow file-read* (literal "/custody/helper") (subpath "/usr/lib")',
-    ),
-  );
-  assert.ok(
-    ownedPolicy.includes(
-      '(allow file-map-executable (literal "/custody/helper") (subpath "/usr/lib")',
-    ),
-  );
-  assert.ok(
-    ownedPolicy.includes(
-      '(allow process-exec (literal "/custody/helper") (literal "/fixture/build/helper")',
-    ),
-  );
-  assert.ok(
-    ownedPolicy.endsWith(
-      '(allow file-read-data file-read-metadata file-map-executable (literal "/custody/exec-control"))\n',
-    ),
-  );
-  assert.ok(
-    ownedPolicy.includes(
-      '(deny file-map-executable (subpath "/fixture/workspace"))',
-    ),
-  );
+    assert.equal(
+      await entry("/fixture", components, baseline, caseId, "a".repeat(40)),
+      result,
+    );
+    assert.deepEqual(events, ["stage", "admit", "run"]);
+    for (const [grant, retained] of [
+      ["file-read*", '(subpath "/usr/lib")'],
+      ["file-map-executable", '(subpath "/usr/lib")'],
+      ["process-exec", '(literal "/fixture/build/helper")'],
+    ])
+      assert.ok(
+        ownedPolicy.includes(
+          `(allow ${grant} (literal "${directory}/helper") ${retained}`,
+        ),
+      );
+    assert.ok(
+      ownedPolicy.includes(
+        `(allow file-read-data file-read-metadata file-map-executable (literal "${directory}/exec-control"))\n`,
+      ),
+    );
+    assert.deepEqual(
+      ownedPolicy
+        .split("\n")
+        .filter((line) => line.startsWith("(deny file-map-executable ")),
+      [
+        '(deny file-map-executable (subpath "/fixture/workspace"))',
+        `(deny file-map-executable (literal "${copiedPolicy}"))`,
+      ],
+    );
+    assert.ok(!ownedPolicy.includes(stagedPolicy));
+    assert.ok(!ownedPolicy.includes(feasibilityDomainPath("3".repeat(32))));
+  }
   const application = helper.slice(
     helper.indexOf("static void policy("),
     helper.indexOf("static void parked("),

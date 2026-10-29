@@ -434,6 +434,14 @@ later errno changes; failed output modes are never read. Assertions bind mismatc
 one `lstat` then one `stat`, attempted reporting and the unchanged first refusal,
 including no emitted record and independently preserved caller/query errno.
 Successful 45-query order and other selectors gain no advisory inspections.
+The existing startup ownership-composition VM fixture executes both fault recipes
+with distinct valid nonces and injected staging/admission. It binds complete bytes
+and their digest, exclusive source staging and unchanged helper/control grants to
+the exact copied-policy mapping denial, excluding the staged source and other
+nonces. The effective-policy fixture retains row-8 expected 1 and refuses actual
+0/raw errno 2 or a query error without advancement. These portable regressions
+establish no native policy effect; matching Darwin must still prove the exact
+decision, every obligation, mapping/execution positives and independent retirement.
 The matrix and advisory share the fixed required `/usr/lib/dyld` operand with
 unchanged row-5 decisions. Actual native binding bodies cover complete pinned
 bytes, no-follow open, regular/nonempty/bounded type and size, allocation/read/

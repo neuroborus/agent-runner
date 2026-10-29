@@ -1113,6 +1113,10 @@ test("fault policy queries retain exact decisions and errno before the first unc
     inspections,
   }));
   runtimeFaults.push({ ...runtimeFaults[0], noRecord: true });
+  const policyMap = queries.findIndex(
+    ({ row, operation }) => row === 8 && operation === "file-map-executable",
+  );
+  assert.equal(queries[policyMap].expected, 1);
   for (const fault of [
     null,
     { at: 0, actual: 1, errno: 71 },
@@ -1121,6 +1125,8 @@ test("fault policy queries retain exact decisions and errno before the first unc
     { at: 10, actual: -1, errno: 13 },
     { at: 7, actual: 2, errno: 0 },
     { at: 44, actual: 1, errno: 74 },
+    { at: policyMap, actual: 0, errno: 2 },
+    { at: policyMap, actual: -1, errno: 2 },
     { at: runtimeFaults[0].at + 1, actual: 0, errno: 72 },
     ...runtimeFaults,
   ]) {

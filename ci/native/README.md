@@ -4781,6 +4781,15 @@ types together with the bound regular-file controls below, never by an intrinsic
 non-file mmap failure. In particular, the workspace directory query returning 0
 and observed errno 2 establish neither regular-file mapping permission nor denial.
 
+For both fault recipes, ownership policy composition explicitly denies executable
+mapping of `/private/var/run/native-feasibility-<nonce>/policy`. The literal never
+targets the staged `evidence/<caseId>.sb` source or another nonce; helper, control and
+runtime grants remain unchanged. Complete staged bytes and their digest still
+bind native copying and admission. Matching Darwin execution must return exactly
+1 at row 8 with all unchanged obligations, real mapping/execution positives and
+independent retirement. Compilation/application failure or continued mismatch
+preserves failure; unreadability and raw query errno establish no mapping denial.
+
 The existing signed argv bytes also supply one held workspace map fixture.
 Feasibility snapshots explicitly select that exact third object as a regular
 `0444`, single-link file of 1–16777216 bytes. Signed-source production and
