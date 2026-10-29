@@ -290,6 +290,11 @@ export function buildDarwinPolicy(input, { execWitnessVersion = 1 } = {}) {
     "(allow process-fork)",
     "(allow process-info* (target same-sandbox))",
   ];
+  if (value.purpose === "experiment")
+    lines.push(
+      '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+      `(allow file-read-data ${literal("/")})`,
+    );
   if (
     value.purpose === "experiment" &&
     !request.execution &&

@@ -489,9 +489,17 @@ preparation removals. Explicit no-admission and settlement evidence separates sa
 preparation cleanup from uncertain retirement; exit codes and stage names supply
 no such proof. Dependent provider blocks retain the originating native diagnosis
 without replacing either the primary cause or its separate cleanup cause.
-The experiment adds only the loader's `Sandbox` MAC syscall 67 container query
-from the inspected pinned runtime baseline, without unrelated Mach/network or
-general write grants. Fixed matching-CI startup controls separate policy-only
+Feasibility already included the loader's `Sandbox` MAC syscall 67 container query
+and `file-read-data` on literal `/`. Both ownership and access builders now add
+exactly these previously omitted operations only for experiment purpose, using
+their existing renderers. Feasibility and reviewed/default bytes, PF rules and both
+exec-witness contracts remain unchanged, without new descendant, metadata, mapping,
+Mach/network or general write authority. This is a source-backed compatibility
+candidate: neither MAC67 nor the archived execution deadline has a proved exclusive
+causal role. Fresh primary `fixture-main`/armed/output, strict mapping/exec negatives
+and complete independent retirement remain required; failed positives, successful
+negatives, binding drift or unproved cleanup stop the candidate.
+Fixed matching-CI startup controls separate policy-only
 application, the same inspected outside fixture, invalid policy and withheld
 fixture exec from corrected confined startup. Readiness-bound process identity,
 stable image bytes and live sandbox state precede release; independent retirement

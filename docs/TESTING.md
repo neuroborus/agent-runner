@@ -247,6 +247,15 @@ the second build observation. These tests add no
 native effect or slow-tier assignment; reviewed and protected rejection coverage
 remains retained in the explicit harness.
 
+Pure regressions in the existing Darwin policy and preparation suites pin the
+pre-correction output of both ownership and access builders. Experiment output
+must gain exactly two complete rules: `Sandbox` MAC syscall 67 and `file-read-data`
+on literal `/`. Reviewed/default bytes, PF output, both exec-witness versions and
+mapping/exec restrictions remain pinned; feasibility's existing regression stays
+unchanged. These protect the builder correction, not exclusive MAC67/deadline
+causality or native success. Fresh matching CI must still establish primary
+`fixture-main`/armed/output, strict mapping/exec negatives and independent retirement.
+
 The same Darwin preparation fixtures acquire a compact real XNU event declaration
 excerpt without `BSLOOKUP` and an `audit_record.h` named-version/alias excerpt.
 The latter reproduces the producer-selected OpenBSM version without a synthetic

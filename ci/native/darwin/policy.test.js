@@ -295,6 +295,46 @@ test("Darwin policies seal writable roots, images and both directions of every p
   }
 });
 
+test("Darwin access loader rules change only experiment Seatbelt bytes", () => {
+  const loaderRules = [
+    '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+    '(allow file-read-data (literal "/"))',
+  ];
+  // Captured from the existing fixture before the loader correction.
+  const readOnly = [
+      "14bf174b1a28d5cc4779946ca050db361f399342f23097c094ee9062b4fb0f18",
+      "68d80051fd205f20b64aa49e0c298b6982845d9ef98cc04bc38574e5ea6a9dec",
+    ],
+    writable = [
+      "e98a9eff29964ee48560c7a1ddd85780a141616d181110dbf6a666b7b8d77a73",
+      "83e053e7c2a0fb29f3398d82c433898d328e3795d29bbfaed459930fcb9d6cae",
+    ];
+  for (const profile of ["read-only", "workspace-write", "trusted-command"])
+    for (const purpose of ["reviewed", "experiment"])
+      for (const execWitnessVersion of [0, 1]) {
+        const { input } = fixture(profile, purpose),
+          { seatbelt, pf } = buildDarwinPolicy(input, { execWitnessVersion }),
+          lines = seatbelt.split("\n"),
+          before = (profile === "read-only" ? readOnly : writable)[
+            Number(purpose === "experiment" && execWitnessVersion === 1)
+          ];
+        assert.deepEqual(
+          lines.filter((line) => loaderRules.includes(line)),
+          purpose === "experiment" ? loaderRules : [],
+        );
+        assert.equal(
+          digest(
+            lines.filter((line) => !loaderRules.includes(line)).join("\n"),
+          ),
+          before,
+        );
+        assert.equal(
+          digest(pf),
+          "fe7dc98703bc8f27fd6f6a244877225a323b52e0418d257eb7c802a1794ded5f",
+        );
+      }
+});
+
 test("Darwin policy inputs reject broad images, host aliases, collisions and unreviewed disposable grants", () => {
   for (const failure of [
     "runtime",

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29 — Align Darwin experiment builders with the loader baseline
+
+Ownership and access experiment policies now include exactly the `Sandbox` MAC
+syscall 67 query and literal-root data read already present in feasibility.
+Reviewed/default bytes, feasibility, PF rules and both exec-witness contracts stay
+unchanged. Pure byte regressions protect this bounded compatibility candidate,
+not exclusive MAC67/deadline causality or native completion. Fresh primary
+main/armed/output, strict mapping/exec negatives and independent retirement remain
+required; failed positives, successful negatives, drift or unproved cleanup stop it.
+The separate libSystem applicability issue and Windows failures remain unresolved.
+
 ## 2026-10-29 — Restrict Darwin workspace executable mappings
 
 Workspace policies now grant precise data/metadata reads and explicitly deny

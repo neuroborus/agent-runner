@@ -6027,6 +6027,12 @@ function caseBinding(
         "(deny default)",
         "(allow process-fork)",
         "(allow process-info* (target same-sandbox))",
+        ...(experiment
+          ? [
+              '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+              '(allow file-read-data (literal "/"))',
+            ]
+          : []),
         `(allow file-read-data file-read-metadata file-write* (subpath ${JSON.stringify(request.workspace)}))`,
         `(deny file-map-executable (subpath ${JSON.stringify(request.workspace)}))`,
         `(allow file-read-metadata (literal ${JSON.stringify(request.storage)}))`,
@@ -7602,6 +7608,37 @@ test("Darwin partial probe recovery attributes original receipt joins without in
     );
     assert.ok(!f.events.some((event) => event.startsWith("tool:")));
   }
+});
+
+test("Darwin ownership loader rules change only experiment policy bytes", () => {
+  const loaderRules = [
+    '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+    '(allow file-read-data (literal "/"))',
+  ];
+  // Captured from the existing fixture before the loader correction.
+  const before = [
+    "d609b5afee6f3028649de2d5d39286e37772af1d797312984baebf563537b9e7",
+    "d552d2f5251668ec8ba1c330d220a6dc3f89f528735f92f6928a66f6e2d8b0c4",
+  ];
+  for (const experiment of [false, true])
+    for (const execWitnessVersion of [0, 1]) {
+      const f = buildTranscripts(experiment);
+      caseBinding(f, "ownership.literal", true, { execWitnessVersion });
+      const { input, assets } = f.manifest.darwinPreparation.cases.find(
+          ({ id }) => id === "ownership.literal",
+        ).bindings,
+        policy = darwinOwnershipPolicy(input, { execWitnessVersion }),
+        lines = policy.split("\n");
+      assert.deepEqual(
+        lines.filter((line) => loaderRules.includes(line)),
+        experiment ? loaderRules : [],
+      );
+      assert.equal(
+        digest(lines.filter((line) => !loaderRules.includes(line)).join("\n")),
+        before[Number(experiment && execWitnessVersion === 1)],
+      );
+      assert.equal(policy, f.files.get(assets[2].path).bytes.toString());
+    }
 });
 
 test("fixed Darwin entry executes each ownership owner through raw custody and held observations", async () => {

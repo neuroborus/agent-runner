@@ -68,6 +68,12 @@ export function darwinOwnershipPolicy(
     "(deny default)",
     "(allow process-fork)",
     "(allow process-info* (target same-sandbox))",
+    ...(request.purpose === "experiment"
+      ? [
+          '(allow system-mac-syscall (require-all (mac-policy-name "Sandbox") (mac-syscall-number 67)))',
+          `(allow file-read-data (literal ${quote("/")}))`,
+        ]
+      : []),
     `(allow file-read-data file-read-metadata file-write* (subpath ${quote(request.workspace)}))`,
     `(deny file-map-executable (subpath ${quote(request.workspace)}))`,
     `(allow file-read-metadata (literal ${quote(request.storage)}))`,

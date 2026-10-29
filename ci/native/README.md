@@ -2283,14 +2283,18 @@ Matching macOS CI must exercise absent, valid-empty and nonempty ACLs. This
 source-proven property correction does not identify the separately observed
 first-launch SIGABRT cause or establish repaired startup or native cleanup.
 
-The Darwin experiment retains the loader's `Sandbox` MAC syscall 67
-container query in addition to its existing runtime mappings. The inspected
+Darwin feasibility already included the loader's `Sandbox` MAC syscall 67
+container query and literal-root data read. The ownership and access policy
+builders previously omitted them; both now add exactly those two operations
+only for experiment purpose. Feasibility and reviewed/default policy bytes,
+PF rules and both exec-witness contracts remain unchanged. The inspected
 [pinned runtime baseline](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/sandboxing/src/seatbelt_read_only_platform_defaults.sbpl)
 and supplied inspected
 [Apple loader reference](https://github.com/apple-oss-distributions/dyld/blob/dyld-1284.13/dyld/DyldProcessConfig.cpp)
 support investigating that startup operation. No unrelated Mach lookup, device,
 network, general write, metadata traversal or broader baseline grant is copied.
-This narrow correction is not evidence that syscall 67 caused the archived abort.
+This is a bounded source-backed compatibility candidate; neither MAC67 nor the
+archived execution deadline has a proved exclusive causal role.
 
 The policy additionally allows only `file-read-data` on the literal `/` directory.
 The pinned loader delegates shared-cache discovery to `ignite`; this is consistent
@@ -2299,6 +2303,14 @@ root-directory abort, while the outside fixture opened `/` successfully. The
 literal grant adds no descendant access, writes or executable mappings. Finite
 runtime/image/workspace grants and all denial controls remain unchanged. Fresh
 matching macOS CI must establish confined startup and the retained negative cases.
+
+The discriminating observation is primary `fixture-main`/armed/output under
+unchanged confinement, strict mapping/exec negatives and complete independent
+retirement. Failed positives, successful negatives, binding drift or unproved
+cleanup stop this candidate; all 69 controls and model-free routes remain required.
+Feasibility matrix row 5 retains `file-read-data` on `/usr/lib/libSystem.B.dylib`
+with expected result 0; its filesystem/shared-cache applicability remains
+unresolved. This correction does not resolve that issue or the Windows failures.
 
 Before the confined argv case, matching macOS CI runs four fixed controls:
 policy application without exec; the same inspected sibling fixture outside the
