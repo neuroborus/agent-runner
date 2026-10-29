@@ -705,7 +705,7 @@ test("retry-time lease and stop inspections retain correlated causes without com
   }
 });
 
-test("MCP authoring selection reaches descriptor settings before start mutation", async () => {
+test("MCP authoring and execution selections reach descriptor settings before start mutation", async () => {
   let selection;
   const inspected = new Error("Boundary inspected");
   const control = createMcpControlPlane({
@@ -739,4 +739,15 @@ test("MCP authoring selection reaches descriptor settings before start mutation"
     outputPaths: ["reports/a.md"],
   });
   assert.equal(Object.hasOwn(selection, "planKind"), false);
+  await assert.rejects(
+    control.runStart({
+      idempotencyKey: "custom-execution",
+      pipelineId: "plan-execution",
+      projectPath: "/workspace",
+      taskPath: "/task",
+      planKind: "custom",
+    }),
+    (cause) => cause === inspected,
+  );
+  assert.deepEqual(selection.settingOverrides, { planKind: "custom" });
 });

@@ -177,15 +177,7 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
-export const FINALIZATION_INSTRUCTIONS = `Use only the established active-step inventory. The complete persisted schedule retains future requirements; do not run future-step checks. Inventory amendments apply only to the current step. Any shared infrastructure change must remain valid for future requirements and receive explicit terminal confirmation.
-
-Run the complete project finalization procedure in this dedicated turn and report its result using the provided schema. Follow every substantive instruction in the applicable project guidance, including required checks, project-required formatting or generated output, and staging-independent content review.
-
-${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
-Do not perform unrelated fixes or create a commit.
-Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
-The validated plan subject remains authoritative. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
-Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+const FINALIZATION_RESULT_INSTRUCTIONS = `Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
@@ -195,14 +187,42 @@ For BLOCKED, use only when required validation cannot run because of sandbox, IP
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
-export function finalizationBootstrapInstructions({ selection, skillPath }) {
+export const FINALIZATION_INSTRUCTIONS = `Use only the established active-step inventory. The complete persisted schedule retains future requirements; do not run future-step checks. Inventory amendments apply only to the current step. Any shared infrastructure change must remain valid for future requirements and receive explicit terminal confirmation.
+
+Run the complete project finalization procedure in this dedicated turn and report its result using the provided schema. Follow every substantive instruction in the applicable project guidance, including required checks, project-required formatting or generated output, and staging-independent content review.
+
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
+Do not perform unrelated fixes or create a commit.
+Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
+The validated plan subject remains authoritative. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
+${FINALIZATION_RESULT_INSTRUCTIONS}`;
+
+const CUSTOM_FINALIZATION_INSTRUCTIONS = `Finalize only the current custom result against its agreed observable criteria and established active-step inventory. Review the analysis, criterion evidence and exact inspected outputs, using explicitly selected frozen guidance when present. Coding checks apply only when the user selected applicable coding requirements. A semantic-only inventory may be empty; every required candidate and terminal review still applies.
+Report unmet criteria as FAIL with concrete issues even when no executable check fails. For a criterion issue, identify the criterion in its command field (for example, criterion:traceability); do not invent an executable check or misreport a passing check as failed.
+Run applicable agent-executed checks in this dedicated turn. Reserve selected runner-trusted commands as ordered NOT_RUN entries; the runner executes their frozen exact vectors. Preserve their identities, capability declarations, applicability and provenance.
+Never stage, inspect an index-relative diff, prepare a commit, create a commit or change Git controls. No custom phase has commit authority. Do not perform unrelated repairs or change the accepted analysis/evidence during finalization; content repairs require fresh convergence.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
+${FINALIZATION_RESULT_INSTRUCTIONS}`;
+
+export function finalizationBootstrapInstructions({
+  selection,
+  skillPath,
+  planKind = "commit",
+}) {
+  if (selection === "fallback" && planKind === "custom")
+    return "No finalization guidance is selected. Discover only criterion-dependent checks; never invent automatic coding gates.";
   if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
   return `The frozen finalization skill is ${skillPath}. Read only that exact confined repository-relative skill, do not substitute another path, and include it in validationInfrastructure.`;
 }
 
-export function finalizationGuidanceInstructions({ skillPath }) {
+export function finalizationGuidanceInstructions({
+  skillPath,
+  planKind = "commit",
+}) {
+  if (skillPath === null && planKind === "custom")
+    return 'No finalization guidance is selected. Derive the gate from agreed custom criteria, preserving explicitly selected coding requirements. For PASS, FAIL or BLOCKED set skillPath to ""; never report SKILL_MISSING or SKILL_INVALID without a selected skill.';
   if (skillPath === null) {
     return `No finalization skill guidance is available for this turn. Derive and run the complete gate from repository instructions and project-defined checks; inspect relevant scripts and established validation commands instead of skipping validation.
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
@@ -234,3 +254,68 @@ For CONTINUE_FIXES or REWORK_IMPLEMENTATION, set findingIds, options, and eviden
 For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set findingIds and options to [], and question and whyBlocked to ""; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set findingIds to [] and reason to ""; use the product-decision fields.`;
+
+// Adapt only a source-controlled instruction prefix. Frozen task/plan text,
+// criterion conditions and evidence in the remaining context stay byte-for-byte.
+export function customExecutionPrompt(prompt) {
+  const bases = [
+    CLARIFICATION_INSTRUCTIONS,
+    PLAN_COMPATIBILITY_INSTRUCTIONS,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    APPLICABILITY_INSTRUCTIONS,
+    BOOTSTRAP_INSTRUCTIONS,
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    IMPLEMENTATION_INSTRUCTIONS,
+    CHECK_AND_FIX_INSTRUCTIONS,
+    CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+    CANDIDATE_REVIEW_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    REVIEW_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    STAGNATION_INSTRUCTIONS,
+  ];
+  const base = bases.find((value) => prompt.startsWith(value));
+  if (base === undefined) return prompt;
+  const instructions =
+    base === FINALIZATION_INSTRUCTIONS
+      ? CUSTOM_FINALIZATION_INSTRUCTIONS
+      : base
+          .replace(
+            "the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects",
+            "only checks required by that step's agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
+          )
+          .replace(
+            "the ordinary fast gate and only slow checks whose documented guarantees that step affects",
+            "only checks required by the agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
+          )
+          .replace(
+            /Staging, [^\n]*?belong only to COMMIT\./gu,
+            "Staging and commit preparation are forbidden throughout custom execution.",
+          )
+          .replace(
+            "Generic commit preparation belongs only to COMMIT.",
+            "No custom phase permits generic commit preparation.",
+          )
+          .replace(
+            "Express an applicable content check against HEAD or explicit trees instead of the index.",
+            "Validate the inspected custom inputs and outputs without staging or requiring Git.",
+          )
+          .replace(
+            "For CHANGED, use only when you changed repository content;",
+            "For CHANGED, use only when you changed workspace content or result data;",
+          )
+          .replace(
+            "For UNCHANGED, use only when you found no problem and changed no repository content;",
+            "For UNCHANGED, use only when you found no problem and changed neither workspace content nor result data;",
+          )
+          .replaceAll(", and Git history", "")
+          .replaceAll("planned commit", "planned step")
+          .replaceAll("authorized commit", "accepted-result checkpoint")
+          .replaceAll("COMMIT", "ACCEPT");
+  return instructions + prompt.slice(base.length);
+}

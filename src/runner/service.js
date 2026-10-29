@@ -132,11 +132,19 @@ async function readInputs(
       ]),
     ),
   );
-  const selection = pipeline.resolveWorkspace?.({
-    settingOverrides: settings ?? {},
-    projectPath,
-    taskPath,
-  });
+  // Static directory inputs are protected by the frozen workspace binding.
+  // Only dynamic declarations contribute this supplemental input hash.
+  const selection = pipeline.resolveWorkspace
+    ? await workspaceSelection(
+        pipeline,
+        {
+          settingOverrides: settings ?? {},
+          projectPath,
+          taskPath,
+        },
+        workspace,
+      )
+    : undefined;
   if (
     selection &&
     (selection.inputPaths?.length ?? 0) + (selection.sourcePaths?.length ?? 0) >
@@ -626,9 +634,9 @@ export function createRunner(options = {}) {
               Object.entries(selectedAdapters).map(([role, adapter]) => [
                 role,
                 {
-                  probe: async () => {
+                  probe: async (options) => {
                     await monitor.check();
-                    return adapter.probe();
+                    return adapter.probe(options);
                   },
                   canReadFiles: async (request) => {
                     await monitor.check();
@@ -1490,11 +1498,16 @@ export function createRunner(options = {}) {
       input.settingOverrides,
       providers,
     );
-    const selection = workspaceSelection(pipeline, {
-      ...input,
-      ...boundary,
-      settingOverrides: settings,
-    });
+    const selection = await workspaceSelection(
+      pipeline,
+      {
+        ...input,
+        ...boundary,
+        settingOverrides: settings,
+        preliminary: true,
+      },
+      workspace,
+    );
     if (selection.kind === "directory") return boundary;
     const configurationPath = resolve(
       boundary.projectPath,
@@ -1559,11 +1572,15 @@ export function createRunner(options = {}) {
         normalized.settingOverrides,
         providers,
       );
-      selection = workspaceSelection(pipeline, {
-        ...normalized,
-        ...boundary,
-        settingOverrides: resolved.settings,
-      });
+      selection = await workspaceSelection(
+        pipeline,
+        {
+          ...normalized,
+          ...boundary,
+          settingOverrides: resolved.settings,
+        },
+        workspace,
+      );
       return validateBoundary(
         selection.kind === "directory"
           ? normalized
@@ -1574,9 +1591,10 @@ export function createRunner(options = {}) {
     selection ??=
       input.pipelineId === undefined
         ? { kind: "git" }
-        : workspaceSelection(
+        : await workspaceSelection(
             getPipeline(input.pipelineId),
             normalizeRunInput(input, providers),
+            workspace,
           );
     if (selection.kind === "directory") {
       const boundary = await runStore.validateStateBoundary({
@@ -1752,7 +1770,8 @@ export function createRunner(options = {}) {
 
   async function prepare(input, options = {}) {
     const normalized = normalizeRunInput(input, providers);
-    const createOptions = normalizeCreateOptions(options);
+    const createOptions = { ...normalizeCreateOptions(options) };
+    createOptions.runId ??= randomUUID();
     if (typeof normalized.proactiveClarification !== "boolean") {
       throw new RunnerError("run.proactiveClarification must be a boolean.", {
         code: "ERR_INVALID_RUNNER_INPUT",
@@ -1781,7 +1800,7 @@ export function createRunner(options = {}) {
     }
     let selection = pipeline.resolveWorkspace
       ? { kind: "directory" }
-      : workspaceSelection(pipeline, normalized);
+      : await workspaceSelection(pipeline, normalized, workspace);
     const initialBoundary = pipeline.resolveWorkspace
       ? null
       : await validateBoundary(normalized, selection);
@@ -1813,12 +1832,18 @@ export function createRunner(options = {}) {
       );
     try {
       resolved = resolveConfiguration();
-      selection = workspaceSelection(pipeline, {
-        ...normalized,
-        projectPath,
-        taskPath,
-        settingOverrides: resolved.settings,
-      });
+      selection = await workspaceSelection(
+        pipeline,
+        {
+          ...normalized,
+          projectPath,
+          taskPath,
+          settingOverrides: resolved.settings,
+          runId: createOptions.runId,
+          artifactRoot: resolved.artifactRoot,
+        },
+        workspace,
+      );
       const selectedBoundary = await validateBoundary(
         selection.kind === "directory"
           ? normalized
@@ -1846,12 +1871,18 @@ export function createRunner(options = {}) {
           runnerConfiguration: configuration,
         });
         resolved = resolveConfiguration();
-        selection = workspaceSelection(pipeline, {
-          ...normalized,
-          projectPath,
-          taskPath,
-          settingOverrides: resolved.settings,
-        });
+        selection = await workspaceSelection(
+          pipeline,
+          {
+            ...normalized,
+            projectPath,
+            taskPath,
+            settingOverrides: resolved.settings,
+            runId: createOptions.runId,
+            artifactRoot: resolved.artifactRoot,
+          },
+          workspace,
+        );
         const rebound = await validateBoundary(
           selection.kind === "directory"
             ? normalized

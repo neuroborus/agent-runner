@@ -113,6 +113,7 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     roles: {},
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
+    planKind: "commit",
     preferredCommitLineLimit: 900,
     commitSizeAssessmentMultiplier: 3,
     finalization: "auto",

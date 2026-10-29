@@ -6,13 +6,20 @@ import {
   createPlanExecutionState,
   migratePlanExecutionStateV32,
   planExecutionPipeline,
-  runPlanExecution,
 } from "../src/index.js";
 import {
   canonicalExecutionPlan,
   MAX_PLAN_LENGTH,
   planKindPolicy,
 } from "../src/step-policy.js";
+import {
+  customExecutionPrompt,
+  APPLICABILITY_INSTRUCTIONS,
+  BOOTSTRAP_INSTRUCTIONS,
+  CHECK_AND_FIX_INSTRUCTIONS,
+  FINALIZATION_INSTRUCTIONS,
+  IMPLEMENTATION_INSTRUCTIONS,
+} from "../src/prompts.js";
 import {
   assertRuntime,
   normalizeAdapterCapabilities,
@@ -42,6 +49,66 @@ const customPlan = serializeCustomPlan({
       criterionRefs: ["source-coverage"],
     },
   ],
+});
+
+test("custom instructions preserve frozen task, criteria and evidence text verbatim", () => {
+  const context =
+    "\n\nTask data: preserve the literal COMMIT token and planned commit wording.\nCriteria: Staging, index inspection belong only to COMMIT.\nEvidence: authorized commit.";
+  for (const instructions of [
+    IMPLEMENTATION_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+  ]) {
+    const prompt = customExecutionPrompt(instructions + context);
+    assert.ok(prompt.endsWith(context));
+    assert.notEqual(prompt, instructions + context);
+    assert.equal(
+      prompt.slice(0, -context.length).includes("executor alone runs git add"),
+      false,
+    );
+  }
+});
+
+test("custom bootstrap derives checks from criteria without a mandatory coding gate", () => {
+  for (const instructions of [
+    BOOTSTRAP_INSTRUCTIONS,
+    APPLICABILITY_INSTRUCTIONS,
+  ]) {
+    const context =
+      "\n\nCriterion data: preserve the ordinary fast gate wording.";
+    const prompt = customExecutionPrompt(instructions + context);
+    assert.ok(prompt.endsWith(context));
+    assert.equal(
+      prompt.slice(0, -context.length).includes("ordinary fast gate"),
+      false,
+    );
+    assert.ok(
+      prompt.includes("semantic-only steps may have no executable checks"),
+    );
+    assert.equal(
+      prompt.includes("commit preparation belongs only to ACCEPT"),
+      false,
+    );
+    assert.equal(prompt.includes("against HEAD or explicit trees"), false);
+    assert.ok(instructions.includes("ordinary fast gate"));
+  }
+});
+
+test("custom check/fix status accounts for result-only repairs without rewriting task data", () => {
+  const changed = "For CHANGED, use only when you changed repository content;";
+  const unchanged =
+    "For UNCHANGED, use only when you found no problem and changed no repository content;";
+  const context = `\n\nTask data: ${changed}\n${unchanged}`;
+  const prompt = customExecutionPrompt(CHECK_AND_FIX_INSTRUCTIONS + context);
+  const instructions = prompt.slice(0, -context.length);
+  assert.ok(prompt.endsWith(context));
+  assert.equal(instructions.includes(changed), false);
+  assert.equal(instructions.includes(unchanged), false);
+  assert.ok(instructions.includes("changed workspace content or result data"));
+  assert.ok(
+    instructions.includes("changed neither workspace content nor result data"),
+  );
+  assert.ok(CHECK_AND_FIX_INSTRUCTIONS.includes(changed));
+  assert.ok(CHECK_AND_FIX_INSTRUCTIONS.includes(unchanged));
 });
 
 test("execution parsing selects the explicit contract and preserves exact subjects", () => {
@@ -128,9 +195,19 @@ test("custom inspection uses the bound directory snapshot and cannot obtain Git 
       },
     },
   );
-  assert.deepEqual(await policy.inspectWorkspace({ git: safety }), {
-    snapshot,
-  });
+  assert.deepEqual(
+    await policy.inspectWorkspace({
+      git: safety,
+      projectPath: "/workspace",
+      artifactRoot: "LOCAL_ARTIFACTS",
+      runId: "run-1",
+    }),
+    {
+      snapshot,
+      clarificationPath:
+        "/workspace/LOCAL_ARTIFACTS/agent-runner/run-1/clarifications.md",
+    },
+  );
   assert.equal(await policy.inspectPlanPosition({ git: safety }), null);
   assert.equal(snapshots, 1);
   // Even a fully capable supplied Git service cannot grant this policy effects.
@@ -146,7 +223,7 @@ test("custom inspection uses the bound directory snapshot and cannot obtain Git 
     code: "ERR_PLAN_KIND_EFFECT_FORBIDDEN",
   });
   assert.deepEqual(policy.workspace, { kind: "directory", lease: "exclusive" });
-  assert.equal(policy.terminalState, null);
+  assert.equal(policy.terminalState, "ACCEPT");
   assert.deepEqual(policy.roleAccess.worker, ["read-only", "workspace-write"]);
   for (const role of ["reviewer", "arbiter"])
     assert.deepEqual(policy.roleAccess[role], ["read-only"]);
@@ -173,6 +250,7 @@ test("kind-specific runtime and provider requirements do not demand custom commi
         "prepareEdit",
       ].map((name) => [name, noop]),
     ),
+    workspace: { assertUnchanged: noop, inspectPath: noop, snapshot: noop },
     git: { assertUnchanged: noop, inspectPath: noop, snapshot: noop },
     trustedValidation: { execute: noop, preflight: noop },
     finishAgentTurn: noop,
@@ -222,44 +300,27 @@ test("kind-specific runtime and provider requirements do not demand custom commi
   );
 });
 
-test("persisted kind is explicit and custom execution cannot start through internal entry points", async (t) => {
+test("persisted kind stays explicit and public custom selection grants no commit access", () => {
   const initial = createPlanExecutionState();
   assert.equal(initial.planKind, "commit");
   const { planKind: _kind, ...legacy } = initial;
-  assert.throws(() => normalizePipelineState(legacy), {
-    code: "ERR_INVALID_PLAN_EXECUTION_STATE",
-  });
-  for (const planKind of [null, undefined, "unknown"]) {
-    assert.throws(() => normalizePipelineState({ ...initial, planKind }), {
-      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
-    });
-  }
-  assert.equal(
-    Object.hasOwn(planExecutionPipeline.settings, "planKind"),
-    false,
+  assert.throws(() => normalizePipelineState(legacy));
+  for (const planKind of [null, undefined, "unknown"])
+    assert.throws(() => normalizePipelineState({ ...initial, planKind }));
+  assert.equal(planExecutionPipeline.settings.planKind.defaultValue, "commit");
+  assert.ok(planExecutionPipeline.runOptions.includes("plan-kind"));
+  const custom = createPlanExecutionState({ planKind: "custom" });
+  assert.equal(custom.planKind, "custom");
+  assert.equal(custom.commitSizeAssessment.eligible, false);
+  assert.throws(() =>
+    planExecutionPipeline.migrations[34]({ pipelineState: custom }),
   );
-  assert.equal(planExecutionPipeline.runOptions.includes("planKind"), false);
-  assert.throws(() => createPlanExecutionState({ planKind: "custom" }), {
-    code: "ERR_CUSTOM_EXECUTION_INACTIVE",
-  });
-  const fixture = await createFixture(t);
-  await assert.rejects(
-    runPlanExecution({
-      run: {
-        ...fixture.currentRun,
-        pipelineState: { ...initial, planKind: "custom" },
-      },
-      runtime: new Proxy(
-        {},
-        {
-          get() {
-            assert.fail("custom runtime was accessed");
-          },
-        },
-      ),
-    }),
-    { code: "ERR_CUSTOM_EXECUTION_INACTIVE" },
-  );
+  for (const change of [
+    { workflowState: "COMMIT" },
+    { pendingCommit: {} },
+    { completedCommits: ["a".repeat(40)] },
+  ])
+    assert.throws(() => normalizePipelineState({ ...custom, ...change }));
 });
 
 for (const mode of ["independent", "lazy", "combined"]) {
@@ -289,7 +350,23 @@ for (const mode of ["independent", "lazy", "combined"]) {
     assert.deepEqual(migrated, { ...saved, planKind: "commit" });
     assert.ok(Object.isFrozen(migrated));
     assert.doesNotThrow(() => normalizePipelineState(migrated));
-    fixture.persistPipelineState(migrated);
+    for (const missing of ["finalization", "trustedChecks"]) {
+      const legacySettings = structuredClone(migrated);
+      delete legacySettings.customCandidate;
+      delete legacySettings.settings.planKind;
+      delete legacySettings.settings[missing];
+      const upgraded = planExecutionPipeline.migrations[34]({
+        pipelineState: legacySettings,
+      });
+      assert.deepEqual(normalizePipelineState(upgraded), migrated);
+    }
+    const legacy34 = structuredClone(migrated);
+    delete legacy34.customCandidate;
+    delete legacy34.settings.planKind;
+    const upgraded = planExecutionPipeline.migrations[34]({
+      pipelineState: legacy34,
+    });
+    fixture.persistPipelineState(normalizePipelineState(upgraded));
     const done = await fixture.run();
     assert.equal(
       done.pipelineState.workflowState,

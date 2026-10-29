@@ -3,8 +3,9 @@
 ## Goal
 
 Create a deterministic, reviewable `plan.md` of the explicitly selected kind.
-Commit execution consumes validated commit plans unchanged; custom authoring
-produces criterion-driven plans while custom execution remains unavailable.
+Commit execution consumes validated commit plans unchanged. Custom authoring
+produces criterion-driven plans consumed by explicitly selected custom execution,
+which settles reviewed results without staging or committing.
 
 ## Inputs And Artifacts
 
@@ -69,7 +70,8 @@ selections nor adopts changed inputs. Directory workflows use the existing
 workspace drift guards; commit authoring additionally fingerprints declared
 read trees around turns without traversing unrelated Git content or ignored
 dependencies.
-Custom execution remains unavailable.
+Execution separately confines and freezes output authority; authoring declarations
+alone grant no execution permissions.
 
 ## Configuration
 

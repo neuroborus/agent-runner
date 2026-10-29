@@ -125,6 +125,7 @@ function fixture({ mode = "independent", outputs = [] } = {}) {
           run.pipelineState.customResults.binding,
           snapshot,
           value,
+          run.pipelineState.customResults.clarificationFingerprint,
         ),
       );
       return value;
@@ -230,6 +231,31 @@ test("changed criteria, frozen inputs, permissions and accepted output bytes can
   assert.equal(f.run.pipelineState.customResults.accepted.length, 1);
 });
 
+test("a clarification version cannot reuse active gates or replace earlier receipts", async () => {
+  const f = fixture({ mode: "combined" });
+  await f.approve();
+  const first = await f.checkpoint().accept(result());
+  f.run.pipelineState.currentStep = 2;
+  await f.approve();
+  f.run.hashes.executionClarifications = "authorized-answer";
+  await assert.rejects(f.checkpoint().accept(result()), {
+    code: "ERR_CUSTOM_RESULT_GATE",
+  });
+  assert.deepEqual(f.run.pipelineState.customResults.accepted, [first]);
+  f.run.pipelineState.customResults = {
+    ...f.run.pipelineState.customResults,
+    clarificationFingerprint: digest(f.run.hashes.executionClarifications),
+  };
+  await assert.rejects(f.checkpoint().accept(result()), {
+    code: "ERR_CUSTOM_RESULT_GATE",
+  });
+  await f.approve();
+  const second = await f.checkpoint().accept(result());
+  assert.notEqual(second.resultFingerprint, first.resultFingerprint);
+  assert.equal(second.previous, first.receipt);
+  assert.deepEqual(f.run.pipelineState.customResults.accepted[0], first);
+});
+
 test("accepted subtrees bind external link targets, intermediate links and linked directory contents", async (t) => {
   const root = await fs.mkdtemp(join(tmpdir(), "custom-result-links-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -326,6 +352,12 @@ test("interrupted acceptance reconciles its exact record and retains drift or st
   });
   assert.deepEqual(f.run.pipelineState.customResults.pending, pending);
   f.snapshot.contentFingerprint = pending.contentFingerprint;
+  f.run.hashes.executionClarifications = "changed";
+  await assert.rejects(f.checkpoint().reconcile(), {
+    code: "ERR_CUSTOM_RESULT_GATE",
+  });
+  assert.deepEqual(f.run.pipelineState.customResults.pending, pending);
+  delete f.run.hashes.executionClarifications;
   const accepted = await f.checkpoint().reconcile();
   assert.deepEqual(accepted.accepted, [pending]);
   assert.equal(accepted.pending, null);
@@ -519,7 +551,7 @@ for (const interruption of ["allocation", "creation", "identity"]) {
     const f = fixture({ outputs: [path] });
     const created = await store.createRun({
       pipelineId: "plan-execution",
-      pipelineStateVersion: 34,
+      pipelineStateVersion: 35,
       projectPath,
       taskPath,
       roles: { worker: { backend: "codex", model: null } },

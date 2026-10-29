@@ -28,8 +28,29 @@ defaults change, while preserving exact-request idempotency.
 Pipeline-owned `workflow.test.js` covers all three
 custom authoring gates, missing criteria, declaration correction and legacy
 commit defaults with fake effects. Its regressions cover canonical criterion
-publication, aggregate serialized declaration budgets before freezing, and
-correctable canonical draft expansion. Custom execution remains inactive.
+publication, aggregate serialized declaration budgets before freezing, and correctable canonical draft expansion.
+
+Fast `test/runner-custom-execution.test.js` uses lightweight transitions and
+workspace effects for sequential analysis/output execution in all three modes,
+criterion-bound gates, result-only repairs, output-preparation baseline recovery and drift rejection, bounded malformed-output correction, trusted provenance and interrupted acceptance. Repository-contained coverage also checks canonical exclusion and untouched Git controls.
+Semantic-only finalization failures retain their issues across reconstruction
+and require result repair and fresh combined gates without invented checks.
+Root creation still proves descriptor selection, configuration and declared permissions.
+Boundary validation and creation cover a project commit-kind override of a
+runner custom default before plan parsing.
+Focused reconstruction coverage rejects writable provider-policy drift before
+another turn while preserving startup receipts, accepted results and permissions.
+`test/runner-custom-execution.slow.test.js` owns real leased authoring-to-execution
+composition and accepted-result recovery without Git; run it when changing public
+custom selection, directory role probing, custom orchestration or settlement.
+Its slow invocation is `npm run test:slow -- test/runner-custom-execution.slow.test.js`.
+Fast recovery cases cover compatible authorized decisions before acceptance and
+after an earlier receipt, fresh gates for the new clarification version, and
+rejection of unauthorized drift or an answer invalidating accepted results.
+The pure result-checkpoint suite rejects stale clarification approvals; execution
+contract tests retain legacy finalization/trusted-check defaults in every mode.
+The existing root orchestration, effect, stop and CLI/MCP slow suites retain their
+separate guarantees and remain applicable to their documented boundaries.
 
 Fast `packages/custom-plan/test/custom-plan.test.js` owns the pure custom-plan
 contract: analysis/output plans, immutable parsing, canonical round trips,
@@ -102,7 +123,7 @@ providers. Coincident and ancestor task roots retain drift protection for
 undeclared project content while allowing explicitly declared task artifacts.
 Frozen-input identity drift blocks trusted
 execution and capability preparation before service invocation. Injected
-descriptor workflows keep incomplete custom execution routes unregistered; selected
+descriptor workflows isolate lifecycle behavior from pipeline execution; selected
 trusted command execution is faked rather than invoking project checks.
 
 The fast state `preservation.test.js` suite owns unfinished-work capture and
@@ -290,7 +311,7 @@ two-step selection in all modes, persisted reload, confirmation reuse, and
 migration of pending rework and correction accounting.
 The fast execution `step-policy.test.js` covers explicit plan-contract selection,
 criterion context, analysis without an artificial diff, directory-only inspection,
-absence of custom Git effects and closed execution entry points. Its lightweight
+absence of custom Git effects and explicit execution entry points. Its lightweight
 all-mode fixtures verify that adding persisted kind preserves consumed commit
 verification without another provider turn or renewed accounting. Existing
 stale-plan, implementation-evidence, refinement and commit-safety suites retain

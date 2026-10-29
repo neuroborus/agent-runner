@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { completedStepCount, stepLabel } from "./step-policy.js";
 import {
   assembleBootstrapInventory,
   createBootstrapScope,
@@ -90,7 +91,7 @@ export function revisionBootstrapScope(
     repositoryFingerprint = fingerprint(state.repositoryBaseline),
     infrastructureFingerprint,
     revision,
-    step = state.completedCommits.length + 1,
+    step = completedStepCount(state) + 1,
     amendment = amendmentOf(state),
   },
 ) {
@@ -136,9 +137,15 @@ export function revisionBootstrapScope(
       })),
     );
   }
-  const position = { step, subject: authority.steps[step - 1]?.subject };
+  const position = {
+    step,
+    subject: authority.steps[step - 1]
+      ? stepLabel(authority.steps[step - 1])
+      : null,
+  };
   return createBootstrapScope({
     canonicalPlan: authority.plan,
+    planKind: state.planKind,
     role,
     inputFingerprint,
     repositoryFingerprint,

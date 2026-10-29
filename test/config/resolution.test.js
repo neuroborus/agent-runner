@@ -115,6 +115,7 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     },
   });
   assert.deepEqual(resolved.settings, {
+    planKind: "commit",
     preferredCommitLineLimit: 900,
     commitSizeAssessmentMultiplier: 3,
     finalization: "auto",
@@ -1004,12 +1005,11 @@ test("authoring plan selection resolves additively without inferring kind from c
   assert.equal(resolved.settings.criteriaPath, "criteria.md");
   assert.deepEqual(resolved.settings.sourceReferences, ["sources/b.md"]);
   assert.deepEqual(resolved.settings.outputPaths, ["reports/a.md"]);
-  assert.throws(
-    () =>
-      resolvePipelineConfiguration("plan-execution", root, {}, {}, null, null, {
-        planKind: "custom",
-      }),
-    /planKind/u,
+  assert.equal(
+    resolvePipelineConfiguration("plan-execution", root, {}, {}, null, null, {
+      planKind: "custom",
+    }).settings.planKind,
+    "custom",
   );
 });
 

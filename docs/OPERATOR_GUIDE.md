@@ -14,11 +14,20 @@ the pipeline specifications own exact workflow and recovery contracts.
 
 Choose one pipeline for the intended outcome:
 
-| Pipeline         | Starting point                             | Successful result                                                    |
-| ---------------- | ------------------------------------------ | -------------------------------------------------------------------- |
-| `plan-authoring` | A task and optional context                | A reviewed, validated `plan.md`; no implementation or commit         |
-| `plan-execution` | A clean worktree and validated commit plan | One verified local commit per planned step                           |
-| `polishing`      | An existing non-empty local change set     | The complete finalized and reviewed changes staged, without a commit |
+| Pipeline         | Starting point                         | Successful result                                                    |
+| ---------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| `plan-authoring` | A task and optional context            | A reviewed, validated `plan.md`; no implementation or commit         |
+| `plan-execution` | An explicitly selected validated plan  | One verified commit or criterion-bound accepted result per step      |
+| `polishing`      | An existing non-empty local change set | The complete finalized and reviewed changes staged, without a commit |
+
+Execution defaults to commit plans. Explicit `--plan-kind custom` (MCP
+`planKind: "custom"`) consumes agreed criteria and confined declarations from
+its plan, including in ordinary directories. Custom results pass the same
+mode-required candidate, criterion-dependent finalization and distinct terminal
+confirmation gates before durable acceptance. They gain no staging/commit
+authority or automatic coding checks. `auto` selects no custom coding skill;
+explicit guidance remains frozen. Preserve accepted receipts and outputs on
+recovery; changed inputs or earlier results require revised planning and a new run.
 
 `independent` is the default and recommended mode: separate primary and review
 roles provide independent semantic review, using more provider context and
@@ -39,8 +48,9 @@ All planning turns remain repository-read-only, with runner-owned artifact write
 Execution and polishing additionally require finalization and a distinct read-only
 terminal confirmation over the resulting fingerprint and validation evidence:
 Worker in lazy mode, Reviewer otherwise.
-Execution then authorizes one Worker commit; consumed commits recover by
-verification only. Polishing ends with runner-owned staging without a commit.
+Commit execution then authorizes one Worker commit; consumed commits recover by
+verification only. Custom execution settles a durable result receipt. Polishing
+ends with runner-owned staging without a commit.
 See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
 [authoring](../pipelines/plan-authoring/docs/SPEC.md),
 [execution](../pipelines/plan-execution/docs/SPEC.md), and
@@ -79,7 +89,8 @@ task inputs or tracked project documentation, with commands clearly identified
 as required checks or background examples. Ambiguous commands in prose can
 produce a different inventory from the one you intended.
 
-Plan execution consumes the validated subjects and commit boundaries unchanged.
+Commit execution consumes the validated subjects and commit boundaries unchanged;
+custom execution consumes the frozen ordered steps and agreed result criteria.
 A decision that conflicts with the plan requires a revised plan and a new
 execution run. Do not edit a frozen clarification transcript to override it,
 rewrite completed commits, or reuse a plan whose steps are already implemented.
@@ -737,9 +748,11 @@ only under the runner's exact content and infrastructure fingerprint rules;
 there must still be a fresh successful terminal confirmation. An operator's
 manual validation result does not replace this evidence.
 
-For plan execution, only the runner-authorized Worker commit effect stages,
+For commit-plan execution, only the runner-authorized Worker commit effect stages,
 checks staged hygiene, and creates the exact subject-only planned local commit.
 No body, footer, authorship trailer, identity change, or remote write is allowed.
+Custom execution instead settles the exact confirmed result and its receipt,
+preserving earlier receipts and output fingerprints without staging or committing.
 For polishing, only the runner's `HANDOFF` stages and verifies the complete
 accepted change set; `HEAD` stays unchanged. Wait for `DONE` and its verified
 outcome, not merely a successful agent message or passing tests. Never replay

@@ -52,6 +52,7 @@ export function classifyStopCheckpoint(run, checkpoint) {
 // Selected steps remain targets while suspended; terminal acceptance is state-owned.
 export function resolveStopBoundary(run) {
   const current = run.pipelineState;
+  if (current.planKind === "custom") return null;
   if (
     !Number.isSafeInteger(current.currentStep) ||
     current.currentStep < 1 ||

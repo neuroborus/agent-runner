@@ -1,7 +1,11 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { planKindPolicy } from "./step-policy.js";
+import {
+  planKindPolicy,
+  PLAN_KIND_SETTING,
+  resolveExecutionWorkspace,
+} from "./step-policy.js";
 import { assertCustomOutputPreparation } from "./custom-results.js";
 import {
   COMMIT_SIZE_DEFAULTS,
@@ -119,6 +123,7 @@ function trustedCheckSelection(value) {
 
 const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
+  planKind: PLAN_KIND_SETTING,
   preferredCommitLineLimit: positiveIntegerSetting(
     COMMIT_SIZE_DEFAULTS.preferredCommitLineLimit,
   ),
@@ -184,6 +189,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "REVIEW",
   "RESOLVE_FINDINGS",
   "COMMIT",
+  "ACCEPT",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
@@ -514,6 +520,12 @@ function projectStatus(run) {
   const state = run.pipelineState;
   return Object.freeze({
     currentStep: state.currentStep,
+    planKind: state.planKind,
+    acceptedSteps: Object.freeze(
+      state.customResults?.accepted.map(({ step, receipt, result }) =>
+        Object.freeze({ step, receipt, result }),
+      ) ?? [],
+    ),
     planPath: state.planPath ?? join(run.taskPath, "plan.md"),
     refinementProgress: projectPlanProgress(run),
     findings: Object.freeze(
@@ -1484,7 +1496,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 34,
+  stateVersion: 35,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1524,18 +1536,41 @@ export const planExecutionPipeline = Object.freeze({
     31: migratePlanExecutionStateV31,
     32: migratePlanExecutionStateV32,
     33: migratePlanExecutionStateV33,
+    34: (run) => {
+      if (
+        run.pipelineState.planKind !== "commit" ||
+        run.pipelineState.customResults !== null
+      )
+        throw new PlanExecutionWorkflowError(
+          "Legacy execution has no custom result authority.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        customCandidate: null,
+        customWritePolicy: null,
+        settings:
+          run.pipelineState.settings === null
+            ? null
+            : { planKind: "commit", ...run.pipelineState.settings },
+      });
+    },
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,
   workspace: planKindPolicy("commit").workspace,
+  resolveWorkspace: resolveExecutionWorkspace,
+  initialRoleAccess: ({ workspacePolicy }) =>
+    workspacePolicy ? ["read-only"] : undefined,
+  resolveRoleAccess: ({ role, workspacePolicy }) =>
+    planKindPolicy(workspacePolicy ? "custom" : "commit").roleAccess[role],
   resolveActiveRoles,
   settings: SETTINGS,
   validateSettings: commitSizeThreshold,
   taskInputs: TASK_INPUTS,
-  runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
+  runOptions: Object.freeze(["project", "task", "mode", "plan-kind", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description:
-    "Execute, converge, finalize, confirm, and commit each plan step.",
+    "Execute reviewed commit plans or criterion-driven custom steps.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

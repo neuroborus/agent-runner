@@ -76,14 +76,12 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
 - The adapter foundation also supports declared directory reads and output-only
   writes in Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux,
   without Git or commit readiness. Claude writes through sandboxed Bash to
-  existing declared output roots. Directory
-  execution workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
+  existing declared output roots. Explicit custom execution uses these directory permissions; see the [provider contract](docs/product/PROVIDER_MODEL.md).
 - The runner lifecycle foundation selects workspace and lease requirements from
   pipeline descriptors before Git inspection. Directory bindings, protected
   inputs and output permissions survive recovery; repository-contained directory
   work shares the enclosing worktree lease. Explicit custom authoring uses that
-  directory lifecycle; commit authoring, execution and polishing still require
-  Git. Missing Git never selects another completion contract.
+  directory lifecycle, as does explicitly selected custom execution; commit authoring, commit execution and polishing require Git. Missing Git never selects another completion contract.
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target
   repository.
@@ -166,7 +164,7 @@ configuration.
 | Pipeline         | Purpose                                                                                         | Specification                                                                    |
 | ---------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md`                                  | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
-| `plan-execution` | Converge, finalize, confirm, and locally commit every plan step                                 | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
+| `plan-execution` | Execute reviewed commit steps or criterion-driven custom results                                | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
 | `polishing`      | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md)           |
 
 Plan authoring and execution share the deterministic
@@ -177,8 +175,7 @@ change set.
 
 The separate [`@agent-runner/custom-plan`](packages/custom-plan/README.md)
 package defines criterion-driven `Step N` plans, including analysis-only results.
-Explicit custom authoring is available through CLI/MCP/configuration; custom
-execution remains unavailable.
+Explicit custom authoring and sequential execution are available through CLI/MCP/configuration. Custom completion produces accepted result receipts, including analysis without a file diff; it never stages or commits.
 
 ## Configuration
 
@@ -279,6 +276,7 @@ Pipeline settings use these defaults:
 | `plan-authoring` | `maxRevisionRounds`              |            20 |
 | `plan-authoring` | `preferredCommitLineLimit`       |           900 |
 | `plan-authoring` | `stagnationWindowRounds`         |             3 |
+| `plan-execution` | `planKind`                       |      `commit` |
 | `plan-execution` | `mode`                           | `independent` |
 | `plan-execution` | `preferredCommitLineLimit`       |           900 |
 | `plan-execution` | `commitSizeAssessmentMultiplier` |             3 |
@@ -750,6 +748,33 @@ and receive no authoring write permission. Analysis-only plans may omit
 coding requirements only when selected. Only Runner writes `clarifications.md`
 and the validated `plan.md`.
 
+Execute the reviewed custom plan with its frozen criteria and declarations:
+
+```bash
+agent-run run plan-execution --project /path/to/workspace --task /path/to/task \
+  --plan-kind custom --mode combined
+```
+
+MCP `run_start` uses `pipelineId: "plan-execution"` and `planKind: "custom"`;
+configuration uses `pipelines.plan-execution.planKind`. Execution takes sources,
+outputs and agreed criteria from `plan.md`; authoring-only selectors cannot
+replace them. Existing output files or directories can be writable. To create
+new files, prefer a declared output directory; a trailing `/` explicitly
+requests directory preparation under an existing parent. A missing file grants
+no parent writes, and Claude requires an existing exact mount root.
+
+All three modes retain candidate convergence, criterion-dependent finalization
+and distinct read-only terminal confirmation. `finalization: auto` selects no
+coding skill for custom work; explicit selected guidance remains frozen. A
+semantic-only step may need no executable checks, but it still requires its
+review gates. Selected trusted commands keep their exact provenance. Each
+settled result records bounded analysis, criterion evidence and exact output
+fingerprints; status exposes accepted-step receipts. Interruptions reconcile
+pending acceptance before advancing. Earlier accepted outputs remain immutable.
+Custom execution never stages, commits or gains automatic coding gates, including
+inside a repository. Commit execution retains exact subjects, observed initial
+changes and one-shot commit authorization.
+
 Clarification artifacts inside a Git repository must already be ignored and
 untracked, including custom authoring; the runner never changes ignore rules.
 
@@ -759,8 +784,7 @@ MCP `run_start` uses `planKind: "custom"`, `criteriaPath: "criteria.md"`,
 `pipelines.plan-authoring` in global/project configuration. CLI/MCP overrides
 win; selections and read bindings freeze for resume. Omitted and legacy kinds
 remain `commit`, including with supplemental criteria. Unknown or mismatched
-kinds fail closed; absent Git never selects custom. Custom execution is not yet
-available.
+kinds fail closed; absent Git never selects custom.
 
 `guidance` prints the complete common operator guide and local additions.
 `guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`
@@ -881,9 +905,7 @@ nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 34, and polishing version 16. Execution persists explicit commit
-plan kind and a null custom-result ledger for existing runs; custom execution
-remains unavailable. Their ordered migrations resolve missing
+version 35, and polishing version 16. Existing execution runs retain explicit commit semantics and a null custom-result ledger; the new version adds current custom result data without granting legacy custom authority. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

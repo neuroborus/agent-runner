@@ -112,7 +112,10 @@ export async function runBoundedBootstrap({
               output.result,
               role,
               scope.steps.length,
-              { trustedCommands: scope.trustedCommands },
+              {
+                trustedCommands: scope.trustedCommands,
+                allowEmpty: state().planKind === "custom",
+              },
             );
             if (
               candidate.result.status === "READY" ||

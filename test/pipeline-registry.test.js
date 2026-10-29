@@ -533,6 +533,7 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
     "mode",
+    "plan-kind",
     "worker",
     "reviewer",
     "arbiter",

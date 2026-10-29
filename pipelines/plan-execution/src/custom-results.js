@@ -71,11 +71,15 @@ function bindingFor(run) {
     fingerprint(workspace.bindingFingerprint) &&
       fingerprint(workspace.protectedFingerprint),
   );
+  // Execution clarifications can change through the authorized product-decision
+  // flow. Bind their exact version on each receipt; immutable inputs and output
+  // authority remain shared by every step.
+  const { executionClarifications: _clarifications, ...hashes } = run.hashes;
   return {
     planFingerprint: hash(serializeCustomPlan(plan)),
     criteriaFingerprint: hash(plan.criteria),
     inputFingerprint: hash({
-      hashes: run.hashes,
+      hashes,
       protectedFingerprint: workspace.protectedFingerprint,
     }),
     workspaceFingerprint: workspace.bindingFingerprint,
@@ -84,7 +88,8 @@ function bindingFor(run) {
   };
 }
 
-function normalizeResult(result, step) {
+export function normalizeCustomResult(result, step) {
+  assert(step !== undefined);
   assert(
     exact(result, ["analysis", "evidence", "outputPaths"]) &&
       text(result.analysis, 32 * 1024) &&
@@ -160,12 +165,82 @@ function outputFingerprints(snapshot, paths) {
   });
 }
 
-export function customResultFingerprint(binding, snapshot, result) {
+export function customResultFingerprint(
+  binding,
+  snapshot,
+  result,
+  clarificationFingerprint = hash(null),
+) {
   return hash({
     binding,
+    clarificationFingerprint,
     contentFingerprint: snapshot.contentFingerprint,
     result,
   });
+}
+
+export function executionContentFingerprint(
+  state,
+  snapshot = state.repositoryBaseline,
+) {
+  return state.planKind === "custom" &&
+    state.customCandidate &&
+    state.customResults
+    ? customResultFingerprint(
+        state.customResults.binding,
+        snapshot,
+        state.customCandidate,
+        state.customResults.clarificationFingerprint,
+      )
+    : snapshot?.contentFingerprint;
+}
+
+const RESULT_SCHEMA = {
+  type: "object",
+  properties: {
+    analysis: { type: "string", minLength: 1, maxLength: 32768 },
+    evidence: {
+      type: "array",
+      maxItems: 256,
+      items: {
+        type: "object",
+        properties: {
+          criterionId: { type: "string", minLength: 1 },
+          observations: {
+            type: "array",
+            minItems: 1,
+            maxItems: 32,
+            items: { type: "string", minLength: 1, maxLength: 4000 },
+          },
+        },
+        required: ["criterionId", "observations"],
+        additionalProperties: false,
+      },
+    },
+    outputPaths: {
+      type: "array",
+      maxItems: 256,
+      items: { type: "string", minLength: 1 },
+    },
+  },
+  required: ["analysis", "evidence", "outputPaths"],
+  additionalProperties: false,
+};
+
+export function customTurnSchema(schema, resultTurn) {
+  const copy = structuredClone(schema);
+  function allowCriterionValidation(value) {
+    if (!value || typeof value !== "object") return;
+    if (value.properties?.requiredChecks?.minItems)
+      value.properties.requiredChecks.minItems = 0;
+    for (const child of Object.values(value)) allowCriterionValidation(child);
+  }
+  allowCriterionValidation(copy);
+  if (resultTurn) {
+    copy.properties.result = { anyOf: [RESULT_SCHEMA, { type: "null" }] };
+    copy.required.push("result");
+  }
+  return copy;
 }
 
 function assertRecord(record, ledger, plan, step) {
@@ -174,6 +249,7 @@ function assertRecord(record, ledger, plan, step) {
       "step",
       "previous",
       "bindingFingerprint",
+      "clarificationFingerprint",
       "result",
       "outputs",
       "contentFingerprint",
@@ -192,6 +268,7 @@ function assertRecord(record, ledger, plan, step) {
       receipt === hash(body) &&
       [
         record.contentFingerprint,
+        record.clarificationFingerprint,
         record.snapshotFingerprint,
         record.resultFingerprint,
         record.validationFingerprint,
@@ -204,9 +281,10 @@ function assertRecord(record, ledger, plan, step) {
         ledger.binding,
         { contentFingerprint: record.contentFingerprint },
         record.result,
+        record.clarificationFingerprint,
       ),
   );
-  normalizeResult(record.result, plan.steps[step - 1]);
+  normalizeCustomResult(record.result, plan.steps[step - 1]);
   assert(
     record.result.outputPaths.every((path) =>
       ledger.binding.outputPaths.some((root) => within(root, path)),
@@ -231,11 +309,14 @@ export function normalizeCustomResults(value, canonicalPlan) {
     exact(ledger, [
       "schemaVersion",
       "binding",
+      "clarificationFingerprint",
       "accepted",
       "pending",
       "preparedRoots",
       "preparation",
-    ]) && ledger.schemaVersion === 1,
+    ]) &&
+      ledger.schemaVersion === 1 &&
+      fingerprint(ledger.clarificationFingerprint),
   );
   const binding = ledger.binding;
   assert(
@@ -389,6 +470,9 @@ export function createCustomResultCheckpoint({ run: initial, runtime }) {
       ? freeze({
           schemaVersion: 1,
           binding,
+          clarificationFingerprint: hash(
+            run.hashes.executionClarifications ?? null,
+          ),
           accepted: [],
           pending: null,
           preparedRoots: [],
@@ -505,9 +589,13 @@ export function createCustomResultCheckpoint({ run: initial, runtime }) {
     const state = run.pipelineState;
     assert(
       state.currentStep === ledger.accepted.length + 1 &&
+        ledger.clarificationFingerprint ===
+          hash(run.hashes.executionClarifications ?? null) &&
         stepGatePassed(state, resultFingerprint) &&
         (!record ||
-          (record.gateFingerprint === gateFingerprint(state) &&
+          (record.clarificationFingerprint ===
+            hash(run.hashes.executionClarifications ?? null) &&
+            record.gateFingerprint === gateFingerprint(state) &&
             record.validationFingerprint ===
               validationEvidenceFingerprint(state.finalizationResult))),
       "Custom acceptance requires current candidate, finalization and terminal confirmation evidence.",
@@ -548,7 +636,7 @@ export function createCustomResultCheckpoint({ run: initial, runtime }) {
       );
       const step = plan.steps[ledger.accepted.length];
       assert(step !== undefined);
-      result = normalizeResult(result, step);
+      result = normalizeCustomResult(result, step);
       assert(
         result.outputPaths.every((path) =>
           binding.outputPaths.some((root) => within(root, path)),
@@ -559,6 +647,7 @@ export function createCustomResultCheckpoint({ run: initial, runtime }) {
         binding,
         snapshot,
         result,
+        hash(run.hashes.executionClarifications ?? null),
       );
       assertGates(resultFingerprint);
       await initialize();
@@ -566,6 +655,9 @@ export function createCustomResultCheckpoint({ run: initial, runtime }) {
         step: step.number,
         previous: ledger.accepted.at(-1)?.receipt ?? null,
         bindingFingerprint: hash(binding),
+        clarificationFingerprint: hash(
+          run.hashes.executionClarifications ?? null,
+        ),
         result,
         outputs: outputFingerprints(snapshot, result.outputPaths),
         contentFingerprint: snapshot.contentFingerprint,

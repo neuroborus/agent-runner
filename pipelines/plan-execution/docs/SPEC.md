@@ -2,9 +2,9 @@
 
 ## 1. Goal
 
-Define the `plan-execution` pipeline that executes a predefined coding plan
-autonomously, one planned commit at a time, using local coding agents through
-the shared Agent Runner CLI/runtime.
+Define the `plan-execution` pipeline that executes a reviewed commit or custom
+plan sequentially through the shared Agent Runner CLI/runtime. Commit plans
+produce verified local commits; custom plans settle criterion-bound results.
 
 The runner must:
 
@@ -32,10 +32,11 @@ This is a local orchestration CLI, not a general agent framework.
 
 ---
 
-The descriptor explicitly selects a Git workspace and an exclusive canonical-worktree lease.
+The descriptor explicitly selects a Git workspace for commit plans or a directory
+workspace for custom plans, with an exclusive canonical exclusion lease.
 The root resolves that selection before Git-specific inspection; a missing Git
-repository never selects a directory workflow. Role access, ignored artifacts
-and this pipeline's completion contract retain their existing guarantees.
+repository never selects a directory workflow. Role access and repository-local
+ignored artifacts retain their existing guarantees.
 
 ## 2. Technology Baseline
 
@@ -48,7 +49,7 @@ Verified baseline as of **2026-08-16**:
 - npm: use the version bundled with the selected Node.js 24.x release
 - Codex CLI stable release used as the V1 compatibility baseline: **0.147.0**
 - Claude Code current release used as the V1 compatibility baseline: **2.1.233**
-- Git: required external executable
+- Git: required for commit execution; ordinary-directory custom execution needs no Git
 
 Use Node.js 24.x LTS. The supported range is **`>=24 <25`**. Do not target the Current Node.js line.
 
@@ -112,7 +113,7 @@ Do not hard-pin their versions in workflow logic. Detect and log installed versi
 
 The runner receives:
 
-1. a local Git repository;
+1. a local Git repository for commit plans, or a directory for custom plans;
 2. a task directory.
 
 ```bash
@@ -133,7 +134,7 @@ task/
 
 - `task.md`: task/problem statement.
 - `clarifications.md`: optional product decisions captured during plan authoring.
-- `plan.md`: ordered commit-by-commit implementation plan.
+- `plan.md`: ordered plan of the explicitly selected kind.
 - `context.md`: optional extra context supplied by the user.
 
 The execution run keeps its own clarification transcript at:
@@ -144,11 +145,11 @@ The execution run keeps its own clarification transcript at:
 
 This local artifact uses the common Markdown transcript format and contains
 execution-specific questions and answers. Before creating it, preflight must
-use `git check-ignore` to verify that the target
-repository ignores the resolved path. `artifactRoot` is a persisted normalized
-repository-relative selection and defaults to `LOCAL_ARTIFACTS`. If the path is
-not ignored, pause
-with `local_artifacts_not_ignored`; never edit `.gitignore` or
+verify that any enclosing target repository ignores the resolved path with
+`git check-ignore`; ordinary directories require no Git inspection.
+`artifactRoot` is a persisted normalized project-relative selection and
+defaults to `LOCAL_ARTIFACTS`. If a repository-contained path is not ignored,
+pause with `local_artifacts_not_ignored`; never edit `.gitignore` or
 `.git/info/exclude` automatically. The artifact is not runner state and must
 never enter a planned commit. The task directory may be located inside or
 outside the target repository. Runner state must therefore **never** be stored
@@ -158,14 +159,16 @@ inside the task directory or target repository.
 
 ## 4. Plan Format
 
-The authoritative shared contract lives in
-[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md). Before
-bootstrap, this pipeline must parse and validate the plan with that deterministic
-contract rather than an LLM.
+Commit plans use the authoritative shared
+[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md) contract;
+custom plans use
+[`@agent-runner/custom-plan`](../../../packages/custom-plan/README.md). Before
+bootstrap, this pipeline must parse and validate the explicitly selected kind
+with its deterministic contract rather than an LLM.
 
-The Worker must use the validated subject exactly as returned by the parser. The
-runner must never ask an agent to generate or rewrite it, and multiple planned
-commits must never be merged into one implementation step.
+For commit plans, the Worker must use the validated subject exactly as returned
+by the parser. The runner must never ask an agent to generate or rewrite it,
+and multiple planned commits must never be merged into one implementation step.
 
 ### Plan-kind step policies
 
@@ -184,11 +187,7 @@ step's referenced observable conditions, work, expected results and frozen
 declarations, and permits analysis without an artificial file diff. It selects
 directory inspection through the root-supplied bound capability, grants neither
 retrieval nor paths from plan declarations, and has no `local-commit` access or
-Git effect service. Analysis eligibility is not result acceptance. Private
-`custom-results.js` supplies accepted-result checkpoints; no
-CLI/MCP/configuration selector exposes custom execution,
-and both state creation and persisted validation reject custom execution before
-runtime effects.
+Git effect service. Analysis eligibility is not result acceptance. `custom-results.js` supplies accepted-result checkpoints. CLI `--plan-kind custom`, MCP `planKind: "custom"` and configuration `pipelines.plan-execution.planKind` explicitly select this route. Omitted and legacy kinds stay commit; plan syntax or absent Git never infers a kind. Execution consumes criteria and input/output declarations from the frozen plan, rather than accepting authoring-only criteria/source/output overrides.
 
 The existing mode policy, finding/correction loops, availability handling,
 output-exhaustion recovery and fingerprint-bound gate evidence remain shared
@@ -196,11 +195,11 @@ within this pipeline. Commit-specific effective revisions, validation rebinding,
 replacement execution and derived progress retain their existing contracts and
 eligibility rules. There is no second runner or cross-pipeline dependency.
 
-### Private custom result checkpoints
+### Custom execution and accepted results
 
-The dormant custom checkpoint uses the existing leased, revision-bound,
+The custom checkpoint uses the existing leased, revision-bound,
 write-ahead pipeline transition capability. Its ledger binds the canonical plan,
-agreed criteria, inspected input hashes, protected workspace fingerprint and
+agreed criteria, immutable input hashes, protected workspace fingerprint and
 exact frozen permissions. References grant neither retrieval nor writes.
 Each contiguous accepted record chains its predecessor receipt and contains
 bounded analysis, criterion observations, exact selected output fingerprints,
@@ -223,6 +222,14 @@ Git operation. Earlier accepted outputs remain immutable; changed frozen
 criteria/inputs or invalidated earlier results require revised planning and a
 new execution run.
 
+Authorized product-decision answers still require the read-only plan-compatibility
+gate and fresh candidate/finalization/confirmation evidence. Execution clarification
+versions are bound in active result fingerprints and per result receipt,
+separately from the immutable ledger binding. Only successful compatibility
+and refreezing advance the active version. Compatible answers require fresh
+convergence without rewriting earlier receipts or changing frozen input/output
+authority. Unauthorized transcript edits remain input drift.
+
 Output-directory preparation journals the exact declared root, its prior state,
 real parent and a unique allocation path in private durable state before
 creation. It pins the empty allocation with a no-follow descriptor before
@@ -234,6 +241,11 @@ on the same filesystem and `/usr/bin/mv` with GNU coreutils 9.4's
 fails closed without a copy fallback; existing roots need no utility.
 The descriptor remains open through synchronization and final identity checks,
 rejecting empty replacements before the first public-path identity read.
+The workflow saves that verified prepared identity and its workspace baseline in
+one transition, accepting only the exact empty-root creation. Recovery cannot
+mistake a journaled preparation for unrelated drift or adopt intervening output edits.
+Resume checks every required directory's settled preparation record, including
+interruptions after ledger initialization or between separate root preparations.
 An interrupted allocation or publication without a recorded identity stays
 ambiguous; its exact journaled allocation and root are preserved. Only an explicitly
 authorized output directory can be published; its parent must already exist.
@@ -259,7 +271,56 @@ never manufactures new effect authority.
 State version 34 adds `customResults`, initially `null`. Its version-33
 migration initializes no acceptance or preparation evidence and changes no
 existing gates, counters, effects or eligibility. Commit runs reject a non-null
-custom ledger; custom execution remains inactive even with a valid private ledger.
+custom ledger. Version 35 adds nullable `customCandidate`, a nullable
+`customWritePolicy` receipt and explicit setting defaults. Its version-34 migration
+preserves commit semantics, gates, counters and consumed effects without granting
+custom access or a writable policy receipt.
+
+Custom execution uses the existing sequential state machine. `IMPLEMENT` produces
+bounded `result` data: analysis, observations in exact current criterion-reference
+order, and absolute inspected output paths. Writable check/fix and finding
+resolution return the complete result; inactive outcomes use `result: null`.
+Analysis/evidence changes invalidate dependent gates just like output changes.
+Every role sees the current and earlier accepted results, the current step's
+work/expected results and agreed criteria. Coding requirements apply only when
+selected by the user; unrelated repository coding gates are never automatic.
+
+Independent candidate review, lazy check/fix plus distinct read-only clean
+confirmation, and combined convergence followed by independent review retain
+their ordinary bounded finding and correction contracts. Validation inventories
+and schedules may be empty for semantic-only criteria, but discovery still covers
+every step and retains every selected trusted command with its exact provenance.
+Custom `finalization: auto` selects no coding skill; `none` also selects none,
+while an explicit confined skill remains frozen and verified. Criterion-dependent
+finalization and distinct read-only terminal confirmation bind the result,
+content and exact validation evidence before `ACCEPT` journals and settles it.
+Unmet criteria produce `FAIL` with concrete `F`-prefixed issues even when the
+inventory is empty or all executable checks pass. Each semantic issue identifies
+its criterion in `command`, without adding a fictitious check. These failures
+must be fixed and return through fresh mode-required candidate convergence,
+finalization and terminal confirmation before acceptance.
+Only settled receipts advance the cursor; interruption reconciles pending
+acceptance before another step. No custom state can enter `COMMIT`, carry a
+pending commit, record completed commits or activate commit refinement.
+
+Preliminary boundary discovery selects the workspace policy without reading
+the plan. After project configuration and run overrides resolve, workspace
+selection reads the explicit custom contract through a confined task reader
+before Git inspection, binds local inputs and exact output authority and
+grants no URL retrieval. Existing files or directories can be outputs; a trailing
+`/` explicitly requests a directory root and permits journaled preparation under
+an existing parent. An absent file never grants parent writes. Claude writable
+mounts still require existing roots, so use an existing file or a declared
+output directory for new files. Startup proves read-only access; after output
+preparation the runner proves the exact writable access. Execution pins its
+separate receipt before the first writable turn and requires the same proof
+before subsequent writes, including reconstruction. Policy drift fails closed
+without replacing the frozen startup receipt or broadening the workspace.
+Repository-contained execution shares canonical exclusion and protects Git
+controls. Its local clarification path must already be ignored and untracked.
+Outputs remain unstaged, and completion exposes accepted-step receipts and
+bounded results rather than commit SHAs. Source or accepted-output drift requires
+revised planning and a new execution run.
 
 ---
 
@@ -269,6 +330,7 @@ Required commands:
 
 ```bash
 agent-run run plan-execution --project <repo> --task <task-dir>
+agent-run run plan-execution --project <directory> --task <task-dir> --plan-kind custom
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
 ```
@@ -1671,9 +1733,9 @@ capability preparation, or stale-plan inspection. Independent branch, ref,
 remote, identity, index, and workspace violations retain their Git-safety
 checks and diagnostics. Plan revision requires a revised plan and a new run.
 
-A fresh `run` requires a clean Git working tree, including untracked non-ignored files.
+A fresh commit-plan `run` requires a clean Git working tree, including untracked non-ignored files.
 
-Before any implementation work:
+Before commit-plan implementation work:
 
 - verify the project is a Git repository;
 - record the initial HEAD;
@@ -4278,7 +4340,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 34, preserving
+74. every supported legacy version migrates through state version 35, preserving
     its saved mode and defaulting missing modes to `independent`, without
     fabricating effective-revision approval, reviving terminal runs or replaying
     completed or pending commit effects; unfinished work freezes guidance and repeats

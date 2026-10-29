@@ -139,7 +139,7 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
-      --plan-kind          Author commit (default) or custom plans explicitly
+      --plan-kind          Select commit (default) or custom authoring/execution
       --criteria           Read user criteria from a local Markdown file
       --source             Declare a source path or reference (repeatable; no retrieval)
       --output             Declare an intended output path (repeatable; no authoring writes)
@@ -359,6 +359,15 @@ function runSummary({ directoryPath, run }) {
   }
   if (reviewed !== null) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
+  }
+  if (status.planKind === "custom") {
+    lines.push(`Accepted steps: ${status.acceptedSteps.length}`);
+    for (const { step, receipt, result } of status.acceptedSteps) {
+      lines.push(
+        `Step ${step} receipt: ${shortFingerprint(receipt)}`,
+        result.analysis,
+      );
+    }
   }
   if (status.completedCommits.length > 0) {
     lines.push(

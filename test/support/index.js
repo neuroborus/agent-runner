@@ -26,3 +26,5 @@ export {
   sizeEvidenceResult,
   STRUCTURED_RESULT_BYTES,
 } from "./structured-results.js";
+
+export { customExecutionFixture } from "./custom-execution.js";

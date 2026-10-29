@@ -3,6 +3,14 @@ import { isDeepStrictEqual } from "node:util";
 
 import { canonicalExecutionPlan, planKindPolicy } from "./step-policy.js";
 
+import { customWorkspace } from "./custom-workspace.js";
+import {
+  createCustomResultCheckpoint,
+  executionContentFingerprint,
+  normalizeCustomResult,
+  customTurnSchema,
+} from "./custom-results.js";
+
 import {
   createReplacementCoordinator,
   replacementFindings,
@@ -83,6 +91,7 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  customExecutionPrompt,
   FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
@@ -578,10 +587,14 @@ function normalizeValidationMigrationArbitrationOutput(output) {
   return result;
 }
 
-function normalizeFinalizationRoleOutput(output, trustedCommands) {
+function normalizeFinalizationRoleOutput(
+  output,
+  trustedCommands,
+  allowEmpty = false,
+) {
   const context = finalizationOutputContext();
   try {
-    return normalizeFinalizationResult(output, { trustedCommands });
+    return normalizeFinalizationResult(output, { trustedCommands, allowEmpty });
   } catch (cause) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
@@ -696,9 +709,12 @@ export async function runPlanExecution({
 }) {
   assertRun(run);
   const stepPolicy = planKindPolicy(run.pipelineState.planKind);
-  stepPolicy.assertExecutable();
+  const custom = stepPolicy.kind === "custom";
   if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles), stepPolicy.kind);
+  const safety = custom
+    ? customWorkspace(runtime.workspace, run.projectPath)
+    : runtime.git;
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
@@ -713,6 +729,7 @@ export async function runPlanExecution({
   let dispositionPausePersistence = false;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
+  let customCheckpointSettlement = false;
   let replacementCheckpoint = false;
   // Journal publication can succeed before its caller observes completion.
   let commitAuthorizationPersistence = false;
@@ -736,7 +753,22 @@ ${summary}
 Owned replacement findings (data):
 ${JSON.stringify(replacementFindings(state()))}
 
-Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT.`;
+${custom ? "Phase ownership: the established required-check inventory is input only to FINALIZE. Custom execution has no staging or commit preparation phase." : "Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT."}`;
+  }
+
+  function customPrompt(prompt, resultTurn) {
+    const adapted = customExecutionPrompt(prompt);
+    return `Execute only the explicit custom plan and agreed observable result criteria. Coding conventions and coding checks apply only when the user selected coding requirements. Analysis-only results need no file diff. Never stage, commit, change Git controls or claim commit authority, including inside a repository. Inputs and URLs grant no retrieval; write only the frozen output paths. Validation and finalization are criterion-dependent; an empty command inventory is valid when the criteria require semantic review alone. No coding gate is automatic. Only explicitly selected guidance applies. Findings must identify a failure against the agreed criteria or an established applicable rule. The runner alone accepts a step after all gates.
+
+${adapted}
+
+${state().currentStep === null ? "" : plannedStepContext(planStep())}
+
+Current custom result (data):
+${JSON.stringify(state().customCandidate)}
+
+Earlier accepted results (data):
+${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn result with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the complete current result on UNCHANGED; CHANGED includes analysis/evidence changes. Return result: null only for BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
   }
 
   function planEvidence(evidence) {
@@ -749,7 +781,7 @@ Phase ownership: the established required-check inventory is input only to FINAL
   }
 
   function planPositionPrompt() {
-    return `\n\nRunner-selected plan position (only verified commits are completed):\n${JSON.stringify(selectedPlanPosition(state()))}`;
+    return `\n\nRunner-selected plan position (${custom ? "only settled result receipts are completed" : "only verified commits are completed"}):\n${JSON.stringify(selectedPlanPosition(state()))}`;
   }
 
   function reviewFindingHistory(current, findings = current.previousFindings) {
@@ -1124,6 +1156,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         additionalFixRounds: 0,
         findingOverrides: [],
         pendingCommit: null,
+        ...(custom ? { customCandidate: null } : {}),
       },
       {
         nextCounters: {
@@ -1207,7 +1240,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   async function verifyPersistedRepository() {
     if (!(await ensurePlanPosition())) return false;
     try {
-      await runtime.git.assertUnchanged(state().repositoryBaseline);
+      await safety.assertUnchanged(state().repositoryBaseline);
     } catch (cause) {
       if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
         throw cause;
@@ -1245,7 +1278,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const step = effectivePlanAuthority(current).steps[stepNumber - 1];
     if (step === undefined) return true;
     const evidence = await stepPolicy.inspectPlanPosition({
-      git: runtime.git,
+      git: safety,
       projectPath: currentRun.projectPath,
       baseline: current.repositoryBaseline,
       step,
@@ -1431,6 +1464,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   function workspaceControlChange(before, after) {
+    if (custom) return null;
     if (
       before.projectPath !== after.projectPath ||
       before.head !== after.head ||
@@ -1518,7 +1552,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
     let reconciledRepository;
     try {
-      reconciledRepository = await runtime.git.reconcileInterrupted(
+      reconciledRepository = await safety.reconcileInterrupted(
         state().repositoryBaseline,
         {
           allowWorkspaceChanges,
@@ -1766,10 +1800,28 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     if (access === "workspace-write" && !(await ensureImplementationEvidence()))
       return null;
-    const turnSnapshot = await runtime.git.snapshot({
+    if (custom && access === "workspace-write") {
+      const { policyReceipt } = await runtime.adapters[role].probe({ access });
+      if (state().customWritePolicy === null) {
+        await transition({
+          ...state(),
+          customWritePolicy: structuredClone(policyReceipt),
+        });
+      } else if (!isDeepStrictEqual(state().customWritePolicy, policyReceipt)) {
+        throw new PlanExecutionWorkflowError(
+          "Custom writable provider policy changed.",
+          { code: "ERR_PROVIDER_POLICY_CHANGED" },
+        );
+      }
+    }
+    const turnSnapshot = await safety.snapshot({
       allowedPaths: [],
       projectPath: baseline.projectPath,
     });
+    const turnFixRounds = counters().fixRounds;
+    const beforeCustomFingerprint = custom
+      ? executionContentFingerprint(state())
+      : null;
     const evidenceContext = planEvidence(evidence);
     const sourceContext =
       access === "workspace-write" || ["review", "confirm"].includes(turn.phase)
@@ -1888,8 +1940,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
     ].includes(schema)
       ? `\n\n${STEP_ASSESSMENT_INSTRUCTIONS}`
       : "";
-    const promptFor = (evidence) =>
-      `${buildPrompt(evidence)}\n${sourceContext}${positionPrompt}${assessmentPrompt}`;
+    const resultTurn =
+      custom &&
+      access === "workspace-write" &&
+      [
+        IMPLEMENTATION_SCHEMA,
+        CHECK_AND_FIX_SCHEMA,
+        FINDING_RESOLUTION_SCHEMA,
+      ].includes(schema);
+    const promptFor = (evidence) => {
+      const prompt = `${buildPrompt(evidence)}\n${sourceContext}${positionPrompt}${assessmentPrompt}`;
+      return custom ? customPrompt(prompt, resultTurn) : prompt;
+    };
     const recoveryPrompt = completeRolePrompt(promptFor(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize", "effort"].flatMap((field) =>
@@ -1907,7 +1969,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           ? rolePrompt(promptFor(""))
           : recoveryPrompt,
       recoveryPrompt,
-      schema,
+      schema: custom ? customTurnSchema(schema, resultTurn) : schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
@@ -1956,10 +2018,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       }
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
-        await runtime.git.assertUnchanged(turnSnapshot);
-        await runtime.git.assertUnchanged(baseline);
+        await safety.assertUnchanged(turnSnapshot);
+        await safety.assertUnchanged(baseline);
       } else {
-        nextRepositoryBaseline = await runtime.git.snapshot({
+        nextRepositoryBaseline = await safety.snapshot({
           allowedPaths: baseline.allowedPaths,
           projectPath: baseline.projectPath,
         });
@@ -2224,6 +2286,92 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     if (reconstructingNarrative) {
       narrativeRecovery = { role, checkpoint: availabilityCheckpoint };
+    }
+    if (resultTurn) {
+      const { result, ...output } = response.structured;
+      if (
+        ["COMPLETED", "CHANGED", "UNCHANGED", "RESOLVED"].includes(
+          output.status,
+        )
+      ) {
+        let candidate;
+        try {
+          candidate = normalizeCustomResult(result, planStep());
+          if (
+            candidate.outputPaths.some(
+              (path) =>
+                !currentRun.workspace.policy.outputPaths.some((root) =>
+                  isWithin(root, path),
+                ),
+            )
+          )
+            throw workflowError(
+              "Custom result declares an unauthorized output.",
+            );
+        } catch (cause) {
+          if (!outputContext) throw cause;
+          throw invalidRoleOutput(
+            "Invalid custom criterion evidence.",
+            outputContext,
+            {
+              field: "result",
+              constraint:
+                "bounded-current-criterion-evidence-and-authorized-outputs",
+            },
+          );
+        }
+        if (schema === CHECK_AND_FIX_SCHEMA) {
+          normalizeCheckAndFixResult(output);
+          const changed =
+            (await contentFingerprint()) !== beforeCustomFingerprint ||
+            !isDeepStrictEqual(candidate, state().customCandidate);
+          if ((output.status === "CHANGED") !== changed)
+            throw invalidRoleOutput(
+              "Custom check/fix status must match content and result changes.",
+              outputContext,
+              { field: "status", constraint: "matches-result-mutation" },
+            );
+        }
+        if (!isDeepStrictEqual(candidate, state().customCandidate)) {
+          const current = state();
+          await transition(
+            {
+              ...current,
+              ...clearedCandidateAndTerminalGate(),
+              customCandidate: candidate,
+              ...(current.workflowState === "RESOLVE_FINDINGS"
+                ? {
+                    workflowState: candidateCheckpoint(current.settings),
+                    previousFindings: current.findings.length
+                      ? current.findings
+                      : current.previousFindings,
+                    findings: [],
+                    pendingCorrection: true,
+                  }
+                : {}),
+            },
+            (current.workflowState === "RESOLVE_FINDINGS" &&
+              !current.pendingCorrection) ||
+              (current.workflowState === "CHECK_AND_FIX" &&
+                !current.availabilityCorrectionCharged &&
+                !current.pendingLazyCorrection?.fixRoundCharged &&
+                counters().fixRounds === turnFixRounds)
+              ? {
+                  nextCounters: {
+                    ...counters(),
+                    fixRounds: counters().fixRounds + 1,
+                  },
+                }
+              : {},
+          );
+        }
+      } else if (result !== null)
+        throw invalidRoleOutput(
+          "Inactive custom result must be null.",
+          outputContext,
+          { field: "result", constraint: "null-for-inactive-status" },
+        );
+      return output;
     }
     return response.structured;
   }
@@ -2555,14 +2703,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function contentFingerprint() {
-    return runtime.git.contentFingerprint({
+    const fingerprint = await safety.contentFingerprint({
       allowedPaths: [state().clarificationPath],
       projectPath: state().repositoryBaseline.projectPath,
+    });
+    return executionContentFingerprint(state(), {
+      contentFingerprint: fingerprint,
     });
   }
 
   async function validationInfrastructureFingerprint(paths) {
-    return runtime.git.validationInfrastructureFingerprint({
+    return safety.validationInfrastructureFingerprint({
       paths,
       projectPath: state().repositoryBaseline.projectPath,
     });
@@ -2656,7 +2807,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       fixRoundCharged: false,
       step: current.currentStep,
       phase,
-      contentFingerprint: current.repositoryBaseline.contentFingerprint,
+      contentFingerprint: executionContentFingerprint(current),
       validationInfrastructureFingerprint:
         current.validationInfrastructureFingerprint,
     });
@@ -2703,7 +2854,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await safety.inspectPath({
           path,
           projectPath: state().repositoryBaseline.projectPath,
         });
@@ -3508,7 +3659,7 @@ ${JSON.stringify(
 
   async function resolveFinalizationGuidance(projectPath) {
     const policy = state().settings.finalization;
-    if (policy === "none") {
+    if (policy === "none" || (custom && policy === "auto")) {
       return createFinalizationGuidanceDecision({
         configuredPolicy: policy,
       });
@@ -3518,7 +3669,7 @@ ${JSON.stringify(
     for (const skillPath of candidates) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await safety.inspectPath({
           path: skillPath,
           projectPath,
         });
@@ -3543,7 +3694,7 @@ ${JSON.stringify(
         let selectedFileFingerprint;
         try {
           selectedFileFingerprint =
-            await runtime.git.validationInfrastructureFingerprint({
+            await safety.validationInfrastructureFingerprint({
               paths: [skillPath],
               projectPath,
             });
@@ -3593,7 +3744,7 @@ ${JSON.stringify(
     if (guidance?.selection !== "skill") return true;
     let inspection;
     try {
-      inspection = await runtime.git.inspectPath({
+      inspection = await safety.inspectPath({
         path: guidance.skillPath,
         projectPath: state().repositoryBaseline.projectPath,
       });
@@ -3959,7 +4110,7 @@ ${JSON.stringify(
     if (!(await ensureTrustedCapabilities())) return false;
     const input = await readInputs();
     const preflight = await stepPolicy.inspectWorkspace({
-      git: runtime.git,
+      git: safety,
       projectPath: currentRun.projectPath,
       artifactRoot: state().artifactRoot,
       runId: currentRun.runId,
@@ -4004,7 +4155,9 @@ ${JSON.stringify(
         ...state(),
         preflightComplete: true,
         finalizationGuidance,
-        repositoryBaseline: preflight.snapshot,
+        repositoryBaseline: custom
+          ? await safety.snapshot({ allowedPaths: [clarificationPath] })
+          : preflight.snapshot,
         backendVersions: Object.fromEntries(
           Object.keys(currentRun.roles).map((role) => [
             role,
@@ -4068,7 +4221,7 @@ ${JSON.stringify(
         },
         fingerprintInfrastructure: validationInfrastructureFingerprint,
         guidance: () =>
-          `${finalizationBootstrapInstructions(state().finalizationGuidance)}\n\n${trustedValidationInstructions()}`,
+          `${finalizationBootstrapInstructions({ ...state().finalizationGuidance, planKind: stepPolicy.kind })}\n\n${trustedValidationInstructions()}`,
       });
     } catch (cause) {
       if (cause?.code !== "ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED") throw cause;
@@ -4542,6 +4695,7 @@ The runner will derive validation inventories from the independently accepted ro
   }
 
   async function ensureImplementationEvidence() {
+    if (custom) return true;
     const current = state();
     const initial =
       current.workflowState === "IMPLEMENT" &&
@@ -4627,6 +4781,7 @@ ${plannedStepContext(step)}${
     }
     const evidence = state().stepImplementation;
     if (
+      !custom &&
       !correction &&
       !evidence.accepted &&
       !stepPolicy.acceptsInitialResult(
@@ -4645,7 +4800,7 @@ ${plannedStepContext(step)}${
       {
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
-        stepImplementation: { ...evidence, accepted: true },
+        stepImplementation: custom ? null : { ...evidence, accepted: true },
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
@@ -4705,7 +4860,7 @@ ${plannedStepContext(step)}${
             FINALIZATION_SCHEMA,
             (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
-${finalizationGuidanceInstructions(selectedGuidance)}
+${finalizationGuidanceInstructions({ ...selectedGuidance, planKind: stepPolicy.kind })}
 
 ${establishedValidationPrompt(state())}
 
@@ -4740,6 +4895,7 @@ ${
           const result = normalizeFinalizationRoleOutput(
             output,
             activeTrustedCommands(state()).map(({ command }) => command),
+            custom,
           );
           if (
             result.requiredChecks &&
@@ -4997,7 +5153,11 @@ ${
       ]),
     );
     const bindings = Object.freeze({
-      contentFingerprint: fingerprint,
+      // The trusted executor binds the capability's complete content snapshot;
+      // semantic gates separately bind analysis/evidence and inspected outputs.
+      contentFingerprint: custom
+        ? (await runtime.workspace.snapshot()).contentFingerprint
+        : fingerprint,
       validationInfrastructureFingerprint: candidateValidationFingerprint,
       commandFingerprint: state().trustedValidation.commandFingerprint,
       configurationFingerprint:
@@ -5118,6 +5278,7 @@ ${
     try {
       finalizationResult = createPersistedFinalizationEvidence({
         step: state().currentStep,
+        allowEmpty: custom,
         workerResult: result,
         issues,
         checks,
@@ -5952,7 +6113,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
     async function verifiedCandidateScope() {
       const current = state();
       try {
-        await runtime.git.assertUnchanged(current.repositoryBaseline);
+        await safety.assertUnchanged(current.repositoryBaseline);
       } catch (cause) {
         if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
           throw cause;
@@ -6231,7 +6392,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     async function verifiedReviewScope() {
       const current = state();
       try {
-        await runtime.git.assertUnchanged(current.repositoryBaseline);
+        await safety.assertUnchanged(current.repositoryBaseline);
       } catch (cause) {
         if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
           throw cause;
@@ -7080,6 +7241,129 @@ ${JSON.stringify(
     return true;
   }
 
+  function checkpoint() {
+    return createCustomResultCheckpoint({
+      run: currentRun,
+      runtime: {
+        ...runtime,
+        workspace: {
+          ...runtime.workspace,
+          snapshot: () =>
+            safety.snapshot({ allowedPaths: [state().clarificationPath] }),
+        },
+        async transition(patch, options) {
+          const preparation = patch.pipelineState.customResults.preparation;
+          if (preparation?.prepared) {
+            // The prepared identity and its only authorized baseline change
+            // must survive together, including a lost transition response.
+            patch = {
+              ...patch,
+              pipelineState: {
+                ...patch.pipelineState,
+                repositoryBaseline: await safety.preparationSnapshot(
+                  state().repositoryBaseline,
+                  preparation,
+                ),
+              },
+            };
+          }
+          currentRun = await runtime.transition(patch, options);
+          return currentRun;
+        },
+      },
+    });
+  }
+
+  async function prepareCustomOutputs() {
+    await checkpoint().verify();
+    const roots = [];
+    const declaredDirectories = stepPolicy
+      .parse(state().canonicalPlan)
+      .outputs.filter((path) => path.endsWith("/"))
+      .map((path) => resolve(currentRun.projectPath, path));
+    for (const path of currentRun.workspace.policy.outputPaths) {
+      const inspected = await runtime.workspace.inspectPath({
+        path,
+        projectPath: currentRun.projectPath,
+      });
+      if (inspected.kind === "directory" || declaredDirectories.includes(path))
+        roots.push(path);
+    }
+    const ledger = state().customResults;
+    if (
+      ledger === null ||
+      ledger.preparation !== null ||
+      roots.some(
+        (path) => !ledger.preparedRoots.some((root) => root.path === path),
+      )
+    ) {
+      await checkpoint().prepareOutputRoots(roots);
+      await safety.assertUnchanged(state().repositoryBaseline);
+    }
+  }
+
+  async function acceptCustomStep() {
+    let ledger = await checkpoint().reconcile();
+    if (ledger.accepted.length < state().currentStep) {
+      await checkpoint().accept(state().customCandidate);
+      ledger = state().customResults;
+    }
+    const current = state();
+    const done =
+      ledger.accepted.length ===
+      stepPolicy.parse(current.canonicalPlan).steps.length;
+    const next = done
+      ? {}
+      : {
+          ...clearedCandidateAndTerminalGate(),
+          customCandidate: null,
+          requiredChecks: scheduledChecks(current, current.currentStep + 1),
+          validationAmendment: null,
+          finalizationCorrections: [],
+          pendingFinalizationCorrection: null,
+          finalizationRecovery: createFinalizationRecovery(),
+          findings: [],
+          previousFindings: [],
+          pendingDisputes: [],
+          disputeCounts: {},
+          disputeHistory: [],
+          findingArbitrations: [],
+          correctionHistory: [],
+          sameFindingRounds: {},
+          pendingCorrection: false,
+          availabilityCorrectionCharged: false,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: false,
+          stagnationDirection: null,
+          reviewReconsideration: [],
+          additionalFixRounds: 0,
+          findingOverrides: [],
+        };
+    await transition(
+      {
+        ...current,
+        ...next,
+        workflowState: done ? "DONE" : "IMPLEMENT",
+        currentStep: done ? null : current.currentStep + 1,
+        reviewerStep: null,
+        repositoryBaseline: await safety.snapshot({
+          allowedPaths: [current.clarificationPath],
+        }),
+      },
+      {
+        nextCounters: done
+          ? counters()
+          : { ...counters(), fixRounds: 0, correctionRounds: 0 },
+        publicActivity: activity(
+          "runner",
+          "accept",
+          "accepted",
+          `Custom step ${current.currentStep} accepted.`,
+        ),
+      },
+    );
+  }
+
   async function runCommitTurn() {
     const commit = stepPolicy.commitService(runtime);
     const current = state();
@@ -7409,7 +7693,7 @@ ${step.subject}`),
       return false;
     }
 
-    const nextRepositoryBaseline = await runtime.git.snapshot({
+    const nextRepositoryBaseline = await safety.snapshot({
       allowedPaths: current.repositoryBaseline.allowedPaths,
       projectPath: current.repositoryBaseline.projectPath,
     });
@@ -7538,7 +7822,7 @@ ${step.subject}`),
     if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
       const recoveryRevision = currentRun.revision;
       const current = state();
-      const checked = await runtime.git.preflight({
+      const checked = await safety.preflight({
         projectPath: currentRun.projectPath,
         allowedPaths: [current.clarificationPath],
         requiredIgnoredPaths: [current.clarificationPath],
@@ -7616,7 +7900,7 @@ ${step.subject}`),
         const writable =
           interruptedTurn !== null &&
           interruptedTurnIsWritable(interruptedTurn);
-        const inspected = await runtime.git.reconcileInterrupted(
+        const inspected = await safety.reconcileInterrupted(
           current.repositoryBaseline,
           {
             allowWorkspaceChanges: writable,
@@ -7825,6 +8109,16 @@ ${step.subject}`),
             ...state(),
             clarificationFrozen: true,
             compatibilityCheckRequired: false,
+            ...(custom && state().customResults !== null
+              ? {
+                  customResults: {
+                    ...state().customResults,
+                    clarificationFingerprint: validationEvidenceFingerprint(
+                      frozen.hash,
+                    ),
+                  },
+                }
+              : {}),
           },
           {
             nextHashes: {
@@ -7983,6 +8277,21 @@ ${step.subject}`),
         continue;
       }
 
+      if (
+        custom &&
+        !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
+          current.workflowState,
+        )
+      ) {
+        customCheckpointSettlement = true;
+        await prepareCustomOutputs();
+        if (current.workflowState === "ACCEPT") {
+          await acceptCustomStep();
+          customCheckpointSettlement = false;
+          continue;
+        }
+        customCheckpointSettlement = false;
+      }
       replacementCheckpoint = true;
       const refinement = await replacements.advance();
       replacementCheckpoint = false;
@@ -8081,18 +8390,37 @@ ${step.subject}`),
         return fail(cause);
       throw cause;
     }
+    if (
+      custom &&
+      ["ERR_CUSTOM_RESULT_DRIFT", "ERR_WORKSPACE_DRIFT"].includes(cause?.code)
+    ) {
+      return pause("plan_revision_required", {
+        code: cause.code,
+        explanation:
+          "Frozen custom inputs or earlier accepted outputs changed. Preserve the work, revise the plan and start a new run.",
+        evidence: [
+          "Custom acceptance bindings no longer match the inspected workspace.",
+        ],
+      });
+    }
     // Failed publications retain recovery authority; a verified read-only
     // violation still requires the ordinary contamination stop.
     if (
       (replacementCheckpoint &&
         cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") ||
+      customCheckpointSettlement ||
       commitCheckpointSettlement ||
       commitAuthorizationPersistence ||
       legacyRecoveryPersistence ||
       cause?.code === "ERR_RUN_REVISION_CHANGED"
     )
       throw cause;
-    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+    if (
+      [
+        "ERR_PROJECT_CONFIGURATION_CHANGED",
+        "ERR_PROVIDER_POLICY_CHANGED",
+      ].includes(cause?.code)
+    ) {
       throw cause;
     }
     if (

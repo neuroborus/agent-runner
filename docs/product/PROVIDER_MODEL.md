@@ -41,11 +41,13 @@ restricted-host probes use ordinary directories without Git or commit preparatio
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. Custom authoring uses read-only directory
-turns; directory execution remains unavailable. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
-The runner probes every declared directory access separately and pins their
-combined receipt for the logical role. It reproduces that receipt on resume,
+The runner probes every declared directory access separately. Custom execution
+pins the writable receipt after output preparation, independently of its startup
+read-only receipt; other directory roles pin their combined startup receipt.
+It reproduces the applicable receipts before use on resume,
 retains native continuation support, and supplies only the saved path policy to
 turns. Neither directory analysis nor output work requests a commit capability.
 

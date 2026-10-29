@@ -65,10 +65,12 @@ mutation guards.
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
 capability. Authoring explicitly selects Git for commit plans or the directory
-lifecycle for custom plans; custom execution remains unavailable.
+lifecycle for custom plans. Execution selects the same lifecycle explicitly.
+Preliminary boundary discovery selects only the workspace policy; execution
+parses declarations through a confined task-input capability after project
+configuration and run overrides resolve, before Git inspection.
 It is the directory inspection foundation for custom planning/execution, audit
-and init. Custom authoring consumes it; custom execution, audit and init remain
-unexposed. Git snapshots remain Git-owned.
+and init. Custom authoring and execution consume it; audit and init remain unexposed. Git snapshots remain Git-owned.
 `inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
 `taskPath`, and arrays of `inputPaths`, `sourcePaths`, `outputPaths`,
 `configurationPaths`, `artifactPaths` and `infrastructurePaths`. Relative paths
@@ -519,8 +521,7 @@ V1 registers:
 - `plan-authoring`: produces a validated commit or explicitly selected custom
   `plan.md` without changing project content or Git history outside its declared
   task-owned artifacts.
-- `plan-execution`: consumes `plan.md` and implements one reviewed local commit
-  per step.
+- `plan-execution`: consumes `plan.md` and implements one reviewed local commit per commit-plan step, or a durable criterion-bound accepted result per explicitly selected custom step.
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
   stages the complete result while leaving it uncommitted.
 
@@ -4290,16 +4291,13 @@ its existing mode and review policies. `commit-workspace.js` retains two-pass
 Git preflight, ignored artifacts and stale-plan inspection; the one-shot commit
 route obtains Git effects only through the commit policy. Custom analysis needs
 no artificial diff, uses only the already bound directory snapshot capability,
-and cannot obtain commit authority. Custom execution remains unavailable through
-CLI/MCP/configuration and persisted execution state. Execution state version 33
+and cannot obtain commit authority. Explicit CLI/MCP/configuration selection enables custom execution through the same mode and finding loops. Execution state version 33
 requires `planKind`; version-32 migration adds `commit` without changing any
-gate, consumed effect, accounting or refinement eligibility. Current execution
-still consumes only commit plans and preserves its existing session context.
+gate, consumed effect, accounting or refinement eligibility. Legacy execution retains commit semantics and its existing session context.
 
 Execution state version 34 adds nullable `customResults`; version-33 migration
 sets it to `null` without inventing acceptance or output authority. Commit runs
-reject non-null custom ledgers. Custom entry points and persisted custom
-execution remain inactive. The private pipeline-owned checkpoint validates a
+reject non-null custom ledgers. The pipeline-owned checkpoint validates a
 bounded, receipt-chained ledger over frozen criteria/inputs/permissions,
 analysis/evidence and exact output fingerprints, including link resolution hops
 and readable target trees. It consumes the shared mode-specific gate predicate
@@ -4317,7 +4315,9 @@ storage on the same filesystem and `/usr/bin/mv` supporting GNU coreutils 9.4's
 `--no-clobber --no-copy --no-target-directory`; unsupported moves fail closed,
 without copying or replacing an arriving directory. Existing roots need no move.
 The directory descriptor stays open through identity verification and parent
-synchronization. No workspace siblings or parents are created, and provider
+synchronization. The execution workflow atomically saves the prepared identity
+with a baseline allowing only that exact empty-root creation; intervening output
+edits cannot be adopted. No workspace siblings or parents are created, and provider
 mount authority stays unchanged. The runner returns refreshed state after
 process retirement so the identity transition retains revision checking.
 Cancellation is checked immediately before allocation and publication. Lost
@@ -4325,7 +4325,31 @@ creation proof, substitutions, drift and pending
 stops preserve unfinished evidence and fail closed. Earlier accepted outputs
 are verified on reconstruction; invalidated acceptance requires a revised plan
 and new run. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
-owns ledger bounds and the dormant completion contract.
+owns ledger bounds and the accepted-result completion contract.
+
+Execution state version 35 adds nullable current custom-result data, a separately
+pinned writable provider-policy receipt and a commit-default `planKind` setting;
+migration creates neither custom authority
+nor acceptance. `custom-workspace.js` adapts directory inspection without Git
+effects; filesystem identity never masquerades as Git identity. Result
+fingerprints include bounded analysis/evidence and workspace content. Custom
+result fingerprints also bind the active authorized clarification version,
+advanced only after read-only plan compatibility; earlier receipt versions and
+immutable input/permission bindings remain unchanged. Custom
+bootstrap supports criterion-dependent empty command schedules, retaining exact
+trusted catalog provenance. Explicit guidance is optional and `auto` supplies
+no automatic coding gate. All mode-required candidate gates precede finalization
+and distinct terminal confirmation; only journaled `ACCEPT` settlement advances
+the custom cursor. Result-only repairs clear dependent evidence. Interrupted
+publication reconciles its exact receipt without replaying a model effect.
+The runner supplies descriptor-selected role access. Custom startup proves
+read-only access, then exact writable access is probed after journaled output
+preparation and before use. Execution persists that separate receipt before the
+first writable turn and reproduces it before later writes, including on resume;
+policy drift fails closed without replacing the frozen startup receipt.
+Missing directory roots require explicit trailing-slash declarations. Existing
+file outputs grant no parent write. Legacy and commit execution retain their
+Git effects, exact subjects, nonempty initial implementation and one-shot recovery.
 
 ## Global Safety Policy
 

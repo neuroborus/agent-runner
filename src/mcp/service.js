@@ -179,7 +179,7 @@ function createRunStartSchema(providers) {
         .enum(["commit", "custom"])
         .optional()
         .describe(
-          "Authoring only; omitted kind remains commit. Custom requires agreed user criteria.",
+          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes criteria and declarations from its frozen plan.",
         ),
       criteriaPath: z.string().min(1).max(4096).optional(),
       sourceReferences: z
@@ -433,6 +433,9 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     pendingInput: pendingInput(run),
     findings: status.findings,
     completedCommits: status.completedCommits,
+    ...(status.planKind === "custom"
+      ? { planKind: "custom", acceptedSteps: status.acceptedSteps }
+      : {}),
     stagnationDirection: status.stagnationDirection,
     finalizedFingerprint: shortFingerprint(status.finalizedFingerprint),
     reviewedFingerprint: shortFingerprint(status.reviewedFingerprint),

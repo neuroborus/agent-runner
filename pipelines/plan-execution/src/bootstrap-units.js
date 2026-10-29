@@ -1,8 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
-import {
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+
+import { planKindPolicy, stepLabel } from "./step-policy.js";
 import { matchesPlanPosition, validStepAssessment } from "./plan-position.js";
 import {
   freezeReport,
@@ -54,6 +52,7 @@ const DISCOVERY_FIELDS = [
 // these values. Scope contains plan text for requests; work records contain hashes.
 export function createBootstrapScope({
   canonicalPlan,
+  planKind = "commit",
   role,
   inputFingerprint,
   repositoryFingerprint,
@@ -72,9 +71,10 @@ export function createBootstrapScope({
     "canonicalPlan",
     "bounded-canonical-plan",
   );
-  const plan = parseCommitPlan(canonicalPlan);
+  const policy = planKindPolicy(planKind);
+  const plan = policy.parse(canonicalPlan);
   assert(
-    serializeCommitPlan(plan) === canonicalPlan,
+    policy.serialize(plan) === canonicalPlan,
     "canonicalPlan",
     "canonical-plan",
   );
@@ -93,7 +93,7 @@ export function createBootstrapScope({
     Number.isSafeInteger(position?.step) &&
       position.step > 0 &&
       position.step <= plan.steps.length &&
-      plan.steps[position.step - 1]?.subject === position.subject,
+      stepLabel(plan.steps[position.step - 1]) === position.subject,
     "stepAssessment",
     "runner-selected-position",
   );
@@ -143,6 +143,7 @@ export function createBootstrapScope({
   return finish({
     binding: {
       version: VERSION,
+      ...(planKind === "custom" ? { planKind } : {}),
       role,
       inputFingerprint,
       planFingerprint: sha256(canonicalPlan),
@@ -187,6 +188,7 @@ export function normalizeRepositoryDiscovery(
       : normalizePhaseSafeRequiredChecks
   )(payload.requiredChecks, INVALID, {
     maxItems: MAX_BOOTSTRAP_ITEMS,
+    allowEmpty: scope.binding.planKind === "custom",
   });
   if (scope.previousValidation !== undefined) {
     const previous = scope.previousValidation;
@@ -494,7 +496,8 @@ function normalizeBatch(payload, scope, work, unit) {
       for (const step of assignment.steps) coverage.add(step);
     }
     assert(
-      coverage.size === unit.end - unit.start + 1,
+      scope.binding.planKind === "custom" ||
+        coverage.size === unit.end - unit.start + 1,
       "assignments",
       "complete-unit-coverage",
     );
@@ -754,6 +757,9 @@ export function assembleBootstrapInventory(scope, value) {
     },
     scope.binding.role,
     scope.steps.length,
-    { trustedCommands: scope.trustedCommands },
+    {
+      trustedCommands: scope.trustedCommands,
+      allowEmpty: scope.binding.planKind === "custom",
+    },
   );
 }

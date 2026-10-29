@@ -1632,4 +1632,31 @@ test("authoring maps explicit kind and repeated declarations to descriptor setti
     sourceReferences: ["sources/a.md", "https://example.invalid/b"],
     outputPaths: ["reports/a.md", "reports/b.md"],
   });
+  assert.equal(
+    await main(
+      [
+        "run",
+        "plan-execution",
+        "--project",
+        "/workspace",
+        "--task",
+        "/task",
+        "--plan-kind",
+        "custom",
+      ],
+      {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run(value) {
+            input = value;
+            return commandResult({ pipelineId: "plan-execution" });
+          },
+        }),
+      },
+    ),
+    0,
+    stderr.read(),
+  );
+  assert.deepEqual(input.settingOverrides, { planKind: "custom" });
 });

@@ -77,12 +77,27 @@ function assertArtifactSeparation(artifacts, protectedPaths) {
     );
 }
 
-export function workspaceSelection(pipeline, input) {
+export async function workspaceSelection(pipeline, input, workspace) {
   if (pipeline === undefined)
     throw new RunnerError("Unknown pipeline.", {
       code: "ERR_UNKNOWN_PIPELINE",
     });
-  const selection = pipeline.resolveWorkspace?.(input) ?? pipeline.workspace;
+  const selection =
+    (await pipeline.resolveWorkspace?.({
+      ...input,
+      readTaskInput: (filename) => {
+        if (
+          !Object.values(pipeline.taskInputs).some(
+            (entry) => entry.filename === filename,
+          )
+        )
+          throw new RunnerError("Undeclared task input.");
+        return workspace.readFile({
+          path: join(input.taskPath, filename),
+          projectPath: input.taskPath,
+        });
+      },
+    })) ?? pipeline.workspace;
   rejectUnknownFields(
     selection,
     new Set(["kind", "lease", ...PATH_FIELDS]),

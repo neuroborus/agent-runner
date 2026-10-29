@@ -46,11 +46,12 @@ const ACCESS_ORDER = Object.freeze(Object.keys(ACCESS_CAPABILITIES));
 
 function roleAccess(pipeline, role, workspacePolicy) {
   const access =
-    pipeline.roleAccess === undefined
+    pipeline.resolveRoleAccess?.({ role, workspacePolicy }) ??
+    (pipeline.roleAccess === undefined
       ? ["read-only"]
       : isRecord(pipeline.roleAccess)
         ? pipeline.roleAccess[role]
-        : undefined;
+        : undefined);
   if (
     !Array.isArray(access) ||
     access.length === 0 ||
@@ -265,8 +266,12 @@ async function probeRole(
   sourceSession,
   providers,
   workspacePolicy,
+  selectedAccess,
 ) {
-  const access = roleAccess(pipeline, role, workspacePolicy);
+  const declared = roleAccess(pipeline, role, workspacePolicy);
+  const access = selectedAccess ?? declared;
+  if (access.some((mode) => !declared.includes(mode)))
+    throw new RunnerError("Probe exceeds role authority.");
   const options = executionOptions(configuration, providers);
   const context = {
     access,
@@ -414,8 +419,19 @@ function configuredAdapter(
     role,
     configuration.backend,
   );
-  let capabilitiesPromise;
-  const resolveCapabilities = async () => {
+  const capabilitiesByAccess = new Map();
+  const resolveCapabilities = async ({ access } = {}) => {
+    const selectedAccess =
+      run.workspace?.policy && pipeline.initialRoleAccess
+        ? access
+          ? [access]
+          : pipeline.initialRoleAccess({
+              role,
+              workspacePolicy: run.workspace.policy,
+            })
+        : undefined;
+    const key = JSON.stringify(selectedAccess);
+    let capabilitiesPromise = capabilitiesByAccess.get(key);
     capabilitiesPromise ??= Promise.resolve()
       .then(() =>
         probeRole(
@@ -426,16 +442,21 @@ function configuredAdapter(
           run.sessionLineage.source,
           providers,
           run.workspace?.policy ?? undefined,
+          selectedAccess,
         ),
       )
       .then(async ({ capabilities, policyReceipt }) => {
-        await onPolicyReceipt(role, policyReceipt);
+        // Deferred directory writes prove their exact access immediately before
+        // the turn; they do not replace the frozen read-only startup receipt.
+        if (access === undefined || !pipeline.initialRoleAccess)
+          await onPolicyReceipt(role, policyReceipt);
         return capabilities;
       });
+    capabilitiesByAccess.set(key, capabilitiesPromise);
     try {
       return await capabilitiesPromise;
     } catch (error) {
-      capabilitiesPromise = undefined;
+      capabilitiesByAccess.delete(key);
       throw error;
     }
   };
@@ -453,7 +474,11 @@ function configuredAdapter(
       );
     },
     async run(request) {
-      if (run.workspace?.policy) await resolveCapabilities();
+      if (run.workspace?.policy) {
+        await resolveCapabilities();
+        if (pipeline.initialRoleAccess)
+          await resolveCapabilities({ access: request.access });
+      }
       return runAdapter(
         adapter,
         configuration.backend,
@@ -549,6 +574,7 @@ export async function probeRequiredRoles(
           sourceSession,
           providers,
           workspacePolicy,
+          pipeline.initialRoleAccess?.({ role, workspacePolicy }),
         )
       ).policyReceipt;
       continue;

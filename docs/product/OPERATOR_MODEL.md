@@ -22,6 +22,15 @@ missing Git never implies custom. Custom planning requires user-supplied criteri
 agreed during clarification; its outputs are declarations, not write permissions.
 Commit authoring retains fixed coding/safety rules even with supplemental criteria.
 
+Execution separately owns `planKind` with the same explicit commit default.
+Use CLI `--plan-kind custom`, MCP `planKind: "custom"` or
+`pipelines.plan-execution.planKind`. Criteria and source/output declarations come
+from the frozen custom plan; authoring-only selectors do not override it.
+Successful custom status exposes accepted-step receipts and bounded results,
+with no completed commit SHAs or staging effects. `finalization: auto` supplies
+no automatic coding gate for custom work; explicit selected guidance remains
+frozen. Independent remains default/recommended in either completion contract.
+
 Execution's descriptor-owned `preferredCommitLineLimit` and
 `commitSizeAssessmentMultiplier` default to 900 and 3, resolve independently
 through root then project configuration and persist for resume. Positive safe

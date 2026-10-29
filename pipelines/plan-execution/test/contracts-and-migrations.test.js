@@ -31,6 +31,7 @@ import {
 } from "../src/schemas.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
+  createPersistedFinalizationEvidence,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
   normalizeCheckAndFixResult,
@@ -264,6 +265,79 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.requiredChecks[0].command, exactCommand);
   assert.equal(exact.checks[0].command, exactCommand);
   assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("custom finalization can fail criteria without a failing executable check", () => {
+  const passed = finalizationPassed();
+  for (const emptyInventory of [true, false]) {
+    const payload = {
+      ...passed,
+      status: "FAIL",
+      issues: [
+        {
+          id: "F1",
+          command: "criterion:traceability",
+          problem: "The analysis omits the source citation.",
+          evidence: ["The conclusion names no source."],
+        },
+      ],
+      ...(emptyInventory ? { requiredChecks: [], checks: [] } : {}),
+    };
+    assert.throws(() => normalizeFinalizationResult(payload));
+    const workerResult = normalizeFinalizationResult(payload, {
+      allowEmpty: true,
+    });
+    if (!emptyInventory)
+      assert.throws(() =>
+        normalizeFinalizationResult(
+          {
+            ...payload,
+            checks: payload.checks.map((check) => ({
+              ...check,
+              status: "BLOCKED",
+            })),
+          },
+          { allowEmpty: true },
+        ),
+      );
+    assert.throws(() =>
+      normalizeFinalizationResult(
+        { ...payload, issues: [] },
+        { allowEmpty: true },
+      ),
+    );
+    assert.throws(() =>
+      normalizeFinalizationResult(
+        { ...payload, status: "PASS" },
+        { allowEmpty: true },
+      ),
+    );
+    const evidence = {
+      workerResult,
+      issues: workerResult.issues,
+      checks: workerResult.checks.map((check) => ({
+        ...check,
+        executor: "agent",
+        commandIdentity: null,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+      })),
+      validationInfrastructureFingerprint: hash("infrastructure"),
+      trustedCommandFingerprint: hash("commands"),
+      trustedConfigurationFingerprint: hash("configuration"),
+      validationChanged: false,
+      fingerprint: hash("result"),
+    };
+    assert.throws(() => createPersistedFinalizationEvidence(evidence));
+    const persisted = createPersistedFinalizationEvidence({
+      ...evidence,
+      allowEmpty: true,
+    });
+    assert.equal(persisted.status, "FAIL");
+    assert.deepEqual(persisted.issues, workerResult.issues);
+    assert.ok(persisted.checks.every(({ status }) => status === "PASS"));
+  }
 });
 
 test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {
@@ -831,6 +905,41 @@ test("migrates version-1 execution state to the fail-closed shape", () => {
   assert.equal(migrated.reviewResult, null);
 });
 
+test("version 34 migration retains supported legacy setting defaults", () => {
+  for (const mode of ["independent", "lazy", "combined"]) {
+    const current = createPlanExecutionState({
+      settings: { ...SETTINGS, mode },
+    });
+    for (const missing of [
+      [],
+      ["finalization"],
+      ["trustedChecks"],
+      [
+        "preferredCommitLineLimit",
+        "commitSizeAssessmentMultiplier",
+        "finalization",
+      ],
+      [
+        "preferredCommitLineLimit",
+        "commitSizeAssessmentMultiplier",
+        "trustedChecks",
+      ],
+    ]) {
+      const legacy = structuredClone(current);
+      delete legacy.customCandidate;
+      delete legacy.customWritePolicy;
+      delete legacy.settings.planKind;
+      for (const field of missing) delete legacy.settings[field];
+      const saved = structuredClone(legacy);
+      const migrated = planExecutionPipeline.migrations[34]({
+        pipelineState: legacy,
+      });
+      assert.deepEqual(normalizePipelineState(migrated), current);
+      assert.deepEqual(legacy, saved);
+    }
+  }
+});
+
 test("migrates version-3 execution state with no consumed bootstrap corrections", () => {
   const current = createPlanExecutionState();
   const legacy = { ...current };
@@ -842,7 +951,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 34);
+  assert.equal(planExecutionPipeline.stateVersion, 35);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({

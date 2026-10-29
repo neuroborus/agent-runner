@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-10-28
 
+- **Custom execution completes with accepted results, not commits.** Explicit
+  kind selection binds a directory workspace before Git inspection and reuses
+  execution's existing modes, findings, bounded corrections and recovery. All
+  required candidate gates, criterion-dependent finalization and distinct terminal
+  confirmation bind analysis/evidence as well as output bytes. Only journaled
+  result settlement advances the cursor; result-only repairs invalidate approval.
+  Compatible authorized decisions advance a separately bound clarification
+  version after plan compatibility, preserving earlier receipts and permissions.
+  Semantic-only criteria may need no executable command, without losing review.
+  Automatic coding guidance does not apply to custom work, and selected trusted
+  commands keep exact provenance. Deferred writable policy receipts remain
+  separately pinned across reconstruction without replacing startup read-only
+  proof. Existing commit runs and migrations retain
+  their subjects, initial-change proof, refinement eligibility and consumed effects.
+  Selection, role permissions, result fingerprints and settlement activate together
+  so no public intermediate route can bypass the completion gate.
+
 - **Custom result settlement is a separate durable checkpoint.** Private
   execution support binds frozen criteria, inspected inputs and permissions,
   bounded analysis/evidence and exact outputs to a receipt-chained ledger.

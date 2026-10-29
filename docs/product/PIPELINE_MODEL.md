@@ -15,7 +15,7 @@ ordinary Markdown. The reviewed custom plan carries agreed stable criterion
 references, observable results and input/output declarations. Sources remain
 read-only, URLs grant no retrieval, and declared outputs grant no authoring
 writes. Custom prompts inherit coding requirements only when selected by the
-user. Custom execution is not yet exposed. Plan authoring may
+user. Plan authoring may
 clarify material requirements first, but it keeps the target project read-only
 apart from the resolved clarification and plan artifact paths. Commit-plan
 headings contain the exact subject-only Conventional Commit messages that plan
@@ -33,8 +33,9 @@ or guarantee that a later worktree will remain compatible with the plan.
 
 ## Plan execution
 
-Plan execution accepts a deterministically validated commit plan and implements one
-step at a time. Each accepted step becomes exactly one verified local commit
+Plan execution accepts an explicitly selected, deterministically validated commit or custom plan and implements one step at a time. Omitted kind stays commit. Custom execution uses agreed criteria in an ordinary directory, including analysis-only steps, and accepts durable result receipts after all mode-required candidate, finalization and terminal-confirmation gates. Analysis/evidence and inspected outputs bind those gates. It never stages or commits, even inside a repository; coding checks apply only when selected requirements make them relevant.
+
+For commit plans, each accepted step becomes exactly one verified local commit
 with the subject from its plan heading. Findings are resolved within that step,
 not by adding separate review-fix commits. A completed earlier commit is durable
 history and is never rewritten automatically when later work encounters a
@@ -45,7 +46,7 @@ uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
 read-only candidate confirmation. Combined mode requires primary convergence
 followed by the complete independent candidate review. The stable candidate
 then passes full finalization and one distinct read-only terminal confirmation
-immediately before the constrained commit.
+before its selected commit or accepted-result checkpoint.
 
 The plan defines the authorized commit boundaries. New eligible commit-plan
 runs may replace an oversized unfinished step with a reviewed flat sequence,
@@ -99,7 +100,7 @@ Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
 candidate approvals bind the same content fingerprint. Finalization may format
 that content; a distinct Reviewer terminal confirmation approves its resulting
-fingerprint and validation evidence before one-shot commit authorization.
+fingerprint and validation evidence before its selected commit or accepted-result checkpoint.
 Content repairs restart primary convergence. Self-findings go directly to fixing;
 independent findings retain disputes, withdrawals, exact recorded overrides, and
 fresh on-demand arbitration. Unresolved bootstrap disagreements and primary

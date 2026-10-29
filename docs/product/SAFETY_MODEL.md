@@ -23,7 +23,7 @@ automatically.
 
 ## Git ownership
 
-Plan execution permits exactly one ordinary local commit for each validated
+Commit-plan execution permits exactly one ordinary local commit for each validated
 plan step. Only the Worker may trigger it, only after the fingerprint-bound
 gate, and only with a fresh one-shot authorization. The commit must use the
 exact subject from the plan, the existing Git identity, and no body, footer, or
@@ -92,8 +92,7 @@ outputs with a native permission profile; Claude uses authenticated command
 mounts and omits native editing tools for directory turns. Both check protected
 content after every retired attempt, including failures before reconstruction. Directory
 access cannot request a Git commit, and unsupported providers fail closed.
-Custom authoring uses read-only directory turns; directory execution remains
-unexposed. See the
+Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 
 The runner can bind a descriptor-selected directory lifecycle without Git.
@@ -108,8 +107,7 @@ effects. Resume retires verified owned execution before reporting frozen-content
 drift, then persists a blocker without probing or invoking providers. References and URLs confer no fetching authority: retrieval permissions
 remain empty. Legacy runs retain Git semantics. Explicit custom authoring uses read-only directory roles and frozen criteria
 and source bindings; intended outputs grant no authoring writes. Runner alone
-writes its task-owned clarification and plan artifacts. Custom execution remains
-unavailable.
+writes its task-owned clarification and plan artifacts. Custom execution uses the same frozen directory bindings without Git effects.
 
 Task, plan, context, and clarification inputs are hashed and revalidated before
 recovery. Clarification writes occur only through a persisted one-shot editor
@@ -430,7 +428,7 @@ evidence. Fresh cancellation checks after preflight prevent new allocation and
 publication effects. Stops prevent new effects and
 acceptance, and cancellation never disposes of output content. Frozen input or
 earlier accepted-output drift requires revised planning and a new execution run.
-Public custom execution remains inactive.
+Explicit custom execution settles criterion-bound results only after mode-required candidate, finalization and terminal confirmation gates. Result-only changes invalidate approvals; a settled receipt, never provider success, advances the cursor.
 
 Legacy terminal-confirmation recovery is gated by complete journal provenance,
 current inputs and Git controls, unchanged finalized content, and valid

@@ -17,6 +17,7 @@ export function projectPlanProgress(run) {
     state.settings.commitSizeAssessmentMultiplier === undefined
   )
     return null;
+  if (state.planKind === "custom") return null;
   const authority = effectivePlanAuthority(state);
   const completed = state.completedCommits;
   const active = state.currentStep;

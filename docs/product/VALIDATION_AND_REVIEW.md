@@ -10,14 +10,23 @@ original step-start evidence across partial work and resume; an unchanged step
 requires plan revision before convergence or finalization. Unchanged corrections
 and confirmations remain valid. Legacy runs without reconstructable original
 evidence pause before further writable work; already-consumed commits still
-settle through verification. The private custom step policy permits analysis
-without a file diff. Its private accepted-result checkpoint requires the same
+settle through verification. The custom step policy permits analysis
+without a file diff. Its accepted-result checkpoint requires the same
 mode-specific candidate, finalization and terminal-confirmation gates over
 analysis/evidence and inspected output fingerprints. Provider completion cannot
 settle it; pending publication must reconcile before acceptance. Frozen criteria
 and inputs, earlier accepted outputs and exact permissions remain binding;
 invalidated earlier results require a revised plan and a new run. This checkpoint
-grants no Git effects, and public custom execution remains inactive.
+grants no Git effects. Explicit custom execution retains these gates while allowing criterion-dependent empty command inventories and optional selected guidance. Semantic review is still required, and selected trusted commands retain exact provenance.
+Unmet custom criteria remain blocking finalization failures even without a
+failed executable check. They require repair and fresh candidate convergence
+before finalization and terminal confirmation can accept the result.
+
+An authorized compatible product-decision answer changes the active clarification
+version only after read-only plan compatibility. New result fingerprints and
+receipts bind that version; every dependent approval must be earned again.
+Earlier receipts and frozen permissions remain unchanged, and unauthorized
+clarification edits cannot continue the run.
 
 ## Authoring review
 
@@ -26,7 +35,7 @@ ordering through the same mode gates. Custom coding requirements apply only when
 selected. Deterministic validation enforces the custom step/reference format and
 exact frozen criterion/source/output declarations; only Runner writes the final
 plan. Commit planning keeps fixed coding and Git guarantees, with any supplied
-criteria as supplements. Custom execution remains inactive.
+criteria as supplements. Reviewed custom plans can be executed sequentially with explicit custom selection.
 
 Combined authoring requires two distinct approvals over the same durable draft:
 a mutation-free Planner clean confirmation after check/fix, then independent
@@ -45,7 +54,7 @@ Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
 candidate approvals bind the same content fingerprint. Finalization may format
 that content; a distinct Reviewer terminal confirmation approves its resulting
-fingerprint and validation evidence before one-shot commit authorization.
+fingerprint and validation evidence before the selected commit or accepted-result checkpoint.
 Content repairs restart primary convergence. Self-findings go directly to fixing;
 independent findings retain disputes, withdrawals, exact recorded overrides, and
 fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
@@ -122,8 +131,10 @@ checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
 Execution inventories are scoped to canonical plan steps. Every active role
-discovers a complete procedure for every step: the ordinary fast gate and only
-slow checks whose documented guarantees that step affects. The runner preserves
+discovers a complete procedure for every step. Commit steps require the ordinary
+fast gate and only slow checks whose documented guarantees that step affects;
+custom steps require only criterion-dependent checks and explicitly selected
+coding requirements. The runner preserves
 the accepted role assignments, merges commands in Worker-first order, and unions
 their applicability. A Reviewer-only requirement survives reconciliation.
 Later requirements remain persisted without executing during earlier finalization.

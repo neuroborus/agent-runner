@@ -7,8 +7,14 @@ import {
   MAX_PLAN_LENGTH,
   planKindPolicy,
   requiredRoleCapabilities,
+  completedStepCount,
 } from "./step-policy.js";
 
+import {
+  normalizeCustomResults,
+  normalizeCustomResult,
+  executionContentFingerprint,
+} from "./custom-results.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
 import {
   assertCommitSizeAssessment,
@@ -64,6 +70,7 @@ export const WORKFLOW_STATES = Object.freeze([
   "CONFIRM",
   "RESOLVE_FINDINGS",
   "COMMIT",
+  "ACCEPT",
   "WAITING_FOR_USER",
   "DONE",
   "FAILED",
@@ -73,6 +80,8 @@ const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
   "planKind",
   "customResults",
+  "customCandidate",
+  "customWritePolicy",
   "planContextVersion",
   "stepImplementation",
   "implementationEvidenceLegacy",
@@ -357,6 +366,7 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
 const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
+  "planKind",
   "preferredCommitLineLimit",
   "commitSizeAssessmentMultiplier",
   "finalization",
@@ -368,7 +378,8 @@ const SETTINGS_FIELDS = Object.freeze([
   "trustedChecks",
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
-  (field) => !["finalization", "mode", "trustedChecks"].includes(field),
+  (field) =>
+    !["finalization", "mode", "trustedChecks", "planKind"].includes(field),
 );
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
@@ -1210,7 +1221,7 @@ export function normalizeBootstrapResultCandidate(
   payload,
   role,
   stepCount,
-  { trustedCommands = [] } = {},
+  { trustedCommands = [], allowEmpty = false } = {},
 ) {
   assertStepAssessment(payload?.stepAssessment);
   const statuses = [
@@ -1317,7 +1328,7 @@ export function normalizeBootstrapResultCandidate(
   const requiredChecks = normalizeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount },
+    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount, allowEmpty },
   );
   if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
     throw outputError(
@@ -1869,6 +1880,7 @@ export function normalizeRequiredChecks(
   }
   if (
     scoped &&
+    !allowEmpty &&
     stepCount !== undefined &&
     new Set(checks.flatMap(({ steps }) => steps)).size !== stepCount
   ) {
@@ -2225,7 +2237,7 @@ export function normalizeCandidateReviewResult(
 
 export function normalizeFinalizationResult(
   payload,
-  { trustedCommands = [] } = {},
+  { trustedCommands = [], allowEmpty = false } = {},
 ) {
   const statuses = [
     "PASS",
@@ -2282,7 +2294,7 @@ export function normalizeFinalizationResult(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
       {
-        allowEmpty: payload.status !== "BLOCKED",
+        allowEmpty: allowEmpty || payload.status !== "BLOCKED",
         collectDiagnostics: true,
       },
     );
@@ -2358,7 +2370,7 @@ export function normalizeFinalizationResult(
   const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { collectDiagnostics: true },
+    { collectDiagnostics: true, allowEmpty },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     payload.validationInfrastructure,
@@ -2380,7 +2392,8 @@ export function normalizeFinalizationResult(
           !(trustedCommandSet.has(command) && status === "NOT_RUN"),
       )) ||
     (payload.status === "FAIL" &&
-      !checks.some(({ status }) => status === "FAIL"))
+      (checks.some(({ status }) => status === "BLOCKED") ||
+        (!allowEmpty && !checks.some(({ status }) => status === "FAIL"))))
   ) {
     throw outputError("Finalization status does not match its issues.");
   }
@@ -3391,7 +3404,7 @@ function normalizePersistedFindings(value, name = "Plan-execution findings") {
   }
 }
 
-function normalizePersistedFinalization(value) {
+function normalizePersistedFinalization(value, allowEmpty = false) {
   if (value === null) {
     return null;
   }
@@ -3447,6 +3460,7 @@ function normalizePersistedFinalization(value) {
   const requiredChecks = normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
+    { allowEmpty },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     value.validationInfrastructure,
@@ -3516,7 +3530,9 @@ function normalizePersistedFinalization(value) {
   if (
     (value.status === "PASS" &&
       checks.some(({ status }) => status !== "PASS")) ||
-    (value.status === "FAIL" && !checks.some(({ status }) => status === "FAIL"))
+    (value.status === "FAIL" &&
+      !allowEmpty &&
+      !checks.some(({ status }) => status === "FAIL"))
   ) {
     throw workflowError("Plan-execution check evidence is inconsistent.");
   }
@@ -3541,6 +3557,7 @@ function normalizePersistedFinalization(value) {
 /** Constructs the canonical persisted Worker and runner finalization tuple. */
 export function createPersistedFinalizationEvidence({
   step = null,
+  allowEmpty = false,
   workerResult,
   issues,
   checks,
@@ -3551,24 +3568,27 @@ export function createPersistedFinalizationEvidence({
   fingerprint,
 }) {
   const status = issues.length === 0 ? "PASS" : "FAIL";
-  return normalizePersistedFinalization({
-    status,
-    step,
-    skillPath: workerResult.skillPath,
-    summary:
-      status === workerResult.status
-        ? workerResult.summary
-        : "The project finalization procedure found blocking failures.",
-    issues,
-    requiredChecks: workerResult.requiredChecks,
-    validationInfrastructure: workerResult.validationInfrastructure,
-    validationInfrastructureFingerprint,
-    checks,
-    trustedCommandFingerprint,
-    trustedConfigurationFingerprint,
-    validationChanged,
-    fingerprint,
-  });
+  return normalizePersistedFinalization(
+    {
+      status,
+      step,
+      skillPath: workerResult.skillPath,
+      summary:
+        status === workerResult.status
+          ? workerResult.summary
+          : "The project finalization procedure found blocking failures.",
+      issues,
+      requiredChecks: workerResult.requiredChecks,
+      validationInfrastructure: workerResult.validationInfrastructure,
+      validationInfrastructureFingerprint,
+      checks,
+      trustedCommandFingerprint,
+      trustedConfigurationFingerprint,
+      validationChanged,
+      fingerprint,
+    },
+    allowEmpty,
+  );
 }
 
 function normalizePersistedValidation(
@@ -3577,6 +3597,7 @@ function normalizePersistedValidation(
   stepCount,
   allowLegacy,
   trustedCommands,
+  allowEmpty = false,
 ) {
   if (value === null) {
     return null;
@@ -3596,6 +3617,7 @@ function normalizePersistedValidation(
     "ERR_INVALID_PLAN_EXECUTION_STATE",
     {
       maxItems: MAX_BOOTSTRAP_ITEMS,
+      allowEmpty,
       scoped:
         !allowLegacy ||
         (Array.isArray(value.requiredChecks) &&
@@ -3663,7 +3685,7 @@ function validateValidationSchedule(state, planSteps, validations) {
     !isDeepStrictEqual(state.validationSchedule, expected) ||
     expected.steps.some(
       ({ commandIndexes }) =>
-        commandIndexes.length === 0 ||
+        (state.planKind !== "custom" && commandIndexes.length === 0) ||
         commandIndexes.length > MAX_VALIDATION_ITEMS,
     ) ||
     validationCatalog(state).length > MAX_VALIDATION_ITEMS
@@ -3672,7 +3694,7 @@ function validateValidationSchedule(state, planSteps, validations) {
       "Validation schedule does not preserve the accepted role assignments.",
     );
   }
-  const step = state.currentStep ?? state.completedCommits.length;
+  const step = state.currentStep ?? completedStepCount(state);
   // Frozen-plan declarations remain historical evidence after revision
   // acceptance. They cannot select replacement work; its receipts are separate.
   let checks = scheduledChecks(
@@ -3706,6 +3728,7 @@ function validateValidationSchedule(state, planSteps, validations) {
     checks = normalizePhaseSafeRequiredChecks(
       amendment.requiredChecks,
       "ERR_INVALID_PLAN_EXECUTION_STATE",
+      { allowEmpty: state.planKind === "custom" },
     );
   }
   if (!isDeepStrictEqual(state.requiredChecks, checks)) {
@@ -4108,10 +4131,12 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution state is invalid.");
   }
   const stepPolicy = planKindPolicy(value.planKind);
-  // No persisted custom state may reach commit-shaped recovery before its
-  // accepted-result lifecycle is implemented and explicitly exposed.
-  stepPolicy.assertExecutable();
-  if (value.planKind === "commit" && value.customResults !== null)
+  if (
+    value.planKind === "commit" &&
+    (value.customResults !== null ||
+      value.customCandidate !== null ||
+      value.customWritePolicy !== null)
+  )
     throw workflowError(
       "Commit execution cannot carry custom result authority.",
     );
@@ -4161,6 +4186,8 @@ export function normalizePipelineState(value) {
   if (value.settings !== null) {
     const settings = normalizeSettings(value.settings);
     assertSettings(settings);
+    if (value.planKind !== settings.planKind)
+      throw workflowError("Execution kind differs from frozen settings.");
     if (settings !== value.settings) {
       value = { ...value, settings };
     }
@@ -4379,6 +4406,56 @@ export function normalizePipelineState(value) {
   } catch {
     throw workflowError("Invalid persisted effective-plan revisions.");
   }
+  if (value.planKind === "custom") {
+    if (
+      value.customWritePolicy !== null &&
+      (!hasExactFields(value.customWritePolicy, [
+        "schemaVersion",
+        "fingerprint",
+        "supportedAccess",
+      ]) ||
+        value.customWritePolicy.schemaVersion !== 1 ||
+        typeof value.customWritePolicy.fingerprint !== "string" ||
+        !HASH_PATTERN.test(value.customWritePolicy.fingerprint) ||
+        !isDeepStrictEqual(value.customWritePolicy.supportedAccess, [
+          "workspace-write",
+        ]))
+    )
+      throw workflowError("Invalid custom writable provider policy.");
+    if (
+      value.customWritePolicy === null &&
+      (value.customCandidate !== null ||
+        (value.customResults?.accepted?.length ?? 0) > 0)
+    )
+      throw workflowError(
+        "Custom results require their writable provider policy.",
+      );
+    if (
+      value.pendingCommit !== null ||
+      value.workflowState === "COMMIT" ||
+      value.completedCommits.length !== 0 ||
+      value.stepImplementation !== null ||
+      value.commitSizeAssessment.eligible ||
+      value.effectivePlanRevisions.revisions.length !== 0 ||
+      value.effectiveValidation.length !== 0
+    )
+      throw workflowError(
+        "Custom execution cannot carry Git or refinement authority.",
+      );
+    if (value.customResults !== null)
+      normalizeCustomResults(value.customResults, value.canonicalPlan);
+    if (value.customCandidate !== null)
+      normalizeCustomResult(
+        value.customCandidate,
+        planSteps?.[(value.currentStep ?? completedStepCount(value)) - 1],
+      );
+    if (
+      value.workflowState === "ACCEPT" &&
+      (value.customCandidate === null || !commitGatePassed(value))
+    )
+      throw workflowError("Custom acceptance requires complete current gates.");
+  } else if (value.workflowState === "ACCEPT")
+    throw workflowError("Commit execution cannot accept custom results.");
   const frozenStepCount = planSteps?.length;
   if (planSteps !== null) planSteps = effectivePlanAuthority(value).steps;
   const workerSummary = normalizedSummary(
@@ -4395,6 +4472,7 @@ export function normalizePipelineState(value) {
     frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
+    value.planKind === "custom",
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
@@ -4402,6 +4480,7 @@ export function normalizePipelineState(value) {
     frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
+    value.planKind === "custom",
   );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,
@@ -4650,6 +4729,7 @@ export function normalizePipelineState(value) {
   );
   const finalizationResult = normalizePersistedFinalization(
     value.finalizationResult,
+    value.planKind === "custom",
   );
   const requiredChecks =
     value.requiredChecks === null
@@ -4657,6 +4737,7 @@ export function normalizePipelineState(value) {
       : normalizeRequiredChecks(
           value.requiredChecks,
           "ERR_INVALID_PLAN_EXECUTION_STATE",
+          { allowEmpty: value.planKind === "custom" },
         );
   const validationInfrastructure =
     value.validationInfrastructure === null
@@ -4705,7 +4786,7 @@ export function normalizePipelineState(value) {
     );
   }
   if (finalizationResult !== null) {
-    const evidenceStep = value.currentStep ?? value.completedCommits.length;
+    const evidenceStep = value.currentStep ?? completedStepCount(value);
     if (
       !(value.validationScopeLegacy && finalizationResult.step === null) &&
       finalizationResult.step !== evidenceStep
@@ -4782,7 +4863,7 @@ export function normalizePipelineState(value) {
     reviewCorrection !== null &&
     (value.currentStep !== reviewCorrection.step ||
       (value.candidateReviewedFingerprint ??
-        value.repositoryBaseline?.contentFingerprint) !==
+        executionContentFingerprint(value)) !==
         reviewCorrection.contentFingerprint ||
       value.validationInfrastructureFingerprint !==
         reviewCorrection.validationInfrastructureFingerprint ||
@@ -4977,6 +5058,7 @@ export function normalizePipelineState(value) {
   }
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  const completed = completedStepCount(value);
   const gateState = {
     ...value,
     candidateReviewResult,
@@ -5040,11 +5122,17 @@ export function normalizePipelineState(value) {
     );
   }
   if (
-    completedCommits.length > (planSteps?.length ?? 0) ||
+    completed > (planSteps?.length ?? 0) ||
     (value.currentStep !== null &&
-      completedCommits.length !== value.currentStep - 1) ||
-    (value.workflowState === "DONE" &&
-      completedCommits.length !== planSteps?.length) ||
+      completed !== value.currentStep - 1 &&
+      !(
+        value.planKind === "custom" &&
+        ["ACCEPT", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        ) &&
+        completed === value.currentStep
+      )) ||
+    (value.workflowState === "DONE" && completed !== planSteps?.length) ||
     (!value.preflightComplete && completedCommits.length !== 0) ||
     (completedCommits.length > 0 &&
       value.repositoryBaseline?.head !== completedCommits.at(-1))
@@ -5241,6 +5329,7 @@ export function normalizePipelineState(value) {
       "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
+      "ACCEPT",
       "DONE",
       "WAITING_FOR_USER",
       "FAILED",
@@ -5390,6 +5479,7 @@ export function normalizePipelineState(value) {
       "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
+      "ACCEPT",
     ].includes(value.workflowState) &&
     (!value.clarificationFrozen ||
       resolvedSummary === null ||
@@ -5413,7 +5503,7 @@ export function normalizePipelineState(value) {
     (!policy.independentReview ||
       (policy.primaryConvergence &&
         value.candidateConfirmationFingerprint !==
-          value.repositoryBaseline?.contentFingerprint) ||
+          executionContentFingerprint(value)) ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
@@ -5488,7 +5578,7 @@ export function normalizePipelineState(value) {
 
 export function createPlanExecutionState({
   artifactRoot = "LOCAL_ARTIFACTS",
-  planKind = "commit",
+  planKind,
   proactiveClarification = false,
   settings = null,
   trustedValidation = EMPTY_TRUSTED_VALIDATION,
@@ -5501,17 +5591,23 @@ export function createPlanExecutionState({
   }
   const normalizedTrustedValidation =
     normalizeTrustedValidation(trustedValidation);
+  planKind =
+    planKind === undefined ? (settings?.planKind ?? "commit") : planKind;
   return Object.freeze(
     normalizePipelineState({
       workflowState: "CLARIFY",
       planKind,
       customResults: null,
+      customCandidate: null,
+      customWritePolicy: null,
       artifactRoot,
       preflightComplete: false,
       planContextVersion: 1,
       stepImplementation: null,
       implementationEvidenceLegacy: false,
-      commitSizeAssessment: createCommitSizeAssessment({ eligible: true }),
+      commitSizeAssessment: createCommitSizeAssessment({
+        eligible: planKind === "commit",
+      }),
       effectivePlanRevisions: createEffectivePlanRevisions(),
       effectiveValidation: [],
       replacementExecution: {
@@ -5742,7 +5838,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 34 ||
+    run.pipelineStateVersion !== 35 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5757,6 +5853,20 @@ export function assertRun(run) {
     throw workflowError("Plan-execution run envelope is invalid.");
   }
   const state = normalizePipelineState(run.pipelineState);
+  if (state.planKind === "custom" && run.workspace?.kind !== "directory")
+    throw workflowError(
+      "Custom execution requires its frozen directory workspace.",
+    );
+  if (
+    state.planKind === "custom" &&
+    state.clarificationFrozen &&
+    state.customResults !== null &&
+    state.customResults.clarificationFingerprint !==
+      validationEvidenceFingerprint(run.hashes.executionClarifications ?? null)
+  )
+    throw workflowError(
+      "Custom evidence uses a different clarification version.",
+    );
   const activeRoles = resolveActiveRoles(state.settings);
   if (
     Object.keys(run.roles).length !== activeRoles.length ||
@@ -5868,7 +5978,10 @@ export function assertRun(run) {
       state.clarificationPath !== expectedClarificationPath ||
       !Array.isArray(state.repositoryBaseline.allowedPaths) ||
       state.repositoryBaseline.allowedPaths.length !== 1 ||
-      state.repositoryBaseline.allowedPaths[0] !== expectedAllowedPath
+      state.repositoryBaseline.allowedPaths[0] !==
+        (state.planKind === "custom"
+          ? expectedClarificationPath
+          : expectedAllowedPath)
     ) {
       throw workflowError("Plan-execution repository baseline is invalid.");
     }
@@ -6173,6 +6286,8 @@ export function assertSettings(settings) {
   ) {
     throw workflowError("Plan-execution settings are invalid.");
   }
+  if (!settings || !["commit", "custom"].includes(settings.planKind))
+    throw workflowError("Invalid execution plan kind setting.");
   if (!isFinalizationPolicy(settings.finalization)) {
     throw workflowError("Plan-execution setting finalization is invalid.");
   }
@@ -6229,6 +6344,8 @@ export function isFinalizationPolicy(value) {
 
 function normalizeSettings(settings) {
   let normalized = settings;
+  if (isRecord(normalized) && !Object.hasOwn(normalized, "planKind"))
+    normalized = { ...normalized, planKind: "commit" };
   if (
     isRecord(normalized) &&
     Object.keys(COMMIT_SIZE_DEFAULTS).every(
@@ -6240,7 +6357,7 @@ function normalizeSettings(settings) {
   if (
     isRecord(normalized) &&
     !Object.hasOwn(normalized, "finalization") &&
-    ((Object.keys(normalized).length === NUMERIC_SETTINGS_FIELDS.length &&
+    ((Object.keys(normalized).length === NUMERIC_SETTINGS_FIELDS.length + 1 &&
       NUMERIC_SETTINGS_FIELDS.every((field) =>
         Object.hasOwn(normalized, field),
       )) ||
@@ -6280,7 +6397,7 @@ export function assertRuntime(
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
-    !isRecord(runtime.git) ||
+    !isRecord(stepPolicy.kind === "custom" ? runtime.workspace : runtime.git) ||
     !isRecord(runtime.trustedValidation) ||
     typeof runtime.trustedValidation.execute !== "function" ||
     typeof runtime.trustedValidation.preflight !== "function"
@@ -6309,7 +6426,11 @@ export function assertRuntime(
     }
   }
   for (const name of stepPolicy.workspaceMethods) {
-    if (typeof runtime.git[name] !== "function") {
+    if (
+      typeof (stepPolicy.kind === "custom" ? runtime.workspace : runtime.git)[
+        name
+      ] !== "function"
+    ) {
       throw workflowError(`Plan-execution Git service.${name} is invalid.`);
     }
   }

@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import { parseCommitPlan } from "@agent-runner/commit-plan";
 
+import {
+  planKindPolicy,
+  completedStepCount,
+  stepLabel,
+} from "./step-policy.js";
+
 const fingerprint = (text) => createHash("sha256").update(text).digest("hex");
 
 // Selection consumes accepted authority only. Proposals and display labels
@@ -14,7 +20,7 @@ export function effectivePlanAuthority(state, number) {
   if (number !== undefined && number !== 0 && !revision)
     throw new Error("Unknown accepted effective revision.");
   const plan = revision?.plan ?? state.canonicalPlan;
-  const steps = parseCommitPlan(plan).steps;
+  const steps = planKindPolicy(state.planKind).parse(plan).steps;
   return {
     plan,
     steps,
@@ -40,7 +46,7 @@ export function effectiveStepPosition(state, step, revision) {
   return {
     ...authority.binding,
     ...authority.mapping[step - 1],
-    subject: entry.subject,
+    subject: stepLabel(entry),
     stepFingerprint: fingerprint(JSON.stringify(entry)),
   };
 }
@@ -138,25 +144,32 @@ export function validStepAssessment(value) {
 
 export function selectedPlanPosition(state) {
   const { steps, binding } = effectivePlanAuthority(state);
-  const step = state.completedCommits.length + 1;
+  const step = completedStepCount(state) + 1;
   return {
     step,
-    subject: steps[step - 1]?.subject ?? null,
+    subject: steps[step - 1] ? stepLabel(steps[step - 1]) : null,
     ...(binding.revision === 0 || !steps[step - 1]
       ? {}
       : {
           ...effectiveStepPosition(state, step),
         }),
-    completed: state.completedCommits.map((head, index) => ({
-      step: index + 1,
-      subject: steps[index].subject,
-      head,
-      ...(binding.revision === 0
-        ? {}
-        : {
-            ...effectiveStepPosition(state, index + 1),
-          }),
-    })),
+    completed:
+      state.planKind === "custom"
+        ? (state.customResults?.accepted ?? []).map(({ step, receipt }) => ({
+            step,
+            title: stepLabel(steps[step - 1]),
+            receipt,
+          }))
+        : state.completedCommits.map((head, index) => ({
+            step: index + 1,
+            subject: steps[index].subject,
+            head,
+            ...(binding.revision === 0
+              ? {}
+              : {
+                  ...effectiveStepPosition(state, index + 1),
+                }),
+          })),
   };
 }
 
