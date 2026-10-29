@@ -427,6 +427,14 @@ later errno changes; failed output modes are never read. Assertions bind mismatc
 one `lstat` then one `stat`, attempted reporting and the unchanged first refusal,
 including no emitted record and independently preserved caller/query errno.
 Successful 45-query order and other selectors gain no advisory inspections.
+The matrix and advisory share the fixed required `/usr/lib/dyld` operand with
+unchanged row-5 decisions. Actual native binding bodies cover complete pinned
+bytes, no-follow open, regular/nonempty/bounded type and size, allocation/read/
+hash refusal, held/path identity and metadata drift, and failed close. Owned
+memory is freed and descriptor closure is attempted on success and refusal; the
+matrix fixture holds custody across row 5 and rejects failed settlement before
+advancing. These observations establish neither shared-cache membership, target
+loading nor atomic filesystem stability.
 Focused coverage is
 `node --test test/native-darwin-fault-image.test.js`; these portable regressions
 establish no native policy success, host health or independent retirement.
@@ -1080,6 +1088,9 @@ malformed x64 headers, missing signatures and substituted loaders. Injected buil
 also reject native signature-verification failure, changed verified bytes and
 missing image UUIDs before admitting a helper. Successful records bind the exact
 UUID/image digest and installed loader/signature-verifier bytes.
+Both ordinary and command helper builds additionally bind the exact loader digest
+in actual and recorded compiler arguments, including declaration probes, while
+the argv fixture gains no loader-pin argument.
 Selected-SDK declaration fixtures cover both real helper variants, the ordinary
 versus explicit extended selection, mismatched declarations/types, malformed
 capture and compiler refusal before publication. Compile-only AST observations

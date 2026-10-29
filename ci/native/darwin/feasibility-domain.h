@@ -449,14 +449,40 @@ static void domain_control_asset_check(void) {
   need(held.st_size >= 32 && ((uint32_t *)bytes)[0] == 0xfeedfacf && ((uint32_t *)bytes)[1] == 0x01000007 && ((uint32_t *)bytes)[3] == 2 && !strcmp(hash, domain_record.control_hash));
   free(bytes); need(!fstat(fd, &named) && domain_file_same(&held, &named) && !close(fd));
 }
+/* A pinned filesystem operand, independent of loaded-image/cache evidence. */
+static const char domain_runtime[] = "/usr/lib/dyld";
+static int domain_runtime_open(struct stat *held) {
+  int fd = open(domain_runtime, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  unsigned char *bytes = NULL, sum[32]; char hash[65];
+  bool ok = fd >= 0 && !fstat(fd, held) && S_ISREG(held->st_mode) &&
+    held->st_size > 0 && held->st_size <= 64 * 1024 * 1024;
+  if (ok) {
+    bytes = malloc((size_t)held->st_size + 1);
+    ok = bytes && pread(fd, bytes, held->st_size + 1, 0) == held->st_size &&
+      CC_SHA256(bytes, (CC_LONG)held->st_size, sum);
+    if (ok) {
+      for (unsigned i = 0; i < 32; i++) snprintf(hash + 2*i, 3, "%02x", sum[i]);
+      ok = !strcmp(hash, NATIVE_FEASIBILITY_LOADER_SHA256);
+    }
+  }
+  free(bytes);
+  if (!ok) { bool closed = fd < 0 || !close(fd); invariant(ok && closed, "fault-image-policy"); }
+  return fd;
+}
+static bool domain_runtime_close(int fd, const struct stat *held) {
+  struct stat after, named;
+  bool ok = !fstat(fd, &after) && !lstat(domain_runtime, &named) &&
+    domain_file_same(held, &after) && domain_file_same(held, &named);
+  bool closed = !close(fd); return ok && closed;
+}
 /* Advisory only: row -1 selects the fork query; errno is an observation, not an interpretation. */
 static void domain_effective_diagnostic(struct identity target, int row, const char *operation, int expected, int actual, int observed_errno) {
   int saved = errno;
   if (row == 5 && !strcmp(operation, "file-read-data")) {
     struct stat link_type, runtime_type;
-    int link_result = lstat("/usr/lib/libSystem.B.dylib", &link_type);
+    int link_result = lstat(domain_runtime, &link_type);
     int link_errno = link_result < 0 ? errno : 0;
-    int runtime_result = stat("/usr/lib/libSystem.B.dylib", &runtime_type);
+    int runtime_result = stat(domain_runtime, &runtime_type);
     int runtime_errno = runtime_result < 0 ? errno : 0;
     const char *link_kind = link_result != 0 ? "unavailable" :
       S_ISREG(link_type.st_mode) ? "regular" : S_ISLNK(link_type.st_mode) ? "symlink" : "other";
@@ -473,22 +499,29 @@ static void domain_effective_diagnostic(struct identity target, int row, const c
 static void domain_effective(struct identity target) {
   char paths[4][4096]; const char *names[] = {"build/helper", "build/argv-fixture", "build/git", "workspace"};
   for (unsigned i = 0; i < 4; i++) need(snprintf(paths[i], sizeof(paths[i]), "%s/%s", domain_record.root, names[i]) < sizeof(paths[i]));
-  const char *objects[] = {domain_helper, paths[0], paths[1], paths[2], paths[3], "/usr/lib/libSystem.B.dylib", "/dev/null", "/", domain_policy};
+  const char *objects[] = {domain_helper, paths[0], paths[1], paths[2], paths[3], domain_runtime, "/dev/null", "/", domain_policy};
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "file-map-executable"};
   need(!domain_record.control && domain_record.control_retired && exec_handoff_refused(domain_record.probe));
-  for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 5; j++) {
-    /* Directories (workspace/root) and the null character device have no
-     * regular-file map slot. The held workspace denial plus authorized image
-     * positive discharges those slots; every read/write and regular query stays. */
-    if (j == 4 && (i == 4 || i == 6 || i == 7)) {
-      struct stat type; need(!lstat(objects[i], &type) && (i == 6 ? S_ISCHR(type.st_mode) : S_ISDIR(type.st_mode))); continue;
+  for (unsigned i = 0; i < 9; i++) {
+    struct stat runtime; int fd = i == 5 ? domain_runtime_open(&runtime) : -1;
+    for (unsigned j = 0; j < 5; j++) {
+      /* Directories (workspace/root) and the null character device have no
+       * regular-file map slot. The held workspace denial plus authorized image
+       * positive discharges those slots; every read/write and regular query stays. */
+      if (j == 4 && (i == 4 || i == 6 || i == 7)) {
+        struct stat type; need(!lstat(objects[i], &type) && (i == 6 ? S_ISCHR(type.st_mode) : S_ISDIR(type.st_mode))); continue;
+      }
+      bool read = i != 8, write = i == 6, executable = i < 4 || i == 5;
+      int expected = j == 0 ? !read : j < 4 ? !write : !executable;
+      int actual = feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]);
+      int observed_errno = errno;
+      if (actual != expected) domain_effective_diagnostic(target, i, operations[j], expected, actual, observed_errno);
+      bool settled = true;
+      if (fd >= 0 && (actual != expected || j == 4)) {
+        int saved = errno; settled = domain_runtime_close(fd, &runtime); fd = -1; errno = saved;
+      }
+      invariant(actual == expected && settled, "fault-image-policy");
     }
-    bool read = i != 8, write = i == 6, executable = i < 4 || i == 5;
-    int expected = j == 0 ? !read : j < 4 ? !write : !executable;
-    int actual = feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]);
-    int observed_errno = errno;
-    if (actual != expected) domain_effective_diagnostic(target, i, operations[j], expected, actual, observed_errno);
-    invariant(actual == expected, "fault-image-policy");
   }
   need(feasibility_sandbox_path(sandbox_binding, target.token.val[5], "file-read-data", domain_control_asset) == 0 &&
     feasibility_sandbox_path(sandbox_binding, target.token.val[5], "file-map-executable", domain_control_asset) == 0);

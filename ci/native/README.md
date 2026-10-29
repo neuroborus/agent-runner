@@ -2308,9 +2308,13 @@ The discriminating observation is primary `fixture-main`/armed/output under
 unchanged confinement, strict mapping/exec negatives and complete independent
 retirement. Failed positives, successful negatives, binding drift or unproved
 cleanup stop this candidate; all 69 controls and model-free routes remain required.
-Feasibility matrix row 5 retains `file-read-data` on `/usr/lib/libSystem.B.dylib`
-with expected result 0; its filesystem/shared-cache applicability remains
-unresolved. This correction does not resolve that issue or the Windows failures.
+Feasibility matrix row 5 uses the fixed `/usr/lib/dyld` filesystem operand required
+by `darwinStartupImageUUID` through `inspectDarwinMachO`. It replaces the observed
+absent `/usr/lib/libSystem.B.dylib` within the same unchanged `/usr/lib` policy
+family, retaining read/write/create/unlink/map decisions `[0, 1, 1, 1, 0]`.
+This is required-runtime filesystem authorization, not shared-cache membership
+or target-loaded-image evidence. Independent image/runtime protections remain;
+the separate cleanup-flock and Windows startup failures remain unresolved.
 
 Before the confined argv case, matching macOS CI runs four fixed controls:
 policy application without exec; the same inspected sibling fixture outside the
@@ -4854,7 +4858,7 @@ numeric caller/target PIDs locate the query without publishing paths or policy
 contents. Expected/actual returns and immediately observed raw `observed_errno`
 are retained, and diagnostic output preserves errno. The errno snapshot may be
 stale or zero and supplies no documented interpretation of a query result.
-The row-5 `file-read-data` mismatch alone inspects the fixed runtime path once
+The row-5 `file-read-data` mismatch alone inspects the same fixed `/usr/lib/dyld` once
 with `lstat`, then `stat`, before reporting. Each retains its own result,
 immediate failure errno (zero on success), and closed `regular`, `symlink`,
 `other` or `unavailable` type; failed outputs are never read. This tests whether
@@ -4864,11 +4868,18 @@ documented `ENOENT` supports absence; a symlink alone does not establish target
 presence. Other successful types remain explicit applicability evidence;
 conflicting observations remain inconclusive. These are separate observations
 in the caller's context, proving neither shared-cache membership, target-process
-loading nor atomic filesystem stability. Absence selects a separately evidenced
-equivalent actual runtime-check assessment without choosing a replacement;
-presence retains the mismatch for exact-path/decision investigation. Inconclusive,
-conflicting or missing observations stop this diagnostic route instead of adding
-similar logging. Successful queries and other selectors gain no inspections.
+loading nor atomic filesystem stability. No inspection selects a fallback.
+Successful queries and other selectors gain no advisory inspections.
+Separately, before row 5, native admission opens that loader without following
+symlinks or blocking on a substituted FIFO, and requires a nonempty regular file
+bounded to 64 MiB. It reads the complete file and verifies its digest against the
+existing preparation loader pin, carried in recorded compiler arguments for both
+helper variants. The held
+descriptor spans the row's unchanged queries; held metadata and pathname identity
+are rechecked before acceptance. Acquired memory is freed and descriptor closure
+is attempted on success and refusal; failed closure remains blocking. Preparation,
+compilation and admission rechecks, all nine rows and 45 obligations, actual
+mapping/execution controls and independent complete retirement remain required.
 Existing custodian stderr capture and ordinary CI publication retain this record
 separately from payload output and cleanup failures. Missing or failed output
 does not change refusal, admission or retirement, and the observation establishes

@@ -4281,6 +4281,48 @@ test("selected SDK declarations contrast ordinary and extended getgroups in both
   }
 });
 
+test("Darwin feasibility records the exact loader pin in both helper variants' compiler arguments", async () => {
+  for (const commandObservation of [false, true]) {
+    const injected = effects(),
+      read = injected.fs.readFile,
+      execute = injected.executeFile,
+      commands = [],
+      loader = Buffer.from(
+        `complete loader bytes for variant ${commandObservation}`,
+      ),
+      flag = `-DNATIVE_FEASIBILITY_LOADER_SHA256="${digest(loader)}"`;
+    let report;
+    injected.fs.readFile = (file) =>
+      file === "/usr/lib/dyld" ? loader : read(file);
+    injected.fs.writeFile = async (file, bytes) => {
+      if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
+    };
+    injected.executeFile = (file, args, options) => {
+      if (file === "/fixture/clang" && args[0] !== "--version") {
+        assert.deepEqual(
+          args.filter((arg) =>
+            arg.startsWith("-DNATIVE_FEASIBILITY_LOADER_SHA256="),
+          ),
+          args.at(-1).endsWith("/feasibility-helper.c") ? [flag] : [],
+        );
+        if (!args.includes("-fsyntax-only")) commands.push(args);
+      }
+      return execute(file, args, options);
+    };
+    await buildDarwinFeasibility("/fixture/run", [], {
+      ...injected,
+      commandObservation,
+    });
+    assert.equal(commands.length, 2);
+    assert.deepEqual(
+      report.builds.map((build) => build.args),
+      commands,
+    );
+    assert.ok(report.builds[0].args.includes(flag));
+    assert.equal(report.builds[0].runtime.loader.sha256, digest(loader));
+  }
+});
+
 test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
   const [commandSource, helperSource, handoffSource, closureSource] =
       await Promise.all(

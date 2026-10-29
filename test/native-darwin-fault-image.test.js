@@ -761,6 +761,225 @@ test("fault recovery admits an unpublished replacement only through original bir
   }
 });
 
+test("fault runtime binding hashes the complete held loader and settles every refusal", async () => {
+  const source = await readFile(
+      new URL("../ci/native/darwin/feasibility-domain.h", import.meta.url),
+      "utf8",
+    ),
+    runtime = /static const char domain_runtime\[\] = "([^"]+)";/u.exec(
+      source,
+    )[1],
+    body = (name) =>
+      new RegExp(
+        `static (?:int|bool) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (value) =>
+      value
+        .replaceAll("->", ".")
+        .replace(
+          "unsigned char *bytes = NULL, sum[32]; char hash[65];",
+          "let bytes = null; const sum = Buffer.alloc(32), hash = Array(65).fill(0);",
+        )
+        .replace("struct stat after, named;", "const after = {}, named = {};")
+        .replaceAll(/\b(?:int|bool|unsigned) /gu, "let ")
+        .replaceAll(/\((?:size_t|CC_LONG)\)/gu, "")
+        .replaceAll(/&(after|named)/gu, "$1")
+        .replace("snprintf(hash + 2*i,", "snprintf(hash, 2*i,"),
+    native = new Script(`
+      function domain_file_same(a, b) {${translate(body("domain_file_same"))}}
+      function domain_runtime_open(held) {${translate(body("domain_runtime_open"))}}
+      function domain_runtime_close(fd, held) {${translate(body("domain_runtime_close"))}}
+      ({open: domain_runtime_open, close: domain_runtime_close});
+    `),
+    bytes = Buffer.from("complete synthetic loader bytes"),
+    identity = {
+      st_mode: "regular",
+      st_size: bytes.length,
+      st_dev: 1,
+      st_ino: 2,
+      st_uid: 0,
+      st_gid: 0,
+      st_nlink: 1,
+      st_birthtimespec: { tv_sec: 1, tv_nsec: 2 },
+      st_mtimespec: { tv_sec: 3, tv_nsec: 4 },
+      st_ctimespec: { tv_sec: 5, tv_nsec: 6 },
+    };
+  assert.equal(runtime, "/usr/lib/dyld");
+  for (const fault of [
+    null,
+    "absent",
+    "symlink",
+    "stat",
+    "type",
+    "empty",
+    "oversize",
+    "allocation",
+    "read",
+    "short-read",
+    "growth",
+    "hash",
+    "digest",
+    "held-stat",
+    "named-stat",
+    "held-identity",
+    "named-identity",
+    "mode",
+    "size",
+    "mtime",
+    "ctime",
+    "close",
+    "read-close",
+  ]) {
+    const calls = [];
+    let allocation = null,
+      freed = false,
+      opened = false,
+      stats = 0,
+      closeAttempted = false;
+    const api = {
+      Buffer,
+      domain_runtime: runtime,
+      NATIVE_FEASIBILITY_LOADER_SHA256: hash(bytes),
+      O_RDONLY: 0,
+      O_NOFOLLOW: 1,
+      O_CLOEXEC: 2,
+      O_NONBLOCK: 4,
+      S_ISREG: (mode) => mode === "regular",
+      same_file_stat: (a, b) =>
+        [
+          "st_dev",
+          "st_ino",
+          "st_uid",
+          "st_gid",
+          "st_mode",
+          "st_nlink",
+          "st_birthtimespec",
+        ].every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key])),
+      strcmp: (a, b) =>
+        Number((Array.isArray(a) ? a.slice(0, 64).join("") : a) !== b),
+      invariant: (ok) => assert.ok(ok, fault ?? "success"),
+      open(path, flags) {
+        calls.push("open");
+        assert.equal(path, runtime);
+        assert.equal(flags, 7);
+        opened = !["absent", "symlink"].includes(fault);
+        return opened ? 7 : -1;
+      },
+      fstat(fd, out) {
+        assert.equal(fd, 7);
+        calls.push("fstat");
+        stats++;
+        if (fault === (stats === 1 ? "stat" : "held-stat")) {
+          Object.defineProperty(out, "st_mode", {
+            get() {
+              assert.fail("failed stat output");
+            },
+          });
+          return -1;
+        }
+        Object.assign(out, structuredClone(identity));
+        if (stats === 1) {
+          if (fault === "type") out.st_mode = "directory";
+          if (fault === "empty") out.st_size = 0;
+          if (fault === "oversize") out.st_size = 64 * 1024 * 1024 + 1;
+        } else {
+          if (fault === "held-identity") out.st_ino++;
+          if (fault === "mode") out.st_mode = "symlink";
+          if (fault === "size") out.st_size++;
+          if (fault === "mtime") out.st_mtimespec.tv_nsec++;
+          if (fault === "ctime") out.st_ctimespec.tv_nsec++;
+        }
+        return 0;
+      },
+      lstat(path, out) {
+        calls.push("lstat");
+        assert.equal(path, runtime);
+        if (fault === "named-stat") return -1;
+        Object.assign(out, structuredClone(identity));
+        if (fault === "named-identity") out.st_ino++;
+        return 0;
+      },
+      malloc(size) {
+        calls.push("allocate");
+        assert.equal(size, bytes.length + 1);
+        allocation = fault === "allocation" ? null : Buffer.alloc(size);
+        return allocation;
+      },
+      pread(fd, out, size, offset) {
+        calls.push("read");
+        assert.equal(fd, 7);
+        assert.equal(out, allocation);
+        assert.equal(size, bytes.length + 1);
+        assert.equal(offset, 0);
+        bytes.copy(out);
+        if (["read", "read-close"].includes(fault)) return -1;
+        return (
+          bytes.length +
+          (fault === "short-read" ? -1 : fault === "growth" ? 1 : 0)
+        );
+      },
+      CC_SHA256(input, size, out) {
+        calls.push("hash");
+        assert.equal(size, bytes.length);
+        assert.deepEqual(input.subarray(0, size), bytes);
+        Buffer.from(hash(input.subarray(0, size)), "hex").copy(out);
+        if (fault === "digest") out[0] ^= 1;
+        return fault === "hash" ? 0 : 1;
+      },
+      snprintf(out, offset, size, format, byte) {
+        assert.equal(size, 3);
+        assert.equal(format, "%02x");
+        const hex = byte.toString(16).padStart(2, "0");
+        out[offset] = hex[0];
+        out[offset + 1] = hex[1];
+        out[offset + 2] = 0;
+      },
+      free(value) {
+        calls.push("free");
+        assert.equal(value, allocation);
+        freed = true;
+      },
+      close(fd) {
+        calls.push("close");
+        assert.equal(fd, 7);
+        assert.ok(opened && !closeAttempted && freed);
+        closeAttempted = true;
+        return ["close", "read-close"].includes(fault) ? -1 : 0;
+      },
+    };
+    const binding = native.runInNewContext(api),
+      held = {};
+    const run = () => {
+      const fd = binding.open(held);
+      assert.equal(fd, 7);
+      assert.ok(!closeAttempted && freed);
+      assert.ok(binding.close(fd, held), fault ?? "success");
+    };
+    if (fault) assert.throws(run, undefined, fault);
+    else run();
+    assert.equal(freed, true, fault);
+    assert.equal(closeAttempted, opened, fault);
+    assert.equal(
+      calls.filter((call) => call === "close").length,
+      Number(opened),
+      fault,
+    );
+    if (!fault)
+      assert.deepEqual(calls, [
+        "open",
+        "fstat",
+        "allocate",
+        "read",
+        "hash",
+        "free",
+        "fstat",
+        "lstat",
+        "close",
+      ]);
+  }
+});
+
 test("fault policy queries retain exact decisions and errno before the first unchanged refusal", async () => {
   const source = await readFile(
     new URL("../ci/native/darwin/feasibility-domain.h", import.meta.url),
@@ -789,6 +1008,8 @@ test("fault policy queries retain exact decisions and errno before the first unc
     .replace("snprintf(paths[i],", "snprintf(paths, i,")
     .replace(/int expected = ([^\n]+);/u, "let expected = Number($1);")
     .replaceAll(/\b(?:unsigned|bool|int) /gu, "let ")
+    .replace("struct stat runtime;", "const runtime = {};")
+    .replaceAll("&runtime", "runtime")
     .replace("struct stat type;", "let type = {};")
     .replace("&type", "type")
     .replace("*sandbox_binding.no_report", "sandbox_binding.no_report");
@@ -798,7 +1019,7 @@ test("fault policy queries retain exact decisions and errno before the first unc
     "/sealed/root/build/argv-fixture",
     "/sealed/root/build/git",
     "/sealed/root/workspace",
-    "/usr/lib/libSystem.B.dylib",
+    "/usr/lib/dyld",
     "/dev/null",
     "/",
     "/sealed/policy",
@@ -905,14 +1126,17 @@ test("fault policy queries retain exact decisions and errno before the first unc
   ]) {
     const calls = [],
       records = [],
-      events = [];
+      events = [],
+      runtimeEvents = [];
     let comparisons = 0,
       flushes = 0,
-      advanced = false;
+      advanced = false,
+      runtimeHeld = false;
     const refusal = new Error("fault-image-policy");
     const query = (pid, operation, object) => {
       assert.equal(pid, 42);
       const expected = queries[calls.length];
+      if (expected.row === 5) assert.equal(runtimeHeld, true);
       assert.deepEqual(
         { operation, object },
         {
@@ -931,6 +1155,24 @@ test("fault policy queries retain exact decisions and errno before the first unc
       stderr: {},
       domain_helper: objects[0],
       domain_policy: objects[8],
+      domain_runtime: /static const char domain_runtime\[\] = "([^"]+)";/u.exec(
+        source,
+      )[1],
+      domain_runtime_open() {
+        assert.equal(calls.length, 24);
+        assert.equal(runtimeHeld, false);
+        runtimeEvents.push("open");
+        runtimeHeld = true;
+        return 7;
+      },
+      domain_runtime_close(fd) {
+        assert.equal(fd, 7);
+        assert.equal(runtimeHeld, true);
+        runtimeEvents.push("close");
+        runtimeHeld = false;
+        api.errno = 99;
+        return true;
+      },
       domain_record: {
         root: "/sealed/root",
         control: false,
@@ -1035,6 +1277,7 @@ test("fault policy queries retain exact decisions and errno before the first unc
     if (fault) assert.throws(run, (error) => error === refusal);
     else run();
     const count = fault ? fault.at + 1 : 45;
+    assert.deepEqual(runtimeEvents, count > 24 ? ["open", "close"] : []);
     assert.deepEqual(calls, queries.slice(0, count));
     assert.equal(
       comparisons,
@@ -1086,6 +1329,18 @@ test("fault policy queries retain exact decisions and errno before the first unc
     }
     if (fault?.at === 0) assert.equal(records[0], policyObservation);
     if (!fault) {
+      const settle = api.domain_runtime_close;
+      api.domain_runtime_close = (...args) => {
+        settle(...args);
+        return false;
+      };
+      calls.length = 0;
+      assert.throws(() => evaluate({ token: { val: [0, 0, 0, 0, 0, 42] } }));
+      assert.equal(
+        calls.length,
+        29,
+        "failed loader settlement cannot advance beyond row 5",
+      );
       // The observed directory-map return 0 is not queried as regular-file
       // mapping evidence. Native type substitution still refuses admission.
       assert.ok(

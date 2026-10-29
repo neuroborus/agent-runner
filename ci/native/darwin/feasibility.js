@@ -1707,6 +1707,7 @@ export async function buildDarwinFeasibility(
           "-Wl,-adhoc_codesign",
           ...(name === "helper"
             ? [
+                `-DNATIVE_FEASIBILITY_LOADER_SHA256="${runtime.loader.sha256}"`,
                 "-lsandbox",
                 "-lbsm",
                 "-framework",
