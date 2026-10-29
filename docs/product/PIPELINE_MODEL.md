@@ -96,7 +96,15 @@ Confirmations, corrections, rejections, merges and explicit hypotheses retain
 exact versioned decisions, including rejected claims; review additions must
 also be verified. A separate finite run-wide 20-recheck budget survives all
 batches and reconstruction. Batch acceptance cannot clean discovery or complete
-an audit. Combined audit cycles and public publication remain unavailable. The
+an audit. Combined keeps each Auditor through its series until clean, then starts
+a fresh Auditor; only a successor's clean first discovery pass satisfies its
+discovery gate. Even an initially clean primary requires a successor. Each batch
+first converges with its discovering Auditor, then receives fresh finding review.
+A correcting Reviewer finishes its own series before replacement; only a fresh
+Reviewer's clean first pass accepts the batch. Discovery resumes its prior owner
+after acceptance. Invalid or interrupted work cannot regain a first-pass
+opportunity through reconstruction, and neither run-wide budget resets on
+replacement. Public registration and publication remain unavailable. The
 [audit specification](../../pipelines/audit/docs/SPEC.md) owns exact shapes,
 criteria, state and ordering; the three supported workflows and their gates are unchanged.
 

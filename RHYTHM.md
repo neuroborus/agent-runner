@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-10-29
 
+- **Combined audit replaces logical owners only after their own series is clean.**
+  The primary Auditor always needs a fresh successor; only a later Auditor's
+  clean first discovery pass satisfies the gate. Every batch first converges
+  with its discovering Auditor, then requires fresh clean-first finding review.
+  Correcting Reviewers finish their own series before replacement, and acceptance
+  resumes the same discovery owner. History-derived cycle positions retain
+  non-clean passes and exact batch versions across interruption/reconstruction;
+  neither a new child nor replacement renews either run-wide 20-pass budget.
+  Intermediate recheck cleanliness grants no acceptance, discovery cleanliness
+  or publication authority. Public exposure remains a separate delivery boundary.
+
 - **Audit batches require their own durable recheck before further discovery.**
   Every new or materially revised batch receives a distinct read-only recheck.
   Lazy continues the discovering Auditor; independent replaces the finding

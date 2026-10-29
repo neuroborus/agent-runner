@@ -29,6 +29,12 @@ reservations, exact acceptance recovery, Auditor-only legacy migration/resume
 without fabricated approval or role expansion, and run-wide recheck exhaustion.
 It shares injected effect-free fixtures with discovery through the pipeline's
 test support index.
+Fast `pipelines/audit/test/combined.test.js` owns initially clean and
+finding-producing fresh discovery cycles, duplicate and report-only corrections,
+same-Auditor batch convergence, correcting Reviewer continuity/additions and
+clean-first replacement. Injected capabilities cover invalid/incomplete output,
+interrupted reservations, lost-child reconstruction without reforking, rejected
+premature acceptance and both finite run-wide budgets across replacement/resume.
 Fast `test/runner-audit.test.js` owns audit composition with the existing confined
 workspace/clarification services and persisted session contract: authorized
 transcript edits preserve discovery, while source drift blocks it. It also uses

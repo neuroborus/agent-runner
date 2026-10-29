@@ -291,9 +291,6 @@ test("run-wide exhaustion survives reconstruction and cannot be renewed by mode 
     createAuditState({ settings: { maxDiscoveryPasses: 21 } }),
   );
   assert.equal(createAuditState().settings.mode, "independent");
-  await assert.rejects(fixture([], { mode: "combined" }).execute(), {
-    code: "ERR_AUDIT_MODE_UNAVAILABLE",
-  });
 });
 
 test("clarification edits persist authorization before waiting and empty closes consume no extra round", async () => {

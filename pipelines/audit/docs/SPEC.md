@@ -7,7 +7,8 @@ and default criterion catalog, deterministic English Markdown rendering, and a
 descriptor-owned read-only discovery and finding-verification lifecycle. It
 remains unfinished and unregistered: there is no audit CLI command, MCP route or
 publication capability. The root runtime still exposes its three existing
-pipelines. Combined audit cycles are unavailable at this stage.
+pipelines. All three audit modes have internal discovery and batch gates;
+public completion and report publication remain unavailable.
 
 The private workspace uses native ESM, Node.js `>=24 <25`, the standard library,
 and `node:test`. Its public `src/index.js` exposes `AUDIT_CATALOG`,
@@ -26,12 +27,11 @@ dependencies and the static registry. It selects a directory workspace and
 exclusive canonical workspace lease, allowing the same filesystem inspection
 capability for Git repositories and ordinary directories. Auditor and finding
 Reviewer access is read-only; lazy resolves and invokes only the Auditor. The
-descriptor owns `mode` (default and recommended `independent`; explicit `lazy`;
-reserved `combined`) and `maxDiscoveryPasses` (default 20, positive integer
+descriptor owns `mode` (default and recommended `independent`; explicit `lazy`
+or `combined`) and `maxDiscoveryPasses` (default 20, positive integer
 capped at 20 and frozen at creation). The separate
 `maxFindingRecheckPasses` setting has the same default and finite cap.
-Combined invocation fails before effects until its audit-specific cycle gate
-is implemented. The lifecycle imports no root capability or other pipeline.
+The lifecycle imports no root capability or other pipeline.
 
 `runAuditDiscovery` consumes existing injected runner workspace, clarification,
 adapter, session-lineage and state-transition capabilities. The runner owns
@@ -58,7 +58,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 2 retains the workspace baseline, frozen declarations and their
+State version 3 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -71,7 +71,10 @@ runs without a frozen Reviewer pause at `VERIFY_FINDINGS` with
 evidence remains intact across resume; independently reviewed findings require
 a new run, without resolving or adding roles to the old snapshot. The migration
 is consumed through the existing leased Runner migration boundary, never by
-writing state directly. Task/context hashes remain in the common envelope.
+writing state directly. The ordered version-2 migration adds an empty
+`sourceForkContexts` list for combined logical-owner fork consumption; it changes
+no existing history, roles, budgets, batch versions or approval. Combined had no
+invocable lifecycle in prior versions. Task/context hashes remain in the common envelope.
 Report and pending-batch bindings pin the inspected content snapshot. Each
 history entry retains its ordinal, logical session context, outcome, report
 binding and candidate IDs. Actual opaque child identities/lineage use the
@@ -80,6 +83,12 @@ audit state.
 Session context keys use the run store's SHA-256 format and bind task/context
 hashes, the source snapshot and logical checkpoint. Independent discovery also
 binds frozen declarations; lazy retains one key across clarification and passes.
+Combined derives cycle ordinals and passes within each cycle from preserved
+history prefixes: only `clean` closes a series. Thus reservations, interruptions,
+invalid output, findings and report corrections remain part of the same cycle.
+These histories are the durable cycle record, rather than independently mutable
+freshness counters. Session keys bind that logical owner; a new native child
+cannot reset its first-pass opportunity.
 
 Lazy uses one logical Auditor across clarification and discovery. A deliberately
 supplied source is forked at most once, with consumption persisted before
@@ -155,6 +164,30 @@ at that checkpoint without a redundant unchanged-response turn. The separate
 finding gate and eventual mode-specific completion/publication consume
 these bindings without changing historical outcomes or renewing either budget.
 
+## Combined discovery cycles
+
+Combined continues the initial Auditor from clarification through its discovery
+series. A clean primary always starts a fresh Auditor, including when the primary
+was clean on its first pass. Each successor inspects the same frozen scope with
+compact accumulated findings and accepted dispositions, without preceding
+conversations. If its first discovery pass is clean, it supplies the combined
+`DISCOVERY_CLEAN` gate. Otherwise, keep that Auditor until its own series is clean,
+then create another fresh Auditor. Later cleanliness closes only that series.
+
+Finding-producing passes, exact duplicates, report-only corrections and invalid,
+incomplete or interrupted reservations all retain their non-clean provenance.
+Rejected candidates never retrospectively clean discovery. Every new/material
+batch suspends discovery for the separate verification policy below; accepting
+it resumes the discovering Auditor, without closing or replacing that owner.
+
+Combined source forks are isolated per logical Auditor or finding Reviewer.
+Persist consumption in `sourceForkContexts` before invocation, even before a
+child is known. Continue or reconstruct the same owner without reforking; only
+existing validated no-effect recovery can restore that key's unused fork.
+Reconstruction, replacement and new batches never reset either run-wide budget.
+Discovery and finding review share only the pure history-derived cycle-position
+rule; their distinct starting owners and acceptance rules remain audit-owned.
+
 ## Finding-batch verification
 
 `VERIFY_FINDINGS` requires a distinct read-only recheck of every new or materially
@@ -199,7 +232,16 @@ or their rationale increment the batch version and require another distinct
 recheck. Agreeing with a disposition preserves its exact text/payload. A first
 review with only confirmations is clean immediately, as is unchanged review of
 previously added entries; neither requires a redundant confirmation turn.
-Combined verification remains unavailable until its separate cycle policy exists.
+Combined first rechecks with the discovering Auditor until the exact batch and
+dispositions are unchanged, then starts a fresh finding Reviewer. A clean first
+Reviewer pass accepts that batch immediately. If a Reviewer corrects anything,
+adds findings, or returns invalid/incomplete output, retain it through its own
+series until clean, then replace it. Acceptance requires a later fresh Reviewer's
+clean first pass. An interrupted reservation also consumes that first-pass
+opportunity. Neither the Auditor's clean recheck nor a correcting Reviewer's later
+clean recheck creates an acceptance receipt or releases pending verification.
+Rechecks resume the same exact batch/version after interruption; changes still
+invalidate approval and require verification themselves, including additions.
 
 A write-ahead recheck reservation records ordinal, logical session key,
 discovery pass, batch version/fingerprint, snapshot/report bindings and outcome.
@@ -213,7 +255,7 @@ on resume, without provider work or renewed allowances. Invalid/incomplete
 rechecks pause resumably at verification rather than discovering more findings.
 Source/input drift remains blocking and unsettled execution ownership propagates.
 
-Only a clean distinct recheck creates an accepted-batch receipt bound to its exact
+Only a mode-eligible clean distinct recheck creates an accepted-batch receipt bound to its exact
 entries, dispositions and recheck evidence, then releases `DISCOVER`. A material
 later revision leaves historical receipts intact but requires a new pending
 version; earlier acceptance cannot approve it. Discovery receives accepted

@@ -1426,8 +1426,10 @@ Git services; pipeline workspaces own mode and workflow policy.
 
 The unregistered `pipelines/audit/` workspace supplies strict finding/report
 contracts and a read-only discovery lifecycle with frozen scope, isolated sessions,
-pending findings and bounded recovery. Finding verification and public completion
-are not yet available through CLI/MCP. See its
+pending findings, separate batch verification and bounded recovery in all three
+modes. Combined requires a fresh successor's clean first discovery pass and
+converges each batch before fresh clean-first finding review. Public completion
+and report publication are not yet available through CLI/MCP. See its
 [specification](pipelines/audit/docs/SPEC.md) for discovery, classification,
 evidence, concrete examples, uncertainty and criteria.
 

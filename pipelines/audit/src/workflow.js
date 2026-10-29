@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import { recheckRole } from "./cycles.js";
 import {
   acceptDiscovery,
   assertAudit,
@@ -15,6 +16,7 @@ import {
 import {
   AUDIT_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
+  COMBINED_INSTRUCTIONS,
   DISCOVERY_INSTRUCTIONS,
   RECHECK_INSTRUCTIONS,
 } from "./prompts.js";
@@ -50,12 +52,6 @@ export async function runAuditDiscovery({
   operatorStop = false,
 }) {
   assertAuditRun(run);
-  if (run.pipelineState.settings.mode === "combined") {
-    throw new AuditWorkflowError(
-      "Combined audit discovery is not available yet.",
-      "ERR_AUDIT_MODE_UNAVAILABLE",
-    );
-  }
   let current = run;
   const state = () => current.pipelineState;
   const transcript = {
@@ -137,8 +133,7 @@ export async function runAuditDiscovery({
   }
   async function attempt(phase, evidence) {
     const recheck = phase === "recheck";
-    const role =
-      recheck && state().settings.mode !== "lazy" ? "reviewer" : "auditor";
+    const role = recheck ? recheckRole(state()) : "auditor";
     const resumeState = recheck
       ? "VERIFY_FINDINGS"
       : phase === "clarify"
@@ -156,6 +151,7 @@ export async function runAuditDiscovery({
       return { failure: "workspace_changed" };
     }
     const lazy = state().settings.mode === "lazy";
+    const combined = state().settings.mode === "combined";
     const key = sessionContextKey(
       current,
       phase,
@@ -199,7 +195,8 @@ export async function runAuditDiscovery({
         : !reconstructing &&
             state().sourceForkRecovery !== key &&
             source !== null &&
-            (!lazy || !state().sourceForkConsumed)
+            (!lazy || !state().sourceForkConsumed) &&
+            (!combined || !state().sourceForkContexts.includes(key))
           ? { mode: "fork", id: source }
           : undefined;
     const activeTurn = { role, phase };
@@ -210,9 +207,13 @@ export async function runAuditDiscovery({
           state().sourceForkConsumed || (lazy && session?.mode === "fork"),
         sourceForkRecovery:
           session?.mode === "fork" ? key : state().sourceForkRecovery,
+        sourceForkContexts:
+          combined && session?.mode === "fork"
+            ? [...state().sourceForkContexts, key]
+            : state().sourceForkContexts,
       },
     });
-    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}\n\n${JSON.stringify(evidence)}`;
+    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}\n\n${JSON.stringify(evidence)}`;
     const configuration = current.roles[role];
     let response;
     let agentError;
@@ -278,6 +279,9 @@ export async function runAuditDiscovery({
             sourceForkRecovery: noForkEffect
               ? null
               : state().sourceForkRecovery,
+            sourceForkContexts: noForkEffect
+              ? state().sourceForkContexts.filter((context) => context !== key)
+              : state().sourceForkContexts,
           },
           {
             activeTurn: null,
@@ -325,6 +329,9 @@ export async function runAuditDiscovery({
             ...state(),
             sourceForkConsumed: lazy ? false : state().sourceForkConsumed,
             sourceForkRecovery: null,
+            sourceForkContexts: state().sourceForkContexts.filter(
+              (context) => context !== key,
+            ),
           });
         }
         return {
@@ -558,7 +565,8 @@ export async function runAuditDiscovery({
   while (["DISCOVER", "VERIFY_FINDINGS"].includes(state().workflowState)) {
     if (state().workflowState === "VERIFY_FINDINGS") {
       if (
-        state().settings.mode === "independent" &&
+        recheckRole(state(), state().recheckHistory.length + 1) ===
+          "reviewer" &&
         current.roles.reviewer === undefined
       )
         return pause("audit_reviewer_required", "VERIFY_FINDINGS", {

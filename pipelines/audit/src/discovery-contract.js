@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
+import {
+  acceptsCleanDiscovery,
+  cyclePosition,
+  findingRecheckCycle,
+} from "./cycles.js";
 import { normalizeAuditReport, texts } from "./findings.js";
 
 export const MAX_DISCOVERY_PASSES = 20;
@@ -102,19 +107,34 @@ export function sessionContextKey(
 ) {
   const state = run.pipelineState;
   const lazy = state.settings.mode === "lazy";
+  const combined = state.settings.mode === "combined";
+  let checkpoint = lazy
+    ? "audit:auditor"
+    : phase === "clarify"
+      ? "audit:clarify"
+      : `audit:${phase}:${number}`;
+  if (combined) {
+    if (phase === "recheck") {
+      const { sourcePass, cycle } = findingRecheckCycle(state, number);
+      if (cycle === 1) return state.history[sourcePass - 1].contextKey;
+      checkpoint = `audit:recheck:${sourcePass}:cycle:${cycle - 1}`;
+    } else {
+      const cycle =
+        phase === "clarify" ? 1 : cyclePosition(state.history, number).cycle;
+      checkpoint = `audit:auditor:cycle:${cycle}`;
+    }
+  }
+  const bindInputs =
+    !lazy &&
+    phase !== "clarify" &&
+    !(combined && checkpoint === "audit:auditor:cycle:1");
   return fingerprint({
     role: phase === "recheck" && !lazy ? "reviewer" : "auditor",
     task: run.hashes.task,
     context: run.hashes.context,
     snapshot: state.repositoryBaseline.contentFingerprint,
-    checkpoint: lazy
-      ? "audit:auditor"
-      : phase === "clarify"
-        ? "audit:clarify"
-        : `audit:${phase}:${number}`,
-    ...(!lazy && phase !== "clarify"
-      ? { inputs: state.inputsFingerprint }
-      : {}),
+    checkpoint,
+    ...(bindInputs ? { inputs: state.inputsFingerprint } : {}),
   });
 }
 
@@ -207,6 +227,7 @@ export function createAuditState({ settings = {} } = {}) {
     pendingEdit: null,
     sourceForkConsumed: false,
     sourceForkRecovery: null,
+    sourceForkContexts: [],
     report: null,
     reportFingerprint: null,
     ledger: [],
@@ -241,6 +262,23 @@ export function assertDiscoveryRun(run) {
     state.sourceForkRecovery === null ||
       (isHash(state.sourceForkRecovery) && run.sessionLineage.source !== null),
     "Audit source-fork recovery is invalid.",
+  );
+  assertAudit(
+    Array.isArray(state.sourceForkContexts) &&
+      state.sourceForkContexts.length <=
+        1 +
+          state.settings.maxDiscoveryPasses +
+          state.settings.maxFindingRecheckPasses &&
+      state.sourceForkContexts.every(isHash) &&
+      new Set(state.sourceForkContexts).size ===
+        state.sourceForkContexts.length &&
+      (state.sourceForkContexts.length === 0 ||
+        (state.settings.mode === "combined" &&
+          run.sessionLineage.source !== null)) &&
+      (state.settings.mode !== "combined" ||
+        state.sourceForkRecovery === null ||
+        state.sourceForkContexts.includes(state.sourceForkRecovery)),
+    "Audit combined source-fork consumption is invalid.",
   );
   if (state.inputs !== null) {
     assertAudit(
@@ -344,6 +382,19 @@ export function assertDiscoveryRun(run) {
           )),
       "Audit discovery session provenance is invalid.",
     );
+    if (
+      state.settings.mode === "combined" &&
+      pass.outcome === "clean" &&
+      acceptsCleanDiscovery(state, pass.number)
+    ) {
+      assertAudit(
+        index === state.history.length - 1 &&
+          ["DISCOVERY_CLEAN", "WAITING_FOR_USER", "FAILED"].includes(
+            state.workflowState,
+          ),
+        "Audit discovery continued after its combined clean-first successor gate.",
+      );
+    }
   }
   if (state.pendingBatch !== null) {
     const batch = state.pendingBatch;
@@ -373,7 +424,8 @@ export function assertDiscoveryRun(run) {
   if (state.workflowState === "DISCOVERY_CLEAN") {
     assertAudit(
       state.history.at(-1)?.outcome === "clean" &&
-        state.history.at(-1).reportFingerprint === state.reportFingerprint,
+        state.history.at(-1).reportFingerprint === state.reportFingerprint &&
+        acceptsCleanDiscovery(state),
       "Audit clean discovery lacks current evidence.",
     );
   }
@@ -463,7 +515,7 @@ export function acceptDiscovery(state, value) {
     workflowState:
       entries.length > 0
         ? "VERIFY_FINDINGS"
-        : outcome === "clean"
+        : outcome === "clean" && acceptsCleanDiscovery(state)
           ? "DISCOVERY_CLEAN"
           : "DISCOVER",
     pendingBatch:

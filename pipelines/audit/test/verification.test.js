@@ -446,11 +446,18 @@ test("auditor-only version-1 snapshots preserve roles and pause before independe
     delete legacy.pipelineState.settings.maxFindingRecheckPasses;
     delete legacy.pipelineState.pendingBatch.version;
     delete legacy.pipelineState.pendingBatch.dispositions;
+    delete legacy.pipelineState.sourceForkContexts;
     const roles = structuredClone(legacy.roles);
-    const migrated = auditPipeline.migrations[1](legacy);
+    const version2 = auditPipeline.migrations[1](legacy);
+    const migrated = auditPipeline.migrations[2]({
+      ...legacy,
+      pipelineState: version2,
+    });
     assert.equal(migrated.settings.maxFindingRecheckPasses, 20);
     assert.deepEqual(migrated.recheckHistory, []);
     assert.deepEqual(migrated.acceptedBatches, []);
+    assert.deepEqual(migrated.sourceForkContexts, []);
+    assert.deepEqual(migrated.history, legacy.pipelineState.history);
     assert.equal(migrated.history[0].outcome, "findings");
     const saved = { ...legacy, pipelineState: migrated };
     assert.doesNotThrow(() => auditPipeline.workflow.validateRun(saved));

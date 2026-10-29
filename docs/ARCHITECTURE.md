@@ -580,7 +580,20 @@ historical discovery cleanliness. State version 2 initializes these records from
 version 1 through the descriptor migration without inventing acceptance.
 Auditor-only legacy roles remain frozen: lazy can recheck, while independent
 verification pauses before reserving work and requires a new run with a Reviewer.
-Combined cycles, public registration and report publication remain unavailable.
+State version 3 adds combined per-owner source-fork consumption without changing
+earlier roles, histories, budgets or approvals. Combined derives discovery and
+recheck cycle positions from preserved history; only clean closes a logical
+owner's series, and reconstruction never grants another first-pass opportunity.
+The initial Auditor continues from clarification until clean, then a fresh
+successor must be clean on its first discovery pass. A finding-producing or
+report-correcting successor finishes its own series before replacement. Each
+batch first converges with that discovering Auditor, then passes to fresh finding
+Reviewers. A correcting Reviewer finishes its own series before replacement;
+only a fresh Reviewer's clean first pass accepts the exact batch. Intermediate
+clean rechecks retain pending verification without acceptance receipts.
+Batch acceptance resumes the same discovering owner. Both run-wide budgets and
+all non-clean history survive reconstruction and replacement. Public registration
+and report publication remain unavailable.
 See the [audit specification](../pipelines/audit/docs/SPEC.md).
 
 ## Structured Result Headroom

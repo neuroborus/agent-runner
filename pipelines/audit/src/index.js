@@ -28,7 +28,7 @@ export { runAuditDiscovery } from "./workflow.js";
 // Intentionally absent from root dependencies/registry until all audit gates exist.
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 2,
+  stateVersion: 3,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -47,6 +47,7 @@ export const auditPipeline = Object.freeze({
       recheckHistory: [],
       acceptedBatches: [],
     }),
+    2: ({ pipelineState }) => ({ ...pipelineState, sourceForkContexts: [] }),
   }),
   roles: Object.freeze(["auditor", "reviewer"]),
   resolveActiveRoles: (settings) =>

@@ -1,3 +1,4 @@
+import { acceptsCleanRecheck, recheckRole } from "./cycles.js";
 import {
   assertAudit,
   assertDiscoveryRun,
@@ -203,13 +204,18 @@ export function assertAuditRun(run) {
             pass.dispositions.length > 0 &&
             run.sessionLineage.children.some(
               (child) =>
-                child.role ===
-                  (state.settings.mode === "lazy" ? "auditor" : "reviewer") &&
+                child.role === recheckRole(state, pass.number) &&
                 child.contextKey === pass.contextKey,
             )
           : pass.resultFingerprint === null && pass.dispositions.length === 0),
       "Audit recheck history is invalid.",
     );
+    if (pass.outcome === "clean" && acceptsCleanRecheck(state, pass.number)) {
+      assertAudit(
+        state.recheckHistory[index + 1]?.sourcePass !== pass.sourcePass,
+        "Audit verification continued after batch acceptance.",
+      );
+    }
     const ids = new Set();
     for (const decision of pass.dispositions) {
       const entry = state.ledger.find(
@@ -235,6 +241,7 @@ export function assertAuditRun(run) {
       Number.isSafeInteger(receipt.recheckPass) &&
         receipt.recheckPass > 0 &&
         pass?.outcome === "clean" &&
+        acceptsCleanRecheck(state, receipt.recheckPass) &&
         !acceptedPasses.has(receipt.recheckPass) &&
         pass.sourcePass === receipt.batch.sourcePass &&
         pass.batchVersion === receipt.batch.version &&
@@ -247,8 +254,10 @@ export function assertAuditRun(run) {
     acceptedPasses.add(receipt.recheckPass);
   }
   assertAudit(
-    state.recheckHistory.filter(({ outcome }) => outcome === "clean").length ===
-      acceptedPasses.size,
+    state.recheckHistory.filter(
+      ({ outcome, number }) =>
+        outcome === "clean" && acceptsCleanRecheck(state, number),
+    ).length === acceptedPasses.size,
     "Audit clean rechecks require durable batch receipts.",
   );
   if (state.pendingBatch !== null) {
@@ -256,7 +265,11 @@ export function assertAuditRun(run) {
     const pass = state.recheckHistory.at(-1);
     if (pass?.sourcePass === state.pendingBatch.sourcePass) {
       assertAudit(
-        pass.outcome === "corrected"
+        pass.outcome !== "clean" || !acceptsCleanRecheck(state, pass.number),
+        "An accepted audit batch cannot remain pending verification.",
+      );
+      assertAudit(
+        ["corrected", "clean"].includes(pass.outcome)
           ? pass.resultFingerprint === fingerprint(state.pendingBatch)
           : pass.batchFingerprint === fingerprint(state.pendingBatch) &&
               pass.outcome !== "clean",
@@ -428,12 +441,13 @@ export function acceptRecheck(state, value) {
     resultFingerprint: fingerprint(nextBatch),
     dispositions: decisions,
   };
+  const accepted = unchanged && acceptsCleanRecheck(state);
   return {
     ...state,
     ledger,
-    pendingBatch: unchanged ? null : nextBatch,
-    workflowState: unchanged ? "DISCOVER" : "VERIFY_FINDINGS",
-    acceptedBatches: unchanged
+    pendingBatch: accepted ? null : nextBatch,
+    workflowState: accepted ? "DISCOVER" : "VERIFY_FINDINGS",
+    acceptedBatches: accepted
       ? [
           ...state.acceptedBatches,
           { batch: nextBatch, recheckPass: pass.number },

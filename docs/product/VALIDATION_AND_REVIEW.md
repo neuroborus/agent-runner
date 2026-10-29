@@ -77,13 +77,18 @@ Audit's internal batch gate is separate from coding-pipeline candidate review.
 Every new or materially revised batch requires a distinct read-only recheck of
 relevance, evidence, examples, impact, classification, overlap and optional
 recommendations. Lazy retains the discovering Auditor; independent requires a
-fresh finding Reviewer after each substantive correction. Versioned
+fresh finding Reviewer after each substantive correction. Combined first
+converges with the discovering Auditor, then requires a fresh Reviewer's clean
+first pass. A correcting Reviewer stays through its own series until clean,
+then a replacement must accept on its first pass. Intermediate cleanliness
+does not release pending verification; discovery resumes the same Auditor only
+after batch acceptance. Versioned
 snapshot/report-bound receipts accept only an unchanged exact batch and its
 dispositions. Rejected decisions remain reviewable; additions and revisions
 require verification themselves. This gate has its own finite run-wide 20-pass
 budget and never changes discovery cleanliness or establishes audit completion.
 The [audit specification](../../pipelines/audit/docs/SPEC.md#finding-batch-verification)
-owns these contracts; combined cycles and public exposure remain unavailable.
+owns these contracts; public exposure remains unavailable.
 
 ## Bootstrap inventory
 

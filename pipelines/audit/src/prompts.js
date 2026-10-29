@@ -35,3 +35,9 @@ When agreeing with an existing disposition, return it unchanged, including ratio
 Copy snapshotFingerprint, reportFingerprint and batchFingerprint from the request exactly. COMPLETE describes this batch recheck only.
 Use INCOMPLETE when verification is unfinished. Recheck cleanliness cannot clean discovery, finish a discovery cycle or complete an audit.
 Review structured content only; never generate or review the static classification map.`;
+
+export const COMBINED_INSTRUCTIONS = `Combined audit keeps each Auditor through its discovery series until clean, then starts a fresh Auditor.
+Only a later fresh Auditor's clean FIRST discovery pass satisfies discovery; even an initially clean primary needs a successor.
+Every new or revised batch first converges through distinct rechecks by its discovering Auditor, then goes to a fresh finding Reviewer.
+A correcting Reviewer continues until clean, then a fresh Reviewer must accept on its FIRST pass. Additions require verification themselves.
+Batch acceptance resumes the same discovering Auditor; it never cleans discovery. The Runner derives cycle gates from preserved pass history, not session reconstruction.`;
