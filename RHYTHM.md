@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29 — Preserve complete nonces in bounded Darwin POSIX names
+
+Shared memory and semaphores use distinct 28-visible-byte names with all 128
+nonce bits encoded as canonical unpadded Base64url. JavaScript and native banks,
+creation, held identities, attempts, unlink and fresh retirement agree; invalid
+or historical names grant no adoption or removal authority. Both names validate
+before effects, and uncertainty retains exclusion. Portable regressions establish
+no native PASS; the independent cleanup-lock, runtime and Windows gaps remain.
+
 ## 2026-10-29 — Align Darwin experiment builders with the loader baseline
 
 Ownership and access experiment policies now include exactly the `Sandbox` MAC

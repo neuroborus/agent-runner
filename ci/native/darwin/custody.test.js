@@ -14,10 +14,322 @@ import {
 import { darwinCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
 import { protectedBytes, isDarwinInstalledPath } from "./private-files.js";
+import { darwinPosixIpcName } from "./access.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
 } from "../diagnostics.js";
+
+test("Darwin POSIX IPC names bind complete nonces through creation, unlink and fresh absence", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = (name) =>
+      new RegExp(
+        `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (value) =>
+      value
+        .replaceAll("->", ".")
+        .replace(/const char alphabet\[\]/u, "const alphabet")
+        .replace(/const char \*expected/gu, "const expected")
+        .replace(/char \*(next|field)([;,])/gu, "let $1 = {}$2")
+        .replace(/char \*value/gu, "let value")
+        .replaceAll(", *", ", ")
+        .replace(/char (\w+)\[(?:\d+|PATH_MAX)\]/gu, "let $1 = []")
+        .replace(/, name\[PATH_MAX\]/gu, ", name = []")
+        .replace(/\(unsigned\)/gu, "")
+        .replace(/\bunsigned /gu, "let ")
+        .replace(/\bint fd/gu, "let fd")
+        .replace(/sem_t \*named_sem/gu, "let named_sem")
+        .replace(/\b1u\b/gu, "1")
+        .replaceAll("sizeof(access_vectors[0])", "8192")
+        .replaceAll("sizeof(name)", "4096")
+        .replaceAll("&next", "next")
+        .replaceAll("&field", "field")
+        .replaceAll("&access_shm_identity", "access_shm_identity")
+        .replaceAll("&named", "named")
+        .replaceAll("NULL", "null"),
+    creation =
+      /else if \(i == 15 \|\| i == 16\) \{([\s\S]*?)\n    \} else if \(i == 17/u.exec(
+        source,
+      )[1],
+    close = body("access_controls_close"),
+    retired = body("access_controls_retired"),
+    retiredLoop = retired.slice(
+      retired.indexOf("    char value[8192]"),
+      retired.indexOf("    if (row == 13)"),
+    ),
+    absence = /if \(row == 15 \|\| row == 16\) \{([\s\S]*?)\n    \}/u.exec(
+      retired,
+    )[1],
+    text = (value) =>
+      typeof value === "string"
+        ? value
+        : value
+            .slice(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0))
+            .join(""),
+    copy = (out, value, size = text(value).length) => {
+      for (let i = 0; i < size; i++) out[i] = text(value)[i];
+    },
+    calls = [],
+    objects = new Map(),
+    descriptors = new Map(),
+    bank = { fd: "", stat: { st_size: 0 } };
+  const api = {
+    bank,
+    case_mode: true,
+    case_recovery: true,
+    count: 40,
+    CASE_BASE_COUNT: 13,
+    access_ready: false,
+    access_pending: false,
+    access_control_pid: 0,
+    access_audit_pid: 0,
+    access_pf_pid: 0,
+    access_shm: -1,
+    access_sem: -1,
+    access_shm_identity: {},
+    access_vectors: Array.from({ length: 39 }, () => []),
+    access_names: Array.from({ length: 39 }, () => [[], []]),
+    O_CREAT: 512,
+    O_EXCL: 2048,
+    O_RDWR: 2,
+    O_RDONLY: 0,
+    SEM_FAILED: -1,
+    ENOENT: 2,
+    errno: 0,
+    need: (ok) => assert.ok(ok, "Native POSIX refusal"),
+    digit: (value) => Number.parseInt(value, 16),
+    strlen: (value) => text(value).length,
+    strspn: (value, alphabet) =>
+      [...value].findIndex((byte) => !alphabet.includes(byte)) < 0
+        ? value.length
+        : [...value].findIndex((byte) => !alphabet.includes(byte)),
+    strcmp: (a, b) => Number(text(a) !== text(b)),
+    memcpy: copy,
+    strcpy(out, value) {
+      copy(out, value);
+      out[text(value).length] = 0;
+    },
+    memchr: (value, byte, size) =>
+      value.slice(0, size).some((item) => item === byte || item === "\0"),
+    read_at(fd, out, size) {
+      copy(out, fd, size);
+    },
+    strtok_r(value, delimiter, state) {
+      if (value !== null)
+        state.tokens = text(value).split(delimiter).filter(Boolean);
+      return state.tokens.shift() ?? null;
+    },
+    decode(value, out, bound) {
+      assert.match(value, /^(?:[0-9a-f]{2})+$/u);
+      const bytes = Buffer.from(value, "hex");
+      assert.ok(bytes.length < bound && !bytes.includes(0));
+      api.strcpy(out, bytes.toString());
+    },
+    stable() {},
+    reservation_guard() {},
+    no_subjects() {},
+    fputs() {},
+    stdout: 1,
+    access_named: () => bank,
+    shm_open(name, flags) {
+      name = text(name);
+      calls.push(["shm_open", name]);
+      if (flags & api.O_CREAT) {
+        assert.equal(objects.has(name), false);
+        objects.set(name, { ino: 71 });
+      }
+      if (!objects.has(name)) {
+        api.errno = api.ENOENT;
+        return -1;
+      }
+      const fd = descriptors.size + 10;
+      descriptors.set(fd, objects.get(name));
+      return fd;
+    },
+    sem_open(name, flags) {
+      name = text(name);
+      calls.push(["sem_open", name]);
+      if (flags & api.O_CREAT) {
+        assert.equal(objects.has(name), false);
+        objects.set(name, { ino: 72 });
+      }
+      if (!objects.has(name)) {
+        api.errno = api.ENOENT;
+        return -1;
+      }
+      return objects.get(name);
+    },
+    ftruncate: () => 0,
+    pwrite: (_fd, bytes, size) => {
+      assert.equal(bytes.slice(0, size), api.case_context.slice(0, 32));
+      return size;
+    },
+    fstat(fd, out) {
+      Object.assign(out, descriptors.get(fd));
+      return 0;
+    },
+    same_stat: (a, b) => assert.equal(a.ino, b.ino),
+    close: () => 0,
+    sem_close: () => 0,
+    shm_unlink(name) {
+      name = text(name);
+      calls.push(["shm_unlink", name]);
+      assert.ok(objects.delete(name));
+      return 0;
+    },
+    sem_unlink(name) {
+      name = text(name);
+      calls.push(["sem_unlink", name]);
+      assert.ok(objects.delete(name));
+      return 0;
+    },
+  };
+  // Execute the actual finite C bodies with injected string/filesystem/syscall
+  // edges, following the existing sockaddr tests; no Darwin tool is invoked.
+  const native = new Script(
+    [
+      ...[
+        "access_posix_name",
+        "access_posix_check",
+        "access_bank",
+        "access_provision",
+      ].map(
+        (name) =>
+          `function ${name}(${name === "access_posix_name" || name === "access_posix_check" ? "index, name" : "bank"}) {${translate(body(name))}}`,
+      ),
+      `function create(i) {${translate(creation)}}`,
+      `function finish() {${translate(close.slice(0, close.indexOf("  for (unsigned i = 0")))} let named = {}; ${translate(close.slice(close.indexOf("  if (access_shm >= 0)"), close.indexOf("  if (access_sysv_shm >= 0)")))}}`,
+      `function retire(bank) {${translate(retired.slice(0, retired.indexOf("  for (unsigned row")))} for (let row = 15; row <= 16; row++) {${translate(retiredLoop)} ${translate(absence)}}}`,
+      "({access_posix_name, access_provision, create, close: finish, retire});",
+    ].join("\n"),
+  ).runInNewContext(api);
+  api.access_resources = () => {
+    for (const i of [15, 16]) {
+      api.access_names[i][0] = Buffer.from(
+        text(api.access_vectors[i]).split(" ")[1],
+        "hex",
+      ).toString();
+      native.create(i);
+    }
+  };
+  const vectors = [
+    ["00000000000000000000000000000000", "AAAAAAAAAAAAAAAAAAAAAA"],
+    ["00000000000000000000000000000001", "AAAAAAAAAAAAAAAAAAAAAQ"],
+    ["00000000000000000000000000000002", "AAAAAAAAAAAAAAAAAAAAAg"],
+    ["000102030405060708090a0b0c0d0e0f", "AAECAwQFBgcICQoLDA0ODw"],
+    ["ffeeddccbbaa99887766554433221100", "_-7dzLuqmYh3ZlVEMyIRAA"],
+    ["ffffffffffffffffffffffffffffffff", "_____________________w"],
+  ];
+  for (const [nonce, suffix] of vectors) {
+    api.case_context = nonce + "a".repeat(32);
+    for (const [index, kind, prefix] of [
+      [15, "shm", "/np-m-"],
+      [16, "sem", "/np-s-"],
+    ]) {
+      const name = Array(30).fill("guard"),
+        expected = prefix + suffix;
+      native.access_posix_name(index, name);
+      assert.equal(text(name), expected);
+      assert.equal(darwinPosixIpcName(kind, nonce), expected);
+      assert.equal(name[28], 0);
+      assert.equal(name[29], "guard");
+      assert.equal(Buffer.byteLength(expected), 28);
+      assert.ok(
+        expected.length <= 31 &&
+          expected.length + 1 <= 31 &&
+          expected.length <= 30,
+      );
+      assert.equal(Buffer.from(suffix, "base64url").toString("hex"), nonce);
+      const legacy = "/native-poc-" + nonce;
+      assert.equal(legacy.length, 44);
+      assert.ok(legacy.length > 31 && legacy.length + 1 > 31);
+    }
+  }
+  for (const nonce of [
+    null,
+    1,
+    "",
+    "a".repeat(31),
+    "a".repeat(33),
+    "A".repeat(32),
+    "g".repeat(32),
+    "a".repeat(32) + "\n",
+  ]) {
+    assert.throws(() => darwinPosixIpcName("shm", nonce));
+    api.case_context = typeof nonce === "string" ? nonce + "a".repeat(32) : "";
+    assert.throws(() => native.access_posix_name(15, []));
+  }
+  api.case_context = vectors[4][0] + "a".repeat(32);
+  for (const kind of [null, "", "posix-shm", "SHM", {}])
+    assert.throws(() => darwinPosixIpcName(kind, vectors[4][0]));
+  assert.throws(() => native.access_posix_name(17, []));
+  const shm = "/np-m-" + vectors[4][1],
+    sem = "/np-s-" + vectors[4][1],
+    load = (names) => {
+      bank.fd = Array.from(
+        { length: 39 },
+        (_, i) =>
+          `${i === 15 ? "shm" : i === 16 ? "sem" : "read"} ${Buffer.from(i === 15 ? names[0] : i === 16 ? names[1] : "/fixture").toString("hex")} 0 0\n`,
+      ).join("");
+      bank.stat.st_size = bank.fd.length;
+      api.access_ready = false;
+      calls.length = 0;
+    };
+  for (const names of [
+    ["/native-poc-" + vectors[4][0], sem],
+    [shm, "/native-poc-" + vectors[4][0]],
+    [sem, shm],
+    [shm, "/np-s-" + vectors[0][1]],
+    [shm + "==", sem],
+    [shm.slice(0, -1) + "B", sem],
+    [shm.replace("_", "/"), sem],
+  ]) {
+    load(names);
+    assert.throws(() => native.access_provision(bank));
+    assert.throws(() => native.retire(bank));
+    [api.access_names[15][0], api.access_names[16][0]] = names;
+    assert.throws(() => native.close());
+    assert.deepEqual(calls, []);
+    assert.equal(objects.size, 0);
+  }
+  assert.equal(
+    Buffer.from(shm.slice(6, -1) + "B", "base64url").toString("hex"),
+    vectors[4][0],
+  );
+  load([shm, sem]);
+  bank.fd = bank.fd.replace(/^sem /mu, "shm ");
+  assert.throws(() => native.access_provision(bank));
+  assert.throws(() => native.retire(bank));
+  assert.deepEqual(calls, []);
+  load([shm, sem]);
+  native.access_provision(bank);
+  assert.equal(objects.size, 2);
+  assert.throws(() => native.retire(bank)); // Existing objects cannot be adopted or removed.
+  assert.equal(objects.size, 2);
+  api.access_shm_identity.ino++;
+  assert.throws(() => native.close());
+  assert.equal(objects.size, 2);
+  api.access_shm_identity.ino--;
+  native.close();
+  native.retire(bank);
+  assert.equal(objects.size, 0);
+  objects.set(sem, { ino: 99 });
+  assert.throws(() => native.retire(bank));
+  assert.equal(objects.size, 1);
+  objects.delete(sem);
+  native.retire(bank);
+  for (const [operation, name] of calls)
+    assert.equal(name, operation.startsWith("shm") ? shm : sem);
+  assert.deepEqual(calls.slice(-2), [
+    ["shm_open", shm],
+    ["sem_open", sem],
+  ]);
+});
 
 test("Darwin reader retains successful spawn identity and channels before fallible cleanup", async () => {
   const reader = await readFile(
@@ -488,10 +800,19 @@ test("Darwin scoped access targets survive control and payload argv with confine
     assert.equal(select(30, "::1"), "::1");
     assert.equal(select(2, "192.0.2.2"), "127.0.0.1");
   }
-  for (const operation of ["tcp6", "udp6"]) {
-    const target = "fe80::2%7",
-      nonce = "a".repeat(32),
-      args = [operation, Buffer.from(target).toString("hex"), "48001", "48002"];
+  const nonce = "a".repeat(32);
+  for (const [index, operation, target] of [
+    [29, "tcp6", "fe80::2%7"],
+    [30, "udp6", "fe80::2%7"],
+    [15, "shm", darwinPosixIpcName("shm", nonce)],
+    [16, "sem", darwinPosixIpcName("sem", nonce)],
+  ]) {
+    const args = [
+      operation,
+      Buffer.from(target).toString("hex"),
+      index >= 19 ? "48001" : "0",
+      index >= 19 ? "48002" : "0",
+    ];
     for (const vector of [controlVector, payloadVector]) {
       const expression = vector.slice(
           vector.indexOf("{") + 1,
@@ -506,16 +827,19 @@ test("Darwin scoped access targets survive control and payload argv with confine
           args,
           nonce,
           target,
-          index: 29,
+          index,
           NULL: null,
         });
       assert.deepEqual(Array.from(actual.slice(1, 5)), [
         nonce,
         operation,
         target,
-        "48001",
+        args[2],
       ]);
-      assert.equal(actual[5], vector === controlVector ? "0" : "48002");
+      assert.equal(
+        actual[5],
+        vector === controlVector && index >= 19 ? "0" : args[3],
+      );
     }
   }
 });

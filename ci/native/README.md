@@ -7939,6 +7939,17 @@ IPC controls and sixteen outside services, retaining the eight reviewed loopback
 sockets under their creation UID. The Unix control uses the short case-local
 `ipc` name to fit Darwin's native socket-path bound.
 
+POSIX shared-memory and semaphore names encode all 16 nonce bytes as canonical
+unpadded Base64url after `/np-m-` and `/np-s-`, respectively. Each distinct name
+is 28 visible ASCII bytes including the leading slash (29 including NUL). This
+fits shared memory's 31 visible bytes and semaphores' 31 bytes including NUL.
+JavaScript expectations and the native owner reject legacy, mixed, substituted
+or noncanonical names before effects. Creation, held identities, attempts, unlink
+and independent fresh absence checks bind the same names; recovery never adopts
+or removes an unproved object. Naming success does not resolve the separate
+cleanup exclusion-lock failure or runtime coverage gap, and supplies no native
+acceptance.
+
 Outside positive controls run in acknowledged audit windows before payload
 admission. Denial and permit records join full process births, object attributes,
 held bytes and native selectors; socket joins retain both source and destination

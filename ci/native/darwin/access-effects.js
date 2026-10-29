@@ -22,6 +22,7 @@ import { buildDarwinPolicy, darwinPfctlArguments } from "./policy.js";
 import {
   DARWIN_ACCESS_DENIALS,
   assertDarwinAccessObservation,
+  darwinPosixIpcName,
 } from "./access.js";
 import {
   configureDarwinPolicy,
@@ -251,8 +252,8 @@ export async function darwinAccessPreparation(
     caseRoot + "/outside/sentinel",
     "org.native-poc." + request.nonce,
     caseRoot + "/ipc",
-    "/native-poc-" + request.nonce,
-    "/native-poc-" + request.nonce,
+    darwinPosixIpcName("shm", request.nonce),
+    darwinPosixIpcName("sem", request.nonce),
     "sysv-shm",
     "sysv-sem",
   ];

@@ -281,6 +281,12 @@ retirement; cold reads reject malformed scopes and disagreeing TCP/UDP targets.
 The custody suite executes both native sockaddr constructors and control/payload
 argument expressions with injected operations, covering exact scope IDs, source
 binding and reviewed-scope refusal without compiling or running Darwin code.
+The same custody and preparation fixtures cover short POSIX names against both
+native bounds, independent encoding vectors preserving all 128 nonce bits, and
+consistent attempt banks, creation, unlink and fresh absence inspection. Legacy,
+mixed, substituted and noncanonical names refuse before effects; uncertain
+identity or retirement retains exclusion. These injected results establish no
+native PASS or repair of the separate cleanup-lock and runtime failures.
 These synthetic reads and injected commands run through the existing native
 harness without a slow-tier addition or host networking changes. Missing-family
 diagnostics and portable regressions supply no native acceptance.

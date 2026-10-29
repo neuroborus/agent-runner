@@ -58,7 +58,11 @@ import { digest, darwinLaunchDigest, sameDarwinIdentity } from "./protocol.js";
 import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
 import { runDarwinFileCase, DARWIN_FILE_CASE_IDS } from "./files-cases.js";
 import { runDarwinGitCase } from "./git.js";
-import { DARWIN_ACCESS_DENIALS, runDarwinAccessCase } from "./access.js";
+import {
+  DARWIN_ACCESS_DENIALS,
+  darwinPosixIpcName,
+  runDarwinAccessCase,
+} from "./access.js";
 import {
   darwinExperimentCaseDeclarations,
   createDarwinCaseProvisioning,
@@ -6337,8 +6341,8 @@ function accessBinding(
       root + "/outside/sentinel",
       "org.native-poc." + request.nonce,
       root + "/ipc",
-      "/native-poc-" + request.nonce,
-      "/native-poc-" + request.nonce,
+      darwinPosixIpcName("shm", request.nonce),
+      darwinPosixIpcName("sem", request.nonce),
       "sysv-shm",
       "sysv-sem",
     ],
@@ -9921,6 +9925,12 @@ test("Darwin access recovery joins drained audit and independent IPC absence aft
   );
   for (const pid of f.processes.keys())
     if (!holders.has(pid)) f.processes.delete(pid);
+  f.operationFrames((name) =>
+    name === "access-controls-retired" ? { absent: false } : undefined,
+  );
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.equal(f.events.includes("access-lease-released"), false);
+  f.operationFrames(null);
   assert.equal((await recoverTranscripts(f)).status, "RETIRED");
   assert.ok(f.events.includes("access-controls-retired"));
   assert.ok(f.events.includes("access-lease-released"));
@@ -10838,6 +10848,17 @@ test("Darwin access cold reads retain numeric scope and refuse legacy, mixed or 
   for (const i of [29, 30]) original.attempts[i].target = "fe80::2%7";
   for (const mutate of [
     null,
+    ...[15, 16].flatMap((index) =>
+      [
+        "/native-poc-" + declared.bindings.input.request.nonce,
+        original.attempts[index === 15 ? 16 : 15].target,
+        darwinPosixIpcName(index === 15 ? "shm" : "sem", "f".repeat(32)),
+        original.attempts[index].target + "==",
+        original.attempts[index].target.slice(0, -1) + "B",
+      ].map((target) => (value) => {
+        value.attempts[index].target = target;
+      }),
+    ),
     (value) => {
       value.schemaVersion = 1;
     },
@@ -12595,6 +12616,32 @@ async function installedCaseAcquisition(format) {
       rows = bytes.toString().trim().split("\n");
     assert.equal(rows.length, 39);
     assert.equal(digest(bytes), bank.sha256);
+    const [nonce, encodedNonce] = {
+      "access.read-only": [
+        "6de9ba326fbcf8f6b93f1c786fd6a236",
+        "bem6Mm-8-Pa5Pxx4b9aiNg",
+      ],
+      "access.workspace-write": [
+        "31fc00a77589df347aaa3bf95b6a4efb",
+        "MfwAp3WJ3zR6qjv5W2pO-w",
+      ],
+      "access.trusted-command": [
+        "a259baf1aedd412216032765bf96df9a",
+        "olm68a7dQSIWAydlv5bfmg",
+      ],
+    }[access.id];
+    assert.equal(access.bindings.input.request.nonce, nonce);
+    for (const [index, prefix] of [
+      [15, "/np-m-"],
+      [16, "/np-s-"],
+    ]) {
+      const expected = prefix + encodedNonce;
+      assert.equal(record.attempts[index].target, expected);
+      assert.equal(
+        Buffer.from(rows[index].split(" ")[1], "hex").toString(),
+        expected,
+      );
+    }
     for (const i of [29, 30]) {
       assert.equal(record.attempts[i].target, acquired.inputs.addresses.inet6);
       assert.equal(

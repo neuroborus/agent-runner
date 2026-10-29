@@ -38,6 +38,17 @@ const root = (value) => {
   return identity;
 };
 
+/** Lossless, kind-separated POSIX names fit Darwin's stricter semaphore bound. */
+export function darwinPosixIpcName(kind, nonce) {
+  requireDarwin(
+    ["shm", "sem"].includes(kind) &&
+      typeof nonce === "string" &&
+      nonce.length === 32 &&
+      /^[0-9a-f]{32}$/u.test(nonce),
+  );
+  return `/np-${kind === "shm" ? "m" : "s"}-${Buffer.from(nonce, "hex").toString("base64url")}`;
+}
+
 /** Provider/fixture text never supplies native attempts. The protected observer
  * joins exact nonce bytes and native identities to ready outside controls. */
 export function assertDarwinAccessObservation(value, input, admitted) {

@@ -2140,6 +2140,41 @@ static bool owned_access_socket(const char *name, const struct stat *st) {
   if (strcmp(name, "ipc")) return false;
   need(access_servers[14] >= 0 && S_ISSOCK(st->st_mode)); same_stat(access_unix_identity, *st); return true;
 }
+/* Encode all 128 nonce bits; 28 visible bytes and NUL fit both POSIX limits. */
+static void access_posix_name(unsigned index, char name[29]) {
+  need(index == 15 || index == 16);
+  need(strlen(case_context) == 64 && strspn(case_context, "0123456789abcdef") == 64);
+  const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  memcpy(name, index == 15 ? "/np-m-" : "/np-s-", 6);
+  unsigned value = 0, bits = 0, used = 6;
+  for (unsigned i = 0; i < 32; i++) {
+    value = (value << 4) | (unsigned)digit(case_context[i]); bits += 4;
+    if (bits >= 6) { bits -= 6; name[used++] = alphabet[value >> bits]; value &= (1u << bits) - 1; }
+  }
+  if (bits) name[used++] = alphabet[value << (6 - bits)];
+  need(used == 28); name[used] = 0;
+}
+static void access_posix_check(unsigned index, const char *name) {
+  char expected[29]; access_posix_name(index, expected); need(!strcmp(name, expected));
+}
+/* Validate both entries before any creation or fresh lookup, including mixed
+ * banks. Recovery observes absence only; it never adopts or unlinks old names. */
+static void access_bank(struct entry *bank) {
+  stable(bank); need(bank->stat.st_size > 0 && bank->stat.st_size < 65536);
+  char bytes[65536]; read_at(bank->fd, bytes, bank->stat.st_size, 0); need(!memchr(bytes, 0, bank->stat.st_size)); bytes[bank->stat.st_size] = 0;
+  char *next; unsigned row = 0;
+  for (char *value = strtok_r(bytes, "\n", &next); value; value = strtok_r(NULL, "\n", &next)) {
+    need(row < 39 && strlen(value) < sizeof(access_vectors[0])); strcpy(access_vectors[row++], value);
+  }
+  need(row == 39);
+  for (unsigned i = 15; i <= 16; i++) {
+    char vector[8192], name[PATH_MAX]; strcpy(vector, access_vectors[i]);
+    char *field, *op = strtok_r(vector, " ", &field), *encoded = strtok_r(NULL, " ", &field), *remote = strtok_r(NULL, " ", &field), *local = strtok_r(NULL, " ", &field);
+    need(op && encoded && remote && local && !strtok_r(NULL, " ", &field) && !strcmp(op, i == 15 ? "shm" : "sem"));
+    decode(encoded, name, sizeof(name)); access_posix_check(i, name);
+  }
+  stable(bank);
+}
 static void access_resources(void) {
   need(!gettimeofday(&access_created, NULL));
   for (unsigned i = 0; i < 39; i++) { access_targets[i][0] = access_targets[i][1] = access_servers[i] = -1; }
@@ -2180,7 +2215,7 @@ static void access_resources(void) {
       struct sockaddr_un address = {.sun_len = sizeof(address), .sun_family = AF_UNIX}; need(strlen(expected) < sizeof(address.sun_path)); strcpy(address.sun_path, expected);
       int fd = socket(AF_UNIX, SOCK_STREAM, 0); need(fd >= 0 && !bind(fd, (void *)&address, sizeof(address)) && !chmod(expected, 0600) && !listen(fd, 1)); access_servers[i] = fd; need(!lstat(expected, &access_unix_identity) && S_ISSOCK(access_unix_identity.st_mode));
     } else if (i == 15 || i == 16) {
-      char expected[64]; snprintf(expected, sizeof(expected), "/native-poc-%.32s", case_context); need(!strcmp(expected, access_names[i][0]));
+      access_posix_check(i, access_names[i][0]); const char *expected = access_names[i][0];
       if (i == 15) { access_shm = shm_open(expected, O_RDWR | O_CREAT | O_EXCL, 0600); need(access_shm >= 0 && !ftruncate(access_shm, 32) && pwrite(access_shm, case_context, 32, 0) == 32 && !fstat(access_shm, &access_shm_identity)); }
       else { access_sem = sem_open(expected, O_CREAT | O_EXCL, 0600, 0); need(access_sem != SEM_FAILED); }
     } else if (i == 17 || i == 18) {
@@ -2256,6 +2291,7 @@ static void access_target_socket(unsigned index) {
 }
 static void access_controls_close(void) {
   need(!access_pending && !access_control_pid && !access_audit_pid && !access_pf_pid); reservation_guard(); no_subjects();
+  for (unsigned i = 15; i <= 16; i++) access_posix_check(i, access_names[i][0]);
   for (unsigned i = 0; i < 39; i++) {
     for (unsigned j = 0; j < 2; j++) if (access_targets[i][j] >= 0) { need(!close(access_targets[i][j])); access_targets[i][j] = -1; }
     if (access_servers[i] >= 0) { need(!close(access_servers[i])); access_servers[i] = -1; }
@@ -2288,15 +2324,14 @@ static void access_controls_close(void) {
  * bank pins exact names/keys; all named objects and old owner domains must be
  * independently absent before policy or exclusion can be released. */
 static void access_controls_retired(struct entry *bank) {
-  need(case_mode && case_recovery && bank == access_named("/custody/access-cases")); reservation_guard(); no_subjects(); stable(bank);
-  char bytes[65536]; need(bank->stat.st_size > 0 && bank->stat.st_size < sizeof(bytes)); read_at(bank->fd, bytes, bank->stat.st_size, 0); bytes[bank->stat.st_size] = 0;
-  char *next; unsigned row = 0;
-  for (char *value = strtok_r(bytes, "\n", &next); value; value = strtok_r(NULL, "\n", &next)) {
+  need(case_mode && case_recovery && bank == access_named("/custody/access-cases")); reservation_guard(); no_subjects(); access_bank(bank);
+  for (unsigned row = 0; row < 39; row++) {
+    char value[8192]; strcpy(value, access_vectors[row]);
     char *field, *op = strtok_r(value, " ", &field), *encoded = strtok_r(NULL, " ", &field), *remote = strtok_r(NULL, " ", &field), *local = strtok_r(NULL, " ", &field);
     need(row < 39 && op && encoded && remote && local && !strtok_r(NULL, " ", &field)); char name[PATH_MAX]; decode(encoded, name, sizeof(name));
     if (row == 13) { char expected[128]; snprintf(expected, sizeof(expected), "org.native-poc.%.32s", case_context); need(!strcmp(op, "mach") && !strcmp(name, expected)); mach_port_t found; need(bootstrap_look_up(bootstrap_port, name, &found) == BOOTSTRAP_UNKNOWN_SERVICE); }
     if (row == 14) { char expected[PATH_MAX]; snprintf(expected, sizeof(expected), "%s/ipc", case_path); need(!strcmp(op, "unix") && !strcmp(name, expected)); struct stat st; errno = 0; need(lstat(name, &st) < 0 && errno == ENOENT); }
-    if (row == 15 || row == 16) { char expected[64]; snprintf(expected, sizeof(expected), "/native-poc-%.32s", case_context); need(!strcmp(name, expected)); errno = 0;
+    if (row == 15 || row == 16) { access_posix_check(row, name); errno = 0;
       if (row == 15) need(!strcmp(op, "shm") && shm_open(name, O_RDONLY, 0) < 0 && errno == ENOENT);
       else need(!strcmp(op, "sem") && sem_open(name, 0) == SEM_FAILED && errno == ENOENT);
     }
@@ -2304,9 +2339,8 @@ static void access_controls_retired(struct entry *bank) {
       if (row == 17) need(!strcmp(op, "sysv-shm") && shmget(key, 1, 0) < 0 && errno == ENOENT);
       else need(!strcmp(op, "sysv-sem") && semget(key, 1, 0) < 0 && errno == ENOENT);
     }
-    row++;
   }
-  need(row == 39); stable(bank); fputs("{\"absent\":true}", stdout);
+  stable(bank); fputs("{\"absent\":true}", stdout);
 }
 static void access_counters(void) {
   reservation_guard(); int fd = open("/dev/pf", O_RDONLY | O_CLOEXEC); need(fd >= 0);
@@ -2347,13 +2381,7 @@ static void access_counters(void) {
 
 static void access_provision(struct entry *bank) {
   need(case_mode && count > CASE_BASE_COUNT && !access_ready && !access_pending && bank == access_named("/custody/access-cases"));
-  reservation_guard(); no_subjects(); need(bank->stat.st_size > 0 && bank->stat.st_size < 65536);
-  char bytes[65536]; read_at(bank->fd, bytes, bank->stat.st_size, 0); need(!memchr(bytes, 0, bank->stat.st_size)); bytes[bank->stat.st_size] = 0;
-  char *next; unsigned row = 0;
-  for (char *value = strtok_r(bytes, "\n", &next); value; value = strtok_r(NULL, "\n", &next)) {
-    need(row < 39 && strlen(value) < sizeof(access_vectors[0])); strcpy(access_vectors[row++], value);
-  }
-  need(row == 39); access_resources(); access_ready = true; fputs("null", stdout);
+  reservation_guard(); no_subjects(); access_bank(bank); access_resources(); access_ready = true; fputs("null", stdout);
 }
 static void access_attempt(unsigned control, unsigned index) {
   need(access_ready && !access_pending && index < 39 && control <= 1 && (!control || (index >= 2 && index < 35))); reservation_guard();
@@ -2361,6 +2389,7 @@ static void access_attempt(unsigned control, unsigned index) {
   char vector[8192]; strcpy(vector, access_vectors[index]); char *args[5], *next; unsigned n = 0;
   for (char *p = strtok_r(vector, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 4); args[n++] = p; } need(n == 4);
   char nonce[33], target[PATH_MAX]; memcpy(nonce, case_context, 32); nonce[32] = 0; decode(args[1], target, sizeof(target));
+  if (index == 15 || index == 16) access_posix_check(index, target);
   if (control && index < 13) strcpy(target, access_names[index][1]);
   if (control) {
     need(!access_control_pid); char *argv[] = {entries[5].path, nonce, args[0], target, args[2], index >= 19 ? "0" : args[3], NULL};
@@ -2422,6 +2451,7 @@ static void access_target(unsigned index, unsigned control) {
   need(access_ready && access_pending && index == access_index && control == access_control && index < 39); reservation_guard();
   char vector[8192]; strcpy(vector, access_vectors[index]); char *next, *operation = strtok_r(vector, " ", &next), *encoded = strtok_r(NULL, " ", &next);
   need(operation && encoded); char name[PATH_MAX]; decode(encoded, name, sizeof(name));
+  if (index == 15 || index == 16) access_posix_check(index, name);
   if (index < 13) { access_file_target(index, control); return; }
   if (index >= 19) { access_target_socket(index); return; }
   printf("{\"kind\":\"ipc\",\"path\":\"%s\",\"value\":", name);

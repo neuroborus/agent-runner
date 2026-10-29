@@ -9,7 +9,7 @@ import { darwinOwnershipPolicy } from "./case-effects.js";
 import { darwinGitPolicies } from "./git-effects.js";
 import { darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { buildDarwinPolicy } from "./policy.js";
-import { DARWIN_ACCESS_DENIALS } from "./access.js";
+import { DARWIN_ACCESS_DENIALS, darwinPosixIpcName } from "./access.js";
 import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
 
 const lease = "/private/var/run/native-poc/pf-lease";
@@ -594,8 +594,8 @@ function accessAttempts(plan, root, inputs) {
       root + "/outside/sentinel",
       "org.native-poc." + request.nonce,
       root + "/ipc",
-      "/native-poc-" + request.nonce,
-      "/native-poc-" + request.nonce,
+      darwinPosixIpcName("shm", request.nonce),
+      darwinPosixIpcName("sem", request.nonce),
       "sysv-shm",
       "sysv-sem",
     ];
