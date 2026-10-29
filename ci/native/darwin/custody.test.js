@@ -4267,7 +4267,7 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
   );
   assert.match(
     launcher,
-    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1, launch_control_parent = -1;\s+static void descriptors/u,
+    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1;\s+static void descriptors/u,
   );
   const childEntry = launcher.indexOf("  if (!child) {");
   const childStdio = launcher.indexOf(
@@ -4275,8 +4275,7 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
     childEntry,
   );
   assert.ok(childEntry > 0 && childStdio > childEntry);
-  // Experimental probe settlement precedes entry logging; the protected branch
-  // still logs entry before its original setup effects.
+  // Both branches log entry before setup; witness copies remain accounted.
   assert.match(
     translate(launcher.slice(childEntry, childStdio)),
     /if \(!child\) \{\s+launch_stage\("child-entry"/u,
@@ -4571,7 +4570,6 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
       launch_child: 42,
       launch_reply_owner: 0,
       launch_diagnostic: -1,
-      launch_control_parent: -1,
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
       EXC_MASK_ALL: 63,

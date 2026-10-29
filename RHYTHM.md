@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29 — Restrict Darwin workspace executable mappings
+
+Workspace policies now grant precise data/metadata reads and explicitly deny
+executable mapping while preserving writes and outside runtime/image authority.
+Trusted children retain only the two original custodian-opened read-only witnesses
+through sanitation and final-credential checks, then settle both before admission;
+original object/parent/hash/policy/epoch joins and retirement remain required.
+The preceding final-context acquisition experiment still allowed launcher workspace
+mapping and failed feasibility's outside open. Reopening alone is stopped. Precise
+reads plus explicit map denial with applicable same-object witnesses are one bounded
+hypothesis, not established wildcard causality or native PASS. Failed positives,
+workspace map success, custody drift or uncertain settlement stop it.
+
 ## 2026-10-29 — Bind Darwin probes to their final acquisition context
 
 Children close inherited probe copies, sanitize aliases and acquire the exact

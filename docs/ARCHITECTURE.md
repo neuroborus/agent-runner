@@ -2168,14 +2168,26 @@ types plus a held regular-file mapping witness. The existing handoff owner runs
 identical bounded read/executable-map operations on signed argv bytes outside
 policy and under the final primary credentials. Outside mapping, primary reading
 and authorized-control mapping must succeed; workspace mapping requires immediate
-EPERM/EACCES from MAP_FAILED. Children check both inherited file closures before
-credentials/policy and remove their sanitation exemptions. New descriptions bind
-the exact frozen original vnode/metadata/hash after verified final credentials,
-limits and primary policy. Pinned cwd/parent-relative acquisition preserves private
-directory modes: launcher storage custody is temporary, while feasibility's exact
-workspace parent is search-only across the UID change. Unrelated aliases are swept;
-temporary parent copies and both partial/acquired files settle before ready/closure.
-Both settlement attempts survive either failure; every successful mapping is removed.
+EPERM/EACCES from MAP_FAILED. The custodian retains its original read-only fixture,
+authorized image and parent custody across both rounds. Each child keeps exactly
+the two accounted read-only witness copies through sanitation, closing unrelated
+aliases and parent copies; the launcher verifies the descriptor inventory. Complete
+reads and maps follow verified final UID/GID/groups/limits and primary policy,
+preserving original audit-session/epoch bindings and frozen vnode/metadata/hash
+joins. This capability equivalence does not assert final-credential pathname-open
+access or add writable authority. Both copies must close successfully before
+ready publication, closure preparation or admitted execution. Interrupted setup
+retains cleanup; both closes are attempted without retrying uncertain closure,
+and every successful mapping is removed.
+The three workspace policies use precise data/metadata reads plus explicit
+executable-map denial, preserving protected exclusions, writes, process-exec
+restrictions and outside runtime/image grants. The preceding final-context
+acquisition experiment still allowed launcher workspace mmap and separately failed
+feasibility's outside open. Reopening alone is stopped; private wildcard causality
+is unproved. Precise workspace reads plus explicit map denial with applicable
+same-object witnesses remain one bounded hypothesis. Native positives, permission-
+denied MAP_FAILED and independent retirement must establish its effect; failed
+positives, workspace map success, custody drift or uncertain settlement stop it.
 Each mapping object retains its first failed operation/result and only immediate
 failed-syscall errno, with separate map/unmap/close outcomes (0 uncalled, 1 success,
 -1 failure). The existing launcher/fault owners emit one bounded failure-only

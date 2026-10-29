@@ -1072,7 +1072,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
   new Script(parentOpen).runInNewContext({
     domain_map_parent: -1,
     mapping_parent: "/bound/private/workspace",
-    O_SEARCH: 1,
+    O_RDONLY: 1,
     O_DIRECTORY: 2,
     O_NOFOLLOW: 4,
     O_CLOEXEC: 8,
@@ -1118,8 +1118,6 @@ test("fault trusted setup applies policy and complete closure before the direct 
       "let limit = {rlim_cur:32, rlim_max:32}, observed = {};",
     )
     .replace("gid_t group;", "let group;")
-    .replace("struct stat held_parent;", "let held_parent={};")
-    .replaceAll("&held_parent", "held_parent")
     .replace("mach_port_t local =", "let local =")
     .replace("struct identity birth =", "let birth =")
     .replaceAll("&handoff", "handoff")
@@ -1142,8 +1140,6 @@ test("fault trusted setup applies policy and complete closure before the direct 
     "closure",
     "mapping",
     "map-close",
-    "acquisition",
-    "parent-close",
     "groups-failed",
     "groups-empty",
     "groups-wrong",
@@ -1163,45 +1159,24 @@ test("fault trusted setup applies policy and complete closure before the direct 
         exec_handoff_byte: () => true,
         exec_handoff_attempt: () => ({}),
         exec_handoff_refused: () => true,
-        domain_mapping: {},
-        domain_map_control: {},
-        domain_map_parent: 66,
-        domain_map_directory: {},
-        AT_FDCWD: -2,
+        domain_mapping: { fd: 64 },
+        domain_map_control: { fd: 65 },
         parent_asid: 77,
-        fstat: () => 0,
-        exec_mapping_same: () => true,
         domain_creator_check(identity, parent) {
           assert.equal(identity, creator);
           assert.equal(parent, 77);
           events.push("credentials");
         },
-        exec_mapping_acquire(value, parent, name) {
+        exec_mapping_check(_value, denied) {
           assert.ok(events.includes("credentials"));
           assert.equal(events.includes("policy"), !api.domain_record.control);
-          assert.equal(parent, value === api.domain_mapping ? 66 : -2);
-          assert.equal(
-            name,
-            value === api.domain_mapping ? "map-fixture" : "exec-control",
-          );
-          events.push("acquire");
-          return fault !== "acquisition" || value !== api.domain_mapping;
-        },
-        close(fd) {
-          assert.equal(fd, 66);
-          events.push("parent-close");
-          return fault === "parent-close" ? -1 : 0;
-        },
-        errno: 5,
-        remember_cleanup(...args) {
-          assert.deepEqual(args, ["fault-map-parent-close", "errno", 5]);
-        },
-        exec_mapping_check(_value, denied) {
           events.push(denied ? "map-deny" : "map-allow");
           return fault !== "mapping";
         },
-        exec_mapping_close() {
+        exec_mapping_close(value) {
           events.push("map-close");
+          assert.ok([64, 65].includes(value.fd));
+          value.fd = -1;
           return fault !== "map-close";
         },
         domain_mapping_diagnostic() {
@@ -1223,9 +1198,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
         remember(operation, kind, value) {
           assert.deepEqual(
             [operation, kind, value],
-            ["mapping", "map-close", "acquisition", "parent-close"].includes(
-              fault,
-            )
+            ["mapping", "map-close"].includes(fault)
               ? ["fault-image-mapping", "invariant", 0]
               : ["fault-image-prepare", "errno", 12],
           );
@@ -1275,6 +1248,8 @@ test("fault trusted setup applies policy and complete closure before the direct 
         feasibility_sandbox_active: () => (api.domain_record.control ? 0 : 1),
         image_closure_prepare(_handoff, local) {
           events.push("closure");
+          assert.equal(api.domain_mapping.fd, -1);
+          assert.equal(api.domain_map_control.fd, -1);
           assert.equal(local, 200);
           assert.equal(api.domain_bootstrap_local, 0);
           assert.notEqual(fault, "closure");
@@ -1313,9 +1288,6 @@ test("fault trusted setup applies policy and complete closure before the direct 
         "audit",
         "credentials",
         ...(fault === "outside" ? [] : ["policy"]),
-        "acquire",
-        "acquire",
-        "parent-close",
         fault === "outside" ? "map-allow" : "map-deny",
         "map-allow",
         "map-close",
@@ -1325,7 +1297,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
       ]);
     }
     if (refused) assert.ok(!events.includes("X"));
-    if (["mapping", "map-close", "acquisition", "parent-close"].includes(fault))
+    if (["mapping", "map-close"].includes(fault))
       assert.equal(events.filter((event) => event === "map-close").length, 2);
   }
 });

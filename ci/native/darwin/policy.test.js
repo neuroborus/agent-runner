@@ -215,6 +215,50 @@ test("Darwin policies seal writable roots, images and both directions of every p
       seatbelt.includes("(allow file-write*"),
       profile !== "read-only",
     );
+    const workspace = `(subpath ${JSON.stringify(f.input.request.workspace)})`,
+      exclusions = [
+        f.input.request.custody,
+        f.input.checkout,
+        f.input.configuration,
+        f.input.credentials,
+      ]
+        .map((name) => `(require-not (subpath ${JSON.stringify(name)}))`)
+        .join(" ");
+    assert.ok(
+      seatbelt.includes(
+        `(allow file-read-data file-read-metadata (require-all ${workspace} ${exclusions}))`,
+      ),
+    );
+    assert.ok(seatbelt.includes(`(deny file-map-executable ${workspace})`));
+    assert.ok(
+      !seatbelt.includes(`(allow file-read* (require-all ${workspace}`),
+    );
+    if (profile !== "read-only")
+      assert.ok(
+        seatbelt.includes(
+          `(allow file-write* (require-all ${workspace} ${exclusions} (require-not (subpath ${JSON.stringify(f.input.pointer)})) (require-not (literal ${JSON.stringify(f.input.request.workspace)}))))`,
+        ),
+      );
+    for (const image of f.input.runtime) {
+      assert.ok(
+        seatbelt.includes(
+          `(allow file-read-data file-read-metadata (literal ${JSON.stringify(image.path)}))`,
+        ),
+      );
+      assert.ok(
+        seatbelt.includes(
+          `(allow file-map-executable (literal ${JSON.stringify(image.path)}))`,
+        ),
+      );
+    }
+    assert.ok(
+      seatbelt.includes(
+        `(allow process-exec (literal ${JSON.stringify(f.input.request.executable.path)}))`,
+      ),
+    );
+    assert.equal(f.plan.seatbeltSha256, digest(seatbelt));
+    assert.equal(f.input.request.policy.sha256, f.plan.seatbeltSha256);
+    assert.equal(f.input.request.bindings.policy, f.plan.compositionSha256);
     assert.ok(
       !seatbelt.includes("(allow mach-") &&
         !seatbelt.includes("(allow ipc-") &&

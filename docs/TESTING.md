@@ -418,15 +418,25 @@ both objects before failure-only reporting and retain refusal with failed writes
 flushes or closed capture, without release or cleanup retry.
 Directory-query 0 supplies no mapping evidence; declared directory/character
 types discharge non-file slots only alongside the bound regular-file controls.
-Existing image and preparation fixtures cover checked inherited-probe closure and
-alias sanitation, fixed-entry guards, unchanged custody across rounds and interrupted
-recovery without publication/probe replay. Tier ownership stays unchanged;
-matching macOS CI must independently establish actual mapping and retirement.
-Actual acquisition/caller bodies reject retained descriptions and equal-hash vnode
-substitution, require final credentials/limits and outside/primary policy ordering,
-and settle both partial acquisitions, either failed close and temporary parents
-before ready or release. Parent-relative access preserves the private layout;
-portable effects establish ordering, equivalence and settlement, never Seatbelt semantics.
+Existing image, fault, custody and preparation fixtures cover the two accounted
+read-only witness copies through sanitation, removal of unrelated aliases and child
+parent copies, the launcher's complete descriptor inventory, and both checked
+closures before ready/closure/admission. Actual caller bodies retain final
+credentials/limits, outside/primary policy ordering, independent authorized checks,
+either failed close and interrupted-setup settlement without retrying uncertain
+closure. Identity and full-read/hash failures still reject equal-byte object
+substitution. Custodian/source/parent joins, unchanged originals across rounds,
+fixed-entry guards and recovery without publication/probe replay remain covered.
+Generated-policy assertions require precise workspace data/metadata reads and
+explicit executable-map denial in all three builders, retaining writing positives,
+protected exclusions, outside runtime/image grants and exact policy bindings.
+The preceding final-context acquisition experiment still allowed launcher workspace
+mmap and failed feasibility's outside open. Reopening alone is stopped; portable
+ordering, capability-equivalence and policy-byte tests prove neither wildcard
+causality nor hosted Seatbelt behavior. Tier ownership stays unchanged; matching
+macOS CI must establish all positives, strict permission-denied MAP_FAILED and
+independent retirement. Failed positives, successful workspace mapping, custody
+drift or uncertain settlement stop the hypothesis.
 The build suite additionally executes actual fixture production and five-record
 snapshot bodies through native shape/read/hash/emission predicates with injected
 OS effects. It reproduces the third-object `0444`/generic-`0600` refusal and covers

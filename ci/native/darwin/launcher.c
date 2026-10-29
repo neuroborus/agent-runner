@@ -45,20 +45,29 @@ static void launch_need_at(bool ok, const char *file, unsigned line);
 #undef need
 #define need(ok) launch_need_at(!!(ok), __FILE__, __LINE__)
 #endif
-static int launch_diagnostic = -1, launch_control_parent = -1;
+static int launch_diagnostic = -1;
 static void descriptors(void) {
   struct proc_fdinfo fds[4096];
   int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   need(size > 0 && size < (int)sizeof(fds) && size % sizeof(fds[0]) == 0);
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++)
-    if (fds[i].proc_fd >= 5 && fds[i].proc_fd != launch_diagnostic &&
-        fds[i].proc_fd != launch_control_parent) need(!close(fds[i].proc_fd));
+    if (fds[i].proc_fd >= 5 && fds[i].proc_fd != launch_diagnostic
+#ifdef NATIVE_CI_EXPERIMENT
+        && fds[i].proc_fd != launch_mapping.fd && fds[i].proc_fd != launch_map_control.fd
+#endif
+       ) need(!close(fds[i].proc_fd));
   size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   unsigned expected = launch_diagnostic == 5 ? 6 : 5;
-  need(size == (expected + (launch_control_parent >= 0)) * (int)sizeof(fds[0]));
+  unsigned probes = 0;
+#ifdef NATIVE_CI_EXPERIMENT
+  probes = (launch_mapping.fd >= 0) + (launch_map_control.fd >= 0);
+#endif
+  need(size == (expected + probes) * (int)sizeof(fds[0]));
   unsigned mask = 0;
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++) {
-    if (fds[i].proc_fd == launch_control_parent) continue;
+#ifdef NATIVE_CI_EXPERIMENT
+    if (fds[i].proc_fd == launch_mapping.fd || fds[i].proc_fd == launch_map_control.fd) continue;
+#endif
     need(fds[i].proc_fd >= 0 && fds[i].proc_fd < expected); mask |= 1U << fds[i].proc_fd;
   }
   need(mask == (1U << expected) - 1);
@@ -134,10 +143,6 @@ static void launch_need_at(bool ok, const char *file, unsigned line) {
     (void)signal(SIGPIPE, SIG_IGN);
     if (!exec_mapping_close(&launch_mapping)) fprintf(stderr, "native-darwin-launch-cleanup: operation=workspace-close errno=%d\n", launch_mapping.close_error);
     if (!exec_mapping_close(&launch_map_control)) fprintf(stderr, "native-darwin-launch-cleanup: operation=authorized-close errno=%d\n", launch_map_control.close_error);
-    if (launch_control_parent >= 0) {
-      int fd = launch_control_parent; launch_control_parent = -1;
-      if (close(fd)) fprintf(stderr, "native-darwin-launch-cleanup: operation=parent-close errno=%d\n", errno);
-    }
     if (launch_probe) {
       exec_handoff_destroy(launch_probe);
       fprintf(stderr, "native-darwin-probe-cleanup: files=%d attributes=%d\n", launch_probe->files_cleanup, launch_probe->attributes_cleanup);
@@ -550,9 +555,9 @@ int main(int argc, char **argv) {
   const char *control_hash = getenv("NATIVE_EXEC_CONTROL_SHA256");
   need(control_hash && strlen(control_hash) == 64 && strspn(control_hash, "0123456789abcdef") == 64);
   struct stat control_identity; free(file(control_path, gid, 0550, imageMaximum, control_hash, &control_identity));
-  char mapping_path[PATH_MAX]; struct stat mapping_parent, control_parent;
+  char mapping_path[PATH_MAX]; struct stat mapping_parent;
   need(snprintf(mapping_path, sizeof(mapping_path), "%s/map-fixture", argv[5]) < sizeof(mapping_path) &&
-    !fstat(workspace, &mapping_parent) && !fstat(storage, &control_parent) && exec_mapping_open(&launch_mapping, mapping_path, control_hash) &&
+    !fstat(workspace, &mapping_parent) && exec_mapping_open(&launch_mapping, mapping_path, control_hash) &&
     exec_mapping_open(&launch_map_control, control_path, control_hash));
   for (unsigned round = 0; round < 2; round++) {
   struct stat mapping_named, parent_named, control_named;
@@ -575,15 +580,6 @@ int main(int argc, char **argv) {
 #endif
   if (child > 0) launch_child = child;
   if (!child) {
-#ifdef NATIVE_CI_EXPERIMENT
-    bool inherited_closed = exec_mapping_close(&launch_mapping);
-    inherited_closed = exec_mapping_close(&launch_map_control) && inherited_closed;
-    if (!inherited_closed) launch_mapping_diagnostic(control);
-    need(inherited_closed);
-    launch_control_parent = fcntl(storage, F_DUPFD_CLOEXEC, 64);
-    struct stat held_parent;
-    need(launch_control_parent >= 64 && !fstat(launch_control_parent, &held_parent) && exec_mapping_same(held_parent, control_parent));
-#endif
     launch_stage("child-entry", NULL, 0, 0);
     close(ready[0]); close(release[1]);
     launch_stage("child-stdio", NULL, 0, 0);
@@ -632,17 +628,11 @@ int main(int argc, char **argv) {
 #endif
     need(!sandbox_init((const char *)policy, 0, &error));
 #ifdef NATIVE_CI_EXPERIMENT
-    need(!fstatat(AT_FDCWD, ".", &held_parent, AT_SYMLINK_NOFOLLOW) && exec_mapping_same(held_parent, mapping_parent));
-    need(!fstat(launch_control_parent, &held_parent) && exec_mapping_same(held_parent, control_parent));
-    bool acquired = exec_mapping_acquire(&launch_mapping, AT_FDCWD, "map-fixture");
-    acquired = exec_mapping_acquire(&launch_map_control, launch_control_parent, "exec-control") && acquired;
-    int parent_fd = launch_control_parent; launch_control_parent = -1;
-    int parent_closed = close(parent_fd), parent_error = parent_closed ? errno : 0;
-    bool mapped = acquired && !parent_closed && exec_mapping_check(&launch_mapping, !control);
-    mapped = acquired && !parent_closed && exec_mapping_check(&launch_map_control, false) && mapped;
+    /* Only the two original read-only witness copies survived sanitation. */
+    bool mapped = exec_mapping_check(&launch_mapping, !control);
+    mapped = exec_mapping_check(&launch_map_control, false) && mapped;
     bool map_closed = exec_mapping_close(&launch_mapping); map_closed = exec_mapping_close(&launch_map_control) && map_closed;
     if (!(mapped && map_closed)) launch_mapping_diagnostic(control);
-    if (parent_closed) launch_failure("mapping-parent-close", parent_closed, parent_error, 0, -1, 0);
     need(mapped && map_closed);
     mach_port_t local_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local_bootstrap);

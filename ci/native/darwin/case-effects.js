@@ -68,7 +68,8 @@ export function darwinOwnershipPolicy(
     "(deny default)",
     "(allow process-fork)",
     "(allow process-info* (target same-sandbox))",
-    `(allow file-read* file-write* (subpath ${quote(request.workspace)}))`,
+    `(allow file-read-data file-read-metadata file-write* (subpath ${quote(request.workspace)}))`,
+    `(deny file-map-executable (subpath ${quote(request.workspace)}))`,
     `(allow file-read-metadata (literal ${quote(request.storage)}))`,
     ...[
       request.executable.path,

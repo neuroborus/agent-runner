@@ -2163,7 +2163,6 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         "let st=value.object,named={};",
       )
       .replace("struct stat after;", "let after={};")
-      .replace("struct stat held, named;", "let held={},named={};")
       .replace("struct proc_fdinfo fds[512];", "let fds=[];")
       .replace("struct vnode_fdinfowithpath info;", "let info={};")
       .replace(
@@ -2184,16 +2183,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         'hash.write(sum[i].toString(16).padStart(2,"0"),2*i);',
       )
       .replaceAll(/\b(?:unsigned|bool|int|size_t|ssize_t) /gu, "let ");
-  const functions = [
-    "result",
-    "same",
-    "close",
-    "read",
-    "open",
-    "acquire",
-    "check",
-    "held",
-  ]
+  const functions = ["result", "same", "close", "read", "open", "check", "held"]
     .map((name) => {
       const args = {
         result: "value,ok,operation,result,error",
@@ -2201,7 +2191,6 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         close: "value",
         read: "value,bytes",
         open: "value,path,hash",
-        acquire: "value,parent,name",
         check: "value,denied",
         held: "pid,object",
       }[name];
@@ -2351,84 +2340,17 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
       };
       const native = new Script(
         functions +
-          ";({exec_mapping_open,exec_mapping_acquire,exec_mapping_check,exec_mapping_close,exec_mapping_held})",
+          ";({exec_mapping_open,exec_mapping_check,exec_mapping_close,exec_mapping_held})",
       ).runInNewContext(api);
       const opened = native.exec_mapping_open(value, "/bound/map-fixture", pin);
       const valid = !fault || ["unmap", "close"].includes(fault);
       assert.equal(!!opened, valid, fault);
       if (opened) {
+        const frozen = structuredClone(value.object),
+          frozenHash = String(value.hash);
         attempt = native.exec_mapping_check(value, denied);
         assert.equal(attempt, fault !== "unmap" || denied, fault);
         if (!fault && !denied) {
-          const original = { ...api };
-          for (const failure of [
-            null,
-            "inherited",
-            "open",
-            "stat",
-            "flags",
-            "access",
-            "name",
-            "same-hash-substitute",
-            "named-substitute",
-            "read",
-            "digest",
-          ]) {
-            const child = { ...value, fd: failure === "inherited" ? 64 : -1 },
-              frozen = structuredClone(value.object);
-            Object.assign(api, original, {
-              AT_SYMLINK_NOFOLLOW: 32,
-              openat(parent, name, flags) {
-                assert.deepEqual(
-                  [parent, name, flags],
-                  [66, "map-fixture", 28],
-                );
-                api.errno = 5;
-                return failure === "open" ? -1 : 64;
-              },
-              fstat(fd, out) {
-                original.fstat(fd, out);
-                if (failure === "same-hash-substitute") out.st_ino++;
-                api.errno = 6;
-                return failure === "stat" ? -1 : 0;
-              },
-              fcntl() {
-                api.errno = 7;
-                return failure === "flags" ? -1 : failure === "access" ? 1 : 0;
-              },
-              fstatat(parent, name, out, flags) {
-                assert.deepEqual(
-                  [parent, name, flags],
-                  [66, "map-fixture", 32],
-                );
-                Object.assign(out, st);
-                if (failure === "named-substitute") out.st_ino++;
-                api.errno = 8;
-                return failure === "name" ? -1 : 0;
-              },
-              pread(...args) {
-                const count = original.pread(...args);
-                return failure === "read" ? count - 1 : count;
-              },
-              CC_SHA256(input, size, out) {
-                return original.CC_SHA256(
-                  failure === "digest" ? Buffer.alloc(size) : input,
-                  size,
-                  out,
-                );
-              },
-            });
-            assert.equal(
-              native.exec_mapping_acquire(child, 66, "map-fixture"),
-              !failure,
-              failure,
-            );
-            assert.deepEqual(child.object, frozen);
-            assert.equal(String(child.hash), String(value.hash));
-            assert.equal(native.exec_mapping_close(child), true);
-            assert.equal(child.fd, -1);
-          }
-          Object.assign(api, original);
           events.length = 0;
           const effects = { ...api },
             initialEvents = [...events];
@@ -2635,6 +2557,8 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
           assert.equal(native.exec_mapping_check(value, true), false);
           st.st_ino--;
         }
+        assert.deepEqual(value.object, frozen);
+        assert.equal(String(value.hash), frozenHash);
       }
       assert.equal(
         native.exec_mapping_close(value),
@@ -2646,7 +2570,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
     }
 });
 
-test("mapping callers acquire under final restrictions and settle both objects before refusal or ready", async () => {
+test("mapping callers check retained witnesses under final restrictions and settle both before refusal or ready", async () => {
   for (const [file, owner, prefix, diagnostic] of [
     ["launcher.c", "launcher", "launch", "launch_mapping_diagnostic"],
     ["feasibility-domain.h", "fault", "domain", "domain_mapping_diagnostic"],
@@ -2655,48 +2579,52 @@ test("mapping callers acquire under final restrictions and settle both objects b
       new URL("../ci/native/darwin/" + file, import.meta.url),
       "utf8",
     );
-    const inheritedStart = source.indexOf("    bool inherited_closed =");
-    const inheritedEnd = source.indexOf(
-      "\n",
-      source.indexOf(
-        owner === "launcher"
-          ? "    need(inherited_closed);"
-          : "    invariant(inherited_closed,",
-        inheritedStart,
-      ),
+    const cleanupStart = source.indexOf(
+      owner === "launcher"
+        ? "static void launch_need_at(bool ok, const char *file, unsigned line) {"
+        : "static void domain_port_cleanup(void) {",
     );
-    const inherited = source
-      .slice(inheritedStart, inheritedEnd)
+    const cleanup = source
+      .slice(
+        source.indexOf("if (!exec_mapping_close", cleanupStart),
+        source.indexOf(
+          `if (${prefix}_probe${owner === "fault" ? "_handoff" : ""})`,
+          cleanupStart,
+        ),
+      )
       .replaceAll(/&(launch|domain)_(mapping|map_control)/gu, "$1_$2")
-      .replace("bool ", "let ");
-    assert.ok(inheritedStart > 0 && inheritedEnd > inheritedStart);
-    for (const failed of [null, 64, 65]) {
+      .replaceAll("->", ".")
+      .replaceAll(/\bint /gu, "let ");
+    assert.ok(cleanupStart > 0 && cleanup.includes(`${prefix}_map_control`));
+    for (const failed of [null, 64, 65, "partial"]) {
       const closed = [],
         work = { fd: 64 },
-        authorized = { fd: 65 };
-      const check = (ok) => {
-        assert.deepEqual(closed, [64, 65]);
-        if (!ok) throw new Error("close-refusal");
+        authorized = { fd: failed === "partial" ? -1 : 65 },
+        expected = failed === "partial" ? [64] : [64, 65];
+      const settle = new Script(cleanup);
+      const api = {
+        [`${prefix}_mapping`]: work,
+        [`${prefix}_map_control`]: authorized,
+        domain_map_parent: -1,
+        stderr: 2,
+        errno: 9,
+        fprintf() {},
+        remember_cleanup() {},
+        exec_mapping_close(value) {
+          const fd = value.fd;
+          value.fd = -1;
+          if (fd < 0) return true;
+          closed.push(fd);
+          value.close_error = fd === failed ? 9 : 0;
+          return fd !== failed;
+        },
       };
-      const run = () =>
-        new Script(inherited + '; "settled";').runInNewContext({
-          [`${prefix}_mapping`]: work,
-          [`${prefix}_map_control`]: authorized,
-          control: false,
-          exec_mapping_close(value) {
-            const fd = value.fd;
-            value.fd = -1;
-            closed.push(fd);
-            return fd !== failed;
-          },
-          [diagnostic]() {},
-          need: check,
-          invariant: check,
-        });
-      if (failed) assert.throws(run, /close-refusal/u);
-      else assert.equal(run(), "settled");
+      settle.runInNewContext(api);
+      assert.deepEqual(closed, expected);
       assert.equal(work.fd, -1);
       assert.equal(authorized.fd, -1);
+      settle.runInNewContext(api);
+      assert.deepEqual(closed, expected);
     }
     const note = new RegExp(
       `static void ${diagnostic}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
@@ -2713,10 +2641,9 @@ test("mapping callers acquire under final restrictions and settle both objects b
     const start = source.indexOf(
       owner === "launcher"
         ? "    struct rlimit limit ="
-        : "    bool acquired = exec_mapping_acquire(",
-      inheritedEnd,
+        : "    bool mapped = exec_mapping_check(",
     );
-    assert.ok(start > inheritedEnd);
+    assert.ok(start > source.indexOf("  if (!child) {"));
     const guard = source
       .slice(start, source.indexOf("    mach_port_t local", start))
       .replaceAll(/^#(?:ifdef NATIVE_CI_EXPERIMENT|endif)\n/gmu, "")
@@ -2731,7 +2658,7 @@ test("mapping callers acquire under final restrictions and settle both objects b
       .replace("gid_t only;", "let only;")
       .replace("&only", "{set value(v){only=v}}")
       .replace("char *error = NULL;", "let error=null;")
-      .replaceAll(/&(audit|limit|observed|held_parent)\b/gu, "$1")
+      .replaceAll(/&(audit|limit|observed)\b/gu, "$1")
       .replaceAll("sizeof(audit)", "64")
       .replaceAll("(unsigned)", "")
       .replace("(const char *)", "")
@@ -2749,9 +2676,6 @@ test("mapping callers acquire under final restrictions and settle both objects b
       "settlement",
       "pipe",
       "flush",
-      "acquire-workspace",
-      "acquire-authorized",
-      "parent-close",
       "workspace-close",
       "authorized-close",
     ]) {
@@ -2773,16 +2697,13 @@ test("mapping callers acquire under final restrictions and settle both objects b
         close_error: 0,
       });
       const work = object(),
-        authorized = object();
+        authorized = { ...object(), fd: 65 };
       let ignored = owner === "fault",
         remembered = false;
       const api = {
         [`${prefix}_mapping`]: work,
         [`${prefix}_map_control`]: authorized,
         domain_record: { control },
-        AT_FDCWD: -2,
-        launch_control_parent: 66,
-        domain_map_parent: 66,
         control,
         errno: 77,
         stderr: 2,
@@ -2796,10 +2717,6 @@ test("mapping callers acquire under final restrictions and settle both objects b
         RLIMIT_NPROC: 7,
         NULL: null,
         policy: "bound-policy",
-        held_parent: {},
-        mapping_parent: {},
-        control_parent: {},
-        AT_SYMLINK_NOFOLLOW: 32,
         launch_stage() {},
         setrlimit(kind, limit) {
           assert.equal(kind, 7);
@@ -2864,10 +2781,7 @@ test("mapping callers acquire under final restrictions and settle both objects b
           state.policy = true;
           return fault === "policy" ? 1 : 0;
         },
-        fstatat: () => 0,
-        fstat: () => 0,
-        exec_mapping_same: () => true,
-        exec_mapping_acquire(value, parent, name) {
+        exec_mapping_check(value, denied) {
           if (owner === "launcher")
             assert.deepEqual(
               [
@@ -2880,32 +2794,6 @@ test("mapping callers acquire under final restrictions and settle both objects b
               ],
               [90001, 90002, true, true, true, !control],
             );
-          const kind = value === work ? "workspace" : "authorized";
-          assert.equal(name, value === work ? "map-fixture" : "exec-control");
-          assert.equal(
-            parent,
-            (owner === "launcher") === (value === work) ? -2 : 66,
-          );
-          events.push("acquire-" + kind);
-          return fault !== "acquire-" + kind;
-        },
-        close(fd) {
-          assert.equal(fd, 66);
-          events.push("close-parent");
-          api.errno = 5;
-          return fault === "parent-close" ? -1 : 0;
-        },
-        launch_failure(operation, result, error) {
-          assert.deepEqual(
-            [operation, result, error],
-            ["mapping-parent-close", -1, 5],
-          );
-          throw new Error("launcher-refusal:126");
-        },
-        remember_cleanup(...args) {
-          assert.deepEqual(args, ["fault-map-parent-close", "errno", 5]);
-        },
-        exec_mapping_check(value, denied) {
           events.push(value === work ? "workspace" : "authorized");
           assert.equal(denied, value === work && !control);
           const failed =
@@ -2920,7 +2808,7 @@ test("mapping callers acquire under final restrictions and settle both objects b
         },
         exec_mapping_close(value) {
           events.push(value === work ? "close-workspace" : "close-authorized");
-          assert.equal(value.fd, 64);
+          assert.equal(value.fd, value === work ? 64 : 65);
           value.fd = -1;
           api.errno = 91;
           value.closed =
@@ -2939,16 +2827,8 @@ test("mapping callers acquire under final restrictions and settle both objects b
           assert.equal(fd, 2);
           assert.equal(ignored, true);
           assert.deepEqual(events, [
-            "acquire-workspace",
-            "acquire-authorized",
-            "close-parent",
-            ...([
-              "acquire-workspace",
-              "acquire-authorized",
-              "parent-close",
-            ].includes(fault)
-              ? []
-              : ["workspace", "authorized"]),
+            "workspace",
+            "authorized",
             "close-workspace",
             "close-authorized",
           ]);
@@ -3032,16 +2912,8 @@ test("mapping callers acquire under final restrictions and settle both objects b
       }
       assert.equal(records.length, fault && fault !== "outside" ? 1 : 0);
       assert.deepEqual(events, [
-        "acquire-workspace",
-        "acquire-authorized",
-        "close-parent",
-        ...([
-          "acquire-workspace",
-          "acquire-authorized",
-          "parent-close",
-        ].includes(fault)
-          ? []
-          : ["workspace", "authorized"]),
+        "workspace",
+        "authorized",
         "close-workspace",
         "close-authorized",
       ]);
@@ -3049,11 +2921,8 @@ test("mapping callers acquire under final restrictions and settle both objects b
   }
 });
 
-test("experimental descriptor sweep removes inherited probes and aliases while bounding temporary parent custody", async () => {
-  for (const [file, parent] of [
-    ["launcher.c", "launch_control_parent"],
-    ["feasibility-domain.h", "domain_map_parent"],
-  ]) {
+test("experimental descriptor sweep retains only the two witness copies until checked settlement", async () => {
+  for (const file of ["launcher.c", "feasibility-domain.h"]) {
     const source = await readFile(
       new URL("../ci/native/darwin/" + file, import.meta.url),
       "utf8",
@@ -3078,21 +2947,54 @@ test("experimental descriptor sweep removes inherited probes and aliases while b
       .replaceAll(/\((?:size_t|int|unsigned)\)/gu, "")
       .replaceAll(/\b(?:unsigned|int|size_t) /gu, "let ")
       .replaceAll("1U", "1");
-    for (const fail of [false, true]) {
+    const cleanupStart = source.indexOf(
+        "static void domain_port_cleanup(void) {",
+      ),
+      cleanup =
+        file === "launcher.c"
+          ? null
+          : new Script(
+              source
+                .slice(
+                  source.indexOf("  if (!exec_mapping_close", cleanupStart),
+                  source.indexOf("  if (domain_probe_handoff)", cleanupStart),
+                )
+                .replaceAll(/&(domain_(?:mapping|map_control))/gu, "$1")
+                .replaceAll(/\bint /gu, "let "),
+            );
+    for (const failed of file === "launcher.c"
+      ? [null, 66, 77]
+      : [null, 5, 66, 77]) {
       const held = new Set([0, 1, 2, 3, 4, 5, 64, 65, 66, 77]),
-        closed = [];
+        closed = [],
+        cleanupErrors = [];
       const api = {
         launch_diagnostic: 5,
-        [parent]: 66,
+        domain_map_parent: 66,
         launch_mapping: { fd: 64 },
         launch_map_control: { fd: 65 },
+        domain_mapping: { fd: 64 },
+        domain_map_control: { fd: 65 },
         PROC_PIDLISTFDS: 1,
         F_SETFD: 2,
         FD_CLOEXEC: 1,
         getpid: () => 42,
         need: (ok) => assert.ok(ok),
         invariant: (ok) => assert.ok(ok),
-        posix_check: (value) => assert.equal(value, 0),
+        posix_check(value, operation) {
+          if (value === 0) return;
+          const primary = new Error(operation + ":" + api.errno);
+          cleanup.runInNewContext(api);
+          throw primary;
+        },
+        remember_cleanup(...args) {
+          cleanupErrors.push(args);
+        },
+        exec_mapping_close(value) {
+          const fd = value.fd;
+          value.fd = -1;
+          return fd < 0 || api.close(fd) === 0;
+        },
         proc_pidinfo(_pid, _selector, _arg, out) {
           out.length = 0;
           for (const fd of held) out.push({ proc_fd: fd });
@@ -3100,8 +3002,10 @@ test("experimental descriptor sweep removes inherited probes and aliases while b
         },
         close(fd) {
           closed.push(fd);
-          if (fail) return -1;
-          held.delete(fd);
+          // A failed close may already have consumed the description.
+          const present = held.delete(fd);
+          api.errno = fd === failed ? 5 : present ? 91 : 9;
+          if (fd === failed || !present) return -1;
           return 0;
         },
         fcntl: (fd) => {
@@ -3110,18 +3014,32 @@ test("experimental descriptor sweep removes inherited probes and aliases while b
         },
       };
       const sweep = new Script(`()=>{${body}}`).runInNewContext(api);
-      if (fail) assert.throws(sweep);
-      else {
+      if (failed !== null) {
+        assert.throws(sweep, cleanup ? /fault-close:5/u : undefined);
+        if (cleanup) {
+          assert.equal(api.domain_map_parent, -1);
+          for (const fd of [64, 65, 66])
+            assert.equal(closed.filter((value) => value === fd).length, 1);
+          assert.deepEqual(cleanupErrors, []);
+        }
+      } else {
         sweep();
         assert.deepEqual(closed, [
           ...(file === "launcher.c" ? [] : [5]),
-          64,
-          65,
+          66,
           77,
         ]);
-        assert.ok(!held.has(64) && !held.has(65));
-        held.delete(66);
-        api[parent] = -1;
+        assert.ok(held.has(64) && held.has(65));
+        if (file !== "launcher.c") assert.equal(api.domain_map_parent, -1);
+        else {
+          held.delete(64);
+          assert.throws(sweep);
+          held.add(64);
+        }
+        held.delete(64);
+        held.delete(65);
+        api.launch_mapping.fd = api.launch_map_control.fd = -1;
+        api.domain_mapping.fd = api.domain_map_control.fd = -1;
         sweep();
         assert.deepEqual(
           [...held],

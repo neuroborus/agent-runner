@@ -840,9 +840,8 @@ static void domain_start(int argc, char **argv) {
   char mapping_path[4096], mapping_parent[4096];
   need(snprintf(mapping_parent, sizeof(mapping_parent), "%s/workspace", canonical) < sizeof(mapping_parent) &&
     snprintf(mapping_path, sizeof(mapping_path), "%s/map-fixture", mapping_parent) < sizeof(mapping_path));
-  /* Search-only custody pins this exact private parent across the UID change;
-   * only this temporary directory copy survives sanitation, never probe files. */
-  domain_map_parent = open(mapping_parent, O_SEARCH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  /* Parent custody stays here; children retain only the two read-only probes. */
+  domain_map_parent = open(mapping_parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   need(domain_map_parent > 4 && !fstat(domain_map_parent, &domain_map_directory) &&
     exec_mapping_open(&domain_mapping, mapping_path, domain_record.control_hash) &&
     exec_mapping_open(&domain_map_control, domain_control_asset, domain_record.control_hash));
@@ -894,10 +893,6 @@ static void domain_start(int argc, char **argv) {
   invariant(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &threads, sizeof(threads)) == sizeof(threads) && threads.pti_threadnum == 1, "fault-fork-threads");
   pid_t child = domain_fault_fork();
   if (!child) {
-    bool inherited_closed = exec_mapping_close(&domain_mapping);
-    inherited_closed = exec_mapping_close(&domain_map_control) && inherited_closed;
-    if (!inherited_closed) domain_mapping_diagnostic();
-    invariant(inherited_closed, "fault-inherited-mapping-close");
     domain_access_observe("child-fork");
     posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close");
     posix_check(fchdir(domain_root), "fault-cwd");
@@ -908,7 +903,14 @@ static void domain_start(int argc, char **argv) {
     domain_check(descriptors_ready, "fault-creator-descriptors", "errno", descriptor_error);
     struct proc_fdinfo fds[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
     invariant(size > 0 && size < sizeof(fds) && !(size % sizeof(fds[0])), "fault-fd-count");
-    for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 4 && fds[i].proc_fd != domain_map_parent) posix_check(close(fds[i].proc_fd), "fault-close");
+    for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 4 &&
+      fds[i].proc_fd != domain_mapping.fd && fds[i].proc_fd != domain_map_control.fd) {
+      int fd = fds[i].proc_fd;
+      /* Failure cleanup must never retry this child's parent close. */
+      if (fd == domain_map_parent) domain_map_parent = -1;
+      posix_check(close(fd), "fault-close");
+    }
+    need(domain_map_parent < 0);
     char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
     posix_check(setenv("NATIVE_FAULT_PARENT_ASID", parent, 1), "fault-environment"); posix_check(unsetenv("NATIVE_STARTUP_CUSTODY"), "fault-environment");
     char *arguments[] = {domain_helper, "fault", NULL}; extern char **environ;
@@ -929,18 +931,12 @@ static void domain_start(int argc, char **argv) {
     domain_creator_check(fault_inspect(getpid()), parent_asid);
     if (!domain_record.control) policy(domain_policy);
     invariant(feasibility_sandbox_active(sandbox_binding, getpid()) == (domain_record.control ? 0 : 1), "fault-image-policy");
-    struct stat held_parent; need(!fstat(domain_map_parent, &held_parent) && exec_mapping_same(held_parent, domain_map_directory));
-    bool acquired = exec_mapping_acquire(&domain_mapping, domain_map_parent, "map-fixture");
-    acquired = exec_mapping_acquire(&domain_map_control, AT_FDCWD, "exec-control") && acquired;
-    int parent_fd = domain_map_parent; domain_map_parent = -1;
-    int parent_closed = close(parent_fd), parent_error = parent_closed ? errno : 0;
-    bool mapped = acquired && !parent_closed && exec_mapping_check(&domain_mapping, !domain_record.control);
-    mapped = acquired && !parent_closed && exec_mapping_check(&domain_map_control, false) && mapped;
+    bool mapped = exec_mapping_check(&domain_mapping, !domain_record.control);
+    mapped = exec_mapping_check(&domain_map_control, false) && mapped;
     bool map_closed = exec_mapping_close(&domain_mapping); map_closed = exec_mapping_close(&domain_map_control) && map_closed;
     if (!(mapped && map_closed)) {
       remember("fault-image-mapping", "invariant", 0); domain_mapping_diagnostic();
     }
-    if (parent_closed) remember_cleanup("fault-map-parent-close", "errno", parent_error);
     invariant(mapped && map_closed, "fault-image-mapping");
     mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local);

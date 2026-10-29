@@ -308,7 +308,8 @@ export function buildDarwinPolicy(input, { execWitnessVersion = 1 } = {}) {
       lines.push(`(allow process-exec ${literal(entry.path)})`);
   }
   lines.push(
-    `(allow file-read* (require-all ${subtree(request.workspace)} ${exclude}))`,
+    `(allow file-read-data file-read-metadata (require-all ${subtree(request.workspace)} ${exclude}))`,
+    `(deny file-map-executable ${subtree(request.workspace)})`,
     `(allow file-read* ${subtree(value.metadata)})`,
     `(allow file-read-metadata ${literal(request.storage)})`,
   );

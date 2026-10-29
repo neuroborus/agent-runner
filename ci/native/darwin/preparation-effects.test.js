@@ -1,4 +1,7 @@
-import { retireDarwinConstructorHistory } from "./case-effects.js";
+import {
+  darwinOwnershipPolicy,
+  retireDarwinConstructorHistory,
+} from "./case-effects.js";
 import { createDarwinRefusalBinding } from "./startup-trace.js";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -6024,7 +6027,8 @@ function caseBinding(
         "(deny default)",
         "(allow process-fork)",
         "(allow process-info* (target same-sandbox))",
-        `(allow file-read* file-write* (subpath ${JSON.stringify(request.workspace)}))`,
+        `(allow file-read-data file-read-metadata file-write* (subpath ${JSON.stringify(request.workspace)}))`,
+        `(deny file-map-executable (subpath ${JSON.stringify(request.workspace)}))`,
         `(allow file-read-metadata (literal ${JSON.stringify(request.storage)}))`,
         ...[
           request.executable.path,
@@ -7620,6 +7624,33 @@ test("fixed Darwin entry executes each ownership owner through raw custody and h
       },
     });
     assert.equal(proof.observed.policy.policy.kind, "darwin-ownership");
+    const bytes = darwinOwnershipPolicy(prepared.input);
+    assert.equal(digest(bytes), prepared.input.policy.sha256);
+    assert.ok(
+      bytes.includes(
+        `(allow file-read-data file-read-metadata file-write* (subpath ${JSON.stringify(prepared.input.workspace)}))`,
+      ),
+    );
+    assert.ok(
+      bytes.includes(
+        `(deny file-map-executable (subpath ${JSON.stringify(prepared.input.workspace)}))`,
+      ),
+    );
+    assert.ok(
+      bytes.includes(
+        `(allow process-exec (literal ${JSON.stringify(prepared.input.executable.path)}))`,
+      ),
+    );
+    for (const image of [
+      prepared.input.executable.path,
+      "/usr/lib/dyld",
+      "/usr/lib/libSystem.B.dylib",
+    ])
+      assert.ok(
+        bytes.includes(
+          `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(image)}))`,
+        ),
+      );
     if (["literal", "storage"].includes(mode)) {
       prepared.admitted = await prepared.admit();
       const value = await effects.literal(prepared, {

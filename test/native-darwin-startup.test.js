@@ -2522,8 +2522,33 @@ test("Darwin expected negative controls require their exact native cause before 
 test("Darwin runtime policy and actual source retain narrow grants and finite flushed phases", async () => {
   const policy = darwinFeasibilityPolicy("/fixture");
   const execControl = darwinFeasibilityPolicy("/fixture", false, false);
-  for (const value of [policy, execControl])
+  const writable = darwinFeasibilityPolicy("/fixture", true);
+  for (const value of [policy, execControl, writable]) {
     assert.match(value, /^\(allow file-read-data \(literal "\/"\)\)$/mu);
+    assert.ok(
+      value.includes(
+        '(allow file-read-data file-read-metadata (subpath "/fixture/workspace"))',
+      ),
+    );
+    assert.ok(
+      value.includes(
+        '(deny file-map-executable (subpath "/fixture/workspace"))',
+      ),
+    );
+    assert.ok(
+      value.includes(
+        '(allow file-read* (subpath "/usr/lib") (subpath "/System/Library") (literal "/dev/null") (literal "/fixture/build/helper") (literal "/fixture/build/argv-fixture") (literal "/fixture/build/git"))',
+      ),
+    );
+    assert.match(
+      value,
+      /allow file-map-executable.*\/usr\/lib.*\/System\/Library.*build\/argv-fixture/u,
+    );
+    assert.equal(
+      value.includes('(literal "/fixture/workspace/edited.txt")'),
+      value === writable,
+    );
+  }
   assert.doesNotMatch(
     execControl
       .split("\n")
@@ -2538,7 +2563,7 @@ test("Darwin runtime policy and actual source retain narrow grants and finite fl
     policy,
     /mach-lookup|network-|iokit-|file-test-existence|path-ancestors/u,
   );
-  const [helper, fixture] = await Promise.all([
+  const [helper, fixture, feasibility] = await Promise.all([
     readFile(
       new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
       "utf8",
@@ -2547,7 +2572,50 @@ test("Darwin runtime policy and actual source retain narrow grants and finite fl
       new URL("../ci/native/darwin/argv-fixture.c", import.meta.url),
       "utf8",
     ),
+    readFile(
+      new URL("../ci/native/darwin/feasibility.js", import.meta.url),
+      "utf8",
+    ),
   ]);
+  const policyStart = feasibility.indexOf(
+      "  const policyBytes =",
+      feasibility.indexOf("async function ownershipEntry("),
+    ),
+    policyEnd = feasibility.indexOf("  const policy =", policyStart),
+    ownedPolicy = new Script(
+      feasibility.slice(policyStart, policyEnd) + "\npolicyBytes;",
+    ).runInNewContext({
+      darwinFeasibilityPolicy,
+      root: "/fixture",
+      helper: "/custody/helper",
+      control: "/custody/exec-control",
+    });
+  assert.ok(policyStart > 0 && policyEnd > policyStart);
+  assert.ok(
+    ownedPolicy.includes(
+      '(allow file-read* (literal "/custody/helper") (subpath "/usr/lib")',
+    ),
+  );
+  assert.ok(
+    ownedPolicy.includes(
+      '(allow file-map-executable (literal "/custody/helper") (subpath "/usr/lib")',
+    ),
+  );
+  assert.ok(
+    ownedPolicy.includes(
+      '(allow process-exec (literal "/custody/helper") (literal "/fixture/build/helper")',
+    ),
+  );
+  assert.ok(
+    ownedPolicy.endsWith(
+      '(allow file-read-data file-read-metadata file-map-executable (literal "/custody/exec-control"))\n',
+    ),
+  );
+  assert.ok(
+    ownedPolicy.includes(
+      '(deny file-map-executable (subpath "/fixture/workspace"))',
+    ),
+  );
   const application = helper.slice(
     helper.indexOf("static void policy("),
     helper.indexOf("static void parked("),
