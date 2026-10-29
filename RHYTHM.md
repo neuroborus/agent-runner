@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29 — Bind Darwin probes to their final acquisition context
+
+Children close inherited probe copies, sanitize aliases and acquire the exact
+custodian-bound objects after final credentials/limits and unchanged primary policy.
+Pinned cwd/temporary parent custody preserves private directory modes; all partial
+resources settle before admission. Positives, strict mmap denial and retirement
+remain mandatory. This tests one acquisition-context hypothesis without claiming
+Seatbelt causality; continued success or failed custody/positives/settlement stops it.
+
 ## 2026-10-29 — Attribute Darwin mapping refusal to its first actual failed stage
 
 Existing mapping objects retain first failure and immediate failed-syscall errno,

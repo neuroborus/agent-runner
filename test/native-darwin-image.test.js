@@ -2163,6 +2163,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         "let st=value.object,named={};",
       )
       .replace("struct stat after;", "let after={};")
+      .replace("struct stat held, named;", "let held={},named={};")
       .replace("struct proc_fdinfo fds[512];", "let fds=[];")
       .replace("struct vnode_fdinfowithpath info;", "let info={};")
       .replace(
@@ -2176,14 +2177,23 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
       .replace("&info", "info")
       .replace("void *mapped", "let mapped")
       .replace("unsigned char *bytes", "let bytes")
-      .replaceAll(/&(before|after|named|value\.object)\b/gu, "$1")
+      .replaceAll(/&(before|after|held|named|value\.object)\b/gu, "$1")
       .replaceAll(/\((?:size_t|CC_LONG|unsigned)\)/gu, "")
       .replace(
         'snprintf(hash + 2*i, 3, "%02x", sum[i]);',
         'hash.write(sum[i].toString(16).padStart(2,"0"),2*i);',
       )
       .replaceAll(/\b(?:unsigned|bool|int|size_t|ssize_t) /gu, "let ");
-  const functions = ["result", "same", "close", "read", "open", "check", "held"]
+  const functions = [
+    "result",
+    "same",
+    "close",
+    "read",
+    "open",
+    "acquire",
+    "check",
+    "held",
+  ]
     .map((name) => {
       const args = {
         result: "value,ok,operation,result,error",
@@ -2191,6 +2201,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         close: "value",
         read: "value,bytes",
         open: "value,path,hash",
+        acquire: "value,parent,name",
         check: "value,denied",
         held: "pid,object",
       }[name];
@@ -2340,7 +2351,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
       };
       const native = new Script(
         functions +
-          ";({exec_mapping_open,exec_mapping_check,exec_mapping_close,exec_mapping_held})",
+          ";({exec_mapping_open,exec_mapping_acquire,exec_mapping_check,exec_mapping_close,exec_mapping_held})",
       ).runInNewContext(api);
       const opened = native.exec_mapping_open(value, "/bound/map-fixture", pin);
       const valid = !fault || ["unmap", "close"].includes(fault);
@@ -2349,6 +2360,76 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         attempt = native.exec_mapping_check(value, denied);
         assert.equal(attempt, fault !== "unmap" || denied, fault);
         if (!fault && !denied) {
+          const original = { ...api };
+          for (const failure of [
+            null,
+            "inherited",
+            "open",
+            "stat",
+            "flags",
+            "access",
+            "name",
+            "same-hash-substitute",
+            "named-substitute",
+            "read",
+            "digest",
+          ]) {
+            const child = { ...value, fd: failure === "inherited" ? 64 : -1 },
+              frozen = structuredClone(value.object);
+            Object.assign(api, original, {
+              AT_SYMLINK_NOFOLLOW: 32,
+              openat(parent, name, flags) {
+                assert.deepEqual(
+                  [parent, name, flags],
+                  [66, "map-fixture", 28],
+                );
+                api.errno = 5;
+                return failure === "open" ? -1 : 64;
+              },
+              fstat(fd, out) {
+                original.fstat(fd, out);
+                if (failure === "same-hash-substitute") out.st_ino++;
+                api.errno = 6;
+                return failure === "stat" ? -1 : 0;
+              },
+              fcntl() {
+                api.errno = 7;
+                return failure === "flags" ? -1 : failure === "access" ? 1 : 0;
+              },
+              fstatat(parent, name, out, flags) {
+                assert.deepEqual(
+                  [parent, name, flags],
+                  [66, "map-fixture", 32],
+                );
+                Object.assign(out, st);
+                if (failure === "named-substitute") out.st_ino++;
+                api.errno = 8;
+                return failure === "name" ? -1 : 0;
+              },
+              pread(...args) {
+                const count = original.pread(...args);
+                return failure === "read" ? count - 1 : count;
+              },
+              CC_SHA256(input, size, out) {
+                return original.CC_SHA256(
+                  failure === "digest" ? Buffer.alloc(size) : input,
+                  size,
+                  out,
+                );
+              },
+            });
+            assert.equal(
+              native.exec_mapping_acquire(child, 66, "map-fixture"),
+              !failure,
+              failure,
+            );
+            assert.deepEqual(child.object, frozen);
+            assert.equal(String(child.hash), String(value.hash));
+            assert.equal(native.exec_mapping_close(child), true);
+            assert.equal(child.fd, -1);
+          }
+          Object.assign(api, original);
+          events.length = 0;
           const effects = { ...api },
             initialEvents = [...events];
           for (const [stage, operation, result, error] of [
@@ -2565,7 +2646,7 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
     }
 });
 
-test("both mapping callers settle both objects before advisory output and preserve refusal on closed capture", async () => {
+test("mapping callers acquire under final restrictions and settle both objects before refusal or ready", async () => {
   for (const [file, owner, prefix, diagnostic] of [
     ["launcher.c", "launcher", "launch", "launch_mapping_diagnostic"],
     ["feasibility-domain.h", "fault", "domain", "domain_mapping_diagnostic"],
@@ -2574,6 +2655,49 @@ test("both mapping callers settle both objects before advisory output and preser
       new URL("../ci/native/darwin/" + file, import.meta.url),
       "utf8",
     );
+    const inheritedStart = source.indexOf("    bool inherited_closed =");
+    const inheritedEnd = source.indexOf(
+      "\n",
+      source.indexOf(
+        owner === "launcher"
+          ? "    need(inherited_closed);"
+          : "    invariant(inherited_closed,",
+        inheritedStart,
+      ),
+    );
+    const inherited = source
+      .slice(inheritedStart, inheritedEnd)
+      .replaceAll(/&(launch|domain)_(mapping|map_control)/gu, "$1_$2")
+      .replace("bool ", "let ");
+    assert.ok(inheritedStart > 0 && inheritedEnd > inheritedStart);
+    for (const failed of [null, 64, 65]) {
+      const closed = [],
+        work = { fd: 64 },
+        authorized = { fd: 65 };
+      const check = (ok) => {
+        assert.deepEqual(closed, [64, 65]);
+        if (!ok) throw new Error("close-refusal");
+      };
+      const run = () =>
+        new Script(inherited + '; "settled";').runInNewContext({
+          [`${prefix}_mapping`]: work,
+          [`${prefix}_map_control`]: authorized,
+          control: false,
+          exec_mapping_close(value) {
+            const fd = value.fd;
+            value.fd = -1;
+            closed.push(fd);
+            return fd !== failed;
+          },
+          [diagnostic]() {},
+          need: check,
+          invariant: check,
+        });
+      if (failed) assert.throws(run, /close-refusal/u);
+      else assert.equal(run(), "settled");
+      assert.equal(work.fd, -1);
+      assert.equal(authorized.fd, -1);
+    }
     const note = new RegExp(
       `static void ${diagnostic}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
@@ -2586,23 +2710,56 @@ test("both mapping callers settle both objects before advisory output and preser
       .replaceAll("->", ".")
       .replace("int saved", "let saved")
       .replaceAll("(void)", "");
-    const start = source.indexOf("    bool mapped = exec_mapping_check(");
+    const start = source.indexOf(
+      owner === "launcher"
+        ? "    struct rlimit limit ="
+        : "    bool acquired = exec_mapping_acquire(",
+      inheritedEnd,
+    );
+    assert.ok(start > inheritedEnd);
     const guard = source
       .slice(start, source.indexOf("    mach_port_t local", start))
+      .replaceAll(/^#(?:ifdef NATIVE_CI_EXPERIMENT|endif)\n/gmu, "")
+      .replace(
+        "struct rlimit limit = { .rlim_cur = 32, .rlim_max = 32 }, observed;",
+        "const limit={rlim_cur:32,rlim_max:32}, observed={};",
+      )
+      .replace(
+        "struct identity final_credentials =",
+        "const final_credentials =",
+      )
+      .replace("gid_t only;", "let only;")
+      .replace("&only", "{set value(v){only=v}}")
+      .replace("char *error = NULL;", "let error=null;")
+      .replaceAll(/&(audit|limit|observed|held_parent)\b/gu, "$1")
+      .replaceAll("sizeof(audit)", "64")
+      .replaceAll("(unsigned)", "")
+      .replace("(const char *)", "")
+      .replace("&error", "null")
       .replaceAll(/&(launch|domain)_(mapping|map_control)/gu, "$1_$2")
-      .replaceAll("bool ", "let ");
+      .replaceAll(/\b(?:bool|int) /gu, "let ");
     for (const fault of [
       null,
+      ...(owner === "launcher"
+        ? ["outside", "credentials", "limits", "policy"]
+        : []),
       "workspace",
       "authorized",
       "both",
       "settlement",
       "pipe",
       "flush",
+      "acquire-workspace",
+      "acquire-authorized",
+      "parent-close",
+      "workspace-close",
+      "authorized-close",
     ]) {
       const events = [],
         records = [],
-        control = fault === "workspace";
+        control = ["outside", "workspace"].includes(fault),
+        setupFailure = ["credentials", "limits", "policy"].includes(fault),
+        state = {};
       const object = () => ({
         fd: 64,
         operation: null,
@@ -2623,11 +2780,131 @@ test("both mapping callers settle both objects before advisory output and preser
         [`${prefix}_mapping`]: work,
         [`${prefix}_map_control`]: authorized,
         domain_record: { control },
+        AT_FDCWD: -2,
+        launch_control_parent: 66,
+        domain_map_parent: 66,
         control,
         errno: 77,
         stderr: 2,
         SIGPIPE: 13,
         SIG_IGN: 1,
+        uid: 90001,
+        gid: 90002,
+        audit: { ai_auid: 90001, ai_asid: -1 },
+        AU_ASSIGN_ASID: -1,
+        AU_DEFAUDITSID: 0,
+        RLIMIT_NPROC: 7,
+        NULL: null,
+        policy: "bound-policy",
+        held_parent: {},
+        mapping_parent: {},
+        control_parent: {},
+        AT_SYMLINK_NOFOLLOW: 32,
+        launch_stage() {},
+        setrlimit(kind, limit) {
+          assert.equal(kind, 7);
+          assert.deepEqual({ ...limit }, { rlim_cur: 32, rlim_max: 32 });
+          state.limit = true;
+          return 0;
+        },
+        setaudit_addr: () => 0,
+        getaudit_addr(audit) {
+          audit.ai_asid = 17;
+          return 0;
+        },
+        setgroups(count, groups) {
+          assert.deepEqual([count, groups], [0, null]);
+          state.groups = true;
+          return 0;
+        },
+        setgid(gid) {
+          state.gid = gid;
+          return 0;
+        },
+        setuid(uid) {
+          state.uid = uid;
+          return 0;
+        },
+        getgroups(count, group) {
+          assert.equal(count, 1);
+          assert.equal(state.groups, true);
+          group.value = state.gid;
+          state.groupsChecked = true;
+          return 1;
+        },
+        getrlimit(kind, observed) {
+          assert.equal(kind, 7);
+          assert.equal(state.limit, true);
+          observed.rlim_cur = 32;
+          observed.rlim_max = fault === "limits" ? 31 : 32;
+          state.limitsChecked = true;
+          return 0;
+        },
+        getpid: () => 42,
+        inspect(pid) {
+          assert.equal(pid, 42);
+          state.inspected = true;
+          return {
+            bsd: {
+              pbi_uid: state.uid,
+              pbi_ruid: state.uid,
+              pbi_svuid: fault === "credentials" ? 0 : state.uid,
+              pbi_gid: state.gid,
+              pbi_rgid: state.gid,
+              pbi_svgid: state.gid,
+            },
+            token: { val: [state.uid, 0, 0, 0, 0, 42, 17] },
+          };
+        },
+        sandbox_init(policy, flags) {
+          assert.deepEqual(
+            [policy, flags, control],
+            ["bound-policy", 0, false],
+          );
+          state.policy = true;
+          return fault === "policy" ? 1 : 0;
+        },
+        fstatat: () => 0,
+        fstat: () => 0,
+        exec_mapping_same: () => true,
+        exec_mapping_acquire(value, parent, name) {
+          if (owner === "launcher")
+            assert.deepEqual(
+              [
+                state.uid,
+                state.gid,
+                state.groupsChecked,
+                state.limitsChecked,
+                state.inspected,
+                state.policy ?? false,
+              ],
+              [90001, 90002, true, true, true, !control],
+            );
+          const kind = value === work ? "workspace" : "authorized";
+          assert.equal(name, value === work ? "map-fixture" : "exec-control");
+          assert.equal(
+            parent,
+            (owner === "launcher") === (value === work) ? -2 : 66,
+          );
+          events.push("acquire-" + kind);
+          return fault !== "acquire-" + kind;
+        },
+        close(fd) {
+          assert.equal(fd, 66);
+          events.push("close-parent");
+          api.errno = 5;
+          return fault === "parent-close" ? -1 : 0;
+        },
+        launch_failure(operation, result, error) {
+          assert.deepEqual(
+            [operation, result, error],
+            ["mapping-parent-close", -1, 5],
+          );
+          throw new Error("launcher-refusal:126");
+        },
+        remember_cleanup(...args) {
+          assert.deepEqual(args, ["fault-map-parent-close", "errno", 5]);
+        },
         exec_mapping_check(value, denied) {
           events.push(value === work ? "workspace" : "authorized");
           assert.equal(denied, value === work && !control);
@@ -2646,9 +2923,11 @@ test("both mapping callers settle both objects before advisory output and preser
           assert.equal(value.fd, 64);
           value.fd = -1;
           api.errno = 91;
-          value.closed = ["settlement", "pipe", "flush"].includes(fault)
-            ? -1
-            : 1;
+          value.closed =
+            ["settlement", "pipe", "flush"].includes(fault) ||
+            fault === (value === work ? "workspace-close" : "authorized-close")
+              ? -1
+              : 1;
           value.close_error = value.closed < 0 ? 9 : 0;
           return value.closed > 0;
         },
@@ -2660,8 +2939,16 @@ test("both mapping callers settle both objects before advisory output and preser
           assert.equal(fd, 2);
           assert.equal(ignored, true);
           assert.deepEqual(events, [
-            "workspace",
-            "authorized",
+            "acquire-workspace",
+            "acquire-authorized",
+            "close-parent",
+            ...([
+              "acquire-workspace",
+              "acquire-authorized",
+              "parent-close",
+            ].includes(fault)
+              ? []
+              : ["workspace", "authorized"]),
             "close-workspace",
             "close-authorized",
           ]);
@@ -2715,7 +3002,7 @@ test("both mapping callers settle both objects before advisory output and preser
         },
         need(ok) {
           if (!ok) {
-            assert.equal(api.errno, 91);
+            if (!setupFailure) assert.equal(api.errno, 91);
             throw new Error("launcher-refusal:126");
           }
         },
@@ -2730,7 +3017,7 @@ test("both mapping callers settle both objects before advisory output and preser
         new Script(
           `function ${diagnostic}(control){${note}} ${guard}; "ready";`,
         ).runInNewContext(api);
-      if (fault)
+      if (fault && fault !== "outside")
         assert.throws(
           run,
           owner === "fault"
@@ -2738,10 +3025,23 @@ test("both mapping callers settle both objects before advisory output and preser
             : /launcher-refusal:126/u,
         );
       else assert.equal(run(), "ready");
-      assert.equal(records.length, fault ? 1 : 0);
+      if (setupFailure) {
+        assert.deepEqual(events, []);
+        assert.deepEqual(records, []);
+        continue;
+      }
+      assert.equal(records.length, fault && fault !== "outside" ? 1 : 0);
       assert.deepEqual(events, [
-        "workspace",
-        "authorized",
+        "acquire-workspace",
+        "acquire-authorized",
+        "close-parent",
+        ...([
+          "acquire-workspace",
+          "acquire-authorized",
+          "parent-close",
+        ].includes(fault)
+          ? []
+          : ["workspace", "authorized"]),
         "close-workspace",
         "close-authorized",
       ]);
@@ -2749,60 +3049,85 @@ test("both mapping callers settle both objects before advisory output and preser
   }
 });
 
-test("experimental descriptor sweep retains only the acquired probes until their checked closure", async () => {
-  const source = await readFile(
-    new URL("../ci/native/darwin/launcher.c", import.meta.url),
-    "utf8",
-  );
-  const body = /static void descriptors\(void\) \{([\s\S]*?)\n\}/u
-    .exec(source)[1]
-    .replace(/^#.*$/gmu, "")
-    .replace("struct proc_fdinfo fds[4096];", "let fds=[];")
-    .replaceAll("sizeof(fds[0])", "8")
-    .replaceAll("sizeof(fds)", "32768")
-    .replaceAll(/\((?:size_t|int)\)/gu, "")
-    .replaceAll(/\b(?:unsigned|int|size_t) /gu, "let ")
-    .replaceAll("1U", "1");
-  for (const fail of [false, true]) {
-    const held = new Set([0, 1, 2, 3, 4, 5, 64, 65, 77]),
-      closed = [];
-    const api = {
-      launch_diagnostic: 5,
-      launch_mapping: { fd: 64 },
-      launch_map_control: { fd: 65 },
-      PROC_PIDLISTFDS: 1,
-      F_SETFD: 2,
-      FD_CLOEXEC: 1,
-      getpid: () => 42,
-      need: (ok) => assert.ok(ok),
-      proc_pidinfo(_pid, _selector, _arg, out) {
-        out.length = 0;
-        for (const fd of held) out.push({ proc_fd: fd });
-        return held.size * 8;
-      },
-      close(fd) {
-        closed.push(fd);
-        if (fail) return -1;
-        held.delete(fd);
-        return 0;
-      },
-      fcntl: (fd) => {
-        assert.ok([3, 4].includes(fd));
-        return 0;
-      },
-    };
-    const sweep = new Script(`()=>{${body}}`).runInNewContext(api);
-    if (fail) assert.throws(sweep);
-    else {
-      sweep();
-      assert.deepEqual(closed, [77]);
-      assert.ok(held.has(64) && held.has(65));
-      for (const probe of [api.launch_mapping, api.launch_map_control]) {
-        held.delete(probe.fd);
-        probe.fd = -1;
+test("experimental descriptor sweep removes inherited probes and aliases while bounding temporary parent custody", async () => {
+  for (const [file, parent] of [
+    ["launcher.c", "launch_control_parent"],
+    ["feasibility-domain.h", "domain_map_parent"],
+  ]) {
+    const source = await readFile(
+      new URL("../ci/native/darwin/" + file, import.meta.url),
+      "utf8",
+    );
+    const faultSweep = source.slice(
+      source.indexOf(
+        "    struct proc_fdinfo fds[512]; int size =",
+        source.indexOf("  pid_t child = domain_fault_fork();"),
+      ),
+      source.indexOf("    char parent[24];"),
+    );
+    const body = (
+      file === "launcher.c"
+        ? /static void descriptors\(void\) \{([\s\S]*?)\n\}/u.exec(source)[1]
+        : faultSweep
+    )
+      .replace(/^#.*$/gmu, "")
+      .replace("struct proc_fdinfo fds[4096];", "let fds=[];")
+      .replace("struct proc_fdinfo fds[512];", "let fds=[];")
+      .replaceAll("sizeof(fds[0])", "8")
+      .replaceAll("sizeof(fds)", file === "launcher.c" ? "32768" : "4096")
+      .replaceAll(/\((?:size_t|int|unsigned)\)/gu, "")
+      .replaceAll(/\b(?:unsigned|int|size_t) /gu, "let ")
+      .replaceAll("1U", "1");
+    for (const fail of [false, true]) {
+      const held = new Set([0, 1, 2, 3, 4, 5, 64, 65, 66, 77]),
+        closed = [];
+      const api = {
+        launch_diagnostic: 5,
+        [parent]: 66,
+        launch_mapping: { fd: 64 },
+        launch_map_control: { fd: 65 },
+        PROC_PIDLISTFDS: 1,
+        F_SETFD: 2,
+        FD_CLOEXEC: 1,
+        getpid: () => 42,
+        need: (ok) => assert.ok(ok),
+        invariant: (ok) => assert.ok(ok),
+        posix_check: (value) => assert.equal(value, 0),
+        proc_pidinfo(_pid, _selector, _arg, out) {
+          out.length = 0;
+          for (const fd of held) out.push({ proc_fd: fd });
+          return held.size * 8;
+        },
+        close(fd) {
+          closed.push(fd);
+          if (fail) return -1;
+          held.delete(fd);
+          return 0;
+        },
+        fcntl: (fd) => {
+          assert.ok([3, 4].includes(fd));
+          return 0;
+        },
+      };
+      const sweep = new Script(`()=>{${body}}`).runInNewContext(api);
+      if (fail) assert.throws(sweep);
+      else {
+        sweep();
+        assert.deepEqual(closed, [
+          ...(file === "launcher.c" ? [] : [5]),
+          64,
+          65,
+          77,
+        ]);
+        assert.ok(!held.has(64) && !held.has(65));
+        held.delete(66);
+        api[parent] = -1;
+        sweep();
+        assert.deepEqual(
+          [...held],
+          file === "launcher.c" ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 4],
+        );
       }
-      sweep();
-      assert.deepEqual([...held], [0, 1, 2, 3, 4, 5]);
     }
   }
 });

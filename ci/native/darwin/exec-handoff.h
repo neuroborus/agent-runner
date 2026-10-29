@@ -66,6 +66,29 @@ static bool exec_mapping_open(struct exec_mapping *value, const char *path, cons
   unsigned char *bytes = malloc((size_t)st.st_size);
   bool ok = bytes && exec_mapping_read(value, bytes); free(bytes); return ok;
 }
+/* The custodian's frozen object/hash survive child-only descriptor settlement.
+ * Open a new description under final credentials/policy, never adopt its stat. */
+static bool exec_mapping_acquire(struct exec_mapping *value, int parent, const char *name) {
+  if (!exec_mapping_result(value, value->fd < 0, "inherited-description", 0, 0)) return false;
+  value->closed = value->close_error = 0;
+  value->fd = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  if (!exec_mapping_result(value, value->fd >= 0, "openat", value->fd, value->fd < 0 ? errno : 0)) return false;
+  struct stat held, named;
+  int result = fstat(value->fd, &held);
+  if (!exec_mapping_result(value, !result, "acquired-stat", result, result ? errno : 0) ||
+      !exec_mapping_result(value, exec_mapping_same(held, value->object) && S_ISREG(held.st_mode) &&
+        held.st_nlink == 1 && !(held.st_mode & 022) && held.st_size > 0 && held.st_size <= 16777216,
+        "acquired-identity", 0, 0)) return false;
+  result = fcntl(value->fd, F_GETFL);
+  if (!exec_mapping_result(value, result >= 0, "acquired-flags", result, result < 0 ? errno : 0) ||
+      !exec_mapping_result(value, (result & O_ACCMODE) == O_RDONLY, "acquired-access", 0, 0)) return false;
+  result = fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW);
+  if (!exec_mapping_result(value, !result, "acquired-name", result, result ? errno : 0) ||
+      !exec_mapping_result(value, exec_mapping_same(held, named), "acquired-named-identity", 0, 0)) return false;
+  unsigned char *bytes = malloc((size_t)held.st_size);
+  bool ok = exec_mapping_result(value, bytes != NULL, "allocation", 0, 0) && exec_mapping_read(value, bytes);
+  free(bytes); return ok;
+}
 static bool exec_mapping_check(struct exec_mapping *value, bool denied) {
   size_t size = (size_t)value->object.st_size;
   /* One fixed prefix; the outside control must prove executable applicability. */

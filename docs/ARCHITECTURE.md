@@ -2168,8 +2168,14 @@ types plus a held regular-file mapping witness. The existing handoff owner runs
 identical bounded read/executable-map operations on signed argv bytes outside
 policy and under the final primary credentials. Outside mapping, primary reading
 and authorized-control mapping must succeed; workspace mapping requires immediate
-EPERM/EACCES from MAP_FAILED. Probe descriptors survive only setup sanitation and
-are checked closed, with mappings removed, before ready and closure barriers.
+EPERM/EACCES from MAP_FAILED. Children check both inherited file closures before
+credentials/policy and remove their sanitation exemptions. New descriptions bind
+the exact frozen original vnode/metadata/hash after verified final credentials,
+limits and primary policy. Pinned cwd/parent-relative acquisition preserves private
+directory modes: launcher storage custody is temporary, while feasibility's exact
+workspace parent is search-only across the UID change. Unrelated aliases are swept;
+temporary parent copies and both partial/acquired files settle before ready/closure.
+Both settlement attempts survive either failure; every successful mapping is removed.
 Each mapping object retains its first failed operation/result and only immediate
 failed-syscall errno, with separate map/unmap/close outcomes (0 uncalled, 1 success,
 -1 failure). The existing launcher/fault owners emit one bounded failure-only

@@ -4778,19 +4778,37 @@ prefix, entry11/12 and historical receipt sizes. Existing per-object copy/read
 and recovery custody bind it to its source, parent, inode, size, hash and signature.
 The fixed Git executor has no mapping control rounds and retains its original
 two-file workspace and full status expectation without this fixture.
-The trusted custodian retains it unchanged across both rounds. Under final
-credentials, outside-policy read/map and primary-policy read must succeed;
+The trusted custodian retains it unchanged across both rounds. Each child checks
+both inherited probe closures before credentials/policy, then sanitizes aliases.
+New descriptions are acquired only after verified final credentials/limits and
+the primary's unchanged policy. Named objects must match the frozen original
+vnode, metadata and full-byte hash; equal bytes or descriptor reuse cannot substitute.
+The launcher uses its pinned workspace cwd and a checked temporary storage-parent
+copy. Feasibility retains only its exact search-only workspace-parent copy across
+the UID change; this avoids inaccessible ancestors and preserves `0700` shapes.
+Its authorized control is relative to the original custody cwd. Unrelated aliases
+are swept; temporary parents and both partial/acquired probes are checked closed
+before closure/ready, including refusal. Under final credentials,
+outside-policy read/map and primary-policy read must succeed;
 primary executable mmap must fail specifically with immediate EPERM/EACCES.
 The explicitly map-authorized control must map successfully under policy with
 the same signed prefix (at most 4096 bytes), offset zero and
 PROT_READ|PROT_EXEC/MAP_PRIVATE arguments; complete held bytes are read and hashed.
-The child preserves only these acquired probe descriptors through sanitation,
-unmaps/closes before closure/ready, and never executes mapped bytes. Parent and
+The child unmaps every successful mapping, including unexpected workspace success,
+and never executes mapped bytes. Parent and
 independent readers join named signed bytes to the live custodian's held vnodes
 and creator/replacement/policy bindings; a ready flag alone grants no admission.
 Unexpected success, setup, substitution, query or settlement errors remain
 blocking. Matching native execution must establish the controls; portable
 injections establish no native PASS or repair of separate deadline/cleanup faults.
+The bounded hypothesis is that removing inherited pre-policy file descriptions
+and acquiring the same objects under final restrictions restores the workspace
+denial witness. Both owners must retain outside/authorized positives, primary
+full reads and immediate permission-denied workspace mmap with clean settlement.
+Continued success, either failed positive, custody drift or failed settlement
+keeps admission blocked and stops this hypothesis. Final-acquisition results and,
+for continued success, supported hosted Seatbelt semantics remain required;
+this correction establishes no exclusive inherited-opener causality or policy grant.
 At the unchanged mapping refusal, each child emits at most one failure-only
 `native-darwin-mapping` stderr record through existing capture/publication. The
 bounded slots identify launcher/fault, outside/primary and workspace/authorized:

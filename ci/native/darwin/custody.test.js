@@ -3447,6 +3447,11 @@ test("Darwin launcher numeric credentials retain primary-only groups and every s
   const script = new Script(
     `() => {${drop}
     ${credentials}}`
+      .replaceAll(/^#(?:ifdef NATIVE_CI_EXPERIMENT|endif)\n/gmu, "")
+      .replace(
+        "struct identity final_credentials =",
+        "const final_credentials =",
+      )
       .replace("gid_t only", "const only = {value: 0}")
       .replaceAll("&only", "only")
       .replaceAll("only == gid", "only.value == gid")
@@ -3482,10 +3487,16 @@ test("Darwin launcher numeric credentials retain primary-only groups and every s
         ].map((key) => [key, key.includes("uid") ? uid : gid]),
       );
     if (Object.hasOwn(bsd, fault)) bsd[fault] = 0;
+    const identity = { bsd, token: { val: [uid, 0, 0, 0, 0, 0, 17] } };
     const run = script.runInNewContext({
       uid,
       gid,
-      identity: { bsd, token: { val: [uid, 0, 0, 0, 0, 0, 17] } },
+      identity,
+      getpid: () => 42,
+      inspect(pid) {
+        assert.equal(pid, 42);
+        return identity;
+      },
       audit: { ai_asid: 17 },
       observed: {},
       RLIMIT_NPROC: 7,
@@ -4256,9 +4267,20 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
   );
   assert.match(
     launcher,
-    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1;\s+static void descriptors/u,
+    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1, launch_control_parent = -1;\s+static void descriptors/u,
   );
-  assert.match(launcher, /if \(!child\) \{\s+launch_stage\("child-entry"/u);
+  const childEntry = launcher.indexOf("  if (!child) {");
+  const childStdio = launcher.indexOf(
+    '    launch_stage("child-stdio"',
+    childEntry,
+  );
+  assert.ok(childEntry > 0 && childStdio > childEntry);
+  // Experimental probe settlement precedes entry logging; the protected branch
+  // still logs entry before its original setup effects.
+  assert.match(
+    translate(launcher.slice(childEntry, childStdio)),
+    /if \(!child\) \{\s+launch_stage\("child-entry"/u,
+  );
   const functions =
     `const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};\n` +
     [
@@ -4549,6 +4571,7 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
       launch_child: 42,
       launch_reply_owner: 0,
       launch_diagnostic: -1,
+      launch_control_parent: -1,
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
       EXC_MASK_ALL: 63,

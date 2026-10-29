@@ -418,10 +418,15 @@ both objects before failure-only reporting and retain refusal with failed writes
 flushes or closed capture, without release or cleanup retry.
 Directory-query 0 supplies no mapping evidence; declared directory/character
 types discharge non-file slots only alongside the bound regular-file controls.
-Existing image and preparation fixtures cover probe descriptor preservation and
-closure, fixed-entry guards, unchanged custody across rounds and interrupted
+Existing image and preparation fixtures cover checked inherited-probe closure and
+alias sanitation, fixed-entry guards, unchanged custody across rounds and interrupted
 recovery without publication/probe replay. Tier ownership stays unchanged;
 matching macOS CI must independently establish actual mapping and retirement.
+Actual acquisition/caller bodies reject retained descriptions and equal-hash vnode
+substitution, require final credentials/limits and outside/primary policy ordering,
+and settle both partial acquisitions, either failed close and temporary parents
+before ready or release. Parent-relative access preserves the private layout;
+portable effects establish ordering, equivalence and settlement, never Seatbelt semantics.
 The build suite additionally executes actual fixture production and five-record
 snapshot bodies through native shape/read/hash/emission predicates with injected
 OS effects. It reproduces the third-object `0444`/generic-`0600` refusal and covers

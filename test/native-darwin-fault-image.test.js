@@ -1066,6 +1066,21 @@ test("fault trusted setup applies policy and complete closure before the direct 
     new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
     "utf8",
   );
+  const parentOpen = /domain_map_parent = open\(mapping_parent, [^\n]+;/u.exec(
+    source,
+  )[0];
+  new Script(parentOpen).runInNewContext({
+    domain_map_parent: -1,
+    mapping_parent: "/bound/private/workspace",
+    O_SEARCH: 1,
+    O_DIRECTORY: 2,
+    O_NOFOLLOW: 4,
+    O_CLOEXEC: 8,
+    open(name, flags) {
+      assert.deepEqual([name, flags], ["/bound/private/workspace", 15]);
+      return 66;
+    },
+  });
   // Apple's Libc include/unistd.h selects directory-backed __getgroups for
   // either explicit opt-in. Model that declaration rule from the real preamble;
   // restoring the macro must fail the missing-directory-record regression.
@@ -1103,6 +1118,8 @@ test("fault trusted setup applies policy and complete closure before the direct 
       "let limit = {rlim_cur:32, rlim_max:32}, observed = {};",
     )
     .replace("gid_t group;", "let group;")
+    .replace("struct stat held_parent;", "let held_parent={};")
+    .replaceAll("&held_parent", "held_parent")
     .replace("mach_port_t local =", "let local =")
     .replace("struct identity birth =", "let birth =")
     .replaceAll("&handoff", "handoff")
@@ -1112,18 +1129,21 @@ test("fault trusted setup applies policy and complete closure before the direct 
     .replace("sizeof(birth)", "128")
     .replace("sizeof(birth)", "128")
     .replace("&group", "{set value(v){group=v}}")
-    .replaceAll(/\bbool /gu, "let ")
+    .replaceAll(/\b(?:bool|int) /gu, "let ")
     .replaceAll("&domain_mapping", "domain_mapping")
     .replaceAll("&domain_map_control", "domain_map_control")
     .replaceAll(/\barguments, environ/gu, "arguments_, environ");
   for (const fault of [
     null,
+    "outside",
     "missing-directory",
     "prepare",
     "policy",
     "closure",
     "mapping",
     "map-close",
+    "acquisition",
+    "parent-close",
     "groups-failed",
     "groups-empty",
     "groups-wrong",
@@ -1136,7 +1156,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
       api = {
         domain_helper: "/sealed/helper",
         domain_policy: "/sealed/policy",
-        domain_record: { uid: 90001, gid: 90002, control: false },
+        domain_record: { uid: 90001, gid: 90002, control: fault === "outside" },
         domain_control_asset: "/sealed/exec-control",
         image_spawn_inputs: () => true,
         setenv: () => 0,
@@ -1145,6 +1165,37 @@ test("fault trusted setup applies policy and complete closure before the direct 
         exec_handoff_refused: () => true,
         domain_mapping: {},
         domain_map_control: {},
+        domain_map_parent: 66,
+        domain_map_directory: {},
+        AT_FDCWD: -2,
+        parent_asid: 77,
+        fstat: () => 0,
+        exec_mapping_same: () => true,
+        domain_creator_check(identity, parent) {
+          assert.equal(identity, creator);
+          assert.equal(parent, 77);
+          events.push("credentials");
+        },
+        exec_mapping_acquire(value, parent, name) {
+          assert.ok(events.includes("credentials"));
+          assert.equal(events.includes("policy"), !api.domain_record.control);
+          assert.equal(parent, value === api.domain_mapping ? 66 : -2);
+          assert.equal(
+            name,
+            value === api.domain_mapping ? "map-fixture" : "exec-control",
+          );
+          events.push("acquire");
+          return fault !== "acquisition" || value !== api.domain_mapping;
+        },
+        close(fd) {
+          assert.equal(fd, 66);
+          events.push("parent-close");
+          return fault === "parent-close" ? -1 : 0;
+        },
+        errno: 5,
+        remember_cleanup(...args) {
+          assert.deepEqual(args, ["fault-map-parent-close", "errno", 5]);
+        },
         exec_mapping_check(_value, denied) {
           events.push(denied ? "map-deny" : "map-allow");
           return fault !== "mapping";
@@ -1154,12 +1205,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
           return fault !== "map-close";
         },
         domain_mapping_diagnostic() {
-          assert.deepEqual(events.slice(-4), [
-            "map-deny",
-            "map-allow",
-            "map-close",
-            "map-close",
-          ]);
+          assert.deepEqual(events.slice(-2), ["map-close", "map-close"]);
         },
         need: (ok) => assert.ok(ok),
         domain_bootstrap_local: 200,
@@ -1177,7 +1223,9 @@ test("fault trusted setup applies policy and complete closure before the direct 
         remember(operation, kind, value) {
           assert.deepEqual(
             [operation, kind, value],
-            ["mapping", "map-close"].includes(fault)
+            ["mapping", "map-close", "acquisition", "parent-close"].includes(
+              fault,
+            )
               ? ["fault-image-mapping", "invariant", 0]
               : ["fault-image-prepare", "errno", 12],
           );
@@ -1224,7 +1272,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
           events.push("policy");
           assert.notEqual(fault, "policy");
         },
-        feasibility_sandbox_active: () => 1,
+        feasibility_sandbox_active: () => (api.domain_record.control ? 0 : 1),
         image_closure_prepare(_handoff, local) {
           events.push("closure");
           assert.equal(local, 200);
@@ -1237,13 +1285,21 @@ test("fault trusted setup applies policy and complete closure before the direct 
         domain_io: (size, expected) => assert.equal(size, expected),
         exec_handoff_execute(_handoff, gate, receipt, image, args) {
           assert.equal(api.domain_handoff, _handoff);
-          assert.deepEqual([gate, receipt, image], [4, 3, "/sealed/helper"]);
-          assert.equal(args.join(","), "/sealed/helper,fault,");
+          assert.deepEqual(
+            [gate, receipt, image],
+            [
+              4,
+              3,
+              fault === "outside" ? "/sealed/exec-control" : "/sealed/helper",
+            ],
+          );
+          if (fault !== "outside")
+            assert.equal(args.join(","), "/sealed/helper,fault,");
           events.push("X");
         },
       };
     const run = () => new Script(body).runInNewContext(api);
-    const refused = fault && fault !== "missing-directory";
+    const refused = fault && !["missing-directory", "outside"].includes(fault);
     if (refused)
       assert.throws(
         run,
@@ -1255,8 +1311,12 @@ test("fault trusted setup applies policy and complete closure before the direct 
       run();
       assert.deepEqual(events, [
         "audit",
-        "policy",
-        "map-deny",
+        "credentials",
+        ...(fault === "outside" ? [] : ["policy"]),
+        "acquire",
+        "acquire",
+        "parent-close",
+        fault === "outside" ? "map-allow" : "map-deny",
         "map-allow",
         "map-close",
         "map-close",
@@ -1265,7 +1325,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
       ]);
     }
     if (refused) assert.ok(!events.includes("X"));
-    if (["mapping", "map-close"].includes(fault))
+    if (["mapping", "map-close", "acquisition", "parent-close"].includes(fault))
       assert.equal(events.filter((event) => event === "map-close").length, 2);
   }
 });
