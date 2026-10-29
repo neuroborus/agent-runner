@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-10-29
 
+- **Audit discovery preserves pass provenance independently of finding acceptance.**
+  The unregistered descriptor freezes agreed scope before read-only discovery.
+  Independent Auditors start fresh per pass; lazy keeps one logical owner and
+  never renews a consumed source fork. Write-ahead reservations, invalid output
+  and interruptions consume the same finite 20-pass budget. Versioned candidates
+  block further discovery pending verification, while report-only corrections
+  and later rejected candidates cannot manufacture a clean historical pass.
+  Snapshot/report bindings and durable exhaustion survive reconstruction without
+  publication or Git authority. Shared provider policies preserve terminal safety
+  and distinct operator pauses without renewing discovery or source-fork budgets.
+  Finding verification and public exposure remain
+  separate delivery boundaries.
+
 - **Audit report semantics start as a pure, unregistered pipeline contract.**
   One catalog drives severity/category validation, severity ordering and the
   static classification map. Stable finding/cause keys, evidence, impact and

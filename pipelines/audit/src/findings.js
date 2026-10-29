@@ -92,7 +92,7 @@ function list(value, path, normalize, minimum = 0) {
   );
 }
 
-function texts(value, path, minimum = 0, singleLine = false) {
+export function texts(value, path, minimum = 0, singleLine = false) {
   const result = list(
     value,
     path,

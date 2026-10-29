@@ -15,8 +15,24 @@ Fast `pipelines/audit/test/report.test.js` owns the pure audit report contract:
 strict evidence/examples and classification values, shared-cause consolidation,
 stable severity/ID ordering, optional recommendations, separate uncertainty,
 zero findings, and safe catalog-derived Markdown. It uses no providers,
-processes, Git repositories, or temporary storage. Audit remains unregistered;
-these tests establish no lifecycle or publication behavior.
+processes, Git repositories, or temporary storage.
+Fast `pipelines/audit/test/discovery.test.js` owns frozen scope, read-only discovery,
+lazy/independent session isolation, duplicate/revised candidates, pending-batch
+blocking, invalid/incomplete output, drift, write-ahead interruption and finite
+exhaustion recovery using injected root capabilities. It also covers the two-MiB
+role-result limit, complete frozen inputs/findings in fresh discovery prompts and
+propagation of unsettled execution ownership.
+Fast `test/runner-audit.test.js` owns audit composition with the existing confined
+workspace/clarification services and persisted session contract: authorized
+transcript edits preserve discovery, while source drift blocks it. It also uses
+actual inactivity, availability and disposition policies with in-memory storage
+to cover checkpoint initialization, bounded reconstruction, terminal isolation
+failures, authentication/output pauses and source-fork recovery. Normalized
+provider structured-output failures remain resumable invalid passes. The actual
+transition normalizer proves persistent field/collection overflow is rejected
+before acceptance without reducing the two-MiB aggregate role allowance. No provider
+or Git process is needed. Audit remains unregistered;
+these tests establish no public workflow or report-publication behavior.
 
 Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
 configured selection before Git, read-only provider declarations, frozen criteria

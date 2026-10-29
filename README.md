@@ -1424,10 +1424,12 @@ CLI owns the common `--clarify` lifecycle option. Each workspace owns its
 explicit JavaScript workflow. The runner provides state, events, agents, and
 Git services; pipeline workspaces own mode and workflow policy.
 
-The unregistered `pipelines/audit/` workspace supplies strict finding contracts
-and deterministic report rendering only. It is not available through CLI/MCP.
-See its [report specification](pipelines/audit/docs/SPEC.md) for classification,
-evidence, concrete examples, uncertainty, and criteria.
+The unregistered `pipelines/audit/` workspace supplies strict finding/report
+contracts and a read-only discovery lifecycle with frozen scope, isolated sessions,
+pending findings and bounded recovery. Finding verification and public completion
+are not yet available through CLI/MCP. See its
+[specification](pipelines/audit/docs/SPEC.md) for discovery, classification,
+evidence, concrete examples, uncertainty and criteria.
 
 The Git/state boundaries preserve unfinished work outside the repository and
 transient validation storage. Newly eligible execution runs use their verified
@@ -1519,7 +1521,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   ├── commit-plan/
 │   └── custom-plan/
 ├── pipelines/
-│   ├── audit/                 # unregistered report contracts
+│   ├── audit/                 # unregistered read-only discovery and report contracts
 │   ├── plan-authoring/
 │   ├── plan-execution/
 │   └── polishing/

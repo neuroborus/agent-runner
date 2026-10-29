@@ -72,18 +72,26 @@ access and never changes `HEAD`.
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.
 
-## Audit report contract
+## Unregistered audit foundation
 
 The unregistered audit workspace currently supplies finding contracts and an
-English report renderer, without an executable audit workflow. Findings have
+English report renderer and an internal read-only discovery lifecycle. Findings have
 independent severity/category classification, stable report-local identities,
 supporting evidence, impact rationale and concrete observed or code-derived
 examples. Shared causes must be consolidated; unsupported claims stay explicitly
 unverified. Recommendations are optional and zero findings is valid. The static
 classification map is generated from one catalog without a model turn. Report
-rendering grants no source writes or publication authority. The
+rendering grants no source writes or publication authority. Discovery freezes
+scope, references, exclusions and criteria during bounded clarification. Lazy
+retains one logical Auditor; independent uses a fresh Auditor per pass. New or
+revised findings block discovery pending a separate verification gate. A clean
+pass has no candidates or substantive report corrections; rejected candidates
+cannot make their historical pass clean. Interrupted and incomplete work consumes
+the same finite 20-pass run-wide budget, which survives reconstruction and
+exhaustion. Clean discovery alone is not audit completion. Finding verification,
+combined audit cycles and public publication remain unavailable. The
 [audit specification](../../pipelines/audit/docs/SPEC.md) owns exact shapes,
-criteria and ordering; the three supported workflows and their gates are unchanged.
+criteria, state and ordering; the three supported workflows and their gates are unchanged.
 
 ## Review modes
 

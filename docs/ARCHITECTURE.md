@@ -550,16 +550,28 @@ changes.
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 
-The unregistered audit workspace owns pure report contracts behind
+The unregistered audit workspace owns report and discovery contracts behind
 `pipelines/audit/src/index.js`: its canonical classification/criterion catalog,
 strict immutable structured content and deterministic English renderer. One
 catalog supplies classification validation, severity ordering and map text.
 Confirmed findings require evidence, impact/severity rationale and labeled
 concrete examples; unsupported claims remain separate hypotheses, and repeated
 cause keys require consolidation. The renderer returns `audit.md` text without
-filesystem or provider effects. Snapshot inspection, future report acceptance
-and publication remain Runner-owned; this contract adds no executable pipeline
-or persistence authority. See the [audit specification](../pipelines/audit/docs/SPEC.md).
+filesystem or provider effects. Its unregistered descriptor selects read-only
+directory inspection and an exclusive canonical workspace lease. The discovery
+lifecycle uses injected workspace, clarification, adapter, session and durable
+transition capabilities; it grants no new root authority. Frozen scope,
+references, exclusions, criteria and snapshot/report bindings precede discovery.
+Lazy retains one logical Auditor, while independent creates a fresh Auditor per
+pass. A write-ahead pass history preserves the frozen run-wide budget capped at 20,
+including interrupted reservations. New/revised candidates block discovery at
+pending verification; clean discovery is separate evidence, not public audit
+completion. Logical turns establish existing inactivity/availability checkpoints
+and use the common `repositoryBaseline` for recovery settlement. Distinct provider
+dispositions survive pauses, terminal failures stay failed, and result acceptance
+enforces enclosing persistent field/collection limits as well as aggregate bytes.
+Finding verification, combined cycles, public registration and report
+publication remain unavailable. See the [audit specification](../pipelines/audit/docs/SPEC.md).
 
 ## Structured Result Headroom
 
