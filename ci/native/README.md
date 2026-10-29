@@ -7961,6 +7961,16 @@ or removes an unproved object. Naming success does not resolve the separate
 cleanup exclusion-lock failure or runtime coverage gap, and supplies no native
 acceptance.
 
+Shared-memory preparation retains exclusive creation with mode `0600` and checked
+truncation to 32 bytes. Like the existing access fixture, it uses a shared writable
+mapping, copies exactly 32 nonce bytes and checks unmapping before capturing the
+held descriptor's identity. Mapping, settlement or stat failure blocks preparation;
+held custody, identity-checked close/unlink and independent fresh absence remain.
+Public XNU evidence supports replacing unsupported positioned shm writes; the
+compound errno-29 guard alone does not identify an individual syscall. Ordinary
+file `pread` and audit-journal `pwrite` stay unchanged. Separate cleanup-flock and
+Windows startup failures remain unresolved; this correction supplies no native PASS.
+
 Outside positive controls run in acknowledged audit windows before payload
 admission. Denial and permit records join full process births, object attributes,
 held bytes and native selectors; socket joins retain both source and destination

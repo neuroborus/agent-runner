@@ -44,6 +44,7 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
         .replace(/\bunsigned /gu, "let ")
         .replace(/\bint fd/gu, "let fd")
         .replace(/sem_t \*named_sem/gu, "let named_sem")
+        .replace(/void \*memory/gu, "const memory")
         .replace(/\b1u\b/gu, "1")
         .replaceAll("sizeof(access_vectors[0])", "8192")
         .replaceAll("sizeof(name)", "4096")
@@ -75,9 +76,15 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
       for (let i = 0; i < size; i++) out[i] = text(value)[i];
     },
     calls = [],
+    shmEvents = [],
     objects = new Map(),
     descriptors = new Map(),
-    bank = { fd: "", stat: { st_size: 0 } };
+    bank = { fd: "", stat: { st_size: 0 } },
+    refusal = new Error("Native POSIX refusal");
+  let shmFault = null,
+    memory = null,
+    mapped = false,
+    nextDescriptor = 10;
   const api = {
     bank,
     case_mode: true,
@@ -99,9 +106,17 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
     O_RDWR: 2,
     O_RDONLY: 0,
     SEM_FAILED: -1,
+    MAP_FAILED: -1,
+    MAP_SHARED: 1,
+    PROT_READ: 1,
+    PROT_WRITE: 2,
     ENOENT: 2,
+    EEXIST: 17,
+    ESPIPE: 29,
     errno: 0,
-    need: (ok) => assert.ok(ok, "Native POSIX refusal"),
+    need: (ok) => {
+      if (!ok) throw refusal;
+    },
     digit: (value) => Number.parseInt(value, 16),
     strlen: (value) => text(value).length,
     strspn: (value, alphabet) =>
@@ -109,7 +124,16 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
         ? value.length
         : [...value].findIndex((byte) => !alphabet.includes(byte)),
     strcmp: (a, b) => Number(text(a) !== text(b)),
-    memcpy: copy,
+    memcpy(out, value, size) {
+      assert.notEqual(out, api.MAP_FAILED);
+      if (out === memory) {
+        shmEvents.push("copy");
+        assert.equal(mapped, true);
+        assert.equal(size, 32);
+        assert.equal(value, api.case_context);
+      }
+      copy(out, value, size);
+    },
     strcpy(out, value) {
       copy(out, value);
       out[text(value).length] = 0;
@@ -136,18 +160,24 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
     fputs() {},
     stdout: 1,
     access_named: () => bank,
-    shm_open(name, flags) {
+    shm_open(name, flags, mode) {
       name = text(name);
       calls.push(["shm_open", name]);
       if (flags & api.O_CREAT) {
-        assert.equal(objects.has(name), false);
-        objects.set(name, { ino: 71 });
+        shmEvents.push("create");
+        assert.equal(flags, api.O_RDWR | api.O_CREAT | api.O_EXCL);
+        assert.equal(mode, 0o600);
+        if (shmFault === "create" || objects.has(name)) {
+          api.errno = api.EEXIST;
+          return -1;
+        }
+        objects.set(name, { ino: 71, mode, size: 0 });
       }
       if (!objects.has(name)) {
         api.errno = api.ENOENT;
         return -1;
       }
-      const fd = descriptors.size + 10;
+      const fd = nextDescriptor++;
       descriptors.set(fd, objects.get(name));
       return fd;
     },
@@ -164,17 +194,61 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
       }
       return objects.get(name);
     },
-    ftruncate: () => 0,
-    pwrite: (_fd, bytes, size) => {
-      assert.equal(bytes.slice(0, size), api.case_context.slice(0, 32));
-      return size;
-    },
-    fstat(fd, out) {
-      Object.assign(out, descriptors.get(fd));
+    ftruncate(fd, size) {
+      shmEvents.push("truncate");
+      assert.equal(fd, api.access_shm);
+      assert.equal(size, 32);
+      assert.ok(descriptors.has(fd));
+      if (shmFault === "truncate") return -1;
+      descriptors.get(fd).size = size;
       return 0;
     },
-    same_stat: (a, b) => assert.equal(a.ino, b.ino),
-    close: () => 0,
+    pwrite(fd) {
+      assert.equal(fd, api.access_shm);
+      shmEvents.push("pwrite");
+      api.errno = api.ESPIPE;
+      return -1;
+    },
+    mmap(address, size, protection, flags, fd, offset) {
+      shmEvents.push("map");
+      assert.equal(address, null);
+      assert.equal(size, 32);
+      assert.equal(protection, api.PROT_READ | api.PROT_WRITE);
+      assert.equal(flags, api.MAP_SHARED);
+      assert.equal(offset, 0);
+      assert.equal(fd, api.access_shm);
+      assert.equal(descriptors.get(fd).size, 32);
+      if (shmFault === "map") return api.MAP_FAILED;
+      memory = Array(size).fill(0);
+      mapped = true;
+      descriptors.get(fd).bytes = memory;
+      return memory;
+    },
+    munmap(value, size) {
+      shmEvents.push("unmap");
+      assert.notEqual(value, api.MAP_FAILED);
+      assert.equal(value, memory);
+      assert.equal(mapped, true);
+      assert.equal(size, 32);
+      assert.equal(memory.join(""), api.case_context.slice(0, 32));
+      if (shmFault === "unmap") return -1;
+      mapped = false;
+      return 0;
+    },
+    fstat(fd, out) {
+      shmEvents.push("stat");
+      assert.ok(descriptors.has(fd));
+      assert.equal(mapped, false);
+      if (shmFault === "stat") return -1;
+      const { ino, mode, size } = descriptors.get(fd);
+      Object.assign(out, { ino, mode, size });
+      return 0;
+    },
+    same_stat: (a, b) => assert.deepEqual({ ...a }, { ...b }),
+    close(fd) {
+      assert.ok(descriptors.delete(fd));
+      return 0;
+    },
     sem_close: () => 0,
     shm_unlink(name) {
       name = text(name);
@@ -309,6 +383,13 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
   load([shm, sem]);
   native.access_provision(bank);
   assert.equal(objects.size, 2);
+  const lifecycle = ["create", "truncate", "map", "copy", "unmap", "stat"];
+  assert.deepEqual(shmEvents, lifecycle);
+  assert.equal(mapped, false);
+  assert.equal(descriptors.get(api.access_shm), objects.get(shm));
+  assert.equal(api.access_shm_identity.size, 32);
+  assert.equal(api.access_shm_identity.mode, 0o600);
+  assert.equal(objects.get(shm).bytes.join(""), api.case_context.slice(0, 32));
   assert.throws(() => native.retire(bank)); // Existing objects cannot be adopted or removed.
   assert.equal(objects.size, 2);
   api.access_shm_identity.ino++;
@@ -329,6 +410,61 @@ test("Darwin POSIX IPC names bind complete nonces through creation, unlink and f
     ["shm_open", shm],
     ["sem_open", sem],
   ]);
+  for (const fault of [
+    "create",
+    "truncate",
+    "map",
+    "unmap",
+    "stat",
+    "foreign",
+  ]) {
+    // Each injected refusal models a fresh reader; partial preparation retains
+    // its original descriptor/object and never establishes fresh retirement.
+    objects.clear();
+    descriptors.clear();
+    shmEvents.length = 0;
+    api.access_shm = api.access_sem = -1;
+    api.access_shm_identity = {};
+    [api.access_names[15][0], api.access_names[16][0]] = [shm, sem];
+    shmFault = fault;
+    memory = null;
+    mapped = false;
+    load([shm, sem]);
+    const foreign = { ino: 99, mode: 0o600, size: 32 };
+    if (fault === "foreign") objects.set(shm, foreign);
+    assert.throws(
+      () => native.access_provision(bank),
+      (error) => error === refusal,
+    );
+    assert.equal(api.access_ready, false);
+    const created = !["create", "foreign"].includes(fault);
+    assert.equal(api.access_shm >= 0, created);
+    assert.equal(descriptors.has(api.access_shm), created);
+    assert.equal(mapped, fault === "unmap");
+    const count = {
+      create: 1,
+      foreign: 1,
+      truncate: 2,
+      map: 3,
+      unmap: 5,
+      stat: 6,
+    }[fault];
+    assert.deepEqual(shmEvents, lifecycle.slice(0, count));
+    assert.deepEqual(calls, [["shm_open", shm]]);
+    if (fault === "foreign") {
+      native.close();
+      assert.equal(objects.get(shm), foreign);
+      assert.equal(descriptors.size, 0);
+    }
+    if (fault !== "create") {
+      assert.throws(
+        () => native.retire(bank),
+        (error) => error === refusal,
+      );
+      assert.equal(objects.has(shm), true);
+      assert.ok(!calls.some(([operation]) => operation === "shm_unlink"));
+    }
+  }
 });
 
 test("Darwin reader retains successful spawn identity and channels before fallible cleanup", async () => {

@@ -2216,7 +2216,11 @@ static void access_resources(void) {
       int fd = socket(AF_UNIX, SOCK_STREAM, 0); need(fd >= 0 && !bind(fd, (void *)&address, sizeof(address)) && !chmod(expected, 0600) && !listen(fd, 1)); access_servers[i] = fd; need(!lstat(expected, &access_unix_identity) && S_ISSOCK(access_unix_identity.st_mode));
     } else if (i == 15 || i == 16) {
       access_posix_check(i, access_names[i][0]); const char *expected = access_names[i][0];
-      if (i == 15) { access_shm = shm_open(expected, O_RDWR | O_CREAT | O_EXCL, 0600); need(access_shm >= 0 && !ftruncate(access_shm, 32) && pwrite(access_shm, case_context, 32, 0) == 32 && !fstat(access_shm, &access_shm_identity)); }
+      if (i == 15) {
+        access_shm = shm_open(expected, O_RDWR | O_CREAT | O_EXCL, 0600); need(access_shm >= 0 && !ftruncate(access_shm, 32));
+        void *memory = mmap(NULL, 32, PROT_READ | PROT_WRITE, MAP_SHARED, access_shm, 0); need(memory != MAP_FAILED);
+        memcpy(memory, case_context, 32); need(!munmap(memory, 32) && !fstat(access_shm, &access_shm_identity));
+      }
       else { access_sem = sem_open(expected, O_CREAT | O_EXCL, 0600, 0); need(access_sem != SEM_FAILED); }
     } else if (i == 17 || i == 18) {
       key_t key = (key_t)number(remote); need(key != IPC_PRIVATE);

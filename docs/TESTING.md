@@ -287,6 +287,13 @@ consistent attempt banks, creation, unlink and fresh absence inspection. Legacy,
 mixed, substituted and noncanonical names refuse before effects; uncertain
 identity or retirement retains exclusion. These injected results establish no
 native PASS or repair of the separate cleanup-lock and runtime failures.
+The existing POSIX custody fixture models positioned shm writes as unsupported
+with `ESPIPE`. Its actual creation body must map/copy/unmap in order with exact
+shared/writable flags, 32 nonce bytes and retained descriptor/size/permission
+custody. Creation, truncation, mapping, unmapping and stat refusals cannot advance
+preparation; failed mappings are never used or unmapped. Partial ownership and
+foreign-object refusal remain distinct from independent fresh absence. Ordinary
+file and audit-journal I/O stay unchanged; no Darwin commands or subprocesses run.
 These synthetic reads and injected commands run through the existing native
 harness without a slow-tier addition or host networking changes. Missing-family
 diagnostics and portable regressions supply no native acceptance.
