@@ -76,6 +76,17 @@ static void descriptors(void) {
 static pid_t launcher_pid, launch_child;
 static struct identity launcher_identity;
 #ifdef NATIVE_CI_EXPERIMENT
+static void launch_mapping_diagnostic(bool control) {
+  int saved = errno;
+  const struct exec_mapping *work = &launch_mapping, *authorized = &launch_map_control;
+  (void)signal(SIGPIPE, SIG_IGN);
+  fprintf(stderr, "native-darwin-mapping: owner=launcher round=%s workspace=%s:%ld:%d workspace-map=%d:%d workspace-unmap=%d:%d workspace-close=%d:%d authorized=%s:%ld:%d authorized-map=%d:%d authorized-unmap=%d:%d authorized-close=%d:%d\n",
+    control ? "outside" : "primary", work->operation ? work->operation : "none", work->result, work->error,
+    work->map, work->map_error, work->unmap, work->unmap_error, work->closed, work->close_error,
+    authorized->operation ? authorized->operation : "none", authorized->result, authorized->error,
+    authorized->map, authorized->map_error, authorized->unmap, authorized->unmap_error, authorized->closed, authorized->close_error);
+  fflush(stderr); errno = saved;
+}
 /* Fixed child-only call sites, never one record per censused Mach right. */
 static void launch_stage(const char *stage, const char *operation, long result, int error) {
   int saved = errno;
@@ -611,6 +622,7 @@ int main(int argc, char **argv) {
     bool mapped = exec_mapping_check(&launch_mapping, !control);
     mapped = exec_mapping_check(&launch_map_control, false) && mapped;
     bool map_closed = exec_mapping_close(&launch_mapping); map_closed = exec_mapping_close(&launch_map_control) && map_closed;
+    if (!(mapped && map_closed)) launch_mapping_diagnostic(control);
     need(mapped && map_closed);
     mach_port_t local_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local_bootstrap);

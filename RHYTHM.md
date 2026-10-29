@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29 — Attribute Darwin mapping refusal to its first actual failed stage
+
+Existing mapping objects retain first failure and immediate failed-syscall errno,
+with independent map/unmap/close outcomes. Both callers settle both objects before
+one bounded failure-only stderr observation and the original refusal, even when
+capture fails. The observation discriminates mapping mismatch from setup/read/
+custody/settlement failures and selects the native owner's narrow next decision.
+Missing output proves no stage; further logging needs new evidence. Controls,
+authority and snapshot contracts remain unchanged; portable tests prove no native PASS.
+
 ## 2026-10-28 — Select the exact feasibility mapping-fixture snapshot contract
 
 Five-record feasibility snapshots now select the signed `0444` mapping fixture

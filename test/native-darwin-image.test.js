@@ -2182,10 +2182,11 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
         'snprintf(hash + 2*i, 3, "%02x", sum[i]);',
         'hash.write(sum[i].toString(16).padStart(2,"0"),2*i);',
       )
-      .replaceAll(/\b(?:unsigned|bool|int|size_t) /gu, "let ");
-  const functions = ["same", "close", "read", "open", "check", "held"]
+      .replaceAll(/\b(?:unsigned|bool|int|size_t|ssize_t) /gu, "let ");
+  const functions = ["result", "same", "close", "read", "open", "check", "held"]
     .map((name) => {
       const args = {
+        result: "value,ok,operation,result,error",
         same: "a,b",
         close: "value",
         read: "value,bytes",
@@ -2347,6 +2348,166 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
       if (opened) {
         attempt = native.exec_mapping_check(value, denied);
         assert.equal(attempt, fault !== "unmap" || denied, fault);
+        if (!fault && !denied) {
+          const effects = { ...api },
+            initialEvents = [...events];
+          for (const [stage, operation, result, error] of [
+            ["allocation", "allocation", 0, 0],
+            ["before", "fstat-before", -1, 5],
+            ["identity-before", "identity-before", 0, 0],
+            ["read", "pread", -1, 5],
+            ["short", "short-read", bytes.length - 1, 0],
+            ["sha256", "sha256", 0, 0],
+            ["after-read", "fstat-after-read", -1, 6],
+            ["identity-read", "identity-after-read", 0, 0],
+            ["hash", "hash", 1, 0],
+            ["map", "mmap", -1, 22],
+            ["positive", "mmap", -1, 13],
+            ["unexpected", "unexpected-map", 0, 0],
+            ["prefix", "prefix", -1, 0],
+            ["after-map", "fstat-after-map", -1, 7],
+            ["identity-map", "identity-after-map", 0, 0],
+            ["settlement", "munmap", -1, 8],
+            ["close", "close", -1, 9],
+          ]) {
+            const probe = {
+              ...value,
+              operation: null,
+              result: 0,
+              error: 0,
+              map: 0,
+              map_error: 0,
+              unmap: 0,
+              unmap_error: 0,
+              closed: 0,
+              close_error: 0,
+            };
+            let calls = 0;
+            events.length = 0;
+            Object.assign(api, {
+              malloc(size) {
+                events.push("allocate");
+                return stage === "allocation" ? null : effects.malloc(size);
+              },
+              free() {
+                events.push("free");
+                api.errno = 97;
+              },
+              fstat(fd, out) {
+                events.push("stat" + ++calls);
+                effects.fstat(fd, out);
+                api.errno = 99;
+                if (
+                  ["before", "after-read", "after-map"][calls - 1] === stage ||
+                  (stage === "unexpected" && calls === 3)
+                ) {
+                  api.errno = calls === 3 ? 7 : error;
+                  return -1;
+                }
+                if (
+                  ["identity-before", "identity-read", "identity-map"][
+                    calls - 1
+                  ] === stage
+                )
+                  out.st_ino++;
+                return 0;
+              },
+              pread(...args) {
+                const used = effects.pread(...args);
+                api.errno = 5;
+                return stage === "read"
+                  ? -1
+                  : stage === "short"
+                    ? used - 1
+                    : used;
+              },
+              CC_SHA256(...args) {
+                events.push("hash");
+                if (stage === "sha256") return null;
+                const sum = effects.CC_SHA256(...args);
+                if (stage === "hash") sum.fill(0);
+                return sum;
+              },
+              mmap(...args) {
+                const mapped = effects.mmap(...args);
+                if (["map", "positive"].includes(stage)) {
+                  api.errno = error;
+                  return -1;
+                }
+                return stage === "prefix" ? Buffer.alloc(args[1]) : mapped;
+              },
+              memcmp(...args) {
+                events.push("prefix");
+                return effects.memcmp(...args);
+              },
+              munmap(...args) {
+                if (stage !== "prefix") effects.munmap(...args);
+                else events.push("unmap");
+                api.errno = 8;
+                return ["unexpected", "settlement"].includes(stage) ? -1 : 0;
+              },
+              close(fd) {
+                effects.close(fd);
+                api.errno = 9;
+                return -1;
+              },
+            });
+            assert.equal(
+              native.exec_mapping_check(
+                probe,
+                ["map", "unexpected"].includes(stage),
+              ),
+              stage === "close",
+              stage,
+            );
+            assert.equal(native.exec_mapping_close(probe), false);
+            assert.deepEqual(
+              [probe.operation, probe.result, probe.error],
+              [operation, result, error],
+              stage,
+            );
+            assert.deepEqual([probe.closed, probe.close_error], [-1, 9]);
+            if (probe.unmap === 1) assert.equal(probe.unmap_error, 0);
+            if (stage === "unexpected") {
+              assert.deepEqual(
+                [probe.map, probe.map_error, probe.unmap, probe.unmap_error],
+                [1, 0, -1, 8],
+              );
+              assert.deepEqual(events, [
+                "allocate",
+                "stat1",
+                "read",
+                "hash",
+                "stat2",
+                "mmap",
+                "unmap",
+                "stat3",
+                "free",
+                "close:64",
+              ]);
+            }
+            if (
+              ["allocation", "before", "read", "short", "hash"].includes(stage)
+            )
+              assert.equal(probe.map, 0);
+            if (["map", "positive"].includes(stage))
+              assert.deepEqual(
+                [probe.map, probe.map_error, probe.unmap],
+                [-1, error, 0],
+              );
+            assert.equal(native.exec_mapping_close(probe), true);
+            assert.equal(
+              events.filter((event) => event === "close:64").length,
+              1,
+            );
+            assert.deepEqual(
+              [probe.operation, probe.result, probe.error],
+              [operation, result, error],
+            );
+          }
+          Object.assign(api, effects);
+          events.splice(0, events.length, ...initialEvents);
+        }
         // A successful outside control never turns an unrelated primary error
         // or unexpected mapping success into denial. Ambient errno is stale.
         for (const error of [1, 13, 2, 12, 22]) {
@@ -2402,6 +2563,190 @@ test("bound native mapping uses the same readable bytes and arguments and refuse
       if (!valid) assert.equal(events.includes("mmap"), false);
       assert.ok(events.filter((event) => event === "close:64").length <= 1);
     }
+});
+
+test("both mapping callers settle both objects before advisory output and preserve refusal on closed capture", async () => {
+  for (const [file, owner, prefix, diagnostic] of [
+    ["launcher.c", "launcher", "launch", "launch_mapping_diagnostic"],
+    ["feasibility-domain.h", "fault", "domain", "domain_mapping_diagnostic"],
+  ]) {
+    const source = await readFile(
+      new URL("../ci/native/darwin/" + file, import.meta.url),
+      "utf8",
+    );
+    const note = new RegExp(
+      `static void ${diagnostic}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    )
+      .exec(source)[1]
+      .replace(
+        /const struct exec_mapping \*work = &(\w+), \*authorized = &(\w+);/u,
+        "const work=$1, authorized=$2;",
+      )
+      .replaceAll("->", ".")
+      .replace("int saved", "let saved")
+      .replaceAll("(void)", "");
+    const start = source.indexOf("    bool mapped = exec_mapping_check(");
+    const guard = source
+      .slice(start, source.indexOf("    mach_port_t local", start))
+      .replaceAll(/&(launch|domain)_(mapping|map_control)/gu, "$1_$2")
+      .replaceAll("bool ", "let ");
+    for (const fault of [
+      null,
+      "workspace",
+      "authorized",
+      "both",
+      "settlement",
+      "pipe",
+      "flush",
+    ]) {
+      const events = [],
+        records = [],
+        control = fault === "workspace";
+      const object = () => ({
+        fd: 64,
+        operation: null,
+        result: 0,
+        error: 0,
+        map: 0,
+        map_error: 0,
+        unmap: 0,
+        unmap_error: 0,
+        closed: 0,
+        close_error: 0,
+      });
+      const work = object(),
+        authorized = object();
+      let ignored = owner === "fault",
+        remembered = false;
+      const api = {
+        [`${prefix}_mapping`]: work,
+        [`${prefix}_map_control`]: authorized,
+        domain_record: { control },
+        control,
+        errno: 77,
+        stderr: 2,
+        SIGPIPE: 13,
+        SIG_IGN: 1,
+        exec_mapping_check(value, denied) {
+          events.push(value === work ? "workspace" : "authorized");
+          assert.equal(denied, value === work && !control);
+          const failed =
+            value === work
+              ? ["workspace", "both", "pipe", "flush"].includes(fault)
+              : ["authorized", "both"].includes(fault);
+          value.map = failed || denied ? -1 : 1;
+          value.map_error = value.map < 0 ? 13 : 0;
+          if (failed)
+            Object.assign(value, { operation: "mmap", result: -1, error: 13 });
+          return !failed;
+        },
+        exec_mapping_close(value) {
+          events.push(value === work ? "close-workspace" : "close-authorized");
+          assert.equal(value.fd, 64);
+          value.fd = -1;
+          api.errno = 91;
+          value.closed = ["settlement", "pipe", "flush"].includes(fault)
+            ? -1
+            : 1;
+          value.close_error = value.closed < 0 ? 9 : 0;
+          return value.closed > 0;
+        },
+        signal(sig, disposition) {
+          assert.deepEqual([sig, disposition], [13, 1]);
+          ignored = true;
+        },
+        fprintf(fd, format, ...values) {
+          assert.equal(fd, 2);
+          assert.equal(ignored, true);
+          assert.deepEqual(events, [
+            "workspace",
+            "authorized",
+            "close-workspace",
+            "close-authorized",
+          ]);
+          if (owner === "fault") assert.equal(remembered, true);
+          assert.match(
+            format,
+            new RegExp(
+              `^native-darwin-mapping: owner=${owner} round=%s workspace=`,
+              "u",
+            ),
+          );
+          assert.doesNotMatch(format, /%[px]|path|hash/u);
+          let slot = 0;
+          const line = format.replace(/%s|%ld|%d/gu, () =>
+            String(values[slot++]),
+          );
+          assert.ok(Buffer.byteLength(line) < 1024);
+          assert.equal(line.split("\n").length, 2);
+          assert.deepEqual(values, [
+            control ? "outside" : "primary",
+            work.operation ?? "none",
+            work.result,
+            work.error,
+            work.map,
+            work.map_error,
+            work.unmap,
+            work.unmap_error,
+            work.closed,
+            work.close_error,
+            authorized.operation ?? "none",
+            authorized.result,
+            authorized.error,
+            authorized.map,
+            authorized.map_error,
+            authorized.unmap,
+            authorized.unmap_error,
+            authorized.closed,
+            authorized.close_error,
+          ]);
+          records.push(values);
+          api.errno = 32;
+          return fault === "pipe" ? -1 : 1;
+        },
+        fflush() {
+          api.errno = 28;
+          return fault === "flush" ? -1 : 0;
+        },
+        remember(...args) {
+          assert.deepEqual(args, ["fault-image-mapping", "invariant", 0]);
+          remembered = true;
+        },
+        need(ok) {
+          if (!ok) {
+            assert.equal(api.errno, 91);
+            throw new Error("launcher-refusal:126");
+          }
+        },
+        invariant(ok, operation) {
+          if (!ok) {
+            assert.equal(api.errno, 91);
+            throw new Error(operation + ":126");
+          }
+        },
+      };
+      const run = () =>
+        new Script(
+          `function ${diagnostic}(control){${note}} ${guard}; "ready";`,
+        ).runInNewContext(api);
+      if (fault)
+        assert.throws(
+          run,
+          owner === "fault"
+            ? /fault-image-mapping:126/u
+            : /launcher-refusal:126/u,
+        );
+      else assert.equal(run(), "ready");
+      assert.equal(records.length, fault ? 1 : 0);
+      assert.deepEqual(events, [
+        "workspace",
+        "authorized",
+        "close-workspace",
+        "close-authorized",
+      ]);
+    }
+  }
 });
 
 test("experimental descriptor sweep retains only the acquired probes until their checked closure", async () => {

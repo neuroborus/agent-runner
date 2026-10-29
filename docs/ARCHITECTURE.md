@@ -2170,6 +2170,14 @@ policy and under the final primary credentials. Outside mapping, primary reading
 and authorized-control mapping must succeed; workspace mapping requires immediate
 EPERM/EACCES from MAP_FAILED. Probe descriptors survive only setup sanitation and
 are checked closed, with mappings removed, before ready and closure barriers.
+Each mapping object retains its first failed operation/result and only immediate
+failed-syscall errno, with separate map/unmap/close outcomes (0 uncalled, 1 success,
+-1 failure). The existing launcher/fault owners emit one bounded failure-only
+stderr record after both checks and closures, preserving original refusal and
+errno even on failed capture. Later metadata, free and settlement cannot replace
+primary evidence. The native owner's decision rules distinguish mapping mismatch
+from setup/read/custody/settlement failures; missing output establishes no stage,
+and further logging needs new discriminating evidence. No native completion follows.
 Existing per-object custody and fresh live-custodian vnode joins bind the fixture,
 source, parent, signature, policy and inherited replacement without changing
 receipt sizes or replaying work in recovery. System declarations append the

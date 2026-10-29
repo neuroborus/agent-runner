@@ -76,6 +76,16 @@ static unsigned domain_image_phase;
 static struct image_closure domain_inherited, domain_inspected;
 static struct exec_handoff *domain_handoff, *domain_probe_handoff;
 static struct exec_mapping domain_mapping = {.fd = -1}, domain_map_control = {.fd = -1};
+static void domain_mapping_diagnostic(void) {
+  int saved = errno;
+  const struct exec_mapping *work = &domain_mapping, *authorized = &domain_map_control;
+  fprintf(stderr, "native-darwin-mapping: owner=fault round=%s workspace=%s:%ld:%d workspace-map=%d:%d workspace-unmap=%d:%d workspace-close=%d:%d authorized=%s:%ld:%d authorized-map=%d:%d authorized-unmap=%d:%d authorized-close=%d:%d\n",
+    domain_record.control ? "outside" : "primary", work->operation ? work->operation : "none", work->result, work->error,
+    work->map, work->map_error, work->unmap, work->unmap_error, work->closed, work->close_error,
+    authorized->operation ? authorized->operation : "none", authorized->result, authorized->error,
+    authorized->map, authorized->map_error, authorized->unmap, authorized->unmap_error, authorized->closed, authorized->close_error);
+  fflush(stderr); errno = saved;
+}
 static int domain_map_parent = -1;
 static struct stat domain_map_directory;
 static char domain_path[4096], domain_helper[4096], domain_policy[4096], domain_control_asset[4096];
@@ -916,6 +926,9 @@ static void domain_start(int argc, char **argv) {
     bool mapped = exec_mapping_check(&domain_mapping, !domain_record.control);
     mapped = exec_mapping_check(&domain_map_control, false) && mapped;
     bool map_closed = exec_mapping_close(&domain_mapping); map_closed = exec_mapping_close(&domain_map_control) && map_closed;
+    if (!(mapped && map_closed)) {
+      remember("fault-image-mapping", "invariant", 0); domain_mapping_diagnostic();
+    }
     invariant(mapped && map_closed, "fault-image-mapping");
     mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
     image_closure_prepare(&handoff, local);

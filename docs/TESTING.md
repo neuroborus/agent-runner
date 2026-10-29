@@ -411,6 +411,11 @@ Mapping regressions execute the shared handoff bodies with injected effects:
 outside read/map, primary read, authorized mapping and workspace permission
 denial are distinct requirements. They reject setup/type/link/size/identity/hash
 errors, non-permission failures, unexpected success and failed unmap/close.
+The same actual bodies distinguish each first failed stage, syscall errno from
+short-read/library/invariant results, uncalled operations and simultaneous cleanup
+failures despite later errno changes. Both actual caller guards/writers settle
+both objects before failure-only reporting and retain refusal with failed writes,
+flushes or closed capture, without release or cleanup retry.
 Directory-query 0 supplies no mapping evidence; declared directory/character
 types discharge non-file slots only alongside the bound regular-file controls.
 Existing image and preparation fixtures cover probe descriptor preservation and

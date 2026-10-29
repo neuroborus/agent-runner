@@ -1153,6 +1153,14 @@ test("fault trusted setup applies policy and complete closure before the direct 
           events.push("map-close");
           return fault !== "map-close";
         },
+        domain_mapping_diagnostic() {
+          assert.deepEqual(events.slice(-4), [
+            "map-deny",
+            "map-allow",
+            "map-close",
+            "map-close",
+          ]);
+        },
         need: (ok) => assert.ok(ok),
         domain_bootstrap_local: 200,
         MACH_PORT_NULL: 0,
@@ -1169,7 +1177,9 @@ test("fault trusted setup applies policy and complete closure before the direct 
         remember(operation, kind, value) {
           assert.deepEqual(
             [operation, kind, value],
-            ["fault-image-prepare", "errno", 12],
+            ["mapping", "map-close"].includes(fault)
+              ? ["fault-image-mapping", "invariant", 0]
+              : ["fault-image-prepare", "errno", 12],
           );
         },
         failure() {

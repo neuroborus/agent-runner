@@ -11,7 +11,18 @@
 
 /* Read-only custody survives both rounds; only the child releases its copies.
  * Callers additionally bind the signed source, parent, policy and creator. */
-struct exec_mapping { int fd; struct stat object; char hash[65]; };
+struct exec_mapping {
+  int fd; struct stat object; char hash[65];
+  const char *operation; long result; int error;
+  /* Zero means uncalled; 1 success and -1 failure. Errno belongs only to -1. */
+  int map, map_error, unmap, unmap_error, closed, close_error;
+};
+static bool exec_mapping_result(struct exec_mapping *value, bool ok, const char *operation, long result, int error) {
+  if (!ok && !value->operation) {
+    value->operation = operation; value->result = result; value->error = error;
+  }
+  return ok;
+}
 static bool exec_mapping_same(struct stat a, struct stat b) {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode &&
     a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_nlink == b.st_nlink && a.st_size == b.st_size &&
@@ -21,16 +32,25 @@ static bool exec_mapping_same(struct stat a, struct stat b) {
 }
 static bool exec_mapping_close(struct exec_mapping *value) {
   int fd = value->fd; value->fd = -1;
-  return fd < 0 || close(fd) == 0;
+  if (fd < 0) return true;
+  int result = close(fd); value->close_error = result ? errno : 0;
+  value->closed = result ? -1 : 1;
+  return exec_mapping_result(value, !result, "close", result, value->close_error);
 }
 static bool exec_mapping_read(struct exec_mapping *value, unsigned char *bytes) {
   struct stat before, after; unsigned char sum[32]; char hash[65];
-  if (fstat(value->fd, &before) || !exec_mapping_same(before, value->object) ||
-      pread(value->fd, bytes, before.st_size, 0) != before.st_size ||
-      !CC_SHA256(bytes, (CC_LONG)before.st_size, sum) || fstat(value->fd, &after) ||
-      !exec_mapping_same(before, after)) return false;
+  int result = fstat(value->fd, &before);
+  if (!exec_mapping_result(value, !result, "fstat-before", result, result ? errno : 0) ||
+      !exec_mapping_result(value, exec_mapping_same(before, value->object), "identity-before", 0, 0)) return false;
+  ssize_t used = pread(value->fd, bytes, before.st_size, 0);
+  if (!exec_mapping_result(value, used == before.st_size, used < 0 ? "pread" : "short-read", used, used < 0 ? errno : 0) ||
+      !exec_mapping_result(value, CC_SHA256(bytes, (CC_LONG)before.st_size, sum) != NULL, "sha256", 0, 0)) return false;
+  result = fstat(value->fd, &after);
+  if (!exec_mapping_result(value, !result, "fstat-after-read", result, result ? errno : 0) ||
+      !exec_mapping_result(value, exec_mapping_same(before, after), "identity-after-read", 0, 0)) return false;
   for (unsigned i = 0; i < 32; i++) snprintf(hash + 2*i, 3, "%02x", sum[i]);
-  return !strcmp(hash, value->hash);
+  result = strcmp(hash, value->hash);
+  return exec_mapping_result(value, !result, "hash", result, 0);
 }
 static bool exec_mapping_open(struct exec_mapping *value, const char *path, const char *hash) {
   int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
@@ -51,15 +71,22 @@ static bool exec_mapping_check(struct exec_mapping *value, bool denied) {
   /* One fixed prefix; the outside control must prove executable applicability. */
   size_t range = size < 4096 ? size : 4096;
   unsigned char *bytes = malloc(size);
-  bool ok = bytes && exec_mapping_read(value, bytes);
+  bool ok = exec_mapping_result(value, bytes != NULL, "allocation", 0, 0) && exec_mapping_read(value, bytes);
   if (ok) {
     void *mapped = mmap(NULL, range, PROT_READ | PROT_EXEC, MAP_PRIVATE, value->fd, 0);
-    if (mapped == MAP_FAILED) { int error = errno; ok = denied && (error == EPERM || error == EACCES); }
+    value->map_error = mapped == MAP_FAILED ? errno : 0;
+    value->map = mapped == MAP_FAILED ? -1 : 1;
+    if (mapped == MAP_FAILED) ok = exec_mapping_result(value, denied && (value->map_error == EPERM || value->map_error == EACCES), "mmap", -1, value->map_error);
     else {
-      ok = !denied && !memcmp(mapped, bytes, range);
-      int unmapped = munmap(mapped, range); ok = !unmapped && ok;
+      ok = exec_mapping_result(value, !denied, "unexpected-map", 0, 0);
+      if (ok) { int result = memcmp(mapped, bytes, range); ok = exec_mapping_result(value, !result, "prefix", result, 0); }
+      int result = munmap(mapped, range); value->unmap_error = result ? errno : 0;
+      value->unmap = result ? -1 : 1;
+      ok = exec_mapping_result(value, !result, "munmap", result, value->unmap_error) && ok;
     }
-    struct stat after; ok = !fstat(value->fd, &after) && exec_mapping_same(value->object, after) && ok;
+    struct stat after; int result = fstat(value->fd, &after);
+    ok = exec_mapping_result(value, !result, "fstat-after-map", result, result ? errno : 0) &&
+      exec_mapping_result(value, exec_mapping_same(value->object, after), "identity-after-map", 0, 0) && ok;
   }
   free(bytes); return ok;
 }

@@ -4791,6 +4791,24 @@ and creator/replacement/policy bindings; a ready flag alone grants no admission.
 Unexpected success, setup, substitution, query or settlement errors remain
 blocking. Matching native execution must establish the controls; portable
 injections establish no native PASS or repair of separate deadline/cleanup faults.
+At the unchanged mapping refusal, each child emits at most one failure-only
+`native-darwin-mapping` stderr record through existing capture/publication. The
+bounded slots identify launcher/fault, outside/primary and workspace/authorized:
+each object's first operation/result/errno, then separate map/unmap/close
+outcome/errno pairs. Outcome 0 means uncalled, 1 success and -1 failure; `none`
+means no failed operation. Only failed syscalls carry immediate errno; allocation,
+short reads, library and identity/hash/prefix failures carry no ambient errno.
+Both checks and owned closures precede reporting and the original refusal;
+later metadata/free/settlement or failed writes/flushes cannot replace first evidence.
+This tests one hypothesis: a real mapping mismatch versus setup/read/custody or
+settlement refusal. Unexpected workspace success selects effective-policy/object
+context assessment; allocation/read/hash/identity failures select their narrow
+setup/custody/fixture correction; authorized-positive refusal selects applicability
+or setup assessment; other mapping errors select assessment of that operation.
+Unmap/close failures remain separately blocking, including simultaneous failures.
+Missing output establishes no stage. Stop adding indistinguishable diagnostics
+without new evidence; this observation establishes neither mapping success nor
+native completion and authorizes no policy, path, credential or fixture change.
 Actual bound exec evidence
 replaces the nine `process-exec` pre-evaluations; no query error selects a fallback.
 Each retained effective-policy query executes once. Its first mismatching exact
