@@ -771,10 +771,14 @@ test("fault policy queries retain exact decisions and errno before the first unc
       `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
-  const diagnostic = body("domain_effective_diagnostic").replaceAll(
-    "int ",
-    "let ",
-  );
+  const diagnostic = body("domain_effective_diagnostic")
+    .replaceAll("int ", "let ")
+    .replace(
+      "struct stat link_type, runtime_type;",
+      "const link_type = {}, runtime_type = {};",
+    )
+    .replaceAll(/const char \*(\w+) =/gu, "const $1 =")
+    .replaceAll(/&(link_type|runtime_type)/gu, "$1");
   const effective = body("domain_effective")
     .replace("char paths[4][4096];", "const paths = Array(4);")
     .replaceAll(
@@ -846,6 +850,48 @@ test("fault policy queries retain exact decisions and errno before the first unc
     },
     { row: -1, operation: "process-fork", expected: 0 },
   );
+  const runtimeFaults = [
+    [
+      [-1, 2, "unavailable"],
+      [-1, 2, "unavailable"],
+    ],
+    [
+      [0, 47, "regular"],
+      [0, 61, "regular"],
+    ],
+    [
+      [0, 47, "symlink"],
+      [0, 61, "regular"],
+    ],
+    [
+      [0, 47, "symlink"],
+      [-1, 2, "unavailable"],
+    ],
+    [
+      [-1, 13, "unavailable"],
+      [-1, 5, "unavailable"],
+    ],
+    [
+      [0, 47, "other"],
+      [0, 61, "other"],
+    ],
+    [
+      [-1, 2, "unavailable"],
+      [0, 61, "regular"],
+    ],
+    [
+      [0, 47, "regular"],
+      [-1, 2, "unavailable"],
+    ],
+  ].map((inspections) => ({
+    at: queries.findIndex(
+      ({ row, operation }) => row === 5 && operation === "file-read-data",
+    ),
+    actual: 1,
+    errno: 2,
+    inspections,
+  }));
+  runtimeFaults.push({ ...runtimeFaults[0], noRecord: true });
   for (const fault of [
     null,
     { at: 0, actual: 1, errno: 71 },
@@ -854,9 +900,12 @@ test("fault policy queries retain exact decisions and errno before the first unc
     { at: 10, actual: -1, errno: 13 },
     { at: 7, actual: 2, errno: 0 },
     { at: 44, actual: 1, errno: 74 },
+    { at: runtimeFaults[0].at + 1, actual: 0, errno: 72 },
+    ...runtimeFaults,
   ]) {
     const calls = [],
-      records = [];
+      records = [],
+      events = [];
     let comparisons = 0,
       flushes = 0,
       advanced = false;
@@ -873,6 +922,7 @@ test("fault policy queries retain exact decisions and errno before the first unc
       );
       const failing = calls.length === fault?.at;
       calls.push(expected);
+      if (failing) events.push("mismatch");
       api.errno = failing ? fault.errno : 79;
       return failing ? fault.actual : expected.expected;
     };
@@ -890,11 +940,15 @@ test("fault policy queries retain exact decisions and errno before the first unc
       domain_control_asset: "/sealed/exec-control",
       exec_handoff_refused: () => true,
       lstat(path, type) {
+        assert.ok([objects[4], objects[6], objects[7]].includes(path));
         type.st_mode = path === "/dev/null" ? "character" : "directory";
         return 0;
       },
       S_ISCHR: (mode) => mode === "character",
       S_ISDIR: (mode) => mode === "directory",
+      S_ISREG: (mode) => mode === "regular",
+      S_ISLNK: (mode) => mode === "symlink",
+      strcmp: (a, b) => Number(a !== b),
       sandbox_binding: {
         no_report: 256,
         check(pid, operation, filter) {
@@ -920,7 +974,10 @@ test("fault policy queries retain exact decisions and errno before the first unc
           api.errno,
           fault?.at === calls.length - 1 ? fault.errno : 79,
         );
-        if (!ok) throw refusal;
+        if (!ok) {
+          events.push("refusal");
+          throw refusal;
+        }
       },
       getpid() {
         api.errno = 95;
@@ -928,18 +985,45 @@ test("fault policy queries retain exact decisions and errno before the first unc
       },
       fprintf(stream, format, ...values) {
         assert.equal(stream, api.stderr);
-        records.push(format.replace(/%[dus]/gu, () => String(values.shift())));
+        events.push("emit");
+        const record = format.replace(/%[dus]/gu, () => String(values.shift()));
+        if (!fault?.noRecord) records.push(record);
         assert.equal(values.length, 0);
         api.errno = 5;
         return -1;
       },
       fflush(stream) {
         assert.equal(stream, api.stderr);
+        events.push("flush");
         flushes++;
         api.errno = 28;
         return -1;
       },
     };
+    for (const [index, name] of ["lstat", "stat"].entries()) {
+      const ordinary = api[name];
+      api[name] = (path, output) => {
+        if (path !== objects[5]) {
+          assert.equal(name, "lstat");
+          return ordinary(path, output);
+        }
+        assert.ok(fault?.inspections);
+        events.push(name);
+        const [result, error, type] = fault.inspections[index];
+        Object.defineProperty(output, "st_mode", {
+          get() {
+            assert.equal(
+              result,
+              0,
+              "failed inspection output must not be read",
+            );
+            return type;
+          },
+        });
+        api.errno = error;
+        return result;
+      };
+    }
     const evaluate = new Script(`
       function domain_effective_diagnostic(target, row, operation, expected, actual, observed_errno) {${diagnostic}}
       (target) => {${effective}}
@@ -958,15 +1042,48 @@ test("fault policy queries retain exact decisions and errno before the first unc
     );
     assert.equal(advanced, fault === null);
     assert.equal(flushes, fault ? 1 : 0);
-    const expected = fault && queries[fault.at];
     assert.deepEqual(
-      records,
+      events,
       fault
         ? [
-            `native-darwin-fault-policy: caller=9000 target=42 row=${expected.row} operation=${expected.operation} expected=${expected.expected} actual=${fault.actual} observed_errno=${fault.errno}\n`,
+            "mismatch",
+            ...(fault.inspections ? ["lstat", "stat"] : []),
+            "emit",
+            "flush",
+            "refusal",
           ]
         : [],
     );
+    const expected = fault && queries[fault.at];
+    const inspectionFields = fault?.inspections
+      ? fault.inspections
+          .map(([result, error, type], index) => {
+            const name = index === 0 ? "lstat" : "stat";
+            return ` ${name}_result=${result} ${name}_errno=${result < 0 ? error : 0} ${name}_type=${type}`;
+          })
+          .join("")
+      : "";
+    assert.deepEqual(
+      records,
+      fault && !fault.noRecord
+        ? [
+            `native-darwin-fault-policy: caller=9000 target=42 row=${expected.row} operation=${expected.operation} expected=${expected.expected} actual=${fault.actual} observed_errno=${fault.errno}${inspectionFields}\n`,
+          ]
+        : [],
+    );
+    if (fault === runtimeFaults[0]) {
+      api.errno = 103;
+      api.domain_effective_diagnostic(
+        { token: { val: [0, 0, 0, 0, 0, 42] } },
+        5,
+        "file-read-data",
+        0,
+        fault.actual,
+        fault.errno,
+      );
+      assert.equal(api.errno, 103);
+      assert.equal(records[1], records[0]);
+    }
     if (fault?.at === 0) assert.equal(records[0], policyObservation);
     if (!fault) {
       // The observed directory-map return 0 is not queried as regular-file

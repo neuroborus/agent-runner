@@ -413,7 +413,15 @@ decision mismatches, query errors, unexpected returns and fork refusal stop at
 the original predicate without advancement. Exact closed selectors, caller/target,
 returns and raw errno survive failed advisory writes/flushes without changing
 errno or the refusal. Its custody-channel fixture retains the observation,
-payload stderr and cleanup failure separately. Focused coverage is
+payload stderr and cleanup failure separately. Injected row-5 runtime inspections
+cover absent targets, regular files, resolving/dangling symlinks, other types,
+permission/other errors and conflicting observations. Separate `lstat`/`stat`
+results, immediate failure errno, zero success errno and closed types survive
+later errno changes; failed output modes are never read. Assertions bind mismatch,
+one `lstat` then one `stat`, attempted reporting and the unchanged first refusal,
+including no emitted record and independently preserved caller/query errno.
+Successful 45-query order and other selectors gain no advisory inspections.
+Focused coverage is
 `node --test test/native-darwin-fault-image.test.js`; these portable regressions
 establish no native policy success, host health or independent retirement.
 Mapping regressions execute the shared handoff bodies with injected effects:

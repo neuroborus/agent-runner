@@ -452,7 +452,20 @@ static void domain_control_asset_check(void) {
 /* Advisory only: row -1 selects the fork query; errno is an observation, not an interpretation. */
 static void domain_effective_diagnostic(struct identity target, int row, const char *operation, int expected, int actual, int observed_errno) {
   int saved = errno;
-  fprintf(stderr, "native-darwin-fault-policy: caller=%d target=%u row=%d operation=%s expected=%d actual=%d observed_errno=%d\n",
+  if (row == 5 && !strcmp(operation, "file-read-data")) {
+    struct stat link_type, runtime_type;
+    int link_result = lstat("/usr/lib/libSystem.B.dylib", &link_type);
+    int link_errno = link_result < 0 ? errno : 0;
+    int runtime_result = stat("/usr/lib/libSystem.B.dylib", &runtime_type);
+    int runtime_errno = runtime_result < 0 ? errno : 0;
+    const char *link_kind = link_result != 0 ? "unavailable" :
+      S_ISREG(link_type.st_mode) ? "regular" : S_ISLNK(link_type.st_mode) ? "symlink" : "other";
+    const char *runtime_kind = runtime_result != 0 ? "unavailable" :
+      S_ISREG(runtime_type.st_mode) ? "regular" : S_ISLNK(runtime_type.st_mode) ? "symlink" : "other";
+    fprintf(stderr, "native-darwin-fault-policy: caller=%d target=%u row=%d operation=%s expected=%d actual=%d observed_errno=%d lstat_result=%d lstat_errno=%d lstat_type=%s stat_result=%d stat_errno=%d stat_type=%s\n",
+      getpid(), target.token.val[5], row, operation, expected, actual, observed_errno,
+      link_result, link_errno, link_kind, runtime_result, runtime_errno, runtime_kind);
+  } else fprintf(stderr, "native-darwin-fault-policy: caller=%d target=%u row=%d operation=%s expected=%d actual=%d observed_errno=%d\n",
     getpid(), target.token.val[5], row, operation, expected, actual, observed_errno);
   fflush(stderr); errno = saved;
 }

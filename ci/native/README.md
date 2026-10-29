@@ -4854,10 +4854,27 @@ numeric caller/target PIDs locate the query without publishing paths or policy
 contents. Expected/actual returns and immediately observed raw `observed_errno`
 are retained, and diagnostic output preserves errno. The errno snapshot may be
 stale or zero and supplies no documented interpretation of a query result.
+The row-5 `file-read-data` mismatch alone inspects the fixed runtime path once
+with `lstat`, then `stat`, before reporting. Each retains its own result,
+immediate failure errno (zero on success), and closed `regular`, `symlink`,
+`other` or `unavailable` type; failed outputs are never read. This tests whether
+the query addresses an absent filesystem target: raw query errno alone cannot
+distinguish absence, presence or restricted inspection. Only a failed inspection's
+documented `ENOENT` supports absence; a symlink alone does not establish target
+presence. Other successful types remain explicit applicability evidence;
+conflicting observations remain inconclusive. These are separate observations
+in the caller's context, proving neither shared-cache membership, target-process
+loading nor atomic filesystem stability. Absence selects a separately evidenced
+equivalent actual runtime-check assessment without choosing a replacement;
+presence retains the mismatch for exact-path/decision investigation. Inconclusive,
+conflicting or missing observations stop this diagnostic route instead of adding
+similar logging. Successful queries and other selectors gain no inspections.
 Existing custodian stderr capture and ordinary CI publication retain this record
 separately from payload output and cleanup failures. Missing or failed output
 does not change refusal, admission or retirement, and the observation establishes
 no policy success, host-health explanation, native PASS or functional correction.
+No branch attributes or fixes the separate system deadline or reopens stopped
+experiments.
 
 Recovery fences new admissions and settles inspection references before retiring
 the complete original held audit domain. Interrupted pre-replacement setup,
