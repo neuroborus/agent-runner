@@ -550,7 +550,7 @@ changes.
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 
-The unregistered audit workspace owns report and discovery contracts behind
+The unregistered audit workspace owns report, discovery and finding-verification contracts behind
 `pipelines/audit/src/index.js`: its canonical classification/criterion catalog,
 strict immutable structured content and deterministic English renderer. One
 catalog supplies classification validation, severity ordering and map text.
@@ -570,8 +570,18 @@ completion. Logical turns establish existing inactivity/availability checkpoints
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.
-Finding verification, combined cycles, public registration and report
-publication remain unavailable. See the [audit specification](../pipelines/audit/docs/SPEC.md).
+The separate batch gate rechecks every new/material version before more discovery.
+Lazy continues the discovering Auditor; independent creates a fresh read-only
+finding Reviewer after each correction. Versioned entries/dispositions, retained
+rejections, snapshot/report bindings, write-ahead recheck reservations and exact
+accepted-batch receipts preserve a second finite run-wide budget capped at 20.
+Corrections and review additions invalidate batch approval without changing
+historical discovery cleanliness. State version 2 initializes these records from
+version 1 through the descriptor migration without inventing acceptance.
+Auditor-only legacy roles remain frozen: lazy can recheck, while independent
+verification pauses before reserving work and requires a new run with a Reviewer.
+Combined cycles, public registration and report publication remain unavailable.
+See the [audit specification](../pipelines/audit/docs/SPEC.md).
 
 ## Structured Result Headroom
 

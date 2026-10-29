@@ -1,18 +1,19 @@
-# Audit — Discovery, Finding and Report Contract
+# Audit — Discovery, Finding Verification and Report Contract
 
 ## Status and ownership
 
 `pipelines/audit/` owns strict structured findings, the canonical classification
 and default criterion catalog, deterministic English Markdown rendering, and a
-descriptor-owned read-only discovery lifecycle. It remains unfinished and
-unregistered: there is no audit CLI command, MCP route, finding-verification
-gate or publication capability. The root runtime still exposes its three
-existing pipelines. Combined audit cycles are unavailable at this stage.
+descriptor-owned read-only discovery and finding-verification lifecycle. It
+remains unfinished and unregistered: there is no audit CLI command, MCP route or
+publication capability. The root runtime still exposes its three existing
+pipelines. Combined audit cycles are unavailable at this stage.
 
 The private workspace uses native ESM, Node.js `>=24 <25`, the standard library,
 and `node:test`. Its public `src/index.js` exposes `AUDIT_CATALOG`,
 `normalizeAuditReport`, `AuditReportValidationError`, `renderAuditReport`, and
-the discovery descriptor/state/workflow contracts described below.
+the discovery/verification descriptor, state and workflow contracts described
+below.
 It imports neither root runtime capabilities nor another pipeline. Report
 semantics belong here; filesystem publication and snapshot inspection remain
 Runner-owned. Rendering returns text without reading sources, writing files,
@@ -23,10 +24,12 @@ invoking providers, or granting Git or retrieval authority.
 The exported `auditPipeline` descriptor is intentionally absent from root
 dependencies and the static registry. It selects a directory workspace and
 exclusive canonical workspace lease, allowing the same filesystem inspection
-capability for Git repositories and ordinary directories. Auditor access is
-read-only. The descriptor owns `mode` (default and recommended `independent`;
-explicit `lazy`; reserved `combined`) and `maxDiscoveryPasses` (default 20,
-positive integer capped at 20 and frozen at creation).
+capability for Git repositories and ordinary directories. Auditor and finding
+Reviewer access is read-only; lazy resolves and invokes only the Auditor. The
+descriptor owns `mode` (default and recommended `independent`; explicit `lazy`;
+reserved `combined`) and `maxDiscoveryPasses` (default 20, positive integer
+capped at 20 and frozen at creation). The separate
+`maxFindingRecheckPasses` setting has the same default and finite cap.
 Combined invocation fails before effects until its audit-specific cycle gate
 is implemented. The lifecycle imports no root capability or other pipeline.
 
@@ -55,11 +58,20 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 1 retains the workspace baseline, frozen declarations and their
+State version 2 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
-ledger, pending batch and full discovery-pass history. Task/context hashes remain
-in the common envelope.
+ledger, versioned pending batch, discovery/recheck histories and accepted-batch
+receipts. The descriptor migration from version 1 initializes the recheck
+budget/history and pending-batch version without manufacturing acceptance or
+changing discovery provenance. Version-1 snapshots retain their Auditor-only
+frozen role configuration. Lazy verification continues that Auditor; independent
+runs without a frozen Reviewer pause at `VERIFY_FINDINGS` with
+`audit_reviewer_required` before reserving or invoking any recheck. Their pending
+evidence remains intact across resume; independently reviewed findings require
+a new run, without resolving or adding roles to the old snapshot. The migration
+is consumed through the existing leased Runner migration boundary, never by
+writing state directly. Task/context hashes remain in the common envelope.
 Report and pending-batch bindings pin the inspected content snapshot. Each
 history entry retains its ordinal, logical session context, outcome, report
 binding and candidate IDs. Actual opaque child identities/lineage use the
@@ -82,7 +94,7 @@ Accumulated findings retain evidence, concrete examples, impact/severity rationa
 classification and optional recommendations so fresh Auditors can assess their
 consistency and return material corrections under the existing finding/cause IDs.
 
-Every clarification/discovery invocation first establishes its logical checkpoint
+Every clarification/discovery/recheck invocation first establishes its logical checkpoint
 with the existing Runner inactivity coordinator. Classified availability uses
 the existing durable backoff, while inactivity retains its shared reconstruction
 allowance; both recover the same reserved pass without renewing its budget.
@@ -92,7 +104,9 @@ again at that checkpoint; only validated no-effect evidence restores an unused
 fork. Provider-neutral structured-output failures pause as invalid output after
 read-only reconciliation; discovery records an invalid pass before resuming at
 a new ordinal. Terminal provider safety failures propagate after reconciliation and
-persist `FAILED`, which cannot resume discovery. No native diagnostics are saved.
+persist `FAILED`, which cannot resume discovery or verification. A pending batch
+and its interrupted recheck remain valid preserved evidence in this terminal state.
+No native diagnostics are saved.
 The baseline uses the common `repositoryBaseline` binding so successful recovery
 can retire its evidence against the same unchanged workspace.
 
@@ -113,7 +127,7 @@ omitted. Malformed, interrupted, incomplete or stale-snapshot output never
 supplies clean evidence. Partial results are not adopted. Source or frozen-input
 drift rejects the result and remains blocking.
 
-Clarification and discovery role results share the two-MiB serialized UTF-8
+Clarification, discovery and recheck role results share the two-MiB serialized UTF-8
 limit, independently of the enclosing store's 100,000-character string and
 10,000-item collection limits. Clarification questions additionally retain the
 shared service's 32-item and 4,000-character text limits. Oversized,
@@ -131,14 +145,82 @@ duplicates create no new pending batch, but their discovery pass remains
 finding-producing. A later rejection likewise cannot retrospectively change
 discovery history. New or revised entries enter a snapshot/report-bound pending
 batch at `VERIFY_FINDINGS`, which blocks all further discovery across resume.
-They are not confirmed report findings. Finding dispositions and verification
-are a separate, still unavailable gate.
+Only confirmed dispositions in accepted batches may later supply report
+findings. This step retains structured report context without projecting or
+publishing ledger findings.
 
 `DISCOVERY_CLEAN` records clean discovery evidence only: it is not public audit
 completion, finding acceptance or permission to publish. The lifecycle returns
 at that checkpoint without a redundant unchanged-response turn. The separate
-finding gate and eventual mode-specific completion/publication must consume
+finding gate and eventual mode-specific completion/publication consume
 these bindings without changing historical outcomes or renewing either budget.
+
+## Finding-batch verification
+
+`VERIFY_FINDINGS` requires a distinct read-only recheck of every new or materially
+revised batch, in every supported mode. Exact unchanged duplicate candidates
+create no batch. A pending batch binds its discovery pass, source snapshot,
+structured report fingerprint, monotonically increasing batch version, exact
+ledger entry versions and proposed dispositions. Recheck requests include frozen
+inputs, compact accumulated findings and prior decisions, including rejected
+claims. Responses echo the exact snapshot, report and batch fingerprints;
+stale responses cannot approve a later version.
+
+A complete recheck decides every current batch entry exactly once. Each closed
+decision contains `id`, `kind`, nonempty supported `rationale`, `finding`,
+`targetId` and `hypothesis`. Unused payloads must be null:
+
+- `confirm` retains the finding unchanged.
+- `correct` carries a complete corrected finding, preserving finding/cause IDs.
+  Material content changes increment its ledger version.
+- `reject` retains an evidence-based dismissal in decision history, without
+  deleting the candidate or rewriting discovery cleanliness. Subsequent rechecks
+  assess unsupported dismissals as well as supported findings.
+- `merge` names a distinct retained finding. Correct the target to consolidate
+  supporting locations, evidence and examples. Targets enter the batch if needed
+  and must remain confirmed or corrected; chains and dismissed targets fail.
+- `hypothesis` carries the original ID, title, evidence and explicit uncertainty
+  in the report's unverified hypothesis shape; it is never a confirmed finding.
+
+Rechecks assess scope/criterion relevance, evidence, concrete examples, impact,
+severity/category, overlap and recommendations when present. `additions` can
+introduce new findings or material revisions to other ledger findings; exact
+unchanged repeats are ignored. Added/revised entries themselves require recheck.
+No response can silently remove a batch member. All updates are adopted together,
+and partial, malformed or interrupted output cannot approve a batch.
+
+Lazy continues the discovering Auditor's logical session until the exact batch
+and dispositions are unchanged. Reconstruction reuses frozen evidence and never
+reforks its consumed source. Independent starts a fresh finding Reviewer for
+each recheck, including every pass after a substantive correction. Each fresh
+Reviewer receives complete structured evidence without prior conversations;
+its own source fork is isolated from discovery. Changes to entries, dispositions
+or their rationale increment the batch version and require another distinct
+recheck. Agreeing with a disposition preserves its exact text/payload. A first
+review with only confirmations is clean immediately, as is unchanged review of
+previously added entries; neither requires a redundant confirmation turn.
+Combined verification remains unavailable until its separate cycle policy exists.
+
+A write-ahead recheck reservation records ordinal, logical session key,
+discovery pass, batch version/fingerprint, snapshot/report bindings and outcome.
+Complete decisions remain in history even after rejection is reversed. The
+finite run-wide `maxFindingRecheckPasses` budget charges reservations,
+interruptions, invalid and incomplete responses, across all batches, cycles and
+sessions. Classified provider recovery retries the original reservation using
+existing policies; unclassified interruption charges it and reserves a new pass.
+`finding_recheck_limit_reached` preserves the pending batch and exhausted history
+on resume, without provider work or renewed allowances. Invalid/incomplete
+rechecks pause resumably at verification rather than discovering more findings.
+Source/input drift remains blocking and unsettled execution ownership propagates.
+
+Only a clean distinct recheck creates an accepted-batch receipt bound to its exact
+entries, dispositions and recheck evidence, then releases `DISCOVER`. A material
+later revision leaves historical receipts intact but requires a new pending
+version; earlier acceptance cannot approve it. Discovery receives accepted
+dispositions with version references so rejected and uncertain claims remain
+visible. Recheck cleanliness accepts only that batch: it cannot clean a discovery
+pass, complete a discovery cycle or finish the audit. Structured report projection
+and Runner-owned publication remain separate delivery boundaries.
 
 ## Criteria and classification
 

@@ -22,6 +22,13 @@ blocking, invalid/incomplete output, drift, write-ahead interruption and finite
 exhaustion recovery using injected root capabilities. It also covers the two-MiB
 role-result limit, complete frozen inputs/findings in fresh discovery prompts and
 propagation of unsettled execution ownership.
+Fast `pipelines/audit/test/verification.test.js` owns all five finding dispositions,
+fresh independent versus continuing lazy rechecks, review additions, retained
+rejections, version invalidation, stale/malformed/incomplete output, interrupted
+reservations, exact acceptance recovery, Auditor-only legacy migration/resume
+without fabricated approval or role expansion, and run-wide recheck exhaustion.
+It shares injected effect-free fixtures with discovery through the pipeline's
+test support index.
 Fast `test/runner-audit.test.js` owns audit composition with the existing confined
 workspace/clarification services and persisted session contract: authorized
 transcript edits preserve discovery, while source drift blocks it. It also uses

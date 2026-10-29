@@ -2,11 +2,12 @@ import { join } from "node:path";
 
 import {
   AUDIT_MODES,
-  assertAuditRun,
   createAuditState,
   MAX_DISCOVERY_PASSES,
+  MAX_FINDING_RECHECK_PASSES,
   validDiscoveryBudget,
 } from "./discovery-contract.js";
+import { assertAuditRun } from "./verification-contract.js";
 import { runAuditDiscovery } from "./workflow.js";
 
 export { AUDIT_CATALOG } from "./catalog.js";
@@ -20,15 +21,42 @@ export {
   AuditWorkflowError,
   createAuditState,
   MAX_DISCOVERY_PASSES,
+  MAX_FINDING_RECHECK_PASSES,
 } from "./discovery-contract.js";
 export { runAuditDiscovery } from "./workflow.js";
 
 // Intentionally absent from root dependencies/registry until all audit gates exist.
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 1,
-  roles: Object.freeze(["auditor"]),
-  roleAccess: Object.freeze({ auditor: Object.freeze(["read-only"]) }),
+  stateVersion: 2,
+  migrations: Object.freeze({
+    1: ({ pipelineState }) => ({
+      ...pipelineState,
+      settings: {
+        ...pipelineState.settings,
+        maxFindingRecheckPasses: MAX_FINDING_RECHECK_PASSES,
+      },
+      pendingBatch:
+        pipelineState.pendingBatch === null
+          ? null
+          : {
+              ...pipelineState.pendingBatch,
+              version: 1,
+              dispositions: [],
+            },
+      recheckHistory: [],
+      acceptedBatches: [],
+    }),
+  }),
+  roles: Object.freeze(["auditor", "reviewer"]),
+  resolveActiveRoles: (settings) =>
+    Object.freeze(
+      settings?.mode === "lazy" ? ["auditor"] : ["auditor", "reviewer"],
+    ),
+  roleAccess: Object.freeze({
+    auditor: Object.freeze(["read-only"]),
+    reviewer: Object.freeze(["read-only"]),
+  }),
   workspace: Object.freeze({ kind: "directory", lease: "exclusive" }),
   resolveWorkspace: ({ taskPath }) =>
     Object.freeze({
@@ -46,6 +74,11 @@ export const auditPipeline = Object.freeze({
     }),
     maxDiscoveryPasses: Object.freeze({
       defaultValue: MAX_DISCOVERY_PASSES,
+      validate: validDiscoveryBudget,
+      errorMessage: "must be a positive integer no greater than 20",
+    }),
+    maxFindingRecheckPasses: Object.freeze({
+      defaultValue: MAX_FINDING_RECHECK_PASSES,
       validate: validDiscoveryBudget,
       errorMessage: "must be a positive integer no greater than 20",
     }),

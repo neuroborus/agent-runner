@@ -46,6 +46,15 @@ const finding = {
     },
   },
 };
+const FINDING = {
+  anyOf: [object(finding), object({ ...finding, recommendation: TEXT })],
+};
+const HYPOTHESIS = object({
+  id: TEXT,
+  title: TEXT,
+  evidence: TEXTS,
+  uncertainty: TEXT,
+});
 
 export const CLARIFICATION_SCHEMA = object({
   status: { type: "string", enum: ["READY", "QUESTIONS", "BLOCKED"] },
@@ -62,19 +71,34 @@ export const DISCOVERY_SCHEMA = object({
   snapshotFingerprint: TEXT,
   candidates: {
     type: "array",
-    items: {
-      anyOf: [object(finding), object({ ...finding, recommendation: TEXT })],
-    },
+    items: FINDING,
   },
   limitations: TEXTS,
   hypotheses: {
     type: "array",
-    items: object({
-      id: TEXT,
-      title: TEXT,
-      evidence: TEXTS,
-      uncertainty: TEXT,
-    }),
+    items: HYPOTHESIS,
   },
   reportCorrections: TEXTS,
+});
+
+export const RECHECK_SCHEMA = object({
+  status: { type: "string", enum: ["COMPLETE", "INCOMPLETE"] },
+  snapshotFingerprint: TEXT,
+  reportFingerprint: TEXT,
+  batchFingerprint: TEXT,
+  decisions: {
+    type: "array",
+    items: object({
+      id: TEXT,
+      kind: {
+        type: "string",
+        enum: ["confirm", "correct", "reject", "merge", "hypothesis"],
+      },
+      rationale: TEXT,
+      finding: { anyOf: [FINDING, { type: "null" }] },
+      targetId: { type: ["string", "null"] },
+      hypothesis: { anyOf: [HYPOTHESIS, { type: "null" }] },
+    }),
+  },
+  additions: { type: "array", items: FINDING },
 });

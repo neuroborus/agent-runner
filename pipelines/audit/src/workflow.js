@@ -4,7 +4,6 @@ import {
   acceptDiscovery,
   assertAudit,
   assertAuditResultSize,
-  assertAuditRun,
   AuditWorkflowError,
   emptyReport,
   fingerprint,
@@ -17,8 +16,19 @@ import {
   AUDIT_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   DISCOVERY_INSTRUCTIONS,
+  RECHECK_INSTRUCTIONS,
 } from "./prompts.js";
-import { CLARIFICATION_SCHEMA, DISCOVERY_SCHEMA } from "./schemas.js";
+import {
+  CLARIFICATION_SCHEMA,
+  DISCOVERY_SCHEMA,
+  RECHECK_SCHEMA,
+} from "./schemas.js";
+import {
+  acceptRecheck,
+  assertAuditRun,
+  finishRecheck,
+  reserveRecheck,
+} from "./verification-contract.js";
 
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
 
@@ -33,7 +43,7 @@ function isOwnershipFailure(cause) {
   );
 }
 
-/** Unregistered discovery lifecycle. The runner supplies all persistence and read-only effects. */
+/** Unregistered discovery and finding-verification lifecycle. The runner supplies all persistence and read-only effects. */
 export async function runAuditDiscovery({
   run,
   runtime,
@@ -126,15 +136,32 @@ export async function runAuditDiscovery({
     }
   }
   async function attempt(phase, evidence) {
+    const recheck = phase === "recheck";
+    const role =
+      recheck && state().settings.mode !== "lazy" ? "reviewer" : "auditor";
+    const resumeState = recheck
+      ? "VERIFY_FINDINGS"
+      : phase === "clarify"
+        ? "CLARIFY"
+        : "DISCOVER";
+    const invalid = recheck ? "invalid_recheck" : "invalid_discovery";
+    const finishReserved = async (outcome) => {
+      if (recheck) await save(finishRecheck(state(), outcome));
+      else if (phase === "discovery") await save(finishPass(state(), outcome));
+    };
     try {
       await runtime.workspace.assertUnchanged(state().repositoryBaseline);
     } catch {
-      if (phase === "discovery") await save(finishPass(state(), "interrupted"));
+      await finishReserved("interrupted");
       return { failure: "workspace_changed" };
     }
     const lazy = state().settings.mode === "lazy";
-    const key = sessionContextKey(current, phase);
-    const checkpoint = `audit:${phase}:read-only:${phase === "discovery" ? state().history.length : state().clarificationRounds}`;
+    const key = sessionContextKey(
+      current,
+      phase,
+      recheck ? state().recheckHistory.length : state().history.length,
+    );
+    const checkpoint = `audit:${phase}:read-only:${recheck ? state().recheckHistory.length : phase === "discovery" ? state().history.length : state().clarificationRounds}`;
     const repository = state().repositoryBaseline;
     try {
       if (
@@ -142,14 +169,14 @@ export async function runAuditDiscovery({
         runtime.availability !== undefined
       ) {
         current = await runtime.availability.before({
-          role: "auditor",
+          role,
           checkpoint,
           repository,
         });
       }
       if (runtime.inactivity !== undefined) {
         current = await runtime.inactivity.before({
-          role: "auditor",
+          role,
           checkpoint,
           repository,
         });
@@ -163,7 +190,7 @@ export async function runAuditDiscovery({
     }
     const previous = [...current.sessionLineage.children]
       .reverse()
-      .find((child) => child.role === "auditor" && child.contextKey === key);
+      .find((child) => child.role === role && child.contextKey === key);
     const source = current.sessionLineage.source;
     const reconstructing = current.inactivityRecovery != null;
     const session =
@@ -175,7 +202,7 @@ export async function runAuditDiscovery({
             (!lazy || !state().sourceForkConsumed)
           ? { mode: "fork", id: source }
           : undefined;
-    const activeTurn = { role: "auditor", phase };
+    const activeTurn = { role, phase };
     current = await runtime.startAgentTurn(activeTurn, {
       pipelineState: {
         ...state(),
@@ -185,17 +212,22 @@ export async function runAuditDiscovery({
           session?.mode === "fork" ? key : state().sourceForkRecovery,
       },
     });
-    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}\n\n${JSON.stringify(evidence)}`;
-    const configuration = current.roles.auditor;
+    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}\n\n${JSON.stringify(evidence)}`;
+    const configuration = current.roles[role];
     let response;
     let agentError;
     try {
-      response = await runtime.adapters.auditor.run({
+      response = await runtime.adapters[role].run({
         access: "read-only",
         cwd: current.projectPath,
         prompt,
         recoveryPrompt: prompt,
-        schema: phase === "clarify" ? CLARIFICATION_SCHEMA : DISCOVERY_SCHEMA,
+        schema:
+          phase === "clarify"
+            ? CLARIFICATION_SCHEMA
+            : recheck
+              ? RECHECK_SCHEMA
+              : DISCOVERY_SCHEMA,
         ...Object.fromEntries(
           ["profile", "model", "contextSize", "effort"].flatMap((key) =>
             typeof configuration[key] === "string" &&
@@ -217,7 +249,7 @@ export async function runAuditDiscovery({
       current = await runtime.finishAgentTurn(activeTurn, {
         repositoryReconciled: false,
       });
-      if (phase === "discovery") await save(finishPass(state(), "interrupted"));
+      await finishReserved("interrupted");
       return { failure: "workspace_changed" };
     }
     if ((await inspectInputs()) === null) {
@@ -256,8 +288,8 @@ export async function runAuditDiscovery({
               code: exhausted
                 ? "ERR_OUTPUT_EXHAUSTED"
                 : "ERR_AUTHENTICATION_REQUIRED",
-              resumeState: phase === "clarify" ? "CLARIFY" : "DISCOVER",
-              ...(exhausted ? { role: "auditor", checkpoint } : {}),
+              resumeState,
+              ...(exhausted ? { role, checkpoint } : {}),
             },
           },
         );
@@ -265,8 +297,8 @@ export async function runAuditDiscovery({
       }
       current = await runtime.finishAgentTurn(activeTurn);
       if (agentError.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
-        if (phase === "discovery") await save(finishPass(state(), "invalid"));
-        return { failure: "invalid_discovery" };
+        await finishReserved("invalid");
+        return { failure: invalid };
       }
       if (
         runtime.inactivity?.eligible(agentError) &&
@@ -276,7 +308,7 @@ export async function runAuditDiscovery({
       if (runtime.availability?.eligible(agentError)) {
         current = await runtime.availability.schedule({
           cause: agentError,
-          role: "auditor",
+          role,
           checkpoint,
           repository,
         });
@@ -300,7 +332,7 @@ export async function runAuditDiscovery({
           details: { code: safeCode(agentError) },
         };
       }
-      if (phase === "discovery") await save(finishPass(state(), "interrupted"));
+      await finishReserved("interrupted");
       await save(
         { ...state(), workflowState: "FAILED" },
         { pause: { reason: "internal_failure", code: safeCode(agentError) } },
@@ -319,12 +351,12 @@ export async function runAuditDiscovery({
         ))
     ) {
       current = await runtime.finishAgentTurn(activeTurn);
-      if (phase === "discovery") await save(finishPass(state(), "invalid"));
-      return { failure: "invalid_discovery" };
+      await finishReserved("invalid");
+      return { failure: invalid };
     }
     if (response.sessionId !== previous?.sessionId) {
       current = await runtime.recordChildSession({
-        role: "auditor",
+        role,
         sessionId: response.sessionId,
         contextKey: key,
       });
@@ -336,10 +368,18 @@ export async function runAuditDiscovery({
       assertAuditResultSize(response.structured);
     } catch (cause) {
       if (!(cause instanceof AuditWorkflowError)) throw cause;
-      if (phase === "discovery") await save(finishPass(state(), "invalid"));
-      return { failure: "invalid_discovery" };
+      await finishReserved("invalid");
+      return { failure: invalid };
     }
     return { output: response.structured };
+  }
+
+  function assertPersistentSize(pipelineState) {
+    assertAudit(
+      Buffer.byteLength(JSON.stringify({ ...current, pipelineState })) <=
+        32 * 1024 * 1024,
+      "Audit result exceeds the enclosing persistent run limit.",
+    );
   }
 
   function safeCode(cause) {
@@ -400,6 +440,8 @@ export async function runAuditDiscovery({
         "discovery_interrupted",
         "invalid_discovery",
         "discovery_incomplete",
+        "invalid_recheck",
+        "recheck_incomplete",
         "authentication_required",
         "output_exhausted",
         "backend_unavailable",
@@ -448,6 +490,9 @@ export async function runAuditDiscovery({
     ].includes(run.pause?.reason);
   if (state().history.at(-1)?.outcome === "running" && !recovering) {
     await save(finishPass(state(), "interrupted"));
+  }
+  if (state().recheckHistory.at(-1)?.outcome === "running" && !recovering) {
+    await save(finishRecheck(state(), "interrupted"));
   }
   if (current.activeTurn !== null && !recovering)
     current = await runtime.finishAgentTurn(current.activeTurn, {
@@ -510,7 +555,66 @@ export async function runAuditDiscovery({
     return requestEdit(output.questions);
   }
 
-  while (state().workflowState === "DISCOVER") {
+  while (["DISCOVER", "VERIFY_FINDINGS"].includes(state().workflowState)) {
+    if (state().workflowState === "VERIFY_FINDINGS") {
+      if (
+        state().settings.mode === "independent" &&
+        current.roles.reviewer === undefined
+      )
+        return pause("audit_reviewer_required", "VERIFY_FINDINGS", {
+          code: "ERR_AUDIT_REVIEWER_REQUIRED",
+          explanation:
+            "This run has no frozen finding Reviewer. Start a new independent audit run to verify findings.",
+        });
+      const reserved = state().recheckHistory.at(-1)?.outcome === "running";
+      if (
+        !reserved &&
+        state().recheckHistory.length >=
+          state().settings.maxFindingRecheckPasses
+      )
+        return pause("finding_recheck_limit_reached");
+      const evidence = await inspectInputs();
+      if (evidence === null) return current;
+      if (!reserved) await save(reserveRecheck(current));
+      const result = await turn("recheck", {
+        task: evidence.inputs.task.content,
+        context: evidence.inputs.context?.content ?? "",
+        clarifications: evidence.clarification.content,
+        inputs: state().inputs,
+        inputsFingerprint: state().inputsFingerprint,
+        clarificationHash: state().clarificationHash,
+        report: {
+          limitations: state().report.limitations,
+          hypotheses: state().report.hypotheses,
+        },
+        batch: state().pendingBatch,
+        batchFingerprint: fingerprint(state().pendingBatch),
+        accumulatedFindings: state().ledger,
+        priorDecisions: state().recheckHistory.filter(({ outcome }) =>
+          ["corrected", "clean"].includes(outcome),
+        ),
+      });
+      if (result.paused) return current;
+      if (result.failure)
+        return pause(result.failure, "VERIFY_FINDINGS", result.details);
+      let accepted;
+      try {
+        accepted = acceptRecheck(state(), result.output);
+        assertPersistentSize(accepted);
+      } catch (cause) {
+        if (
+          !(cause instanceof AuditWorkflowError) &&
+          cause?.code !== "ERR_INVALID_AUDIT_REPORT"
+        )
+          throw cause;
+        await save(finishRecheck(state(), "invalid"));
+        return pause("invalid_recheck", "VERIFY_FINDINGS");
+      }
+      await save(accepted);
+      if (state().recheckHistory.at(-1).outcome === "incomplete")
+        return pause("recheck_incomplete", "VERIFY_FINDINGS");
+      continue;
+    }
     const reserved = state().history.at(-1)?.outcome === "running";
     if (
       !reserved &&
@@ -552,6 +656,13 @@ export async function runAuditDiscovery({
         ...finding,
         version,
       })),
+      acceptedDispositions: state().acceptedBatches.map(({ batch }) => ({
+        entries: batch.entries.map(({ finding, version }) => ({
+          id: finding.id,
+          version,
+        })),
+        dispositions: batch.dispositions,
+      })),
     });
     if (result.paused) return current;
     if (result.failure)
@@ -560,13 +671,7 @@ export async function runAuditDiscovery({
     let accepted;
     try {
       accepted = acceptDiscovery(state(), result.output);
-      assertAudit(
-        Buffer.byteLength(
-          JSON.stringify({ ...current, pipelineState: accepted }),
-        ) <=
-          32 * 1024 * 1024,
-        "Audit result exceeds the enclosing persistent run limit.",
-      );
+      assertPersistentSize(accepted);
     } catch (cause) {
       if (
         !(cause instanceof AuditWorkflowError) &&
@@ -580,6 +685,6 @@ export async function runAuditDiscovery({
     if (state().history.at(-1).outcome === "incomplete")
       return pause("discovery_incomplete", "DISCOVER");
   }
-  // Finding verification and public completion/publication are deliberately unavailable here.
+  // Clean discovery remains separate from public completion/publication.
   return current;
 }

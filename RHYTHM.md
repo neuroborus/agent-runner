@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-29
 
+- **Audit batches require their own durable recheck before further discovery.**
+  Every new or materially revised batch receives a distinct read-only recheck.
+  Lazy continues the discovering Auditor; independent replaces the finding
+  Reviewer after each substantive correction. Exact versioned decisions retain
+  dismissals and uncertainty, and review additions require verification themselves.
+  Snapshot/report-bound receipts and write-ahead reservations preserve a separate
+  finite 20-pass run-wide budget across all batches and interruptions. Accepting
+  a batch cannot clean discovery or finish an audit; combined cycles and public
+  exposure remain separate boundaries.
+
 - **Audit discovery preserves pass provenance independently of finding acceptance.**
   The unregistered descriptor freezes agreed scope before read-only discovery.
   Independent Auditors start fresh per pass; lazy keeps one logical owner and

@@ -75,7 +75,8 @@ repository must not overlap writable changes.
 ## Unregistered audit foundation
 
 The unregistered audit workspace currently supplies finding contracts and an
-English report renderer and an internal read-only discovery lifecycle. Findings have
+English report renderer and internal read-only discovery and batch-verification
+lifecycles. Findings have
 independent severity/category classification, stable report-local identities,
 supporting evidence, impact rationale and concrete observed or code-derived
 examples. Shared causes must be consolidated; unsupported claims stay explicitly
@@ -88,8 +89,14 @@ revised findings block discovery pending a separate verification gate. A clean
 pass has no candidates or substantive report corrections; rejected candidates
 cannot make their historical pass clean. Interrupted and incomplete work consumes
 the same finite 20-pass run-wide budget, which survives reconstruction and
-exhaustion. Clean discovery alone is not audit completion. Finding verification,
-combined audit cycles and public publication remain unavailable. The
+exhaustion. Every new or materially revised finding batch requires a distinct
+recheck before more discovery. Lazy continues its discovering Auditor;
+independent uses a fresh finding Reviewer after every substantive correction.
+Confirmations, corrections, rejections, merges and explicit hypotheses retain
+exact versioned decisions, including rejected claims; review additions must
+also be verified. A separate finite run-wide 20-recheck budget survives all
+batches and reconstruction. Batch acceptance cannot clean discovery or complete
+an audit. Combined audit cycles and public publication remain unavailable. The
 [audit specification](../../pipelines/audit/docs/SPEC.md) owns exact shapes,
 criteria, state and ordering; the three supported workflows and their gates are unchanged.
 

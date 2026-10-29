@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeAuditReport, texts } from "./findings.js";
 
 export const MAX_DISCOVERY_PASSES = 20;
+export const MAX_FINDING_RECHECK_PASSES = 20;
 export const MAX_CLARIFICATION_ROUNDS = 3;
 const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
 // Match the enclosing run store's field limits without importing root policy.
@@ -102,7 +103,7 @@ export function sessionContextKey(
   const state = run.pipelineState;
   const lazy = state.settings.mode === "lazy";
   return fingerprint({
-    role: "auditor",
+    role: phase === "recheck" && !lazy ? "reviewer" : "auditor",
     task: run.hashes.task,
     context: run.hashes.context,
     snapshot: state.repositoryBaseline.contentFingerprint,
@@ -110,8 +111,8 @@ export function sessionContextKey(
       ? "audit:auditor"
       : phase === "clarify"
         ? "audit:clarify"
-        : `audit:discovery:${number}`,
-    ...(!lazy && phase === "discovery"
+        : `audit:${phase}:${number}`,
+    ...(!lazy && phase !== "clarify"
       ? { inputs: state.inputsFingerprint }
       : {}),
   });
@@ -185,13 +186,15 @@ export function createAuditState({ settings = {} } = {}) {
   const resolved = {
     mode: "independent",
     maxDiscoveryPasses: MAX_DISCOVERY_PASSES,
+    maxFindingRecheckPasses: MAX_FINDING_RECHECK_PASSES,
     ...settings,
   };
-  exact(resolved, ["mode", "maxDiscoveryPasses"]);
+  exact(resolved, ["mode", "maxDiscoveryPasses", "maxFindingRecheckPasses"]);
   assertAudit(
     AUDIT_MODES.includes(resolved.mode) &&
-      validDiscoveryBudget(resolved.maxDiscoveryPasses),
-    "Audit settings must preserve the finite discovery budget.",
+      validDiscoveryBudget(resolved.maxDiscoveryPasses) &&
+      validDiscoveryBudget(resolved.maxFindingRecheckPasses),
+    "Audit settings must preserve both finite pass budgets.",
   );
   return {
     workflowState: "CLARIFY",
@@ -209,11 +212,13 @@ export function createAuditState({ settings = {} } = {}) {
     ledger: [],
     pendingBatch: null,
     history: [],
+    recheckHistory: [],
+    acceptedBatches: [],
   };
 }
 
 /** Validate persisted discovery provenance without inventing acceptance evidence. */
-export function assertAuditRun(run) {
+export function assertDiscoveryRun(run) {
   assertAudit(
     run.pipelineId === "audit",
     "Audit run has the wrong pipeline owner.",
@@ -302,7 +307,7 @@ export function assertAuditRun(run) {
         Number.isSafeInteger(entry.sourcePass) &&
         entry.sourcePass > 0 &&
         entry.sourcePass <= state.history.length &&
-        entry.version <= entry.sourcePass &&
+        entry.version <= entry.sourcePass + state.recheckHistory.length &&
         state.history[entry.sourcePass - 1]?.outcome === "findings",
       "Audit finding ledger is inconsistent.",
     );
@@ -342,14 +347,10 @@ export function assertAuditRun(run) {
   }
   if (state.pendingBatch !== null) {
     const batch = state.pendingBatch;
-    exact(batch, [
-      "sourcePass",
-      "snapshotFingerprint",
-      "reportFingerprint",
-      "entries",
-    ]);
     assertAudit(
-      ["VERIFY_FINDINGS", "WAITING_FOR_USER"].includes(state.workflowState) &&
+      ["VERIFY_FINDINGS", "WAITING_FOR_USER", "FAILED"].includes(
+        state.workflowState,
+      ) &&
         Array.isArray(batch.entries) &&
         batch.entries.length > 0 &&
         batch.sourcePass === state.history.length &&
@@ -357,15 +358,14 @@ export function assertAuditRun(run) {
         batch.snapshotFingerprint ===
           state.repositoryBaseline.contentFingerprint &&
         batch.reportFingerprint === state.reportFingerprint &&
-        same(
-          batch.entries,
-          state.ledger.filter((entry) => entry.sourcePass === batch.sourcePass),
+        batch.entries.every((entry) =>
+          state.ledger.some((recorded) => same(recorded, entry)),
         ),
       "Audit pending verification binding is invalid.",
     );
   }
   assertAudit(
-    state.workflowState === "WAITING_FOR_USER" ||
+    ["WAITING_FOR_USER", "FAILED"].includes(state.workflowState) ||
       (state.workflowState === "VERIFY_FINDINGS") ===
         (state.pendingBatch !== null),
     "Audit pending verification must block discovery.",
@@ -473,7 +473,9 @@ export function acceptDiscovery(state, value) {
             sourcePass: number,
             snapshotFingerprint: state.repositoryBaseline.contentFingerprint,
             reportFingerprint,
-            entries: ledger.filter((entry) => entry.sourcePass === number),
+            entries,
+            version: 1,
+            dispositions: [],
           },
     history: [
       ...state.history.slice(0, -1),
