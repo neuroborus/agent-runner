@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-29
+
+- **Audit report semantics start as a pure, unregistered pipeline contract.**
+  One catalog drives severity/category validation, severity ordering and the
+  static classification map. Stable finding/cause keys, evidence, impact and
+  labeled concrete examples keep confirmed claims distinct from hypotheses;
+  repeated causes require consolidation while recommendations remain optional.
+  The deterministic English renderer preserves zero-findings scope and
+  limitations without provider calls or filesystem effects. Root-owned snapshot
+  inspection, acceptance and publication authority are not implied by rendering.
+
 ## 2026-10-28
 
 - **Custom execution completes with accepted results, not commits.** Explicit

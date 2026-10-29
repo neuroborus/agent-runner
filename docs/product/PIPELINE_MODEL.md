@@ -72,6 +72,19 @@ access and never changes `HEAD`.
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.
 
+## Audit report contract
+
+The unregistered audit workspace currently supplies finding contracts and an
+English report renderer, without an executable audit workflow. Findings have
+independent severity/category classification, stable report-local identities,
+supporting evidence, impact rationale and concrete observed or code-derived
+examples. Shared causes must be consolidated; unsupported claims stay explicitly
+unverified. Recommendations are optional and zero findings is valid. The static
+classification map is generated from one catalog without a model turn. Report
+rendering grants no source writes or publication authority. The
+[audit specification](../../pipelines/audit/docs/SPEC.md) owns exact shapes,
+criteria and ordering; the three supported workflows and their gates are unchanged.
+
 ## Review modes
 
 `independent` is the default and recommended mode. A primary role produces the

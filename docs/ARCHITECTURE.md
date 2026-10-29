@@ -550,6 +550,17 @@ changes.
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 
+The unregistered audit workspace owns pure report contracts behind
+`pipelines/audit/src/index.js`: its canonical classification/criterion catalog,
+strict immutable structured content and deterministic English renderer. One
+catalog supplies classification validation, severity ordering and map text.
+Confirmed findings require evidence, impact/severity rationale and labeled
+concrete examples; unsupported claims remain separate hypotheses, and repeated
+cause keys require consolidation. The renderer returns `audit.md` text without
+filesystem or provider effects. Snapshot inspection, future report acceptance
+and publication remain Runner-owned; this contract adds no executable pipeline
+or persistence authority. See the [audit specification](../pipelines/audit/docs/SPEC.md).
+
 ## Structured Result Headroom
 
 All three pipelines accept structured role results through exactly 2 MiB

@@ -261,6 +261,7 @@ All pipelines additionally require:
 | `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
+| `pipelines/audit/`                | Unregistered audit finding contracts, report renderer, tests/spec    |
 | `test/agents/`                    | Provider boundaries and descriptor-registry behavior                 |
 | `test/clarifications/`            | Clarification-service behavior tests                                 |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests                 |

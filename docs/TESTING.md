@@ -11,6 +11,13 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `pipelines/audit/test/report.test.js` owns the pure audit report contract:
+strict evidence/examples and classification values, shared-cause consolidation,
+stable severity/ID ordering, optional recommendations, separate uncertainty,
+zero findings, and safe catalog-derived Markdown. It uses no providers,
+processes, Git repositories, or temporary storage. Audit remains unregistered;
+these tests establish no lifecycle or publication behavior.
+
 Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
 configured selection before Git, read-only provider declarations, frozen criteria
 and source bindings, source-drift recovery, repository-local clarification ignore
