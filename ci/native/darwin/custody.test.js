@@ -5508,7 +5508,7 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
       "u",
     ).exec(source)[1];
   const setup = source.slice(
-    source.indexOf("  int fd = native(open("),
+    source.indexOf("  audit_available();"),
     source.indexOf("  unsigned int low"),
   );
   const capture = source.slice(
@@ -5539,6 +5539,11 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
         (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
       )
       .replaceAll(/sizeof\((?:marker|total|records|length)\)/gu, "4")
+      .replaceAll(
+        "&condition",
+        "{get value(){return condition},set value(v){condition=v}}",
+      )
+      .replaceAll("sizeof(condition)", "4")
       .replaceAll("sizeof(receipt)", "16")
       .replaceAll("sizeof(bytes)", "RECORD_LIMIT")
       .replaceAll(/\((?:size_t|uint64_t|uint32_t)\)/gu, "")
@@ -5548,6 +5553,7 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
       )
       .replaceAll("NULL", "null");
   const script = new Script(`
+    function audit_available(){${project(body("audit_available").replace("char bytes[512];", "const bytes={};").replaceAll("sizeof(bytes)", "512"))}}
     function native(result,file="observer-helper.c",line=1,predicate="native"){${project(body("native_at"))}}
     function call(fd,request,value){need(native(ioctl(fd,request,value))===0);}
     function command_ready(){${project(body("command_ready"))}}
@@ -5567,8 +5573,18 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
   );
   const syscallFailures =
     "nonblocking select poll poll-after command-read audit-read".split(" ");
+  // Symbolic injected SDK values; these integers are not native observations.
+  const conditions = { AUC_AUDITING: 101, AUC_NOAUDIT: 102, AUC_DISABLED: 103 };
+  const unavailable = new Map([
+    ["suspended", [conditions.AUC_NOAUDIT, "unavailable"]],
+    ["disabled", [conditions.AUC_DISABLED, "disabled"]],
+    ["unknown", [104, "unknown"]],
+    ["query", [conditions.AUC_AUDITING, "invalid"]],
+    ["query-untouched", [conditions.AUC_DISABLED, "invalid"]],
+  ]);
   for (const fault of [
     ...successful,
+    ...unavailable.keys(),
     ...syscallFailures,
     "fd-bound",
     "command-eof",
@@ -5576,7 +5592,13 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
     ...closures.keys(),
   ]) {
     const fd = fault === "highest" ? 1023 : fault === "fd-bound" ? 1024 : 7;
+    const [raw, state] = unavailable.get(fault) ?? [
+      conditions.AUC_AUDITING,
+      "auditing",
+    ];
+    const result = fault.startsWith("query") ? -1 : 0;
     const frames = [],
+      diagnostics = [],
       operations = [];
     let waits = 0,
       turn = -1,
@@ -5608,6 +5630,30 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
       O_CLOEXEC: 2,
       __FILE__: "observer-helper.c",
       __LINE__: 1,
+      ...conditions,
+      A_GETCOND: "get-condition",
+      auditon(operation, target, size) {
+        assert.deepEqual([operation, size, api.errno], ["get-condition", 4, 0]);
+        assert.equal(target.value, conditions.AUC_DISABLED);
+        operations.push("auditon");
+        if (fault !== "query-untouched") target.value = raw;
+        api.errno = 5;
+        return result;
+      },
+      snprintf(out, size, format, ...values) {
+        assert.equal(size, 512);
+        out.text = format.replace(/%[ds]/gu, (specifier) =>
+          specifier === "%d"
+            ? String(Number(values.shift()))
+            : String(values.shift()),
+        );
+        api.errno = 88;
+        return Buffer.byteLength(out.text);
+      },
+      diagnostic(bytes) {
+        diagnostics.push(bytes.text);
+        api.errno = 91;
+      },
       fail_at: fail,
       need(ok) {
         if (!ok) fail(null, null, "invariant", 0, 0);
@@ -5731,7 +5777,11 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
         assert.equal(failure.code, 126, fault);
         assert.deepEqual(
           [failure.result, failure.error],
-          syscallFailures.includes(fault) ? [-1, 5] : [0, 0],
+          unavailable.has(fault)
+            ? [result, 5]
+            : syscallFailures.includes(fault)
+              ? [-1, 5]
+              : [0, 0],
           fault,
         );
         return true;
@@ -5739,7 +5789,15 @@ test("Darwin audit observer selects its nonblocking private pipe and retains dra
       assert.ok(!operations.includes("close"), fault);
       if (closures.has(fault)) assert.equal(commands, 0, fault);
     }
-    assert.deepEqual(operations.slice(0, 2), ["open", "FIONBIO"]);
+    assert.equal(
+      diagnostics[0],
+      `native-darwin-audit: operation=auditon(A_GETCOND) return=${result} errno=5 condition=${raw} valid=${result === 0 ? 1 : 0} state=${state}\n`,
+    );
+    if (unavailable.has(fault)) {
+      assert.deepEqual(frames, []);
+      assert.deepEqual(operations, ["auditon"]);
+    } else
+      assert.deepEqual(operations.slice(0, 3), ["auditon", "open", "FIONBIO"]);
   }
 });
 
@@ -5782,6 +5840,7 @@ test("Darwin audit observer refusals retain call-site facts and exit 126 through
     .exec(source)[1]
     .replace("native(ioctl(fd, request, value))", native);
   const script = new Script(`
+    function diagnostic(bytes,length){${translate(body("diagnostic"))}}
     function fail_at(file,line,predicate,result,error){${translate(body("fail_at"))}}
     function native_at(result,file,line,predicate){${translate(body("native_at"))}}
     ()=>{${call};}

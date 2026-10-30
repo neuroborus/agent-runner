@@ -22,12 +22,9 @@
 #define RECORD_LIMIT 65536
 #define BYTE_LIMIT 8388608
 
-static void fail_at(const char *file, unsigned line, const char *predicate, long result, int error) {
-  char bytes[512];
-  int length = snprintf(bytes, sizeof(bytes), "native-darwin-audit: file=%s line=%u predicate=%s result=%ld errno=%d\n",
-    file, line, predicate, result, error);
+static void diagnostic(const char *bytes, int length) {
   sigset_t blocked, previous, pending;
-  if (length > 0 && length < (int)sizeof(bytes) && !sigemptyset(&blocked) && !sigaddset(&blocked, SIGPIPE) &&
+  if (length > 0 && length < 512 && !sigemptyset(&blocked) && !sigaddset(&blocked, SIGPIPE) &&
       !sigprocmask(SIG_BLOCK, &blocked, &previous)) {
     if (!sigpending(&pending)) {
       int was_pending = sigismember(&pending, SIGPIPE);
@@ -42,9 +39,28 @@ static void fail_at(const char *file, unsigned line, const char *predicate, long
         }
       }
     }
-    (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+    if (sigprocmask(SIG_SETMASK, &previous, NULL)) _exit(126);
   }
+}
+static void fail_at(const char *file, unsigned line, const char *predicate, long result, int error) {
+  char bytes[512];
+  int length = snprintf(bytes, sizeof(bytes), "native-darwin-audit: file=%s line=%u predicate=%s result=%ld errno=%d\n",
+    file, line, predicate, result, error);
+  diagnostic(bytes, length);
   _exit(126);
+}
+static void audit_available(void) {
+  int condition = AUC_DISABLED;
+  errno = 0;
+  int result = auditon(A_GETCOND, &condition, sizeof(condition));
+  int error = errno, observed = condition;
+  char bytes[512];
+  int length = snprintf(bytes, sizeof(bytes), "native-darwin-audit: operation=auditon(A_GETCOND) return=%d errno=%d condition=%d valid=%d state=%s\n",
+    result, error, observed, result == 0, result != 0 ? "invalid" : observed == AUC_AUDITING ? "auditing" :
+    observed == AUC_NOAUDIT ? "unavailable" : observed == AUC_DISABLED ? "disabled" : "unknown");
+  diagnostic(bytes, length);
+  if (result != 0 || observed != AUC_AUDITING)
+    fail_at(__FILE__, __LINE__, "auditon(A_GETCOND) == 0 && condition == AUC_AUDITING", result, error);
 }
 static long native_at(long result, const char *file, unsigned line, const char *predicate) {
   if (result < 0) fail_at(file, line, predicate, result, errno);
@@ -103,6 +119,7 @@ int main(int argc, char **argv) {
   /* The independent owner persists/verifies this parked root process and its
    * private pipes before acknowledging any audit effect. */
   need(native(read(0, &admission, 1)) == 1 && admission == 'A');
+  audit_available();
   int fd = native(open("/dev/auditpipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC));
   /* XNU's audit open ignores O_NONBLOCK; FIONBIO enables its private bit. */
   int nonblocking = 1;

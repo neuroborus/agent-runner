@@ -564,6 +564,12 @@ nonblocking setup, command checks and select/drain bodies with injected calls.
 Cases retain readiness and rebuilt sets/timeouts, descriptor bounds, EINTR,
 empty EAGAIN drains, syscall/EOF/closure refusals (including buffered commands),
 and ready/barrier/terminal framing. Poll is confined to the command pipe.
+The actual availability-query body covers auditing, disabled/suspended, unknown
+and failed-query conditions (including untouched output) before any ready frame.
+Symbolic injected SDK values are not native numeric facts. Saved return/errno/raw
+condition and its validity survive diagnostic errno changes; the shared writer
+retains SIGPIPE protection and exit 126. Successful framing/draining and strict
+empty-window rejection remain.
 The [native observer contract](../ci/native/README.md#independent-native-tool-observers)
 cites Apple's device limitation and pinned XNU behavior as the compatibility
 basis. Portable fixtures establish no numeric native revents or global audit
@@ -578,6 +584,10 @@ Read and diagnostic-write failures preserve the original outcome. Unexpected
 task-access authority refusals, owner-loss fences and independent cleanup coverage
 remain required. Audit-pipe open/query/selection failures retain exact caller/guard,
 return value and saved errno, including when diagnostics or cleanup change errno.
+The actual `command_pipe` body additionally checks `A_GETCOND` before either a
+successful prerequisite reply or broker release. Injected auditing, unavailable,
+unknown, failed and unsupported queries preserve condition validity, original
+failure facts, separate cleanup causes and existing 78/126 exit classifications.
 Checked `FIONBIO` success and failure protect the audit driver's explicit nonblocking initialization
 before its selection queries. Actual drain bodies cover empty nonblocking drains
 returning to command input, EINTR before and after expiry, native read/EOF failures

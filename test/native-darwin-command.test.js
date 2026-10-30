@@ -124,6 +124,11 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "const audit={ai_termid:{},ai_mask:{}};",
         )
         .replaceAll("sizeof(audit)", "1")
+        .replaceAll("sizeof(condition)", "4")
+        .replaceAll(
+          "&condition",
+          "{get value(){return condition},set value(v){condition=v}}",
+        )
         .replace(/(?<!&)&time\b/gu, "time")
         .replace("au_mask_t empty={0,0};", "const empty={};")
         .replace(
@@ -935,22 +940,65 @@ test("Darwin command audit prerequisites retain exact native guards through clea
       "FLUSH",
     ].map((name) => `AUDITPIPE_${name}`),
   ];
-  for (const fault of [null, "open", ...operations, "queue"]) {
+  // Symbolic injected SDK conditions, not native constant observations.
+  const conditions = { AUC_AUDITING: 101, AUC_NOAUDIT: 102, AUC_DISABLED: 103 };
+  const unavailable = {
+    suspended: [conditions.AUC_NOAUDIT, 0, 5, 78],
+    disabled: [conditions.AUC_DISABLED, 0, 5, 78],
+    unknown: [104, 0, 5, 126],
+    query: [conditions.AUC_AUDITING, -1, 5, 126],
+    "query-untouched": [conditions.AUC_DISABLED, -1, 5, 126],
+    unsupported: [conditions.AUC_AUDITING, -1, 45, 78],
+    unimplemented: [conditions.AUC_AUDITING, -1, 99, 78],
+  };
+  const faults = [
+    null,
+    ...Object.keys(unavailable),
+    "open",
+    ...operations,
+    "queue",
+  ];
+  for (const [prerequisite, fault] of [true, false].flatMap((prerequisite) =>
+    faults.map((fault) => [prerequisite, fault]),
+  )) {
+    const [raw, queryResult, queryError, code] = unavailable[fault] ?? [
+      conditions.AUC_AUDITING,
+      0,
+      5,
+      0,
+    ];
     const f = commandGuards(
         header,
         helper,
-        `const classes=1,uid=501,select=true;${body}`,
+        `const classes=1,uid=501,select=true;const prepare=()=>{${body}};const held=prepare();ready();return held;`,
         "command_pipe",
-        { cleanup: !!fault },
+        { cleanup: !!fault, context: { command_prerequisite: prerequisite } },
       ),
       context = {
         O_RDONLY: 0,
         O_NONBLOCK: 1,
         O_CLOEXEC: 2,
         AUDITPIPE_PRESELECT_MODE_LOCAL: 1,
+        ...conditions,
+        A_GETCOND: "get-condition",
+        ENOSYS: 99,
       };
     for (const operation of operations) context[operation] = operation;
     Object.assign(f.context, context, {
+      auditon(operation, target, size) {
+        assert.deepEqual(
+          [operation, size, f.context.errno],
+          ["get-condition", 4, 0],
+        );
+        assert.equal(target.value, conditions.AUC_DISABLED);
+        f.calls.push("auditon");
+        if (fault !== "query-untouched") target.value = raw;
+        f.context.errno = queryError;
+        return queryResult;
+      },
+      ready() {
+        f.calls.push(prerequisite ? "prerequisite-reply" : "broker-release");
+      },
       open() {
         f.calls.push("open");
         f.context.errno = fault === "open" ? 13 : 0;
@@ -971,11 +1019,39 @@ test("Darwin command audit prerequisites retain exact native guards through clea
     });
     if (!fault) {
       assert.equal(f.run(), 7);
-      assert.deepEqual(f.calls, ["open", ...operations]);
+      assert.deepEqual(f.calls, [
+        "auditon",
+        "open",
+        ...operations,
+        prerequisite ? "prerequisite-reply" : "broker-release",
+      ]);
+      assert.deepEqual(f.reports[0], [0, 5, context.AUC_AUDITING, true]);
+      continue;
+    }
+    if (unavailable[fault]) {
+      const failedQuery = queryResult < 0;
+      assert.throws(f.run, (failure) => {
+        assert.equal(failure.code, prerequisite ? 78 : code);
+        assert.equal(failure.kind, failedQuery ? "errno" : "status");
+        assert.equal(failure.value, failedQuery ? queryError : raw);
+        assert.deepEqual(failure.cleanup, ["fixture-close", "errno", 16]);
+        return true;
+      });
+      assert.deepEqual(f.calls, ["auditon"]);
+      assert.deepEqual(f.reports[0], [
+        queryResult,
+        queryError,
+        raw,
+        !failedQuery,
+      ]);
+      assert.deepEqual(f.diagnostics[0].slice(3), [
+        failedQuery ? queryResult : raw,
+        queryError,
+      ]);
       continue;
     }
     assert.throws(f.run, (error) => {
-      assert.equal(error.code, 78);
+      assert.equal(error.code, prerequisite || fault === "open" ? 78 : 126);
       assert.equal(error.operation, "helper-invariant");
       assert.equal(
         error.value,
@@ -1001,13 +1077,17 @@ test("Darwin command audit prerequisites retain exact native guards through clea
     assert.deepEqual(
       f.calls,
       fault === "open"
-        ? ["open"]
+        ? ["auditon", "open"]
         : fault === "queue"
-          ? ["open", ...operations.slice(0, 3)]
-          : ["open", ...operations.slice(0, operations.indexOf(fault) + 1)],
+          ? ["auditon", "open", ...operations.slice(0, 3)]
+          : [
+              "auditon",
+              "open",
+              ...operations.slice(0, operations.indexOf(fault) + 1),
+            ],
     );
     assert.equal(
-      f.reports[0][2],
+      f.reports.find((report) => report[0] === "helper-invariant")[2],
       fault === "open" ? 13 : fault === "queue" ? 0 : 5,
     );
   }

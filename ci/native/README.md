@@ -11760,7 +11760,20 @@ dynamic addresses or nonempty routing pools are unsupported. Limits are 64 ancho
 
 Darwin's `observer-helper.c` opens one cloned `/dev/auditpipe`, selects LOCAL
 mode, zero default/non-attributable flags and successful/failed event classes for
-the reserved audit UID. It changes only its private pipe. Its queue is bounded
+the reserved audit UID. After custody acknowledgement, it first requires a
+successful read-only `auditon(A_GETCOND)` reporting `AUC_AUDITING`, using matching
+SDK declarations ([pinned `bsm/audit.h`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/bsm/audit.h)).
+The model-free command owner's `command_pipe` applies the same
+prerequisite before either its prerequisite reply or broker readiness. Both
+paths clear errno before querying and immediately save the return, errno and
+raw condition; bounded operation-tagged stderr diagnostics report these on
+success and refusal, with condition validity restricted to successful queries.
+`AUC_NOAUDIT`/`AUC_DISABLED`, unknown conditions and query errors prevent readiness.
+The observer retains exit 126; the command owner retains prerequisite/unsupported
+78 versus fatal 126, including separate original-failure and cleanup facts.
+The observer's condition report shares its SIGPIPE-protected diagnostic writer,
+outside audit frames. The query changes no global auditing state; pipe setup
+changes only its private pipe. Its queue is bounded
 at 1024 entries, separately from the 4096-record capture limit, and the helper
 verifies the native minimum/maximum envelope before setup. The observer
 explicitly enables private nonblocking mode with checked `FIONBIO`, then
@@ -11792,10 +11805,23 @@ Each audit command still writes exactly once after the reservation guard; local
 masking consumes only newly pending SIGPIPE after EPIPE before restoring the prior
 mask. An uncertain drain keeps SIGPIPE blocked through fatal cleanup and exit 126.
 Write and signal-handling failures refuse before frame reads, retaining the write
-errno through existing cleanup. Completed native evidence establishes a combined
-poll-event refusal before EPIPE and exit 126, without identifying the individual
-fd/revents or global audit availability. Model-free command observation, Darwin
-cleanup and Windows startup remain unresolved.
+errno through existing cleanup. Completed native evidence reaches ready and two
+barriers around a successful original operation with zero audit-record bytes;
+the first refusal is the decoder's empty window, before later reader EOF and
+command-pipe closure. Hosted audit availability and the delivery cause remain
+unobserved. Pinned XNU
+[`audit_syscalls.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_syscalls.c)
+reports `AUC_AUDITING` only for enabled, unsuspended auditing;
+[`audit.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit.c)
+gates ordinary allocation/commit, and
+[`audit_worker.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_worker.c)
+ties enabled state to an audit vnode. These are contracts, not hosted-state
+evidence. Next native observation must join both preparation queries on the same
+candidate. Unavailable, unknown or failed queries stop without activating auditing.
+`AUC_AUDITING` proves only that sampled prerequisite; continued empty capture stops
+this diagnostic with delivery, selection and timing unresolved. No mask, permission,
+delay, retry, timeout, global service/policy/log or tracing-authority change follows.
+Model-free command observation, Darwin cleanup and Windows startup remain unresolved.
 Private `B` commands acknowledge drained queue boundaries with sequence and native
 time; `S` finishes capture with checked totals. The decoder requires complete
 header/subject/return/trailer records, uniquely selected native metadata, matched

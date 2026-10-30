@@ -271,6 +271,15 @@ static void command_mapping(unsigned classes) {
   endauevent(); need(count && paths); printf("],\"headerVersion\":%u",COMMAND_BSM_VERSION);
 }
 static int command_pipe(unsigned classes, uid_t uid, bool select) {
+  int condition=AUC_DISABLED;errno=0;
+  int result=auditon(A_GETCOND,&condition,sizeof(condition));
+  int condition_error=errno, observed=condition;
+  fprintf(stderr,"native-darwin-command-audit: operation=auditon(A_GETCOND) return=%d errno=%d condition=%d valid=%d\n",
+    result,condition_error,observed,result==0);fflush(stderr);
+  command_guard_at(result==0 && observed==AUC_AUDITING, __func__, __LINE__, "auditon(A_GETCOND) == 0 && condition == AUC_AUDITING",
+    result<0 ? "errno" : "status", result ? result : observed, condition_error,
+    (result==0 && (observed==AUC_NOAUDIT || observed==AUC_DISABLED)) ||
+    (result<0 && (condition_error==ENOSYS || condition_error==ENOTSUP)) ? 78 : 126);
   int fd=open("/dev/auditpipe",O_RDONLY|O_NONBLOCK|O_CLOEXEC), error=errno;
   command_guard_at(fd>=0, __func__, __LINE__, "open(/dev/auditpipe)", "errno", fd, error,
     error==EACCES || error==ENOENT || error==ENOTSUP ? 78 : 126);
