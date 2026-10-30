@@ -323,20 +323,18 @@ all owned descendants absent before clearing the process record. Live,
 replaced, unverifiable, or descendant-bearing process evidence remains a
 blocking ownership condition. Retirement and stop settlement are separate
 journaled transitions so an interruption safely retries either boundary.
-For shared-host sessions, the persisted frozen boot/PID/start baseline lets
-recovery exclude a new unrelated process only when every stabilized ancestry
-hop reaches an unchanged pre-launch identity, or when inaccessible current
-environment metadata is paired with a stable control-group identity different
-from the recorded owner. Observed session and token ownership always wins over
-an anchor. PID reuse, a stale or missing anchor, boot or namespace mismatch,
-cycles, missing or matching control-group evidence, or incomplete evidence
-remain conservative; a recorded previous boot remains independent absence
-proof. A process or ancestor that exits or reparents during
-inspection receives only the fixed per-entry retry bound; recovery ignores it
-only after a fresh read proves the snapshot PID absent. Reuse, surviving
-ownership, malformed evidence, and exhausted churn remain blocking. Legacy
-records gain no baseline authority, and public projections never expose the
-baseline or retry evidence.
+Shared-host recovery uses positive association through owned-session membership,
+a matching launch token or observed owned ancestry. It follows available parent
+links through inaccessible environments and retains observed association through
+later evidence loss. Unassociated processes neither block progress nor receive
+signals because metadata is unreadable, their session is newer or their cgroup
+is shared. Historical ancestry and control-group proofs remain strictly validated
+but optional; no historical evidence is synthesized. Required owner identity,
+namespace checks, live-owner exclusion and bounded inspection remain mandatory.
+Shared-host discovery cannot prove absence against arbitrary same-user processes
+hiding all ancestry and token evidence. The
+[safety contract](SAFETY_MODEL.md#inputs-artifacts-and-state) owns exact retirement
+rules. Public projections never expose private process proofs.
 
 ## Pauses, resume, and observability
 

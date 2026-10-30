@@ -3920,25 +3920,18 @@ descendant-bearing recorded process, clears a retired record under the
 replacement execution lease, and makes process retirement plus checkpoint
 settlement independently retryable across interruption.
 
-Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
-baseline captured before supervisor launch. Replacement ownership may exclude
-a new unrelated process only after every stabilized hop reaches an unchanged
-baseline identity without bypassing observed session or token ownership. A
-stable inaccessible intermediate environment can be crossed only when the same
-walk reaches that exact anchor. Version 14 also persists the owner's
-control-group identity; inaccessible current environment metadata is unrelated
-only when its stable identity differs. PID reuse, a stale or missing anchor,
-boot or namespace mismatch, cycles, missing or matching control-group evidence,
-malformed identities, and surviving or escaping descendants remain fail-closed
-ownership barriers. Older envelopes migrate with null new evidence and gain no
-recovery authority. A recorded previous boot remains independent proof that
-the old process tree is absent. Each current-boot snapshot entry has three
-attempts bound to its first readable start tick. Transient disappearance or
-reparenting restarts that PID and its new ancestry from scratch; only a fresh
-absent read discards the exited entry. Reuse, malformed evidence, unresolved
-permission denial, live ownership, surviving descendants, and exhausted churn
-retain the process record. Action-free CLI and MCP recovery use this same
-inspection before immediate pause or cancellation settlement.
+Shared-host supervision and owner-loss recovery associate processes through
+owned-session membership, a matching launch token or observed owned ancestry.
+Available parent links continue through inaccessible environments, and observed
+association survives later evidence loss. Unassociated processes neither block
+progress nor receive signals because metadata is unreadable, their session is
+newer or their cgroup is shared. Historical ancestry and control-group fields
+remain strictly validated but optional; new launches store null values. Required
+supervisor identity and namespace, live-owner exclusion, bounded inspection and
+journaled retirement remain mandatory. Recovery never signals persisted host
+PIDs. Shared-host discovery cannot prove absence against arbitrary same-user
+processes hiding all ancestry and token evidence; see the
+[safety contract](../../../docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The

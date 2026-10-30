@@ -970,8 +970,17 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   }
 });
 
-test("same-run recovery journals retirement after proving unrelated live custody and preserves its pending request", async (t) => {
+test("same-run recovery ignores an unassociated session and journals retirement before continuing its pending request", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    `${PLAN}
+
+## Commit 2: feat(test): extend behavior
+
+Extend the requested behavior.
+`,
+  );
   const bootId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const executionPid = 2_000_000_001;
   const identity = { bootId, startTicks: "9000" };
@@ -986,11 +995,40 @@ test("same-run recovery journals retirement after proving unrelated live custody
       pid === executionPid ? identity : { bootId, startTicks: String(pid) },
   };
   const store = createRunStore(storeOptions);
-  const { run } = await runnerFor(
+  const delegate = createExecutionAdapter();
+  let implementations = 0;
+  const original = runnerFor(
     fixture,
-    { codex: createExecutionAdapter() },
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (
+            request.prompt.includes(
+              "Run the complete project finalization procedure",
+            ) &&
+            (await store.loadRun(run.runId)).pipelineState.completedCommits
+              .length === 1
+          )
+            throw Object.assign(new Error("Interrupted finalization"), {
+              code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            });
+          const result = await delegate.run(request);
+          if (
+            request.prompt.includes("Implement the changes described") &&
+            ++implementations === 2
+          )
+            await writeFile(
+              join(fixture.projectPath, "feature.js"),
+              "export const value = 2;\n",
+            );
+          return result;
+        },
+      },
+    },
     { runStore: store },
-  ).create({
+  );
+  const { run } = await original.create({
     pipelineId: "plan-execution",
     projectPath: fixture.projectPath,
     taskPath: fixture.taskPath,
@@ -998,6 +1036,17 @@ test("same-run recovery journals retirement after proving unrelated live custody
     roleOverrides: {},
     sourceSession: null,
   });
+  await assert.rejects(original.resume({ runId: run.runId, action: null }), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const accepted = await store.loadRun(run.runId);
+  assert.equal(accepted.pipelineState.workflowState, "FINALIZE");
+  assert.equal(accepted.pipelineState.completedCommits.length, 1);
+  assert.equal(accepted.pipelineState.candidateReviewResult.status, "APPROVED");
+  assert.match(
+    accepted.pipelineState.candidateReviewedFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
   const lease = await store.acquireRunLease(run.runId);
   await store.acquireWorktreeLease(fixture.projectPath, run.runId);
   const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
@@ -1052,7 +1101,7 @@ test("same-run recovery journals retirement after proving unrelated live custody
       runStore: replacement,
       inspectSessionProcesses(sessionId, token, options) {
         assert.equal(sessionId, executionPid);
-        assert.deepEqual(options.ancestryBaseline, baseline);
+        assert.deepEqual(options, { includeSession: true });
         inspected = true;
         return inspectOwnedSessionProcesses(sessionId, token, {
           ...options,
@@ -1067,8 +1116,8 @@ test("same-run recovery journals retirement after proving unrelated live custody
               const fields = Array(20).fill("0");
               fields[0] = "S";
               fields[1] = String({ 101: 202, 202: 303, 303: 1 }[pid]);
-              fields[3] = "303";
-              fields[19] = { 101: "1234", 202: "5678", 303: "6789" }[pid];
+              fields[3] = pid === 101 ? "101" : "303";
+              fields[19] = { 101: "9999", 202: "5678", 303: "6789" }[pid];
               return `${pid} (process) ${fields.join(" ")}`;
             }
             if (path.endsWith("/status"))
@@ -1097,13 +1146,27 @@ test("same-run recovery journals retirement after proving unrelated live custody
   const history = await replacement.loadRunHistory(run.runId);
   const retirement = history.events.find(
     ({ activity }) =>
-      activity.phase === "execution" && activity.kind === "stopped",
+      activity?.phase === "execution" && activity.kind === "stopped",
   );
   assert.ok(retirement);
   const unchanged = ({ revision, updatedAt, executionProcess, ...state }) =>
     state;
   assert.deepEqual(unchanged(retirement.state), unchanged(checkpoint));
   assert.equal(retirement.state.executionProcess, null);
+  assert.deepEqual(retirement.state.counters, accepted.counters);
+  assert.deepEqual(retirement.state.hashes, accepted.hashes);
+  assert.deepEqual(retirement.state.pipelineState, accepted.pipelineState);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "feature.js"), "utf8"),
+    "export const value = 2;\n",
+  );
+  assert.equal(
+    history.events.filter(
+      ({ activity }) =>
+        activity?.phase === "execution" && activity.kind === "stopped",
+    ).length,
+    1,
+  );
   assert.deepEqual(await replacement.readAction(request), intent);
   assert.equal(
     (await replacement.inspectRecoveryDispatch(run.runId, dispatch)).ready,

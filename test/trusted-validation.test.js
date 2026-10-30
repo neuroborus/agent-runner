@@ -1816,8 +1816,8 @@ function preparation(
       if (pid !== null) {
         work.registrations += 1;
         assert.deepEqual(proof.launchCutoff, proof.processIdentity);
-        assert.ok(proof.ancestryBaseline.length > 0);
-        assert.match(proof.controlGroup, /^[a-f0-9]{64}$/u);
+        assert.equal(proof.ancestryBaseline, null);
+        assert.equal(proof.controlGroup, null);
         registered.resolve();
         await registration.promise;
         if (failRegistration) throw publicationFailure;

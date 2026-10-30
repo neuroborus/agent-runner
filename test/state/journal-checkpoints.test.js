@@ -1596,8 +1596,8 @@ async function preparationFixture(t, options = {}) {
       processIdentity: identity,
       launchCutoff: identity,
       namespaceId: "pid:[1]",
-      ancestryBaseline: [{ ...identity, pid: process.pid }],
-      controlGroup: "a".repeat(64),
+      ancestryBaseline: null,
+      controlGroup: null,
     };
   };
   f.attach = async (authority, canRelease = () => true) =>
@@ -1628,6 +1628,40 @@ async function preparationFixture(t, options = {}) {
     });
   return f;
 }
+
+test("preparation custody requires owner identity and namespace with optional historical proofs", async (t) => {
+  const f = await preparationFixture(t);
+  const proof = await f.proof();
+  const authority = await f.reserve();
+  for (const [change, code] of [
+    [
+      { processIdentity: null, launchCutoff: null },
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ],
+    [{ namespaceId: null }, "ERR_EXECUTION_PROCESS_UNVERIFIABLE"],
+    [{ ancestryBaseline: [] }, "ERR_INVALID_RUN_STATE"],
+    [{ controlGroup: "invalid" }, "ERR_INVALID_RUN_STATE"],
+  ]) {
+    f.proof = () => ({ ...proof, ...change });
+    await assert.rejects(f.attach(authority), { code });
+  }
+  for (const historical of [false, true]) {
+    f.proof = () => ({
+      ...proof,
+      ancestryBaseline: historical
+        ? [{ ...proof.processIdentity, pid: process.pid }]
+        : null,
+      controlGroup: historical ? "a".repeat(64) : null,
+    });
+    const currentAuthority = historical ? await f.reserve() : authority;
+    await f.attach(currentAuthority);
+    await f.retire(currentAuthority);
+    await f.settle();
+    const cold = createRunStore({ stateRoot: f.stateRoot });
+    const loaded = await cold.loadRun(f.current.runId);
+    assert.equal(loaded.preparation, null);
+  }
+});
 
 // Reuse the journal growth/rotation fixture and normalization counter above.
 // Count actual bytes and hashing as well as expensive canonical publications.

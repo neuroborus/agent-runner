@@ -262,14 +262,7 @@ export function createPreparationService({
             ancestryBaseline: proof.ancestryBaseline,
             controlGroup: proof.controlGroup,
           });
-          if (
-            [
-              process.processIdentity,
-              process.namespaceId,
-              process.ancestryBaseline,
-              process.controlGroup,
-            ].includes(null)
-          )
+          if (process.processIdentity === null || process.namespaceId === null)
             invalid();
           const assertIdentity = async () => {
             const identity = await processIdentity(pid);

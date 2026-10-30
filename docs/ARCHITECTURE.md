@@ -2050,13 +2050,15 @@ membership. Versions 5 through 10 derive the cutoff from a valid recorded
 supervisor identity during normalization. Versions 5 through 11 normalize the
 baseline to null; versions 5 through 13 normalize the control-group identity to
 null. Neither migration rescans the host or synthesizes recovery authority.
-The ordinary leased runtime migration persists that conservative shape, while
-malformed, unsorted, oversized, mixed-boot, or mismatched current evidence is
-rejected. Before a provider or trusted command can execute, a private
-supervisor waits on a separate inherited Node IPC channel while the runner
-journals its host PID, hostname, boot/start identity, launch cutoff, frozen
-ancestry baseline, control-group identity, and PID namespace identity. The
-shared agents boundary owns the
+Historical ancestry and control-group fields remain strictly validated, including
+ordering, size, boot identity and digest shape, but neither supplies recovery
+authority. New launches retain the same persisted shape with null ancestry and
+control-group fields; no global pre-launch process census is required. Valid old
+records with or without those optional proofs use the same ownership policy.
+Before a provider or trusted command can execute, a private supervisor waits on
+a separate inherited Node IPC channel while the runner journals its host PID,
+hostname, boot/start identity, matching launch cutoff and PID namespace identity.
+The shared agents boundary owns the
 closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
 processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,
@@ -2093,79 +2095,46 @@ child handle and control channel. The session token is derived from the already
 persisted PID, boot, and process-start proof, so recovery can reject clearing a
 dead session supervisor while matching descendants remain without signalling a
 numeric host PID. Unverifiable ownership retains exclusion.
-Former group-only records remain conservative until a verified reboot; they
-cannot prove that detached descendants stopped. Unavailable ordinary namespace
-support fails before execution. Session-mode discovery combines session
-membership and verified live ancestry with a per-launch inherited ownership
-token, including same-user descendants that create another session or PID
-namespace. Complete ancestry that reaches an unrelated host process remains an
-independent reason to disregard a candidate only when every observed hop
-reaches an unchanged frozen baseline identity. Parent loss before target launch
-retires the inert supervisor without scanning the shared namespace; no provider
-descendants can yet exist. Once launch is accepted, live and replacement-owner
-inspection use the identical frozen baseline. The scanner reads and stabilizes
-each hop before accepting an exact boot/PID/start anchor. It checks observed
-session and token evidence first, so an anchor cannot skip known ownership. A
-stable inaccessible intermediate environment may be crossed only if the
-lineage subsequently reaches an unchanged anchor; inaccessible current-process
-environment is excluded only when its lineage reaches no owned evidence and its
-stable control-group identity differs from the recorded owner, or the separate
-fully exited or live-custody candidate proof below succeeds. A missing or
-matching control-group identity without either proof, a stale or reused anchor,
-a missing baseline, a boot mismatch, a cycle, malformed
-identity evidence, and otherwise unproven candidates remain unverifiable
-during both live execution and recovery. Recovery also rejects a
-recorded PID namespace that differs from its own because the envelope does not
-grant authority to infer that the old namespace was private. Legacy state with
-a null baseline reports that it predates frozen ancestry recovery evidence
-instead of falling back to its launch cutoff. The independently proven
-previous-boot owner case is handled below. Other incomplete process evidence is
-unverifiable, and surviving descendants after bounded TERM/KILL retirement fail
-closed. Reusing the enclosing trusted namespace neither retries without
-containment nor widens its policy; its namespace init remains responsible for
-otherwise detached descendants.
-Ordinary processes never receive the initial-host session fallback.
+Identity-free records remain conservative until a verified reboot. Unavailable
+ordinary namespace support fails before execution. Ordinary processes never
+receive the initial-host session fallback.
 
-Both inspectors use the same narrow fully exited candidate proof after checking
-observed ownership and reaching a frozen baseline anchor. It requires the exact
-PID/start and parent/session, `Z` state, Linux `PF_EXITING`, a valid kernel exit
-code, and one reported thread. Two task views must each contain only that same
-dead leader with matching termination evidence and no children. Every ancestry
-hop through the anchor is revalidated, followed by the candidate's identity and
-termination evidence. Missing, malformed, reused, or unstable evidence cannot
-supply this exclusion. Invalidated candidate, task, or lineage evidence blocks
-classification even when the candidate's control group differs from the owner.
-A bare zombie state is insufficient; failed exit proof supplies no authority to
-exclude live work. Exclusion applies only to that snapshot entry: every other
-PID, including descendants, is classified independently before a complete empty
-scan can support process-tree retirement.
+Shared-host supervision and replacement-owner recovery use the same positive
+association scanner. Owned-session membership, a matching per-launch inherited
+token, or observed owned ancestry associates a process. Available parent links
+are followed through inaccessible environments; a historical baseline never
+short-circuits the search. Every snapshot descendant is inspected independently.
+An unassociated process does not block progress or receive signals because its
+metadata is unreadable, its session began later, or its cgroup is shared. There
+is no unrelated-process custody, exited-candidate or control-group exclusion
+proof. Shared-host discovery cannot prove absence against arbitrary same-user
+processes hiding all ancestry and token evidence; private PID containment
+remains the stronger kernel-enforced boundary.
 
-The separate positive live-custody proof follows the candidate's parent chain
-through a consistent session to that session's live leader. The leader's exact
-boot/PID/start identity must be in the frozen pre-launch baseline; an earlier
-baseline ancestor cannot end this walk. Candidate and hop identities already
-observed by the ancestry scan remain pinned. Every hop checks observed owned
-session and token evidence before accepting custody, including inaccessible
-intermediate environments and the leader itself. The entire lineage and leader
-are revalidated for identity, parent/session and live state, followed by final
-stat reads. Parent/session churn restarts the existing bounded classification;
-reuse or invalidated identity evidence blocks exclusion. This proof can exclude
-inaccessible live candidates and descendants in the owner's control group.
-Invalidated live-custody evidence cannot fall back to control-group exclusion;
-that separate exclusion also requires complete anchored ancestry.
-A different session, baseline ancestor, permission denial or control-group
-difference alone is not this proof. Missing or dead leaders, incomplete or
-cyclic lineages, inconsistent sessions and exhausted bounds cannot establish
-custody. Each descendant must independently satisfy classification; excluding a
-parent never establishes complete process-tree retirement.
+Positive association is retained across retries and live scans until a fresh
+stat proves the PID absent. Loss of a token, session change or reparenting cannot
+discard that association. An associated identity that is replaced, unreadable,
+malformed or unstable remains unverifiable rather than authorizing a signal or
+an empty scan. Previously observed members are rechecked even when omitted from
+a later directory listing. Session termination and containment failure freeze
+supervisor discovery and pass its retained associations to parent-side cleanup.
+Parent-side absence can clear registration only after that handoff is received;
+a watchdog killing the supervisor before transfer retains the ownership blocker.
+If IPC disconnects after handoff, the supervisor resumes discovery using its
+retained associations and signals verified owned members. Any pending termination
+check is upgraded to verified absence at its original deadline; surviving or
+uncertain descendants keep the supervisor live as an ownership blocker.
+Recovery remains inspection-only for persisted host PIDs. Recorded supervisor
+identity and namespace validation, live-owner exclusion and journaled retirement
+remain mandatory. Recovery rejects a current-boot
+namespace mismatch; a previous boot independently proves the old work absent.
+Parent loss before payload release retires the inert supervisor directly because
+no provider descendants can yet exist.
 
-Live and recovery shared-host scans additionally share a 65,536-operation and
-250-millisecond inspection budget. Reads, snapshot entries, baseline indexing,
-and ancestry traversal consume bounded work; a final read that exceeds the time
-budget also fails closed. Each inspection builds its validated baseline index
-once. Baseline capture uses the same work/time limits and retains its 4,096-entry
-cap. These limits cannot reset per PID or during process churn, and exhaustion
-never proves process absence.
+Live and recovery scans share a 65,536-operation and 250-millisecond inspection
+budget covering reads, snapshot entries, retained associations and ancestry
+traversal. A final read exceeding the time budget fails closed. These limits do
+not reset per PID or during churn, and exhaustion never proves process absence.
 
 Runner construction supplies the same session inspector to ordinary recovery
 and operator-stop reconciliation. Production uses the shared strict inspector;
@@ -2173,16 +2142,12 @@ synthetic-process orchestration tests inject their process-table view instead of
 sampling unrelated host workers. Identity rechecks, namespace checks, and lease
 ownership remain in the real retirement path.
 
-Both shared-host scanners classify each PID under a fixed three-attempt bound.
-The first readable stat pins that entry's start tick. An `ENOENT`/`ESRCH` from a
-later UID, environment, or ancestry read, or an observed parent/session change,
-restarts only that PID from a fresh stat and new ancestry. An entry absent on
-that fresh read is ignored as exited; a changed start tick is PID reuse and
-remains unverifiable. Malformed metadata, unapproved permission denial, live
-session/token evidence, a surviving descendant, and exhausted churn keep the
-existing fail-closed result. This per-entry retry applies identically inside the
-live supervisor and during replacement-owner recovery; it does not extend the
-completion grace below.
+Both scanners allow at most three attempts per snapshot entry. Transient
+`ENOENT`/`ESRCH` or parent/session change restarts that entry's classification.
+Unassociated churn supplies no ownership authority. Once ownership is observed,
+identity replacement or exhausted retries retains the process record; only an
+observed absent PID can retire that association. This retry policy does not
+extend the completion grace below.
 
 Completion-time descendant inspection retries transiently incomplete evidence
 against one non-resetting one-second descendant-grace deadline. Complete
@@ -2209,15 +2174,14 @@ after owner loss, and prevents checkpoint advancement before process cleanup.
 CLI/MCP command registration remains transport-owned.
 
 After owner loss, the replacement execution lease inspects the recorded
-PID/boot/start, frozen ancestry baseline, control-group identity, and namespace
-evidence. A PID that
-vanishes between liveness and identity reads is checked again and classified
-dead only when that second read proves absence. Same-boot PID replacement, a
+PID/boot/start and namespace evidence. A PID that vanishes between liveness and
+identity reads is checked again and classified dead only when that second read
+proves absence. Same-boot PID replacement, a
 live or unverifiable owner, an initial-host namespace hidden from the recovery
-process, missing or incompatible frozen ancestry, incomplete descendant
-inspection, or surviving descendants all retain the record. A previous boot or
-a dead same-namespace session with a complete empty descendant scan permits
-journaled clearing under the replacement lease. Current-boot namespace
+process, missing required owner identity, incomplete bounded inspection, or
+surviving positively associated descendants all retain the record. A previous
+boot or a dead same-namespace session with a complete empty descendant scan
+permits journaled clearing under the replacement lease. Current-boot namespace
 mismatch remains unverifiable even when the recorded owner PID is dead.
 Crashes before clearing repeat retirement proof; crashes after clearing repeat
 resource and checkpoint settlement without signalling the former PID.
@@ -3606,10 +3570,12 @@ Launch starts the unchanged absolute preparation deadline. Attachment and
 one-shot admission use fresh stable custody/lease reads, directory identity and
 process-identity rechecks. The log identifies the issued reservation by revision
 and digest without copying or hashing its history certificate. It preserves the
-complete existing process proof, including ancestry and control group, within
-16 records and 2 MiB; no proof is truncated. Cancellation during attachment
-retains the captured proof with denied admission even if the supervisor has
-exited; settlement still requires verified retirement. These compact operations
+complete process record within 16 records and 2 MiB; no historical field is
+truncated. Attachment requires supervisor identity and namespace. Historical
+ancestry and control-group proofs remain strictly validated when present, while
+new launches attach null values for both obsolete fields. Cancellation during
+attachment retains the captured proof with denied admission even if the
+supervisor has exited; settlement still requires verified retirement. These compact operations
 bypass canonical mutation queues, history loading/normalization and progress
 generation.
 The short state-owned custody gate serializes them with stop revocation. Stop
@@ -3627,8 +3593,8 @@ removal and canonical clearing. Retries reuse settlement rather than duplicate
 facts. Storage cleanup, further preparation, availability, checkpoint advancement
 and ownership release wait for that lifecycle. A reservation remains visible to
 lock-free ownership projections and blocks worktree reclamation. Recovery never
-releases an old attempt: it reconciles attachment, applies the existing independent
-tree-retirement proofs, and settles the same endpoint. An incomplete final record
+releases an old attempt: it reconciles attachment, applies the shared retirement
+policy, and settles the same endpoint. An incomplete final record
 can be removed only after original-prefix verification and phase-specific
 no-launch or retirement proof. Truncation binds the inspected file's identity,
 observations and exact prefix length, then rechecks the synced prefix and

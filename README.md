@@ -900,11 +900,10 @@ specific version-skew error while preserving the run. Common envelope version 8
 persists active-role effort; legacy missing values migrate to `current` without
 provider activity or changes to saved progress and session evidence. Version 11
 adds the supervisor's boot/start launch cutoff for durable shared-host recovery.
-Version 12 adds the bounded frozen boot/PID/start ancestry baseline used by both
-live supervision and replacement-owner recovery. Version 14 adds the owner's
-control-group identity so an inaccessible same-user process can be excluded
-only when it is proven to belong elsewhere. Legacy states migrate with no new
-authority and remain compatibility-blocked when that evidence is needed.
+Versions 12 and 14 added ancestry and control-group proof fields. Historical
+values remain strictly validated, but recovery uses positive ownership with or
+without those proofs. New launches store null values for both obsolete fields;
+required supervisor identity and namespace evidence remain unchanged.
 Version 20 separates generic reconstruction provenance from proven inactivity
 expiry. Legacy markers grant no timeout proof or additional recovery allowance;
 CLI/MCP expose `expiryProven` alongside recovery status.
@@ -1058,36 +1057,20 @@ owner loss it may immediately reclaim a current same-host execution or worktree
 lease only when the recorded boot/PID/start identity proves the exact owner dead
 or replaced; acquisition age is not a delay or proof. Legacy, identity-free,
 foreign-host, live, invalid, and unverifiable lease records remain blocking.
-The runner then clears a process record only after proving the recorded process
-and descendants absent. A post-launch shared-host process is excluded only after
-its complete, stabilized lineage reaches an unchanged entry in the frozen
-launch baseline.
-Every observed session and ownership token is checked before accepting that
-anchor. An inaccessible current environment is excluded only when its stable
-control-group identity differs from the recorded owner, or a narrow fully
-exited or separate positive live-custody proof succeeds after the anchored
-ownership checks. The exit proof requires matching identity, parent/session and
-kernel termination evidence,
-with two stable views of a sole dead task without children. Zombie state alone
-is insufficient. It excludes only that entry, even in the owner's control
-group; descendants remain independently inspected before complete process-tree
-retirement. Live custody instead requires a consistent stabilized parent/session
-chain to a live unrelated session leader with an exact pre-launch baseline
-identity, then rechecks the candidate, every hop and custodian. Known owned or
-delegated evidence takes precedence even at a baseline ancestor or leader.
-It supports inaccessible live trees in the owner's group while still inspecting
-each descendant independently. Different sessions, baseline ancestry,
-control-group differences or permission denial alone do not establish custody.
-Failed exit proof grants no authority over live work. Replaced or
-reused PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
-control-group evidence without either proof, missing or dead custodians,
-surviving descendants, and otherwise unverifiable evidence remain blocked and
-must not be bypassed by killing a persisted PID. A
-stable inaccessible intermediate may be crossed only when the same walk reaches
-its exact baseline anchor. If a snapshot PID exits or
-reparents during inspection, the runner retries that PID and its new ancestry
-under a fixed small bound and ignores it only after a fresh read proves it
-absent; namespace mismatch and exhausted churn remain unverifiable.
+The runner clears a process record only after validating the recorded supervisor
+identity and namespace, proving its death, and completing bounded discovery
+without surviving positively associated descendants. Both live supervision and
+recovery associate processes through owned-session membership, a matching launch
+token, or observed owned ancestry. They follow available parent links through
+inaccessible environments and retain observed association through later evidence
+loss. Unassociated processes neither block progress nor receive signals because
+metadata is unreadable, a session is newer, or a cgroup is shared. Historical
+ancestry and control-group proofs are optional and confer no exclusion authority.
+Shared-host discovery cannot prove absence against arbitrary same-user processes
+hiding all ancestry and token evidence. Private PID namespaces retain their
+kernel-enforced containment guarantee. Live, replaced or unverifiable recorded
+owners, namespace mismatches, uncertain known descendants and inspection-budget
+exhaustion remain blocking. Recovery never signals a persisted host PID.
 
 For repeatable automation, supply both captured values explicitly. Retry an
 uncertain request with exactly the same revision, key, and timing; never refresh a stale

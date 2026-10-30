@@ -338,16 +338,18 @@ inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
 
-Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
-baseline captured before supervisor launch. Owner-loss recovery excludes a new
-unrelated process only after every stabilized hop reaches an unchanged baseline
-identity without bypassing observed session or token ownership. Version 14
-also persists the owner's control-group identity; inaccessible current
-environment metadata is unrelated only when its stable identity differs. PID
-reuse, stale or missing anchors, boot or namespace mismatch, cycles, missing or
-matching control-group evidence, and surviving descendants fail closed before
-the process record can be retired. Legacy envelopes migrate with null evidence
-and gain no recovery authority.
+Shared-host supervision and owner-loss recovery associate processes through
+owned-session membership, a matching launch token or observed owned ancestry.
+Available parent links continue through inaccessible environments, and observed
+association survives later evidence loss. Unassociated processes neither block
+progress nor receive signals because metadata is unreadable, their session is
+newer or their cgroup is shared. Historical ancestry and control-group fields
+remain strictly validated but optional; new launches store null values. Required
+supervisor identity and namespace, live-owner exclusion, bounded inspection and
+journaled retirement remain mandatory. Recovery never signals persisted host
+PIDs. Shared-host discovery cannot prove absence against arbitrary same-user
+processes hiding all ancestry and token evidence; see the
+[safety contract](../../../docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow

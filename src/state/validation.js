@@ -1111,8 +1111,6 @@ export function normalizePreparationCustody(records, reservation) {
         process === null ||
         process.processIdentity === null ||
         process.namespaceId === null ||
-        process.ancestryBaseline === null ||
-        process.controlGroup === null ||
         !isDeepStrictEqual(process, value)
       )
         invalid();

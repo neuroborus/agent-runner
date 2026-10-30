@@ -14,7 +14,6 @@ import { dirname, isAbsolute, sep } from "node:path";
 
 import {
   readProcessChildren,
-  readProcessControlGroup,
   readProcessIdentity,
   readProcessNamespace,
 } from "./process-containment.js";
@@ -27,7 +26,6 @@ const BUBBLEWRAP_CANDIDATES = Object.freeze([
 ]);
 const DEFAULT_DESCENDANT_GRACE_MS = 1_000;
 const OWNED_PROCESS_INSPECTION_ATTEMPTS = 3;
-const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
 const MAX_INSPECTION_WORK = 65_536;
 const MAX_INSPECTION_MS = 250;
 
@@ -50,193 +48,6 @@ function inspectionBudget(now, maxWork, maxElapsedMs) {
   };
 }
 
-function exitedProcessEvidence(stat, pid, expected) {
-  const separator = stat.lastIndexOf(")");
-  if (stat.slice(0, stat.indexOf(" ")) !== String(pid)) return null;
-  const fields = stat
-    .slice(separator + 2)
-    .trim()
-    .split(/\s+/u);
-  if (
-    separator < 0 ||
-    fields.length < 50 ||
-    fields[0] !== "Z" ||
-    fields[1] !== String(expected.parentPid) ||
-    fields[3] !== expected.sessionId ||
-    fields[19] !== expected.startTicks ||
-    fields[17] !== "1" ||
-    !/^(?:0|[1-9]\d{0,9})$/u.test(fields[6]) ||
-    BigInt(fields[6]) > 0xffff_ffffn ||
-    (BigInt(fields[6]) & 4n) === 0n || // Linux PF_EXITING
-    !/^(?:0|[1-9]\d{0,9})$/u.test(fields[49]) ||
-    Number(fields[49]) > 0x7fff_ffff
-  )
-    return null;
-  return `${fields[6]}:${fields[49]}`;
-}
-
-// This excludes one fully exited entry, never its independently scanned tree.
-// Call only after owned evidence was checked and ancestry reached a baseline.
-// Missing termination proof permits other classification; invalidated evidence
-// must block even a different control group from excluding this candidate.
-function inspectExitedCandidate(pid, details, lineage, read, list) {
-  try {
-    if (lineage.length === 0) return "invalid";
-    const observe = () => {
-      const stat = read(`/proc/${pid}/stat`, "utf8");
-      const current = processStatDetails(stat, pid);
-      if (current === null || current.startTicks !== details.startTicks)
-        return "invalid";
-      if (
-        current.parentPid !== details.parentPid ||
-        current.sessionId !== details.sessionId
-      )
-        return "retry";
-      return exitedProcessEvidence(stat, pid, details);
-    };
-    const termination = observe();
-    if (termination === null || ["retry", "invalid"].includes(termination))
-      return termination;
-    const taskPath = `/proc/${pid}/task`;
-    for (let view = 0; view < 2; view += 1) {
-      const tasks = list(taskPath);
-      if (
-        !Array.isArray(tasks) ||
-        tasks.length !== 1 ||
-        tasks[0] !== String(pid)
-      )
-        return "invalid";
-      if (
-        exitedProcessEvidence(
-          read(`${taskPath}/${pid}/stat`, "utf8"),
-          pid,
-          details,
-        ) !== termination ||
-        read(`${taskPath}/${pid}/children`, "utf8").trim() !== ""
-      )
-        return "invalid";
-    }
-    for (const ancestor of lineage) {
-      const verification = verifyProcessDetails(
-        ancestor.pid,
-        ancestor.details,
-        read,
-      );
-      if (verification !== "stable") return verification ?? "invalid";
-    }
-    const final = observe();
-    return final === termination
-      ? "exited"
-      : final === "retry"
-        ? "retry"
-        : "invalid";
-  } catch (cause) {
-    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : "invalid";
-  }
-}
-
-// A baseline ancestor alone is not custody. Follow the candidate's session all
-// the way to its live, pre-launch leader, checking ownership before any anchor.
-function inspectLiveCustody(
-  pid,
-  details,
-  ancestry,
-  ownerSession,
-  ownerToken,
-  isBaseline,
-  read,
-) {
-  const lineage = [];
-  const pinned = new Map(ancestry.map((entry) => [entry.pid, entry.details]));
-  const seen = new Set();
-  const observe = (currentPid, expected) => {
-    const current = processStatDetails(
-      read(`/proc/${currentPid}/stat`, "utf8"),
-      currentPid,
-    );
-    if (current === null || current.startTicks !== expected.startTicks)
-      return "invalid";
-    if (
-      current.parentPid !== expected.parentPid ||
-      current.sessionId !== expected.sessionId
-    )
-      return "retry";
-    let owned =
-      String(currentPid) === ownerSession || current.sessionId === ownerSession;
-    try {
-      const environment = read(`/proc/${currentPid}/environ`, "utf8").split(
-        "\0",
-      );
-      owned ||= environment.includes(
-        `AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`,
-      );
-    } catch (cause) {
-      if (!["EACCES", "EPERM"].includes(cause?.code)) throw cause;
-    }
-    const verification = verifyProcessDetails(currentPid, current, read);
-    if (verification !== "stable") return verification ?? "invalid";
-    if (owned) return "current";
-    if (!["R", "S", "D", "T", "t", "W", "K", "P", "I"].includes(current.state))
-      return "invalid";
-    return current.sessionId === details.sessionId ? "stable" : null;
-  };
-  try {
-    let currentPid = pid;
-    let current = details;
-    while (currentPid > 0 && !seen.has(currentPid)) {
-      seen.add(currentPid);
-      const observation = observe(currentPid, current);
-      if (observation !== "stable") return observation;
-      lineage.push({ pid: currentPid, details: current });
-      if (seen.has(current.parentPid)) return "invalid";
-      if (String(currentPid) === details.sessionId) {
-        if (!isBaseline(currentPid, current.startTicks)) return "invalid";
-        for (const entry of lineage) {
-          const verification = observe(entry.pid, entry.details);
-          if (verification !== "stable") return verification;
-        }
-        // The last environment read must not hide a changed identity or exit.
-        for (const entry of lineage.toReversed()) {
-          const final = processStatDetails(
-            read(`/proc/${entry.pid}/stat`, "utf8"),
-            entry.pid,
-          );
-          if (final === null || final.startTicks !== entry.details.startTicks)
-            return "invalid";
-          if (
-            final.parentPid !== entry.details.parentPid ||
-            final.sessionId !== entry.details.sessionId
-          )
-            return "retry";
-          if (
-            !["R", "S", "D", "T", "t", "W", "K", "P", "I"].includes(final.state)
-          )
-            return "invalid";
-        }
-        return "unrelated";
-      }
-      currentPid = current.parentPid;
-      current = processStatDetails(
-        read(`/proc/${currentPid}/stat`, "utf8"),
-        currentPid,
-      );
-      if (current === null) return "invalid";
-      if (pinned.has(currentPid)) {
-        const expected = pinned.get(currentPid);
-        if (current.startTicks !== expected.startTicks) return "invalid";
-        if (
-          current.parentPid !== expected.parentPid ||
-          current.sessionId !== expected.sessionId
-        )
-          return "retry";
-      }
-    }
-    return "invalid";
-  } catch (cause) {
-    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : "invalid";
-  }
-}
-
 const OWNERSHIP_MODES = new Set(["ordinary", "native-sandbox-provider"]);
 // Linux reserves this procfs inode for the initial PID namespace.
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
@@ -246,7 +57,6 @@ const namespaceLaunchSupport = new Map();
 const SUPERVISOR_SOURCE = String.raw`
 const { readdirSync } = require("node:fs");
 const { spawn } = require("node:child_process");
-const { createHash } = require("node:crypto");
 const [mode, graceText, executable, encodedArguments, extraText, initialToken, deadlineText] =
   process.argv.slice(1);
 const deadlineNs = deadlineText === undefined || deadlineText === "-"
@@ -260,11 +70,13 @@ let target;
 let settled = false;
 let outcome;
 let ownerToken = initialToken;
-let launchCutoff;
-let ancestryBaseline;
-let controlGroup;
+// Retain positive association across scans until absence is observed.
+const observedProcesses = new Map();
 let retentionTimer;
+let terminationCheck;
+let verifyTermination = false;
 let releaseClosed = false;
+let ownershipHandedOff = false;
 function preparationExpired() {
   if (deadlineNs === null || process.hrtime.bigint() < deadlineNs) return false;
   releaseClosed = true;
@@ -274,9 +86,6 @@ function preparationExpired() {
   return true;
 }
 const inspectionBudget = ${inspectionBudget.toString()};
-const exitedProcessEvidence = ${exitedProcessEvidence.toString()};
-const inspectExitedCandidate = ${inspectExitedCandidate.toString()};
-const inspectLiveCustody = ${inspectLiveCustody.toString()};
 let charge;
 function readProc(path, encoding) {
   charge();
@@ -292,233 +101,12 @@ function listProc(path) {
   } finally { charge(0); }
 }
 
-function processStatDetails(stat, pid) {
-  const separator = stat.lastIndexOf(")");
-  if (separator < 0 || stat.slice(0, stat.indexOf(" ")) !== String(pid)) return null;
-  const fields = stat.slice(separator + 2).trim().split(/\s+/);
-  if (
-    fields.length < 20 ||
-    !/^\d+$/.test(fields[1]) ||
-    !/^\d+$/.test(fields[3]) ||
-    !/^(?:0|[1-9]\d{0,31})$/.test(fields[19])
-  ) return null;
-  return {
-    state: fields[0],
-    parentPid: Number(fields[1]),
-    sessionId: fields[3],
-    startTicks: fields[19],
-  };
-}
-function normalizedLaunchCutoff(value) {
-  if (
-    value === null ||
-    typeof value !== "object" ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== 2 ||
-    typeof value.bootId !== "string" ||
-    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.bootId) ||
-    typeof value.startTicks !== "string" ||
-    !/^(?:0|[1-9]\d{0,31})$/.test(value.startTicks)
-  ) return null;
-  return value;
-}
-function normalizedAncestryBaseline(value, cutoff) {
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.length > ${MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES}
-  ) return null;
-  let previousPid = 0;
-  const identities = new Map();
-  for (const entry of value) {
-    if (
-      entry === null ||
-      typeof entry !== "object" ||
-      Array.isArray(entry) ||
-      Object.keys(entry).length !== 3 ||
-      typeof entry.bootId !== "string" ||
-      !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(entry.bootId) ||
-      !Number.isSafeInteger(entry.pid) ||
-      entry.pid <= previousPid ||
-      typeof entry.startTicks !== "string" ||
-      !/^(?:0|[1-9]\d{0,31})$/.test(entry.startTicks) ||
-      entry.bootId !== cutoff.bootId
-    ) return null;
-    previousPid = entry.pid;
-    identities.set(entry.pid, entry.startTicks);
-  }
-  return identities;
-}
-function isBaselineIdentity(pid, startTicks) {
-  return ancestryBaseline?.get(pid) === startTicks;
-}
-function processUid(pid) {
-  const status = readProc(
-    "/proc/" + pid + "/status",
-    "utf8",
-  );
-  const match = /^Uid:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/m.exec(status);
-  if (match === null) throw new Error("invalid process uid");
-  return match.slice(1).map(Number);
-}
-function processControlGroup(pid) {
-  const source = readProc(
-    "/proc/" + pid + "/cgroup",
-    "utf8",
-  );
-  if (
-    Buffer.byteLength(source) === 0 ||
-    Buffer.byteLength(source) > 64 * 1024 ||
-    !source.endsWith("\n")
-  ) throw new Error("invalid process control group");
-  return createHash("sha256").update(source).digest("hex");
-}
-function verifyProcessDetails(pid, expected) {
-  try {
-    const current = processStatDetails(
-      readProc("/proc/" + pid + "/stat", "utf8"),
-      pid,
-    );
-    if (current === null || current.startTicks !== expected.startTicks) {
-      return null;
-    }
-    return current.parentPid === expected.parentPid &&
-      current.sessionId === expected.sessionId
-      ? "stable"
-      : "retry";
-  } catch (cause) {
-    return cause?.code === "ENOENT" || cause?.code === "ESRCH"
-      ? "retry"
-      : null;
-  }
-}
-function inspectOwnedAncestry(parentPid, session, lineage = []) {
-  const seen = new Set();
-  while (parentPid > 0 && !seen.has(parentPid)) {
-    charge();
-    if (String(parentPid) === session) return "current";
-    seen.add(parentPid);
-    const ancestorPid = parentPid;
-    let details;
-    try {
-      details = processStatDetails(
-        readProc(
-          "/proc/" + ancestorPid + "/stat",
-          "utf8",
-        ),
-        ancestorPid,
-      );
-      if (details === null) return null;
-      if (details.sessionId === session) {
-        const verification = verifyProcessDetails(ancestorPid, details);
-        return verification === "stable" ? "current" : verification;
-      }
-      const environment = readProc("/proc/" + ancestorPid + "/environ", "utf8")
-        .split("\0");
-      const verification = verifyProcessDetails(ancestorPid, details);
-      if (verification !== "stable") return verification;
-      if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
-        return "current";
-      }
-      lineage.push({ pid: ancestorPid, details });
-      if (isBaselineIdentity(ancestorPid, details.startTicks)) {
-        return "anchored";
-      }
-      parentPid = details.parentPid;
-    } catch (cause) {
-      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return "retry";
-      if (cause?.code === "EACCES" || cause?.code === "EPERM") {
-        if (details === undefined) return null;
-        const verification = verifyProcessDetails(ancestorPid, details);
-        if (verification !== "stable") return verification;
-        lineage.push({ pid: ancestorPid, details });
-        if (isBaselineIdentity(ancestorPid, details.startTicks)) {
-          return "anchored";
-        }
-        parentPid = details.parentPid;
-        continue;
-      }
-      return null;
-    }
-  }
-  return null;
-}
-function inspectSessionProcess(pid, session) {
-  let pinnedStartTicks;
-  for (
-    let attempt = 0;
-    attempt < OWNED_PROCESS_INSPECTION_ATTEMPTS;
-    attempt += 1
-  ) {
-    let details;
-    try {
-      details = processStatDetails(
-        readProc("/proc/" + pid + "/stat", "utf8"),
-        pid,
-      );
-    } catch (cause) {
-      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return "absent";
-      return null;
-    }
-    if (details === null) return null;
-    if (pinnedStartTicks === undefined) pinnedStartTicks = details.startTicks;
-    else if (details.startTicks !== pinnedStartTicks) return null;
-
-    let ownership;
-    try {
-      if (details.sessionId === session) ownership = "current";
-      else if (processUid(pid).some((uid) => uid !== process.getuid())) {
-        ownership = "unrelated";
-      } else {
-        const environment = readProc("/proc/" + pid + "/environ", "utf8")
-          .split("\0");
-        if (environment.includes("AGENT_RUNNER_OWNED_PROCESS=" + ownerToken)) {
-          ownership = "current";
-        } else if (isBaselineIdentity(pid, details.startTicks)) {
-          ownership = "anchored";
-        } else {
-          ownership = inspectOwnedAncestry(details.parentPid, session);
-        }
-      }
-    } catch (cause) {
-      if (cause?.code === "ENOENT" || cause?.code === "ESRCH") {
-        ownership = "retry";
-      } else if (cause?.code === "EACCES" || cause?.code === "EPERM") {
-        const verification = verifyProcessDetails(pid, details);
-        if (verification !== "stable") ownership = verification;
-        else if (isBaselineIdentity(pid, details.startTicks)) {
-          ownership = "anchored";
-        } else {
-          const lineage = [];
-          const ancestry = inspectOwnedAncestry(details.parentPid, session, lineage);
-          const classification = ancestry === "anchored"
-            ? inspectExitedCandidate(pid, details, lineage, readProc, listProc)
-            : ancestry;
-          if (classification === "exited") return "unrelated";
-          if (classification === "invalid") return null;
-          if (["current", "retry"].includes(classification)) ownership = classification;
-          else {
-            ownership = ancestry === "anchored"
-              ? inspectLiveCustody(pid, details, lineage, session, ownerToken, isBaselineIdentity, readProc)
-              : null;
-            if (ownership === "unrelated") return "unrelated";
-            if (ownership === "invalid") return null;
-            if (ownership === null && ancestry === "anchored" && processControlGroup(pid) !== controlGroup) {
-              ownership = "unrelated";
-            }
-          }
-        }
-      } else return null;
-    }
-    if (ownership === "retry") continue;
-    if (ownership === null) return null;
-    const verification = verifyProcessDetails(pid, details);
-    if (verification === "retry") continue;
-    if (verification === null) return null;
-    return ownership === "anchored" ? "unrelated" : ownership;
-  }
-  return null;
-}
+const processStatDetails = ${processStatDetails.toString()};
+const processUid = ${processUid.toString()};
+const verifyProcessDetails = ${verifyProcessDetails.toString()};
+const inspectOwnedAncestry = ${inspectOwnedAncestry.toString()};
+const inspectSessionProcess = ${inspectSessionProcess.toString()};
+const reconcileOwnedMembers = ${reconcileOwnedMembers.toString()};
 function ownedMembers() {
   if (mode !== "session") return [];
   const session = String(process.pid);
@@ -526,18 +114,20 @@ function ownedMembers() {
   // to this supervisor's session and descendants carrying its launch token.
   try {
     charge = inspectionBudget(() => performance.now(), ${MAX_INSPECTION_WORK}, ${MAX_INSPECTION_MS});
-    charge();
-    const names = listProc("/proc");
+    charge(observedProcesses.size);
+    const names = new Set([...listProc("/proc"), ...Array.from(observedProcesses.keys(), String)]);
     const members = [];
+    const inspect = (pid) => inspectSessionProcess(pid, Number(session), ownerToken, true, () => process.getuid(), readProc, observedProcesses);
     for (const name of names) {
       charge();
       if (!/^\d+$/.test(name) || name === String(process.pid)) continue;
-      const ownership = inspectSessionProcess(Number(name), session);
+      const ownership = inspect(Number(name));
       if (ownership === null) return null;
       if (ownership === "current") members.push(Number(name));
     }
+    const reconciled = reconcileOwnedMembers(members, observedProcesses, inspect, charge);
     charge(0);
-    return members;
+    return reconciled;
   } catch {
     return null;
   }
@@ -570,16 +160,19 @@ function signalDescendants(signal) {
   return true;
 }
 function retainContainmentFailure(code) {
+  releaseClosed = true;
+  ownershipHandedOff = true;
   if (process.connected) {
-    process.send({ type: "containment-failure", code });
+    process.send({ type: "containment-failure", code, observedProcesses: [...observedProcesses] });
   }
   retentionTimer ??= setInterval(() => {}, 60_000);
 }
 function finish() {
-  if (settled) return;
+  if (settled || releaseClosed) return;
   settled = true;
   let inspectionDeadline;
   const withCompleteInspection = (inspect, complete) => {
+    if (releaseClosed) return;
     const inspection = inspect();
     if (inspection !== null) {
       complete(inspection);
@@ -657,19 +250,33 @@ function terminate(signal = "SIGTERM", verify = false) {
   releaseClosed = true;
   // Before the start message, this inert supervisor cannot have descendants.
   if (target === undefined) process.exit(124);
+  if (verify) {
+    verifyTermination = true;
+    terminationCheck?.ref();
+  }
+  // Connected handoff freezes discovery; disconnect reclaims cleanup with the
+  // retained identities and upgrades the original timer without extending it.
+  if (ownershipHandedOff && !verify) {
+    try { target.kill(signal); } catch {}
+    return;
+  }
   const inspectionComplete = signalDescendants(signal);
   if (target?.pid) {
     try { target.kill(signal); } catch {}
   }
   if (!inspectionComplete) return retainContainmentFailure("unverifiable");
-  const terminationCheck = setTimeout(() => {
-    if (!verify) return process.exit(124);
+  if (mode === "session" && process.connected) {
+    ownershipHandedOff = true;
+    process.send({ type: "ownership-handoff", observedProcesses: [...observedProcesses] });
+  }
+  terminationCheck ??= setTimeout(() => {
+    if (!verifyTermination) return process.exit(124);
     const inspection = inspectDescendants();
     if (!inspection.complete) return retainContainmentFailure("unverifiable");
     if (inspection.active) return retainContainmentFailure("active");
     process.exit(124);
   }, grace);
-  if (!verify) terminationCheck.unref();
+  if (!verifyTermination) terminationCheck.unref();
 }
 process.on("disconnect", () => terminate("SIGKILL", true));
 process.on("SIGTERM", () => terminate("SIGTERM"));
@@ -684,20 +291,6 @@ process.on("message", (message) => {
   if (typeof message.ownerToken !== "string" || message.ownerToken.length !== 64) {
     process.exit(126);
   }
-  launchCutoff = normalizedLaunchCutoff(message.launchCutoff);
-  ancestryBaseline =
-    launchCutoff === null
-      ? null
-      : normalizedAncestryBaseline(message.ancestryBaseline, launchCutoff);
-  controlGroup =
-    typeof message.controlGroup === "string" &&
-    /^[a-f0-9]{64}$/.test(message.controlGroup)
-      ? message.controlGroup
-      : null;
-  if (
-    mode === "session" &&
-    (ancestryBaseline === null || controlGroup === null)
-  ) process.exit(126);
   ownerToken = message.ownerToken;
   const stdio = [0, 1, 2];
   for (let index = 0; index < extra; index += 1) stdio.push(index + 4);
@@ -900,23 +493,6 @@ function processUid(pid, read = readFileSync) {
   return match.slice(1).map(Number);
 }
 
-function processControlGroup(pid, read = readFileSync) {
-  const source = read(`/proc/${pid}/cgroup`, "utf8");
-  if (
-    Buffer.byteLength(source) === 0 ||
-    Buffer.byteLength(source) > 64 * 1024 ||
-    !source.endsWith("\n")
-  )
-    return null;
-  return createHash("sha256").update(source).digest("hex");
-}
-
-function hasDifferentControlGroup(pid, controlGroup, read = readFileSync) {
-  if (controlGroup === null) return false;
-  const candidate = processControlGroup(pid, read);
-  return candidate !== null && candidate !== controlGroup;
-}
-
 function processStatDetails(stat, pid) {
   const separator = stat.lastIndexOf(")");
   if (separator < 0 || stat.slice(0, stat.indexOf(" ")) !== String(pid))
@@ -940,137 +516,18 @@ function processStatDetails(stat, pid) {
   };
 }
 
-function validBootId(value) {
-  return (
-    typeof value === "string" &&
-    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u.test(value)
-  );
-}
-
-function normalizedAncestryBaseline(value) {
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.length > MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES
-  )
-    return null;
-  const entries = [];
-  let previousPid = 0;
-  let bootId = null;
-  for (const entry of value) {
-    if (
-      entry === null ||
-      typeof entry !== "object" ||
-      Array.isArray(entry) ||
-      Object.keys(entry).length !== 3 ||
-      !validBootId(entry.bootId) ||
-      !Number.isSafeInteger(entry.pid) ||
-      entry.pid <= previousPid ||
-      typeof entry.startTicks !== "string" ||
-      !/^(?:0|[1-9]\d{0,31})$/u.test(entry.startTicks) ||
-      (bootId !== null && entry.bootId !== bootId)
-    )
-      return null;
-    bootId ??= entry.bootId;
-    previousPid = entry.pid;
-    entries.push({
-      bootId: entry.bootId,
-      pid: entry.pid,
-      startTicks: entry.startTicks,
-    });
-  }
-  return entries;
-}
-
-function captureProcessAncestryBaseline({
-  list = readdirSync,
-  read = readFileSync,
-} = {}) {
-  try {
-    const charge = inspectionBudget(
-      () => performance.now(),
-      MAX_INSPECTION_WORK,
-      MAX_INSPECTION_MS,
-    );
-    const rawRead = read;
-    read = (...args) => {
-      charge();
-      try {
-        return rawRead(...args);
-      } finally {
-        charge(0);
-      }
-    };
-    const bootPath = "/proc/sys/kernel/random/boot_id";
-    const bootId = read(bootPath, "utf8").trim();
-    if (!validBootId(bootId)) return null;
-    const names = list("/proc");
-    charge(names.length);
-    const pids = [
-      ...new Set(
-        names
-          .filter((name) => /^(?:[1-9]\d*)$/u.test(name))
-          .map(Number)
-          .filter(Number.isSafeInteger),
-      ),
-    ].sort((left, right) => left - right);
-    if (
-      pids.length === 0 ||
-      pids.length > MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES
-    )
-      return null;
-    const entries = [];
-    for (const pid of pids) {
-      try {
-        const details = processStatDetails(
-          read(`/proc/${pid}/stat`, "utf8"),
-          pid,
-        );
-        if (details === null) return null;
-        entries.push({ bootId, pid, startTicks: details.startTicks });
-      } catch (cause) {
-        if (!["ENOENT", "ESRCH"].includes(cause?.code)) return null;
-      }
-    }
-    if (entries.length === 0 || read(bootPath, "utf8").trim() !== bootId)
-      return null;
-    return entries;
-  } catch {
-    return null;
-  }
-}
-
-function ancestryBaselineIndex(value, read) {
-  const entries = normalizedAncestryBaseline(value);
-  if (entries === null) return null;
-  let currentBootId;
-  try {
-    currentBootId = read("/proc/sys/kernel/random/boot_id", "utf8").trim();
-  } catch {
-    return null;
-  }
-  if (!validBootId(currentBootId) || entries[0].bootId !== currentBootId) {
-    return null;
-  }
-  return new Map(entries.map(({ pid, startTicks }) => [pid, startTicks]));
-}
-
-function isBaselineIdentity(baseline, pid, startTicks) {
-  return baseline?.get(pid) === startTicks;
-}
-
 function verifyProcessDetails(pid, expected, read) {
   try {
     const current = processStatDetails(read(`/proc/${pid}/stat`, "utf8"), pid);
-    if (current === null || current.startTicks !== expected.startTicks) {
-      return null;
-    }
+    if (current === null) return "unavailable";
+    if (current.startTicks !== expected.startTicks) return "replaced";
     return current.parentPid === expected.parentPid &&
       current.sessionId === expected.sessionId
       ? "stable"
       : "retry";
   } catch (cause) {
-    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : null;
+    if (["ENOENT", "ESRCH"].includes(cause?.code)) return "retry";
+    return "unavailable";
   }
 }
 
@@ -1079,60 +536,64 @@ function inspectOwnedAncestry(
   sessionId,
   ownerToken,
   includeSession,
-  ancestryBaseline,
   read,
-  lineage = [],
+  observedProcesses,
+  associate,
 ) {
-  const seen = new Set();
-  while (parentPid > 0 && !seen.has(parentPid)) {
-    if (includeSession && parentPid === sessionId) return "current";
-    seen.add(parentPid);
+  const lineage = new Map();
+  const associateLineage = () => {
+    for (const [pid, startTicks] of lineage) {
+      observedProcesses.set(pid, startTicks);
+    }
+    associate();
+  };
+  while (parentPid > 0 && !lineage.has(parentPid)) {
+    if (includeSession && String(parentPid) === String(sessionId)) {
+      associateLineage();
+      return "current";
+    }
     const ancestorPid = parentPid;
+    const known = observedProcesses.get(ancestorPid);
     let details;
     try {
       details = processStatDetails(
         read(`/proc/${ancestorPid}/stat`, "utf8"),
         ancestorPid,
       );
-      if (details === null) return null;
-      if (includeSession && details.sessionId === String(sessionId)) {
-        const verification = verifyProcessDetails(ancestorPid, details, read);
-        return verification === "stable" ? "current" : verification;
-      }
-      const environment = read(`/proc/${ancestorPid}/environ`, "utf8").split(
-        "\0",
-      );
-      const verification = verifyProcessDetails(ancestorPid, details, read);
-      if (verification !== "stable") return verification;
-      if (environment.includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`)) {
-        return "current";
-      }
-      lineage.push({ pid: ancestorPid, details });
-      if (
-        isBaselineIdentity(ancestryBaseline, ancestorPid, details.startTicks)
-      ) {
-        return "anchored";
-      }
-      parentPid = details.parentPid;
     } catch (cause) {
       if (["ENOENT", "ESRCH"].includes(cause?.code)) return "retry";
-      if (["EACCES", "EPERM"].includes(cause?.code)) {
-        if (details === undefined) return null;
-        const verification = verifyProcessDetails(ancestorPid, details, read);
-        if (verification !== "stable") return verification;
-        lineage.push({ pid: ancestorPid, details });
-        if (
-          isBaselineIdentity(ancestryBaseline, ancestorPid, details.startTicks)
-        ) {
-          return "anchored";
-        }
-        parentPid = details.parentPid;
-        continue;
-      }
-      return null;
+      return known === undefined ? "unrelated" : null;
     }
+    if (details === null) return known === undefined ? "unrelated" : null;
+    if (known !== undefined && known !== details.startTicks) return null;
+    let owned =
+      known !== undefined ||
+      (includeSession && details.sessionId === String(sessionId));
+    try {
+      owned ||= read(`/proc/${ancestorPid}/environ`, "utf8")
+        .split("\0")
+        .includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`);
+    } catch (cause) {
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) return "retry";
+    }
+    if (owned) {
+      observedProcesses.set(ancestorPid, details.startTicks);
+    }
+    const verification = verifyProcessDetails(ancestorPid, details, read);
+    if (verification === "unavailable") return owned ? null : "unrelated";
+    if (verification === "replaced") return owned ? null : "retry";
+    if (verification !== "stable") return verification;
+    if (owned) {
+      // Retain the ancestor's evidence, but associate new descendants only
+      // after its identity and parent/session observations are verified.
+      associateLineage();
+      return "current";
+    }
+    lineage.set(ancestorPid, details.startTicks);
+    // Permission to read an environment is not required to follow its parent.
+    parentPid = details.parentPid;
   }
-  return null;
+  return "unrelated";
 }
 
 function inspectSessionProcess(
@@ -1140,13 +601,11 @@ function inspectSessionProcess(
   sessionId,
   ownerToken,
   includeSession,
-  ancestryBaseline,
-  controlGroup,
   getuid,
   read,
-  list,
+  observedProcesses,
 ) {
-  let pinnedStartTicks;
+  let pinnedStartTicks = observedProcesses.get(pid);
   for (
     let attempt = 0;
     attempt < OWNED_PROCESS_INSPECTION_ATTEMPTS;
@@ -1156,120 +615,98 @@ function inspectSessionProcess(
     try {
       details = processStatDetails(read(`/proc/${pid}/stat`, "utf8"), pid);
     } catch (cause) {
-      if (["ENOENT", "ESRCH"].includes(cause?.code)) return "absent";
-      return null;
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) {
+        observedProcesses.delete(pid);
+        return "absent";
+      }
+      return observedProcesses.has(pid) ? null : "unrelated";
     }
-    if (details === null) return null;
+    if (details === null)
+      return observedProcesses.has(pid) ? null : "unrelated";
     if (pinnedStartTicks === undefined) pinnedStartTicks = details.startTicks;
-    else if (details.startTicks !== pinnedStartTicks) return null;
-
-    let ownership;
+    else if (details.startTicks !== pinnedStartTicks) {
+      if (observedProcesses.has(pid)) return null;
+      pinnedStartTicks = details.startTicks;
+    }
+    const associate = () => observedProcesses.set(pid, details.startTicks);
+    let ownership = "unrelated";
     try {
-      if (includeSession && details.sessionId === String(sessionId)) {
+      if (
+        observedProcesses.has(pid) ||
+        (includeSession && details.sessionId === String(sessionId))
+      ) {
+        associate();
         ownership = "current";
       } else {
-        const uids = processUid(pid, read);
-        if (uids === null) return null;
-        if (uids.some((uid) => uid !== getuid())) ownership = "unrelated";
-        else {
-          const environment = read(`/proc/${pid}/environ`, "utf8");
-          if (
-            environment
+        let uids = null;
+        try {
+          uids = processUid(pid, read);
+        } catch (cause) {
+          if (["ENOENT", "ESRCH"].includes(cause?.code)) throw cause;
+        }
+        let owned = false;
+        if (uids === null || uids.every((uid) => uid === getuid())) {
+          try {
+            owned = read(`/proc/${pid}/environ`, "utf8")
               .split("\0")
-              .includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`)
-          ) {
-            ownership = "current";
-          } else if (
-            isBaselineIdentity(ancestryBaseline, pid, details.startTicks)
-          ) {
-            ownership = "anchored";
-          } else {
-            ownership = inspectOwnedAncestry(
-              details.parentPid,
-              sessionId,
-              ownerToken,
-              includeSession,
-              ancestryBaseline,
-              read,
-            );
+              .includes(`AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`);
+          } catch (cause) {
+            if (["ENOENT", "ESRCH"].includes(cause?.code)) throw cause;
           }
         }
-      }
-    } catch (cause) {
-      if (["ENOENT", "ESRCH"].includes(cause?.code)) ownership = "retry";
-      else if (["EACCES", "EPERM"].includes(cause?.code)) {
-        const verification = verifyProcessDetails(pid, details, read);
-        if (verification !== "stable") ownership = verification;
-        else if (
-          isBaselineIdentity(ancestryBaseline, pid, details.startTicks)
-        ) {
-          ownership = "anchored";
+        if (owned) {
+          associate();
+          ownership = "current";
         } else {
-          const lineage = [];
-          const ancestry = inspectOwnedAncestry(
+          ownership = inspectOwnedAncestry(
             details.parentPid,
             sessionId,
             ownerToken,
             includeSession,
-            ancestryBaseline,
             read,
-            lineage,
+            observedProcesses,
+            associate,
           );
-          const classification =
-            ancestry === "anchored"
-              ? inspectExitedCandidate(pid, details, lineage, read, list)
-              : ancestry;
-          if (classification === "exited") return "unrelated";
-          if (classification === "invalid") return null;
-          if (["current", "retry"].includes(classification))
-            ownership = classification;
-          else {
-            ownership =
-              ancestry === "anchored"
-                ? inspectLiveCustody(
-                    pid,
-                    details,
-                    lineage,
-                    includeSession ? String(sessionId) : null,
-                    ownerToken,
-                    (candidate, startTicks) =>
-                      isBaselineIdentity(
-                        ancestryBaseline,
-                        candidate,
-                        startTicks,
-                      ),
-                    read,
-                  )
-                : null;
-            if (ownership === "unrelated") return "unrelated";
-            if (ownership === "invalid") return null;
-            if (
-              ownership === null &&
-              ancestry === "anchored" &&
-              hasDifferentControlGroup(pid, controlGroup, read)
-            ) {
-              ownership = "unrelated";
-            }
-          }
         }
-      } else return null;
+      }
+    } catch (cause) {
+      if (["ENOENT", "ESRCH"].includes(cause?.code)) ownership = "retry";
+      else throw cause;
     }
     if (ownership === "retry") continue;
     if (ownership === null) return null;
     const verification = verifyProcessDetails(pid, details, read);
     if (verification === "retry") continue;
-    if (verification === null) return null;
-    return ownership === "anchored" ? "unrelated" : ownership;
+    if (verification === "unavailable")
+      return observedProcesses.has(pid) ? null : "unrelated";
+    if (verification === "replaced") {
+      if (observedProcesses.has(pid)) return null;
+      continue;
+    }
+    return observedProcesses.has(pid) ? "current" : ownership;
   }
-  return null;
+  return observedProcesses.has(pid) ? null : "unrelated";
+}
+
+function reconcileOwnedMembers(members, observedProcesses, inspect, charge) {
+  // Ancestry discovery can associate PIDs omitted or already classified in the
+  // initial snapshot. Recheck those identities before accepting process absence.
+  if (members.length === 0) {
+    for (const pid of observedProcesses.keys()) {
+      charge();
+      const ownership = inspect(pid);
+      if (ownership === null) return null;
+      if (ownership === "current") members.push(pid);
+    }
+  }
+  return members;
 }
 
 export function inspectOwnedSessionProcesses(
   sessionId,
   ownerToken,
   {
-    ancestryBaseline = null,
-    controlGroup = null,
+    observedProcesses = new Map(),
     getuid = () => process.getuid(),
     includeSession = true,
     list = readdirSync,
@@ -1290,7 +727,7 @@ export function inspectOwnedSessionProcesses(
     return null;
   try {
     const charge = inspectionBudget(now, maxWork, maxElapsedMs);
-    charge(Array.isArray(ancestryBaseline) ? ancestryBaseline.length : 1);
+    charge(observedProcesses.size);
     const rawRead = read;
     read = (...args) => {
       charge();
@@ -1311,35 +748,37 @@ export function inspectOwnedSessionProcesses(
         charge(0);
       }
     };
-    const baseline =
-      ancestryBaseline === null
-        ? null
-        : ancestryBaselineIndex(ancestryBaseline, read);
-    if (ancestryBaseline !== null && baseline === null) return null;
-    if (controlGroup !== null && !/^[a-f0-9]{64}$/u.test(controlGroup))
-      return null;
-    const names = list("/proc");
+    const names = new Set([
+      ...list("/proc"),
+      ...Array.from(observedProcesses.keys(), String),
+    ]);
     const members = [];
-    for (const name of names) {
-      charge();
-      if (!/^\d+$/u.test(name)) continue;
-      const pid = Number(name);
-      const ownership = inspectSessionProcess(
+    const inspect = (pid) =>
+      inspectSessionProcess(
         pid,
         sessionId,
         ownerToken,
         includeSession,
-        baseline,
-        controlGroup,
         getuid,
         read,
-        list,
+        observedProcesses,
       );
+    for (const name of names) {
+      charge();
+      if (!/^\d+$/u.test(name)) continue;
+      const pid = Number(name);
+      const ownership = inspect(pid);
       if (ownership === null) return null;
       if (ownership === "current") members.push(pid);
     }
+    const reconciled = reconcileOwnedMembers(
+      members,
+      observedProcesses,
+      inspect,
+      charge,
+    );
     charge(0);
-    return members;
+    return reconciled;
   } catch {
     return null;
   }
@@ -1349,13 +788,11 @@ function signalSession(
   sessionId,
   ownerToken,
   signal,
-  ancestryBaseline,
-  controlGroup,
+  observedProcesses,
   inspectSessionProcesses,
 ) {
   const members = inspectSessionProcesses(sessionId, ownerToken, {
-    ancestryBaseline,
-    controlGroup,
+    observedProcesses,
   });
   if (members === null) {
     throw ownedError(
@@ -1536,7 +973,6 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     );
   }
   const {
-    captureAncestryBaseline = captureProcessAncestryBaseline,
     deadlineNs,
     descendantGraceMs = DEFAULT_DESCENDANT_GRACE_MS,
     inspectSessionProcesses = inspectOwnedSessionProcesses,
@@ -1549,7 +985,6 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     ...spawnOptions
   } = options;
   if (
-    typeof captureAncestryBaseline !== "function" ||
     typeof inspectSessionProcesses !== "function" ||
     typeof onProcess !== "function" ||
     typeof monotonicNow !== "function" ||
@@ -1573,18 +1008,6 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const launcher = resolveLauncher(cwd, {
     ownershipMode,
   });
-  const capturedAncestryBaseline = normalizedAncestryBaseline(
-    captureAncestryBaseline(),
-  );
-  if (capturedAncestryBaseline === null) {
-    throw ownedError(
-      "Owned-process launch ancestry is unavailable.",
-      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-    );
-  }
-  const ancestryBaseline = Object.freeze(
-    capturedAncestryBaseline.map((entry) => Object.freeze(entry)),
-  );
   let ownerToken = randomUUID();
   const child = spawn(
     launcher.file,
@@ -1614,8 +1037,9 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let closed = false;
   const killChild = child.kill.bind(child);
   let containmentFailure = null;
-  let launchCutoff = null;
-  let controlGroup = null;
+  // Parent-side cleanup also retains association across its bounded scans.
+  const observedProcesses = new Map();
+  let ownershipHandedOff = false;
   let startRequested = false;
   child.ownedPayloadRequested = false;
   const pendingSends = new Set();
@@ -1656,8 +1080,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           child.pid,
           ownerToken,
           signal,
-          ancestryBaseline,
-          controlGroup,
+          observedProcesses,
           inspectSessionProcesses,
         );
       } catch (cause) {
@@ -1747,11 +1170,11 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         registered &&
         supervision === null &&
         startRequested &&
-        terminationRequested
+        terminationRequested &&
+        ownershipHandedOff
       ) {
         const members = inspectSessionProcesses(child.pid, ownerToken, {
-          ancestryBaseline,
-          controlGroup,
+          observedProcesses,
         });
         if (members === null) {
           containmentFailure = ownedError(
@@ -1831,7 +1254,38 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         };
         return;
       }
-      if (message?.type === "containment-failure") {
+      if (
+        message?.type === "containment-failure" ||
+        message?.type === "ownership-handoff"
+      ) {
+        // Carry observed ownership into parent-side cleanup before retiring the
+        // supervisor; losing its process must not erase known descendants.
+        const observations = message.observedProcesses;
+        if (
+          !Array.isArray(observations) ||
+          observations.length > MAX_INSPECTION_WORK ||
+          observations.some(
+            (entry) =>
+              !Array.isArray(entry) ||
+              entry.length !== 2 ||
+              !Number.isSafeInteger(entry[0]) ||
+              entry[0] < 1 ||
+              typeof entry[1] !== "string" ||
+              !/^(?:0|[1-9]\d{0,31})$/u.test(entry[1]),
+          )
+        ) {
+          failure ??= ownedError(
+            "Owned process observations are invalid.",
+            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          );
+          child.kill("SIGKILL");
+          return;
+        }
+        for (const [pid, startTicks] of observations) {
+          observedProcesses.set(pid, startTicks);
+        }
+        ownershipHandedOff = true;
+        if (message.type === "ownership-handoff") return;
         const unverifiable = message.code === "unverifiable";
         retainedContainmentFailure ??= ownedError(
           unverifiable
@@ -1880,24 +1334,16 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           );
         }
         child.ownedPid = children?.[0] ?? child.pid;
-        const [
-          processIdentity,
-          namespaceId,
-          runnerNamespaceId,
-          ownerControlGroup,
-        ] = await Promise.all([
-          readProcessIdentity(child.ownedPid),
-          readProcessNamespace(child.ownedPid),
-          readProcessNamespace(process.pid),
-          readProcessControlGroup(child.ownedPid),
-        ]);
-        launchCutoff = processIdentity;
-        controlGroup = ownerControlGroup;
+        const [processIdentity, namespaceId, runnerNamespaceId] =
+          await Promise.all([
+            readProcessIdentity(child.ownedPid),
+            readProcessNamespace(child.ownedPid),
+            readProcessNamespace(process.pid),
+          ]);
         if (
           processIdentity === null ||
           namespaceId === null ||
           runnerNamespaceId === null ||
-          controlGroup === null ||
           (launcher.isolatedNamespace
             ? namespaceId === runnerNamespaceId
             : namespaceId !== runnerNamespaceId)
@@ -1907,18 +1353,12 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
           );
         }
-        if (ancestryBaseline[0].bootId !== processIdentity.bootId) {
-          throw ownedError(
-            "Owned-process launch ancestry is stale.",
-            "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-          );
-        }
         const proof = {
           processIdentity,
           namespaceId,
-          launchCutoff,
-          ancestryBaseline,
-          controlGroup,
+          launchCutoff: processIdentity,
+          ancestryBaseline: null,
+          controlGroup: null,
         };
         const allowed = await onProcess(child.ownedPid, proof, {
           canRelease: () =>
@@ -1946,9 +1386,6 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           {
             type: "start",
             ownerToken,
-            launchCutoff,
-            ancestryBaseline,
-            controlGroup,
           },
           () => child.kill("SIGKILL"),
         );
@@ -2012,18 +1449,10 @@ export async function terminateOwnedProcess(
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
       );
     }
-    if (owner.ancestryBaseline === null) {
-      throw ownedError(
-        "Owned execution process predates frozen ancestry recovery evidence.",
-        "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-      );
-    }
     const members = inspectSessionProcesses(
       owner.pid,
       ownedProcessToken(owner.pid, owner.processIdentity),
       {
-        ancestryBaseline: owner.ancestryBaseline,
-        controlGroup: owner.controlGroup ?? null,
         includeSession: true,
       },
     );

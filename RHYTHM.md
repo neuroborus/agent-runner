@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-30
+
+- **Process recovery follows positive ownership.** Live supervision and owner-loss
+  recovery retain session, launch-token and verified-ancestry associations until
+  absence is observed. Unassociated inaccessible processes neither veto progress
+  nor receive signals. Global launch census and exclusion proofs are removed;
+  historical fields remain strictly validated, with null values for new launches.
+  Supervisor identity, namespace, leases and journaled retirement stay mandatory.
+  Shared-host discovery cannot prove absence against processes hiding all
+  ancestry and token evidence; private PID containment remains stronger.
+
 ## 2026-10-29
 
 - **Audit publishes exact reviewed versions without source effects.** The fourth

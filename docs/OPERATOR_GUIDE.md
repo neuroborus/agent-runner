@@ -364,15 +364,20 @@ reported blocker, then retry the identical key and arguments. Retry alone
 does not repair it, complete the intent or release uncertain ownership. Never
 collect raw child streams, provider output or transcripts to fill this gap.
 
-Shared-host recovery requires frozen pre-launch boot/PID/start evidence and
-stable complete ancestry. Observed ownership takes precedence. Inaccessible
-candidates need positive control-group, fully exited, or separate live-custody
-proof; `Z`, baseline ancestry, a different session, or permission denial alone
-does not suffice. Every descendant is independently inspected. Missing, reused,
-unstable, incomplete, mismatched, or exhausted evidence blocks; legacy records
-gain no retroactive proof. Never delete process/lease records. The
-[safety contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state)
-owns exact exclusion and bounded retry rules.
+Shared-host recovery requires recorded supervisor identity and namespace, then
+bounded positive-association inspection through the owned session, matching
+launch token or observed owned ancestry. Available parent links continue through
+inaccessible environments. Observed association is retained, and every descendant
+is inspected independently. Unassociated processes neither block progress nor
+receive signals because metadata is unreadable, their session is newer or their
+cgroup is shared. Historical ancestry/control-group proofs remain strictly
+validated but optional. Shared-host discovery cannot prove absence against
+arbitrary same-user processes hiding all ancestry and token evidence. Live or
+replaced recorded owners, namespace mismatches, uncertain known descendants and
+inspection-budget exhaustion remain blocking. Never signal persisted host PIDs
+or delete process/lease records. The
+[safety contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state) owns exact
+retirement and bounded retry rules.
 
 After both fixes pass review and commit gates, follow the operator-owned
 [operational acceptance procedure](product/SAFETY_MODEL.md#ownership-repair-operational-acceptance)

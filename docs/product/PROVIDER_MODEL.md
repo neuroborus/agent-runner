@@ -252,15 +252,18 @@ lifetimes; activity is cleared only after matching completion or proven process
 retirement. Codex uses scoped App Server notifications; Claude uses bounded
 validated stream JSON and preserves its terminal structured-result and failure
 contracts. This internal signal adds no public activity, deadline, or retry.
-Owned supervisors wait for durable registration, including their bounded
-launch-time boot/PID/start ancestry baseline and control-group identity, before
-launching work. Live
-supervision and owner-loss recovery receive the same frozen evidence and may
-exclude a new unrelated process only after its stabilized lineage reaches an
-unchanged baseline identity. A baseline anchor never bypasses observed session
-or ownership-token evidence. A same-user process with inaccessible current
-environment is unrelated only when its stable control-group identity differs
-from the owner; missing or matching evidence remains conservative. A provider
+Owned supervisors wait for durable registration of their boot/start identity and
+PID namespace before launching work. Live supervision and owner-loss recovery
+share positive association through the owned session, matching launch token or
+observed owned ancestry. Available ancestry continues through inaccessible
+environments; observed association survives subsequent evidence loss.
+Unassociated processes neither block progress nor receive signals because their
+metadata is unreadable, their session is newer or their cgroup is shared.
+Historical ancestry/control-group fields remain strictly validated but optional;
+new launches store null values. Shared-host discovery cannot prove absence
+against arbitrary same-user processes hiding all ancestry and token evidence.
+The [safety contract](SAFETY_MODEL.md#inputs-artifacts-and-state) owns bounded
+inspection and retirement. A provider
 adapter declares `native-sandbox-provider` only for an
 execution that requires a native sandbox. That mode uses a private PID
 namespace only after the complete nested namespace shape is proven; when

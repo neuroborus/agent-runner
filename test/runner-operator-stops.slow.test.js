@@ -841,7 +841,8 @@ test("operator stop contains native provider work and preserves writable content
   ]);
   const before = await store.loadRun(fixture.runId);
   assert.equal(before.executionProcess.pid, child.ownedPid);
-  assert.ok(before.executionProcess.ancestryBaseline.length > 0);
+  assert.equal(before.executionProcess.ancestryBaseline, null);
+  assert.equal(before.executionProcess.controlGroup, null);
   assert.equal(await store.runIsLeased(fixture.runId), true);
   await runner.requestOperatorStop({
     runId: fixture.runId,
@@ -1415,8 +1416,6 @@ test("action-free recovery retires a dead session before further provider work",
       inspectSessionProcesses(sessionId, _token, inspection) {
         assert.equal(sessionId, executionPid);
         assert.deepEqual(inspection, {
-          ancestryBaseline,
-          controlGroup: null,
           includeSession: true,
         });
         retirementInspections++;
@@ -1456,12 +1455,11 @@ test("action-free recovery retires a dead session before further provider work",
   assert.equal(repositoryAfterRecovery, repositoryBeforeRecovery);
 });
 
-test("legacy recovery evidence remains non-mutating and compatibility-blocked", async () => {
+test("recovery without the required namespace remains non-mutating and blocked", async () => {
   const fixture = await executionLifecycle.implementation.restore();
   const bootId = "11111111-1111-4111-8111-111111111111";
   const executionPid = 2_000_000_002;
   const launchIdentity = { bootId, startTicks: String(executionPid) };
-  const namespaceId = readlinkSync("/proc/self/ns/pid");
   const options = {
     stateRoot: fixture.stateRoot,
     resolveStopBoundary,
@@ -1478,7 +1476,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
   await store.acquireWorktreeLease(fixture.projectPath, fixture.runId);
   const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
     processIdentity: launchIdentity,
-    namespaceId,
+    namespaceId: null,
   });
   await assert.rejects(lease.release(), {
     code: "ERR_EXECUTION_PROCESS_ACTIVE",
@@ -1497,7 +1495,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
       codex: {
         ...delegate,
         run: () =>
-          assert.fail("Compatibility recovery must not invoke a provider."),
+          assert.fail("Incomplete ownership must not invoke a provider."),
       },
     },
     { runStore: recoveredStore },
@@ -1519,8 +1517,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
     recoveredRunner.resume({ runId: fixture.runId, action: null }),
     {
       code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-      message:
-        "Owned execution process predates frozen ancestry recovery evidence.",
+      message: "Owned execution process cannot be safely reconciled.",
     },
   );
   assert.deepEqual(await recoveredStore.loadRun(fixture.runId), durableBefore);

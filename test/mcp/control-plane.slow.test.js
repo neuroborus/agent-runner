@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readlinkSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -36,6 +37,11 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
+
+import {
+  inspectOwnedSessionProcesses,
+  terminateOwnedProcess,
+} from "../../src/agents/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 
@@ -2865,19 +2871,21 @@ test("resumes only action-free ownerless interrupted runs at the exact revision"
   assert.equal(launches.length, 2);
 });
 
-test("action-free resume immediately reclaims an exact dead owner", async (t) => {
+test("saved action-free resume retires owned work despite an unassociated session and replays one receipt", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-dead-owner-resume-");
   const bootId = "44444444-4444-4444-8444-444444444444";
+  const executionPid = 2_000_000_001;
+  const group = "0::/shared.scope\n";
   const storeOptions = {
     stateRoot: paths.stateRoot,
     hostName: "test-host",
-    processIsAlive: (pid) => pid !== 100,
+    processIsAlive: (pid) => ![100, executionPid].includes(pid),
     processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
   };
   const ownerStore = createRunStore({ ...storeOptions, processId: 100 });
   await createStoredRun(ownerStore, paths);
   const ownerLease = await ownerStore.acquireRunLease(RUN_ID);
-  const started = await ownerStore.startAgentTurn(
+  await ownerStore.startAgentTurn(
     ownerLease,
     { role: "planner", phase: "clarify" },
     {
@@ -2889,27 +2897,112 @@ test("action-free resume immediately reclaims an exact dead owner", async (t) =>
       },
     },
   );
+  const checkpoint = await ownerStore.recordExecutionProcess(
+    ownerLease,
+    executionPid,
+    {
+      processIdentity: storeOptions.processIdentity(executionPid),
+      namespaceId: readlinkSync("/proc/self/ns/pid"),
+      ancestryBaseline: [{ bootId, pid: 303, startTicks: "303" }],
+      controlGroup: createHash("sha256").update(group).digest("hex"),
+    },
+  );
+  const input = {
+    idempotencyKey: "dead-owner-resume",
+    runId: RUN_ID,
+    expectedRevision: checkpoint.revision,
+    action: null,
+  };
+  const identity = {
+    key: input.idempotencyKey,
+    tool: "run_resume",
+    arguments: {
+      runId: RUN_ID,
+      expectedRevision: checkpoint.revision,
+      action: null,
+    },
+  };
+  const saved = await ownerStore.beginAction({
+    ...identity,
+    context: { runId: RUN_ID, expectedRevision: checkpoint.revision },
+  });
+  const intent = saved.record;
+  await saved.release();
 
   const recoveryStore = createRunStore({ ...storeOptions, processId: 200 });
   let launches = 0;
   const control = createMcpControlPlane({
-    async launchRun(id, _action, options) {
-      launches += 1;
-      await advanceMutatingStoredRun(recoveryStore, id, options.dispatch);
+    async launchRun(id, action, options) {
+      assert.equal(action, null);
+      launches++;
+      const lease = await recoveryStore.acquireRunLease(id);
+      try {
+        await assert.rejects(recoveryStore.acquireRunLease(id), {
+          code: "ERR_RUN_LEASED",
+        });
+        await recoveryStore.recoverRun(lease);
+        await recoveryStore.recordRecoveryDispatch(lease, options.dispatch);
+        await terminateOwnedProcess(
+          executionPid,
+          () => recoveryStore.inspectExecutionProcess(id),
+          {
+            inspectSessionProcesses(session, token, inspection) {
+              return inspectOwnedSessionProcesses(session, token, {
+                ...inspection,
+                getuid: () => 1000,
+                now: () => 0,
+                list: () => ["101", "303"],
+                read(path) {
+                  if (path.endsWith("/stat") && !path.startsWith("/proc/1/")) {
+                    const pid = Number(path.split("/")[2]);
+                    const fields = Array(20).fill("0");
+                    fields[0] = "S";
+                    fields[1] = pid === 101 ? "303" : "1";
+                    fields[3] = String(pid);
+                    fields[19] = String(pid);
+                    return `${pid} (process) ${fields.join(" ")}`;
+                  }
+                  if (path.endsWith("/status"))
+                    return "Uid:\t1000\t1000\t1000\t1000\n";
+                  if (path.endsWith("/cgroup")) return group;
+                  throw Object.assign(new Error("inaccessible metadata"), {
+                    code: "EACCES",
+                  });
+                },
+              });
+            },
+          },
+        );
+        const retired = await recoveryStore.recordExecutionProcess(lease, null);
+        assert.deepEqual(retired.pipelineState, checkpoint.pipelineState);
+        assert.deepEqual(retired.counters, checkpoint.counters);
+        await recoveryStore.recordRecoveryDispatch(
+          lease,
+          options.dispatch,
+          true,
+        );
+      } finally {
+        await lease.release();
+      }
     },
     runner: storedRunner(recoveryStore, paths),
     runStore: recoveryStore,
   });
-  assert.deepEqual(
-    await control.runResume({
-      idempotencyKey: "dead-owner-resume",
-      runId: RUN_ID,
-      expectedRevision: started.revision,
-      action: null,
-    }),
-    { runId: RUN_ID },
-  );
+  assert.deepEqual(await recoveryStore.readAction(identity), intent);
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  const receipt = await recoveryStore.readAction(identity);
+  assert.equal(receipt.status, "completed");
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(await recoveryStore.readAction(identity), receipt);
   assert.equal(launches, 1);
+  const { events } = await recoveryStore.loadRunHistory(RUN_ID);
+  const retirement = events.filter(
+    ({ activity }) =>
+      activity?.phase === "execution" && activity.kind === "stopped",
+  );
+  assert.equal(retirement.length, 1);
+  assert.equal(retirement[0].state.executionProcess, null);
+  assert.equal(await recoveryStore.runIsLeased(RUN_ID), false);
 });
 
 test("rejects a live pausing owner and permits an exact-key retry after release", async (t) => {

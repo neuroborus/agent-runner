@@ -752,6 +752,7 @@ test("migrates legacy process evidence without inventing ancestry authority", as
       const loaded = await store.loadRun(legacy.runId);
       assert.deepEqual(loaded.executionProcess.launchCutoff, processIdentity);
       assert.equal(loaded.executionProcess.ancestryBaseline, null);
+      assert.equal(loaded.executionProcess.controlGroup, null);
       assert.equal(await readFile(statePath, "utf8"), stateSource);
       assert.equal(await readFile(eventsPath, "utf8"), eventSource);
 
@@ -778,6 +779,7 @@ test("migrates legacy process evidence without inventing ancestry authority", as
           processIdentity,
         );
         assert.equal(migrated.executionProcess.ancestryBaseline, null);
+        assert.equal(migrated.executionProcess.controlGroup, null);
         assert.deepEqual(
           JSON.parse(await readFile(statePath, "utf8")).executionProcess,
           migrated.executionProcess,
@@ -830,7 +832,7 @@ test("rejects missing, malformed, and widened current launch cutoffs", async (t)
   }
 });
 
-test("validates current frozen ancestry baselines strictly and bounds their size", async (t) => {
+test("validates historical ancestry baselines strictly and bounds their size", async (t) => {
   const { created, store } = await createFixture(t);
   await created.lease.release();
   const statePath = join(created.directoryPath, "state.json");
@@ -877,7 +879,7 @@ test("validates current frozen ancestry baselines strictly and bounds their size
   }
 });
 
-test("validates current execution control-group evidence", async (t) => {
+test("validates historical execution control-group evidence", async (t) => {
   const { created, store } = await createFixture(t);
   await created.lease.release();
   const statePath = join(created.directoryPath, "state.json");

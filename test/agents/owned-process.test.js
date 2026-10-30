@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,14 +21,6 @@ import {
 
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const BOOT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-// Keep synthetic procfs identities outside Linux's PID range so they cannot
-// alias the live supervisor or its target in a small test PID namespace.
-const TOPOLOGY_PIDS = Object.freeze({
-  process: 2 ** 32,
-  parent: 2 ** 32 + 1,
-  anchor: 2 ** 32 + 2,
-  session: 2 ** 32 + 3,
-});
 const OWNED_PROCESS_MODULE = fileURLToPath(
   new URL("../../src/agents/index.js", import.meta.url),
 );
@@ -108,52 +101,6 @@ async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
 
 async function inspectionSequenceEnvironment(t, sequence) {
   return (await inspectionSequenceFixture(t, sequence)).environment;
-}
-
-async function productionTopologyEnvironment(t, bootId) {
-  const { process: pid, parent, anchor, session } = TOPOLOGY_PIDS;
-  const directory = await mkdtemp(join(tmpdir(), "owned-process-topology-"));
-  t.after(() => rm(directory, { force: true, recursive: true }));
-  const preloadPath = join(directory, "production-topology.cjs");
-  const denied = `{ throw Object.assign(new Error("denied"), { code: "EACCES" }); }`;
-  await writeFile(
-    preloadPath,
-    `if (process.argv[1] === "session") {
-  const fs = require("node:fs");
-  const originalRead = fs.readFileSync;
-  const originalList = fs.readdirSync;
-  const values = new Map(${JSON.stringify([
-    [`/proc/${pid}/stat`, processStat(pid, parent, session)],
-    [
-      `/proc/${pid}/status`,
-      `Uid:\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\t${process.getuid()}\n`,
-    ],
-    [`/proc/${pid}/environ`, ""],
-    [`/proc/${parent}/stat`, processStat(parent, anchor, session, "5678")],
-    [`/proc/${anchor}/stat`, processStat(anchor, 1, session, "6789")],
-    [`/proc/${anchor}/environ`, ""],
-    ["/proc/sys/kernel/random/boot_id", `${bootId}\n`],
-  ])});
-  fs.readdirSync = function readdirSync(path, ...argumentsList) {
-    return path === "/proc"
-      ? [${JSON.stringify(String(pid))}]
-      : Reflect.apply(originalList, this, [path, ...argumentsList]);
-  };
-  fs.readFileSync = function readFileSync(path, ...argumentsList) {
-    if (path === "/proc/${parent}/environ") ${denied}
-    return values.has(path)
-      ? values.get(path)
-      : Reflect.apply(originalRead, this, [path, ...argumentsList]);
-  };
-}
-`,
-  );
-  return {
-    ...process.env,
-    NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${preloadPath}`]
-      .filter(Boolean)
-      .join(" "),
-  };
 }
 
 function detachedDescendantCommand() {
@@ -265,94 +212,45 @@ function processRaceOptions(sequences = {}) {
   };
 }
 
-function exitedStat({
-  pid = 101,
-  parent = 202,
-  session = 3,
-  start = "1234",
-  fields = {},
-} = {}) {
-  const values = Array(50).fill("0");
-  Object.assign(values, {
-    0: "Z",
-    1: String(parent),
-    3: String(session),
-    6: "4",
-    17: "1",
-    19: start,
-    ...fields,
-  });
-  return `${pid} (process) ${values.join(" ")}`;
-}
-
-function exitedCandidateFixture({
-  reads = {},
-  lists = {},
-  pids = ["101"],
-} = {}) {
+function unassociatedSessionFixture() {
   const group = "0::/shared.scope\n";
   const fixture = processRaceOptions({
-    "/proc/101/stat": [exitedStat()],
+    "/proc/101/stat": [processStat(101, 202, 101, "9000")],
     "/proc/101/environ": [processRaceError("EACCES")],
     "/proc/101/cgroup": [group],
-    "/proc/101/task/101/stat": [exitedStat()],
-    "/proc/101/task/101/children": [""],
-    ...reads,
+    "/proc/202/stat": [processStat(202, 303, 303, "5678")],
+    "/proc/202/environ": [processRaceError("EPERM")],
   });
+  fixture.options.ancestryBaseline = ancestryBaseline([202, "5678"]);
   fixture.options.controlGroup = createHash("sha256")
     .update(group)
     .digest("hex");
   fixture.options.now = () => 0;
-  const counts = new Map();
-  fixture.options.list = (path) => {
-    const count = counts.get(path) ?? 0;
-    counts.set(path, count + 1);
-    const sequence = lists[path] ?? [path === "/proc" ? pids : ["101"]];
-    const value = sequence[Math.min(count, sequence.length - 1)];
-    if (value instanceof Error) throw value;
-    return value;
-  };
-  return fixture;
-}
-
-function liveCustodyFixture({ reads = {}, pids = ["101"] } = {}) {
-  const fixture = exitedCandidateFixture({
-    pids,
-    reads: {
-      "/proc/101/stat": [processStat(101, 202, 303)],
-      "/proc/202/stat": [processStat(202, 303, 303, "5678")],
-      "/proc/202/environ": [processRaceError("EPERM")],
-      "/proc/303/stat": [processStat(303, 1, 303, "6789")],
-      "/proc/303/environ": [processRaceError("EACCES")],
-      ...reads,
-    },
-  });
-  // An intermediate baseline entry must not short-circuit the custody walk.
-  fixture.options.ancestryBaseline = ancestryBaseline(
-    [1, "1"],
-    [202, "5678"],
-    [303, "6789"],
-  );
   return fixture;
 }
 
 // Run the actual launcher payload with an injected procfs and clock, without
 // starting a supervisor, provider, timer, or any host process.
-function inspectEmbeddedSession(ownerToken, options) {
+function embeddedSession(ownerToken, options) {
   const source = hostSessionLauncher(process.cwd(), {
     ownershipMode: "native-sandbox-provider",
   }).arguments[1];
   const context = {
     Buffer,
-    baseline: options.ancestryBaseline,
-    group: options.controlGroup,
     performance: { now: options.now },
+    next: options.next,
+    reportFailure: options.onFailure !== undefined,
+    setInterval: () => 1,
+    setTimeout: options.setTimeout,
     process: {
       argv: ["node", "session", "1000", "unused", "[]", "0", ownerToken],
       pid: 44,
       getuid: options.getuid,
+      kill: options.onSignal ?? (() => assert.fail("unexpected signal")),
       on() {},
-      connected: false,
+      connected: options.onFailure !== undefined,
+      send: options.onFailure,
+      ...options.process,
     },
     require(name) {
       if (name === "node:fs")
@@ -360,30 +258,64 @@ function inspectEmbeddedSession(ownerToken, options) {
       if (name === "node:crypto") return { createHash };
       if (name === "node:child_process")
         return {
-          spawn() {
-            assert.fail("unexpected spawn");
-          },
+          spawn:
+            options.spawn ??
+            (() => {
+              assert.fail("unexpected spawn");
+            }),
         };
       assert.fail(`Unexpected supervisor import: ${name}`);
     },
   };
+  runInNewContext(source, context);
+  return context;
+}
+
+function inspectEmbeddedSession(ownerToken, options) {
+  const context = embeddedSession(ownerToken, options);
   runInNewContext(
-    `${source}
-ancestryBaseline = normalizedAncestryBaseline(baseline, { bootId: ${JSON.stringify(BOOT_ID)} });
-controlGroup = group;
-globalThis.result = ownedMembers();`,
+    `globalThis.result = ${options.signal ? 'signalDescendants("SIGKILL")' : "ownedMembers()"};
+for (const advance of [].concat(next ?? [])) {
+  advance(globalThis.result);
+  globalThis.result = ownedMembers();
+}
+if (reportFailure) retainContainmentFailure("unverifiable");`,
     context,
   );
-  return context.result === null ? null : Array.from(context.result);
+  return context.result === null || typeof context.result === "boolean"
+    ? context.result
+    : Array.from(context.result);
 }
 
 const SESSION_INSPECTORS = [
   [
     "recovery",
-    (token, options) => inspectOwnedSessionProcesses(44, token, options),
+    (token, options) => {
+      const observedProcesses = new Map();
+      const inspect = () =>
+        inspectOwnedSessionProcesses(44, token, {
+          ...options,
+          observedProcesses,
+        });
+      let result = inspect();
+      for (const advance of [].concat(options.next ?? [])) {
+        advance(result);
+        result = inspect();
+      }
+      return result;
+    },
   ],
   ["embedded supervisor", inspectEmbeddedSession],
 ];
+
+test("ignores an unassociated new session with unreadable environment and a shared cgroup", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      const { options, ownerToken } = unassociatedSessionFixture();
+      assert.deepEqual(inspect(ownerToken, options), []);
+    });
+  }
+});
 
 async function waitForFile(path, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -542,7 +474,7 @@ test("rejects indeterminate namespace capability evidence", () => {
   );
 });
 
-test("uses ancestry and rejects incomplete owned-session evidence", () => {
+test("uses available ancestry without requiring unrelated metadata", () => {
   const ownerToken = "a".repeat(64);
   const options = {
     ancestryBaseline: ancestryBaseline([1, "1"]),
@@ -575,7 +507,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
     [101],
   );
 
-  assert.equal(
+  assert.deepEqual(
     inspectOwnedSessionProcesses(44, ownerToken, {
       ...options,
       read(path) {
@@ -584,7 +516,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
           : options.read(path);
       },
     }),
-    null,
+    [],
   );
 
   assert.deepEqual(
@@ -734,7 +666,7 @@ test("restarts classification after current or ancestor reparenting", async (t) 
   }
 });
 
-test("ignores an exited entry but fails closed for reuse or exhausted churn", async (t) => {
+test("bounds unassociated process churn without claiming ownership", async (t) => {
   const stableCurrent = processStat(101, 202, 3);
   for (const fixture of [
     {
@@ -756,7 +688,7 @@ test("ignores an exited entry but fails closed for reuse or exhausted churn", as
         "/proc/101/stat": [stableCurrent, processStat(101, 202, 3, "9999")],
         "/proc/101/status": [processRaceError()],
       },
-      expected: null,
+      expected: [],
     },
     {
       name: "ancestor PID is reused",
@@ -766,12 +698,12 @@ test("ignores an exited entry but fails closed for reuse or exhausted churn", as
           processStat(202, 1, 3, "9999"),
         ],
       },
-      expected: null,
+      expected: [],
     },
     {
       name: "churn exhausts its attempt bound",
       sequences: { "/proc/101/status": [processRaceError()] },
-      expected: null,
+      expected: [],
       expectedStatusReads: 3,
     },
   ]) {
@@ -814,17 +746,6 @@ test(
   "classifies an unrelated process tree during process churn",
   { timeout: 5_000 },
   async (t) => {
-    let frozenBaseline;
-    const baselineOwner = spawnOwnedProcess(process.execPath, ["-e", ""], {
-      onProcess: async (pid, proof) => {
-        if (pid !== null) frozenBaseline = proof.ancestryBaseline;
-      },
-      ownershipMode: "native-sandbox-provider",
-      resolveLauncher: hostSessionLauncher,
-      stdio: "ignore",
-    });
-    await baselineOwner.ownedCompletion;
-    assert.ok(Array.isArray(frozenBaseline));
     const churn = spawnUnrelatedProcessChurn();
     t.after(() => {
       try {
@@ -836,7 +757,6 @@ test(
     for (let index = 0; index < 25; index += 1) {
       assert.deepEqual(
         inspectOwnedSessionProcesses(Number.MAX_SAFE_INTEGER, "f".repeat(64), {
-          ancestryBaseline: frozenBaseline,
           list: () => churnProcessList(churn),
         }),
         [],
@@ -872,802 +792,582 @@ test(
   },
 );
 
-function inaccessibleProcessOptions(startTicks = ["1234"]) {
-  let identityReads = 0;
-  return {
-    getuid: () => 1000,
-    list: () => ["101"],
-    read(path) {
-      if (path === "/proc/sys/kernel/random/boot_id") return `${BOOT_ID}\n`;
-      if (path === "/proc/101/stat") {
-        const current =
-          startTicks[Math.min(identityReads, startTicks.length - 1)];
-        identityReads += 1;
-        return processStat(101, 1, 3, current);
-      }
-      if (path === "/proc/101/status") {
-        return "Uid:\t1000\t1000\t1000\t1000\n";
-      }
-      throw Object.assign(new Error("denied"), { code: "EACCES" });
-    },
-  };
-}
-
-test("excludes only a fully exited anchored candidate in the owner's control group", async (t) => {
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, () => {
-      for (const fields of [{}, { 6: "4194308", 49: "256" }]) {
-        const { options, ownerToken } = exitedCandidateFixture({
-          reads: {
-            "/proc/101/stat": [exitedStat({ fields })],
-            "/proc/101/task/101/stat": [exitedStat({ fields })],
-          },
-        });
-        assert.deepEqual(inspect(ownerToken, options), []);
-      }
-    });
-  }
-});
-
-test("invalidated exited-candidate evidence cannot fall back to control-group exclusion", async (t) => {
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, () => {
-      const group = { "/proc/101/cgroup": ["0::/unrelated.scope\n"] };
-      const live = exitedCandidateFixture({
-        reads: { ...group, "/proc/101/stat": [processStat(101, 202, 3)] },
-      });
-      assert.deepEqual(inspect(live.ownerToken, live.options), []);
-      for (const [path, stable, count, changed] of [
-        [
-          "/proc/1/stat",
-          processStat(1, 0, 1, "1"),
-          2,
-          processStat(1, 0, 1, "9999"),
-        ],
-        [
-          "/proc/202/stat",
-          processStat(202, 1, 3, "5678"),
-          2,
-          processStat(202, 1, 3, "9999"),
-        ],
-        [
-          "/proc/1/stat",
-          processStat(1, 0, 1, "1"),
-          2,
-          processStat(404, 0, 1, "1"),
-        ],
-        [
-          "/proc/202/stat",
-          processStat(202, 1, 3, "5678"),
-          2,
-          processStat(404, 1, 3, "5678"),
-        ],
-        ["/proc/101/stat", exitedStat(), 3, exitedStat({ start: "9999" })],
-        [
-          "/proc/101/task/101/stat",
-          exitedStat(),
-          1,
-          exitedStat({ start: "9999" }),
-        ],
-      ]) {
-        const fixture = exitedCandidateFixture({
-          reads: { ...group, [path]: [...Array(count).fill(stable), changed] },
-        });
-        assert.equal(inspect(fixture.ownerToken, fixture.options), null, path);
-      }
-    });
-  }
-});
-
-test("exited-candidate proof rejects missing, malformed, live, reused, or unstable evidence", async (t) => {
-  const dead = exitedStat();
-  const cases = [
-    [
-      "bare zombie",
-      { "/proc/101/stat": [processStat(101, 202, 3).replace(") S", ") Z")] },
-    ],
-    [
-      "no kernel exit flag",
-      { "/proc/101/stat": [exitedStat({ fields: { 6: "0" } })] },
-    ],
-    [
-      "malformed exit flags",
-      { "/proc/101/stat": [exitedStat({ fields: { 6: "invalid" } })] },
-    ],
-    [
-      "missing exit code",
-      { "/proc/101/stat": [dead.split(" ").slice(0, -1).join(" ")] },
-    ],
-    [
-      "malformed exit code",
-      { "/proc/101/stat": [exitedStat({ fields: { 49: "invalid" } })] },
-    ],
-    [
-      "out of range exit code",
-      { "/proc/101/stat": [exitedStat({ fields: { 49: "4294967296" } })] },
-    ],
-    [
-      "multiple reported threads",
-      { "/proc/101/stat": [exitedStat({ fields: { 17: "2" } })] },
-    ],
-    [
-      "live task",
-      { "/proc/101/task/101/stat": [exitedStat({ fields: { 0: "S" } })] },
-    ],
-    ["malformed task", { "/proc/101/task/101/stat": ["invalid"] }],
-    [
-      "inaccessible task",
-      { "/proc/101/task/101/stat": [processRaceError("EACCES")] },
-    ],
-    ["missing task", { "/proc/101/task/101/stat": [processRaceError()] }],
-    [
-      "reused task",
-      { "/proc/101/task/101/stat": [exitedStat({ start: "9999" })] },
-    ],
-    [
-      "task view changes",
-      {
-        "/proc/101/task/101/stat": [
-          dead,
-          exitedStat({ fields: { 49: "256" } }),
-        ],
-      },
-    ],
-    ["live child", { "/proc/101/task/101/children": ["404\n"] }],
-    ["child appears", { "/proc/101/task/101/children": ["", "404\n"] }],
-    [
-      "missing children",
-      { "/proc/101/task/101/children": [processRaceError("EACCES")] },
-    ],
-    ["malformed children", { "/proc/101/task/101/children": ["invalid"] }],
-    [
-      "reused candidate",
-      { "/proc/101/stat": [dead, dead, dead, exitedStat({ start: "9999" })] },
-    ],
-    ["mismatched stat PID", { "/proc/101/stat": [exitedStat({ pid: 404 })] }],
-    [
-      "termination changes",
-      {
-        "/proc/101/stat": [
-          dead,
-          dead,
-          dead,
-          exitedStat({ fields: { 49: "256" } }),
-        ],
-      },
-    ],
-    ["ancestry gap", { "/proc/202/stat": [processRaceError()] }],
-    [
-      "ancestry cycle",
-      { "/proc/202/stat": [processStat(202, 101, 3, "5678")] },
-    ],
-    ["reused baseline", { "/proc/1/stat": [processStat(1, 0, 1, "9999")] }],
-    [
-      "baseline changes after tasks",
-      {
-        "/proc/1/stat": [
-          processStat(1, 0, 1, "1"),
-          processStat(1, 0, 1, "1"),
-          processStat(1, 0, 1, "9999"),
-        ],
-      },
-    ],
-    [
-      "ancestor changes after tasks",
-      {
-        "/proc/202/stat": [
-          processStat(202, 1, 3, "5678"),
-          processStat(202, 1, 3, "5678"),
-          processStat(202, 1, 3, "9999"),
-        ],
-      },
-    ],
-    [
-      "live candidate gains no custody authority",
-      { "/proc/101/stat": [exitedStat({ fields: { 0: "S", 6: "0" } })] },
-    ],
-  ];
-  for (const [pid, parent, session, start] of [
-    [202, 1, 3, "5678"],
-    [1, 0, 1, "1"],
-  ]) {
-    for (const [phase, stableReads] of [
-      ["collection", 0],
-      ["stabilization", 1],
-      ["final recheck", 2],
-    ]) {
-      const stable = processStat(pid, parent, session, start);
-      cases.push([
-        `${pid} stat PID mismatch during ${phase}`,
-        {
-          [`/proc/${pid}/stat`]: [
-            ...Array(stableReads).fill(stable),
-            processStat(404, parent, session, start),
-            stable,
-          ],
-        },
-      ]);
-    }
-  }
-  for (const [label, lists] of [
-    ["live sibling task", [["101", "404"]]],
-    ["sibling appears", [["101"], ["101", "404"]]],
-    ["missing sole task", [[]]],
-    ["inaccessible task list", [processRaceError("EACCES")]],
-  ])
-    cases.push([label, {}, { "/proc/101/task": lists }]);
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, async (t) => {
-      for (const [label, reads, lists] of cases) {
-        await t.test(label, () => {
-          const fixture = exitedCandidateFixture({ reads, lists });
-          assert.equal(inspect(fixture.ownerToken, fixture.options), null);
-        });
-      }
-      for (const field of ["parent", "session"]) {
-        for (const pid of [101, 202]) {
-          await t.test(`${pid} ${field} churn`, () => {
-            let count = 0;
-            const fixture = exitedCandidateFixture({
-              reads: {
-                [`/proc/${pid}/stat`]: [
-                  () => {
-                    const value = count++ % 2;
-                    return pid === 101
-                      ? exitedStat({
-                          [field]: (field === "parent" ? 202 : 3) + value,
-                        })
-                      : processStat(
-                          202,
-                          field === "parent" ? 1 + value : 1,
-                          field === "session" ? 3 + value : 3,
-                          "5678",
-                        );
-                  },
-                ],
-              },
-            });
-            assert.equal(inspect(fixture.ownerToken, fixture.options), null);
-            assert.equal(count, 6, "churn keeps the existing three attempts");
-          });
-        }
-      }
-    });
-  }
-});
-
-test("exited-candidate exclusion preserves observed ownership and independent descendant scanning", async (t) => {
+test("positive ownership survives inaccessible ancestry and descendants are scanned independently", async (t) => {
   const marker = `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`;
   for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
       for (const reads of [
-        { "/proc/101/environ": [marker] },
-        { "/proc/101/stat": [exitedStat({ session: 44 })] },
-        { "/proc/1/environ": [marker] },
-        { "/proc/202/stat": [processStat(202, 1, 44, "5678")] },
-      ]) {
-        const fixture = exitedCandidateFixture({ reads });
-        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
-        assert.equal(fixture.reads.has("/proc/101/task/101/stat"), false);
-      }
-      const parent = processStat(202, 1, 3, "5678");
-      const changed = exitedCandidateFixture({
-        reads: {
-          "/proc/202/stat": [parent, parent, processStat(202, 1, 44, "5678")],
-        },
-      });
-      assert.deepEqual(
-        inspect(changed.ownerToken, changed.options),
-        [101],
-        "an owned relationship discovered after task inspection restarts classification",
-      );
-      for (const [environment, session, expected] of [
-        [marker, 3, [404]],
-        ["", 44, [404]],
-        [processRaceError("EACCES"), 3, null],
-      ]) {
-        const fixture = exitedCandidateFixture({
-          pids: ["101", "404"],
-          reads: {
-            "/proc/404/stat": [processStat(404, 101, session, "7890")],
-            "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
-            "/proc/404/environ": [environment],
-            "/proc/404/cgroup": ["0::/shared.scope\n"],
-          },
-        });
-        assert.deepEqual(
-          inspect(fixture.ownerToken, fixture.options),
-          expected,
-        );
-        assert.equal(fixture.reads.has("/proc/404/stat"), true);
-      }
-    });
-  }
-});
-
-test("exited-candidate inspection shares work and elapsed bounds through the final read", async (t) => {
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, () => {
-      const exhausted = exitedCandidateFixture({
-        pids: Array(3000).fill("101"),
-      });
-      assert.equal(inspect(exhausted.ownerToken, exhausted.options), null);
-      assert.ok(exhausted.reads.get("/proc/101/task/101/stat") > 2);
-      const successful = exitedCandidateFixture();
-      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
-      const finalRead = successful.reads.get("/proc/101/stat");
-      const fixture = exitedCandidateFixture();
-      const read = fixture.options.read;
-      let elapsed = 0;
-      fixture.options.now = () => elapsed;
-      fixture.options.read = (path) => {
-        const value = read(path);
-        if (path === "/proc/101/stat" && fixture.reads.get(path) === finalRead)
-          elapsed = 250;
-        return value;
-      };
-      assert.equal(inspect(fixture.ownerToken, fixture.options), null);
-      assert.equal(
-        elapsed,
-        250,
-        "the final read crosses the unchanged elapsed bound",
-      );
-    });
-  }
-});
-
-test("proves inaccessible live custody through the exact baseline session leader in the shared control group", async (t) => {
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, () => {
-      const fixture = liveCustodyFixture({
-        pids: ["101", "404"],
-        reads: {
-          "/proc/404/stat": [processStat(404, 101, 303, "7890")],
-          "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
-          "/proc/404/environ": [processRaceError("EACCES")],
-          "/proc/404/cgroup": ["0::/shared.scope\n"],
-        },
-      });
-      assert.deepEqual(inspect(fixture.ownerToken, fixture.options), []);
-      assert.ok(fixture.reads.get("/proc/303/stat") >= 3);
-      assert.ok(fixture.reads.get("/proc/404/stat") >= 3);
-      assert.equal(fixture.reads.has("/proc/101/task/101/stat"), false);
-    });
-  }
-});
-
-test("live custody retains owned and delegated evidence before every anchor and scans descendants independently", async (t) => {
-  const marker = `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`;
-  for (const [name, inspect] of SESSION_INSPECTORS) {
-    await t.test(name, () => {
-      for (const reads of [
-        { "/proc/101/environ": [marker] },
         { "/proc/101/stat": [processStat(101, 202, 44)] },
+        { "/proc/101/environ": [marker] },
         { "/proc/202/environ": [marker] },
-        { "/proc/202/stat": [processStat(202, 303, 44, "5678")] },
+        { "/proc/202/stat": [processStat(202, 1, 44, "5678")] },
+        { "/proc/202/stat": [processStat(202, 44, 3, "5678")] },
         { "/proc/303/environ": [marker] },
       ]) {
-        const fixture = liveCustodyFixture({ reads });
-        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
+        const { options, ownerToken } = unassociatedSessionFixture();
+        const original = options.read;
+        options.read = (path) => reads[path]?.[0] ?? original(path);
+        assert.deepEqual(inspect(ownerToken, options), [101]);
       }
-      for (const pid of [101, 202, 303]) {
-        const fixture = liveCustodyFixture({
-          reads: {
-            [`/proc/${pid}/environ`]: [processRaceError("EACCES"), marker],
-          },
+      const { options, ownerToken } = unassociatedSessionFixture();
+      const original = options.read;
+      options.list = () => ["101", "404"];
+      options.read = (path) => {
+        if (path === "/proc/404/stat") return processStat(404, 101, 404);
+        if (path === "/proc/404/status")
+          return "Uid:\t1000\t1000\t1000\t1000\n";
+        if (path === "/proc/404/environ") return marker;
+        return original(path);
+      };
+      assert.deepEqual(inspect(ownerToken, options), [404]);
+    });
+  }
+});
+
+test("retains observed ownership after evidence changes or becomes inaccessible", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      for (const firstEvidence of ["session", "token", "ancestry"]) {
+        const { options, ownerToken } = processRaceOptions({
+          "/proc/101/stat": [
+            processStat(101, 202, firstEvidence === "session" ? 44 : 3),
+            processStat(101, 303, 3),
+          ],
+          "/proc/101/environ":
+            firstEvidence === "token"
+              ? [
+                  `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`,
+                  processRaceError("EACCES"),
+                ]
+              : [processRaceError("EACCES")],
+          "/proc/202/stat": [processStat(202, 1, 44, "5678")],
         });
-        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
+        options.now = () => 0;
+        assert.deepEqual(inspect(ownerToken, options), [101]);
       }
-      for (const [environment, session, expected] of [
-        [marker, 303, [404]],
-        ["", 44, [404]],
-        [processRaceError("EACCES"), 505, null],
+      for (const changed of [
+        processRaceError("EPERM"),
+        processRaceError("EIO"),
+        processStat(101, 202, 44, "9999"),
       ]) {
-        const fixture = liveCustodyFixture({
-          pids: ["101", "404"],
-          reads: {
-            "/proc/404/stat": [processStat(404, 101, session, "7890")],
-            "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
-            "/proc/404/environ": [environment],
-            "/proc/404/cgroup": ["0::/shared.scope\n"],
-          },
+        const { options, ownerToken } = processRaceOptions({
+          "/proc/101/stat": [processStat(101, 202, 44), changed],
         });
-        assert.deepEqual(
-          inspect(fixture.ownerToken, fixture.options),
-          expected,
-        );
-        assert.equal(fixture.reads.has("/proc/404/stat"), true);
+        options.now = () => 0;
+        assert.equal(inspect(ownerToken, options), null);
       }
     });
   }
 });
 
-test("live custody rejects baseline ancestry without a live leader, incomplete or cyclic lineage, and unstable evidence", async (t) => {
-  const cases = [
-    ["missing leader", { "/proc/303/stat": [processRaceError()] }],
-    [
-      "inaccessible leader identity",
-      { "/proc/303/stat": [processRaceError("EACCES")] },
-    ],
-    ["reused leader", { "/proc/303/stat": [processStat(303, 1, 303, "9999")] }],
-    [
-      "dead leader",
-      {
-        "/proc/303/stat": [
-          exitedStat({ pid: 303, parent: 1, session: 303, start: "6789" }),
-        ],
-      },
-    ],
-    ["malformed leader", { "/proc/303/stat": ["invalid"] }],
-    ["session gap", { "/proc/202/stat": [processStat(202, 303, 505, "5678")] }],
-    ["parent gap", { "/proc/202/stat": [processStat(202, 505, 303, "5678")] }],
-    [
-      "incomplete ancestry with a different control group",
-      {
-        "/proc/202/stat": [processRaceError("EACCES")],
-        "/proc/101/cgroup": ["0::/unrelated.scope\n"],
-      },
-    ],
-    [
-      "cycle",
-      {
-        "/proc/101/stat": [processStat(101, 202, 505)],
-        "/proc/202/stat": [processStat(202, 101, 505, "5678")],
-      },
-    ],
-    [
-      "cycle through the baseline leader",
-      { "/proc/303/stat": [processStat(303, 101, 303, "6789")] },
-    ],
-  ];
+test("retains known members across scans until their exact PID is absent", async (t) => {
   for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
-      const unanchored = liveCustodyFixture();
-      unanchored.options.ancestryBaseline = ancestryBaseline(
-        [1, "1"],
-        [202, "5678"],
-      );
-      assert.equal(inspect(unanchored.ownerToken, unanchored.options), null);
-      const groupAlone = liveCustodyFixture({
-        reads: { "/proc/101/cgroup": ["0::/unrelated.scope\n"] },
-      });
-      groupAlone.options.ancestryBaseline = null;
-      assert.equal(inspect(groupAlone.ownerToken, groupAlone.options), null);
-      for (const [label, reads] of cases) {
-        const fixture = liveCustodyFixture({ reads });
-        assert.equal(inspect(fixture.ownerToken, fixture.options), null, label);
-      }
-      // Invalidate each observation, including the last read of every hop.
-      const successful = liveCustodyFixture();
-      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
-      for (const [pid, parent, start] of [
-        [101, 202, "1234"],
-        [202, 303, "5678"],
-        [303, 1, "6789"],
-      ]) {
-        const path = `/proc/${pid}/stat`;
-        const stable = processStat(pid, parent, 303, start);
-        for (let count = 1; count < successful.reads.get(path); count += 1) {
-          for (const [changed, churn] of [
-            [processStat(pid, parent, 303, "9999"), false],
-            [exitedStat({ pid, parent, session: 303, start }), false],
-            [processStat(pid, 505, 303, start), true],
-            [processStat(pid, parent, 505, start), true],
-          ]) {
-            let changedView = false;
-            const fixture = liveCustodyFixture({
-              reads: {
-                "/proc/101/cgroup": ["0::/unrelated.scope\n"],
-                [path]: [
-                  ...Array(count).fill(stable),
-                  () => {
-                    changedView = !changedView;
-                    return !churn || changedView ? changed : stable;
-                  },
-                ],
-              },
-            });
-            assert.equal(
-              inspect(fixture.ownerToken, fixture.options),
-              null,
-              `${path} read ${count + 1}`,
+      for (const outcome of ["retained", "unreadable", "replaced", "absent"]) {
+        let rescanning = false;
+        const { options, ownerToken } = processRaceOptions();
+        const read = options.read;
+        options.now = () => 0;
+        options.list = () => (rescanning ? [] : ["101"]);
+        options.next = (first) => {
+          assert.deepEqual(Array.from(first), [101]);
+          rescanning = true;
+        };
+        options.read = (path) => {
+          if (path === "/proc/101/stat") {
+            if (rescanning && ["unreadable", "absent"].includes(outcome))
+              throw processRaceError(
+                outcome === "absent" ? "ENOENT" : "EACCES",
+              );
+            return processStat(
+              101,
+              202,
+              rescanning ? 101 : 44,
+              rescanning && outcome === "replaced" ? "9999" : "1234",
             );
           }
-        }
+          return read(path);
+        };
+        assert.deepEqual(
+          inspect(ownerToken, options),
+          outcome === "retained" ? [101] : outcome === "absent" ? [] : null,
+        );
+      }
+      const ancestor = processStat(202, 1, 44, "5678");
+      const { options, ownerToken } = processRaceOptions({
+        "/proc/202/stat": [ancestor, processStat(202, 1, 44, "9999")],
+      });
+      options.now = () => 0;
+      assert.equal(inspect(ownerToken, options), null);
+    });
+  }
+});
+
+test("failed ancestor identity cannot associate a new child across scans", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, async (t) => {
+      const ancestor = processStat(202, 1, 44, "5678");
+      const reused = processStat(202, 1, 202, "9999");
+      for (const [failure, observations] of [
+        ["reused", [reused]],
+        ["unreadable", [processRaceError("EACCES")]],
+        ["malformed", ["invalid stat"]],
+        ["reused during verification", [ancestor, reused]],
+        [
+          "unreadable during verification",
+          [ancestor, processRaceError("EPERM")],
+        ],
+      ]) {
+        await t.test(failure, () => {
+          let scan = 0;
+          let ancestorReads = 0;
+          const { options, ownerToken } = processRaceOptions();
+          const read = options.read;
+          options.now = () => 0;
+          options.list = () => (scan === 0 ? ["202"] : ["101"]);
+          options.read = (path) => {
+            if (path === "/proc/202/stat") {
+              if (scan === 0) return ancestor;
+              if (scan === 2) throw processRaceError();
+              const value =
+                observations[
+                  Math.min(ancestorReads++, observations.length - 1)
+                ];
+              if (value instanceof Error) throw value;
+              return value;
+            }
+            if (path === "/proc/101/stat")
+              return processStat(101, scan === 2 ? 1 : 202, 101);
+            return read(path);
+          };
+          options.next = [
+            (first) => {
+              assert.deepEqual(Array.from(first), [202]);
+              scan = 1;
+            },
+            (failed) => {
+              assert.equal(failed, null);
+              // The unrelated ancestor exits; its unassociated child survives.
+              scan = 2;
+            },
+          ];
+          assert.deepEqual(inspect(ownerToken, options), []);
+        });
       }
     });
   }
 });
 
-test("live custody shares the unchanged work and elapsed bounds through its final read", async (t) => {
+test("retains intermediate ancestry after reparenting and the other owned processes exit", async (t) => {
   for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
-      const exhausted = liveCustodyFixture({ pids: Array(3000).fill("101") });
-      assert.equal(inspect(exhausted.ownerToken, exhausted.options), null);
-      assert.ok(exhausted.reads.get("/proc/303/stat") > 3);
-      const successful = liveCustodyFixture();
-      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
-      const fixture = liveCustodyFixture();
-      const read = fixture.options.read;
-      let elapsed = 0;
-      fixture.options.now = () => elapsed;
-      fixture.options.read = (path) => {
-        const value = read(path);
-        if (
-          path === "/proc/101/stat" &&
-          fixture.reads.get(path) === successful.reads.get(path)
-        )
-          elapsed = 250;
-        return value;
-      };
-      assert.equal(inspect(fixture.ownerToken, fixture.options), null);
-      assert.equal(elapsed, 250);
-    });
-  }
-});
-
-test("ignores a proven pre-existing inaccessible process", () => {
-  assert.deepEqual(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), {
-      ...inaccessibleProcessOptions(),
-      ancestryBaseline: ancestryBaseline([101, "1234"]),
-    }),
-    [],
-  );
-});
-
-test("anchors the production SSH and tmux topology to frozen ancestry", () => {
-  const ownerToken = "a".repeat(64);
-  assert.deepEqual(
-    inspectOwnedSessionProcesses("44", ownerToken, {
-      ancestryBaseline: ancestryBaseline([303, "6789"]),
-      getuid: () => 1000,
-      list: () => ["101"],
-      read(path) {
-        if (path === "/proc/sys/kernel/random/boot_id") {
-          return `${BOOT_ID}\n`;
-        }
+      let reparented = false;
+      let rescanning = false;
+      let childReads = 0;
+      const { options, ownerToken } = processRaceOptions();
+      const read = options.read;
+      options.now = () => 0;
+      options.list = () => (rescanning ? ["202"] : ["101", "202", "303"]);
+      options.read = (path) => {
         if (path === "/proc/101/stat") {
-          return processStat(101, 202, 3);
+          if (rescanning) throw processRaceError();
+          const stat = read(path);
+          // Reparent after ancestry discovery, before independent inspection.
+          childReads += 1;
+          if (childReads === 2) reparented = true;
+          return stat;
         }
-        if (path === "/proc/101/status") {
-          return "Uid:\t1000\t1000\t1000\t1000\n";
-        }
-        if (path === "/proc/101/environ") return "";
         if (path === "/proc/202/stat") {
-          return processStat(202, 303, 3, "5678");
-        }
-        if (path === "/proc/202/environ") {
-          throw processRaceError("EACCES");
+          return processStat(202, reparented ? 1 : 303, 202, "5678");
         }
         if (path === "/proc/303/stat") {
-          return processStat(303, 1, 3, "6789");
+          if (rescanning) throw processRaceError();
+          return processStat(303, 1, 44, "6789");
         }
-        if (path === "/proc/303/environ") return "";
-        throw processRaceError("EACCES");
-      },
-    }),
-    [],
-  );
-});
-
-test(
-  "embedded supervision uses the same production-shaped ancestry anchor",
-  { timeout: 5_000 },
-  async (t) => {
-    const identity = await readProcessIdentity(process.pid);
-    assert.notEqual(identity, null);
-    const frozenBaseline = [
-      {
-        bootId: identity.bootId,
-        pid: TOPOLOGY_PIDS.anchor,
-        startTicks: "6789",
-      },
-    ];
-    const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
-      captureAncestryBaseline: () => frozenBaseline,
-      env: await productionTopologyEnvironment(t, identity.bootId),
-      onProcess: async (_pid, proof) => {
-        if (proof !== undefined) {
-          assert.deepEqual(proof.ancestryBaseline, frozenBaseline);
-        }
-      },
-      ownershipMode: "native-sandbox-provider",
-      resolveLauncher: hostSessionLauncher,
-      stdio: "ignore",
-    });
-
-    const result = await child.ownedCompletion;
-    assert.equal(result.inspectionComplete, true);
-    assert.equal(result.descendantsActive, false);
-  },
-);
-
-test("does not let a baseline anchor hide observed owned evidence", async (t) => {
-  for (const fixture of [
-    {
-      name: "owned token",
-      environment: `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`,
-      ancestorSession: 3,
-    },
-    {
-      name: "owned session",
-      environment: "",
-      ancestorSession: 44,
-    },
-  ]) {
-    await t.test(fixture.name, () => {
-      assert.deepEqual(
-        inspectOwnedSessionProcesses(44, "a".repeat(64), {
-          ancestryBaseline: ancestryBaseline([303, "6789"]),
-          getuid: () => 1000,
-          list: () => ["101"],
-          read(path) {
-            if (path === "/proc/sys/kernel/random/boot_id") {
-              return `${BOOT_ID}\n`;
-            }
-            if (path === "/proc/101/stat") {
-              return processStat(101, 202, 3);
-            }
-            if (path === "/proc/101/status") {
-              return "Uid:\t1000\t1000\t1000\t1000\n";
-            }
-            if (path === "/proc/101/environ") return fixture.environment;
-            if (path === "/proc/202/stat") {
-              return processStat(202, 303, fixture.ancestorSession, "5678");
-            }
-            if (path === "/proc/202/environ") return fixture.environment;
-            if (path === "/proc/303/stat") {
-              return processStat(303, 1, 3, "6789");
-            }
-            if (path === "/proc/303/environ") return "";
-            throw processRaceError("EACCES");
-          },
-        }),
-        [101],
-      );
+        return read(path);
+      };
+      options.next = (first) => {
+        assert.ok(Array.from(first).includes(101));
+        assert.ok(Array.from(first).includes(303));
+        rescanning = true;
+      };
+      assert.deepEqual(inspect(ownerToken, options), [202]);
     });
   }
 });
 
-test("fails closed for stale, reused, malformed, or wrong-boot anchors", async (t) => {
-  const ownerToken = "a".repeat(64);
-  for (const fixture of [
-    {
-      name: "reused anchor",
-      baseline: ancestryBaseline([303, "6789"]),
-      anchorTicks: "9999",
-      bootId: BOOT_ID,
-    },
-    {
-      name: "wrong boot",
-      baseline: [
-        {
-          bootId: "ffffffff-1111-2222-3333-444444444444",
-          pid: 303,
-          startTicks: "6789",
-        },
-      ],
-      anchorTicks: "6789",
-      bootId: BOOT_ID,
-    },
-    {
-      name: "unsorted baseline",
-      baseline: ancestryBaseline([303, "6789"], [1, "1"]).reverse(),
-      anchorTicks: "6789",
-      bootId: BOOT_ID,
-    },
-  ]) {
-    await t.test(fixture.name, () => {
-      assert.equal(
-        inspectOwnedSessionProcesses(44, ownerToken, {
-          ancestryBaseline: fixture.baseline,
-          getuid: () => 1000,
-          list: () => ["101"],
-          read(path) {
-            if (path === "/proc/sys/kernel/random/boot_id") {
-              return `${fixture.bootId}\n`;
-            }
-            if (path === "/proc/101/stat") {
-              return processStat(101, 303, 3);
-            }
-            if (path === "/proc/101/status") {
-              return "Uid:\t1000\t1000\t1000\t1000\n";
-            }
-            if (path === "/proc/101/environ") return "";
-            if (path === "/proc/303/stat") {
-              return processStat(303, 1, 3, fixture.anchorTicks);
-            }
-            if (path === "/proc/303/environ") return "";
-            throw processRaceError("EACCES");
-          },
-        }),
-        null,
-      );
+test("reconciles newly owned ancestors when the inspected child exits during verification", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      for (const listedParent of [false, true]) {
+        let childInspected = false;
+        let childExited = false;
+        const { options, ownerToken } = processRaceOptions({
+          "/proc/101/stat": [
+            () => {
+              if (childInspected) {
+                childExited = true;
+                throw processRaceError();
+              }
+              childInspected = true;
+              return processStat(101, 202, 101);
+            },
+          ],
+          "/proc/202/stat": [
+            () =>
+              processStat(
+                202,
+                childInspected && !childExited ? 303 : 1,
+                202,
+                "5678",
+              ),
+          ],
+          "/proc/303/stat": [processStat(303, 1, 44, "6789")],
+        });
+        options.now = () => 0;
+        // The parent is either omitted or classified before ownership is found.
+        options.list = () => (listedParent ? ["202", "101"] : ["101"]);
+        assert.deepEqual(
+          inspect(ownerToken, options)?.sort((left, right) => left - right),
+          [202, 303],
+        );
+      }
     });
   }
 });
 
-test("fails closed for an ancestry cycle before the frozen anchor", () => {
-  assert.equal(
-    inspectOwnedSessionProcesses(44, "a".repeat(64), {
-      ancestryBaseline: ancestryBaseline([303, "6789"]),
-      getuid: () => 1000,
-      list: () => ["101"],
-      read(path) {
-        if (path === "/proc/sys/kernel/random/boot_id") {
-          return `${BOOT_ID}\n`;
-        }
-        if (path === "/proc/101/stat") return processStat(101, 202, 3);
-        if (path === "/proc/101/status") {
-          return "Uid:\t1000\t1000\t1000\t1000\n";
-        }
-        if (path === "/proc/101/environ") return "";
-        if (path === "/proc/202/stat") {
-          return processStat(202, 101, 3, "5678");
-        }
-        if (path === "/proc/202/environ") return "";
-        throw processRaceError("EACCES");
-      },
-    }),
-    null,
-  );
-});
-
-test("fails closed before scanning when current boot evidence is unavailable", () => {
-  let listed = false;
-  assert.equal(
-    inspectOwnedSessionProcesses(44, "a".repeat(64), {
-      ancestryBaseline: ancestryBaseline([1, "1"]),
-      list: () => {
-        listed = true;
-        return [];
-      },
-      read: () => {
-        throw processRaceError("EACCES");
-      },
-    }),
-    null,
-  );
-  assert.equal(listed, false);
-});
-
-test("rejects inaccessible new processes but retains an owned session", () => {
-  const options = inaccessibleProcessOptions();
-  assert.equal(
-    inspectOwnedSessionProcesses("44", "a".repeat(64), options),
-    null,
-  );
-  assert.deepEqual(
-    inspectOwnedSessionProcesses("3", "a".repeat(64), {
-      ...options,
-      ancestryBaseline: ancestryBaseline([1, "1"]),
-    }),
-    [101],
-  );
-});
-
-test("excludes an inaccessible process only with complete unrelated ancestry and a different control group", () => {
-  const ownerSource = "0::/owned.scope\n";
-  const ownerControlGroup = createHash("sha256")
-    .update(ownerSource)
-    .digest("hex");
-  const { options } = processRaceOptions({
-    "/proc/101/environ": [processRaceError("EACCES")],
-  });
+test("supervisor failure carries retained ownership into parent cleanup", () => {
+  let inaccessible = false;
+  let retained;
+  const { options, ownerToken } = processRaceOptions();
   const read = options.read;
-  const inspect = (source, sessionId = "44") =>
-    inspectOwnedSessionProcesses(sessionId, "a".repeat(64), {
+  options.now = () => 0;
+  options.read = (path) => {
+    if (path === "/proc/101/stat") {
+      if (inaccessible) throw processRaceError("EACCES");
+      return processStat(101, 202, 44);
+    }
+    return read(path);
+  };
+  options.next = () => {
+    inaccessible = true;
+  };
+  options.onFailure = (message) => {
+    if (message.type === "containment-failure") retained = message;
+  };
+  assert.equal(inspectEmbeddedSession(ownerToken, options), null);
+  const observedProcesses = new Map(retained.observedProcesses);
+  assert.equal(observedProcesses.get(101), "1234");
+  assert.equal(
+    inspectOwnedSessionProcesses(44, ownerToken, {
       ...options,
-      controlGroup: ownerControlGroup,
-      read(path) {
-        return path === "/proc/101/cgroup" ? source : read(path);
-      },
-    });
+      observedProcesses,
+    }),
+    null,
+  );
+});
 
-  assert.deepEqual(inspect("0::/unrelated.scope\n"), []);
-  assert.equal(inspect(ownerSource), null);
-  assert.deepEqual(inspect("0::/unrelated.scope\n", 1), [101]);
+test("watchdog cleanup requires the supervisor's retained ownership before clearing registration", async (t) => {
+  for (const [name, transfer, survives, watchdog] of [
+    ["ordinary termination retains the descendant", true, true, false],
+    ["watchdog termination retains the descendant", true, true, true],
+    ["handoff is missing", false, true, true],
+    ["retained descendant exits", true, false, true],
+  ]) {
+    await t.test(name, async () => {
+      let detached = false;
+      let absent = false;
+      const { options, ownerToken } = processRaceOptions();
+      const read = options.read;
+      options.now = () => 0;
+      options.read = (path) => {
+        if (path === "/proc/101/stat") {
+          if (absent) throw processRaceError();
+          return processStat(101, 1, detached ? 101 : 44);
+        }
+        if (path === "/proc/101/environ" && detached)
+          throw processRaceError("EACCES");
+        return read(path);
+      };
+      const registrations = [];
+      const signals = [];
+      const watchdogs = [];
+      const supervisorTimers = [];
+      const supervisorHandlers = new Map();
+      const started = Promise.withResolvers();
+      const payload = Object.assign(new EventEmitter(), {
+        pid: 55,
+        kill() {},
+      });
+      const child = new EventEmitter();
+      Object.assign(child, {
+        pid: 44,
+        connected: true,
+        exitCode: null,
+        signalCode: null,
+        kill(signal) {
+          child.signalCode = signal;
+          child.emit("close");
+          return true;
+        },
+        send(message, complete) {
+          supervisorHandlers.get("message")(message);
+          complete();
+        },
+      });
+      const context = {
+        Buffer,
+        createHash,
+        randomUUID: () => ownerToken,
+        spawn: () => child,
+        readProcessChildren: async () => [],
+        readProcessIdentity: async () => ({
+          bootId: BOOT_ID,
+          startTicks: "44",
+        }),
+        readProcessNamespace: async () => "pid:[1]",
+        readFileSync: options.read,
+        readdirSync: options.list,
+        performance: { now: options.now },
+        setTimeout(callback) {
+          watchdogs.push(callback);
+          return { unref() {} };
+        },
+        clearTimeout() {},
+        process: {
+          pid: 9,
+          execPath: process.execPath,
+          cwd: () => process.cwd(),
+          getuid: options.getuid,
+          hrtime: process.hrtime,
+          kill: (pid, signal) => signals.push({ pid, signal }),
+        },
+      };
+      // Exercise the actual parent with injected effects, alongside the actual
+      // embedded supervisor. No processes, signals or timers reach the host.
+      const source = readFileSync(
+        new URL("../../src/agents/owned-process.js", import.meta.url),
+        "utf8",
+      )
+        .replace(/^import[\s\S]*?;\n/gmu, "")
+        .replace(/^export /gmu, "");
+      runInNewContext(
+        `${source}\nglobalThis.launch = spawnOwnedProcess;`,
+        context,
+      );
+      context.launch("unused", [], {
+        descendantGraceMs: 25,
+        onProcess: async (pid) => registrations.push(pid),
+        resolveLauncher: () => ({
+          file: "unused",
+          arguments: [],
+          isolatedNamespace: false,
+        }),
+      });
+      const supervisor = embeddedSession(ownerToken, {
+        ...options,
+        setTimeout(callback) {
+          supervisorTimers.push(callback);
+          return { unref() {} };
+        },
+        spawn() {
+          started.resolve();
+          return payload;
+        },
+        process: {
+          connected: true,
+          on: (event, handler) => supervisorHandlers.set(event, handler),
+          kill: (pid, signal) => signals.push({ pid, signal }),
+          exit(code) {
+            child.exitCode = code;
+            child.emit("close");
+          },
+          send(message, complete) {
+            if (message.type === "ready" || transfer)
+              child.emit("message", message);
+            complete?.();
+          },
+        },
+      });
+      await started.promise;
+      assert.deepEqual(Array.from(supervisor.ownedMembers()), [101]);
+      payload.emit("exit", 0, null);
+      detached = true;
+      child.kill("SIGTERM");
+      assert.ok(
+        signals.some(({ pid, signal }) => pid === 101 && signal === "SIGTERM"),
+      );
+      const handedOffSignals = signals.length;
+      // Completion queued before termination must stop using the handed-off cache.
+      supervisorTimers[0]();
+      assert.equal(signals.length, handedOffSignals);
+      absent = !survives;
+      // Either close the supervisor normally or expire the parent's watchdog
+      // before any supervisor failure report.
+      if (watchdog) watchdogs[0]();
+      else supervisorTimers[1]();
+      const result = await child.ownedCompletion.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      if (survives) {
+        assert.deepEqual(registrations, [44]);
+        assert.equal(result.error?.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+      } else {
+        assert.deepEqual(registrations, [44, null]);
+        assert.equal(result.value?.descendantsStopped, true);
+      }
+    });
+  }
+});
+
+test("parent loss after handoff resumes verified cleanup with retained ownership", async (t) => {
+  for (const outcome of ["survives", "unreadable", "exits"]) {
+    await t.test(outcome, () => {
+      let detached = false;
+      let disconnected = false;
+      let absent = false;
+      const { options, ownerToken } = processRaceOptions();
+      const read = options.read;
+      options.now = () => 0;
+      options.read = (path) => {
+        if (path === "/proc/101/stat") {
+          if (absent) throw processRaceError();
+          if (disconnected && outcome === "unreadable")
+            throw processRaceError("EACCES");
+          return processStat(101, 1, detached ? 101 : 44);
+        }
+        if (path === "/proc/101/environ" && detached)
+          throw processRaceError("EACCES");
+        return read(path);
+      };
+      const handlers = new Map();
+      const messages = [];
+      const signals = [];
+      const exits = [];
+      const timers = [];
+      const supervisor = embeddedSession(ownerToken, {
+        ...options,
+        setTimeout(callback) {
+          const timer = {
+            callback,
+            referenced: true,
+            ref() {
+              this.referenced = true;
+            },
+            unref() {
+              this.referenced = false;
+            },
+          };
+          timers.push(timer);
+          return timer;
+        },
+        spawn: () => ({ pid: 55, once() {}, kill() {} }),
+        process: {
+          connected: true,
+          on: (event, handler) => handlers.set(event, handler),
+          send: (message) => messages.push(message),
+          exit: (code) => exits.push(code),
+          kill(pid, signal) {
+            signals.push({ pid, signal });
+            if (pid === 101 && signal === "SIGKILL" && outcome === "exits")
+              absent = true;
+          },
+        },
+      });
+      handlers.get("message")({ type: "start", ownerToken });
+      assert.deepEqual(Array.from(supervisor.ownedMembers()), [101]);
+      detached = true;
+      assert.deepEqual(
+        inspectOwnedSessionProcesses(44, ownerToken, options),
+        [],
+      );
+      handlers.get("message")({ type: "terminate", signal: "SIGTERM" });
+      const handoff = messages.find(({ type }) => type === "ownership-handoff");
+      assert.equal(handoff.observedProcesses[0][0], 101);
+      assert.equal(timers[0].referenced, false);
+
+      // Lose the parent before its watchdog can use the handed-off identities.
+      supervisor.process.connected = false;
+      disconnected = true;
+      handlers.get("disconnect")();
+      // The original unchecked exit must become the bounded verification step.
+      timers[0].callback();
+      assert.deepEqual(
+        {
+          descendantSignaled: signals.some(
+            ({ pid, signal }) => pid === 101 && signal === "SIGKILL",
+          ),
+          descendantPresent: !absent,
+          supervisorExits: exits,
+          referenced: timers[0].referenced,
+          timers: timers.length,
+        },
+        {
+          descendantSignaled: outcome !== "unreadable",
+          descendantPresent: outcome !== "exits",
+          supervisorExits: outcome === "exits" ? [124] : [],
+          referenced: true,
+          timers: 1,
+        },
+      );
+    });
+  }
+});
+
+test("embedded cleanup never signals unassociated processes", () => {
+  const { options, ownerToken } = unassociatedSessionFixture();
+  const signaled = [];
+  assert.equal(
+    inspectEmbeddedSession(ownerToken, {
+      ...options,
+      signal: true,
+      onSignal: (pid, signal) => signaled.push({ pid, signal }),
+    }),
+    true,
+  );
+  assert.deepEqual(signaled, []);
+});
+
+test("unassociated inaccessible metadata is ignored while inspection failures remain bounded", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      for (const path of ["stat", "status", "environ"]) {
+        for (const code of ["EACCES", "EPERM", "EIO"]) {
+          const { options, ownerToken } = processRaceOptions({
+            [`/proc/101/${path}`]: [processRaceError(code)],
+          });
+          options.now = () => 0;
+          assert.deepEqual(inspect(ownerToken, options), []);
+        }
+      }
+      for (const mutate of [
+        (options) => {
+          options.list = () => {
+            throw processRaceError("EACCES");
+          };
+        },
+        (options) => {
+          options.list = () => Array(65_537).fill("101");
+        },
+        (options) => {
+          let elapsed = 0;
+          const read = options.read;
+          options.now = () => elapsed;
+          options.read = (path) => {
+            const result = read(path);
+            elapsed = 250;
+            return result;
+          };
+        },
+      ]) {
+        const { options, ownerToken } = processRaceOptions();
+        options.now = () => 0;
+        mutate(options);
+        assert.equal(inspect(ownerToken, options), null);
+      }
+    });
+  }
 });
 
 test(
@@ -2183,7 +1883,7 @@ test(
 );
 
 test(
-  "records bounded frozen ancestry before provider work starts",
+  "registers identity before provider work without global exclusion proofs",
   {
     timeout: 5_000,
   },
@@ -2205,16 +1905,8 @@ test(
           if (pid === null) return;
           await assert.rejects(access(startedPath), { code: "ENOENT" });
           assert.deepEqual(proof.launchCutoff, proof.processIdentity);
-          assert.ok(proof.ancestryBaseline.length > 0);
-          assert.ok(proof.ancestryBaseline.length <= 4_096);
-          assert.equal(
-            proof.ancestryBaseline.every(
-              (entry, index, entries) =>
-                entry.bootId === proof.processIdentity.bootId &&
-                (index === 0 || entries[index - 1].pid < entry.pid),
-            ),
-            true,
-          );
+          assert.equal(proof.ancestryBaseline, null);
+          assert.equal(proof.controlGroup, null);
         },
         ownershipMode: "native-sandbox-provider",
         resolveLauncher(cwd, { ownershipMode }) {
@@ -2234,35 +1926,6 @@ test(
     assert.equal(await readFile(startedPath, "utf8"), "started");
   },
 );
-
-test("rejects an oversized launch ancestry before spawning work", () => {
-  let launcherResolved = false;
-  assert.throws(
-    () =>
-      spawnOwnedProcess(process.execPath, ["-e", ""], {
-        captureAncestryBaseline: () =>
-          Array.from({ length: 4_097 }, (_, index) => ({
-            bootId: BOOT_ID,
-            pid: index + 1,
-            startTicks: String(index + 1),
-          })),
-        onProcess: async () => {},
-        resolveLauncher: () => {
-          launcherResolved = true;
-          return {
-            file: process.execPath,
-            arguments: [],
-            isolatedNamespace: true,
-          };
-        },
-      }),
-    {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-      message: "Owned-process launch ancestry is unavailable.",
-    },
-  );
-  assert.equal(launcherResolved, true);
-});
 
 test(
   "does not signal through a completed owned-process handle",
@@ -2313,8 +1976,6 @@ test("recovery clears a dead session only after proving descendants absent", asy
       inspectSessionProcesses(sessionId, _token, options) {
         assert.equal(sessionId, ownerPid);
         assert.deepEqual(options, {
-          ancestryBaseline: frozenBaseline,
-          controlGroup: null,
           includeSession: true,
         });
         return [];
@@ -2350,8 +2011,6 @@ test("recovery retains a dead session owner while descendants remain", async () 
           assert.equal(sessionId, ownerPid);
           assert.equal(token, ownerToken);
           assert.deepEqual(options, {
-            ancestryBaseline: frozenBaseline,
-            controlGroup: null,
             includeSession: true,
           });
           return [123_456];
@@ -2362,21 +2021,19 @@ test("recovery retains a dead session owner while descendants remain", async () 
   );
 });
 
-test("recovery rejects legacy sessions without frozen ancestry evidence", async () => {
-  await assert.rejects(
-    terminateOwnedProcess(987_654, async () => ({
+test("recovery accepts historical records without optional exclusion proofs", async () => {
+  await terminateOwnedProcess(
+    987_654,
+    async () => ({
       ancestryBaseline: null,
+      controlGroup: null,
       namespaceId: readlinkSync("/proc/self/ns/pid"),
       pid: 987_654,
       previousBoot: false,
       processIdentity: { bootId: BOOT_ID, startTicks: "1234" },
       status: "dead",
-    })),
-    {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-      message:
-        "Owned execution process predates frozen ancestry recovery evidence.",
-    },
+    }),
+    { inspectSessionProcesses: () => [] },
   );
 });
 
@@ -2440,7 +2097,7 @@ test("recovery rejects replaced and incompletely recorded owners", async () => {
   }
 });
 
-test("bounds inspection work and elapsed time across baseline, ancestry, and process churn", () => {
+test("bounds inspection work and elapsed time across ancestry and process churn", () => {
   const { options, ownerToken } = processRaceOptions();
   assert.deepEqual(
     inspectOwnedSessionProcesses(44, ownerToken, { ...options, now: () => 0 }),
@@ -2475,33 +2132,6 @@ test("bounds inspection work and elapsed time across baseline, ancestry, and pro
       null,
     );
 
-  let bootReads = 0;
-  const baseline = Array.from({ length: 4_096 }, (_, index) => ({
-    bootId: BOOT_ID,
-    pid: index + 1,
-    startTicks: "1234",
-  }));
-  const result = inspectOwnedSessionProcesses(99_999, ownerToken, {
-    ancestryBaseline: baseline,
-    now: () => 0,
-    getuid: () => 1000,
-    list: () => baseline.map(({ pid }) => String(pid)),
-    read(path) {
-      if (path.endsWith("/boot_id")) {
-        bootReads++;
-        return BOOT_ID;
-      }
-      if (path.endsWith("/status")) return "Uid:\t1000\t1000\t1000\t1000\n";
-      if (path.endsWith("/environ")) return "";
-      return processStat(Number(path.split("/")[2]), 1, 3);
-    },
-  });
-  assert.deepEqual(result, []);
-  assert.equal(
-    bootReads,
-    1,
-    "validate and index the baseline once per inspection",
-  );
   let elapsed = 0;
   assert.equal(
     inspectOwnedSessionProcesses(44, ownerToken, {
