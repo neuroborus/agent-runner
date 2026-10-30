@@ -20,6 +20,7 @@ import {
   DISCOVERY_INSTRUCTIONS,
   RECHECK_INSTRUCTIONS,
 } from "./prompts.js";
+import { publicationContent, reportPaths } from "./publication-contract.js";
 import {
   CLARIFICATION_SCHEMA,
   DISCOVERY_SCHEMA,
@@ -45,7 +46,7 @@ function isOwnershipFailure(cause) {
   );
 }
 
-/** Unregistered discovery and finding-verification lifecycle. The runner supplies all persistence and read-only effects. */
+/** Discovery and finding verification; public completion is owned by runAudit. */
 export async function runAuditDiscovery({
   run,
   runtime,
@@ -91,18 +92,25 @@ export async function runAuditDiscovery({
     }
     return { inputs, clarification, hashes };
   }
-  async function requestEdit(questions) {
-    const round = state().clarificationRounds + 1;
-    const appended = await runtime.clarifications.appendQuestionRound({
+  async function prepareEdit(
+    action,
+    reason,
+    {
+      expectedHash = current.hashes.clarifications,
+      round = state().clarificationRounds,
+      inputRequest = action === "proactive-clarification"
+        ? {
+            kind: "clarification",
+            questions: [],
+            rationale: "Optional task clarification before agent work begins.",
+          }
+        : undefined,
+    } = {},
+  ) {
+    return runtime.clarifications.prepareEdit({
       ...transcript,
-      expectedHash: current.hashes.clarifications,
-      round,
-      questions,
-    });
-    await runtime.clarifications.prepareEdit({
-      ...transcript,
-      expectedHash: appended.hash,
-      action: "clarification-answers",
+      expectedHash,
+      action,
       suspendedState: "CLARIFY",
       persistPendingEdit: async (authorization) =>
         save(
@@ -113,16 +121,60 @@ export async function runAuditDiscovery({
             pendingEdit: authorization,
           },
           {
-            hashes: { ...current.hashes, clarifications: appended.hash },
+            hashes: { ...current.hashes, clarifications: expectedHash },
             pause: {
-              reason: "clarification_answers_required",
+              reason,
               resumeState: "CLARIFY",
+              authorizationId: authorization.id,
+              ...(inputRequest === undefined
+                ? {}
+                : {
+                    inputRequest: {
+                      ...inputRequest,
+                      id: authorization.id,
+                      artifactPath: authorization.transcriptPath,
+                    },
+                  }),
             },
           },
         ),
     });
-    // The common CLI/MCP clarification boundary can consume this persisted one-shot edit.
-    return current;
+  }
+  async function consumeEdit(result) {
+    assertAudit(
+      result.authorizationId === state().pendingEdit.id,
+      "Audit edit authorization changed.",
+    );
+    if (!result.changed && result.action !== "proactive-clarification") {
+      // Unanswered material questions retain their round and receive a new one-shot window.
+      await prepareEdit(result.action, current.pause.reason, {
+        expectedHash: result.hash,
+        inputRequest: current.pause.inputRequest,
+      });
+      return;
+    }
+    await save(
+      {
+        ...state(),
+        workflowState: "CLARIFY",
+        pendingEdit: null,
+        proactiveClarificationComplete:
+          result.action === "proactive-clarification"
+            ? true
+            : state().proactiveClarificationComplete,
+      },
+      {
+        hashes: { ...current.hashes, clarifications: result.hash },
+        pause: null,
+      },
+    );
+  }
+  async function requestEdit(action, reason, options) {
+    const authorization = await prepareEdit(action, reason, options);
+    const result = await runtime.clarifications.openEditor(authorization, {
+      consumePendingEdit: consumeEdit,
+    });
+    return result.status !== "WAITING_FOR_USER" && state().pendingEdit === null;
   }
   const retry = Symbol("retry");
   async function turn(phase, evidence) {
@@ -381,12 +433,14 @@ export async function runAuditDiscovery({
     return { output: response.structured };
   }
 
-  function assertPersistentSize(pipelineState) {
+  function assertUpdateSize(pipelineState) {
     assertAudit(
       Buffer.byteLength(JSON.stringify({ ...current, pipelineState })) <=
         32 * 1024 * 1024,
       "Audit result exceeds the enclosing persistent run limit.",
     );
+    // Markdown escaping can exceed the publisher's bound even when JSON fits.
+    publicationContent(pipelineState);
   }
 
   function safeCode(cause) {
@@ -396,7 +450,7 @@ export async function runAuditDiscovery({
       : "ERR_AUDIT_PROVIDER_FAILED";
   }
 
-  if (state().workflowState === "FAILED") return current;
+  if (["FAILED", "CANCELED"].includes(state().workflowState)) return current;
 
   if (operatorStop) {
     if (state().repositoryBaseline !== null) {
@@ -426,20 +480,9 @@ export async function runAuditDiscovery({
     if (["workspace_changed", "input_changed"].includes(current.pause?.reason))
       return current;
     await runtime.clarifications.acceptEdit(state().pendingEdit, {
-      consumePendingEdit: async (result) => {
-        assertAudit(
-          result.authorizationId === state().pendingEdit.id,
-          "Audit edit authorization changed.",
-        );
-        await save(
-          { ...state(), workflowState: "CLARIFY", pendingEdit: null },
-          {
-            hashes: { ...current.hashes, clarifications: result.hash },
-            pause: null,
-          },
-        );
-      },
+      consumePendingEdit: consumeEdit,
     });
+    if (state().pendingEdit !== null) return current;
   } else if (state().workflowState === "WAITING_FOR_USER") {
     if (
       ![
@@ -468,7 +511,10 @@ export async function runAuditDiscovery({
       {
         ...state(),
         repositoryBaseline: await runtime.workspace.snapshot({
-          allowedPaths: [transcript.transcriptPath],
+          allowedPaths: [
+            transcript.transcriptPath,
+            ...reportPaths(run.taskPath),
+          ],
         }),
       },
       {
@@ -507,6 +553,18 @@ export async function runAuditDiscovery({
     });
 
   while (state().workflowState === "CLARIFY") {
+    if (
+      state().proactiveClarification &&
+      !state().proactiveClarificationComplete
+    ) {
+      if (
+        !(await requestEdit(
+          "proactive-clarification",
+          "proactive_clarification",
+        ))
+      )
+        return current;
+    }
     const evidence = await inspectInputs();
     if (evidence === null) return current;
     const result = await turn("clarify", {
@@ -559,7 +617,34 @@ export async function runAuditDiscovery({
     }
     if (state().clarificationRounds >= MAX_CLARIFICATION_ROUNDS)
       return pause("clarification_limit_reached");
-    return requestEdit(output.questions);
+    const round = state().clarificationRounds + 1;
+    const appended = await runtime.clarifications.appendQuestionRound({
+      ...transcript,
+      expectedHash: current.hashes.clarifications,
+      round,
+      questions: output.questions,
+    });
+    if (
+      !(await requestEdit(
+        "clarification-answers",
+        "clarification_answers_required",
+        {
+          expectedHash: appended.hash,
+          round,
+          inputRequest: {
+            kind: "clarification",
+            questions: output.questions.map((question, index) => ({
+              id: `q${index + 1}`,
+              question: question.question,
+              options: [],
+              rationale: question.whyItMatters,
+            })),
+            rationale: "Answer every material clarification question.",
+          },
+        },
+      ))
+    )
+      return current;
   }
 
   while (["DISCOVER", "VERIFY_FINDINGS"].includes(state().workflowState)) {
@@ -608,7 +693,7 @@ export async function runAuditDiscovery({
       let accepted;
       try {
         accepted = acceptRecheck(state(), result.output);
-        assertPersistentSize(accepted);
+        assertUpdateSize(accepted);
       } catch (cause) {
         if (
           !(cause instanceof AuditWorkflowError) &&
@@ -679,7 +764,7 @@ export async function runAuditDiscovery({
     let accepted;
     try {
       accepted = acceptDiscovery(state(), result.output);
-      assertPersistentSize(accepted);
+      assertUpdateSize(accepted);
     } catch (cause) {
       if (
         !(cause instanceof AuditWorkflowError) &&

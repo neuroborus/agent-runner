@@ -9,6 +9,7 @@ import {
   sessionContextKey,
 } from "./discovery-contract.js";
 import { normalizeAuditReport, texts } from "./findings.js";
+import { assertPublication } from "./publication-contract.js";
 
 const KINDS = ["confirm", "correct", "reject", "merge", "hypothesis"];
 const OUTCOMES = [
@@ -162,6 +163,7 @@ export function assertAuditRun(run) {
     "Audit recheck history is required.",
   );
   assertDiscoveryRun(run);
+  assertPublication(run);
   assertAudit(
     state.recheckHistory.length <= state.settings.maxFindingRecheckPasses &&
       (state.inputs !== null || state.recheckHistory.length === 0),

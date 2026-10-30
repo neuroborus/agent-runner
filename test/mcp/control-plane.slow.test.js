@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -699,7 +700,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   });
   assert.deepEqual(
     pipelines.structuredContent.pipelines.map(({ id }) => id),
-    ["plan-authoring", "plan-execution", "polishing"],
+    ["plan-authoring", "plan-execution", "polishing", "audit"],
   );
   for (const pipeline of pipelines.structuredContent.pipelines) {
     assert.deepEqual(pipeline.settings.mode, {
@@ -2336,6 +2337,233 @@ test("retries when a detached loser exits after transient ownership", async (t) 
 
   assert.deepEqual(await control.runStart(input), { runId: RUN_ID });
   assert.deepEqual(launches, [RUN_ID, RUN_ID]);
+});
+
+test("audit clarification works through MCP start/respond and the CLI editor", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "audit-clarification-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const transport of ["mcp", "mcp-proactive", "cli"]) {
+    await t.test(transport, async () => {
+      const projectPath = join(root, transport);
+      const taskPath = join(projectPath, "task");
+      await mkdir(taskPath, { recursive: true });
+      await writeFile(
+        join(taskPath, "task.md"),
+        "Audit the agreed source tree.\n",
+      );
+      let runId = "11111111-1111-4111-8111-111111111111";
+      const runStore = createRunStore({
+        stateRoot: join(root, `state-${transport}`),
+      });
+      const answer = "Inspect src/ only.";
+      const calls = [];
+      const edits = [];
+      const adapter = {
+        async probe(request) {
+          return {
+            version: "fixture",
+            readOnly: true,
+            structuredOutput: true,
+            declaredWorkspace: true,
+            remoteWriteBlocked: true,
+            nativeSessionContinuation: true,
+            policyReceipt: {
+              schemaVersion: 1,
+              fingerprint: createHash("sha256")
+                .update(JSON.stringify(request))
+                .digest("hex"),
+              supportedAccess: ["read-only"],
+            },
+          };
+        },
+        async run(request) {
+          calls.push(request);
+          const evidence = JSON.parse(request.prompt.split("\n").at(-1));
+          if (calls.length === 2)
+            assert.ok(evidence.clarifications.includes(answer));
+          return {
+            sessionId: `child-${calls.length}`,
+            structured:
+              calls.length === 1
+                ? {
+                    status: "QUESTIONS",
+                    inputs: null,
+                    questions: [
+                      {
+                        question: "Which source tree is in scope?",
+                        whyItMatters: "Scope determines the inspected material",
+                      },
+                    ],
+                    reason: "",
+                  }
+                : calls.length === 2
+                  ? {
+                      status: "READY",
+                      inputs: {
+                        scope: ["src/"],
+                        references: [],
+                        exclusions: [],
+                        criteria: ["Established rules"],
+                      },
+                      questions: [],
+                      reason: "",
+                    }
+                  : {
+                      status: "COMPLETE",
+                      snapshotFingerprint: evidence.snapshotFingerprint,
+                      candidates: [],
+                      limitations: [],
+                      hypotheses: [],
+                      reportCorrections: [],
+                    },
+          };
+        },
+      };
+      const runner = createRunner({
+        adapters: { codex: adapter },
+        runStore: {
+          ...runStore,
+          async createRun(input) {
+            runId = input.runId;
+            return runStore.createRun(input);
+          },
+        },
+        loadConfiguration: async () =>
+          parseRunnerConfiguration(
+            JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+          ),
+        clarifications: createClarificationService({
+          interactive: transport === "cli",
+          env: { EDITOR: "fixture-editor" },
+          async launchEditor(_command, path) {
+            assert.equal(transport, "cli", "MCP must never open an editor");
+            const run = await runStore.loadRun(runId);
+            assert.equal(run.pipelineState.workflowState, "WAITING_FOR_USER");
+            assert.equal(
+              run.pause.inputRequest.id,
+              run.pipelineState.pendingEdit.id,
+            );
+            edits.push(run.pipelineState.pendingEdit.action);
+            if (edits.length === 1) assert.equal(calls.length, 0);
+            else
+              await writeFile(
+                path,
+                `${await readFile(path, "utf8")}\n${answer}\n`,
+              );
+            return { exitCode: 0, signal: null };
+          },
+        }),
+      });
+      if (transport === "cli") {
+        assert.equal(
+          await main(
+            [
+              "run",
+              "audit",
+              "--project",
+              projectPath,
+              "--task",
+              taskPath,
+              "--clarify",
+            ],
+            {
+              runner,
+              stdout: { write() {} },
+              stderr: { write: (value) => assert.fail(value) },
+            },
+          ),
+          0,
+        );
+        assert.deepEqual(edits, [
+          "proactive-clarification",
+          "clarification-answers",
+        ]);
+      } else {
+        let launches = 0;
+        const control = createMcpControlPlane({
+          runner,
+          runStore,
+          runIdFactory: () => runId,
+          async launchRun(
+            id,
+            action,
+            { dispatch, expectedRuntimeCompatibility },
+          ) {
+            launches++;
+            await runner.resume({
+              runId: id,
+              action,
+              dispatch,
+              expectedRuntimeCompatibility,
+            });
+          },
+        });
+        const input = {
+          pipelineId: "audit",
+          projectPath,
+          taskPath,
+          proactiveClarification: transport === "mcp-proactive",
+          sourceSession: null,
+          idempotencyKey: "start-audit",
+        };
+        assert.deepEqual(await control.runStart(input), { runId });
+        assert.deepEqual(await control.runStart(input), { runId });
+        assert.equal(launches, 1);
+        let status = await control.runStatus({ runId });
+        if (input.proactiveClarification) {
+          assert.equal(calls.length, 0);
+          assert.deepEqual(status.pendingInput.questions, []);
+          await control.runRespond({
+            runId,
+            requestId: status.pendingInput.id,
+            expectedRevision: status.revision,
+            answers: [],
+            idempotencyKey: "optional-input",
+          });
+          status = await control.runStatus({ runId });
+        }
+        assert.equal(calls.length, 1);
+        assert.equal(status.pendingInput.kind, "clarification");
+        assert.equal(status.pendingInput.questions[0].id, "q1");
+        assert.deepEqual(status.pause.nextActions, [
+          { type: "respond", requestId: status.pendingInput.id },
+        ]);
+        await assert.rejects(
+          control.runRespond({
+            runId,
+            requestId: status.pendingInput.id,
+            expectedRevision: status.revision,
+            answers: [],
+            idempotencyKey: "incomplete-answer",
+          }),
+          { code: "ERR_INCOMPLETE_INPUT_RESPONSE" },
+        );
+        const response = {
+          runId,
+          requestId: status.pendingInput.id,
+          expectedRevision: status.revision,
+          answers: [{ questionId: "q1", answer }],
+          idempotencyKey: "material-answer",
+        };
+        await control.runRespond(response);
+        await control.runRespond(response);
+        assert.equal(launches, input.proactiveClarification ? 3 : 2);
+        status = await control.runStatus({ runId });
+        assert.equal(status.pendingInput, null);
+        assert.equal(status.auditReport.status, "complete");
+      }
+      const run = await runStore.loadRun(runId);
+      assert.equal(run.pipelineState.workflowState, "DONE");
+      assert.equal(
+        run.pipelineState.proactiveClarification,
+        transport !== "mcp",
+      );
+      assert.equal(run.pipelineState.proactiveClarificationComplete, true);
+      assert.equal(run.pipelineState.clarificationRounds, 1);
+      assert.equal(run.pipelineState.pendingEdit, null);
+      assert.equal(calls.length, 3);
+    });
+  }
 });
 
 test("records complete pending answers before detached continuation", async (t) => {

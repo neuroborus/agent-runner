@@ -748,6 +748,47 @@ export function createRunner(options = {}) {
         inspectPath: (...args) => safety.inspectPath(...args),
         ...(run.workspace?.kind === "directory"
           ? {
+              async reportArtifact(request, options) {
+                await monitor?.check();
+                await checkConfiguration();
+                const path = join(run.taskPath, pipeline.reportFilename ?? "");
+                const temporaryPath = join(
+                  run.taskPath,
+                  `.${pipeline.reportFilename}.tmp`,
+                );
+                if (
+                  !pipeline.reportFilename ||
+                  request.path !== path ||
+                  request.temporaryPath !== temporaryPath
+                )
+                  throw new RunnerError("Undeclared report publication.", {
+                    code: "ERR_UNSAFE_WORKSPACE_ACCESS",
+                  });
+                const root = await workspace.exclusionPath({
+                  workspacePath: run.taskPath,
+                });
+                if (
+                  (
+                    await workspace.inspectPath({
+                      projectPath: root,
+                      path: join(root, ".git"),
+                    })
+                  ).exists
+                ) {
+                  for (const artifactPath of [path, temporaryPath]) {
+                    const artifact = await git.inspectPath({
+                      projectPath: root,
+                      path: artifactPath,
+                    });
+                    if (artifact.tracked || !artifact.ignored)
+                      throw new RunnerError(
+                        "Repository-local report artifacts must be ignored and untracked.",
+                        { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
+                      );
+                  }
+                }
+                return safety.reportArtifact(request, options);
+              },
               inspectOutputDirectory: (path) =>
                 safety.inspectOutputDirectory(path),
               async prepareOutputDirectory(intent) {

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 
-import { createAuditState, runAuditDiscovery } from "../../src/index.js";
+import {
+  createAuditState,
+  runAudit,
+  runAuditDiscovery,
+} from "../../src/index.js";
 
 export const HASH = "a".repeat(64);
 export const INPUTS = {
@@ -56,6 +60,7 @@ export function fixture(
     saved,
     context = null,
     clarificationContent = "",
+    proactiveClarification = false,
   } = {},
 ) {
   let current = saved
@@ -71,9 +76,15 @@ export function fixture(
         pause: null,
         activeTurn: null,
         sessionLineage: { source, children: [] },
-        pipelineState: createAuditState({ settings: { mode } }),
+        pipelineState: createAuditState({
+          settings: { mode },
+          proactiveClarification,
+        }),
       };
   let sequence = current.sessionLineage.children.length;
+  let editSequence = Number(
+    current.pipelineState.pendingEdit?.id.split("-").at(-1) ?? 0,
+  );
   let transcriptHash = current.hashes.clarifications ?? "c".repeat(64);
   let taskHash = current.hashes.task ?? "b".repeat(64);
   let changed = false;
@@ -82,6 +93,8 @@ export function fixture(
   let stopStage = null;
   const calls = [];
   const events = [];
+  const publications = [];
+  let artifactHash = null;
   const runtime = {
     transition: async (patch) => {
       const previousStage = current.pipelineState.workflowState;
@@ -116,6 +129,17 @@ export function fixture(
       return current;
     },
     workspace: {
+      reportArtifact: async (
+        { path, content, expectedHash },
+        { inspectOnly = false } = {},
+      ) => {
+        if (!inspectOnly) {
+          assert.equal(expectedHash, artifactHash);
+          publications.push(content);
+          artifactHash = current.pipelineState.publication.pending.contentHash;
+        }
+        return { path, contentHash: artifactHash };
+      },
       snapshot: async () => ({ contentFingerprint: HASH }),
       assertUnchanged: async () => {
         if (changed) throw new Error("Workspace changed");
@@ -145,7 +169,10 @@ export function fixture(
       },
       prepareEdit: async (request) => {
         const authorization = {
-          id: "edit-one",
+          schemaVersion: 1,
+          id: `edit-${++editSequence}`,
+          artifactRoot: request.artifactRoot,
+          transcriptPath: request.transcriptPath,
           action: request.action,
           suspendedState: request.suspendedState,
           preEditorHash: transcriptHash,
@@ -154,11 +181,13 @@ export function fixture(
         events.push({ type: "editor-authorized" });
         return authorization;
       },
+      openEditor: async () => ({ status: "WAITING_FOR_USER" }),
       acceptEdit: async (authorization, { consumePendingEdit }) =>
         consumePendingEdit({
           authorizationId: authorization.id,
+          action: authorization.action,
           hash: transcriptHash,
-          changed: false,
+          changed: transcriptHash !== authorization.preEditorHash,
         }),
     },
     startAgentTurn: async (activeTurn, { pipelineState }) => {
@@ -202,14 +231,19 @@ export function fixture(
   return {
     calls,
     events,
+    publications,
     runtime,
     run: () => current,
     execute: () => runAuditDiscovery({ run: current, runtime }),
+    executePublic: () => runAudit({ run: current, runtime }),
     drift: () => {
       changed = true;
     },
     inputDrift: () => {
       taskHash = "e".repeat(64);
+    },
+    editTranscript: () => {
+      transcriptHash = "f".repeat(64);
     },
     stopAt: (stage) => {
       stopStage = stage;

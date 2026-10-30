@@ -49,7 +49,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
 
   assert.deepEqual(
     pipelines.map((pipeline) => pipeline.id),
-    ["plan-authoring", "plan-execution", "polishing"],
+    ["plan-authoring", "plan-execution", "polishing", "audit"],
   );
 
   for (const pipeline of pipelines) {

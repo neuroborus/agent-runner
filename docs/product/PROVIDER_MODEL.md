@@ -491,7 +491,7 @@ fallback; a false result preserves the original failure. After validated
 local-commit readiness they await `onCommitExecution` before any constrained
 effect. These internal callbacks carry no provider payload or additional authority.
 
-All three pipelines apply the same frozen `providerInactivityTimeoutMs` policy
+All registered pipelines apply the same frozen `providerInactivityTimeoutMs` policy
 to Codex and Claude turns. Its default is 30 minutes; root and project settings
 accept strict positive integers up to 2147483647 milliseconds, with project
 precedence and no transport override. Resume keeps the saved setting, and

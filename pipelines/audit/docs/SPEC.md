@@ -5,10 +5,9 @@
 `pipelines/audit/` owns strict structured findings, the canonical classification
 and default criterion catalog, deterministic English Markdown rendering, and a
 descriptor-owned read-only discovery and finding-verification lifecycle. It
-remains unfinished and unregistered: there is no audit CLI command, MCP route or
-publication capability. The root runtime still exposes its three existing
-pipelines. All three audit modes have internal discovery and batch gates;
-public completion and report publication remain unavailable.
+is registered for CLI and STDIO MCP use. All three modes retain their separate
+discovery and finding-batch gates; only Runner publishes reports. Independent
+is the default and recommended mode, and lazy is explicit opt-in.
 
 The private workspace uses native ESM, Node.js `>=24 <25`, the standard library,
 and `node:test`. Its public `src/index.js` exposes `AUDIT_CATALOG`,
@@ -22,8 +21,8 @@ invoking providers, or granting Git or retrieval authority.
 
 ## Read-only discovery lifecycle
 
-The exported `auditPipeline` descriptor is intentionally absent from root
-dependencies and the static registry. It selects a directory workspace and
+The exported `auditPipeline` descriptor is a root dependency in the static
+registry. It selects a directory workspace and
 exclusive canonical workspace lease, allowing the same filesystem inspection
 capability for Git repositories and ordinary directories. Auditor and finding
 Reviewer access is read-only; lazy resolves and invokes only the Auditor. The
@@ -37,9 +36,10 @@ The lifecycle imports no root capability or other pipeline.
 adapter, session-lineage and state-transition capabilities. The runner owns
 confinement, ignored repository-local artifacts, external atomic/journaled state,
 leases, provider enforcement and retirement. The lifecycle writes no files or
-Git state directly and never publishes `audit.md`.
-The descriptor declares only task-owned `clarifications.md` as a mutable Runner
-artifact. Long-lived snapshots exclude that exact path; task/context and source
+Git state directly. The public `runAudit` lifecycle coordinates report publication
+through a confined Runner effect. The descriptor declares task-owned
+`clarifications.md`, `audit.md` and `.audit.md.tmp` as exact mutable Runner
+artifacts. Long-lived snapshots exclude those paths; task/context and source
 content remain protected, while explicit transcript hashes reject edits outside
 an authorized window. Per-turn provider enforcement remains read-only.
 
@@ -58,7 +58,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 3 retains the workspace baseline, frozen declarations and their
+State version 5 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -141,8 +141,11 @@ limit, independently of the enclosing store's 100,000-character string and
 10,000-item collection limits. Clarification questions additionally retain the
 shared service's 32-item and 4,000-character text limits. Oversized,
 unserializable or malformed output is invalid and cannot enter frozen inputs,
-report content or the finding ledger. Proposed ledger updates also preserve
-collection limits and the complete run's 32-MiB ceiling before persistence.
+report content or the finding ledger. Proposed report/ledger updates also preserve
+collection limits, the complete run's 32-MiB ceiling and the escaped report's
+32-MiB publication bound before acceptance. Overflow records an invalid pass and
+pauses resumably with the prior ledger/report intact, without publishing an
+impossible intent; retries retain both consumed pass budgets.
 Unsettled execution-process or storage ownership propagates to Runner
 reconciliation without retiring the
 active turn or reclassifying its reserved pass as an ordinary interruption.
@@ -155,13 +158,13 @@ finding-producing. A later rejection likewise cannot retrospectively change
 discovery history. New or revised entries enter a snapshot/report-bound pending
 batch at `VERIFY_FINDINGS`, which blocks all further discovery across resume.
 Only confirmed dispositions in accepted batches may later supply report
-findings. This step retains structured report context without projecting or
-publishing ledger findings.
+findings. Discovery retains structured report context and a versioned ledger;
+the public lifecycle projects only current accepted versions into confirmed sections.
 
 `DISCOVERY_CLEAN` records clean discovery evidence only: it is not public audit
 completion, finding acceptance or permission to publish. The lifecycle returns
 at that checkpoint without a redundant unchanged-response turn. The separate
-finding gate and eventual mode-specific completion/publication consume
+finding gate and public mode-specific completion/publication consume
 these bindings without changing historical outcomes or renewing either budget.
 
 ## Combined discovery cycles
@@ -261,8 +264,8 @@ later revision leaves historical receipts intact but requires a new pending
 version; earlier acceptance cannot approve it. Discovery receives accepted
 dispositions with version references so rejected and uncertain claims remain
 visible. Recheck cleanliness accepts only that batch: it cannot clean a discovery
-pass, complete a discovery cycle or finish the audit. Structured report projection
-and Runner-owned publication remain separate delivery boundaries.
+pass, complete a discovery cycle or finish the audit. Recheck cleanliness alone cannot publish complete status. The public lifecycle
+projects exact acceptance into the report as described below.
 
 ## Criteria and classification
 
@@ -375,3 +378,71 @@ context. They neither generate the static map nor review its prose as a report
 correction. Map generation requires no provider turn and remains independently
 testable from the catalog. A rendered report is not permission to publish it,
 change audited sources, stage, commit, create issues, or retrieve references.
+
+## Public completion and publication
+
+Use `agent-run run audit --project <workspace> --task <task-dir>` or MCP
+`run_start` with `pipelineId: "audit"`. The descriptor exposes Auditor and finding
+Reviewer configuration, mode and finite budgets through pipeline metadata;
+lazy resolves only the Auditor. Every agent turn remains read-only. No Arbiter,
+commit, staging, source repair, retrieval or automatic issue creation is authorized.
+
+CLI `--clarify` and MCP `proactiveClarification` persist an optional editor window
+before the first Auditor turn. An unchanged optional close or empty MCP answer set
+is valid and consumes no question round. Material questions persist identified
+`q1` through `qN` requests and their one-shot edit authorization before opening the
+CLI editor or waiting in MCP. MCP never opens an editor. Answers are accepted
+through the shared response boundary or an authorized external edit and resume;
+unchanged material answers retain the pending request without another model turn
+or question round. Closing clarification freezes its accepted transcript hash.
+
+Runner publishes `<task-dir>/audit.md` atomically after accepted structured report,
+ledger or disposition updates. An initial report is marked **In progress**.
+Only current ledger versions with exact accepted-batch receipts and confirm/correct
+dispositions appear as confirmed. Pending revisions remove the earlier confirmed
+version until accepted; pending candidates and hypotheses are explicitly unverified.
+Rejected and merged decisions remain in durable state. Limitations and unavailable
+checks remain visible; neither zero nor Critical findings prevent completion.
+Report-quality corrections alter structured report content and never audited sources.
+
+State version 4 adds `publication: {pending, published, temporary}` through the leased
+version-3 migration, preserving all earlier roles, history and budgets. Each
+publication binding carries source snapshot, projected report fingerprint, rendered
+content hash and completion flag. Persist the exact intent before writing; verify
+readback and unchanged frozen inputs/source before the receipt. Resume settles a
+pending publication before any further discovery. Exact desired bytes reconcile a
+lost acknowledgement without a provider turn. Unexpected report edits, unsafe
+paths, substituted ancestors or conflicting temporaries fail closed and remain
+preserved. Legacy bindings lacking declared report paths gain no new write authority.
+State version 5 adds the selected proactive-clarification boolean and its completion
+flag. The version-4 migration defaults to no proactive request, preserving existing
+clarification progress, discovery history, roles, publication and both budgets.
+Legacy material edits without structured requests retain external edit/resume support.
+
+The Runner anchors replacement to the bound real parent directory, journals the
+temporary's identity and `writing` phase before writing `.audit.md.tmp`, syncs its
+bytes, journals `prepared`, renames it atomically, syncs the parent and verifies bytes.
+Both paths must already be ignored and untracked when repository-local; the
+Runner never edits ignore rules. The publisher accepts only exact declared
+artifacts and bounded report text (32 MiB); agents cannot call it. Recovery may
+rewrite an incomplete `writing` temporary only after verifying its recorded file
+identity, single-link ownership and unchanged destination. Unowned partial files,
+substituted temporaries and changed prepared bytes remain preserved and block report
+publication, independently of immutable source drift. Source snapshots exclude only the declared
+artifacts; per-turn read-only guards still include every artifact.
+
+Complete publication requires the selected clean-discovery gate, no pending
+verification, and unchanged source, task, clarification and report bindings. Lazy
+and independent finish on an eligible clean discovery pass; independent requires
+no redundant unchanged-response turn. Combined requires a fresh successor's clean
+first pass. Only a verified complete report receipt advances to `DONE`.
+Interrupted publication remains a resumable checkpoint. A completed resume verifies
+content and report bytes without model work or replaying publication. CLI status
+and MCP `auditReport` expose the path, publication status/hash, counts and consumed
+pass totals without provider-private content.
+
+Optional checks run only within their existing authorized isolated read boundary,
+with the same snapshot guards; this workflow invokes no arbitrary check or extra
+permission based on a finding. Missing evidence is a report limitation, never an
+invented pass. Findings require a separately authorized workflow for fixes. Critical
+project findings are successful audit results, not unexpected Runner issues.

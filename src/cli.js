@@ -149,7 +149,8 @@ Options:
                            independent review, but uses more context and tokens;
                            lazy is opt-in, uses less, and has no independent review;
                            combined adds primary convergence before independent review
-                           and is available for all three pipelines
+                           and is available for all registered pipelines;
+                           audit uses separate discovery and finding recheck cycles
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role
@@ -341,6 +342,12 @@ function runSummary({ directoryPath, run }) {
   }
   if (status.planPath !== null) {
     lines.push(`Plan: ${status.planPath}`);
+  }
+  if (status.auditReport) {
+    lines.push(
+      `Audit report: ${status.auditReport.path} (${status.auditReport.status})`,
+      `Audit findings: ${status.auditReport.confirmedFindings} confirmed; ${status.auditReport.pendingCandidates} pending (unverified)`,
+    );
   }
   lines.push(...refinementProgressLines(status.refinementProgress));
   if (status.findings.length > 0) {

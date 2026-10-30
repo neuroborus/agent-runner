@@ -17,6 +17,7 @@ const SOURCE_DIRECTORIES = [
   new URL("../pipelines/plan-authoring/src/", import.meta.url),
   new URL("../pipelines/plan-execution/src/", import.meta.url),
   new URL("../pipelines/polishing/src/", import.meta.url),
+  new URL("../pipelines/audit/src/", import.meta.url),
 ];
 const PACKAGE_METADATA_FILES = [
   new URL("../package.json", import.meta.url),
@@ -25,6 +26,7 @@ const PACKAGE_METADATA_FILES = [
   new URL("../pipelines/plan-authoring/package.json", import.meta.url),
   new URL("../pipelines/plan-execution/package.json", import.meta.url),
   new URL("../pipelines/polishing/package.json", import.meta.url),
+  new URL("../pipelines/audit/package.json", import.meta.url),
 ];
 const SKILLS_DIRECTORY = new URL("../.agents/skills/", import.meta.url);
 const NODE_RANGE_DOCUMENTS = [
@@ -110,16 +112,23 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, customPlan, planAuthoring, planExecution, polishing] =
-    await Promise.all(
-      PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
-        JSON.parse(await readFile(metadataUrl, "utf8")),
-      ),
-    );
+  const [
+    commitPlan,
+    customPlan,
+    planAuthoring,
+    planExecution,
+    polishing,
+    audit,
+  ] = await Promise.all(
+    PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
+      JSON.parse(await readFile(metadataUrl, "utf8")),
+    ),
+  );
 
   assert.deepEqual(packageMetadata.workspaces, ["packages/*", "pipelines/*"]);
   assert.equal(packageMetadata.exports, "./src/index.js");
   assert.deepEqual(Object.keys(packageMetadata.dependencies).sort(), [
+    "@agent-runner/audit",
     "@agent-runner/plan-authoring",
     "@agent-runner/plan-execution",
     "@agent-runner/polishing",
@@ -135,6 +144,7 @@ test("workspace topology keeps pipelines independent", async () => {
     planAuthoring,
     planExecution,
     polishing,
+    audit,
   ]) {
     assert.equal(workspace.exports, "./src/index.js");
   }
@@ -148,6 +158,7 @@ test("workspace topology keeps pipelines independent", async () => {
     "@agent-runner/custom-plan": "0.0.0",
   });
   assert.equal(polishing.dependencies, undefined);
+  assert.equal(audit.dependencies, undefined);
 });
 
 test("canonical project skills have valid instructions", async () => {

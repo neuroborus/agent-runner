@@ -1,6 +1,6 @@
 # Pipeline Model
 
-Agent Runner hosts three explicit local workflows. They share runtime safety and
+Agent Runner hosts four explicit local workflows. They share runtime safety and
 durability services, but each pipeline owns its roles, prompts, settings, state,
 and completion rules. The product is not a general workflow framework, and one
 pipeline never calls another.
@@ -72,52 +72,42 @@ access and never changes `HEAD`.
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.
 
-## Unregistered audit foundation
+## Audit
 
-The unregistered audit workspace currently supplies finding contracts and an
-English report renderer and internal read-only discovery and batch-verification
-lifecycles. Findings have
-independent severity/category classification, stable report-local identities,
-supporting evidence, impact rationale and concrete observed or code-derived
-examples. Shared causes must be consolidated; unsupported claims stay explicitly
-unverified. Recommendations are optional and zero findings is valid. The static
-classification map is generated from one catalog without a model turn. Report
-rendering grants no source writes or publication authority. Discovery freezes
-scope, references, exclusions and criteria during bounded clarification. Lazy
-retains one logical Auditor; independent uses a fresh Auditor per pass. New or
-revised findings block discovery pending a separate verification gate. A clean
-pass has no candidates or substantive report corrections; rejected candidates
-cannot make their historical pass clean. Interrupted and incomplete work consumes
-the same finite 20-pass run-wide budget, which survives reconstruction and
-exhaustion. Every new or materially revised finding batch requires a distinct
-recheck before more discovery. Lazy continues its discovering Auditor;
-independent uses a fresh finding Reviewer after every substantive correction.
-Confirmations, corrections, rejections, merges and explicit hypotheses retain
-exact versioned decisions, including rejected claims; review additions must
-also be verified. A separate finite run-wide 20-recheck budget survives all
-batches and reconstruction. Batch acceptance cannot clean discovery or complete
-an audit. Combined keeps each Auditor through its series until clean, then starts
-a fresh Auditor; only a successor's clean first discovery pass satisfies its
-discovery gate. Even an initially clean primary requires a successor. Each batch
-first converges with its discovering Auditor, then receives fresh finding review.
-A correcting Reviewer finishes its own series before replacement; only a fresh
-Reviewer's clean first pass accepts the batch. Discovery resumes its prior owner
-after acceptance. Invalid or interrupted work cannot regain a first-pass
-opportunity through reconstruction, and neither run-wide budget resets on
-replacement. Public registration and publication remain unavailable. The
-[audit specification](../../pipelines/audit/docs/SPEC.md) owns exact shapes,
-criteria, state and ordering; the three supported workflows and their gates are unchanged.
+Audit inspects the agreed Git or ordinary workspace read-only and produces
+`audit.md`. It starts with bounded clarification of scope, references, exclusions
+and criteria. References grant no retrieval or write authority. Every new or
+materially revised finding batch requires distinct verification in every mode;
+accepting findings never cleans discovery. Discovery and recheck budgets are
+separate finite run-wide totals, each capped at 20, preserved across resume.
+
+Lazy continues one logical Auditor. Independent starts a fresh Auditor per
+discovery pass and fresh finding Reviewers after corrections. Combined keeps
+each Auditor through its series until clean, then requires a later fresh
+Auditor's clean first discovery pass. Each batch converges with its discovering
+Auditor before fresh clean-first finding review; correcting Reviewers finish
+their own series before replacement. Reconstruction creates no fresh opportunity.
+
+Runner publishes an in-progress report after accepted updates. Only exact
+rechecked versions appear confirmed; pending candidates and hypotheses remain
+explicitly unverified. Complete publication requires the selected clean gate,
+no pending verification and unchanged bindings. Zero or Critical findings can
+both accompany success. Findings create no automatic issues or repair authority;
+fixes require a separately authorized workflow. The
+[audit specification](../../pipelines/audit/docs/SPEC.md) owns report shape,
+classification, cycle/session rules and recoverable publication.
 
 ## Review modes
 
 `independent` is the default and recommended mode. A primary role produces the
 work and a separately configured Reviewer supplies genuine semantic review;
-an Arbiter is available only for the pipeline's bounded disagreements. This
+in coding pipelines an Arbiter is available only for the pipeline's bounded disagreements. This
 costs more provider context and tokens because the review context is genuinely
 separate.
 
 `lazy` is an explicit lower-consumption choice. It resolves and invokes only
-the Planner or Worker and provides no independent review. The primary role
+the primary role and provides no independent review. Audit uses the read-only
+Auditor and its own discovery/recheck gates described above. In coding pipelines, the primary role
 alternates between a check-and-fix pass and a distinct read-only clean
 confirmation. Authoring returns draft changes as structured output; execution
 and polishing may change safe workspace content during check/fix. Findings go

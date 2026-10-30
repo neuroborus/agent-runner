@@ -2,7 +2,7 @@
   "name": "@agent-runner/audit",
   "version": "0.0.0",
   "private": true,
-  "description": "Read-only audit finding contracts and deterministic reports",
+  "description": "Read-only workspace audits and resumable reviewed reports",
   "type": "module",
   "exports": "./src/index.js",
   "scripts": {

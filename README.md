@@ -165,6 +165,7 @@ configuration.
 | ---------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `plan-authoring` | Analyze a task, review a draft, and atomically write `plan.md`                                  | [`pipelines/plan-authoring/docs/SPEC.md`](pipelines/plan-authoring/docs/SPEC.md) |
 | `plan-execution` | Execute reviewed commit steps or criterion-driven custom results                                | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
+| `audit`          | Inspect an agreed Git or ordinary workspace read-only and publish reviewed `audit.md`           | [`pipelines/audit/docs/SPEC.md`](pipelines/audit/docs/SPEC.md)                   |
 | `polishing`      | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md)           |
 
 Plan authoring and execution share the deterministic
@@ -292,6 +293,9 @@ Pipeline settings use these defaults:
 | `polishing`      | `maxDisputesPerFinding`          |             5 |
 | `polishing`      | `maxSameFindingRounds`           |             5 |
 | `polishing`      | `stagnationWindowRounds`         |             3 |
+| `audit`          | `mode`                           | `independent` |
+| `audit`          | `maxDiscoveryPasses`             |          `20` |
+| `audit`          | `maxFindingRecheckPasses`        |          `20` |
 | `polishing`      | `trustedChecks`                  |          `[]` |
 
 `mode` accepts `independent`, `lazy`, and `combined` in every pipeline. A missing value
@@ -300,7 +304,7 @@ resolves to `independent`. The tracked [example](.agent-runner.example.json) sel
 configuration may select a descriptor-supported value, and `--mode` or MCP
 `run_start.mode` has highest precedence. Configuration remains strictly validated for every
 declared role, but a lazy run resolves, probes, persists, and invokes only its
-Planner or Worker. Reviewer and Arbiter configuration stays available in the
+Planner, Worker or Auditor. Inactive review-role configuration stays available in the
 configuration files for a later independent run without being resolved or
 exposed by the lazy run.
 
@@ -468,7 +472,7 @@ retain their separate policies. See the [provider contract](docs/product/PROVIDE
 for new runs. It accepts integers from `5000` through `2147483647` milliseconds,
 defaults to `1800000` (30 minutes), and resolves project over runner configuration.
 The initial delay is fixed at five seconds. Resume preserves the saved policy;
-legacy runs use the default. Explicit transient availability failures in all three
+legacy runs use the default. Explicit transient availability failures in all registered
 pipelines retry automatically after Git reconciliation. Delays double from five
 seconds to the saved ceiling, then repeat there without a retry quota. A successful
 provider response resets the episode; a normalized authentication-required response
@@ -697,6 +701,10 @@ task/
 └── context.md          # optional
 ```
 
+Audit accepts `task.md` and optional `context.md` in the task directory. Runner
+creates or extends `clarifications.md` and publishes `audit.md` there; it grants
+no source writes. Repository-local artifacts must already be ignored and untracked.
+
 Each plan step begins with:
 
 ```markdown
@@ -845,7 +853,7 @@ combined modes, the first eligible turn in each pipeline-owned primary or review
 forks the source independently.
 Those children are direct siblings with independent later histories, and every
 Arbiter starts fresh. In lazy mode, the source is forked exactly once into the
-logical Planner or Worker for the whole run. Later checkpoints continue that
+logical Planner, Worker or Auditor for the whole run. Later checkpoints continue that
 child when compatible or reconstruct the same logical role without forking the
 source again. The source always stays immutable, and correctness never depends
 on a native session surviving interruption. The runner persists the source,
@@ -1424,14 +1432,23 @@ CLI owns the common `--clarify` lifecycle option. Each workspace owns its
 explicit JavaScript workflow. The runner provides state, events, agents, and
 Git services; pipeline workspaces own mode and workflow policy.
 
-The unregistered `pipelines/audit/` workspace supplies strict finding/report
-contracts and a read-only discovery lifecycle with frozen scope, isolated sessions,
-pending findings, separate batch verification and bounded recovery in all three
-modes. Combined requires a fresh successor's clean first discovery pass and
-converges each batch before fresh clean-first finding review. Public completion
-and report publication are not yet available through CLI/MCP. See its
-[specification](pipelines/audit/docs/SPEC.md) for discovery, classification,
-evidence, concrete examples, uncertainty and criteria.
+Audit is runnable through `agent-run run audit --project <workspace> --task
+<task-dir>` or MCP `run_start` with `pipelineId: "audit"`. Supply `task.md` and
+optional `context.md`; agreed scope includes unchanged content unless explicitly
+limited. It supports Git and ordinary directories, all three modes, and an
+independent default/recommendation. Auditor and finding Reviewer always remain
+read-only. Combined uses distinct discovery and finding-review cycles; see the
+[specification](pipelines/audit/docs/SPEC.md).
+
+Runner publishes `<task-dir>/audit.md` as work progresses. Only rechecked findings
+appear confirmed; pending candidates and hypotheses remain explicitly unverified.
+Completion requires the selected clean-discovery gate, no pending batch and
+unchanged bindings. Both budgets are run-wide and capped at 20, including after
+interruption. Status exposes the report path/status/hash and finding/pass counts.
+Zero or Critical findings can accompany success; findings create no automatic
+issues or repair permissions. Unavailable evidence remains visible. Report
+publication resumes without replaying accepted model work; unexpected report edits
+fail closed. Repository-local task artifacts must already be ignored and untracked.
 
 The Git/state boundaries preserve unfinished work outside the repository and
 transient validation storage. Newly eligible execution runs use their verified
@@ -1523,7 +1540,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   ├── commit-plan/
 │   └── custom-plan/
 ├── pipelines/
-│   ├── audit/                 # unregistered read-only discovery and report contracts
+│   ├── audit/                 # read-only audit and reviewed report publication
 │   ├── plan-authoring/
 │   ├── plan-execution/
 │   └── polishing/

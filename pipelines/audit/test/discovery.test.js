@@ -305,7 +305,15 @@ test("clarification edits persist authorization before waiting and empty closes 
   ]);
   const waiting = await f.execute();
   assert.equal(waiting.pipelineState.clarificationRounds, 1);
-  assert.equal(waiting.pipelineState.pendingEdit.id, "edit-one");
+  assert.equal(waiting.pipelineState.pendingEdit.id, "edit-1");
+  assert.equal(
+    waiting.pause.inputRequest.id,
+    waiting.pipelineState.pendingEdit.id,
+  );
+  assert.deepEqual(
+    waiting.pause.inputRequest.questions.map(({ id }) => id),
+    ["q1"],
+  );
   assert.equal(f.events.at(-1).type, "editor-authorized");
   assert.equal(f.events.at(-2).stage, "WAITING_FOR_USER");
   const stopped = await runAuditDiscovery({
@@ -326,11 +334,21 @@ test("clarification edits persist authorization before waiting and empty closes 
     blocked.pipelineState.pendingEdit,
     waiting.pipelineState.pendingEdit,
   );
+  const unanswered = fixture([], { saved: waiting });
+  const stillWaiting = await unanswered.execute();
+  assert.equal(stillWaiting.pipelineState.workflowState, "WAITING_FOR_USER");
+  assert.equal(stillWaiting.pipelineState.clarificationRounds, 1);
+  assert.notEqual(
+    stillWaiting.pipelineState.pendingEdit.id,
+    waiting.pipelineState.pendingEdit.id,
+  );
+  assert.equal(unanswered.calls.length, 0);
   const resumed = fixture([READY, complete()], { saved: waiting });
+  resumed.editTranscript();
   const result = await resumed.execute();
   assert.equal(result.pipelineState.clarificationRounds, 1);
   assert.equal(result.pipelineState.pendingEdit, null);
-  assert.equal(result.pipelineState.clarificationHash, "d".repeat(64));
+  assert.equal(result.pipelineState.clarificationHash, "f".repeat(64));
   const atLimit = structuredClone(waiting);
   atLimit.pipelineState = {
     ...atLimit.pipelineState,
@@ -348,6 +366,21 @@ test("clarification edits persist authorization before waiting and empty closes 
     "clarification_limit_reached",
   );
   assert.equal(limited.run().pipelineState.clarificationRounds, 3);
+});
+
+test("proactive clarification waits before the first turn and accepts an unchanged optional close", async () => {
+  const f = fixture([READY, complete()], { proactiveClarification: true });
+  const waiting = await f.execute();
+  assert.equal(waiting.pause.reason, "proactive_clarification");
+  assert.deepEqual(waiting.pause.inputRequest.questions, []);
+  assert.equal(waiting.pipelineState.proactiveClarificationComplete, false);
+  assert.equal(f.calls.length, 0);
+  const result = await f.execute();
+  assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.equal(result.pipelineState.proactiveClarification, true);
+  assert.equal(result.pipelineState.proactiveClarificationComplete, true);
+  assert.equal(result.pipelineState.clarificationRounds, 0);
+  assert.equal(result.pipelineState.pendingEdit, null);
 });
 
 test("scope blockers retain a bounded explanation and resume clarification without consuming questions", async () => {

@@ -70,7 +70,7 @@ Preliminary boundary discovery selects only the workspace policy; execution
 parses declarations through a confined task-input capability after project
 configuration and run overrides resolve, before Git inspection.
 It is the directory inspection foundation for custom planning/execution, audit
-and init. Custom authoring and execution consume it; audit and init remain unexposed. Git snapshots remain Git-owned.
+and init. Custom authoring, execution and audit consume it; init remains unexposed. Git snapshots remain Git-owned.
 `inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
 `taskPath`, and arrays of `inputPaths`, `sourcePaths`, `outputPaths`,
 `configurationPaths`, `artifactPaths` and `infrastructurePaths`. Relative paths
@@ -524,6 +524,8 @@ V1 registers:
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit per commit-plan step, or a durable criterion-bound accepted result per explicitly selected custom step.
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
   stages the complete result while leaving it uncommitted.
+- `audit`: inspects an agreed Git or ordinary workspace read-only and publishes
+  a resumable reviewed `audit.md` through Runner-owned artifact effects.
 
 Polishing's private `mode-policy.js` separates active roles, bootstrap
 independence, primary convergence, independent review, terminal confirmer,
@@ -550,14 +552,14 @@ changes.
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 
-The unregistered audit workspace owns report, discovery and finding-verification contracts behind
+The registered audit workspace owns report, discovery and finding-verification contracts behind
 `pipelines/audit/src/index.js`: its canonical classification/criterion catalog,
 strict immutable structured content and deterministic English renderer. One
 catalog supplies classification validation, severity ordering and map text.
 Confirmed findings require evidence, impact/severity rationale and labeled
 concrete examples; unsupported claims remain separate hypotheses, and repeated
 cause keys require consolidation. The renderer returns `audit.md` text without
-filesystem or provider effects. Its unregistered descriptor selects read-only
+filesystem or provider effects. Its descriptor selects read-only
 directory inspection and an exclusive canonical workspace lease. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
 transition capabilities; it grants no new root authority. Frozen scope,
@@ -565,11 +567,14 @@ references, exclusions, criteria and snapshot/report bindings precede discovery.
 Lazy retains one logical Auditor, while independent creates a fresh Auditor per
 pass. A write-ahead pass history preserves the frozen run-wide budget capped at 20,
 including interrupted reservations. New/revised candidates block discovery at
-pending verification; clean discovery is separate evidence, not public audit
-completion. Logical turns establish existing inactivity/availability checkpoints
+pending verification; clean discovery is separate from finding acceptance and
+requires verified report publication before public completion. Logical turns establish existing inactivity/availability checkpoints
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.
+Report/ledger updates must also fit the escaped Markdown publisher's 32-MiB bound
+before acceptance; overflow preserves the prior ledger and pauses resumably
+without an impossible publication intent or a renewed pass budget.
 The separate batch gate rechecks every new/material version before more discovery.
 Lazy continues the discovering Auditor; independent creates a fresh read-only
 finding Reviewer after each correction. Versioned entries/dispositions, retained
@@ -592,13 +597,35 @@ Reviewers. A correcting Reviewer finishes its own series before replacement;
 only a fresh Reviewer's clean first pass accepts the exact batch. Intermediate
 clean rechecks retain pending verification without acceptance receipts.
 Batch acceptance resumes the same discovering owner. Both run-wide budgets and
-all non-clean history survive reconstruction and replacement. Public registration
-and report publication remain unavailable.
+all non-clean history survive reconstruction and replacement. State version 4
+adds pending/published report bindings and temporary ownership without changing
+earlier evidence or roles.
+State version 5 persists proactive clarification and defaults legacy runs to no
+proactive request. Audit uses the common one-shot editor and identified MCP input
+requests before its first Auditor turn and for material clarification questions;
+unanswered material requests remain pending without spending another round.
+The public lifecycle projects confirmed findings only from current exact accepted
+versions, retaining pending candidates and hypotheses as unverified. It persists a
+rendered-content intent, invokes the Runner workspace artifact publisher, verifies
+readback and unchanged frozen inputs/source, then saves its receipt. Publication
+recovery precedes further discovery; `DONE` requires the selected clean gate,
+no pending batch and the exact complete report receipt. CLI/MCP metadata and
+`auditReport` projections remain descriptor-owned. Reports live at task-owned
+`audit.md`; `.audit.md.tmp` and the report are declared exact Runner artifacts,
+excluded from long-lived source guards but protected during every agent turn.
+The workspace publisher anchors its atomic rename to a verified real parent and
+journals temporary identity and writing/prepared phases before their effects.
+Resume rewrites only its own incomplete temporary, preserving substituted files
+and rejecting unexpected bytes/aliases. Report conflicts remain distinct from
+immutable source drift. Root dispatch confines it to the descriptor's
+filename and requires ignored, untracked repository-local paths. It grants no
+source, index, Git, retrieval or automatic issue authority. Critical findings do
+not block successful completion. Conflicting partial temporaries remain preserved.
 See the [audit specification](../pipelines/audit/docs/SPEC.md).
 
 ## Structured Result Headroom
 
-All three pipelines accept structured role results through exactly 2 MiB
+All registered pipelines accept structured role results through exactly 2 MiB
 (2,097,152 bytes) of serialized UTF-8 JSON, rejecting one-byte overflow before
 acceptance. Semantic text, item, path, inventory, dispute, and correction bounds
 remain independent and unchanged. New size diagnostics use
@@ -1714,7 +1741,7 @@ are calculated from the current scheduling time, so overdue recovery cannot
 produce a catch-up schedule. Unrelated transitions and restart retain the episode;
 clearing it is reserved for the successful-provider-turn coordinator path.
 
-The runner injects one availability coordinator into all three pipelines.
+The runner injects one availability coordinator into all registered pipelines.
 Logical checkpoints bind the original access mode as well as role and phase;
 read-only dispute recovery cannot regain write access through an availability
 episode when its correction budget is exhausted.
@@ -1769,7 +1796,7 @@ client timeout or disconnect.
 
 ### Durable authentication-required pauses
 
-The runner injects one provider-neutral authentication policy into all three
+The runner injects one provider-neutral authentication policy into all registered
 pipelines. It accepts only a strict normalized adapter failure carrying
 `disposition: "authentication_required"`; raw messages, diagnostic classes,
 HTTP evidence, and provider-specific codes cannot activate the policy.

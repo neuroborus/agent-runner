@@ -13,7 +13,10 @@ Each role turn receives the narrowest access required by its phase:
 - implementation, polishing, finalization, finding resolution, and lazy
   check-and-fix may change safe workspace content only;
 - plan execution's constrained commit executor is a separate one-shot effect;
-- polishing staging is a runner-owned handoff effect, not an agent permission.
+- polishing staging is a runner-owned handoff effect, not an agent permission;
+- every audit role remains read-only, including report corrections. Runner alone
+  publishes its exact task-owned report artifacts. Findings grant no repair,
+  Git, retrieval or issue-creation authority.
 
 The runner snapshots content, index state, `HEAD`, branch or detached context,
 local refs, remotes, and Git identity around turns. Read-only mutation is a

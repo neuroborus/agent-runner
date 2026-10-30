@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-10-29
 
+- **Audit publishes exact reviewed versions without source effects.** The fourth
+  registered pipeline exposes read-only Auditor/Reviewer roles and independent
+  defaults through CLI/MCP. Runner journals report intent before confined atomic
+  publication, verifies bytes, and settles interruption before discovery resumes.
+  Pending revisions cannot retain confirmed status from older receipts. Complete
+  publication requires the mode-specific clean-discovery gate and unchanged
+  bindings; zero and Critical findings are both valid successful audit results.
+  Findings grant no repairs, Git effects or automatic issue creation.
+  Registration, exact receipt projection and confined publication belong together
+  so public completion cannot expose unchecked findings or broaden source writes.
+
 - **Combined audit replaces logical owners only after their own series is clean.**
   The primary Auditor always needs a fresh successor; only a later Auditor's
   clean first discovery pass satisfies the gate. Every batch first converges

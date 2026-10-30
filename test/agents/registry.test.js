@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -42,6 +42,7 @@ function fakeProvider() {
         version: "fake-1.0.0",
         structuredOutput: true,
         readOnly: true,
+        declaredWorkspace: true,
         autonomousWrite: true,
         gitMetadataWriteBlocked: true,
         workspaceWrite: true,
@@ -466,6 +467,7 @@ test("runner construction, attribution, probing, and source sessions use the reg
   const taskPath = join(root, "task");
   const stateRoot = join(root, "state");
   await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+  await writeFile(join(taskPath, "task.md"), "Inspect the workspace.\n");
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const { adapter, adapterOptions, registry } = fakeProvider();

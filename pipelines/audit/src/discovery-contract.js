@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -23,6 +24,8 @@ const STAGES = [
   "DISCOVER",
   "VERIFY_FINDINGS",
   "DISCOVERY_CLEAN",
+  "DONE",
+  "CANCELED",
   "WAITING_FOR_USER",
   "FAILED",
 ];
@@ -202,7 +205,14 @@ export function normalizeClarification(value) {
   return value;
 }
 
-export function createAuditState({ settings = {} } = {}) {
+export function createAuditState({
+  settings = {},
+  proactiveClarification = false,
+} = {}) {
+  assertAudit(
+    typeof proactiveClarification === "boolean",
+    "proactiveClarification must be a boolean.",
+  );
   const resolved = {
     mode: "independent",
     maxDiscoveryPasses: MAX_DISCOVERY_PASSES,
@@ -219,6 +229,8 @@ export function createAuditState({ settings = {} } = {}) {
   return {
     workflowState: "CLARIFY",
     settings: resolved,
+    proactiveClarification,
+    proactiveClarificationComplete: !proactiveClarification,
     repositoryBaseline: null,
     inputs: null,
     inputsFingerprint: null,
@@ -235,6 +247,7 @@ export function createAuditState({ settings = {} } = {}) {
     history: [],
     recheckHistory: [],
     acceptedBatches: [],
+    publication: { pending: null, published: null, temporary: null },
   };
 }
 
@@ -253,6 +266,15 @@ export function assertDiscoveryRun(run) {
       state.history.length <= state.settings.maxDiscoveryPasses &&
       Array.isArray(state.ledger) &&
       typeof state.sourceForkConsumed === "boolean" &&
+      typeof state.proactiveClarification === "boolean" &&
+      typeof state.proactiveClarificationComplete === "boolean" &&
+      (state.proactiveClarification || state.proactiveClarificationComplete) &&
+      (state.proactiveClarificationComplete ||
+        (state.inputs === null &&
+          state.history.length === 0 &&
+          ["CLARIFY", "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+            state.workflowState,
+          ))) &&
       Number.isSafeInteger(state.clarificationRounds) &&
       state.clarificationRounds >= 0 &&
       state.clarificationRounds <= MAX_CLARIFICATION_ROUNDS,
@@ -308,7 +330,9 @@ export function assertDiscoveryRun(run) {
     );
   } else {
     assertAudit(
-      ["CLARIFY", "WAITING_FOR_USER", "FAILED"].includes(state.workflowState) &&
+      ["CLARIFY", "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+        state.workflowState,
+      ) &&
         state.report === null &&
         state.reportFingerprint === null &&
         state.history.length === 0 &&
@@ -321,12 +345,65 @@ export function assertDiscoveryRun(run) {
   }
   assertAudit(
     state.pendingEdit === null ||
-      (state.workflowState === "WAITING_FOR_USER" &&
+      (["WAITING_FOR_USER", "CANCELED"].includes(state.workflowState) &&
         state.inputs === null &&
         state.pendingEdit.suspendedState === "CLARIFY" &&
         state.pendingEdit.preEditorHash === run.hashes.clarifications),
     "Audit clarification authorization is inconsistent.",
   );
+  if (state.pendingEdit !== null) {
+    const edit = state.pendingEdit;
+    exact(edit, [
+      "schemaVersion",
+      "id",
+      "artifactRoot",
+      "transcriptPath",
+      "action",
+      "suspendedState",
+      "preEditorHash",
+    ]);
+    assertAudit(
+      edit.schemaVersion === 1 &&
+        typeof edit.id === "string" &&
+        edit.id.length > 0 &&
+        edit.id.length <= 256 &&
+        edit.id === edit.id.trim() &&
+        !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(edit.id) &&
+        edit.artifactRoot === run.taskPath &&
+        edit.transcriptPath === join(run.taskPath, "clarifications.md") &&
+        ["proactive-clarification", "clarification-answers"].includes(
+          edit.action,
+        ) &&
+        (edit.action === "proactive-clarification") ===
+          (state.proactiveClarification &&
+            !state.proactiveClarificationComplete),
+      "Audit pending edit is invalid.",
+    );
+  }
+  const request = run.pause?.inputRequest;
+  if (request !== undefined) {
+    assertAudit(
+      state.workflowState === "WAITING_FOR_USER" && state.pendingEdit !== null,
+      "Audit input request requires a pending edit.",
+    );
+    assertAudit(
+      request.id === state.pendingEdit.id &&
+        request.kind === "clarification" &&
+        request.artifactPath === state.pendingEdit.transcriptPath &&
+        Array.isArray(request.questions) &&
+        (state.pendingEdit.action === "proactive-clarification"
+          ? request.questions.length === 0
+          : request.questions.length > 0 &&
+            request.questions.every(
+              (question, index) =>
+                question.id === `q${index + 1}` &&
+                Array.isArray(question.options) &&
+                question.options.length === 0 &&
+                typeof question.rationale === "string",
+            )),
+      "Audit input request does not match its edit authorization.",
+    );
+  }
   const ids = new Set();
   const causes = new Set();
   for (const entry of state.ledger) {
@@ -389,9 +466,13 @@ export function assertDiscoveryRun(run) {
     ) {
       assertAudit(
         index === state.history.length - 1 &&
-          ["DISCOVERY_CLEAN", "WAITING_FOR_USER", "FAILED"].includes(
-            state.workflowState,
-          ),
+          [
+            "DISCOVERY_CLEAN",
+            "DONE",
+            "CANCELED",
+            "WAITING_FOR_USER",
+            "FAILED",
+          ].includes(state.workflowState),
         "Audit discovery continued after its combined clean-first successor gate.",
       );
     }
@@ -399,7 +480,7 @@ export function assertDiscoveryRun(run) {
   if (state.pendingBatch !== null) {
     const batch = state.pendingBatch;
     assertAudit(
-      ["VERIFY_FINDINGS", "WAITING_FOR_USER", "FAILED"].includes(
+      ["VERIFY_FINDINGS", "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
         state.workflowState,
       ) &&
         Array.isArray(batch.entries) &&
@@ -416,12 +497,12 @@ export function assertDiscoveryRun(run) {
     );
   }
   assertAudit(
-    ["WAITING_FOR_USER", "FAILED"].includes(state.workflowState) ||
+    ["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(state.workflowState) ||
       (state.workflowState === "VERIFY_FINDINGS") ===
         (state.pendingBatch !== null),
     "Audit pending verification must block discovery.",
   );
-  if (state.workflowState === "DISCOVERY_CLEAN") {
+  if (["DISCOVERY_CLEAN", "DONE"].includes(state.workflowState)) {
     assertAudit(
       state.history.at(-1)?.outcome === "clean" &&
         state.history.at(-1).reportFingerprint === state.reportFingerprint &&

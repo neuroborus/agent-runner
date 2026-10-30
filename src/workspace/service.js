@@ -16,6 +16,7 @@ import {
 } from "./paths.js";
 import { CONTROL_NAMES, discoverControls } from "./controls.js";
 import { capture, fingerprints, readTextFile } from "./snapshot.js";
+import { reportArtifact } from "./artifact.js";
 import {
   inspectOutputDirectory,
   prepareOutputDirectory,
@@ -389,6 +390,11 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     snapshot,
     snapshotInputs,
     assertUnchanged,
+    reportArtifact: ({ inspection, ...request }, options) =>
+      boundary(async () => {
+        await snapshot({ inspection });
+        return reportArtifact(fs, inspection, request, options);
+      }),
     inspectOutputDirectory: ({ inspection, path }) =>
       boundary(async () => {
         await snapshot({ inspection });

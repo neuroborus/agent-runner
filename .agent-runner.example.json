@@ -43,6 +43,15 @@
     }
   },
   "pipelines": {
+    "audit": {
+      "mode": "independent",
+      "maxDiscoveryPasses": 20,
+      "maxFindingRecheckPasses": 20,
+      "roles": {
+        "auditor": {},
+        "reviewer": {}
+      }
+    },
     "plan-authoring": {
       "mode": "independent",
       "maxRevisionRounds": 20,

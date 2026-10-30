@@ -539,6 +539,10 @@ test("audit discovery composes confined clarification edits and persisted sessio
   const waiting = await runAuditDiscovery({ run: current, runtime });
   assert.equal(waiting.pause.reason, "clarification_answers_required");
   assert.ok(waiting.pipelineState.pendingEdit);
+  await writeFile(
+    join(taskPath, "clarifications.md"),
+    `${await readFile(join(taskPath, "clarifications.md"), "utf8")}\nInspect the complete workspace.\n`,
+  );
   const result = await runAuditDiscovery({ run: waiting, runtime });
   assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
   assert.equal(result.pipelineState.clarificationRounds, 1);

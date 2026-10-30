@@ -103,7 +103,7 @@ test("operator guidance and transports retain mode and deferred-stop choices", a
   assert.match(help, /independent is default and recommended/u);
   assert.match(MCP_INSTRUCTIONS, /independent is the default and recommended/u);
   for (const text of [help, MCP_INSTRUCTIONS]) {
-    assert.match(text, /all three pipelines/u);
+    assert.match(text, /all registered pipelines/u);
     assert.match(text, /lazy is opt-in/u);
     assert.match(text, /after-current-commit/u);
     assert.match(text, /selected (?:plan-execution|execution) step/u);
@@ -139,7 +139,7 @@ test("MCP discovery describes supported modes and execution-only deferred stops"
   const start = tools.find(({ name }) => name === "run_start");
   assert.match(start.description, /independent is default and recommended/u);
   assert.match(start.description, /lazy is opt-in/u);
-  assert.match(start.description, /combined.*all three pipelines/u);
+  assert.match(start.description, /combined.*all registered pipelines/u);
   assert.deepEqual(start.inputSchema.properties.mode.enum, [
     "independent",
     "lazy",

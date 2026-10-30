@@ -353,6 +353,10 @@ export function directorySafety(binding, workspace) {
       });
     },
     inspectPath: (request) => workspace.inspectPath(request),
+    async reportArtifact(request, options) {
+      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      return workspace.reportArtifact({ inspection, ...request }, options);
+    },
     async inspectOutputDirectory(path) {
       const { inspection } = await inspectBoundWorkspace(binding, workspace);
       return workspace.inspectOutputDirectory({ inspection, path });

@@ -44,8 +44,20 @@ failures, authentication/output pauses and source-fork recovery. Normalized
 provider structured-output failures remain resumable invalid passes. The actual
 transition normalizer proves persistent field/collection overflow is rejected
 before acceptance without reducing the two-MiB aggregate role allowance. No provider
-or Git process is needed. Audit remains unregistered;
-these tests establish no public workflow or report-publication behavior.
+or Git process is needed for those policy tests.
+Fast `pipelines/audit/test/publication.test.js` owns escaped report-size rejection
+before ledger acceptance and resumable retry, exact confirmed/pending
+projection, zero/Critical findings, all-mode completion, lost publication
+acknowledgement and completion binding with injected effects.
+Fast `test/runner-audit-publication.test.js` owns public Runner/CLI metadata and
+MCP report projection for Git and ordinary directories, plus actual
+confined artifact replacement, exact-byte and partial-write recovery without
+replaying accepted discovery, edits and temporary/alias substitution rejection.
+The slow `test/mcp/control-plane.slow.test.js` suite owns actual audit MCP
+start/respond with optional and material clarification and persisted interactive
+CLI editor windows. These real journal/action/lease cases remain outside the fast gate.
+The existing slow CLI/MCP workflow, control-plane, runner and state-stop suites
+retain durable shared-runtime ownership; focused audit tests replace none of them.
 
 Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
 configured selection before Git, read-only provider declarations, frozen criteria

@@ -71,9 +71,9 @@ Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
 runner-owned staging without a commit, and resume preserves accepted evidence
 and correction accounting.
 
-## Unregistered audit finding verification
+## Audit finding verification
 
-Audit's internal batch gate is separate from coding-pipeline candidate review.
+Audit's batch gate is separate from coding-pipeline candidate review.
 Every new or materially revised batch requires a distinct read-only recheck of
 relevance, evidence, examples, impact, classification, overlap and optional
 recommendations. Lazy retains the discovering Auditor; independent requires a
@@ -88,7 +88,12 @@ dispositions. Rejected decisions remain reviewable; additions and revisions
 require verification themselves. This gate has its own finite run-wide 20-pass
 budget and never changes discovery cleanliness or establishes audit completion.
 The [audit specification](../../pipelines/audit/docs/SPEC.md#finding-batch-verification)
-owns these contracts; public exposure remains unavailable.
+owns these contracts. Runner publication confirms only exact rechecked ledger
+versions. Completion additionally requires the selected clean-discovery gate,
+no pending batch, unchanged bindings and verified complete report publication.
+Critical findings do not fail the audit or create automatic issues. Unavailable
+authorized checks remain explicit limitations; report corrections never grant
+source writes.
 
 ## Bootstrap inventory
 

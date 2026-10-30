@@ -19,6 +19,7 @@ Choose one pipeline for the intended outcome:
 | `plan-authoring` | A task and optional context            | A reviewed, validated `plan.md`; no implementation or commit         |
 | `plan-execution` | An explicitly selected validated plan  | One verified commit or criterion-bound accepted result per step      |
 | `polishing`      | An existing non-empty local change set | The complete finalized and reviewed changes staged, without a commit |
+| `audit`          | An agreed Git or ordinary workspace    | A reviewed `audit.md`; sources remain read-only                      |
 
 Execution defaults to commit plans. Explicit `--plan-kind custom` (MCP
 `planKind: "custom"`) consumes agreed criteria and confined declarations from
@@ -32,11 +33,13 @@ recovery; changed inputs or earlier results require revised planning and a new r
 `independent` is the default and recommended mode: separate primary and review
 roles provide independent semantic review, using more provider context and
 tokens. `lazy` is an explicit opt-in choice with lower consumption and no
-independent review. It uses the primary role's bounded check/fix and separate
-read-only clean confirmations. Never choose lazy automatically to save tokens.
+independent review. Coding pipelines use the primary role's bounded check/fix
+and separate read-only clean confirmations; audit continues one read-only
+Auditor through its separate discovery and finding-recheck gates. Never choose
+lazy automatically to save tokens.
 
-Every pipeline supports all three modes. Combined adds primary check/fix and a
-separate read-only clean confirmation before the full independent Reviewer gate.
+Every pipeline supports all three modes. In coding pipelines, combined adds
+primary check/fix and a separate read-only clean confirmation before the full independent Reviewer gate.
 Candidate approvals bind the same
 fingerprint; content repairs restart primary convergence. Self-findings return
 directly to fixing. Only independent finding resolution may invoke a fresh
@@ -55,6 +58,17 @@ See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
 [authoring](../pipelines/plan-authoring/docs/SPEC.md),
 [execution](../pipelines/plan-execution/docs/SPEC.md), and
 [polishing](../pipelines/polishing/docs/SPEC.md) specifications.
+
+Audit verifies every new or materially revised finding batch before further
+discovery in every mode. Combined retains each Auditor or correcting finding
+Reviewer until its own series is clean, then requires a later fresh owner's
+clean first pass. Discovery cleanliness and finding acceptance remain separate.
+Runner alone publishes the report; complete publication requires the selected
+discovery gate, no pending batch and unchanged bindings. Both run-wide pass
+budgets remain capped at 20 across resume. Pending candidates and hypotheses
+stay unverified; zero or Critical findings may accompany success. Findings
+grant no fixes, Git effects, retrieval or automatic issues. See the
+[audit specification](../pipelines/audit/docs/SPEC.md).
 
 New eligible commit-plan runs can assess oversized unfinished work and accept
 reviewed replacement commits without editing frozen `plan.md`. Complete role

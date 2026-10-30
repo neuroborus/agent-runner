@@ -278,6 +278,10 @@ function reconciliationRuntime(runtime, initialRun) {
         prepareCommit: rejectEffect,
         stagePolishingHandoff: rejectEffect,
       }),
+      workspace: Object.freeze({
+        ...runtime.workspace,
+        reportArtifact: rejectEffect,
+      }),
       trustedValidation: Object.freeze({
         ...runtime.trustedValidation,
         execute: rejectEffect,

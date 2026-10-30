@@ -86,7 +86,7 @@ strict integer from `5000` through `2147483647` milliseconds with a `1800000`
 (30-minute) default. The project value wins, without CLI/MCP or role overrides.
 Each run freezes the ceiling with a five-second initial delay. Resume preserves
 it, and legacy migration supplies the documented default with no pending retry.
-All three pipelines retry eligible explicit provider availability failures after
+All registered pipelines retry eligible explicit provider availability failures after
 repository reconciliation. Delays double to the ceiling and repeat there without
 an attempt quota. A successful provider response resets the episode, even when
 subsequent output validation rejects that response. A normalized authentication-
@@ -135,8 +135,9 @@ Resolved active roles, settings, artifact root, trusted commands, and optional
 source-session lineage are frozen into a new run. Resume uses that snapshot and
 does not silently adopt later configuration changes. `independent` is the
 default mode; choosing `lazy` or `combined` is always an explicit
-operator decision. Combined adds primary convergence before independent review.
-All three descriptors expose these modes through CLI/MCP discovery. Resume preserves the saved mode, approvals, and budgets.
+operator decision. In coding pipelines combined adds primary convergence before
+independent review; audit uses separate read-only discovery and finding-recheck cycles.
+All registered descriptors expose these modes through CLI/MCP discovery. Resume preserves the saved mode, approvals, and budgets.
 
 Plan execution and polishing save exact-command capability needs and blocker evidence from
 bootstrap and legacy read-only discovery. If the runner cannot satisfy them, it
@@ -214,6 +215,13 @@ process from dispatching a newer or otherwise incompatible workflow. An
 ownerless applicable stop may be recovered by exact-revision, action-free
 `run_resume` with a new key; that separate durable intent makes the original
 pause/cancel key unnecessary without replaying its acceptance receipt.
+
+Audit is available through `run audit` and MCP `run_start`. Pipeline discovery
+exposes its Auditor/Reviewer roles, independent default/recommendation and finite
+20-pass discovery/recheck settings. Status includes `auditReport` publication
+path/status/hash, finding counts and consumed pass totals. Pending candidates
+remain unverified; unavailable evidence stays in the report. Audit completion
+with Critical findings creates no automatic issue and authorizes no repair.
 
 ## Durable state and local artifacts
 

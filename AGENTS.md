@@ -16,6 +16,7 @@
   review and never select it automatically.
 - Stay autonomous during normal execution and pause only for explicit escalation conditions.
 - Make workflow correctness, Git safety, and resumable state more important than convenience.
+- Audit agreed Git or ordinary workspaces read-only and publish resumable reviewed reports with the `audit` pipeline.
 - Keep the runtime a plain Node.js CLI rather than a general agent framework.
 - Expose the same durable runner through a local asynchronous STDIO MCP boundary.
 
@@ -95,13 +96,13 @@ All pipelines additionally require:
   resolved value at creation and preserve it on resume.
 - Validate configured role values deterministically, but in lazy mode resolve,
   probe, persist, source-session-check, invoke, and publicly project only the
-  Planner or Worker. Preserve inactive Reviewer and Arbiter configuration for
+  pipeline primary role. Preserve inactive Reviewer and Arbiter configuration for
   a future independent run without exposing provider-private values.
 - Fork a deliberately supplied source session independently by primary and
   review checkpoints in independent and combined modes. In lazy mode fork it exactly once
   into the logical primary role for the entire run, then continue the child or
   reconstruct the same role without reforking the source.
-- In lazy mode alternate a writable primary-agent `CHECK_AND_FIX` turn with a
+- In coding pipelines, lazy mode alternates a writable primary-agent `CHECK_AND_FIX` turn with a
   separate read-only `CLEAN_CONFIRM`. Advance only for structured `CLEAN`, no
   read-only mutation, and the unchanged inspected fingerprint; route findings
   back to fixing and keep the loop bounded without invoking Reviewer or
@@ -222,61 +223,79 @@ All pipelines additionally require:
   the terminal confirmation and handoff must bind the resulting fingerprint.
 - Leave the finalized and reviewed workspace changes staged and uncommitted.
 
+`audit` additionally requires:
+
+- Keep every Auditor and finding Reviewer turn read-only, including corrections.
+  Only Runner publishes task-owned `audit.md` using journaled intent, atomic
+  replacement and verified readback. Repository-local artifacts must already
+  be ignored and untracked; never edit ignore rules.
+- Verify every new/material finding batch in every mode before further discovery.
+  Pending candidates and hypotheses remain explicitly unverified. Confirm only
+  current versions with exact accepted receipts; preserve rejected decisions.
+- Preserve separate run-wide discovery and finding-recheck budgets capped at 20.
+  Combined requires same-owner convergence followed by fresh clean-first owners;
+  reconstruction never manufactures freshness or renews a budget.
+- Complete only after the selected discovery gate, no pending verification,
+  unchanged input/source/report bindings and verified complete publication.
+  Independent clean discovery requires no redundant unchanged-response turn.
+- Critical findings may accompany success. Findings grant no fixes, Git effects,
+  retrieval or automatic Runner/hosting issue creation.
+
 ## Repository Map
 
-| Path                              | Ownership                                                             |
-| --------------------------------- | --------------------------------------------------------------------- |
-| `bin/agent-run.js`                | Thin executable entry point                                           |
-| `src/index.js`                    | Public root source boundary                                           |
-| `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                 |
-| `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes         |
-| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                         |
-| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting     |
-| `src/config/index.js`             | Public runner-configuration capability boundary                       |
-| `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
-| `src/clarifications/index.js`     | Public clarification-service boundary                                 |
-| `src/clarifications/`             | Private authorization coordination and confined transcript files      |
-| `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                               |
-| `src/runner/index.js`             | Public runner-orchestration capability boundary                       |
-| `src/runner/`                     | Private input, role/session, migration, and orchestration modules     |
-| `src/state/index.js`              | Public run-store capability boundary                                  |
-| `src/state/`                      | Private storage, journals, actions, leases, preservation, validation  |
-| `src/git/index.js`                | Public Git-safety capability boundary                                 |
-| `src/git/`                        | Private commands, content, measurement, preservation, and effects     |
-| `src/workspace/index.js`          | Public Git-independent directory inspection and snapshot boundary     |
-| `src/workspace/`                  | Private confinement, control discovery, snapshots and drift guards    |
-| `src/guidance/index.js`           | Public operator-guidance capability boundary                          |
-| `src/guidance/`                   | Private composition, confined documents, and durable local updates    |
-| `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                  |
-| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution       |
-| `src/agents/index.js`             | Public agent-adapter directory boundary                               |
-| `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                 |
-| `src/agents/claude/index.js`      | Public Claude provider boundary                                       |
-| `src/agents/claude/`              | Private Claude adapter, directory policy, commit, and native sandbox  |
-| `src/agents/codex/index.js`       | Public Codex provider boundary                                        |
-| `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation  |
-| `src/agents/`                     | Shared agent contracts, registration, and provider implementations    |
-| `packages/commit-plan/`           | Shared deterministic commit-plan contract                             |
-| `packages/custom-plan/`           | Shared deterministic criterion-driven custom-plan contract            |
-| `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification            |
-| `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification            |
-| `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                 |
-| `pipelines/audit/`                | Unregistered read-only audit discovery, findings, reports, tests/spec |
-| `test/agents/`                    | Provider boundaries and descriptor-registry behavior                  |
-| `test/clarifications/`            | Clarification-service behavior tests                                  |
-| `test/config/`                    | Configuration parsing, loading, and resolution tests                  |
-| `test/git/`                       | Git-safety behavior tests                                             |
-| `test/workspace/`                 | Directory confinement, controls, snapshots and drift behavior tests   |
-| `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests       |
-| `test/integration/`               | Cross-capability workflow integration tests                           |
-| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                  |
-| `test/state/`                     | State persistence and safety behavior tests                           |
-| `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression          |
-| `test/`                           | Root CLI, registry, adapter, and repository-boundary tests            |
-| `docs/`                           | Cross-cutting architecture documentation                              |
-| `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances    |
-| `RHYTHM.md`                       | Newest-first record of meaningful implemented repository decisions    |
-| `.agents/skills/`                 | Shared repository workflow skills                                     |
+| Path                              | Ownership                                                            |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `bin/agent-run.js`                | Thin executable entry point                                          |
+| `src/index.js`                    | Public root source boundary                                          |
+| `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
+| `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes        |
+| `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |
+| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting    |
+| `src/config/index.js`             | Public runner-configuration capability boundary                      |
+| `src/config/`                     | Private parsing, confined loading, profiles, and resolution          |
+| `src/clarifications/index.js`     | Public clarification-service boundary                                |
+| `src/clarifications/`             | Private authorization coordination and confined transcript files     |
+| `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                              |
+| `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
+| `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |
+| `src/state/index.js`              | Public run-store capability boundary                                 |
+| `src/state/`                      | Private storage, journals, actions, leases, preservation, validation |
+| `src/git/index.js`                | Public Git-safety capability boundary                                |
+| `src/git/`                        | Private commands, content, measurement, preservation, and effects    |
+| `src/workspace/index.js`          | Public Git-independent directory inspection and snapshot boundary    |
+| `src/workspace/`                  | Private confinement, control discovery, snapshots and drift guards   |
+| `src/guidance/index.js`           | Public operator-guidance capability boundary                         |
+| `src/guidance/`                   | Private composition, confined documents, and durable local updates   |
+| `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
+| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution      |
+| `src/agents/index.js`             | Public agent-adapter directory boundary                              |
+| `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                |
+| `src/agents/claude/index.js`      | Public Claude provider boundary                                      |
+| `src/agents/claude/`              | Private Claude adapter, directory policy, commit, and native sandbox |
+| `src/agents/codex/index.js`       | Public Codex provider boundary                                       |
+| `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
+| `src/agents/`                     | Shared agent contracts, registration, and provider implementations   |
+| `packages/commit-plan/`           | Shared deterministic commit-plan contract                            |
+| `packages/custom-plan/`           | Shared deterministic criterion-driven custom-plan contract           |
+| `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
+| `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
+| `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
+| `pipelines/audit/`                | Read-only audit discovery, verification, publication, tests/spec     |
+| `test/agents/`                    | Provider boundaries and descriptor-registry behavior                 |
+| `test/clarifications/`            | Clarification-service behavior tests                                 |
+| `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
+| `test/git/`                       | Git-safety behavior tests                                            |
+| `test/workspace/`                 | Directory confinement, controls, snapshots and drift behavior tests  |
+| `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests      |
+| `test/integration/`               | Cross-capability workflow integration tests                          |
+| `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
+| `test/state/`                     | State persistence and safety behavior tests                          |
+| `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression         |
+| `test/`                           | Root CLI, registry, adapter, and repository-boundary tests           |
+| `docs/`                           | Cross-cutting architecture documentation                             |
+| `docs/product/`                   | Current product guarantees, workflow meaning, and accepted nuances   |
+| `RHYTHM.md`                       | Newest-first record of meaningful implemented repository decisions   |
+| `.agents/skills/`                 | Shared repository workflow skills                                    |
 
 `.claude/skills` is a symlink to `.agents/skills`. Edit the canonical skill
 files under `.agents/skills`; never create a second Claude-specific copy.

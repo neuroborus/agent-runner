@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
   createDetachedRuntimeCompatibilityToken,
@@ -63,6 +64,9 @@ function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
         finalizedFingerprint: "a".repeat(64),
         reviewedFingerprint: "a".repeat(64),
         completedCommits: ["b".repeat(40)],
+        ...(pipelineId === "audit"
+          ? { ...createAuditState(), workflowState: state }
+          : {}),
       },
     },
   };
