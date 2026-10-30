@@ -559,6 +559,17 @@ and independent whole-domain retirement. Two original FAIL results and 23 Linux
 controls remain the last native facts. The fast gate, explicit native harness and
 all accepted future check assignments remain unchanged; no slow suite is added.
 
+`ci/native/darwin/custody.test.js` executes the actual observer's private
+nonblocking setup, command checks and select/drain bodies with injected calls.
+Cases retain readiness and rebuilt sets/timeouts, descriptor bounds, EINTR,
+empty EAGAIN drains, syscall/EOF/closure refusals (including buffered commands),
+and ready/barrier/terminal framing. Poll is confined to the command pipe.
+The [native observer contract](../ci/native/README.md#independent-native-tool-observers)
+cites Apple's device limitation and pinned XNU behavior as the compatibility
+basis. Portable fixtures establish no numeric native revents or global audit
+availability; model-free command observation, Darwin cleanup and Windows startup
+remain unresolved. All original native acceptance and cleanup controls still apply.
+
 `test/native-darwin-command.test.js` additionally executes the actual finite
 command guard, failure and cleanup bodies with injected native calls. Capture
 fixtures forward exact child stderr bytes, including split binary chunks,

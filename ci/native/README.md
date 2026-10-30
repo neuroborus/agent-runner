@@ -11762,7 +11762,18 @@ Darwin's `observer-helper.c` opens one cloned `/dev/auditpipe`, selects LOCAL
 mode, zero default/non-attributable flags and successful/failed event classes for
 the reserved audit UID. It changes only its private pipe. Its queue is bounded
 at 1024 entries, separately from the 4096-record capture limit, and the helper
-verifies the native minimum/maximum envelope before setup. The protected SDK BSM
+verifies the native minimum/maximum envelope before setup. The observer
+explicitly enables private nonblocking mode with checked `FIONBIO`, then
+uses `select` for that held descriptor and command fd 0. Descriptor bounds are
+checked before rebuilding read sets and the one-second (zero when stopping)
+timeout every turn. The command pipe alone retains zero-time poll error/hangup
+checks before and after waiting, including closure with buffered input. Every
+successful wait still drains the audit pipe, even on timeout or command-only
+readiness; EAGAIN and checked queue length govern barrier/stop completion.
+[Apple's poll manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/poll.2.html)
+documents its device limitation; [pinned XNU audit-pipe source](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_pipe.c)
+ignores open flags, handles private `FIONBIO` and supplies select readiness.
+These are compatibility references, not proof of native acceptance. The protected SDK BSM
 decoder must bind header event, subject PID/audit UID/session, return status and
 fixed path/socket/IPC metadata to independently held task/object identities.
 The selected event/class mapping is a reviewed current SDK input, not an assumed
@@ -11781,8 +11792,10 @@ Each audit command still writes exactly once after the reservation guard; local
 masking consumes only newly pending SIGPIPE after EPIPE before restoring the prior
 mask. An uncertain drain keeps SIGPIPE blocked through fatal cleanup and exit 126.
 Write and signal-handling failures refuse before frame reads, retaining the write
-errno through existing cleanup. These observations establish no original observer
-cause, functional repair or cleanup success; missing first facts remain a gap.
+errno through existing cleanup. Completed native evidence establishes a combined
+poll-event refusal before EPIPE and exit 126, without identifying the individual
+fd/revents or global audit availability. Model-free command observation, Darwin
+cleanup and Windows startup remain unresolved.
 Private `B` commands acknowledge drained queue boundaries with sequence and native
 time; `S` finishes capture with checked totals. The decoder requires complete
 header/subject/return/trailer records, uniquely selected native metadata, matched

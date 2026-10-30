@@ -5497,6 +5497,252 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
   }
 });
 
+test("Darwin audit observer selects its nonblocking private pipe and retains drained framing", async () => {
+  const source = await readFile(
+    new URL("observer-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|long) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const setup = source.slice(
+    source.indexOf("  int fd = native(open("),
+    source.indexOf("  unsigned int low"),
+  );
+  const capture = source.slice(
+    source.indexOf("  uint32_t marker = 0;"),
+    source.lastIndexOf("\n}"),
+  );
+  const project = (value) =>
+    value
+      .replace(
+        "struct pollfd command = {0, POLLIN, 0};",
+        "const command={fd:0,events:POLLIN,revents:0};",
+      )
+      .replaceAll("poll(&command, 1, 0)", "poll(command, 1, 0)")
+      .replace("fd_set ready;", "const ready=new Set();")
+      .replace(
+        "struct timeval timeout = {stopping ? 0 : 1, 0};",
+        "const timeout={tv_sec:stopping?0:1,tv_usec:0};",
+      )
+      .replace("struct timeval time;", "const time={};")
+      .replace(
+        "unsigned char bytes[RECORD_LIMIT];",
+        "const bytes=Buffer.alloc(RECORD_LIMIT);",
+      )
+      .replace(/uint32_t receipt\[\] = \{([^;]+)\};/u, "const receipt=[$1];")
+      .replaceAll(/&(ready|timeout|time)\b/gu, "$1")
+      .replaceAll(
+        /&(command|nonblocking|remaining|drops|truncates|marker|total|records|length)\b/gu,
+        (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replaceAll(/sizeof\((?:marker|total|records|length)\)/gu, "4")
+      .replaceAll("sizeof(receipt)", "16")
+      .replaceAll("sizeof(bytes)", "RECORD_LIMIT")
+      .replaceAll(/\((?:size_t|uint64_t|uint32_t)\)/gu, "")
+      .replaceAll(
+        /\b(?:unsigned int|uint64_t|uint32_t|ssize_t|int|char) /gu,
+        "let ",
+      )
+      .replaceAll("NULL", "null");
+  const script = new Script(`
+    function native(result,file="observer-helper.c",line=1,predicate="native"){${project(body("native_at"))}}
+    function call(fd,request,value){need(native(ioctl(fd,request,value))===0);}
+    function command_ready(){${project(body("command_ready"))}}
+    function healthy(fd){${project(body("healthy"))}}
+    ()=>{${project(setup + capture)}}
+  `);
+  const closures = new Map([
+    ["hup", 16],
+    ["hup-buffered", 17],
+    ["pipe-error", 8],
+    ["invalid", 32],
+    ["hup-after", 16],
+    ["hup-buffered-after", 17],
+  ]);
+  const successful = "ready poll-eintr select-eintr read-eintr highest".split(
+    " ",
+  );
+  const syscallFailures =
+    "nonblocking select poll poll-after command-read audit-read".split(" ");
+  for (const fault of [
+    ...successful,
+    ...syscallFailures,
+    "fd-bound",
+    "command-eof",
+    "audit-eof",
+    ...closures.keys(),
+  ]) {
+    const fd = fault === "highest" ? 1023 : fault === "fd-bound" ? 1024 : 7;
+    const frames = [],
+      operations = [];
+    let waits = 0,
+      turn = -1,
+      polls = 0,
+      reads = 0,
+      commands = 0;
+    const fail = (_file, _line, predicate, result, error) => {
+      throw Object.assign(new Error(predicate), { code: 126, result, error });
+    };
+    const api = {
+      Buffer,
+      errno: 5,
+      EINTR: 4,
+      EAGAIN: 35,
+      POLLIN: 1,
+      POLLERR: 8,
+      POLLHUP: 16,
+      POLLNVAL: 32,
+      FD_SETSIZE: 1024,
+      RECORD_LIMIT: 65536,
+      BYTE_LIMIT: 8388608,
+      UINT32_MAX: 0xffffffff,
+      FIONBIO: "FIONBIO",
+      AUDITPIPE_GET_DROPS: "drops",
+      AUDITPIPE_GET_TRUNCATES: "truncates",
+      AUDITPIPE_GET_QLEN: "qlen",
+      O_RDONLY: 0,
+      O_NONBLOCK: 1,
+      O_CLOEXEC: 2,
+      __FILE__: "observer-helper.c",
+      __LINE__: 1,
+      fail_at: fail,
+      need(ok) {
+        if (!ok) fail(null, null, "invariant", 0, 0);
+      },
+      open(path, flags) {
+        assert.deepEqual([path, flags], ["/dev/auditpipe", 3]);
+        operations.push("open");
+        return fd;
+      },
+      ioctl(held, request, value) {
+        assert.equal(held, fd);
+        operations.push(request);
+        api.errno = 5;
+        if (request === "FIONBIO") {
+          assert.equal(value.value, 1);
+          if (fault === "nonblocking") return -1;
+        } else {
+          value.value = request === "qlen" && turn === 3 ? 1 : 0;
+        }
+        return 0;
+      },
+      poll(command, count, milliseconds) {
+        // A device poll registration is rejected; these injected flags are not native-job facts.
+        assert.deepEqual([command.fd, count, milliseconds], [0, 1, 0]);
+        polls++;
+        api.errno = 5;
+        if (fault === "poll" || (fault === "poll-after" && waits)) return -1;
+        if (fault === "poll-eintr" && [1, 3].includes(polls)) {
+          api.errno = 4;
+          return -1;
+        }
+        command.revents =
+          fault?.endsWith("-after") && !waits ? 0 : (closures.get(fault) ?? 0);
+        return Number(command.revents !== 0);
+      },
+      FD_ZERO: (ready) => ready.clear(),
+      FD_SET(held, ready) {
+        assert.ok(held >= 0 && held < 1024);
+        ready.add(held);
+      },
+      FD_ISSET: (held, ready) => ready.has(held),
+      select(maximum, ready, write, errors, timeout) {
+        assert.deepEqual([maximum, write, errors], [fd + 1, null, null]);
+        assert.deepEqual([...ready], [fd, 0]);
+        assert.equal(timeout.tv_sec, turn < 3 ? 1 : 0);
+        assert.equal(timeout.tv_usec, 0);
+        assert.ok(++waits <= 7);
+        ready.clear();
+        Object.assign(timeout, { tv_sec: 99, tv_usec: 99 });
+        api.errno = fault === "select-eintr" && waits === 1 ? 4 : 5;
+        if (fault === "select" || (fault === "select-eintr" && waits === 1))
+          return -1;
+        for (const held of [[], [fd], [fd, 0], [0], []][++turn])
+          ready.add(held);
+        if (fault === "hup-buffered-after") ready.add(0);
+        return ready.size;
+      },
+      read(held, value, size) {
+        api.errno = 5;
+        if (held === 0) {
+          commands++;
+          assert.equal(size, 1);
+          value.value = turn === 2 ? "B" : "S";
+          if (fault === "command-eof") return 0;
+          return fault === "command-read" ? -1 : 1;
+        }
+        assert.deepEqual([held, size], [fd, 4]);
+        reads++;
+        if (fault === "audit-eof") return 0;
+        if (fault === "audit-read") return -1;
+        if (fault === "read-eintr" && reads === 1) {
+          api.errno = 4;
+          return -1;
+        }
+        if (turn === 1) {
+          value.write("bsm!");
+          return 4;
+        }
+        api.errno = 35;
+        return -1;
+      },
+      size: 4,
+      htonl: (value) => value,
+      output(value, size) {
+        frames.push(
+          Buffer.isBuffer(value)
+            ? value.subarray(0, size).toString()
+            : (value.value ?? Array.from(value)),
+        );
+      },
+      memset: (bytes, value, size) => bytes.fill(value, 0, size),
+      gettimeofday(time) {
+        Object.assign(time, { tv_sec: 123, tv_usec: 456000 });
+        return 0;
+      },
+      close(held) {
+        assert.equal(held, fd);
+        operations.push("close");
+        return 0;
+      },
+    };
+    const run = script.runInNewContext(api);
+    if (successful.includes(fault)) {
+      assert.equal(run(), 0);
+      assert.deepEqual(frames, [
+        0,
+        4,
+        "bsm!",
+        [0xfffffffe, 1, 123, 456],
+        0xffffffff,
+        4,
+        1,
+      ]);
+      assert.deepEqual(
+        [waits, reads, commands],
+        [fault === "select-eintr" ? 6 : 5, 5, 2],
+      );
+      assert.equal(operations.at(-1), "close");
+    } else {
+      assert.throws(run, (failure) => {
+        assert.equal(failure.code, 126, fault);
+        assert.deepEqual(
+          [failure.result, failure.error],
+          syscallFailures.includes(fault) ? [-1, 5] : [0, 0],
+          fault,
+        );
+        return true;
+      });
+      assert.ok(!operations.includes("close"), fault);
+      if (closures.has(fault)) assert.equal(commands, 0, fault);
+    }
+    assert.deepEqual(operations.slice(0, 2), ["open", "FIONBIO"]);
+  }
+});
+
 test("Darwin audit observer refusals retain call-site facts and exit 126 through failed stderr", async () => {
   const source = await readFile(
     new URL("observer-helper.c", import.meta.url),

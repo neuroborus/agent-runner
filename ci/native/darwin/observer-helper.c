@@ -6,6 +6,7 @@
 #include <security/audit/audit_ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
@@ -77,6 +78,14 @@ static void healthy(int fd) {
   call(fd, AUDITPIPE_GET_TRUNCATES, &truncates);
   need(!drops && !truncates);
 }
+/* Only the command pipe is polled: buffered input must not hide owner loss. */
+static void command_ready(void) {
+  struct pollfd command = {0, POLLIN, 0};
+  int n;
+  do { n = poll(&command, 1, 0); } while (n < 0 && errno == EINTR);
+  if (n < 0) fail_at(__FILE__, __LINE__, "poll(&command, 1, 0)", n, errno);
+  need(!(command.revents & (POLLERR | POLLHUP | POLLNVAL)));
+}
 
 int main(int argc, char **argv) {
   /* Reviewed exact event classes, successful AND failed, for one reserved auid.
@@ -95,6 +104,9 @@ int main(int argc, char **argv) {
    * private pipes before acknowledging any audit effect. */
   need(native(read(0, &admission, 1)) == 1 && admission == 'A');
   int fd = native(open("/dev/auditpipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC));
+  /* XNU's audit open ignores O_NONBLOCK; FIONBIO enables its private bit. */
+  int nonblocking = 1;
+  call(fd, FIONBIO, &nonblocking);
   unsigned int low = 0, high = 0, size = 0, queue = 1024;
   call(fd, AUDITPIPE_GET_QLIMIT_MIN, &low);
   call(fd, AUDITPIPE_GET_QLIMIT_MAX, &high);
@@ -133,13 +145,16 @@ int main(int argc, char **argv) {
   uint32_t total = 0, records = 0;
   int stopping = 0, barrier = 0; uint32_t sequence = 0;
   for (;;) {
-    struct pollfd pollers[2] = {{fd, POLLIN, 0}, {0, POLLIN, 0}};
-    int n = poll(pollers, 2, stopping ? 0 : 1000);
+    command_ready();
+    need(fd >= 0 && fd < FD_SETSIZE);
+    fd_set ready; FD_ZERO(&ready);
+    FD_SET(fd, &ready); FD_SET(0, &ready);
+    struct timeval timeout = {stopping ? 0 : 1, 0};
+    int n = select(fd + 1, &ready, NULL, NULL, &timeout);
     if (n < 0 && errno == EINTR) continue;
-    if (n < 0) fail_at(__FILE__, __LINE__, "poll(pollers, 2, stopping ? 0 : 1000)", n, errno);
-    need(!(pollers[0].revents & (POLLERR | POLLHUP | POLLNVAL)) &&
-        !(pollers[1].revents & (POLLERR | POLLHUP | POLLNVAL)));
-    if (pollers[1].revents & POLLIN) {
+    if (n < 0) fail_at(__FILE__, __LINE__, "select(fd + 1, &ready, NULL, NULL, &timeout)", n, errno);
+    command_ready();
+    if (FD_ISSET(0, &ready)) {
       char command;
       need(native(read(0, &command, 1)) == 1 && !stopping && !barrier && (command == 'S' || command == 'B'));
       if (command == 'S') stopping = 1; else barrier = 1;
