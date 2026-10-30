@@ -216,9 +216,10 @@ mutations remain outside that turn. Polishing never requests local commit.
 Model-free capability subprocesses for CLI, sandbox, commit-executor, and
 process-containment proofs each have a fixed 10-second deadline. Within that
 bound, a local-commit probe has a one-second network-denial observation
-deadline and fails closed when a silent socket cannot prove isolation. Both
-providers' pre-effect local-commit Git metadata lookups also use the 10-second
-bound; this preparation deadline does not cap the authorized commit effect
+deadline and fails closed when a silent socket cannot prove isolation. Codex's
+pre-effect local-commit Git metadata lookup uses a 60-second bound; Claude's
+pre-effect local-commit Git metadata lookup retains the 10-second bound.
+These preparation deadlines do not cap the authorized commit effect
 after it begins. Codex MCP configuration discovery needed to construct
 isolation gets at most two attempts with a 30-second subprocess deadline apiece
 and no added retry delay; exhaustion reports provider unavailability before a

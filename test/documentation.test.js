@@ -300,7 +300,11 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     assert.match(document, /one-second network-denial observation\s+deadline/u);
     assert.match(
       document,
-      /both\s+providers' pre-effect\s+local-commit Git metadata\s+lookups[^.]*10-second\s+bound/iu,
+      /Codex's\s+pre-effect\s+local-commit\s+Git metadata\s+lookup uses a 60-second\s+bound/iu,
+    );
+    assert.match(
+      document,
+      /Claude's\s+pre-effect\s+local-commit\s+Git metadata\s+lookup retains the 10-second\s+bound/iu,
     );
     assert.match(
       document,

@@ -588,9 +588,10 @@ Some short runner bounds deliberately remain fixed. Each model-free subprocess
 used to prove CLI availability, sandbox support, commit-executor isolation, or
 process containment has a 10-second deadline. A local-commit probe has a
 one-second network-denial observation deadline inside that outer bound; a
-silent socket is not accepted as isolation proof. Both providers' pre-effect
-local-commit Git metadata lookups also use the 10-second bound; this preparation
-deadline does not cap the authorized commit effect after it begins. Codex MCP
+silent socket is not accepted as isolation proof. Codex's pre-effect local-commit
+Git metadata lookup uses a 60-second bound; Claude's pre-effect local-commit
+Git metadata lookup retains the 10-second bound. These preparation deadlines
+do not cap the authorized commit effect after it begins. Codex MCP
 configuration discovery gets at most two attempts with a 30-second subprocess
 deadline apiece. An ordinary non-commit turn with native context exhaustion may
 receive at most one in-session compaction retry when it has a usable native

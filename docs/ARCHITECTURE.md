@@ -2854,11 +2854,12 @@ policy checks, the local-commit executor proof, or owned-process namespace
 proof has a 10-second deadline. Within that outer bound, a local-commit probe
 has a one-second network-denial observation deadline; silence cannot prove
 isolation, so exhaustion fails the capability closed. Claude's per-turn Git
-metadata preparation and both providers' pre-effect local-commit Git metadata
-lookups use the 10-second bound. These preparation deadlines do not cap the
-authorized commit effect after it begins. Codex MCP configuration discovery is
-the deliberate exception: it makes at most two `mcp list` attempts with a
-30-second subprocess deadline apiece and no added retry delay, then reports
+metadata preparation uses the 10-second bound. Codex's pre-effect local-commit
+Git metadata lookup uses a 60-second bound; Claude's pre-effect local-commit
+Git metadata lookup retains the 10-second bound. These preparation deadlines
+do not cap the authorized commit effect after it begins. Codex MCP configuration
+discovery is the deliberate exception: it makes at most two `mcp list` attempts
+with a 30-second subprocess deadline apiece and no added retry delay, then reports
 recoverable provider unavailability. Codex model-catalog discovery issues at
 most 32 page requests with a requested limit of 100 entries per page, and
 rejects a repeated cursor. The 256-name MCP configuration capacity and
