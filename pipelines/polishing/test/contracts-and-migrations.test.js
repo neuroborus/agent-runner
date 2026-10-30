@@ -358,7 +358,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 18);
+  assert.equal(polishingPipeline.stateVersion, 19);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -464,7 +464,7 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 18,
+    pipelineStateVersion: 19,
     pipelineState: migratePolishingStateV17({
       pipelineState: migratePolishingStateV16({
         pipelineState: migratePolishingStateV14(legacyPaused),
@@ -977,7 +977,7 @@ test("invalidates version-1 validation evidence before completed polishing resum
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );
@@ -986,7 +986,7 @@ test("invalidates version-1 validation evidence before completed polishing resum
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );

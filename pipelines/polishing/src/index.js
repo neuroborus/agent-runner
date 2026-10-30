@@ -107,7 +107,7 @@ const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
     errorMessage:
-      "must be auto, none, or a normalized repository-relative SKILL.md path",
+      "must be auto, none, or a normalized infrastructure-relative Markdown path",
     validate: isFinalizationPolicy,
   }),
   maxFixRounds: positiveIntegerSetting(20),
@@ -1115,7 +1115,7 @@ export function migratePolishingStateV17(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 18,
+  stateVersion: 19,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1139,6 +1139,8 @@ export const polishingPipeline = Object.freeze({
       }),
     16: migratePolishingStateV16,
     17: migratePolishingStateV17,
+    // Preserve existing path/fallback decisions and consumed-effect evidence.
+    18: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

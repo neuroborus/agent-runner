@@ -208,8 +208,12 @@ omission or substitution. A project-required content change is fingerprinted
 after it finishes.
 
 Both workflows freeze their effective finalization-guidance path or fallback
-decision before bootstrap. A selected skill remains mandatory fingerprinted
-validation infrastructure for the run; automatic discovery does not switch or
+decision before bootstrap. Explicit Markdown procedures resolve from the bound
+infrastructure root; automatic skills remain repository-local. New selections pin
+bytes, file identity and real ancestry and grant only the exact file read. A
+selected procedure remains mandatory fingerprinted validation infrastructure for
+the run. External guidance has a distinct inventory identity so it cannot shadow
+repository validation files. Automatic discovery does not switch or
 fall back later. Missing, invalid, or changed frozen guidance requires a new
 run rather than consuming correction or review budgets.
 

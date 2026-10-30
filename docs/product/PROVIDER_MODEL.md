@@ -44,6 +44,14 @@ declaration before provider work. Custom authoring uses read-only directory
 turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
+Execution and polishing may supply `readPaths` containing one exact selected
+finalization Markdown file. Adapters reject directories and malformed declarations
+before launch. Codex retains its root read policy and protects the exact file in
+declared directory permissions; Claude carries it into existing read-only
+command mounts and write exclusions. Neither grants the parent or host temporary
+storage. The selected file is excluded from provider storage allocation, and
+pipeline identity/content checks surround guidance-consuming work.
+
 The runner probes every declared directory access separately. Custom execution
 pins the writable receipt after output preparation, independently of its startup
 read-only receipt; other directory roles pin their combined startup receipt.

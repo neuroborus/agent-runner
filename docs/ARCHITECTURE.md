@@ -895,25 +895,44 @@ Plan execution and polishing own a string `finalization` setting. `auto`, the
 default, discovers a conventional confined repository skill and otherwise
 falls back to repository instructions and project-defined checks. `none`
 selects that fallback directly. Any other accepted value is a normalized
-repository-relative `SKILL.md` path; a missing or unsafe explicit path blocks
+infrastructure-relative Markdown path; a missing or unsafe explicit path blocks
 the run. Runner configuration supplies the base value and a safe project
 overlay may replace it. The configured policy is persisted with the other
 pipeline settings; each owning workflow separately freezes the effective
 guidance decision and does not reload it on resume.
 
-Plan execution resolves its effective guidance through the root Git inspection
-and validation-infrastructure fingerprint capabilities after Git preflight and
-before bootstrap. Its pipeline state separately freezes the configured policy,
-selected canonical regular repository-relative skill or fallback decision,
-selected-file fingerprint when applicable, and complete decision fingerprint.
-Bootstrap and validation migration receive only that path or fallback, never
-copied skill content, and no additional provider checkpoint is introduced. The
+The root configuration capability exposes confined finalization-file inspection
+without interpreting the file as configuration or retaining its text. Explicit
+paths resolve from the frozen infrastructure root; automatic conventional
+discovery stays in the target. Plan execution resolves guidance after workspace
+preflight and before bootstrap. Its pipeline state separately freezes the configured policy,
+selected canonical regular Markdown file or fallback decision, selected-file
+fingerprint when applicable, and complete decision fingerprint. New `file`
+decisions bind bytes, file identity, real ancestors, target and infrastructure
+root; legacy `skill` decisions retain their original repository path and
+fingerprint algorithm. The existing `skillPath` field is the inventory label:
+external procedures use `finalization://<infrastructure-relative-path>`, distinct
+from every canonical repository-relative entry. The configured policy retains
+the original relative selection. Both files participate when a repository
+validation file has the same relative path as external guidance.
+Bootstrap and validation migration receive only that label, exact absolute read
+declaration or fallback, never copied procedure content; no additional provider
+checkpoint is introduced. Only that selected label may refer to an external
+file in validation infrastructure. Its identity-bound digest joins the ordinary
+repository-infrastructure digest. Custom directory declarations use the bound
+root for explicitly selected guidance and grant no Git effects. The
 selected skill is part of established validation infrastructure. Execution
 rechecks its exact path and fingerprint before guidance-consuming, correction,
 and resumed work. Missing, invalid, or changed frozen guidance requires a fresh
 run; automatic selection never switches late. This decision does not replace
 the frozen trusted-validation snapshot, exact inventory matching, capability
 reports, environment blockers, or requirement inspection.
+
+Execution state version 36 and polishing version 19 preserve all older frozen
+decisions, fingerprints, inventories, counters and effect evidence through leased
+shape-preserving migrations. They never rediscover an existing selection or
+manufacture identity proof. Consumed commits and completed handoffs remain
+verification-only.
 
 Polishing owns the same behavior through its separate workflow, schemas,
 prompts, state validation, migration, and public pause projection; it does not
@@ -3939,9 +3958,11 @@ mode-specific confirmation gates remain unchanged; the
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints
-finalization evidence, the root Git boundary verifies every
-validation-infrastructure entry is an existing regular file whose canonical
-repository-relative path exactly matches the proposed path. Missing files,
+finalization evidence, the root Git or directory boundary verifies repository
+validation entries are existing regular files whose canonical repository-relative
+paths exactly match the proposed paths. The configuration capability inspects
+the exact selected finalization-file label against its frozen root; external
+labels retain their distinct `finalization://` namespace. Missing files,
 directories, symlinks, and paths traversing a symlink are field-specific
 violations; the runner does not follow or silently canonicalize them. Plan
 execution collects every inspectable violation from the candidate into the

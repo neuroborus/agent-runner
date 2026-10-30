@@ -11,6 +11,7 @@ import {
   canonicalExecutionPlan,
   MAX_PLAN_LENGTH,
   planKindPolicy,
+  resolveExecutionWorkspace,
 } from "../src/step-policy.js";
 import {
   customExecutionPrompt,
@@ -170,6 +171,24 @@ test("custom context carries agreed conditions and declarations without commit r
   );
 });
 
+test("custom execution declares only explicitly selected guidance from the bound infrastructure root", async () => {
+  for (const finalization of ["auto", "none", "finalization/RUNNER.md"]) {
+    const selection = await resolveExecutionWorkspace({
+      projectPath: "/workspace",
+      infrastructureRoot: "/infrastructure",
+      settingOverrides: { planKind: "custom", finalization },
+      readTaskInput: async () => customPlan,
+    });
+    assert.deepEqual(
+      selection.infrastructurePaths,
+      finalization === "finalization/RUNNER.md"
+        ? ["/infrastructure/finalization/RUNNER.md"]
+        : [],
+    );
+    assert.equal(selection.kind, "directory");
+  }
+});
+
 test("custom inspection uses the bound directory snapshot and cannot obtain Git effects", async () => {
   const policy = planKindPolicy("custom");
   const snapshot = {
@@ -237,6 +256,7 @@ test("custom inspection uses the bound directory snapshot and cannot obtain Git 
 test("kind-specific runtime and provider requirements do not demand custom commit authority", () => {
   const noop = () => {};
   const runtime = {
+    finalization: { inspectFile: noop },
     adapters: { worker: { probe: noop, run: noop } },
     clarifications: Object.fromEntries(
       [

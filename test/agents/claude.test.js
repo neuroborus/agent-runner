@@ -731,6 +731,38 @@ function request(overrides = {}) {
   };
 }
 
+test("carries a selected file into Claude read-only mounts without granting its parent", async (t) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "claude-finalization-")),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "RUNNER.md");
+  await writeFile(path, "Run checks.\n");
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    async handle({ call }) {
+      if (call.argumentsList.includes("-p")) {
+        const settings = JSON.parse(option(call.argumentsList, "--settings"));
+        assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
+        assert.equal(
+          settings.sandbox.filesystem.denyWrite.includes(directory),
+          false,
+        );
+        const launcher = await readFile(call.commandLauncherPath, "utf8");
+        assert.ok(
+          launcher.includes(JSON.stringify([`${PROJECT_PATH}/.git`, path])),
+        );
+      }
+    },
+  });
+  for (const readPaths of [[directory], ["relative.md"], [path, path], []]) {
+    await assert.rejects(fixture.adapter.run(request({ readPaths })));
+  }
+  assert.equal(turnCalls(fixture).length, 0);
+  await fixture.adapter.run(request({ readPaths: [path] }));
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
 async function directoryWorkspace(t) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "claude-directory-")),

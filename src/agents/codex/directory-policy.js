@@ -47,6 +47,7 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
       [
         ...(writable ? inspection.outputPaths : []),
         ...inspection.protectedPaths,
+        ...(request.readPaths ?? []),
       ],
       AdapterError,
     );
@@ -110,7 +111,9 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
           ),
           ...(storage ? { [storage.rootPath]: "write" } : {}),
           ...Object.fromEntries(
-            inspection.protectedPaths.map((path) => [path, "read"]),
+            [...inspection.protectedPaths, ...(request.readPaths ?? [])].map(
+              (path) => [path, "read"],
+            ),
           ),
         };
         return deepFreeze({

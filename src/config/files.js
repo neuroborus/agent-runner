@@ -488,3 +488,89 @@ export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {
 
   return parseRunnerConfiguration(source, providers);
 }
+
+// Finalization is read-only input, never configuration authority. Its fingerprint
+// binds bytes, file identity, real ancestry and the target without retaining text.
+export async function inspectFinalizationFile({
+  path,
+  projectPath,
+  infrastructureRoot = projectPath,
+}) {
+  let absolutePath;
+  try {
+    if (
+      typeof path !== "string" ||
+      typeof projectPath !== "string" ||
+      !isAbsolute(projectPath) ||
+      resolve(projectPath) !== projectPath ||
+      typeof infrastructureRoot !== "string" ||
+      !isAbsolute(infrastructureRoot) ||
+      resolve(infrastructureRoot) !== infrastructureRoot ||
+      !path.endsWith(".md") ||
+      /[\\*?[\]{}]/u.test(path) ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(path) ||
+      path.split("/").some((part) => ["", ".", "..", ".git"].includes(part)) ||
+      (infrastructureRoot !== projectPath &&
+        (isWithin(projectPath, infrastructureRoot) ||
+          isWithin(infrastructureRoot, projectPath)))
+    ) {
+      throw new Error("Invalid finalization file selection.");
+    }
+    absolutePath = resolve(infrastructureRoot, path);
+    if (!isWithin(infrastructureRoot, absolutePath)) {
+      throw new Error("Finalization file escapes its root.");
+    }
+    const ancestors = [infrastructureRoot];
+    for (const part of path.split("/").slice(0, -1)) {
+      ancestors.push(join(ancestors.at(-1), part));
+    }
+    // Inspect parents in order so an absent leaf cannot mask an unsafe ancestor.
+    for (const ancestor of ancestors) {
+      if (
+        !(await lstat(ancestor)).isDirectory() ||
+        (await realpath(ancestor)) !== ancestor
+      ) {
+        throw new Error(
+          "Finalization file ancestors must be real directories.",
+        );
+      }
+    }
+    const loaded =
+      infrastructureRoot === projectPath
+        ? await readConfinedConfiguration(absolutePath, projectPath, path)
+        : await readExternalConfiguration(absolutePath, projectPath);
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          schemaVersion: 1,
+          projectPath,
+          infrastructureRoot,
+          protection: loaded.protection,
+          projectAncestors: loaded.projectAncestors ?? null,
+        }),
+      )
+      .digest("hex");
+    return Object.freeze({
+      path: absolutePath,
+      relativePath: path,
+      inventoryPath:
+        infrastructureRoot === projectPath ? path : `finalization://${path}`,
+      exists: true,
+      kind: "file",
+      fingerprint,
+    });
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.cause?.code === "ENOENT") {
+      return Object.freeze({
+        path: absolutePath,
+        relativePath: path,
+        exists: false,
+        kind: null,
+      });
+    }
+    throw new ConfigurationError(
+      "Finalization guidance is not a safe bounded Markdown file.",
+      { cause, code: "ERR_FINALIZATION_FILE_INVALID" },
+    );
+  }
+}

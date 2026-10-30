@@ -35,7 +35,11 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
   assert.match(
     BOOTSTRAP_INSTRUCTIONS,
-    /canonical repository-relative file paths/u,
+    /canonical repository-relative regular files/u,
+  );
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /except for the exact declared label of selected external finalization guidance/u,
   );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
   assert.match(
@@ -280,7 +284,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative skillPath and reason/u,
+    /For SKILL_MISSING or SKILL_INVALID, provide the attempted selected guidance label in skillPath and reason/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,

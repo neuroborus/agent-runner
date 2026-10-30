@@ -9,6 +9,7 @@ export {
 } from "./parsing.js";
 export {
   assertProjectConfigurationProtected,
+  inspectFinalizationFile,
   loadProjectConfiguration,
   loadRunnerConfiguration,
 } from "./files.js";

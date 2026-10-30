@@ -417,8 +417,8 @@ export function createFinalizationGuidanceDecision({
   configuredPolicy,
   skillPath = null,
   selectedFileFingerprint = null,
+  selection = skillPath === null ? "fallback" : "skill",
 }) {
-  const selection = skillPath === null ? "fallback" : "skill";
   return normalizeFinalizationGuidanceDecision({
     configuredPolicy,
     selection,
@@ -441,16 +441,25 @@ export function normalizeFinalizationGuidanceDecision(value) {
     "Polishing finalization guidance",
   );
   const fallback = value.selection === "fallback";
-  const selected = value.selection === "skill";
+  const selected = ["skill", "file"].includes(value.selection);
   const configuredPolicy = value.configuredPolicy;
+  const selectedPath =
+    value.selection === "file" &&
+    typeof value.skillPath === "string" &&
+    value.skillPath.startsWith("finalization://")
+      ? value.skillPath.slice("finalization://".length)
+      : value.skillPath;
   const validSelectedPath =
     selected &&
-    isFinalizationPolicy(value.skillPath) &&
-    !["auto", "none"].includes(value.skillPath) &&
+    isFinalizationPolicy(selectedPath) &&
+    !["auto", "none"].includes(selectedPath) &&
+    (value.selection !== "skill" ||
+      value.skillPath === "SKILL.md" ||
+      value.skillPath.endsWith("/SKILL.md")) &&
     HASH_PATTERN.test(value.selectedFileFingerprint ?? "") &&
     (configuredPolicy === "auto"
       ? CONVENTIONAL_FINALIZATION_SKILL_PATHS.includes(value.skillPath)
-      : configuredPolicy === value.skillPath);
+      : configuredPolicy === selectedPath);
   if (
     !isFinalizationPolicy(configuredPolicy) ||
     (!fallback && !selected) ||
@@ -1496,6 +1505,17 @@ function normalizePhaseSafeRequiredChecks(value, code, options) {
 }
 
 function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
+  // This non-path namespace cannot shadow a canonical repository-relative file.
+  if (typeof value === "string" && value.startsWith("finalization://")) {
+    const path = value.slice("finalization://".length);
+    if (
+      isFinalizationPolicy(path) &&
+      path.endsWith(".md") &&
+      path.trim() === path
+    ) {
+      return value;
+    }
+  }
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -2747,7 +2767,8 @@ export function isFinalizationPolicy(value) {
     !value.startsWith("../") &&
     value !== ".git" &&
     !value.startsWith(".git/") &&
-    (value === "SKILL.md" || value.endsWith("/SKILL.md")) &&
+    value.endsWith(".md") &&
+    !value.split("/").includes(".git") &&
     !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   );
 }
@@ -3846,7 +3867,7 @@ export function normalizePipelineState(value) {
     resolvedSummary !== null &&
     !value.validationMigrationPending &&
     !guidanceMayBeLegacyPending &&
-    finalizationGuidance?.selection === "skill" &&
+    ["skill", "file"].includes(finalizationGuidance?.selection) &&
     !validationInfrastructure.includes(finalizationGuidance.skillPath)
   ) {
     throw workflowError(
@@ -4738,7 +4759,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 18 ||
+    run.pipelineStateVersion !== 19 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5186,6 +5207,7 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
     !isRecord(runtime.git) ||
+    typeof runtime.finalization?.inspectFile !== "function" ||
     !isRecord(runtime.trustedValidation) ||
     typeof runtime.trustedValidation.execute !== "function" ||
     typeof runtime.trustedValidation.preflight !== "function"

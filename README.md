@@ -426,12 +426,19 @@ For plan execution and polishing, `finalization: "auto"` uses a conventional
 confined repository `finalization` skill when present. The fallback derives the
 complete gate from repository instructions and project-defined checks. Use
 `"none"` to select that fallback deliberately, or a normalized
-repository-relative path ending in `SKILL.md` to require that exact skill. A
-missing, escaping, or invalid explicit skill blocks the run. Every path retains
+infrastructure-relative Markdown path to require that exact procedure, such as
+`.agents/skills/finalization/RUNNER.md` beside an existing skill, or
+`finalization/SKILL.md` under a selected external infrastructure root. Explicit
+paths resolve from that bound root (the target itself for integrated setups);
+auto discovery remains repository-local. The original skill is preserved. A
+missing, escaping, linked, or invalid explicit file blocks the run. Every path retains
 the dedicated fingerprint-bound finalization turn. Both workflows freeze the
 effective path or fallback decision before bootstrap; automatic discovery never
-switches later, and missing, invalid, or changed frozen guidance requires a new
-run.
+switches later. New selections fingerprint file bytes, identity and real ancestry; even
+an identical-byte replacement requires a new run. Selection grants only the
+exact file read, never access to its parent. Custom execution keeps guidance
+optional: `auto` selects none, while an explicit file supplies criterion-dependent
+guidance without Git authority.
 
 Required checks that need loopback listeners, Docker, a local database, or a
 comparable host service may be delegated to the runner's trusted validation

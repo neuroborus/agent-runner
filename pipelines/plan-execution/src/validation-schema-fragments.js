@@ -7,8 +7,8 @@ import {
 // Keep reusable fragments separate from the complete response-schema exports.
 export const PORTABLE_PLAIN_TEXT_PATTERN =
   "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$";
-const PORTABLE_REPOSITORY_PATH_PATTERN =
-  "^[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
+const PORTABLE_VALIDATION_PATH_PATTERN =
+  "^(?:finalization://)?[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
 
 export const EXACT_COMMAND = {
   type: "string",
@@ -20,7 +20,7 @@ const VALIDATION_PATH = {
   type: "string",
   minLength: 1,
   maxLength: MAX_TEXT_LENGTH,
-  pattern: PORTABLE_REPOSITORY_PATH_PATTERN,
+  pattern: PORTABLE_VALIDATION_PATH_PATTERN,
 };
 export const REQUIRED_CHECK = {
   type: "object",

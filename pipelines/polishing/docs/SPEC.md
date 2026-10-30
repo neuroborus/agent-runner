@@ -292,13 +292,30 @@ explicit per-run override.
 It also owns `finalization`, a string setting whose default `auto` discovers a
 conventional confined repository `finalization` skill and otherwise falls back
 to repository instructions and project-defined checks. `none` selects that
-fallback directly. Any other valid value is a normalized repository-relative
-path ending in `SKILL.md` and requires that exact skill. After Git preflight and
+fallback directly. Any other valid value is a normalized infrastructure-relative
+Markdown path and requires that exact procedure (including an adjacent `RUNNER.md`). After Git preflight and
 before backend probing or bootstrap, the workflow durably persists the
 configured policy, selected canonical regular path or fallback, selected-file
 fingerprint when applicable, and a fingerprint of the complete decision. A
 backend pause retains that partial-preflight decision; resume verifies it before
-retrying probes and never reloads or switches it.
+retrying probes and never reloads or switches it. Explicit paths resolve from the
+frozen selected infrastructure root, while `auto` retains conventional discovery
+inside the target. A bound external `finalization/SKILL.md` requires only that
+exact file read; neither the original skill nor any parent is changed or granted
+additional access. New `file` decisions fingerprint bytes, file identity, real
+ancestors, target and root without retaining procedure text. The existing
+`skillPath` field supplies its inventory label: an integrated repository-relative
+path or `finalization://<infrastructure-relative-path>` for external guidance.
+The latter never replaces repository-relative validation entries, including
+same-relative-path files. Prompts also declare the exact absolute read. Only this selected label may name external
+validation infrastructure. Replacement (even identical bytes), links, missing
+files and drift block without switching guidance or consuming repair budgets.
+
+State version 19 preserves version-18 decisions and all accounting and effect
+evidence unchanged through its leased migration. Legacy `skill` decisions retain
+their original repository path and fingerprint algorithm; no identity proof is
+inferred and no frozen selection is rediscovered. Consumed commits and completed
+handoffs remain verification-only. New selection adds no model checkpoint.
 
 `trustedChecks` is an array of unique runner-trusted command aliases and
 defaults to empty. Root and safe project `trustedCommands` catalogs use the same
@@ -652,7 +669,9 @@ policy, and finalization candidate inventories are rejected by it as well.
 
 Before accepting an active role's bootstrap or validation-migration inventory,
 the root Git boundary requires each proposed infrastructure path to identify an
-existing regular file by its exact canonical repository-relative path. Missing
+existing regular file by its exact canonical repository-relative path. The sole
+exception is the exact selected finalization-file label, inspected through the
+root configuration capability against its frozen infrastructure root. Missing
 files, directories, symlinks, and paths traversing a symlink are field-specific
 contract violations. Every producing role, bootstrap or validation-migration
 phase, and bootstrap contract receives at most one read-only correction. The
@@ -759,7 +778,8 @@ resolution. Unavailable explicit guidance or a blocked finalization procedure
 pauses.
 
 Before evidence is fingerprinted, the runner inspects every candidate
-validation-infrastructure path as an existing canonical regular repository file.
+validation-infrastructure path as an existing canonical regular repository file,
+or the exact selected external guidance label through confined file inspection.
 An invalid path uses the existing bounded read-only finalization correction.
 Every non-availability result repeats the complete inventory actually used and
 contains exactly one ordered result with bounded direct evidence for every

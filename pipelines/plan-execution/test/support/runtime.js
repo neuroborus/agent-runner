@@ -16,6 +16,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { inspectFinalizationFile } from "../../../../src/config/index.js";
+
 import { assertExecutionRun as assertRun } from "../../src/bootstrap-progress.js";
 import {
   createPlanExecutionState,
@@ -1790,6 +1792,9 @@ async function createFixture(
     onFreeze,
   });
   const runtime = {
+    finalization: {
+      inspectFile: ({ path }) => inspectFinalizationFile({ path, projectPath }),
+    },
     adapters,
     clarifications,
     trustedValidation: {

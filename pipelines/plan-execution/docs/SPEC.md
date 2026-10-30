@@ -537,11 +537,29 @@ owns the string `finalization` setting. Its default `auto`
 selects the first safely inspectable canonical regular conventional
 `finalization` skill and otherwise falls back to repository instructions and
 project-defined checks. `none` selects that fallback directly; any other valid
-value is a normalized repository-relative path ending in `SKILL.md` and
-requires that exact skill. The runner resolves this decision after Git
+value is a normalized infrastructure-relative Markdown path and requires that
+exact procedure (including an adjacent `RUNNER.md`). The runner resolves this decision after workspace
 preflight and before bootstrap, then persists the configured policy, selected
 path or fallback, selected-file fingerprint when applicable, and a fingerprint
-of the complete decision. Resume never rediscovers or switches guidance.
+of the complete decision. Resume never rediscovers or switches guidance. Explicit paths resolve from the
+frozen selected infrastructure root, while `auto` retains conventional discovery
+inside the target. A bound external `finalization/SKILL.md` requires only that
+exact file read; neither the original skill nor any parent is changed or granted
+additional access. New `file` decisions fingerprint bytes, file identity, real
+ancestors, target and root without retaining procedure text. The existing
+`skillPath` field supplies its inventory label: an integrated repository-relative
+path or `finalization://<infrastructure-relative-path>` for external guidance.
+The latter never replaces repository-relative validation entries, including
+same-relative-path files. Prompts also declare the exact absolute read. Only this selected label may name external
+validation infrastructure. Replacement (even identical bytes), links, missing
+files and drift block without switching guidance or consuming repair budgets.
+
+State version 36 preserves version-35 decisions and all accounting and effect
+evidence unchanged through its leased migration. Legacy `skill` decisions retain
+their original repository path and fingerprint algorithm; no identity proof is
+inferred and no frozen selection is rediscovered. Consumed commits and completed
+handoffs remain verification-only. New selection adds no model checkpoint.
+
 Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
@@ -898,8 +916,9 @@ replaying or recounting consumed work.
 
 Pipeline state version 9 makes finding overrides unique by exact finding ID and
 reviewed content fingerprint and requires finalization validation
-infrastructure to contain only existing canonical repository-relative regular
-files. Its version-8 migration deduplicates legacy override audit entries,
+infrastructure to contain existing canonical repository-relative regular files
+(extended in version 36 only for the exact selected external finalization-file
+label). Its version-8 migration deduplicates legacy override audit entries,
 preserves completed commits, safe current-step content, counters, Git controls,
 and consumed one-shot effect safety, invalidates provisional finalization and
 review evidence, and routes every prepared active run through fresh independent
@@ -1594,17 +1613,19 @@ Finalization is a dedicated pipeline gate, not a Codex-only or Claude-only
 feature. A repository-defined skill may guide it, but the gate does not depend
 on optional guidance being present.
 
-Before bootstrap, the runner resolves the persisted policy with the existing
-Git path inspection and validation-infrastructure fingerprint capabilities.
+Before bootstrap, the runner resolves the persisted policy with the root
+configuration capability's confined, identity-bound Markdown inspection.
+Legacy `skill` decisions keep their original Git inspection and fingerprinting.
 For `auto`, it freezes the first safely inspectable canonical regular
 conventional skill or a fallback decision when none qualifies. `none` freezes
 the fallback directly. An explicit path must already identify a safely confined
 canonical regular file. Missing or deterministically invalid explicit guidance
 pauses before provider probing and requires a new run after repair.
 
-Bootstrap and validation migration receive only the frozen repository-relative
-path or fallback decision. They never receive copied skill content and do not
-add a guidance-specific provider turn. A selected skill is included in the
+Bootstrap and validation migration receive the frozen inventory label or fallback
+decision. New `file` selections also supply the exact absolute read declaration.
+They never receive copied procedure content or add a guidance-specific provider
+turn. A selected skill is included in the
 established validation-infrastructure inventory. Its exact path and
 selected-file fingerprint are verified before bootstrap, validation migration,
 finalization, bounded correction, and resumed work. Drift or later
@@ -2137,7 +2158,8 @@ references, and missing step coverage are rejected. Every role discovers a
 complete procedure for every step, including the repository's ordinary fast
 gate and only slow checks whose documented guarantees that exact step affects.
 It also reports every canonical repository-relative validation-infrastructure
-file. Independent and combined modes preserve accepted Worker evidence followed
+file and the exact declared label of selected external finalization guidance.
+Independent and combined modes preserve accepted Worker evidence followed
 by Reviewer evidence; lazy mode uses Worker evidence alone. The runner unions
 applicability for identical commands, preserves first-seen command order, and
 assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
@@ -2200,8 +2222,10 @@ them.
 Every inventory-producing bootstrap prompt, including validation-migration
 discovery, requires unique check IDs, unique exact single-line commands already
 normalized without boundary whitespace, and unique existing canonical
-repository-relative validation files. A symlink or path through a symlink is an
-invalid alias even when its target is confined to the repository.
+repository-relative validation files, with the sole exception of the exact
+declared label of selected external finalization guidance. A symlink or path
+through a symlink is an invalid alias even when its target is confined to the
+repository.
 Provider-facing structured-output schemas are portable approximations limited
 to the common backend Structured Outputs subset and do not use regex
 lookaround. They retain strict objects, bounds, safe lexical patterns, and
@@ -2227,9 +2251,11 @@ pending batch before any product-decision pause, while its history remains
 consumed. Repeated or still-invalid output fails closed.
 
 Before any inventory is accepted or fingerprinted, the runner asks the root
-Git boundary to inspect each validation-infrastructure path. The path must
-exist as a regular file and the returned canonical repository-relative path
-must exactly equal the proposed value. Every inspectable missing file,
+Git or directory boundary to inspect each repository validation path, and the
+configuration capability to inspect a new selected finalization file. Each path
+must exist as a regular file and the returned canonical repository-relative path
+must exactly equal the proposed value; external guidance uses its frozen
+namespaced inventory label instead. Every inspectable missing file,
 directory, symlink, and symlink-traversing path returns to the producing role in
 the same bounded `existing-canonical-repository-file` diagnostic batch; these
 violations do not surface later as generic unsafe-path failures and are never
@@ -3009,8 +3035,8 @@ non-resumably and requires a new run after repair; automatic selection never
 switches guidance late. A safe structured result is one of `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
 `PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
-the current procedure output. Skill-guided results identify the frozen
-repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
+the current procedure output. Guided results identify the frozen
+guidance label in `skillPath`; skill-less `PASS`, `FAIL`, and `BLOCKED`
 results carry no path. A blocked procedure retains resumable environment
 recovery; unavailable frozen guidance requires a new run.
 
@@ -4301,7 +4327,8 @@ At minimum cover:
     rejection without claiming Reviewer acceptance, and become inapplicable
     after content drift.
 64. finalization candidates accept only existing canonical repository-relative
-    regular validation files before fingerprinting or review, and version-8
+    regular validation files or the exact selected finalization-file label
+    before fingerprinting or review, and version-8
     active runs migrate through fresh independent discovery without losing
     completed commits or safe current-step content.
 65. version-9 consumed and pending bootstrap diagnostics migrate losslessly to
@@ -4470,8 +4497,9 @@ Do not build:
     agent-sandbox limitations alone cannot block pre-finalization repairs.
 31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
-    files; the runner derives the final stable union and assigns contiguous IDs,
-    while invalid output receives at most one read-only diagnostic-batch
+    files plus the exact selected external guidance label when applicable; the
+    runner derives the final stable union and assigns contiguous IDs, while
+    invalid output receives at most one read-only diagnostic-batch
     correction per producing role, phase, and contract.
 32. Provider usage-exhaustion recovery persists no denied input or native
     provider text, never retries the rejected turn, and reconstructs the request
@@ -4501,8 +4529,9 @@ Do not build:
     the exact finding on the applicable candidate-reviewed or terminal-confirmed content; they never record Reviewer
     acceptance or weaken another finding or validation gate.
 38. Every finalization validation-infrastructure candidate is an ordered set of
-    existing canonical repository-relative regular files before it can be
-    fingerprinted, trusted, or reviewed.
+    existing canonical repository-relative regular files, plus the exact selected
+    external guidance label when applicable, before it can be fingerprinted,
+    trusted, or reviewed.
 39. Detached MCP compatibility binds the root run-envelope tuple and every
     loaded pipeline ID/state version, is frozen at server startup, and fails
     before lease acquisition, recovery, or migration without changing durable

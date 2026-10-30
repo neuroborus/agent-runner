@@ -133,7 +133,7 @@ const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
     errorMessage:
-      "must be auto, none, or a normalized repository-relative SKILL.md path",
+      "must be auto, none, or a normalized infrastructure-relative Markdown path",
     validate: isFinalizationPolicy,
   }),
   maxFixRoundsPerStep: positiveIntegerSetting(20),
@@ -1496,7 +1496,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 35,
+  stateVersion: 36,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1554,6 +1554,8 @@ export const planExecutionPipeline = Object.freeze({
             : { planKind: "commit", ...run.pipelineState.settings },
       });
     },
+    // Preserve existing path/fallback decisions and consumed-effect evidence.
+    35: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

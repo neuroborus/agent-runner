@@ -135,6 +135,7 @@ const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
   "ERR_GIT_SNAPSHOT_RACE",
 ]);
 const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+  "ERR_FINALIZATION_FILE_INVALID",
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
@@ -1480,14 +1481,27 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           : [],
       ),
     );
+    const guidance = state().finalizationGuidance;
+    const selectedFile =
+      guidance?.selection === "file"
+        ? await inspectValidationPath(
+            guidance.skillPath,
+            currentRun.projectPath,
+          )
+        : null;
+    const readContext =
+      selectedFile === null
+        ? ""
+        : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
     const request = {
+      ...(selectedFile === null ? {} : { readPaths: [selectedFile.path] }),
       access,
       cwd: currentRun.projectPath,
       prompt:
         session?.mode === "continue"
           ? rolePrompt(buildPrompt(""))
-          : recoveryPrompt,
-      recoveryPrompt,
+          : recoveryPrompt + readContext,
+      recoveryPrompt: recoveryPrompt + readContext,
       schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
@@ -2018,10 +2032,49 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
+  async function inspectValidationPath(path, projectPath) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && path === guidance.skillPath) {
+      const inspection = await runtime.finalization.inspectFile({
+        path:
+          guidance.configuredPolicy === "auto"
+            ? path
+            : guidance.configuredPolicy,
+        policy: guidance.configuredPolicy,
+      });
+      return {
+        ...inspection,
+        relativePath: inspection.inventoryPath ?? inspection.relativePath,
+      };
+    }
+    if (path.startsWith("finalization://")) {
+      throw workflowError(
+        "Validation infrastructure may name only the selected finalization file.",
+        "ERR_FINALIZATION_FILE_INVALID",
+      );
+    }
+    return runtime.git.inspectPath({ path, projectPath });
+  }
+
   async function validationInfrastructureFingerprint(
     paths,
     projectPath = state().repositoryBaseline.projectPath,
   ) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && paths.includes(guidance.skillPath)) {
+      const file = await inspectValidationPath(guidance.skillPath, projectPath);
+      if (!file.exists) {
+        throw workflowError("Frozen finalization guidance is missing.");
+      }
+      const infrastructure =
+        await runtime.git.validationInfrastructureFingerprint({
+          paths: paths.filter((path) => path !== guidance.skillPath),
+          projectPath,
+        });
+      return sha256(
+        JSON.stringify({ infrastructure, finalizationFile: file.fingerprint }),
+      );
+    }
     return runtime.git.validationInfrastructureFingerprint({
       paths,
       projectPath,
@@ -2146,10 +2199,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await inspectValidationPath(
           path,
-          projectPath: state().repositoryBaseline.projectPath,
-        });
+          state().repositoryBaseline.projectPath,
+        );
       } catch (cause) {
         if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
           throw cause;
@@ -2667,7 +2720,7 @@ ${JSON.stringify(
     return reconcileValidationMigration();
   }
 
-  async function resolveFinalizationGuidance(projectPath, policy) {
+  async function resolveFinalizationGuidance(policy) {
     if (policy === "none") {
       return createFinalizationGuidanceDecision({ configuredPolicy: policy });
     }
@@ -2676,9 +2729,9 @@ ${JSON.stringify(
     for (const skillPath of candidates) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await runtime.finalization.inspectFile({
           path: skillPath,
-          projectPath,
+          policy,
         });
       } catch (cause) {
         if (policy === "auto") {
@@ -2687,7 +2740,7 @@ ${JSON.stringify(
         await pause("finalization_skill_invalid", {
           code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
           explanation:
-            "The explicitly configured finalization skill path is not a safe canonical repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill path is not a safe confined Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -2698,35 +2751,18 @@ ${JSON.stringify(
         inspection.kind === "file" &&
         inspection.relativePath === skillPath
       ) {
-        let selectedFileFingerprint;
-        try {
-          selectedFileFingerprint =
-            await runtime.git.validationInfrastructureFingerprint({
-              paths: [skillPath],
-              projectPath,
-            });
-        } catch (cause) {
-          if (policy === "auto") continue;
-          await pause("finalization_skill_invalid", {
-            code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
-            explanation:
-              "The explicitly configured finalization skill could not be fingerprinted safely. Repair it and start a new run.",
-            evidence: [skillPath],
-            skillPath,
-          });
-          return null;
-        }
         return createFinalizationGuidanceDecision({
           configuredPolicy: policy,
-          skillPath,
-          selectedFileFingerprint,
+          skillPath: inspection.inventoryPath ?? skillPath,
+          selectedFileFingerprint: inspection.fingerprint,
+          selection: "file",
         });
       }
       if (policy !== "auto" && inspection.exists === true) {
         await pause("finalization_skill_invalid", {
           code: "ERR_FINALIZATION_SKILL_INVALID",
           explanation:
-            "The explicitly configured finalization skill is not a canonical regular repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill is not a confined regular Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -2751,7 +2787,7 @@ ${JSON.stringify(
     repositoryBaseline,
   } = {}) {
     const guidance = state().finalizationGuidance;
-    if (guidance?.selection !== "skill") return true;
+    if (!["skill", "file"].includes(guidance?.selection)) return true;
     const pauseForGuidance = async (reason, details) => {
       const current = state();
       const contentChanged =
@@ -2792,10 +2828,7 @@ ${JSON.stringify(
     };
     let inspection;
     try {
-      inspection = await runtime.git.inspectPath({
-        path: guidance.skillPath,
-        projectPath,
-      });
+      inspection = await inspectValidationPath(guidance.skillPath, projectPath);
     } catch (cause) {
       return pauseForGuidance("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -2827,10 +2860,13 @@ ${JSON.stringify(
     }
     let fingerprint;
     try {
-      fingerprint = await validationInfrastructureFingerprint(
-        [guidance.skillPath],
-        projectPath,
-      );
+      fingerprint =
+        guidance.selection === "file"
+          ? inspection.fingerprint
+          : await validationInfrastructureFingerprint(
+              [guidance.skillPath],
+              projectPath,
+            );
     } catch (cause) {
       return pauseForGuidance("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -2866,7 +2902,6 @@ ${JSON.stringify(
       interruptedTurnIsWritable(interruptedTurn);
     if (current.finalizationGuidance === null) {
       const guidance = await resolveFinalizationGuidance(
-        current.repositoryBaseline.projectPath,
         current.settings.finalization,
       );
       if (guidance === null) return false;
@@ -3653,7 +3688,6 @@ ${JSON.stringify(
     let finalizationGuidance = state().finalizationGuidance;
     if (finalizationGuidance === null) {
       finalizationGuidance = await resolveFinalizationGuidance(
-        repositoryPath,
         effectiveSettings.finalization,
       );
       if (finalizationGuidance === null) return false;

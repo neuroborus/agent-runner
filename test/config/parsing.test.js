@@ -297,7 +297,7 @@ test("configuration rejects unsupported shapes and values", () => {
       /mode must be independent, lazy, or combined/u,
     ],
     [
-      '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
+      '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.txt"}}}',
       /finalization must be auto, none/u,
     ],
     [

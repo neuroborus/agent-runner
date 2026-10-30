@@ -306,10 +306,11 @@ test("requires a fresh run when frozen guidance drifts during lazy reconvergence
       }
     },
   });
-  const validationInfrastructureFingerprint =
-    fixture.runtime.git.validationInfrastructureFingerprint;
-  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted ? "d".repeat(64) : validationInfrastructureFingerprint(options);
+  const inspectFile = fixture.runtime.finalization.inspectFile;
+  fixture.runtime.finalization.inspectFile = async (options) => ({
+    ...(await inspectFile(options)),
+    ...(drifted ? { fingerprint: "d".repeat(64) } : {}),
+  });
 
   const paused = await fixture.run();
 
@@ -1132,7 +1133,7 @@ test("uses an explicitly configured finalization skill", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(result.pipelineState.settings.finalization, skillPath);
-  assert.equal(result.pipelineState.finalizationGuidance.selection, "skill");
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "file");
   assert.equal(result.pipelineState.finalizationGuidance.skillPath, skillPath);
   assert.match(
     result.pipelineState.finalizationGuidance.selectedFileFingerprint,
@@ -1995,10 +1996,11 @@ test("rejects frozen guidance drift during candidate-review correction", async (
       }
     },
   });
-  const validationInfrastructureFingerprint =
-    fixture.runtime.git.validationInfrastructureFingerprint;
-  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+  const inspectFile = fixture.runtime.finalization.inspectFile;
+  fixture.runtime.finalization.inspectFile = async (options) => ({
+    ...(await inspectFile(options)),
+    ...(drifted ? { fingerprint: "c".repeat(64) } : {}),
+  });
 
   const result = await fixture.run();
 
@@ -2073,10 +2075,11 @@ test("rejects frozen guidance drift during terminal correction", async (t) => {
       }
     },
   });
-  const validationInfrastructureFingerprint =
-    fixture.runtime.git.validationInfrastructureFingerprint;
-  fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted ? "c".repeat(64) : validationInfrastructureFingerprint(options);
+  const inspectFile = fixture.runtime.finalization.inspectFile;
+  fixture.runtime.finalization.inspectFile = async (options) => ({
+    ...(await inspectFile(options)),
+    ...(drifted ? { fingerprint: "c".repeat(64) } : {}),
+  });
 
   const result = await fixture.run();
 

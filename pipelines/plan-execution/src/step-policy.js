@@ -151,6 +151,7 @@ export const stepLabel = (step) => (step.subject ?? step.title).slice(0, 256);
 export async function resolveExecutionWorkspace({
   settingOverrides: settings = {},
   projectPath,
+  infrastructureRoot = projectPath,
   runId,
   artifactRoot = "LOCAL_ARTIFACTS",
   readTaskInput,
@@ -171,7 +172,7 @@ export async function resolveExecutionWorkspace({
     outputPaths: plan.outputs,
     infrastructurePaths:
       settings.finalization && !["auto", "none"].includes(settings.finalization)
-        ? [resolve(projectPath, settings.finalization)]
+        ? [resolve(infrastructureRoot, settings.finalization)]
         : [],
     artifactPaths: runId
       ? [executionClarificationPath(projectPath, artifactRoot, runId)]

@@ -13,7 +13,10 @@ import { join } from "node:path";
 
 import { serializeCustomPlan } from "@agent-runner/custom-plan";
 import { createClarificationService } from "../../src/clarifications/index.js";
-import { parseRunnerConfiguration } from "../../src/config/index.js";
+import {
+  inspectFinalizationFile,
+  parseRunnerConfiguration,
+} from "../../src/config/index.js";
 import { createRunner } from "../../src/runner/index.js";
 import { createRunStore } from "../../src/state/index.js";
 
@@ -157,10 +160,11 @@ export async function customExecutionFixture(
       const saved = memoryRun ?? (await store.loadRun(runId));
       const state = saved.pipelineState;
       const step = state.currentStep ?? 1;
-      const infrastructure =
-        state.finalizationGuidance?.selection === "skill"
-          ? [state.finalizationGuidance.skillPath]
-          : [];
+      const infrastructure = ["skill", "file"].includes(
+        state.finalizationGuidance?.selection,
+      )
+        ? [state.finalizationGuidance.skillPath]
+        : [];
       const checks =
         state.trustedValidation?.commands.map(({ command }, index) => ({
           id: `C${index + 1}`,
@@ -492,6 +496,9 @@ export async function customExecutionFixture(
     return memoryRun;
   };
   const runtime = {
+    finalization: {
+      inspectFile: ({ path }) => inspectFinalizationFile({ path, projectPath }),
+    },
     adapters: Object.fromEntries(
       Object.keys(created.run.roles).map((role) => [
         role,

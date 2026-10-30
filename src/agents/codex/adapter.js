@@ -2152,6 +2152,12 @@ export function createCodexAdapter(options = {}) {
 
   async function run(value) {
     const normalized = normalizeRequest(value);
+    if (
+      normalized.readPaths !== undefined &&
+      !(await canReadFiles(normalized.readPaths))
+    ) {
+      throw directoryPolicyError(CodexAdapterError);
+    }
     const directoryBoundary = await prepareDirectoryPolicy(
       normalized,
       CodexAdapterError,

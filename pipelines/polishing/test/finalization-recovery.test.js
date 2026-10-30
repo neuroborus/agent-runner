@@ -809,7 +809,7 @@ test("infrastructure scope drift discards stale feedback without losing a pendin
     const value = await fingerprint(options);
     if (
       fixture.currentRun.pipelineState.finalizationRecovery.required &&
-      options.paths.length > 1 &&
+      options.paths.includes("package.json") &&
       !drifted
     ) {
       drifted = true;

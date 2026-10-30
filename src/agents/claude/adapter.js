@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess } from "../owned-process.js";
+import { canReadFiles } from "../file-access.js";
 import {
   ADAPTER_FAILURE_CLASS,
   createAdapterContract,
@@ -1573,9 +1574,11 @@ export function createClaudeAdapter(options = {}) {
   ) {
     request.signal?.throwIfAborted();
     await request.directoryBoundary?.verify();
-    const gitDirectories =
-      request.directoryBoundary?.mounts.protectedPaths ??
-      (await gitMetadataDirectories(request));
+    const gitDirectories = [
+      ...(request.directoryBoundary?.mounts.protectedPaths ??
+        (await gitMetadataDirectories(request))),
+      ...(request.readPaths ?? []),
+    ];
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy =
       request.isolationPolicy ?? isolationPolicies?.[request.access];
@@ -1855,6 +1858,12 @@ export function createClaudeAdapter(options = {}) {
 
   async function run(value) {
     const normalized = normalizeRequest(value);
+    if (
+      normalized.readPaths !== undefined &&
+      !(await canReadFiles(normalized.readPaths))
+    ) {
+      throw directoryPolicyError(ClaudeAdapterError);
+    }
     const directoryBoundary = await prepareDirectoryPolicy(
       normalized,
       ClaudeAdapterError,

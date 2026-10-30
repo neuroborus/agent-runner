@@ -951,7 +951,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 35);
+  assert.equal(planExecutionPipeline.stateVersion, 36);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -1695,7 +1695,7 @@ test("invalidates version-1 validation evidence before active execution resumes"
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );
@@ -1704,7 +1704,7 @@ test("invalidates version-1 validation evidence before active execution resumes"
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );

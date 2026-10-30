@@ -16,6 +16,7 @@ const REQUEST_FIELDS = Object.freeze([
   "cwd",
   "model",
   "profile",
+  "readPaths",
   "prompt",
   "recoveryPrompt",
   "schema",
@@ -784,6 +785,23 @@ export function createAdapterContract({
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
+      value.readPaths !== undefined &&
+      (!Array.isArray(value.readPaths) ||
+        value.readPaths.length !== 1 ||
+        Array.from(value.readPaths).some(
+          (path) =>
+            typeof path !== "string" ||
+            !isAbsolute(path) ||
+            resolve(path) !== path ||
+            isFilesystemRoot(path) ||
+            /[\0\r\n]/u.test(path),
+        ))
+    ) {
+      throw optionsError(
+        "Selected finalization read must declare one exact file.",
+      );
+    }
+    if (
       (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
       (value.onProcess !== undefined &&
         typeof value.onProcess !== "function") ||
@@ -833,6 +851,9 @@ export function createAdapterContract({
       access: value.access,
       ...execution,
       cwd: value.cwd,
+      ...(value.readPaths === undefined
+        ? {}
+        : { readPaths: Object.freeze([...value.readPaths]) }),
       prompt,
       recoveryPrompt:
         value.recoveryPrompt === undefined
@@ -869,11 +890,13 @@ export function createAdapterContract({
       ...(value.onResource === undefined
         ? {}
         : { onResource: value.onResource }),
-      ...(value.storageForbiddenPaths === undefined
+      ...(value.storageForbiddenPaths === undefined &&
+      value.readPaths === undefined
         ? {}
         : {
             storageForbiddenPaths: Object.freeze([
-              ...value.storageForbiddenPaths,
+              ...(value.storageForbiddenPaths ?? []),
+              ...(value.readPaths ?? []),
             ]),
           }),
     };

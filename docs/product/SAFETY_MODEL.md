@@ -134,6 +134,12 @@ redirection fails closed as one bounded provider-neutral safety pause. The
 runner never restores the file or derives missing evidence for a legacy run,
 and begun irreversible effects remain verification-only.
 
+Explicit finalization Markdown files use confined, identity-bound reads from
+the selected infrastructure root. They grant no configuration authority or
+parent-directory access, and cannot be replaced or redirected on resume. The
+[validation contract](VALIDATION_AND_REVIEW.md#finalization-and-semantic-review)
+owns selection, legacy decisions and the mandatory guidance gate.
+
 The same protected resolution freezes `trustedCommandTimeoutMs` into each new
 run's version-4 trusted-validation snapshot. It is a strict `1` through
 `2147483647` millisecond integer, defaults to `3600000`, and resolves project

@@ -95,6 +95,8 @@ workspace effects for sequential analysis/output execution in all three modes,
 criterion-bound gates, result-only repairs, output-preparation baseline recovery and drift rejection, bounded malformed-output correction, trusted provenance and interrupted acceptance. Repository-contained coverage also checks canonical exclusion and untouched Git controls.
 Semantic-only finalization failures retain their issues across reconstruction
 and require result repair and fresh combined gates without invented checks.
+Unselected external-guidance labels in custom bootstrap and finalization
+inventories receive bounded field diagnostics before workspace inspection.
 Root creation still proves descriptor selection, configuration and declared permissions.
 Boundary validation and creation cover a project commit-kind override of a
 runner custom default before plan parsing.
@@ -351,6 +353,15 @@ redundant setup and use lightweight effects for policy. Pure migration
 validation remains in the fast tier.
 
 ## Finalization
+
+The fast configuration finalization-file suite owns confined reads and file,
+target and ancestor substitution. `test/runner-finalization.test.js` composes
+both coding pipelines with exact sibling/external file reads, frozen resume and
+legacy selection preservation using lightweight effects. It also covers repository
+validation and external guidance sharing a relative path without losing either
+inventory identity or repository fingerprint input. Existing provider
+suites own exact-read admission and command mounts. These cases do not replace
+the durable migration, runner and handoff coverage listed above.
 
 The canonical finalization skill applies both directly and inside Agent Runner;
 there is no second divergent test policy. Establish affected slow checks before

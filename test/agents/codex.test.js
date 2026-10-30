@@ -553,6 +553,22 @@ test("admits exact binary source reads without granting temporary writes or star
   assert.equal(fixture.workspaceStorages.length, 0);
 });
 
+test("accepts one exact finalization read and rejects broader declarations before launching", async (t) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "codex-finalization-")),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "RUNNER.md");
+  await writeFile(path, "Run checks.\n");
+  const fixture = createFixture();
+  for (const readPaths of [[directory], ["relative.md"], [path, path], []]) {
+    await assert.rejects(fixture.adapter.run(request({ readPaths })));
+  }
+  assert.equal(fixture.processes.length, 0);
+  await fixture.adapter.run(request({ readPaths: [path] }));
+  assert.equal(fixture.processes.length, 1);
+});
+
 test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
   const entered = Promise.withResolvers();
   const observations = [];

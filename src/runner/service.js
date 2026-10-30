@@ -12,6 +12,7 @@ import {
 import { createClarificationService } from "../clarifications/index.js";
 import {
   assertProjectConfigurationProtected,
+  inspectFinalizationFile,
   DEFAULT_ARTIFACT_ROOT,
   loadProjectConfiguration,
   loadRunnerConfiguration,
@@ -429,9 +430,12 @@ export function createRunner(options = {}) {
   }
 
   function storageForbiddenPaths(run) {
-    const base = [run.projectPath, run.taskPath, runStore.rootPath].filter(
-      (path) => typeof path === "string",
-    );
+    const base = [
+      run.projectPath,
+      run.taskPath,
+      runStore.rootPath,
+      run.projectConfigurationProtection?.infrastructureRoot,
+    ].filter((path) => typeof path === "string");
     if (run.workspace?.policy == null) return base;
     const roots = [
       ...new Set(
@@ -624,6 +628,18 @@ export function createRunner(options = {}) {
     }
     return Object.freeze({
       authentication,
+      finalization: {
+        inspectFile: ({ path, policy }) =>
+          inspectFinalizationFile({
+            path,
+            projectPath: run.projectPath,
+            infrastructureRoot:
+              policy === "auto"
+                ? run.projectPath
+                : (run.projectConfigurationProtection?.infrastructureRoot ??
+                  run.projectPath),
+          }),
+      },
       outputExhaustion,
       availability,
       inactivity,
@@ -1950,6 +1966,8 @@ export function createRunner(options = {}) {
           projectPath,
           taskPath,
           settingOverrides: resolved.settings,
+          infrastructureRoot:
+            projectConfiguration?.infrastructure.rootPath ?? projectPath,
           runId: createOptions.runId,
           artifactRoot: resolved.artifactRoot,
         },
@@ -1989,6 +2007,8 @@ export function createRunner(options = {}) {
             projectPath,
             taskPath,
             settingOverrides: resolved.settings,
+            infrastructureRoot:
+              projectConfiguration?.infrastructure.rootPath ?? projectPath,
             runId: createOptions.runId,
             artifactRoot: resolved.artifactRoot,
           },

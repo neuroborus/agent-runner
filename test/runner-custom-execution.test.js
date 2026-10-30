@@ -847,3 +847,81 @@ test("explicit custom finalization guidance is frozen and reviewed without autom
   assert.deepEqual(run.pipelineState.requiredChecks, []);
   assert.equal(run.pipelineState.customResults.accepted.length, 2);
 });
+
+for (const phase of ["bootstrap", "finalize"]) {
+  test(`custom ${phase} corrects an unselected external guidance label before workspace inspection`, async (t) => {
+    let injected = false;
+    let correction;
+    const f = await fixture(t, "combined", {
+      finalization: "review/SKILL.md",
+      afterTransition({ pipelineState }) {
+        const corrections =
+          phase === "bootstrap"
+            ? pipelineState.bootstrapCorrections
+            : pipelineState.finalizationCorrections;
+        if (corrections.length) correction = corrections.at(-1);
+      },
+      beforeTurn({ saved }) {
+        if (injected || saved.activeTurn.phase !== phase) return;
+        injected = true;
+        const skillPath = saved.pipelineState.finalizationGuidance.skillPath;
+        const inventory = {
+          requiredChecks: [],
+          validationInfrastructure: [skillPath, "finalization://other.md"],
+        };
+        if (phase === "bootstrap")
+          return {
+            result: {
+              stepAssessment: {
+                step: 1,
+                subject: "Analyze evidence",
+                disposition: "CURRENT",
+                evidence: [],
+              },
+              summary: "Inspect the result against the traceability criterion.",
+              ...inventory,
+              capabilityRequirements: [],
+              environmentBlockers: [],
+            },
+          };
+        return {
+          status: "PASS",
+          summary: "Inspected the result against its criterion.",
+          skillPath,
+          ...inventory,
+          checks: [],
+          issues: [],
+          reason: "",
+          question: "",
+          whyBlocked: "",
+          options: [],
+          evidence: [],
+        };
+      },
+    });
+    const { run } = await f.run();
+    assert.equal(
+      run.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(run.pause),
+    );
+    assert.ok(injected);
+    assert.equal(correction.attempt, 1);
+    assert.deepEqual(
+      correction.diagnostics.map(({ field, constraint }) => ({
+        field,
+        constraint,
+      })),
+      [
+        {
+          field: "validationInfrastructure[1]",
+          constraint: "existing-canonical-repository-file",
+        },
+      ],
+    );
+    assert.deepEqual(run.pipelineState.validationInfrastructure, [
+      "review/SKILL.md",
+    ]);
+    assert.equal(run.pipelineState.customResults.accepted.length, 2);
+  });
+}

@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-30
 
+- **Finalization can select an exact Markdown procedure.** Execution and polishing
+  bind explicit paths to the selected infrastructure base, preserving conventional
+  auto discovery and optional custom guidance. A sibling `RUNNER.md` can adapt a
+  preserved skill, and external procedures receive only an exact file read.
+  Identity-bound fingerprints reject replacement and ancestry drift as well as
+  content changes. Leased migrations retain legacy selections and consumed-effect
+  evidence without rediscovery, additional checkpoints or renewed budgets.
+
 - **External configuration binds one target and infrastructure root.** Explicit
   CLI/MCP selection reuses existing infrastructure without target writes or global
   registration. Closed project-only bindings reject conflicting targets, roots

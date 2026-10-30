@@ -1309,7 +1309,7 @@ test("rejects repository mutation and fingerprint drift during terminal confirma
     const validationInfrastructureFingerprint =
       fixture.runtime.git.validationInfrastructureFingerprint;
     fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-      drifted && options.paths.length > 1
+      drifted && options.paths.includes("package.json")
         ? "c".repeat(64)
         : validationInfrastructureFingerprint(options);
 
@@ -1741,7 +1741,7 @@ test("uses an explicitly configured finalization skill", async (t) => {
   assert.equal(result.pipelineState.settings.finalization, skillPath);
   assert.deepEqual(result.pipelineState.finalizationGuidance, {
     configuredPolicy: skillPath,
-    selection: "skill",
+    selection: "file",
     skillPath,
     selectedFileFingerprint:
       result.pipelineState.finalizationGuidance.selectedFileFingerprint,
@@ -2647,7 +2647,7 @@ test("reruns finalization when validation infrastructure drifts during lazy reco
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted && options.paths.length > 1
+    drifted && options.paths.includes("package.json")
       ? "d".repeat(64)
       : validationInfrastructureFingerprint(options);
 
@@ -2726,7 +2726,7 @@ test("reruns finalization when retained candidate-review correction scope drifts
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted && options.paths.length > 1
+    drifted && options.paths.includes("package.json")
       ? "c".repeat(64)
       : validationInfrastructureFingerprint(options);
 

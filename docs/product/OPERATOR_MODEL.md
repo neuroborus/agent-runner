@@ -57,7 +57,12 @@ Integrated Git configuration retains ignored/untracked protections, while
 ordinary directories require no Git prerequisite. Selection never creates,
 relocates or registers infrastructure. Resume pins the selected file, its bytes,
 identity, real ancestry and external target identity rather than rediscovering.
-The exact binding schema belongs to [architecture](../ARCHITECTURE.md#runner-configuration).
+The exact binding schema belongs to [architecture](../ARCHITECTURE.md#runner-configuration). Explicit
+execution/polishing `finalization` paths use that frozen infrastructure base and
+accept Markdown procedures such as `finalization/SKILL.md` or an adjacent
+`RUNNER.md`; conventional `auto` discovery stays inside the target. Selection
+preserves the original skill and never rewrites the procedure. Frozen bytes,
+identity and ancestry cannot be replaced or redirected on resume.
 
 Only runner-root configuration accepts `clientAttribution`, an exact
 `{ name, title }` provider-visible identity. It defaults to
