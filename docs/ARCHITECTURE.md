@@ -677,14 +677,40 @@ runtime file remains ignored and untracked.
 
 For a new run, the root also discovers an optional ignored and untracked
 `<project>/LOCAL_ARTIFACTS/agent-runner.json`, or uses an explicitly selected
-confined project path from CLI/MCP. Both files require `schemaVersion: 1`;
-unknown versions, pipelines, roles, settings, and fields are errors. Project
+confined project path from CLI/MCP. Explicit CLI `--project-config` / MCP
+`projectConfigurationPath` may also select a target-bound external file.
+Both files require `schemaVersion: 1`; unknown versions, pipelines, roles,
+settings, and fields are errors. Project
 configuration may define exact trusted commands, select trusted aliases,
 override execution defaults, pipeline roles and settings, and select a normalized
 repository-relative artifact root. It cannot define profiles, credentials,
-provider binaries, or arbitrary environment values. Tracked, non-ignored,
-missing explicit, traversing, and symbolic-link paths are rejected without
-creating a file or changing ignore rules.
+provider binaries, or arbitrary environment values. Integrated Git files must
+remain ignored and untracked. Missing explicit, unsafe, and symbolic-link paths
+are rejected without creating a file or changing ignore rules.
+
+Project-only `infrastructure` is a closed version-1 object with `schemaVersion`,
+`placement` (`integrated` or `external`), canonical absolute `projectPath` and
+`rootPath`. The target must match the resolved workspace. Integrated roots equal
+the target; external roots and targets must be disjoint, with the selected file
+strictly below the root. External files require this binding and explicit
+selection. Integrated discovery remains unchanged, and explicit selection
+replaces discovery rather than merging competing placements. No sibling scan,
+relocation, rewriting, registration or new host authority occurs.
+The loader returns the binding as `infrastructure` and resolves `artifactPath`
+from its root and the effective relative `artifactRoot`. Pipeline artifact and
+guidance publication remain owned by their existing contracts. This resource
+resolution grants no directory read or write permission. External configuration
+can select custom directory semantics before Git inspection, just like an
+integrated project overlay. For a Git selection supplied from a subdirectory,
+external binding may resolve to the canonical worktree root while retaining the
+exact selected file. Relative external selectors resolve before worktree-root
+rebasing in fixed-workspace pipelines such as polishing as well as dynamic
+pipelines. Fixed-workspace pipelines validate their workspace/state boundary
+before loading configuration and retain that validated target during discovery.
+Explicit external overlays resolve before a preliminary custom
+default can prevent their higher-precedence commit selection. A custom directory
+selection retains its requested scope; an external binding cannot widen it to
+the enclosing worktree.
 
 The confined read that supplies parsed project values also produces a
 versioned protection record. It pins the canonical project and file paths,
@@ -693,7 +719,14 @@ file metadata, plus device/inode evidence for every real directory from the
 project root to the file's parent. The initial read and every later inspection
 use a bounded no-follow descriptor and compare path, descriptor, and ancestor
 identity before and after reading. A project configuration must have one hard
-link.
+link. Existing integrated protection remains version 1. External protection is
+version 2 with the same content/file fields, an `infrastructureRoot`, a
+root-relative `relativePath`, complete real ancestry from the filesystem root to the file's
+parent, and `projectAncestors` through the target directory itself. Root identity
+is included in that ancestry. Target ancestry is compared before and after the
+read, so replacing an empty target also invalidates the binding. The state
+boundary strictly validates both versions; legacy records are preserved without
+rediscovery, inferred bindings or new execution authority.
 
 The V1 shape is:
 

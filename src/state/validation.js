@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 import {
   clientAttributionFingerprint,
@@ -144,6 +144,11 @@ const PROJECT_CONFIGURATION_PROTECTION_FIELDS = new Set([
   "contentHash",
   "identity",
   "ancestors",
+]);
+const EXTERNAL_CONFIGURATION_PROTECTION_FIELDS = new Set([
+  ...PROJECT_CONFIGURATION_PROTECTION_FIELDS,
+  "infrastructureRoot",
+  "projectAncestors",
 ]);
 const FILE_IDENTITY_FIELDS = new Set([
   "device",
@@ -586,15 +591,15 @@ function normalizeProjectConfigurationProtection(value, state) {
     return null;
   }
   assertRecord(value, "run.projectConfigurationProtection");
-  rejectUnknownFields(
-    value,
-    PROJECT_CONFIGURATION_PROTECTION_FIELDS,
-    "run.projectConfigurationProtection",
-  );
+  const external = value.schemaVersion === 2;
+  const fields = external
+    ? EXTERNAL_CONFIGURATION_PROTECTION_FIELDS
+    : PROJECT_CONFIGURATION_PROTECTION_FIELDS;
+  const basePath = external ? value.infrastructureRoot : state.projectPath;
+  rejectUnknownFields(value, fields, "run.projectConfigurationProtection");
   if (
-    Object.keys(value).length !==
-      PROJECT_CONFIGURATION_PROTECTION_FIELDS.size ||
-    value.schemaVersion !== 1 ||
+    Object.keys(value).length !== fields.size ||
+    ![1, 2].includes(value.schemaVersion) ||
     value.projectPath !== state.projectPath ||
     typeof value.path !== "string" ||
     !isAbsolute(value.path) ||
@@ -602,13 +607,34 @@ function normalizeProjectConfigurationProtection(value, state) {
     typeof value.relativePath !== "string" ||
     value.relativePath.length === 0 ||
     value.relativePath.includes("\\") ||
-    resolve(state.projectPath, value.relativePath) !== value.path ||
-    relative(state.projectPath, value.path).split(sep).join("/") !==
+    typeof basePath !== "string" ||
+    !isAbsolute(basePath) ||
+    resolve(basePath) !== basePath ||
+    resolve(basePath, value.relativePath) !== value.path ||
+    relative(basePath, value.path).split(sep).join("/") !==
       value.relativePath ||
     typeof value.contentHash !== "string" ||
     !/^[a-f0-9]{64}$/u.test(value.contentHash)
   ) {
     fail("run.projectConfigurationProtection is invalid.");
+  }
+  if (external) {
+    const within = (parent, child) => {
+      const path = relative(parent, child);
+      return (
+        path === "" ||
+        (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`))
+      );
+    };
+    if (
+      UNSAFE_TEXT_PATTERN.test(basePath) ||
+      within(basePath, state.projectPath) ||
+      within(state.projectPath, basePath) ||
+      !within(basePath, value.path) ||
+      value.path === basePath
+    ) {
+      fail("run.projectConfigurationProtection.infrastructureRoot is invalid.");
+    }
   }
   assertRecord(value.identity, "run.projectConfigurationProtection.identity");
   rejectUnknownFields(
@@ -628,22 +654,51 @@ function normalizeProjectConfigurationProtection(value, state) {
       ),
     ]),
   );
-  if (!Array.isArray(value.ancestors) || value.ancestors.length === 0) {
-    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  const ancestors = normalizeConfigurationAncestors(
+    value.ancestors,
+    value.path,
+    external ? parse(value.path).root : state.projectPath,
+    "run.projectConfigurationProtection.ancestors",
+  );
+  return {
+    schemaVersion: value.schemaVersion,
+    path: value.path,
+    projectPath: value.projectPath,
+    relativePath: value.relativePath,
+    contentHash: value.contentHash,
+    identity,
+    ancestors,
+    ...(external
+      ? {
+          infrastructureRoot: value.infrastructureRoot,
+          projectAncestors: normalizeConfigurationAncestors(
+            value.projectAncestors,
+            resolve(state.projectPath, "binding"),
+            parse(state.projectPath).root,
+            "run.projectConfigurationProtection.projectAncestors",
+          ),
+        }
+      : {}),
+  };
+}
+
+function normalizeConfigurationAncestors(value, filePath, rootPath, fieldPath) {
+  if (!Array.isArray(value) || value.length === 0) {
+    fail(`${fieldPath} is invalid.`);
   }
   const expectedPaths = [];
-  for (let current = dirname(value.path); ; current = dirname(current)) {
+  for (let current = dirname(filePath); ; current = dirname(current)) {
     expectedPaths.unshift(current);
-    if (current === state.projectPath) break;
+    if (current === rootPath) break;
     if (current === dirname(current)) {
-      fail("run.projectConfigurationProtection.ancestors is invalid.");
+      fail(`${fieldPath} is invalid.`);
     }
   }
-  if (value.ancestors.length !== expectedPaths.length) {
-    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  if (value.length !== expectedPaths.length) {
+    fail(`${fieldPath} is invalid.`);
   }
-  const ancestors = value.ancestors.map((ancestor, index) => {
-    const path = `run.projectConfigurationProtection.ancestors[${index}]`;
+  return value.map((ancestor, index) => {
+    const path = `${fieldPath}[${index}]`;
     assertRecord(ancestor, path);
     rejectUnknownFields(ancestor, ANCESTOR_IDENTITY_FIELDS, path);
     if (
@@ -658,15 +713,6 @@ function normalizeProjectConfigurationProtection(value, state) {
       inode: decimalIdentity(ancestor.inode, `${path}.inode`),
     };
   });
-  return {
-    schemaVersion: 1,
-    path: value.path,
-    projectPath: value.projectPath,
-    relativePath: value.relativePath,
-    contentHash: value.contentHash,
-    identity,
-    ancestors,
-  };
 }
 
 export function assertRunId(runId) {

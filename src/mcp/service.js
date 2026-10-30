@@ -171,7 +171,13 @@ function createRunStartSchema(providers) {
       idempotencyKey,
       pipelineId: identifier,
       projectPath: z.string().min(1),
-      projectConfigurationPath: z.string().min(1).optional(),
+      projectConfigurationPath: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Explicit integrated or target-bound external project configuration. External selection requires a versioned infrastructure binding; resume retains its frozen identity.",
+        ),
       taskPath: z.string().min(1),
       proactiveClarification: z.boolean().default(false),
       mode: pipelineMode.optional(),

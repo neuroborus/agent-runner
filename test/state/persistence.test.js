@@ -26,6 +26,10 @@ import {
   DEFAULT_CLIENT_ATTRIBUTION,
 } from "../../src/agents/index.js";
 import {
+  loadProjectConfiguration,
+  parseRunnerConfiguration,
+} from "../../src/config/index.js";
+import {
   restoreOperatorPause,
   stopSettlement,
 } from "../../src/runner/stops.js";
@@ -79,6 +83,63 @@ async function createFixture(t, { taskInsideProject = false } = {}) {
   t.after(() => created.lease.release().catch(() => {}));
   return { created, projectPath, stateRoot, store, taskPath, workspace };
 }
+
+test("external configuration protection round-trips and rejects malformed bindings", async (t) => {
+  const { projectPath, taskPath, store, workspace } = await createFixture(t);
+  const infrastructureRoot = join(workspace, "infrastructure");
+  await mkdir(infrastructureRoot);
+  const configurationPath = join(infrastructureRoot, "agent-runner.json");
+  await writeFile(
+    configurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      infrastructure: {
+        schemaVersion: 1,
+        placement: "external",
+        projectPath,
+        rootPath: infrastructureRoot,
+      },
+    }),
+  );
+  const { protection } = await loadProjectConfiguration({
+    configurationPath,
+    projectPath,
+    inspectPath() {
+      assert.fail("External configuration does not inspect Git.");
+    },
+    runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+  });
+  const input = {
+    ...runInput(projectPath, taskPath),
+    projectConfigurationProtection: protection,
+  };
+  const created = await store.createRun(input);
+  t.after(() => created.lease.release().catch(() => {}));
+  assert.deepEqual(
+    (await store.loadRun(created.state.runId)).projectConfigurationProtection,
+    protection,
+  );
+  for (const change of [
+    { schemaVersion: 3 },
+    { infrastructureRoot: projectPath },
+    { infrastructureRoot: 1 },
+    { infrastructureRoot: workspace },
+    { relativePath: "../agent-runner.json" },
+    { projectPath: taskPath },
+    { ancestors: protection.ancestors.slice(1) },
+    { projectAncestors: [] },
+    { projectAncestors: protection.projectAncestors.slice(0, -1) },
+    { authority: true },
+  ]) {
+    await assert.rejects(
+      store.createRun({
+        ...input,
+        projectConfigurationProtection: { ...protection, ...change },
+      }),
+      { code: "ERR_INVALID_RUN_STATE" },
+    );
+  }
+});
 
 test("retains large result copies across journal rotation, interruption, and rejected publication", async (t) => {
   const { created, projectPath, taskPath, stateRoot } = await createFixture(t);

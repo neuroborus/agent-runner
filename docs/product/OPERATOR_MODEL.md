@@ -39,7 +39,7 @@ do not enable splitting: production routing and run eligibility remain inactive.
 See the [execution contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
 Runner-root configuration is the only source of trusted profile
-implementations. Root and safe ignored project configuration may define exact
+implementations. Root and safe project configuration may define exact
 trusted command vectors. Catalogs merge root then project, deduplicate identical
 same-name definitions, and reject conflicts even when unselected. The merged
 catalog permits 256 definitions; each pipeline may select at most 32 root or
@@ -47,6 +47,17 @@ project aliases. Project configuration may also select role preferences,
 pipeline settings, and an artifact root, but cannot add provider binaries,
 credentials, environment values, or new host authority. CLI and MCP overrides
 have the documented highest precedence.
+
+New runs may explicitly select an existing external project configuration using
+CLI `--project-config` or MCP `projectConfigurationPath`. Its versioned
+`infrastructure` declaration binds the canonical target and disjoint external
+root; relative infrastructure resources resolve from that root. Explicit
+selection replaces conventional integrated discovery without merging placements.
+Integrated Git configuration retains ignored/untracked protections, while
+ordinary directories require no Git prerequisite. Selection never creates,
+relocates or registers infrastructure. Resume pins the selected file, its bytes,
+identity, real ancestry and external target identity rather than rediscovering.
+The exact binding schema belongs to [architecture](../ARCHITECTURE.md#runner-configuration).
 
 Only runner-root configuration accepts `clientAttribution`, an exact
 `{ name, title }` provider-visible identity. It defaults to

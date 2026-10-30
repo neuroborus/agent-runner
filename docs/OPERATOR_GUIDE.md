@@ -118,12 +118,18 @@ indivisible larger change remains valid with a rationale in the plan. This is a
 planning preference, not an execution limit. Resume retains the saved target;
 legacy runs receive 900.
 
-Runner-root configuration defines trusted profile implementations. Both root
-and ignored, untracked project configuration may define exact trusted command
-vectors; project configuration may select these aliases and safe settings.
-The default project configuration is
-`LOCAL_ARTIFACTS/agent-runner.json`; an explicit project configuration must be
-confined to the project. `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
+Runner-root configuration defines trusted profile implementations. Root and
+safe project configuration may define exact trusted command vectors; project
+configuration may select these aliases and safe settings. The default project
+configuration is `LOCAL_ARTIFACTS/agent-runner.json`. Integrated Git configuration
+must be confined to the project, ignored and untracked. Explicit CLI
+`--project-config` / MCP `projectConfigurationPath` may instead select an existing
+external file whose versioned `infrastructure` binding names the canonical target
+and a disjoint external root. Relative infrastructure resources resolve from that
+root; resume retains the selected file, bytes, identity and real ancestry.
+Selection never creates, relocates or merges infrastructure. See
+[configuration](product/OPERATOR_MODEL.md#configuration). `artifactRoot` defaults
+to `LOCAL_ARTIFACTS`.
 Repository-local artifacts must already be ignored. The runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
 the project and task directories; neither may contain the other.

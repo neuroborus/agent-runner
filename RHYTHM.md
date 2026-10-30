@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-30
 
+- **External configuration binds one target and infrastructure root.** Explicit
+  CLI/MCP selection reuses existing infrastructure without target writes or global
+  registration. Closed project-only bindings reject conflicting targets, roots
+  and placements; relative infrastructure resources resolve from the selected
+  root. Version-2 protection pins real file and target ancestry as well as bytes
+  and identity, so resume cannot adopt a replacement setup or target. Integrated
+  discovery, Git ignore safeguards, precedence and legacy evidence remain intact.
+
 - **Process recovery follows positive ownership.** Live supervision and owner-loss
   recovery retain session, launch-token and verified-ancestry associations until
   absence is observed. Unassociated inaccessible processes neither veto progress

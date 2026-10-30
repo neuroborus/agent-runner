@@ -213,15 +213,50 @@ Public prompts, status, activity, and diagnostics do not expose it.
 
 A target repository may optionally provide an ignored, untracked
 `LOCAL_ARTIFACTS/agent-runner.json`, or a new run may select another confined
-ignored path with `--project-config`. A project file may select aliases already
-trusted by the runner, set backend/model/context defaults, override pipeline
+ignored path with `--project-config`. An explicitly selected external file may
+instead declare an exact target-bound infrastructure root. A project file may
+select aliases already trusted by the runner, set backend/model/context defaults, override pipeline
 roles and limits, and select a normalized repository-relative `artifactRoot`.
 It may also define exact `trustedCommands` vectors under the same contract as
 the runner catalog; profile implementations remain runner-owned. Agent Runner
-expects an existing ignored, untracked, confined regular file.
+expects an existing confined regular file; integrated Git files must also be
+ignored and untracked.
+
+For an existing external setup, select its configuration explicitly with
+`--project-config /workspace/infrastructure/agent-runner.json` (MCP:
+`projectConfigurationPath`). Include this project-only binding in that file:
+
+```json
+{
+  "schemaVersion": 1,
+  "infrastructure": {
+    "schemaVersion": 1,
+    "placement": "external",
+    "projectPath": "/workspace/project",
+    "rootPath": "/workspace/infrastructure"
+  },
+  "artifactRoot": "artifacts"
+}
+```
+
+Both binding paths must be canonical absolute paths to existing real directories.
+The selected file must be below its infrastructure root, which must be disjoint
+from the target. Relative infrastructure resources resolve from that root;
+here the artifact path is `/workspace/infrastructure/artifacts`. The configuration
+loader exposes this resolved path; individual workflow artifact and guidance
+publication contracts still govern where they write. External selection creates
+no target files, ignore rules, pointer files or global registration. It never
+discovers sibling setups automatically or merges them with integrated settings.
+An explicit integrated binding uses `placement: "integrated"` and the canonical
+project path for both paths; existing integrated files need no binding.
+Git workflows resolve a supplied project subdirectory to the canonical worktree
+target. Relative external configuration selectors resolve from the supplied
+directory before that rebasing, including in polishing. Custom directory
+workflows keep their supplied directory scope.
 
 For a run that uses this file, Agent Runner persists its canonical path,
 content hash, file identity, and real-directory ancestry before agent work.
+External records also pin the infrastructure root and target directory identity.
 The runner checks that record around provider turns and before recovery,
 trusted validation, commit, handoff, and stop reconciliation. Removal, content
 drift, replacement, hard links, symbolic links, or redirected ancestors pause
@@ -827,9 +862,10 @@ agent-run run polishing \
   --worker-context-size 200000
 ```
 
-Use `--project-config <path>` to select an existing ignored and untracked
-project configuration confined to the canonical project. New runs accept the
-flag; resume uses the resolved durable configuration.
+Use `--project-config <path>` to select an existing integrated or explicitly
+target-bound external project configuration. Integrated Git files must be
+ignored and untracked. New runs accept the flag; resume uses the resolved durable
+configuration.
 
 A run may seed the mode's primary and review roles from one existing backend
 session:
@@ -1217,8 +1253,8 @@ for a complete replacement example and common safety precedence.
 Use `pipelines_list` to discover the registry, then start with `run_start` and a
 unique opaque idempotency key. It persists the run, returns a durable `runId`,
 and launches detached execution. Its additive `projectConfigurationPath`
-selects the same confined project file as `--project-config`; `profile`,
-`model`, `contextSize`, and `effort` set run-wide selections; the same fields
+selects the same integrated or bound external project file as `--project-config`;
+`profile`, `model`, `contextSize`, and `effort` set run-wide selections; the same fields
 inside a
 `roleOverrides` entry take precedence. Effort uses the portable enum above;
 `current` overrides lower-precedence values with the native default. Retry a

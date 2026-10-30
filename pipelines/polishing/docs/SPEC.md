@@ -359,8 +359,9 @@ weakened validation.
 
 Settings are stored in pipeline state at run creation and are not reloaded on
 resume. The root may load safe project overrides from an ignored
-`LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected confined ignored
-path. CLI/MCP execution selections win over project values, which win over
+`LOCAL_ARTIFACTS/agent-runner.json` or an explicitly selected integrated ignored
+path or target-bound external configuration under the root configuration
+contract. CLI/MCP execution selections win over project values, which win over
 runner-root values. Alongside trusted command catalogs, a project file may select
 runner-trusted profile aliases and safe role, setting, and repository-relative
 artifact-root values; it cannot define profile implementations, credentials,

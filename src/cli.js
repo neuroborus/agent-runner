@@ -156,7 +156,7 @@ Options:
                            lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
-      --project-config     Load an explicit confined project configuration
+      --project-config     Select integrated or target-bound external configuration
       --model              Set the run-wide backend-native model
       --effort             Set run-wide effort: current|low|medium|high|xhigh
                            current retains the provider default

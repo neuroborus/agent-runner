@@ -1531,7 +1531,12 @@ export function createRunner(options = {}) {
     }
   }
 
-  async function discoverWorkspaceBoundary(pipeline, input, configuration) {
+  async function discoverWorkspaceBoundary(
+    pipeline,
+    input,
+    configuration,
+    initialBoundary,
+  ) {
     const boundary = await runStore.validateStateBoundary(input);
     const settings = resolvePipelineSettings(
       pipeline.id,
@@ -1549,13 +1554,54 @@ export function createRunner(options = {}) {
       },
       workspace,
     );
-    if (selection.kind === "directory") return boundary;
     const configurationPath = resolve(
       boundary.projectPath,
       input.projectConfigurationPath ??
         join(DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME),
     );
     const localPath = relative(boundary.projectPath, configurationPath);
+    const external =
+      input.projectConfigurationPath !== undefined &&
+      (isAbsolute(localPath) ||
+        localPath === ".." ||
+        localPath.startsWith(`..${sep}`));
+    if (!pipeline.resolveWorkspace) {
+      // Fixed Git workspaces also rebase the target; retain external selectors.
+      return {
+        ...(initialBoundary ??
+          (await validateBoundary({ ...input, ...boundary }, selection))),
+        ...(external ? { projectConfigurationPath: configurationPath } : {}),
+      };
+    }
+    // Resolve an explicit external overlay before selecting Git versus directory
+    // semantics, just as with an existing integrated project configuration.
+    if (external) {
+      try {
+        await loadProjectConfiguration({
+          configurationPath,
+          inspectPath: (request) => workspace.inspectPath(request),
+          workspaceKind: "directory",
+          projectPath: boundary.projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+        return boundary;
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_BINDING") throw cause;
+      }
+      // A Git selection may name a subdirectory of the bound target. Keep the
+      // exact external selector when resolving that target to its worktree root.
+      return {
+        ...(await runStore.validateStateBoundary({
+          ...boundary,
+          projectPath: await workspace.exclusionPath({
+            workspacePath: boundary.projectPath,
+          }),
+        })),
+        projectConfigurationPath: configurationPath,
+      };
+    }
+    if (selection.kind === "directory") return boundary;
     if (
       localPath !== "" &&
       !isAbsolute(localPath) &&
@@ -1596,7 +1642,9 @@ export function createRunner(options = {}) {
         configuration,
       );
       const project = await loadProjectConfiguration({
-        configurationPath: normalized.projectConfigurationPath,
+        configurationPath:
+          boundary.projectConfigurationPath ??
+          normalized.projectConfigurationPath,
         inspectPath: (request) => workspace.inspectPath(request),
         workspaceKind: "directory",
         projectPath: boundary.projectPath,
@@ -1622,12 +1670,29 @@ export function createRunner(options = {}) {
         },
         workspace,
       );
-      return validateBoundary(
+      const selectedBoundary = await validateBoundary(
         selection.kind === "directory"
           ? normalized
           : { ...normalized, ...boundary },
         selection,
       );
+      if (
+        project !== null &&
+        project.protection.projectPath !== selectedBoundary.projectPath
+      ) {
+        await loadProjectConfiguration({
+          configurationPath: project.path,
+          inspectPath: (request) =>
+            (selection.kind === "directory" ? workspace : git).inspectPath(
+              request,
+            ),
+          workspaceKind: selection.kind,
+          projectPath: selectedBoundary.projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+      }
+      return selectedBoundary;
     }
     selection ??=
       input.pipelineId === undefined
@@ -1846,12 +1911,17 @@ export function createRunner(options = {}) {
       ? null
       : await validateBoundary(normalized, selection);
     const configuration = await loadConfiguration();
-    const boundary =
-      initialBoundary ??
-      (await discoverWorkspaceBoundary(pipeline, normalized, configuration));
+    const boundary = await discoverWorkspaceBoundary(
+      pipeline,
+      normalized,
+      configuration,
+      initialBoundary,
+    );
     let { projectPath, taskPath } = boundary;
     let projectConfiguration = await loadProjectConfiguration({
-      configurationPath: normalized.projectConfigurationPath,
+      configurationPath:
+        boundary.projectConfigurationPath ??
+        normalized.projectConfigurationPath,
       inspectPath: (options) =>
         (selection.kind === "directory" ? workspace : git).inspectPath(options),
       workspaceKind: selection.kind,

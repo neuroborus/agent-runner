@@ -122,6 +122,11 @@ neither placement adds ignore rules.
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.
+Explicit external selection additionally requires a versioned binding to the
+canonical target and disjoint infrastructure root. It pins the target directory
+identity as well as the configuration ancestry and never broadens provider
+access or project configuration authority. Integrated Git files retain their
+ignored/untracked requirements; ordinary directories need no Git prerequisite.
 The runner checks that evidence around provider turns and before recovery,
 trusted validation, commit, handoff, and stop reconciliation. Removal,
 replacement even with identical bytes, content drift, links, or ancestor

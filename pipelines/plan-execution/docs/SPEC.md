@@ -546,7 +546,8 @@ Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
 the ignored `LOCAL_ARTIFACTS/agent-runner.json` project file unless CLI/MCP
-explicitly selects another confined ignored path. It never creates the file or
+explicitly selects another integrated ignored path or target-bound external
+configuration under the root configuration contract. It never creates the file or
 changes ignore rules. All configured role objects are validated
 deterministically. CLI/MCP pipeline-setting overrides then win over the project
 overlay, runner values, and descriptor defaults. Only active roles are

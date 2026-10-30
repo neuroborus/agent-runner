@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -128,6 +128,54 @@ async function fixture(t, settings = {}, { git } = {}) {
     input: { pipelineId: "plan-authoring", projectPath, taskPath },
   };
 }
+
+test("external project selection freezes custom directory configuration before Git inspection", async (t) => {
+  const f = await fixture(t);
+  const rootPath = join(f.root, "infrastructure");
+  await mkdir(rootPath);
+  const projectConfigurationPath = join(rootPath, "agent-runner.json");
+  await writeFile(
+    projectConfigurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      infrastructure: {
+        schemaVersion: 1,
+        placement: "external",
+        projectPath: f.projectPath,
+        rootPath,
+      },
+      pipelines: {
+        "plan-authoring": {
+          planKind: "custom",
+          mode: "lazy",
+          criteriaPath: "criteria.md",
+        },
+      },
+    }),
+  );
+  const input = { ...f.input, projectConfigurationPath };
+  assert.equal(
+    (await f.runner.validateBoundary(input)).projectPath,
+    f.projectPath,
+  );
+  const { run } = await f.runner.create(input);
+  assert.equal(run.workspace.kind, "directory");
+  assert.deepEqual(Object.keys(run.roles), ["planner"]);
+  assert.equal(run.pipelineState.settings.planKind, "custom");
+  assert.equal(run.projectConfigurationProtection.schemaVersion, 2);
+  assert.equal(run.projectConfigurationProtection.infrastructureRoot, rootPath);
+  assert.deepEqual(run.workspace.policy.configurationPaths, [
+    projectConfigurationPath,
+  ]);
+  assert.deepEqual(
+    (await f.runStore.loadRun(run.runId)).projectConfigurationProtection,
+    run.projectConfigurationProtection,
+  );
+  await writeFile(projectConfigurationPath, '{"schemaVersion":1}\n');
+  const stopped = await f.runner.resume({ runId: run.runId });
+  assert.equal(stopped.run.pause.reason, "project_configuration_changed");
+  assert.deepEqual(f.calls, []);
+});
 
 test("configured custom authoring freezes declarations and publishes only its plan in an ordinary directory", async (t) => {
   const f = await fixture(t);
@@ -372,10 +420,28 @@ test("commit authoring from a subdirectory resolves repository-root configuratio
       pipelines: { "plan-authoring": { mode: "lazy" } },
     }),
   );
-  for (const projectConfigurationPath of [
-    undefined,
-    configurationPath,
-    "LOCAL_ARTIFACTS/agent-runner.json",
+  const rootPath = join(f.root, "infrastructure");
+  const externalPath = join(rootPath, "agent-runner.json");
+  await mkdir(rootPath);
+  await writeFile(
+    externalPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      infrastructure: {
+        schemaVersion: 1,
+        placement: "external",
+        projectPath: f.projectPath,
+        rootPath,
+      },
+      pipelines: { "plan-authoring": { mode: "lazy" } },
+    }),
+  );
+  for (const [projectConfigurationPath, selectedPath] of [
+    [undefined, configurationPath],
+    [configurationPath, configurationPath],
+    ["LOCAL_ARTIFACTS/agent-runner.json", configurationPath],
+    [externalPath, externalPath],
+    [relative(nestedPath, externalPath), externalPath],
   ]) {
     const input = {
       ...f.input,
@@ -391,7 +457,7 @@ test("commit authoring from a subdirectory resolves repository-root configuratio
     assert.equal(run.workspace.kind, "git");
     assert.equal(run.pipelineState.settings.mode, "lazy");
     assert.equal(run.pipelineState.settings.planKind, "commit");
-    assert.equal(run.projectConfigurationProtection.path, configurationPath);
+    assert.equal(run.projectConfigurationProtection.path, selectedPath);
     assert.equal(run.projectConfigurationProtection.projectPath, f.projectPath);
   }
   assert.deepEqual(f.calls, []);
@@ -561,7 +627,7 @@ test("project-selected custom authoring keeps the requested repository subdirect
   }
 });
 
-test("custom project configuration cannot widen the requested directory to its parent", async (t) => {
+test("custom authoring rejects an unbound parent configuration without widening its scope", async (t) => {
   const f = await fixture(t);
   await promisify(execFile)("git", ["init", "-q", f.projectPath]);
   const projectPath = join(f.projectPath, "nested");
@@ -579,10 +645,44 @@ test("custom project configuration cannot widen the requested directory to its p
       pipelines: { "plan-authoring": { planKind: "custom" } },
     }),
   );
-  await assert.rejects(
-    f.runner.create({ ...f.input, projectPath, projectConfigurationPath }),
-    { code: "ERR_WORKSPACE_PATH" },
+  const input = { ...f.input, projectPath, projectConfigurationPath };
+  await assert.rejects(f.runner.validateBoundary(input), {
+    code: "ERR_PROJECT_CONFIGURATION_BINDING",
+  });
+  await assert.rejects(f.runner.create(input), {
+    code: "ERR_PROJECT_CONFIGURATION_BINDING",
+  });
+  assert.deepEqual(f.probes, []);
+  assert.deepEqual(f.calls, []);
+});
+
+test("external custom configuration cannot widen the requested directory to its bound worktree", async (t) => {
+  const f = await fixture(t);
+  await promisify(execFile)("git", ["init", "-q", f.projectPath]);
+  const projectPath = join(f.projectPath, "nested");
+  const rootPath = join(f.root, "infrastructure");
+  await Promise.all([mkdir(projectPath), mkdir(rootPath)]);
+  const projectConfigurationPath = join(rootPath, "agent-runner.json");
+  await writeFile(
+    projectConfigurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      infrastructure: {
+        schemaVersion: 1,
+        placement: "external",
+        projectPath: f.projectPath,
+        rootPath,
+      },
+      pipelines: { "plan-authoring": { planKind: "custom" } },
+    }),
   );
+  const input = { ...f.input, projectPath, projectConfigurationPath };
+  await assert.rejects(f.runner.validateBoundary(input), {
+    code: "ERR_PROJECT_CONFIGURATION_BINDING",
+  });
+  await assert.rejects(f.runner.create(input), {
+    code: "ERR_PROJECT_CONFIGURATION_BINDING",
+  });
   assert.deepEqual(f.probes, []);
   assert.deepEqual(f.calls, []);
 });

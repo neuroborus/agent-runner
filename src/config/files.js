@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -221,6 +229,75 @@ async function readConfinedConfiguration(path, projectPath, relativePath) {
   }
 }
 
+async function projectAncestors(projectPath) {
+  return confinedAncestors(
+    parse(projectPath).root,
+    join(projectPath, "binding"),
+  );
+}
+
+async function readExternalConfiguration(path, projectPath) {
+  try {
+    const ancestorsBefore = await projectAncestors(projectPath);
+    const rootPath = parse(path).root;
+    const loaded = await readConfinedConfiguration(
+      path,
+      rootPath,
+      relative(rootPath, path),
+    );
+    const ancestorsAfter = await projectAncestors(projectPath);
+    if (!isDeepStrictEqual(ancestorsBefore, ancestorsAfter)) {
+      throw new Error("Target identity changed during configuration reading.");
+    }
+    return { ...loaded, projectAncestors: Object.freeze(ancestorsAfter) };
+  } catch (cause) {
+    if (cause instanceof ConfigurationError) throw cause;
+    throw new ConfigurationError(
+      "Cannot bind external project configuration.",
+      {
+        cause,
+        code: "ERR_PROJECT_CONFIGURATION_READ",
+      },
+    );
+  }
+}
+
+function bindInfrastructure(configuration, projectPath, path, external) {
+  const binding = configuration.infrastructure;
+  const placement = external ? "external" : "integrated";
+  const rootPath = binding?.rootPath ?? projectPath;
+  if (
+    (external && binding === undefined) ||
+    (binding !== undefined &&
+      (binding.projectPath !== projectPath ||
+        binding.placement !== placement)) ||
+    (!external && rootPath !== projectPath) ||
+    (external &&
+      (isWithin(rootPath, projectPath) || isWithin(projectPath, rootPath))) ||
+    !isWithin(rootPath, path) ||
+    path === rootPath
+  ) {
+    throw new ConfigurationError(
+      "Selected project configuration and infrastructure binding disagree.",
+      { code: "ERR_PROJECT_CONFIGURATION_BINDING" },
+    );
+  }
+  return Object.freeze({ schemaVersion: 1, placement, projectPath, rootPath });
+}
+
+function externalProtection(loaded, projectPath, infrastructureRoot) {
+  return Object.freeze({
+    ...loaded.protection,
+    schemaVersion: 2,
+    projectPath,
+    infrastructureRoot,
+    relativePath: relative(infrastructureRoot, loaded.protection.path)
+      .split(sep)
+      .join("/"),
+    projectAncestors: loaded.projectAncestors,
+  });
+}
+
 export async function loadProjectConfiguration({
   configurationPath,
   inspectPath,
@@ -240,15 +317,51 @@ export async function loadProjectConfiguration({
   if (
     explicit &&
     (typeof configurationPath !== "string" ||
-      configurationPath.trim().length === 0)
+      configurationPath.trim().length === 0 ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(configurationPath))
   ) {
     throw new ConfigurationError(
       "Project configuration path must be a non-empty string.",
     );
   }
-  const requestedPath =
-    configurationPath ??
-    join(projectPath, DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME);
+  const normalizedRunnerConfiguration = normalizeConfiguration(
+    runnerConfiguration,
+    providers,
+  );
+  const requestedPath = resolve(
+    projectPath,
+    configurationPath ?? join(DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME),
+  );
+  const external = !isWithin(projectPath, requestedPath);
+  if (external) {
+    const loaded = await readExternalConfiguration(requestedPath, projectPath);
+    const configuration = parseProjectConfiguration(
+      loaded.content,
+      normalizedRunnerConfiguration,
+      providers,
+    );
+    const infrastructure = bindInfrastructure(
+      configuration,
+      projectPath,
+      requestedPath,
+      true,
+    );
+    return Object.freeze({
+      path: requestedPath,
+      configuration,
+      infrastructure,
+      artifactPath: resolve(
+        infrastructure.rootPath,
+        configuration.artifactRoot ??
+          normalizedRunnerConfiguration.artifactRoot,
+      ),
+      protection: externalProtection(
+        loaded,
+        projectPath,
+        infrastructure.rootPath,
+      ),
+    });
+  }
   const inspection = await inspectPath({ path: requestedPath, projectPath });
   if (!inspection.exists) {
     if (!explicit) {
@@ -270,12 +383,24 @@ export async function loadProjectConfiguration({
     projectPath,
     inspection.relativePath,
   );
+  const configuration = parseProjectConfiguration(
+    loaded.content,
+    normalizedRunnerConfiguration,
+    providers,
+  );
+  const infrastructure = bindInfrastructure(
+    configuration,
+    projectPath,
+    inspection.path,
+    false,
+  );
   return Object.freeze({
     path: inspection.path,
-    configuration: parseProjectConfiguration(
-      loaded.content,
-      runnerConfiguration,
-      providers,
+    configuration,
+    infrastructure,
+    artifactPath: resolve(
+      infrastructure.rootPath,
+      configuration.artifactRoot ?? normalizedRunnerConfiguration.artifactRoot,
     ),
     protection: loaded.protection,
   });
@@ -290,6 +415,31 @@ export async function assertProjectConfigurationProtected({
   assertWorkspaceKind(workspaceKind);
   if (protection === null) return;
   try {
+    if (protection.projectPath !== projectPath) {
+      throw new Error("Project configuration target changed.");
+    }
+    if (protection.schemaVersion === 2) {
+      const current = await readExternalConfiguration(
+        protection.path,
+        projectPath,
+      );
+      if (
+        !isDeepStrictEqual(
+          externalProtection(
+            current,
+            projectPath,
+            protection.infrastructureRoot,
+          ),
+          protection,
+        )
+      ) {
+        throw new Error("External project configuration binding changed.");
+      }
+      return;
+    }
+    if (protection.schemaVersion !== 1) {
+      throw new Error("Unknown protection version.");
+    }
     const inspection = await inspectPath({
       path: protection.path,
       projectPath,

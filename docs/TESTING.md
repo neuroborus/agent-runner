@@ -59,6 +59,18 @@ CLI editor windows. These real journal/action/lease cases remain outside the fas
 The existing slow CLI/MCP workflow, control-plane, runner and state-stop suites
 retain durable shared-runtime ownership; focused audit tests replace none of them.
 
+Fast `test/config/external-infrastructure.test.js` covers explicit target/root
+bindings, relative resources, placement conflicts, unchanged integrated
+discovery, and external configuration/target substitution without target writes.
+State persistence covers strict protection-record reloads; authoring composition
+also proves external custom selection before Git, frozen-configuration pauses,
+exact external selectors from Git subdirectories and rejection of custom scope
+widening.
+
+Fast `test/runner-configuration.test.js` covers relative external selectors in
+polishing and external project commit selections overriding runner custom
+defaults from Git subdirectories in authoring and execution.
+
 Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
 configured selection before Git, read-only provider declarations, frozen criteria
 and source bindings, source-drift recovery, repository-local clarification ignore

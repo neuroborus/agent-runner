@@ -120,7 +120,8 @@ trusted `profile`, backend-specific `model`, decimal `contextSize`, and portable
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults. The root loads
 an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
-selected confined project file, and permits it to select only runner-trusted
+selected integrated or target-bound external project file under the root
+configuration contract, and permits it to select only runner-trusted
 profiles and safe execution and pipeline values. CLI/MCP values win over the
 project overlay, which wins over runner-root values. Explicit `--mode` or MCP
 `run_start.mode` wins over both configuration sources. All configured role
