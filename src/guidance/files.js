@@ -130,17 +130,26 @@ async function descriptorPath(handle, expectedPath) {
 // Keep filesystem effects relative to open directories, so replacing a lexical
 // ancestor cannot redirect a read, temporary write, rename, or cleanup elsewhere.
 export async function openLocalDirectory(
-  projectPath,
+  basePath,
   localPath,
-  { create = false } = {},
+  { create = false, ancestors = [] } = {},
 ) {
-  const pathFromProject = relative(projectPath, dirname(localPath));
+  const pathFromProject = relative(basePath, dirname(localPath));
   const components = pathFromProject.split(sep);
   if (
     !pathFromProject ||
     isAbsolute(pathFromProject) ||
     components.some((part) =>
-      ["", ".", "..", ".git", ".agents", ".codex", ".claude"].includes(part),
+      [
+        "",
+        ".",
+        "..",
+        ".git",
+        ".agents",
+        ".codex",
+        ".claude",
+        ".claude.json",
+      ].includes(part),
     ) ||
     basename(localPath) !== "rules.md"
   )
@@ -148,6 +157,17 @@ export async function openLocalDirectory(
   const directories = [];
   let missingPath = null;
   async function verify() {
+    for (const ancestor of ancestors) {
+      const current = await metadata(ancestor.path);
+      if (
+        !current?.isDirectory() ||
+        current.dev.toString() !== ancestor.device ||
+        current.ino.toString() !== ancestor.inode ||
+        current.mode.toString() !== ancestor.mode ||
+        (await realpath(ancestor.path)) !== ancestor.path
+      )
+        throw unsafePath();
+    }
     for (const directory of directories) {
       const current = await metadata(directory.path);
       if (
@@ -167,16 +187,16 @@ export async function openLocalDirectory(
       await directory.handle.close();
   }
   try {
-    let currentPath = projectPath;
+    let currentPath = basePath;
     for (let index = -1; index < components.length; index += 1) {
       await verify();
       const parent = directories.at(-1);
       const anchoredPath = parent
         ? join(parent.anchor, components[index])
-        : projectPath;
+        : basePath;
       if (parent) currentPath = join(currentPath, components[index]);
       let stat = await metadata(anchoredPath);
-      // The project is an existing boundary, never an artifact to create.
+      // The selected base is an existing boundary, never an artifact to create.
       if (stat === null && parent === undefined) throw unsafePath();
       if (stat === null && create) {
         try {

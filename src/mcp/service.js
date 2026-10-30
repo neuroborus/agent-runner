@@ -87,7 +87,11 @@ const idempotencyKey = boundedSingleLine(1_024).describe(
 const guidanceReadSchema = z
   .object({
     projectPath: boundedSingleLine(4_096),
-    projectConfigurationPath: boundedSingleLine(4_096).optional(),
+    projectConfigurationPath: boundedSingleLine(4_096)
+      .optional()
+      .describe(
+        "Select integrated or target-bound external configuration; local guidance resolves from its infrastructure root. Ordinary directories require no Git.",
+      ),
   })
   .strict();
 const guidanceUpdateSchema = guidanceReadSchema

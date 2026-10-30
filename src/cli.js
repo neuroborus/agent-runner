@@ -130,8 +130,8 @@ Usage:
   agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
-  agent-run guidance --project <repo> [--project-config <path>]
-  agent-run guidance edit --project <repo> [--project-config <path>]
+  agent-run guidance --project <directory> [--project-config <path>]
+  agent-run guidance edit --project <directory> [--project-config <path>]
   agent-run pipelines
   agent-run mcp
 

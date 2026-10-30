@@ -1139,14 +1139,24 @@ enter polishing after ownership ends and inputs are reconciled, preserving
 contamination safeguards and the uncommitted outcome.
 
 The guidance capability lives under `src/guidance/` behind its public `index.js`.
-Private content, contract, file, and service modules own composition, configuration
+Private content, contract, file, selection, and service modules own composition, configuration
 selection, confined access, and durable replacement. Its factory is deliberately
 exported from `src/index.js`; transports consume the same capability rather
 than duplicating policy. No pipeline depends on it.
 
 `createGuidanceService().read({ projectPath, projectConfigurationPath? })` loads
-the common guide from the installed runner and uses public configuration and
-Git services to resolve `<artifactRoot>/agent-runner/rules.md`. Its result
+the common guide from the installed runner and uses public configuration,
+workspace and Git services to resolve `<artifactRoot>/agent-runner/rules.md` from the
+selected infrastructure root, or the target when no configuration is selected.
+Ordinary directories need no Git prerequisite. Git discovery keeps the worktree
+target, including explicit integrated and external configuration selected from
+subdirectories. Relative external selectors resolve from the originally supplied
+directory before worktree rebasing; selection rechecks and durable action identities
+retain that exact path. Integrated selectors retain worktree-relative recovery.
+Only an explicit configuration bound to the supplied directory
+retains that scope, with the enclosing worktree supplying the canonical exclusion key.
+Explicit external selection uses the configuration capability's target-bound root
+and never merges integrated guidance or discovers sibling infrastructure. Its result
 contains canonical project/local/configuration paths, complete `commonContent`
 and `localContent`, `combinedContent`, and `localHash`. Rendering separates the
 documents and states that local additions cannot weaken common safety or
@@ -1158,8 +1168,16 @@ Both documents have a 64 KiB UTF-8 byte limit. Reads and replacements reject
 invalid encoding, unsafe control characters, and recognizable credential or
 provider-transcript formats without echoing or partially redacting content.
 Operators remain responsible for excluding sensitive material that cannot be
-recognized deterministically. Local paths must be ignored, untracked, confined,
-and disjoint from project configuration and protected control paths. Missing
+recognized deterministically. Integrated paths in a Git worktree must be ignored
+and untracked. External paths use exact target-bound confinement without target
+Git inspection or writes. All paths must be disjoint from project configuration
+and protected control paths. The workspace capability's `inspectControls` reuses
+control discovery along the exact target/destination ancestry, including Git
+pointers, shared metadata and canonical ancestor provider alias targets containing
+selected destinations. It traverses discovered protected control trees and their
+metadata dependencies, including nested Git pointers, without traversing unrelated
+project content. Metadata reached only through state ancestors also protects
+selected destinations; this query grants no snapshot reads. Missing
 destinations receive the same safety inspection. Symlinks, hard links,
 non-regular files, and unsafe ancestors fail closed.
 
@@ -1168,11 +1186,19 @@ The public `update` method accepts the same selectors plus complete
 external-state boundary before intent or lease writes, rejecting state and
 project trees that contain one another. It binds the key to
 canonical arguments and a content hash, and reserves the destination and a hash
-of resolved configuration. The existing action store accepts the narrow
+of resolved configuration. Versioned selection evidence also pins the infrastructure
+base, target exclusion key and existing real directory ancestry; newly prepared
+publication ancestors are persisted before temporary-file writes. State storage
+must be disjoint from the target, enclosing exclusion tree and infrastructure.
+The existing action store accepts the narrow
 `guidance_update` kind. Context and receipts contain paths, hashes, publication
 phases, and filesystem identity, never document bodies. The state service's
 `withGuidanceLease` holds the canonical-worktree lease with an opaque operation
 owner, excluding mutating execution and other guidance writers across processes.
+External publication also holds an infrastructure-root lease unless the target
+lease already encloses that root. Overlapping infrastructure selections from
+different targets therefore cannot publish concurrently; both leases are checked
+before publication and released together.
 A contender receives a conflict and may retry its same incomplete intent after
 ownership is released.
 
@@ -1181,7 +1207,7 @@ Filesystem access is relative to pinned directory descriptors using
 Directory identities and lexical confinement are rechecked around effects so
 ancestor replacement cannot redirect reads, writes, publication, or cleanup.
 Atomic rename publishes an owner-only, synchronized temporary file in the
-destination directory; that temporary path must also be ignored. Publication
+destination directory; integrated Git temporary paths must also be ignored. Publication
 rechecks configuration, path safety, execution ownership, the expected hash,
 and inspected file identities.
 
@@ -1191,7 +1217,12 @@ rename. Recovery removes a proven partial temporary write or recognizes its
 own renamed inode. It never adopts another writer's identical bytes or
 overwrites an intervening edit. An unproven temporary file left before
 provenance was recorded is neither adopted nor deleted; retry reserves a fresh
-name. Changed configuration cannot redirect incomplete publication. A durable
+name. Changed configuration or substituted bound ancestors cannot redirect
+incomplete publication, including after restart. Legacy integrated intents retain
+their original worktree-relative arguments, destination and configuration hash,
+including for configuration selectors retried from Git subdirectories.
+Compatibility lookup applies only to binding-free legacy actions and grants no
+external authority. Current actions retain their exact selector identity. A durable
 published record completes its receipt without replaying the effect. Completed
 retries return the recorded bounded receipt (`projectPath`, `localPath`,
 `localHash`, `updated`) without reapplying the old hash comparison or reloading

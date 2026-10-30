@@ -205,6 +205,37 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     });
   }
 
+  // Exact infrastructure destinations need ancestor controls, including Git
+  // pointer/shared metadata, without traversing unrelated project content.
+  async function inspectControls({ workspacePath, paths, stateRoot }) {
+    return boundary(async () => {
+      workspacePath = location(process.cwd(), workspacePath);
+      assertSafe(Array.isArray(paths), "Control paths must be an array.");
+      assertSafe(
+        (await inspectPath(fs, workspacePath)).kind === "directory",
+        "Workspace must be an ordinary directory.",
+      );
+      return freeze(
+        await discoverControls(
+          fs,
+          {
+            workspacePath,
+            stateRoot: location(process.cwd(), stateRoot),
+            inputPaths: [],
+            sourcePaths: [],
+            configurationPaths: [],
+            artifactPaths: [],
+            infrastructurePaths: paths.map((path) =>
+              location(workspacePath, path),
+            ),
+            outputPaths: [],
+          },
+          { recursive: false },
+        ),
+      );
+    });
+  }
+
   async function readFile({ path, projectPath, optional = false }) {
     return boundary(async () => {
       const binding = await inspectLocalPath({ path, projectPath });
@@ -385,6 +416,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
   return Object.freeze({
     inspect,
     inspectPath: inspectLocalPath,
+    inspectControls,
     readFile,
     exclusionPath,
     snapshot,

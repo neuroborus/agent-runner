@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 import {
   ConfigurationError,
-  loadProjectConfiguration,
   loadRunnerConfiguration,
 } from "../config/index.js";
 import { createGitService, GitSafetyError } from "../git/index.js";
@@ -15,6 +14,10 @@ import {
   openConfiguredEditor,
 } from "../editor.js";
 import { createRunStore, RunStoreError } from "../state/index.js";
+import {
+  createWorkspaceService,
+  WorkspaceSafetyError,
+} from "../workspace/index.js";
 
 import {
   contentHash,
@@ -38,6 +41,10 @@ import {
   sameFile,
   withEditCopy,
 } from "./files.js";
+import {
+  createGuidanceSelection,
+  resolveConfigurationPath,
+} from "./selection.js";
 
 const COMMON_PATH = fileURLToPath(
   new URL("../../docs/OPERATOR_GUIDE.md", import.meta.url),
@@ -68,6 +75,7 @@ async function guarded(operation) {
     if (cause instanceof GuidanceError) throw cause;
     if (cause instanceof EditorError)
       throw new GuidanceError(cause.message, { cause, code: cause.code });
+    if (cause instanceof WorkspaceSafetyError) throw unsafePath(cause);
     const known =
       cause instanceof ConfigurationError ||
       cause instanceof GitSafetyError ||
@@ -81,6 +89,7 @@ async function guarded(operation) {
 
 export function createGuidanceService({
   git = createGitService(),
+  workspace = createWorkspaceService(),
   loadConfiguration = loadRunnerConfiguration,
   runStore = createRunStore(),
   onPublicationBoundary = async () => {},
@@ -89,7 +98,9 @@ export function createGuidanceService({
   temporaryRoot = tmpdir(),
 } = {}) {
   if (
-    typeof git?.resolveProject !== "function" ||
+    typeof workspace?.exclusionPath !== "function" ||
+    typeof workspace?.inspectPath !== "function" ||
+    typeof workspace?.inspectControls !== "function" ||
     typeof git?.inspectPath !== "function" ||
     typeof loadConfiguration !== "function" ||
     typeof runStore?.withGuidanceLease !== "function" ||
@@ -100,83 +111,29 @@ export function createGuidanceService({
     throw new GuidanceError("Guidance service options are invalid.");
   }
 
-  async function inspectDestination(projectPath, path) {
-    const inspection = await git.inspectPath({ projectPath, path });
-    if (inspection.path !== path || inspection.tracked || !inspection.ignored) {
-      throw new GuidanceError(
-        "Local guidance and its temporary files must be ignored, untracked, and confined.",
-        { code: "ERR_GUIDANCE_NOT_IGNORED" },
-      );
-    }
-    return inspection;
-  }
-
-  async function selection(input, projectPath) {
-    const configuration = await loadConfiguration();
-    const projectConfiguration = await loadProjectConfiguration({
-      ...(input.projectConfigurationPath === undefined
-        ? {}
-        : { configurationPath: input.projectConfigurationPath }),
-      inspectPath: git.inspectPath,
-      projectPath,
-      runnerConfiguration: configuration,
+  const { target, selection, assertSelection, inspectDestination } =
+    createGuidanceSelection({
+      git,
+      workspace,
+      loadConfiguration,
+      commonPath: COMMON_PATH,
+      stateRoot: runStore.rootPath,
     });
-    const artifactRoot =
-      projectConfiguration?.configuration.artifactRoot ??
-      configuration.artifactRoot;
-    const localPath = join(
-      projectPath,
-      ...artifactRoot.split("/"),
-      "agent-runner",
-      "rules.md",
-    );
-    if (
-      localPath === COMMON_PATH ||
-      (projectConfiguration !== null &&
-        (isWithin(localPath, projectConfiguration.path) ||
-          isWithin(projectConfiguration.path, localPath)))
-    )
-      throw unsafePath();
-    await inspectDestination(projectPath, localPath);
-    const directory = await openLocalDirectory(projectPath, localPath);
-    try {
-      await directory.verify();
-    } finally {
-      await directory.close();
-    }
-    return {
-      projectPath,
-      localPath,
-      projectConfigurationPath: projectConfiguration?.path ?? null,
-      configurationHash: contentHash(
-        JSON.stringify({ configuration, projectConfiguration }),
-      ),
-    };
-  }
-
-  async function assertSelection(input, context) {
-    const current = await selection(input, context.projectPath);
-    if (
-      current.localPath !== context.localPath ||
-      current.configurationHash !== context.configurationHash
-    ) {
-      throw new GuidanceError(
-        "Guidance configuration changed. The reserved destination cannot be redirected.",
-        { code: "ERR_GUIDANCE_CONFIGURATION_CHANGED" },
-      );
-    }
-  }
 
   async function inspect(input) {
     assertInput(input, SELECTORS);
-    const projectPath = await git.resolveProject(input.projectPath);
-    const resolved = await selection(input, projectPath);
+    const resolved = await selection(input, input.projectPath);
+    const { projectPath } = resolved;
     const common = await readDocument(COMMON_PATH);
     if (common.hash === null)
       throw new GuidanceError(
         "The installed common operator guide is missing.",
       );
-    const directory = await openLocalDirectory(projectPath, resolved.localPath);
+    const directory = await openLocalDirectory(
+      resolved.basePath,
+      resolved.localPath,
+      { ancestors: resolved.binding.ancestors },
+    );
     try {
       const local = await directory.read();
       await assertSelection(input, resolved);
@@ -200,6 +157,22 @@ export function createGuidanceService({
 
   async function read(input) {
     return guarded(async () => (await inspect(input)).guidance);
+  }
+
+  async function withPublicationLease(context, operation) {
+    const leasePath = context.binding?.leasePath ?? context.projectPath;
+    const basePath = context.binding?.basePath ?? context.projectPath;
+    return runStore.withGuidanceLease(leasePath, async (assertTarget) => {
+      if (isWithin(leasePath, basePath)) return operation(assertTarget);
+      // Different targets may select overlapping external infrastructure. Its
+      // lease excludes those publishers as well as execution in that tree.
+      return runStore.withGuidanceLease(basePath, async (assertDestination) =>
+        operation(async () => {
+          await assertTarget();
+          await assertDestination();
+        }),
+      );
+    });
   }
 
   async function edit(input) {
@@ -259,38 +232,92 @@ export function createGuidanceService({
         throw new GuidanceError(
           "Expected local hash must be null or a SHA-256 hash.",
         );
-      const projectPath = await git.resolveProject(input.projectPath);
+      const targetSelection = await target(input.projectPath);
+      let projectPath = targetSelection.projectPath;
       await runStore.validateStateBoundary({
         projectPath,
         taskPath: projectPath,
       });
       const hash = contentHash(input.localContent);
       const receiptHash = preserveAbsence ? null : hash;
-      const identity = {
+      const identityFor = (
+        path,
+        configurationPath = resolveConfigurationPath(input, path),
+      ) => ({
         key: input.idempotencyKey,
         tool: "guidance_update",
         arguments: {
-          projectPath,
-          projectConfigurationPath:
-            input.projectConfigurationPath === undefined
-              ? null
-              : resolve(projectPath, input.projectConfigurationPath),
+          projectPath: path,
+          projectConfigurationPath: configurationPath ?? null,
           localContentHash: hash,
           expectedHash: input.expectedHash,
           ...(preserveAbsence ? { preserveAbsence: true } : {}),
         },
-      };
-      const existing = await runStore.readAction(identity);
-      if (existing?.status === "completed")
-        return assertReceipt(existing.result, projectPath, receiptHash);
+      });
+      let identity = identityFor(projectPath);
+      let existing = null;
+      let conflict;
+      const candidates = [identity];
+      if (
+        input.projectConfigurationPath !== undefined &&
+        resolve(input.projectPath) !== projectPath
+      )
+        candidates.push(identityFor(resolve(input.projectPath)));
+      const legacyIdentity =
+        input.projectConfigurationPath === undefined
+          ? null
+          : identityFor(
+              projectPath,
+              resolve(projectPath, input.projectConfigurationPath),
+            );
+      if (legacyIdentity !== null) candidates.push(legacyIdentity);
+      // Locate an exact prior intent before reading mutable configuration. Both
+      // worktree and explicitly directory-bound receipts preserve their target.
+      // Binding-free legacy actions resolved every selector from the worktree.
+      for (const candidateIdentity of candidates) {
+        try {
+          const record = await runStore.readAction(candidateIdentity);
+          if (
+            record !== null &&
+            (candidateIdentity !== legacyIdentity ||
+              record.context.binding === undefined)
+          ) {
+            existing = record;
+            identity = candidateIdentity;
+            projectPath = candidateIdentity.arguments.projectPath;
+            break;
+          }
+        } catch (cause) {
+          if (cause.code !== "ERR_MCP_IDEMPOTENCY_CONFLICT") throw cause;
+          conflict ??= cause;
+        }
+      }
+      if (existing === null && conflict !== undefined) throw conflict;
+      if (existing?.status === "completed") {
+        assertContext(
+          existing.context,
+          projectPath,
+          receiptHash,
+          input.expectedHash,
+        );
+        return assertReceipt(
+          existing.result,
+          projectPath,
+          receiptHash,
+          existing.context.localPath,
+        );
+      }
       let initial = existing?.context;
       if (initial === undefined) {
         const resolved =
-          selectionSnapshot ?? (await selection(input, projectPath));
+          selectionSnapshot ?? (await selection(input, input.projectPath));
+        projectPath = resolved.projectPath;
+        identity = identityFor(projectPath);
         initial = {
           projectPath,
           localPath: resolved.localPath,
           configurationHash: resolved.configurationHash,
+          binding: resolved.binding,
           phase: "reserved",
           before: null,
           temporaryName: null,
@@ -303,19 +330,36 @@ export function createGuidanceService({
         projectPath,
         taskPath: projectPath,
       });
+      if (initial.binding !== undefined && initial.phase !== "published") {
+        await runStore.validateStateBoundary({
+          projectPath: initial.binding.basePath,
+          taskPath: initial.binding.leasePath,
+        });
+      }
       const action = await runStore.beginAction({
         ...identity,
         context: initial,
       });
+      // Rechecks use the matched action's exact selector, including legacy paths.
+      const publicationInput = {
+        ...input,
+        projectConfigurationPath:
+          identity.arguments.projectConfigurationPath ?? undefined,
+      };
       try {
-        if (action.record.status === "completed")
-          return assertReceipt(action.record.result, projectPath, receiptHash);
         assertContext(
           action.record.context,
           projectPath,
           receiptHash,
           input.expectedHash,
         );
+        if (action.record.status === "completed")
+          return assertReceipt(
+            action.record.result,
+            projectPath,
+            receiptHash,
+            action.record.context.localPath,
+          );
         async function patch(values) {
           await action.updateContext({ ...action.record.context, ...values });
         }
@@ -324,6 +368,7 @@ export function createGuidanceService({
             action.record.context.receipt,
             projectPath,
             receiptHash,
+            action.record.context.localPath,
           );
           await action.complete(receipt);
           await onPublicationBoundary("receipted");
@@ -344,12 +389,19 @@ export function createGuidanceService({
         // receipt must not depend on mutable configuration or subsequent edits.
         if (action.record.context.phase === "published")
           return await complete();
-        return await runStore.withGuidanceLease(
-          projectPath,
+        return await withPublicationLease(
+          action.record.context,
           async (assertOwnership) => {
-            await assertSelection(input, action.record.context);
+            let resolved = await assertSelection(
+              publicationInput,
+              action.record.context,
+            );
             const localPath = action.record.context.localPath;
-            let directory = await openLocalDirectory(projectPath, localPath);
+            let directory = await openLocalDirectory(
+              resolved.basePath,
+              localPath,
+              { ancestors: resolved.binding.ancestors },
+            );
             try {
               let current = await directory.read();
               let context = action.record.context;
@@ -395,26 +447,32 @@ export function createGuidanceService({
                   (preserveAbsence && current.hash === null)
                 ) {
                   await onPublicationBoundary("before-publish");
-                  await assertSelection(input, context);
+                  await assertSelection(publicationInput, context);
                   await assertOwnership();
                   assertSnapshot(await directory.read(), snapshot(current));
                   return published(false);
                 }
                 if (!directory.exists) {
                   await directory.close();
-                  directory = await openLocalDirectory(projectPath, localPath, {
-                    create: true,
-                  });
+                  directory = await openLocalDirectory(
+                    resolved.basePath,
+                    localPath,
+                    { create: true, ancestors: resolved.binding.ancestors },
+                  );
                   const reread = await directory.read();
                   assertSnapshot(reread, snapshot(current));
                   current = reread;
                 }
                 const temporaryName = `.rules.${randomUUID()}.tmp`;
                 await inspectDestination(
-                  projectPath,
+                  resolved,
                   join(dirname(localPath), temporaryName),
                 );
+                resolved = await assertSelection(publicationInput, context);
                 await patch({
+                  ...(context.binding === undefined
+                    ? {}
+                    : { binding: resolved.binding }),
                   phase: "reserved",
                   before: snapshot(current),
                   temporaryName,
@@ -438,10 +496,10 @@ export function createGuidanceService({
               }
               context = action.record.context;
               await onPublicationBoundary("before-publish");
-              await assertSelection(input, context);
+              await assertSelection(publicationInput, context);
               await assertOwnership();
               await inspectDestination(
-                projectPath,
+                resolved,
                 join(dirname(localPath), context.temporaryName),
               );
               const temporary = await directory.read(context.temporaryName);
@@ -461,7 +519,7 @@ export function createGuidanceService({
                 })
               )
                 throw unsafePath();
-              await inspectDestination(projectPath, localPath);
+              await inspectDestination(resolved, localPath);
               await directory.verify();
               return published(true);
             } finally {

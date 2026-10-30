@@ -60,6 +60,12 @@ test("complete local Markdown and existing empty content retain exact bytes and 
 
 test("current runner, discovered project, and explicit project configuration resolve artifactRoot", async (t) => {
   const f = await fixture(t);
+  const subdirectory = join(f.projectPath, "directory");
+  await mkdir(subdirectory);
+  assert.equal(
+    (await f.service.read({ projectPath: subdirectory })).localPath,
+    f.localPath,
+  );
   f.setConfiguration({ artifactRoot: "CUSTOM_ARTIFACTS" });
   assert.equal(
     (await f.service.read({ projectPath: f.projectPath })).localPath,

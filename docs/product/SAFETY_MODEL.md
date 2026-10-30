@@ -396,20 +396,25 @@ operator pause preserves the reconciled checkpoint and existing blockers;
 cancellation is terminal. Neither outcome authorizes replaying an effect,
 restoring contaminated content, or adopting replacement configuration.
 
-Local operating guidance uses the same new-run configuration and Git safety
-boundaries. Its target and temporary files must be ignored, untracked, confined,
-and separate from configuration and protected control paths. Linked, unsafe,
+Local operating guidance uses the same new-run configuration and workspace safety
+boundaries. Integrated target and temporary files in Git must be ignored and
+untracked; external files stay confined to the explicitly selected target-bound
+infrastructure without target writes. Ordinary directories need no Git.
+All destinations stay separate from configuration, state and protected control paths. Linked, unsafe,
 non-regular, malformed, or oversized documents fail closed, including unsafe
 absent destinations. Reading does not create files. Both common and local
 documents are bounded; document bodies never enter action metadata or errors.
 
-Guidance replacement holds the canonical-worktree lease, excluding active
-execution and competing publishers. It compares the expected hash inside the
+Guidance replacement holds the canonical-worktree lease and, for external
+destinations outside that scope, the infrastructure-root lease. These exclude
+active execution and competing publishers, including other targets selecting
+overlapping infrastructure. It compares the expected hash inside the
 publication boundary and atomically replaces only the local file. Pinned
-directory descriptors prevent ancestor replacement from redirecting filesystem
+directory descriptors and durable selection ancestry prevent ancestor replacement from redirecting filesystem
 effects. Durable temporary-file identity distinguishes an interrupted
 publication from another writer's identical content; retries preserve later
-edits and cannot redirect through changed configuration. A completed receipt
+edits and cannot redirect through changed configuration or placement on restart.
+Directory targets share their enclosing worktree's exclusion lease. A completed receipt
 is replayed without repeating publication. Local additions cannot weaken
 common contracts and never enter role prompts or run state.
 

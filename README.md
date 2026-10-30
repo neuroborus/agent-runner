@@ -243,8 +243,9 @@ Both binding paths must be canonical absolute paths to existing real directories
 The selected file must be below its infrastructure root, which must be disjoint
 from the target. Relative infrastructure resources resolve from that root;
 here the artifact path is `/workspace/infrastructure/artifacts`. The configuration
-loader exposes this resolved path; individual workflow artifact and guidance
-publication contracts still govern where they write. External selection creates
+loader exposes this resolved path. Local operator guidance uses
+`/workspace/infrastructure/artifacts/agent-runner/rules.md`; individual workflow
+artifact publication contracts still govern where they write. External selection creates
 no target files, ignore rules, pointer files or global registration. It never
 discovers sibling setups automatically or merges them with integrated settings.
 An explicit integrated binding uses `placement: "integrated"` and the canonical
@@ -840,12 +841,32 @@ kinds fail closed; absent Git never selects custom.
 `guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`
 if the preferred editor cannot launch. Both commands accept
 `--project-config <path>` using the same configuration rules as a new run.
+Local additions resolve as `<artifactRoot>/agent-runner/rules.md` from the selected
+infrastructure root, or from the target without configuration. For example:
+
+```bash
+agent-run guidance --project /workspace/project --project-config /workspace/infrastructure/agent-runner.json
+```
+
+Guidance supports ordinary directories without Git. Git selectors use the
+worktree target, including explicit configurations selected from subdirectories.
+An explicit configuration bound to the supplied directory retains that scope
+and shares the enclosing worktree's exclusion lease when present.
+Integrated Git destinations must already be ignored and untracked. Explicit
+external selection reads and updates only the bound infrastructure; it creates
+no target files, ignore rules, pointers or Git-control changes and never merges
+local additions from another placement. Reads create neither files nor state.
 For editors that launch a separate window, configure their wait flag so the
 command remains open until editing is complete.
 
 Edits use a private temporary copy outside the project. A successful editor
 exit validates and atomically publishes the result only if the original local
 hash, destination, configuration, and execution ownership still permit it.
+External publication also leases the infrastructure tree, excluding publishers
+from other targets that select the same destination.
+Interrupted publication also retains its original infrastructure and directory
+identities across restart. Changed settings cannot redirect an old intent, and
+completed retries return their original receipt without publishing again.
 An unchanged close is a checked no-op, including when no local file exists.
 An empty edited document removes all additions. Editor failure, unsafe content,
 or a concurrent change preserves the local document; reread and reconcile a

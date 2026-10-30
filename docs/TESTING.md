@@ -67,6 +67,22 @@ also proves external custom selection before Git, frozen-configuration pauses,
 exact external selectors from Git subdirectories and rejection of custom scope
 widening.
 
+Fast `test/guidance/external-infrastructure.test.js` owns selected infrastructure
+guidance for Git and ordinary directories: complete common/local reads without
+creation, external updates with unchanged target controls, competing placements,
+worktree-bound selectors from Git subdirectories, explicitly directory-bound
+targets, shared target/execution and external-destination leases across targets,
+stale writers, publication recovery and pinned
+configuration/ancestor identities. Pointer-resolved Git metadata, including
+nested control dependencies and state-ancestor pointers, and canonical ancestor
+provider alias targets cannot become external publication destinations.
+Existing guidance content, editor and publication suites retain integrated ignore,
+byte-limit and inode-provenance coverage. Publication tests also cover legacy
+worktree-relative receipt recovery from Git subdirectories, including incomplete
+published intents. Current external actions reject changed selector identities
+rather than adopting legacy resolution. MCP guidance tests cover the same
+selection through its thin transport.
+
 Fast `test/runner-configuration.test.js` covers relative external selectors in
 polishing and external project commit selections overriding runner custom
 defaults from Git subdirectories in authoring and execution.

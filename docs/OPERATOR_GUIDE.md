@@ -811,14 +811,19 @@ remains authoritative; the runner does not load or maintain this backlog.
 
 The shipped common guide and optional `<artifactRoot>/agent-runner/rules.md`
 are returned complete with explicit boundaries, using current new-run
-configuration. Local additions specialize operation but cannot weaken common safety
+configuration. Local additions resolve from the selected infrastructure root,
+or the target without configuration. Explicit external selection never merges
+other placements; ordinary directories need no Git. Local additions specialize
+operation but cannot weaken common safety
 or product contracts. They guide only the supervisor, never pipeline-role
 prompts or active runs. See [guidance ownership](product/OPERATOR_MODEL.md#project-local-operating-guidance).
 
 Keep local additions short, non-sensitive, and operator-authored. Exclude
 secrets, credentials, raw provider output, transcripts, and chain-of-thought.
-Reads do not create missing files or directories. Unsafe, linked, tracked,
-non-ignored, overlapping, malformed, or oversized targets are rejected.
+Reads do not create missing files or directories. Unsafe, linked, overlapping,
+malformed, or oversized targets are rejected. Integrated guidance and temporary
+files in Git must already be ignored and untracked. External resources use exact
+target-bound confinement without target or Git-control writes.
 Each document is bounded to 64 KiB of valid UTF-8 with safe text characters.
 Recognizable credential and transcript formats are rejected; this is not a
 guarantee that arbitrary prose is free of secrets.
@@ -829,6 +834,10 @@ files have SHA-256 hashes. Atomic replacement compares the previously read hash
 at publication. Stale edits require rereading/reconciling the whole document.
 Local updates never replace the common guide. Completed retries return their
 original receipt, preserving later edits; they are not fresh guidance reads.
+Publication shares the target's canonical exclusion lease and, outside that
+scope, the infrastructure-root lease. Unfinished actions retain their original
+paths, configuration and directory identities after restart; changed selections
+cannot redirect them.
 
 Read and edit through the CLI:
 

@@ -29,7 +29,11 @@ function resolutionMetadata(stat) {
   return stat.isDirectory() ? identity(stat) : observation(stat);
 }
 
-export async function discoverControls(fs, declarations) {
+export async function discoverControls(
+  fs,
+  declarations,
+  { recursive = true } = {},
+) {
   const { workspacePath, stateRoot } = declarations;
   assertSafe(
     !workspacePath.split(sep).some((part) => CONTROL_NAMES.includes(part)),
@@ -42,7 +46,15 @@ export async function discoverControls(fs, declarations) {
       !overlaps(path, stateRoot),
       "State storage must be disjoint from discovered controls.",
     );
-    if (!stateOnly || overlaps(path, workspacePath)) paths.add(path);
+    if (
+      !stateOnly ||
+      overlaps(path, workspacePath) ||
+      (!recursive &&
+        declarations.infrastructurePaths.some((destination) =>
+          within(path, destination),
+        ))
+    )
+      paths.add(path);
   }
   // Ancestor aliases grant no reads, but every resolution hop must be immutable
   // to the workspace writer, even when later dot segments leave the workspace.
@@ -171,9 +183,15 @@ export async function discoverControls(fs, declarations) {
           !overlaps(path, stateRoot) && !overlaps(target, stateRoot),
           "State storage must be disjoint from ancestor provider controls.",
         );
-        // A home control grants no external reads, but its workspace target
-        // must never acquire output authority through an alternate name.
-        if (overlaps(target, workspacePath)) {
+        // Ancestor aliases grant no external snapshot reads. A controls-only
+        // query also protects exact infrastructure destinations in their target.
+        if (
+          overlaps(target, workspacePath) ||
+          (!recursive &&
+            declarations.infrastructurePaths.some((path) =>
+              within(target, path),
+            ))
+        ) {
           protect(target, false);
           if ((await inspectPath(fs, target)).kind === "directory")
             roots.push({ path: target, stateOnly: false });
@@ -199,7 +217,7 @@ export async function discoverControls(fs, declarations) {
   }
   async function inspectScope(scope, stateOnly = false) {
     const binding = await inspectPath(fs, scope, { missing: true });
-    if (!stateOnly && binding.kind === "directory")
+    if (recursive && !stateOnly && binding.kind === "directory")
       roots.push({ path: scope, stateOnly });
     for (
       let path = binding.kind === "directory" ? scope : dirname(scope);
@@ -226,7 +244,8 @@ export async function discoverControls(fs, declarations) {
   ]))
     await inspectScope(scope);
   await inspectScope(stateRoot, true);
-  // State-only dependencies still need traversal, without becoming read roots.
+  // Controls-only queries skip ordinary scope traversal, but still follow all
+  // discovered control dependencies. State-only traversal grants no read roots.
   // A later full traversal upgrades an earlier state-only visit.
   const visited = new Map();
   async function descend(path, stateOnly) {

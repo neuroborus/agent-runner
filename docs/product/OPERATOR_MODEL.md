@@ -575,18 +575,32 @@ and validate the complete index before continuing.
 
 The shared guidance capability composes the installed operator guide and the
 entire optional `<artifactRoot>/agent-runner/rules.md`, using current new-run
-configuration resolution. Clear boundaries state that local additions may
+configuration resolution. Its base is the selected infrastructure root, including
+an explicitly selected external setup; without configuration it is the target.
+Ordinary directories are supported without Git. Git selectors use the worktree
+target, including explicit configuration selected from a subdirectory. An explicit
+configuration bound to the supplied directory retains that scope and shares the
+enclosing worktree's exclusion key.
+Explicit selection never merges competing placements or initializes infrastructure.
+Clear boundaries state that local additions may
 specialize project operation but cannot weaken common safety or product
 contracts. Missing local content is valid and reading never creates it.
 
 Local guidance is a complete, bounded, non-sensitive Markdown document. Whole
 replacement uses an expected content hash, an idempotency key, atomic
-publication, and the canonical-worktree lease. Stale concurrent edits fail;
-completed retries return their original receipt even after subsequent edits.
+publication, and the canonical-worktree lease. External publication also leases
+the infrastructure tree to exclude writers from other targets selecting the
+same destination. Stale concurrent edits fail;
+completed retries return their original receipt even after subsequent edits or
+configuration changes. Incomplete publication retains its selected paths,
+configuration and directory identities across restart; substitution or drift
+requires reconciliation, never automatic redirection. Integrated resources in
+Git remain ignored and untracked; external resources require the exact target
+binding and confinement, with no target or Git-control writes.
 Empty content means no additions. The common guide is never replaced.
 
-CLI operators use `agent-run guidance --project <repo>` to read both documents
-and `agent-run guidance edit --project <repo>` to edit the entire local document.
+CLI operators use `agent-run guidance --project <directory>` to read both documents
+and `agent-run guidance edit --project <directory>` to edit the entire local document.
 Both accept `--project-config <path>`. Editing uses a private external copy in
 `$VISUAL` or `$EDITOR`; failed or signalled closes preserve local guidance.
 Unchanged closes still recheck safety and concurrency, and leave a missing

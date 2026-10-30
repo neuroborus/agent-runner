@@ -17,7 +17,12 @@ export const ROOT_MODULE = new URL("../../../src/index.js", import.meta.url)
 
 export async function fixture(
   t,
-  { ignored = true, initialContent, stateRoot: selectStateRoot } = {},
+  {
+    ignored = true,
+    initialContent,
+    stateRoot: selectStateRoot,
+    gitWorkspace = true,
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-guidance-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -30,7 +35,8 @@ export async function fixture(
     "rules.md",
   );
   await mkdir(projectPath);
-  await executeFile("git", ["init", "--quiet"], { cwd: projectPath });
+  if (gitWorkspace)
+    await executeFile("git", ["init", "--quiet"], { cwd: projectPath });
   await writeFile(
     join(projectPath, ".gitignore"),
     ignored ? "LOCAL_ARTIFACTS/\nCUSTOM_ARTIFACTS/\n" : "",

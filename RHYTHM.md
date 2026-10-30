@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-30
 
+- **Operator guidance follows selected infrastructure.** Complete local additions
+  resolve from the bound infrastructure base, including external setups and
+  ordinary-directory targets. Integrated Git resources retain ignore safeguards;
+  external updates leave target content and controls untouched. Publications share
+  the target's canonical exclusion lease, exclude competing external destinations
+  across targets, and pin real directory ancestry as well
+  as configuration, so restart cannot redirect an unfinished intent. Published
+  receipts retain their original selection without replaying old content.
+
 - **Finalization can select an exact Markdown procedure.** Execution and polishing
   bind explicit paths to the selected infrastructure base, preserving conventional
   auto discovery and optional custom guidance. A sibling `RUNNER.md` can adapt a
