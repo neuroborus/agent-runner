@@ -84,7 +84,7 @@ static void image_failure_cleanup(void) {
   }
 }
 static void image_reader_need(bool ok, const char *file, unsigned line) {
-  if (!ok) image_failure_cleanup();
+  if (!ok) { int error = errno; image_failure_cleanup(); errno = error; }
   need_at(ok, file, line);
 }
 #undef need
@@ -1886,8 +1886,10 @@ static void access_spawn(struct entry *image, char **args, char **environment, p
   posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
   need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
     !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
-    !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1) &&
-    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0));
+    !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1));
+  /* Only the fixed observer lane has a separate binary audit pipe. */
+  if (binary) need(!posix_spawn_file_actions_adddup2(&files, 2, 2));
+  else need(!posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0));
   if (binary) need(!posix_spawn_file_actions_adddup2(&files, data[1], 3));
   need(!posix_spawn(pid, image->path, &files, &attributes, args, environment) &&
     !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes) && !close(in[0]) && !close(out[1]));
@@ -1974,7 +1976,33 @@ static void access_exact(int fd, void *bytes, size_t length) {
 }
 static void access_audit(const char *command) {
   need(access_audit_pid && strlen(command) == 1 && strchr("ABS", *command)); reservation_guard();
-  need(write(access_audit_in, command, 1) == 1); access_audit_used = 0;
+  sigset_t blocked, previous, pending;
+  need(!sigemptyset(&blocked) && !sigaddset(&blocked, SIGPIPE) && !sigprocmask(SIG_BLOCK, &blocked, &previous));
+  int status = sigpending(&pending), error = status ? errno : 0;
+  int was_pending = status ? -1 : sigismember(&pending, SIGPIPE);
+  bool signals_ok = !status && was_pending >= 0;
+  if (!status && was_pending < 0) error = errno;
+  ssize_t written = 0; int write_error = 0;
+  if (signals_ok) {
+    written = write(access_audit_in, command, 1); write_error = written < 0 ? errno : 0;
+    if (written < 0 && write_error == EPIPE && !was_pending) {
+      status = sigpending(&pending); error = status ? errno : 0;
+      int present = status ? -1 : sigismember(&pending, SIGPIPE);
+      signals_ok = !status && present >= 0;
+      if (!status && present < 0) error = errno;
+      if (signals_ok && present) {
+        int received = 0; error = sigwait(&blocked, &received);
+        signals_ok = !error && received == SIGPIPE;
+      }
+      /* An uncertain drain cannot safely unmask our new SIGPIPE. This fatal
+       * guard retains the block through existing cleanup and exit 126. */
+      errno = write_error; need(signals_ok);
+    }
+  }
+  int restored = sigprocmask(SIG_SETMASK, &previous, NULL);
+  if (restored && signals_ok) error = errno;
+  errno = written < 0 ? write_error : error;
+  need(written == 1 && signals_ok && !restored); access_audit_used = 0;
   for (;;) {
     uint32_t marker; access_exact(access_audit_out, &marker, 4); uint32_t size = ntohl(marker);
     need(access_audit_used + 4 <= sizeof(access_audit_bytes)); memcpy(access_audit_bytes + access_audit_used, &marker, 4); access_audit_used += 4;

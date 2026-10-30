@@ -2129,6 +2129,16 @@ reproduces the generic ancestry refusal before the bound join succeeds. Root/fil
 replacement, birth changes, ACLs, wrong pins/bindings and unrelated ancestry still
 refuse, and consuming reads cannot chown or reseal the root.
 
+Actual audit-command and observer-refusal bodies also inject closed/short writes,
+prior pending/blocked signals, missing new SIGPIPE, signal-guard/restoration
+failures, delivery when pending SIGPIPE is unblocked, and errno changes during
+cleanup. They require one command write, no frame read after refusal, unchanged
+successful A/B/S framing and observer exit 126 with best-effort first facts.
+Spawn actions retain stderr only for the fixed
+observer lane; existing capture keeps those diagnostics separate from transport
+and cleanup failures without making them authority. These fixtures add no native
+effect or slow-tier assignment and establish no original observer or cleanup cause.
+
 That same fixture executes the actual ordinary case-parent predicate and ancestry,
 admission, open/read and held-file stability bodies against the observed root-owned
 GID 1 mode-0775 run directory. It admits only fixed, canonical case roots with a

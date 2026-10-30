@@ -11,7 +11,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -19,57 +21,85 @@
 #define RECORD_LIMIT 65536
 #define BYTE_LIMIT 8388608
 
-static void fail(void) { _exit(126); }
+static void fail_at(const char *file, unsigned line, const char *predicate, long result, int error) {
+  char bytes[512];
+  int length = snprintf(bytes, sizeof(bytes), "native-darwin-audit: file=%s line=%u predicate=%s result=%ld errno=%d\n",
+    file, line, predicate, result, error);
+  sigset_t blocked, previous, pending;
+  if (length > 0 && length < (int)sizeof(bytes) && !sigemptyset(&blocked) && !sigaddset(&blocked, SIGPIPE) &&
+      !sigprocmask(SIG_BLOCK, &blocked, &previous)) {
+    if (!sigpending(&pending)) {
+      int was_pending = sigismember(&pending, SIGPIPE);
+      if (was_pending >= 0) {
+        ssize_t written = write(STDERR_FILENO, bytes, (size_t)length); int write_error = errno;
+        if (written < 0 && write_error == EPIPE && !was_pending) {
+          /* Never unmask an undischarged diagnostic SIGPIPE before this exit. */
+          if (sigpending(&pending)) _exit(126);
+          int present = sigismember(&pending, SIGPIPE);
+          if (present < 0) _exit(126);
+          if (present) { int received; if (sigwait(&blocked, &received) || received != SIGPIPE) _exit(126); }
+        }
+      }
+    }
+    (void)sigprocmask(SIG_SETMASK, &previous, NULL);
+  }
+  _exit(126);
+}
+static long native_at(long result, const char *file, unsigned line, const char *predicate) {
+  if (result < 0) fail_at(file, line, predicate, result, errno);
+  return result;
+}
+#define native(operation) native_at((operation), __FILE__, __LINE__, #operation)
+/* Invariant refusals carry no ambient errno. Wrapped ioctls retain their caller. */
+#define need(ok) do { if (!(ok)) fail_at(__FILE__, __LINE__, #ok, 0, 0); } while (0)
+#define call(fd, request, value) need(native(ioctl(fd, request, value)) == 0)
 static void output(const void *bytes, size_t length) {
   const unsigned char *p = bytes;
   while (length) {
     ssize_t n = write(3, p, length);
     if (n < 0 && errno == EINTR) continue;
-    if (n <= 0) fail();
+    if (n < 0) fail_at(__FILE__, __LINE__, "write(3, p, length)", n, errno);
+    need(n > 0);
     p += n; length -= (size_t)n;
   }
 }
 static uint32_t number(const char *s) {
   char *end = NULL;
-  if (!s || !*s || *s < '1' || *s > '9') fail();
+  need(s && *s && *s >= '1' && *s <= '9');
   errno = 0;
   unsigned long n = strtoul(s, &end, 10);
-  if (errno || *end || n >= UINT32_MAX) fail();
+  need(!errno && !*end && n < UINT32_MAX);
   return (uint32_t)n;
-}
-static void call(int fd, unsigned long request, void *value) {
-  if (ioctl(fd, request, value) != 0) fail();
 }
 static void healthy(int fd) {
   uint64_t drops = 0, truncates = 0;
   call(fd, AUDITPIPE_GET_DROPS, &drops);
   call(fd, AUDITPIPE_GET_TRUNCATES, &truncates);
-  if (drops || truncates) fail();
+  need(!drops && !truncates);
 }
 
 int main(int argc, char **argv) {
   /* Reviewed exact event classes, successful AND failed, for one reserved auid.
    * The session/UID and native identities are joined by the independent decoder
    * before any event can become proof. Missing event routes fail controls. */
-  if ((argc != 3 && argc != 4) || geteuid() != 0 || !getenv("CI") ||
-      strcmp(getenv("CI"), "true") || !getenv("GITHUB_ACTIONS") ||
-      strcmp(getenv("GITHUB_ACTIONS"), "true")) fail();
+  need((argc == 3 || argc == 4) && geteuid() == 0 && getenv("CI") &&
+      !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") &&
+      !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   uint32_t auid = number(argv[1]), classes = number(argv[2]);
   struct stat channel;
-  if (fstat(0, &channel) || !S_ISFIFO(channel.st_mode) ||
-      fstat(3, &channel) || !S_ISFIFO(channel.st_mode)) fail();
+  need(native(fstat(0, &channel)) == 0 && S_ISFIFO(channel.st_mode) &&
+      native(fstat(3, &channel)) == 0 && S_ISFIFO(channel.st_mode));
   alarm(argc == 4 ? 420 : 120);
   char admission;
   /* The independent owner persists/verifies this parked root process and its
    * private pipes before acknowledging any audit effect. */
-  if (read(0, &admission, 1) != 1 || admission != 'A') fail();
-  int fd = open("/dev/auditpipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-  if (fd < 0) fail();
+  need(native(read(0, &admission, 1)) == 1 && admission == 'A');
+  int fd = native(open("/dev/auditpipe", O_RDONLY | O_NONBLOCK | O_CLOEXEC));
   unsigned int low = 0, high = 0, size = 0, queue = 1024;
   call(fd, AUDITPIPE_GET_QLIMIT_MIN, &low);
   call(fd, AUDITPIPE_GET_QLIMIT_MAX, &high);
   call(fd, AUDITPIPE_GET_MAXAUDITDATA, &size);
-  if (queue < low || queue > high || size == 0 || size > RECORD_LIMIT) fail();
+  need(queue >= low && queue <= high && size > 0 && size <= RECORD_LIMIT);
   call(fd, AUDITPIPE_SET_QLIMIT, &queue);
   au_mask_t empty = {0, 0};
   int mode = AUDITPIPE_PRESELECT_MODE_LOCAL;
@@ -84,7 +114,7 @@ int main(int argc, char **argv) {
   call(fd, AUDITPIPE_SET_PRESELECT_AUID, &selection);
   if (argc == 4) {
     char *end; errno = 0; unsigned long outside = strtoul(argv[3], &end, 10);
-    if (!*argv[3] || errno || *end || outside > UINT32_MAX || outside == auid) fail();
+    need(*argv[3] && !errno && !*end && outside <= UINT32_MAX && outside != auid);
     if (outside == AU_DEFAUDITID) {
       au_mask_t unattributed = {classes, classes};
       call(fd, AUDITPIPE_SET_PRESELECT_NAFLAGS, &unattributed);
@@ -93,7 +123,7 @@ int main(int argc, char **argv) {
       call(fd, AUDITPIPE_SET_PRESELECT_AUID, &selection);
     }
   }
-  if (ioctl(fd, AUDITPIPE_FLUSH) != 0) fail();
+  need(native(ioctl(fd, AUDITPIPE_FLUSH)) == 0);
   healthy(fd);
   /* Length zero announces ready; final UINT32_MAX announces drained EOF.
    * The owner independently verifies reader identity/selection before release. */
@@ -106,11 +136,12 @@ int main(int argc, char **argv) {
     struct pollfd pollers[2] = {{fd, POLLIN, 0}, {0, POLLIN, 0}};
     int n = poll(pollers, 2, stopping ? 0 : 1000);
     if (n < 0 && errno == EINTR) continue;
-    if (n < 0 || (pollers[0].revents & (POLLERR | POLLHUP | POLLNVAL)) ||
-        (pollers[1].revents & (POLLERR | POLLHUP | POLLNVAL))) fail();
+    if (n < 0) fail_at(__FILE__, __LINE__, "poll(pollers, 2, stopping ? 0 : 1000)", n, errno);
+    need(!(pollers[0].revents & (POLLERR | POLLHUP | POLLNVAL)) &&
+        !(pollers[1].revents & (POLLERR | POLLHUP | POLLNVAL)));
     if (pollers[1].revents & POLLIN) {
       char command;
-      if (read(0, &command, 1) != 1 || stopping || barrier || (command != 'S' && command != 'B')) fail();
+      need(native(read(0, &command, 1)) == 1 && !stopping && !barrier && (command == 'S' || command == 'B'));
       if (command == 'S') stopping = 1; else barrier = 1;
     }
     healthy(fd);
@@ -121,15 +152,16 @@ int main(int argc, char **argv) {
       call(fd, AUDITPIPE_GET_QLEN, &remaining);
       if (barrier && remaining == 0) {
         healthy(fd);
-        struct timeval time; if (gettimeofday(&time, NULL) || time.tv_sec < 0 || (uint64_t)time.tv_sec > UINT32_MAX || ++sequence > 256) fail();
+        struct timeval time; need(native(gettimeofday(&time, NULL)) == 0 && time.tv_sec >= 0 && (uint64_t)time.tv_sec <= UINT32_MAX && ++sequence <= 256);
         uint32_t receipt[] = {htonl(UINT32_MAX - 1), htonl(sequence), htonl((uint32_t)time.tv_sec), htonl((uint32_t)(time.tv_usec / 1000))};
         output(receipt, sizeof(receipt)); barrier = 0;
       }
       if (stopping && remaining == 0) break;
       continue;
     }
-    if (count <= 0 || (size_t)count > sizeof(bytes) || ++records > 4096 ||
-        (uint64_t)total + (uint64_t)count > BYTE_LIMIT) fail();
+    if (count < 0) fail_at(__FILE__, __LINE__, "read(fd, bytes, size)", count, errno);
+    need(count > 0 && (size_t)count <= sizeof(bytes) && ++records <= 4096 &&
+        (uint64_t)total + (uint64_t)count <= BYTE_LIMIT);
     total += (uint32_t)count;
     uint32_t length = htonl((uint32_t)count);
     output(&length, sizeof(length));
@@ -137,7 +169,7 @@ int main(int argc, char **argv) {
     memset(bytes, 0, (size_t)count);
   }
   healthy(fd);
-  if (close(fd) != 0) fail(); /* Only the helper's cloned pipe-local state. */
+  need(native(close(fd)) == 0); /* Only the helper's cloned pipe-local state. */
   marker = UINT32_MAX;
   output(&marker, sizeof(marker));
   total = htonl(total); records = htonl(records);

@@ -5497,15 +5497,594 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
   }
 });
 
+test("Darwin audit observer refusals retain call-site facts and exit 126 through failed stderr", async () => {
+  const source = await readFile(
+    new URL("observer-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|long) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (value) =>
+    value
+      .replace("char bytes[512];", "const bytes={};")
+      .replace(
+        "sigset_t blocked, previous, pending;",
+        "const blocked={},previous={},pending={};",
+      )
+      .replaceAll(/&(blocked|previous|pending)/gu, "$1")
+      .replace("&received", "{set value(v){received=v}}")
+      .replaceAll(/\((?:int|size_t|void)\)/gu, "")
+      .replaceAll("sizeof(bytes)", "512")
+      .replaceAll(/\b(?:int|ssize_t) /gu, "let ")
+      .replaceAll("NULL", "null");
+  const line =
+    source
+      .split("\n")
+      .findIndex((value) => value.includes("call(fd, AUDITPIPE_GET_DROPS,")) +
+    1;
+  const operation = "ioctl(fd, AUDITPIPE_GET_DROPS, &drops)";
+  const native = /^#define native\(operation\) (.+)$/mu
+    .exec(source)[1]
+    .replace("#operation", JSON.stringify(operation))
+    .replace(/\boperation\b/u, operation.replace("&drops", "drops"))
+    .replaceAll("__FILE__", '"observer-helper.c"')
+    .replaceAll("__LINE__", String(line));
+  const call = /^#define call\(fd, request, value\) (.+)$/mu
+    .exec(source)[1]
+    .replace("native(ioctl(fd, request, value))", native);
+  const script = new Script(`
+    function fail_at(file,line,predicate,result,error){${translate(body("fail_at"))}}
+    function native_at(result,file,line,predicate){${translate(body("native_at"))}}
+    ()=>{${call};}
+  `);
+  const uncertain = ["pending-after", "member-after", "wait"];
+  for (const fault of [
+    null,
+    "protocol",
+    "short",
+    "failed",
+    "pipe",
+    "prior-pipe",
+    "blocked",
+    "no-new-pipe",
+    "format",
+    "mask",
+    "pending",
+    "restore",
+    ...uncertain,
+  ]) {
+    const records = [],
+      exit = new Error("observer exit");
+    const wasBlocked = ["blocked", "prior-pipe"].includes(fault),
+      wasPending = fault === "prior-pipe";
+    let blocked = wasBlocked,
+      pending = wasPending,
+      writes = 0,
+      waits = 0,
+      restores = 0,
+      pendingReads = 0,
+      members = 0;
+    const api = {
+      errno: 77,
+      SIGPIPE: 13,
+      SIG_BLOCK: 1,
+      SIG_SETMASK: 2,
+      STDERR_FILENO: 2,
+      EPIPE: 32,
+      fd: 7,
+      AUDITPIPE_GET_DROPS: 19,
+      drops: {},
+      need: (ok) => assert.ok(ok),
+      ioctl(fd, request, value) {
+        assert.deepEqual([fd, request, value], [7, 19, api.drops]);
+        api.errno = 13;
+        return -1;
+      },
+      snprintf(out, size, format, ...values) {
+        assert.equal(size, 512);
+        out.text = format.replace(/%(?:ld|s|u|d)/gu, () =>
+          String(values.shift()),
+        );
+        api.errno = 88;
+        return fault === "format" ? size : Buffer.byteLength(out.text);
+      },
+      sigemptyset: () => 0,
+      sigaddset: () => 0,
+      sigprocmask(how, mask, previous) {
+        if (how === 1) {
+          if (fault === "mask") return -1;
+          previous.blocked = blocked;
+          blocked = true;
+        } else {
+          restores++;
+          if (fault === "restore") return -1;
+          blocked = mask.blocked;
+        }
+        api.errno = 91;
+        return 0;
+      },
+      sigpending(out) {
+        pendingReads++;
+        out.pending = pending;
+        return fault === "pending" ||
+          (fault === "pending-after" && pendingReads === 2)
+          ? -1
+          : 0;
+      },
+      sigismember(mask) {
+        members++;
+        return fault === "member-after" && members === 2
+          ? -1
+          : Number(mask.pending);
+      },
+      sigwait(_mask, received) {
+        waits++;
+        if (fault === "wait") return 5;
+        pending = false;
+        received.value = 13;
+        api.errno = 92;
+        return 0;
+      },
+      write(fd, bytes, size) {
+        assert.deepEqual(
+          [fd, size, blocked],
+          [2, Buffer.byteLength(bytes.text), true],
+        );
+        writes++;
+        records.push(bytes.text);
+        api.errno = 32;
+        if (
+          ["pipe", "prior-pipe", "no-new-pipe", ...uncertain].includes(fault)
+        ) {
+          if (fault !== "no-new-pipe") pending = true;
+          return -1;
+        }
+        if (fault === "failed") {
+          api.errno = 9;
+          return -1;
+        }
+        return fault === "short" ? 1 : size;
+      },
+      _exit(code) {
+        assert.equal(code, 126);
+        throw exit;
+      },
+    };
+    const run = script.runInNewContext(api);
+    assert.throws(
+      () =>
+        fault === "protocol"
+          ? api.fail_at("observer-helper.c", line, "!drops && !truncates", 0, 0)
+          : run(),
+      (error) => error === exit,
+    );
+    assert.equal(
+      writes,
+      ["format", "mask", "pending"].includes(fault) ? 0 : 1,
+      fault,
+    );
+    assert.equal(waits, ["pipe", "wait"].includes(fault) ? 1 : 0, fault);
+    assert.equal(
+      restores,
+      ["format", "mask", ...uncertain].includes(fault) ? 0 : 1,
+      fault,
+    );
+    assert.equal(
+      blocked,
+      fault === "restore" || uncertain.includes(fault) ? true : wasBlocked,
+      fault,
+    );
+    assert.equal(pending, wasPending || uncertain.includes(fault), fault);
+    if (writes)
+      assert.equal(
+        records[0],
+        `native-darwin-audit: file=observer-helper.c line=${line} predicate=${fault === "protocol" ? "!drops && !truncates" : operation} result=${fault === "protocol" ? 0 : -1} errno=${fault === "protocol" ? 0 : 13}\n`,
+      );
+  }
+});
+
+test("Darwin audit commands retain one write, errno and signal custody before framing or refusal", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (value) =>
+    value
+      .replace(
+        "sigset_t blocked, previous, pending;",
+        "const blocked={},previous={},pending={};",
+      )
+      .replace("uint32_t marker;", "const marker={};")
+      .replace("ntohl(marker)", "ntohl(marker.value)")
+      .replaceAll(
+        "access_audit_bytes + access_audit_used",
+        "[access_audit_bytes, access_audit_used]",
+      )
+      .replaceAll(/&(blocked|previous|pending|marker)/gu, "$1")
+      .replace("&received", "{set value(v){received=v}}")
+      .replace("char encoded[262145];", "const encoded={};")
+      .replaceAll("sizeof(access_audit_bytes)", "131072")
+      .replaceAll("*command", "command[0]")
+      .replaceAll(/\b(?:int|bool|ssize_t|uint32_t|unsigned) /gu, "let ")
+      .replaceAll("NULL", "null");
+  const script = new Script(`
+    function need(ok){${translate(body("image_reader_need")).replaceAll("file, line", '"custody-reader.c", 1')}}
+    (command)=>{${translate(body("access_audit"))}}
+  `);
+  const pipeFaults = [
+    "pipe",
+    "prior-pipe",
+    "blocked-pipe",
+    "no-new-pipe",
+    "pending-after",
+    "member-after",
+    "wait",
+    "wrong-signal",
+    "pipe-restore",
+  ];
+  const uncertain = ["pending-after", "member-after", "wait", "wrong-signal"];
+  const beforeWrite = [
+    "guard",
+    "reservation",
+    "empty",
+    "add",
+    "block",
+    "pending",
+    "member",
+  ];
+  for (const fault of [
+    "A",
+    "B",
+    "S",
+    "blocked",
+    ...pipeFaults,
+    "write",
+    "short",
+    ...beforeWrite,
+    "restore",
+  ]) {
+    const success = ["A", "B", "S", "blocked"].includes(fault),
+      command = ["A", "S"].includes(fault) ? fault : "B",
+      wasBlocked = ["blocked", "blocked-pipe", "prior-pipe"].includes(fault),
+      wasPending = fault === "prior-pipe",
+      events = [],
+      frames = [],
+      output = [],
+      refusal = new Error("audit refusal");
+    let blocked = wasBlocked,
+      pending = wasPending,
+      pendingReads = 0,
+      members = 0,
+      writes = 0,
+      waits = 0,
+      restores = 0,
+      refusalErrno;
+    const word = (n) => {
+      const value = Buffer.alloc(4);
+      value.writeUInt32BE(n);
+      return value;
+    };
+    if (command === "B") frames.push(word(4), Buffer.from("bsm!"));
+    frames.push(
+      word(command === "A" ? 0 : command === "B" ? 0xfffffffe : 0xffffffff),
+      Buffer.alloc(command === "A" ? 0 : command === "B" ? 12 : 8),
+    );
+    const expected = Buffer.concat(frames).toString("hex");
+    const api = {
+      errno: 77,
+      SIGPIPE: 13,
+      EPIPE: 32,
+      SIG_BLOCK: 1,
+      SIG_SETMASK: 2,
+      UINT32_MAX: 0xffffffff,
+      stdout: {},
+      access_audit_pid: fault === "guard" ? 0 : 42,
+      access_audit_in: 10,
+      access_audit_out: 11,
+      access_audit_used: 99,
+      access_audit_bytes: Buffer.alloc(131072),
+      strlen: (value) => value.length,
+      strchr: (value, byte) => value.includes(byte),
+      reservation_guard() {
+        events.push("reservation");
+        if (fault === "reservation") api.need(false);
+      },
+      sigemptyset() {
+        if (fault === "empty") {
+          api.errno = 22;
+          return -1;
+        }
+        return 0;
+      },
+      sigaddset() {
+        if (fault === "add") {
+          api.errno = 22;
+          return -1;
+        }
+        return 0;
+      },
+      sigprocmask(how, mask, previous) {
+        api.errno = 22;
+        if (how === 1) {
+          if (fault === "block") return -1;
+          previous.blocked = blocked;
+          previous.other = 23;
+          blocked = true;
+        } else {
+          restores++;
+          events.push("restore");
+          assert.equal(mask.other, 23);
+          if (["restore", "pipe-restore"].includes(fault)) {
+            api.errno = 16;
+            return -1;
+          }
+          blocked = mask.blocked;
+          if (pending && !blocked)
+            throw new Error("Injected delivery of unblocked pending SIGPIPE");
+        }
+        return 0;
+      },
+      sigpending(out) {
+        pendingReads++;
+        api.errno = 22;
+        out.pending = pending;
+        return fault === (pendingReads === 1 ? "pending" : "pending-after")
+          ? -1
+          : 0;
+      },
+      sigismember(mask) {
+        members++;
+        api.errno = 22;
+        return fault === (members === 1 ? "member" : "member-after")
+          ? -1
+          : Number(mask.pending);
+      },
+      sigwait(_mask, received) {
+        waits++;
+        api.errno = 91;
+        if (fault === "wait") return 5;
+        pending = false;
+        received.value = fault === "wrong-signal" ? 99 : 13;
+        return 0;
+      },
+      write(fd, bytes, size) {
+        assert.deepEqual([fd, bytes, size, blocked], [10, command, 1, true]);
+        writes++;
+        events.push("write");
+        if (pipeFaults.includes(fault)) {
+          api.errno = 32;
+          if (fault !== "no-new-pipe") pending = true;
+          return -1;
+        }
+        if (fault === "write") {
+          api.errno = 5;
+          return -1;
+        }
+        return fault === "short" ? 0 : 1;
+      },
+      image_failure_cleanup() {
+        events.push("cleanup");
+        api.errno = 99;
+      },
+      need_at(ok) {
+        if (!ok) {
+          refusalErrno = api.errno;
+          throw refusal;
+        }
+      },
+      access_exact(fd, target, length) {
+        assert.equal(fd, 11);
+        events.push("frame");
+        const chunk = frames.shift();
+        assert.equal(length, chunk.length);
+        if (Array.isArray(target)) chunk.copy(target[0], target[1]);
+        else target.value = chunk.readUInt32BE();
+      },
+      ntohl: (value) => value,
+      memcpy([bytes, offset], marker) {
+        bytes.writeUInt32BE(marker.value, offset);
+      },
+      hex(bytes, length, encoded) {
+        encoded.value = bytes.subarray(0, length).toString("hex");
+      },
+      printf(_format, encoded) {
+        output.push(encoded.value);
+      },
+      memset(bytes, value) {
+        assert.equal(value, 0);
+        bytes.fill(0);
+      },
+    };
+    const run = script.runInNewContext(api);
+    if (success) run(command);
+    else
+      assert.throws(
+        () => run(command),
+        (error) => error === refusal,
+        fault,
+      );
+    assert.equal(writes, beforeWrite.includes(fault) ? 0 : 1, fault);
+    assert.equal(
+      waits,
+      pipeFaults.includes(fault) &&
+        ![
+          "prior-pipe",
+          "no-new-pipe",
+          "pending-after",
+          "member-after",
+        ].includes(fault)
+        ? 1
+        : 0,
+      fault,
+    );
+    assert.equal(
+      restores,
+      ["guard", "reservation", "empty", "add", "block", ...uncertain].includes(
+        fault,
+      )
+        ? 0
+        : 1,
+      fault,
+    );
+    assert.equal(
+      blocked,
+      ["restore", "pipe-restore", ...uncertain].includes(fault)
+        ? true
+        : wasBlocked,
+      fault,
+    );
+    assert.equal(
+      pending,
+      wasPending || ["pending-after", "member-after", "wait"].includes(fault),
+      fault,
+    );
+    if (success) {
+      assert.deepEqual(output, [expected]);
+      assert.equal(frames.length, 0);
+    } else {
+      assert.ok(!events.includes("frame"), fault);
+      assert.equal(events.at(-1), "cleanup", fault);
+      assert.equal(
+        refusalErrno,
+        pipeFaults.includes(fault)
+          ? 32
+          : fault === "write"
+            ? 5
+            : fault === "short"
+              ? 0
+              : fault === "restore"
+                ? 16
+                : ["guard", "reservation"].includes(fault)
+                  ? 77
+                  : 22,
+        fault,
+      );
+    }
+    if (writes)
+      assert.ok(events.indexOf("reservation") < events.indexOf("write"));
+  }
+});
+
+test("Darwin access spawn retains stderr only for the fixed binary audit lane", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void access_spawn\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "int in[2], out[2], data[2];",
+      "const inputPipe=[],out=[],data=[];",
+    )
+    .replaceAll(/\bin\b/gu, "inputPipe")
+    .replace(
+      "posix_spawn_file_actions_t files; posix_spawnattr_t attributes;",
+      "const files={},attributes={};",
+    )
+    .replaceAll(/&(files|attributes)/gu, "$1")
+    .replaceAll(/\*(input|output|binary)/gu, "$1.value")
+    .replaceAll("->", ".");
+  const script = new Script(
+    `(image,args,environment,pid,input,output,binary)=>{${body}}`,
+  );
+  for (const lane of ["observer", "pf", "control", "stderr-guard"]) {
+    const binary = ["observer", "stderr-guard"].includes(lane),
+      image = { path: `/fixture/custody/${binary ? "observer" : lane}` },
+      args = [image.path],
+      environment = ["CI=true"],
+      actions = [],
+      closed = [],
+      pid = {},
+      input = {},
+      output = {},
+      frames = {};
+    let next = 10,
+      spawned = false,
+      stable = 0;
+    const run = script.runInNewContext({
+      O_WRONLY: 1,
+      POSIX_SPAWN_CLOEXEC_DEFAULT: 4,
+      need: (ok) => assert.ok(ok),
+      stable(value) {
+        assert.equal(value, image);
+        stable++;
+      },
+      pipe(fds) {
+        fds.push(next++, next++);
+        return 0;
+      },
+      posix_spawn_file_actions_init: () => 0,
+      posix_spawnattr_init: () => 0,
+      posix_spawnattr_setflags(_attrs, flags) {
+        assert.equal(flags, 4);
+        return 0;
+      },
+      posix_spawn_file_actions_adddup2(_files, from, to) {
+        actions.push(["dup", from, to]);
+        return lane === "stderr-guard" && to === 2 ? 9 : 0;
+      },
+      posix_spawn_file_actions_addopen(_files, fd, path, mode, permissions) {
+        actions.push(["open", fd, path, mode, permissions]);
+        return 0;
+      },
+      posix_spawn(target, path, _files, _attrs, argv, env) {
+        assert.deepEqual([path, argv, env], [image.path, args, environment]);
+        spawned = true;
+        target.value = 42;
+        return 0;
+      },
+      posix_spawn_file_actions_destroy: () => 0,
+      posix_spawnattr_destroy: () => 0,
+      close(fd) {
+        closed.push(fd);
+        return 0;
+      },
+    });
+    if (lane === "stderr-guard")
+      assert.throws(() =>
+        run(image, args, environment, pid, input, output, frames),
+      );
+    else
+      run(image, args, environment, pid, input, output, binary ? frames : null);
+    assert.deepEqual(actions, [
+      ["dup", 10, 0],
+      ["dup", 13, 1],
+      binary ? ["dup", 2, 2] : ["open", 2, "/dev/null", 1, 0],
+      ...(lane === "observer" ? [["dup", 15, 3]] : []),
+    ]);
+    assert.equal(spawned, lane !== "stderr-guard");
+    if (spawned) {
+      assert.deepEqual(
+        [pid.value, input.value, output.value, frames.value],
+        [42, 11, 12, binary ? 14 : undefined],
+      );
+      assert.deepEqual(closed, binary ? [10, 13, 15] : [10, 13]);
+      assert.equal(stable, 2);
+    }
+  }
+});
+
 test("Darwin guard locations and errno remain diagnostics through failed custody", async () => {
   const chunks = [],
+    observer =
+      "native-darwin-audit: file=observer-helper.c line=19 predicate=ioctl(fd, request, value) result=-1 errno=13\n",
     guard = Buffer.from(
-      "native-darwin-sdk: realpath=1 realpath-errno=0 equal=1 lstat=0 lstat-errno=0 kind=1 owner=1 writable=1\n" +
+      observer +
+        "native-darwin-sdk: realpath=1 realpath-errno=0 equal=1 lstat=0 lstat-errno=0 kind=1 owner=1 writable=1\n" +
         "native-darwin-sdk-metadata: uid=0 gid=0 mode=040775 dev=1 inode=42\n" +
         "native-darwin-sdk: malformed untrusted=value\n" +
         "native-darwin-guard: file=fixture.c line=19 errno=13\n" +
         "native-darwin-launch: owner=launcher operation=task_get_special_port/TASK_ACCESS_PORT result=19 errno=13 revents=0 read=-1 launcher=41 reporter=42 child=0\n" +
-        "native-darwin-launch: owner=launcher operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126\n",
+        "native-darwin-launch: owner=launcher operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126\n" +
+        "native-darwin-image-cleanup: operation=release domain=posix value=35 cleanup=1\n",
     );
   await withNativeDiagnostics(
     async () => {
@@ -5523,7 +6102,7 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
         assert.deepEqual(await channel.receive(), hello);
         const pending = assert.rejects(channel.receive()),
           completion = assert.rejects(channel.completion);
-        const at = guard.indexOf("file=");
+        const at = guard.indexOf("file=fixture.c");
         child.stderr.write(guard.subarray(0, at));
         child.stdout.emit(
           "error",
@@ -5542,6 +6121,14 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
     createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
   );
   const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes(observer));
+  assert.ok(
+    output.indexOf(observer) < output.indexOf("native-darwin-image-cleanup:"),
+  );
+  assert.ok(output.includes("Injected custody transport failure"));
+  assert.ok(
+    output.includes("operation=release domain=posix value=35 cleanup=1"),
+  );
   assert.ok(output.includes("native-darwin-guard"));
   assert.ok(output.includes("file=fixture.c line=19 errno=13"));
   assert.ok(output.includes("kind=1 owner=1 writable=1"));

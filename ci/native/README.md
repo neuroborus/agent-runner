@@ -11772,6 +11772,17 @@ reference `audit_pipe.c:audit_pipe_preselect_check`, `audit_ioctl.h` and
 `auditpipe(4)` explain pipe-local selection and why drops/truncates cannot pass.
 `audit.js` continuously decodes its bounded private length-framed stream through
 the sealed reader's matched `libbsm` tokenizer and actual event/class mapping.
+Observer refusal attempts one bounded `native-darwin-audit` stderr record with
+the predicate, source location and immediate failed-syscall result/errno;
+invariant refusals carry no ambient errno. The fixed observer lane retains fd 2
+through ordinary custody capture, separately from audit frames and later cleanup.
+Diagnostic writes are best effort and locally mask SIGPIPE before exit 126.
+Each audit command still writes exactly once after the reservation guard; local
+masking consumes only newly pending SIGPIPE after EPIPE before restoring the prior
+mask. An uncertain drain keeps SIGPIPE blocked through fatal cleanup and exit 126.
+Write and signal-handling failures refuse before frame reads, retaining the write
+errno through existing cleanup. These observations establish no original observer
+cause, functional repair or cleanup success; missing first facts remain a gap.
 Private `B` commands acknowledge drained queue boundaries with sequence and native
 time; `S` finishes capture with checked totals. The decoder requires complete
 header/subject/return/trailer records, uniquely selected native metadata, matched
