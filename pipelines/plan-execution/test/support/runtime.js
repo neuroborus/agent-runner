@@ -152,6 +152,7 @@ function versionOneState(state) {
     "cleanConfirmationFingerprint",
     "lazySourceForkConsumed",
     "authenticationSourceForkRecovery",
+    "diagnosedCheckpoint",
     "lazyCorrections",
     "pendingLazyCorrection",
   ]) {
@@ -263,11 +264,13 @@ function migrateVersionOneState(state) {
   const versionSixteen = migratePlanExecutionStateV15({
     pipelineState: versionFifteen,
   });
-  return migratePlanExecutionStateV25({
-    pipelineState: migratePlanExecutionStateV24({
-      pipelineState: migratePlanExecutionStateV22({
-        pipelineState: migratePlanExecutionStateV21({
-          pipelineState: versionSixteen,
+  return planExecutionPipeline.migrations[26]({
+    pipelineState: migratePlanExecutionStateV25({
+      pipelineState: migratePlanExecutionStateV24({
+        pipelineState: migratePlanExecutionStateV22({
+          pipelineState: migratePlanExecutionStateV21({
+            pipelineState: versionSixteen,
+          }),
         }),
       }),
     }),
@@ -1678,7 +1681,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 26,
+    pipelineStateVersion: 27,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2091,7 +2094,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 26,
+      pipelineStateVersion: 27,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

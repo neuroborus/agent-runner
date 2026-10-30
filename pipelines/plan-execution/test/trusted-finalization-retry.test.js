@@ -76,6 +76,9 @@ async function retryFixture(
         timedOut: false,
         evidence: [
           `Runner-trusted command exited with code ${status === "FAIL" ? 7 : 0}.`,
+          ...(status === "FAIL" && executions.length > 1
+            ? ["Trusted check error class: ERR_ASSERTION."]
+            : []),
         ],
         ...options.bindings,
       };
@@ -112,6 +115,15 @@ for (const mode of ["lazy", "independent", "combined"]) {
     );
     assert.equal(repeated.pipelineState.finalizedFingerprint, null);
     assert.equal(repeated.pipelineState.reviewResult, null);
+    assert.ok(
+      repeated.pipelineState.finalizationResult.checks
+        .find((check) => check.executor === "runner")
+        .evidence.includes("Trusted check error class: ERR_ASSERTION."),
+    );
+    assert.match(
+      fixture.calls.worker.at(-1).prompt,
+      /Trusted check error class: ERR_ASSERTION\./u,
+    );
 
     const retryStart = turns.length;
     const completed = await fixture.run({}, null);

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { polishingPipeline } from "../src/index.js";
 import {
@@ -498,6 +499,170 @@ test("reconciles a content-changing invalid lazy check exactly once", async (t) 
     1,
   );
 });
+
+for (const [mode, stateStore] of [
+  ["lazy", "memory"],
+  ["combined", "memory"],
+  ["lazy", "disk"],
+]) {
+  test(`preserves a ${mode} BLOCKED check/fix pause after a charged correction with ${stateStore} state`, async (t) => {
+    const durable = stateStore === "disk";
+    const blocked = {
+      ...checkAndFix("BLOCKED"),
+      summary: "",
+      reason: "The local analysis service is unavailable.",
+      evidence: ["The service did not answer the local request."],
+    };
+    let checkRound = 0;
+    let beforeRepair;
+    let beforeBlocked;
+    const fixture = await createFixture(t, {
+      mode,
+      stateStore,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "combined" ? [reconciliationResolved()] : []),
+        polishingCompleted(),
+        checkAndFix(),
+        ...(durable
+          ? [
+              candidateClean(),
+              finalizationPassed(),
+              cleanConfirmationFindings("R1"),
+            ]
+          : [candidateFindings("R1")]),
+        { ...checkAndFix("CHANGED"), unexpected: "rejected" },
+        blocked,
+        ...(durable
+          ? [
+              checkAndFix(),
+              candidateClean(),
+              finalizationPassed(),
+              cleanConfirmation(),
+            ]
+          : []),
+      ],
+      async onRoleRun(role, request, _turn, { projectPath }) {
+        if (role !== "worker" || request.schema !== CHECK_AND_FIX_SCHEMA)
+          return;
+        checkRound += 1;
+        if (checkRound === 2) beforeRepair = fixture.currentRun.pipelineState;
+        if (checkRound > 1 && checkRound <= 3) {
+          beforeBlocked = fixture.currentRun;
+          await writeFile(
+            join(projectPath, "repair.txt"),
+            checkRound === 2 ? "partial\n" : "repaired\n",
+          );
+        }
+      },
+    });
+    if (!durable) {
+      const transition = fixture.runtime.transition;
+      fixture.runtime.transition = async (patch, options) => {
+        if (
+          options?.activity == null &&
+          Object.entries(patch).every(([field, value]) =>
+            isDeepStrictEqual(fixture.currentRun[field], value),
+          )
+        ) {
+          throw Object.assign(
+            new Error("Transition has no change or activity."),
+            { code: "ERR_EMPTY_RUN_TRANSITION" },
+          );
+        }
+        return transition(patch, options);
+      };
+    }
+
+    const paused = await fixture.run();
+    const state = paused.pipelineState;
+
+    assert.deepEqual(
+      (mode === "combined"
+        ? beforeRepair.primaryFindings
+        : beforeRepair.findings
+      ).map(({ id }) => id),
+      ["R1"],
+    );
+    if (durable) {
+      assert.equal(beforeRepair.finalizationResult.status, "PASS");
+    } else if (mode === "lazy") {
+      assert.equal(beforeRepair.candidateReviewResult.status, "FINDINGS");
+    }
+    assert.equal(
+      beforeBlocked.pipelineState.pendingLazyCorrection.fixRoundCharged,
+      true,
+    );
+    assert.equal(beforeBlocked.counters.fixRounds, 2);
+    assert.equal(state.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(paused.pause, {
+      reason: "environment_blocked",
+      explanation: blocked.reason,
+      evidence: blocked.evidence,
+      resumeState: "CHECK_AND_FIX",
+    });
+    assert.equal(paused.activeTurn, null);
+    assert.equal(
+      await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+      "repaired\n",
+    );
+    assert.deepEqual(
+      state.repositoryBaseline,
+      await fixture.runtime.git.snapshot({
+        projectPath: fixture.projectPath,
+        allowedPaths: state.repositoryBaseline.allowedPaths,
+      }),
+    );
+    assert.notEqual(
+      state.repositoryBaseline.contentFingerprint,
+      beforeBlocked.pipelineState.repositoryBaseline.contentFingerprint,
+    );
+    for (const field of [
+      "candidateReviewResult",
+      "candidateReviewedFingerprint",
+      "candidateConfirmationFingerprint",
+      "finalizationResult",
+      "finalizedFingerprint",
+      "reviewResult",
+      "reviewedFingerprint",
+      "cleanConfirmationFingerprint",
+    ]) {
+      assert.equal(state[field], null, field);
+    }
+    assert.deepEqual(state.findings, []);
+    assert.deepEqual(state.primaryFindings, []);
+    assert.deepEqual(
+      state.previousFindings.map(({ id }) => id),
+      mode === "lazy" ? ["R1"] : [],
+    );
+    assert.equal(state.pendingCorrection, true);
+    assert.equal(state.pendingLazyCorrection, null);
+    assert.equal(state.availabilityCorrectionCharged, false);
+    assert.equal(paused.counters.fixRounds, 2);
+    polishingPipeline.validateResumeAction(paused, null);
+    assert.equal(
+      fixture.transitions.some(
+        ({ patch }) => patch?.pause?.reason === "internal_failure",
+      ),
+      false,
+    );
+    if (durable) {
+      const recovered = await fixture.recover();
+      assert.deepEqual(recovered.pause, paused.pause);
+      assert.deepEqual(recovered.counters, paused.counters);
+      assert.deepEqual(recovered.pipelineState, state);
+      const completed = await fixture.run();
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.equal(completed.counters.fixRounds, 3);
+      assert.equal(checkRound, 4);
+      assert.equal(
+        await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+        "repaired\n",
+      );
+    }
+  });
+}
 
 test("corrects a provider-classified lazy check in a fresh redacted session", async (t) => {
   const sensitiveMarker = "DO_NOT_PERSIST_LAZY_PROVIDER_OUTPUT";
@@ -1436,6 +1601,9 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
           trustedCalls.length === 1
             ? "The isolated temporary service is unavailable."
             : "The isolated temporary service check passed.",
+          ...(trustedCalls.length === 1
+            ? ["Trusted check error class: ERR_ASSERTION."]
+            : []),
         ],
         ...options.bindings,
       };
@@ -1449,8 +1617,14 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
   assert.equal(paused.pause.code, "ERR_TRUSTED_VALIDATION_BLOCKED");
   assert.equal(paused.pause.resumeState, "FINALIZE");
   assert.equal(paused.pipelineState.finalizationResult, null);
+  assert.ok(
+    polishingPipeline.projections
+      .pause(paused)
+      .evidence.includes("Trusted check error class: ERR_ASSERTION."),
+  );
 
   const recovered = await fixture.recover();
+  assert.deepEqual(recovered.pause.evidence, paused.pause.evidence);
   assert.deepEqual(
     recovered.pipelineState.trustedValidation,
     trustedValidation,
@@ -1604,6 +1778,7 @@ test("replaces failed projected evidence after a content repair", async (t) => {
           failed
             ? "Runner-trusted command service-check exited with code 7."
             : "Runner-trusted command service-check exited with code 0.",
+          `Runner-trusted check elapsed: ${failed ? 10 : 20} ms.`,
         ],
         ...options.bindings,
       };
@@ -1614,6 +1789,25 @@ test("replaces failed projected evidence after a content repair", async (t) => {
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(executions.length, 2);
+  assert.ok(
+    result.pipelineState.finalizationResult.checks[1].evidence.includes(
+      "Runner-trusted check elapsed: 20 ms.",
+    ),
+  );
+  assert.ok(
+    fixture.calls.worker.some(
+      ({ prompt }) =>
+        prompt.includes("Resolve every current blocker") &&
+        prompt.includes("Runner-trusted check elapsed: 10 ms."),
+    ),
+  );
+  assert.ok(
+    fixture.calls.reviewer.some(
+      ({ schema, prompt }) =>
+        schema === REVIEW_SCHEMA &&
+        prompt.includes("Runner-trusted check elapsed: 20 ms."),
+    ),
+  );
   assert.notEqual(
     executions[0].bindings.contentFingerprint,
     executions[1].bindings.contentFingerprint,

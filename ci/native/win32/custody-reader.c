@@ -1,0 +1,5812 @@
+/* One-shot LocalSystem/session-0 reader. A retained handle, never a PID/name,
+ * owns every observation. The bridge and independent verifier gate admission. */
+#define COBJMACROS
+#define UNICODE
+#define _UNICODE
+#define _WIN32_WINNT 0x0A00
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <mswsock.h>
+#include <iphlpapi.h>
+static void reader_failure(const char *file, unsigned line, DWORD error);
+static BOOL ownership_failure_write(const char *source, unsigned line, DWORD error);
+static void ownership_failure_fence(DWORD error);
+#ifdef NATIVE_CI_EXPERIMENT
+static void ownership_refusal_collect(const char *source, unsigned line, DWORD error);
+static void refusal_settle(void);
+#else
+#define ownership_refusal_collect(source,line,error) ((void)0)
+#define refusal_settle() ((void)0)
+#endif
+#define NATIVE_CUSTODY_FAILURE reader_failure
+#include "custody.h"
+#include "account.h"
+#ifdef NATIVE_CI_EXPERIMENT
+static void release_invalidate(void);
+static void release_file_closing(struct held_file *file);
+/* Keep the shared held-file closer, invalidating before it releases custody. */
+#define close_file(value) (release_file_closing(value), (close_file)(value))
+#else
+#define release_invalidate() ((void)0)
+#endif
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
+#include <fcntl.h>
+#include <io.h>
+#include <taskschd.h>
+#include <oleauto.h>
+#include <stddef.h>
+#include <wctype.h>
+#include <tlhelp32.h>
+#include <wbemidl.h>
+#include <winioctl.h>
+#include <winevt.h>
+#include <stdarg.h>
+#pragma comment(lib, "wevtapi.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "taskschd.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "uuid.lib")
+#define SLOTS 128
+struct entry { char kind[16], pin[65], signature[65]; wchar_t path[4096]; struct held_file file; };
+static struct entry entries[SLOTS]; static unsigned count, sequence;
+static const wchar_t *runner_sid;
+static BOOL bridge_entry(const wchar_t *name, const char *pin) {
+  const wchar_t *leaf = wcsrchr(name, '\\'); if (!leaf || wcscmp(leaf+1, L"custody-bridge.exe")) return FALSE;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) return TRUE;
+  return FALSE;
+}
+static void bridge_security(HANDLE file, char hash[65]) {
+  PSID system, runner, owner; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+  need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(runner_sid, &runner) && !EqualSid(system, runner) &&
+    GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
+    owner && EqualSid(owner, system) && dacl && IsValidAcl(dacl) && (dacl->AceCount == 1 || dacl->AceCount == 2) &&
+    GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
+  GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS}; unsigned found = 0;
+  for (unsigned i = 0; i < dacl->AceCount; i++) {
+    ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, i, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags);
+    DWORD mask = ace->Mask; MapGenericMask(&mask, &mapping);
+    if (EqualSid(&ace->SidStart, system)) { need(!(found&1) && mask == FILE_ALL_ACCESS); found |= 1; }
+    else { need(!(found&2) && EqualSid(&ace->SidStart, runner) && mask == (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)); found |= 2; }
+  }
+  need(found == 1 || found == 3); LocalFree(sd); LocalFree(system); LocalFree(runner); security(file, SE_FILE_OBJECT, FALSE, hash);
+}
+/* Reviewed installed MSVC/SDK and native System32 DLL inputs keep their read ACLs. Only the
+ * trusted installation authorities may own or mutate them; held reads still
+ * deny write/delete sharing. Private build/source/receipt objects use System. */
+#ifdef NATIVE_CI_EXPERIMENT
+static BOOL installed_git_runtime(const wchar_t *name) {
+  if (wcslen(name) <= 3 || name[1] != ':' || !((name[0] >= L'A' && name[0] <= L'Z') || (name[0] >= L'a' && name[0] <= L'z'))) return FALSE;
+  const wchar_t *prefixes[] = {L"\\Program Files\\Git\\mingw64\\bin\\", L"\\Program Files\\Git\\ucrt64\\bin\\"};
+  for (unsigned i = 0; i < 2; i++) {
+    size_t length = wcslen(prefixes[i]);
+    if (_wcsnicmp(name+2, prefixes[i], length)) continue;
+    const wchar_t *leaf = name+2+length, *extension = wcsrchr(leaf, '.');
+    if (*leaf && !wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':') && extension &&
+      (!_wcsicmp(extension, L".exe") || !_wcsicmp(extension, L".dll"))) return TRUE;
+  }
+  return FALSE;
+}
+#endif
+static BOOL stock_entry(const wchar_t *name, const char *pin) {
+  const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
+  BOOL installed = wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, msvc, wcslen(msvc)) || !wcsncmp(name+2, sdk, wcslen(sdk)));
+  const wchar_t *leaf = wcsrchr(name, '\\'); need(leaf);
+  wchar_t system[4096]; DWORD size = GetSystemDirectoryW(system, 4096);
+  need(size > 0 && size < 4096);
+  BOOL nativeDll = wcslen(name) > size + 1 && !_wcsnicmp(name, system, size) && name[size] == '\\' && leaf == name + size &&
+    wcslen(leaf+1) > 4 && !_wcsicmp(leaf+wcslen(leaf)-4, L".dll");
+#ifdef NATIVE_CI_EXPERIMENT
+  BOOL gitRuntime = installed_git_runtime(name);
+  installed = installed || gitRuntime;
+#endif
+  if (!installed && !nativeDll) return FALSE;
+  for (unsigned i = 0; i < count; i++) if ((!strcmp(entries[i].kind, "image") || !strcmp(entries[i].kind, "sdk")) &&
+    !wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, pin) &&
+    ((installed && (!strcmp(entries[i].kind, "sdk") || !wcscmp(leaf+1, L"cl.exe") || !wcscmp(leaf+1, L"rc.exe"))) ||
+#ifdef NATIVE_CI_EXPERIMENT
+     (gitRuntime && !strcmp(entries[i].kind, "image")) ||
+#endif
+     (nativeDll && !strcmp(entries[i].kind, "image")))) return TRUE;
+  return FALSE;
+}
+static void stock_security(HANDLE file, char hash[65]) {
+  PSID system, administrators, installer, owner; PACL dacl; PSECURITY_DESCRIPTOR sd;
+  need(ConvertStringSidToSidW(L"S-1-5-18", &system) && ConvertStringSidToSidW(L"S-1-5-32-544", &administrators) &&
+    ConvertStringSidToSidW(L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &installer) &&
+    GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
+    dacl && IsValidAcl(dacl) && (EqualSid(owner, system) || EqualSid(owner, administrators) || EqualSid(owner, installer)));
+  GENERIC_MAPPING mapping = {FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+  for (unsigned i = 0; i < dacl->AceCount; i++) {
+    ACE_HEADER *header; need(GetAce(dacl, i, (void **)&header));
+    need(header->AceType == ACCESS_ALLOWED_ACE_TYPE || header->AceType == ACCESS_DENIED_ACE_TYPE);
+    if (header->AceType == ACCESS_DENIED_ACE_TYPE || (header->AceFlags & INHERIT_ONLY_ACE)) continue;
+    ACCESS_ALLOWED_ACE *ace = (void *)header; DWORD mask = ace->Mask; MapGenericMask(&mask, &mapping);
+    if (mask & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))
+      need(EqualSid(&ace->SidStart, system) || EqualSid(&ace->SidStart, administrators) || EqualSid(&ace->SidStart, installer));
+  }
+  LocalFree(sd); LocalFree(system); LocalFree(administrators); LocalFree(installer); security(file, SE_FILE_OBJECT, FALSE, hash);
+}
+static HANDLE processes[128], tokens[128], jobs[32]; static unsigned process_count, job_count;
+static DWORD sessions[128];
+/* The Security observer retains its own pipes while one finite work helper
+ * runs. Each lane has separately verified creation and whole-Job retirement. */
+static struct helper_custody { HANDLE process, thread, job, input, output; BOOL file; } helpers[2];
+static unsigned helper_lane;
+#define helper helpers[helper_lane].process
+#define helper_thread helpers[helper_lane].thread
+#define helper_job helpers[helper_lane].job
+#define helper_in helpers[helper_lane].input
+#define helper_out helpers[helper_lane].output
+#define helper_file helpers[helper_lane].file
+static HANDLE control; static char nonce[33], candidate[41];
+static BOOL reader_diagnostics_ready;
+static char reader_command[64] = "setup";
+static __declspec(thread) struct {
+  BOOL active, apiFailure, exitAvailable, accountingAvailable;
+  const char *operation; DWORD result, error, waited, exitCode, activeProcesses;
+  size_t childBytes; unsigned childShown; BYTE child[1024];
+} reader_witness;
+/* Only owned duplicates and private resources enter this scope. The existing
+ * failure sender releases them independently while retaining the primary error. */
+static __declspec(thread) struct {
+  HANDLE inherited[208], input, output, job, port;
+  PROCESS_INFORMATION child;
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes;
+  BOOL attributesReady, cleanupFailed;
+  DWORD cleanupError;
+  PSECURITY_DESCRIPTOR descriptor;
+} reader_witness_resources;
+static void ownership_witness_cleanup_error(const char *operation, DWORD error) {
+  if (!reader_witness_resources.cleanupFailed) reader_witness_resources.cleanupError = error;
+  reader_witness_resources.cleanupFailed = TRUE;
+  fprintf(stderr, "native-windows-witness-cleanup: operation=%s error=%lu\n", operation, error);
+  SetLastError(error);
+}
+static BOOL ownership_witness_handle_close(HANDLE *owned) {
+  HANDLE handle = *owned; *owned = NULL;
+  if (!handle || CloseHandle(handle)) return TRUE;
+  ownership_witness_cleanup_error("CloseHandle", GetLastError()); return FALSE;
+}
+static BOOL ownership_witness_close(void) {
+  DWORD error = GetLastError();
+  for (unsigned i = 0; i < 208; i++) ownership_witness_handle_close(&reader_witness_resources.inherited[i]);
+  ownership_witness_handle_close(&reader_witness_resources.input);
+  ownership_witness_handle_close(&reader_witness_resources.output);
+  ownership_witness_handle_close(&reader_witness_resources.child.hThread);
+  ownership_witness_handle_close(&reader_witness_resources.child.hProcess);
+  ownership_witness_handle_close(&reader_witness_resources.port);
+  ownership_witness_handle_close(&reader_witness_resources.job);
+  if (reader_witness_resources.attributesReady) {
+    reader_witness_resources.attributesReady = FALSE;
+    DeleteProcThreadAttributeList(reader_witness_resources.attributes);
+  }
+  free(reader_witness_resources.attributes); reader_witness_resources.attributes = NULL;
+  PSECURITY_DESCRIPTOR descriptor = reader_witness_resources.descriptor; reader_witness_resources.descriptor = NULL;
+  if (descriptor && LocalFree(descriptor)) ownership_witness_cleanup_error("LocalFree", GetLastError());
+  SetLastError(reader_witness_resources.cleanupFailed ? reader_witness_resources.cleanupError : error);
+  return !reader_witness_resources.cleanupFailed;
+}
+static BOOL reader_witness_failure(const char *source, unsigned line, DWORD error) {
+  ownership_witness_close(); SetLastError(error);
+  if (!reader_witness.active) return FALSE;
+  char frame[9216], encoded[2049] = {0}; DWORD written;
+  for (unsigned i = 0; i < reader_witness.childShown; i++)
+    sprintf_s(encoded+i*2, sizeof(encoded)-i*2, "%02x", reader_witness.child[i]);
+  int size = sprintf_s(frame, sizeof(frame), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"witness\":{\"operation\":\"%s\",\"result\":%lu,\"apiFailure\":%s,\"wait\":%lu,\"exitAvailable\":%s,\"exitCode\":%lu,\"accountingAvailable\":%s,\"activeProcesses\":%lu,\"childBytes\":%zu,\"childShown\":%u,\"childTruncated\":%s,\"childHex\":\"%s\"}}\n",
+    sequence, reader_command, source, line, reader_witness.error, reader_witness.operation, reader_witness.result,
+    reader_witness.apiFailure ? "true" : "false", reader_witness.waited,
+    reader_witness.exitAvailable ? "true" : "false", reader_witness.exitCode,
+    reader_witness.accountingAvailable ? "true" : "false", reader_witness.activeProcesses,
+    reader_witness.childBytes, reader_witness.childShown,
+    reader_witness.childBytes > reader_witness.childShown ? "true" : "false", encoded);
+  if (size > 0) WriteFile(control, frame, (DWORD)size, &written, NULL);
+  SetLastError(error); return TRUE;
+}
+static __declspec(thread) struct {
+  BOOL active, apiFailure, cleanupFailed; const char *operation;
+  unsigned index; DWORD cleanupError;
+} reader_baseline;
+static BOOL reader_baseline_failure(const char *source, unsigned line, DWORD error) {
+  if (!reader_baseline.active) return FALSE;
+  char bytes[1024]; DWORD written;
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"baseline\":{\"operation\":\"%s\",\"index\":%u,\"apiFailure\":%s,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",
+    sequence, reader_command, source, line, error, reader_baseline.operation, reader_baseline.index,
+    reader_baseline.apiFailure ? "true" : "false", reader_baseline.cleanupFailed ? "true" : "false", reader_baseline.cleanupError);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+  return TRUE;
+}
+/* Control worker guards must never inherit the census thread's context. */
+static __declspec(thread) struct {
+  BOOL active; ULONG_PTR ordinal, count; USHORT type;
+  ULONG access, attributes; unsigned creator, child;
+} reader_transfer;
+static __declspec(thread) struct {
+  BOOL active; const wchar_t *image, *name; DWORD flags;
+} reader_loader;
+static __declspec(thread) struct {
+  BOOL active, process; DWORD pid, observedPid, processAccess, tokenAccess;
+  int matched, tokenResult;
+} reader_retain;
+#ifdef NATIVE_CI_EXPERIMENT
+/* Original-call facts belong to cold acquisition, not the census's last error. */
+static __declspec(thread) struct {
+  BOOL active, cleanupFailed; const char *operation; HANDLE snapshot, process;
+  DWORD pid, observedPid, error, cleanupError; ULONGLONG expected, birth;
+  unsigned census, count, found; LONGLONG waited, exitCode;
+} reader_cold;
+static void cold_release(void);
+#endif
+/* Task queries own every partial COM result until their one-shot scope closes. */
+struct task_scope {
+  ITaskService *service; ITaskFolder *folder; IRegisteredTask *task, *again;
+  IRunningTaskCollection *all, *instances; IRunningTask *item, *running[32];
+  BSTR root, name, xml, sd, path, guid, registeredPath; HANDLE engine;
+};
+static __declspec(thread) struct task_scope *reader_task;
+static __declspec(thread) struct {
+  const char *operation; HRESULT result; DWORD error, cleanupError; BOOL cleanupFailed; unsigned line, attempt; LONG index;
+} reader_scheduler;
+static void task_census_close(BOOL owned) {
+  struct task_scope *s=reader_task;
+  if(s->path){SysFreeString(s->path);s->path=NULL;}
+  if(s->item){IRunningTask_Release(s->item);s->item=NULL;}
+  if(s->all){IRunningTaskCollection_Release(s->all);s->all=NULL;}
+  if(owned)for(unsigned i=0;i<32;i++)if(s->running[i]){IRunningTask_Release(s->running[i]);s->running[i]=NULL;}
+}
+static BOOL task_engine_close(void) {
+  HANDLE engine=reader_task->engine;reader_task->engine=NULL;if(!engine)return TRUE;
+  if(CloseHandle(engine))return TRUE;
+  reader_scheduler.cleanupError=GetLastError();reader_scheduler.cleanupFailed=TRUE;return FALSE;
+}
+static BOOL task_close(void) {
+  struct task_scope *s=reader_task;if(!s)return !reader_scheduler.cleanupFailed;
+  DWORD saved=GetLastError();task_census_close(TRUE);
+  task_engine_close();
+  BSTR strings[]={s->root,s->name,s->xml,s->sd,s->guid,s->registeredPath};
+  for(unsigned i=0;i<6;i++)if(strings[i])SysFreeString(strings[i]);
+  if(s->instances)IRunningTaskCollection_Release(s->instances);
+  if(s->again)IRegisteredTask_Release(s->again);
+  if(s->task)IRegisteredTask_Release(s->task);
+  if(s->folder)ITaskFolder_Release(s->folder);
+  if(s->service)ITaskService_Release(s->service);
+  reader_task=NULL;SetLastError(saved);return !reader_scheduler.cleanupFailed;
+}
+static BOOL task_result(HRESULT result, const char *operation, unsigned line) {
+  reader_scheduler.error=GetLastError();reader_scheduler.result=result;reader_scheduler.line=line;
+  reader_scheduler.operation=FAILED(result)?operation:NULL;return SUCCEEDED(result);
+}
+#define task_hr(operation, ...) do { HRESULT task_status=operation(__VA_ARGS__); BOOL task_ok=task_result(task_status,#operation,__LINE__); SetLastError(reader_scheduler.error); need_hresult_at(task_status,task_ok,#operation,__FILE__,__LINE__); } while(0)
+/* Diagnostics use bounded UTF-16 bytes, never locale-dependent path output. */
+static BOOL reader_context_failure(const char *source, unsigned line, DWORD error) {
+  if (!reader_loader.active && !reader_retain.active) return FALSE;
+  char bytes[2048], context[1400]; DWORD written;
+  if (reader_loader.active) {
+    char image[513] = {0}, name[513] = {0};
+    size_t units = wcsnlen_s(reader_loader.image, 4096), length = wcsnlen_s(reader_loader.name, 129);
+    if (units > 4095 || length > 128) return FALSE;
+    const BYTE *imageBytes = (const BYTE *)reader_loader.image, *nameBytes = (const BYTE *)reader_loader.name;
+    for (size_t i = 0; i < (units < 128 ? units : 128)*2; i++) sprintf_s(image+i*2, sizeof(image)-i*2, "%02x", imageBytes[i]);
+    for (size_t i = 0; i < length*2; i++) sprintf_s(name+i*2, sizeof(name)-i*2, "%02x", nameBytes[i]);
+    sprintf_s(context, sizeof(context), "\"loader\":{\"imageUnits\":%zu,\"imageHex\":\"%s\",\"importHex\":\"%s\",\"flags\":%lu}", units, image, name, reader_loader.flags);
+  } else {
+    sprintf_s(context, sizeof(context), "\"retain\":{\"pid\":%lu,\"processAccess\":%lu,\"tokenAccess\":%lu,\"process\":%s,\"observedPid\":%lu,\"matched\":%d,\"tokenResult\":%d}",
+      reader_retain.pid, reader_retain.processAccess, reader_retain.tokenAccess, reader_retain.process ? "true" : "false", reader_retain.observedPid, reader_retain.matched, reader_retain.tokenResult);
+  }
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,%s}\n", sequence, reader_command, source, line, error, context);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+  return TRUE;
+}
+static void reader_trust_failure(const char *source, unsigned line) {
+  char bytes[1024], index[8] = "null", pin[68] = "null", expected[68] = "null", identity[50]; DWORD written;
+  struct held_file *file = signature_trust.file;
+  sprintf_s(identity, sizeof(identity), "%016llx:", file->id.VolumeSerialNumber);
+  for (unsigned i = 0; i < 16; i++) sprintf_s(identity+17+i*2, sizeof(identity)-17-i*2, "%02x", file->id.FileId.Identifier[i]);
+  for (unsigned i = 0; i < count; i++) if (&entries[i].file == file) {
+    sprintf_s(index, sizeof(index), "%u", i); sprintf_s(pin, sizeof(pin), "\"%s\"", entries[i].pin); break;
+  }
+  if (signature_trust.expected) sprintf_s(expected, sizeof(expected), "\"%s\"", signature_trust.expected);
+  const char *provider = "";
+#ifdef NATIVE_CI_EXPERIMENT
+  provider = signature_trust.provider;
+#endif
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"trust\":{\"mode\":\"%s\",\"result\":\"0x%08lx\",\"closeResult\":\"0x%08lx\",\"entry\":%s,\"identity\":\"%s\",\"sha256\":%s,\"signatureSha256\":%s,\"inputs\":%s%s}}\n",
+    sequence, reader_command, source, line, signature_trust.choice == WTD_CHOICE_FILE ? "embedded" : "catalog",
+    (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected, signature_trust.inputs, provider);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+}
+static BOOL reader_open_failure(const char *source, unsigned line, DWORD error) {
+  (void)source; (void)line; (void)error;
+#ifdef NATIVE_CI_EXPERIMENT
+  if (open_file_failure.name) {
+    size_t units = wcslen(open_file_failure.name);
+    if (units && units < 4096) {
+      char bytes[17408], path[16385] = {0}, attributes[16] = "null", tag[16] = "null"; DWORD written;
+      for (size_t i = 0; i < units; i++) sprintf_s(path+i*4, sizeof(path)-i*4, "%04x", (unsigned)open_file_failure.name[i]);
+      if (open_file_failure.sampled) {
+        sprintf_s(attributes, sizeof(attributes), "%lu", open_file_failure.tag.FileAttributes);
+        if (open_file_failure.tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+          sprintf_s(tag, sizeof(tag), "%lu", open_file_failure.tag.ReparseTag);
+      }
+      int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"open\":{\"operation\":\"%s\",\"pathUnits\":%zu,\"pathUtf16\":\"%s\",\"directory\":%s,\"apiFailure\":%s,\"attributes\":%s,\"tag\":%s}}\n",
+        sequence, reader_command, source, line, error, open_file_failure.operation, units, path,
+        open_file_failure.directory ? "true" : "false", open_file_failure.api_failure ? "true" : "false", attributes, tag);
+      if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+      return TRUE;
+    }
+  }
+#endif
+  return FALSE;
+}
+static BOOL reader_scheduler_failure(const char *source, unsigned line, DWORD error) {
+  task_close();
+  if(!reader_scheduler.operation&&!reader_scheduler.cleanupFailed)return FALSE;
+  char bytes[1024],operation[96]="null",result[16]="null";DWORD written;
+  if(reader_scheduler.operation){sprintf_s(operation,sizeof(operation),"\"%s\"",reader_scheduler.operation);sprintf_s(result,sizeof(result),"\"0x%08lx\"",(DWORD)reader_scheduler.result);}
+  int size=sprintf_s(bytes,sizeof(bytes),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"scheduler\":{\"operation\":%s,\"hresult\":%s,\"index\":%ld,\"attempt\":%u,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",sequence,reader_command,source,line,error,operation,result,reader_scheduler.index,reader_scheduler.attempt,reader_scheduler.cleanupFailed?"true":"false",reader_scheduler.cleanupError);
+  if(size>0)WriteFile(control,bytes,(DWORD)size,&written,NULL);return TRUE;
+}
+#ifdef NATIVE_CI_EXPERIMENT
+static BOOL reader_cold_failure(const char *source, unsigned line, DWORD error) {
+  if(!reader_cold.active)return FALSE;
+  reader_cold.error=error;cold_release();
+  char bytes[1536];DWORD written;
+  int size=sprintf_s(bytes,sizeof(bytes),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"cold\":{\"operation\":\"%s\",\"pid\":%lu,\"creationTime\":\"%llu\",\"observedPid\":%lu,\"observedCreationTime\":\"%llu\",\"census\":%u,\"count\":%u,\"found\":%u,\"wait\":%lld,\"exitCode\":%lld,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",
+    sequence,reader_command,source,line,reader_cold.error,reader_cold.operation,reader_cold.pid,reader_cold.expected,reader_cold.observedPid,reader_cold.birth,
+    reader_cold.census,reader_cold.count,reader_cold.found,reader_cold.waited,reader_cold.exitCode,reader_cold.cleanupFailed?"true":"false",reader_cold.cleanupError);
+  if(size>0)WriteFile(control,bytes,(DWORD)size,&written,NULL);return TRUE;
+}
+#else
+#define reader_cold_failure(source,line,error) FALSE
+#endif
+static void reader_failure(const char *file, unsigned line, DWORD error) {
+  if (!reader_diagnostics_ready) return;
+  const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  ownership_refusal_collect(source,line,error);
+  refusal_settle();
+  if(reader_witness_failure(source,line,error)) { ownership_failure_fence(error); return; }
+  if(ownership_failure_write(source,line,error)) { ownership_failure_fence(error); return; }
+  ownership_failure_fence(error);
+  if(reader_cold_failure(source,line,error))return;
+  if(reader_baseline_failure(source,line,error))return;
+  if(reader_scheduler_failure(source,line,error))return;
+  if (signature_trust.active) { reader_trust_failure(source, line); return; }
+  /* Import resolution can fail while holding the resolved file or its parents. */
+  if (reader_open_failure(source, line, error) || reader_context_failure(source, line, error)) return;
+  char bytes[1024], transfer[256] = ""; DWORD written;
+  if (reader_transfer.active) sprintf_s(transfer, sizeof(transfer), ",\"transfer\":{\"ordinal\":%llu,\"count\":%llu,\"type\":%u,\"access\":%lu,\"attributes\":%lu,\"creator\":%u,\"child\":%u}",
+    reader_transfer.ordinal, reader_transfer.count, reader_transfer.type, reader_transfer.access, reader_transfer.attributes, reader_transfer.creator, reader_transfer.child);
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu%s}\n", sequence, reader_command, source, line, error, transfer);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+}
+/* The fixed namespace makes possible helper/witness Jobs independently
+ * discoverable after their creator and transfer handles have disappeared. */
+static unsigned recovery_job_count;
+static HANDLE recovery_job(SECURITY_ATTRIBUTES *attributes) {
+  FILETIME birth, exit, kernel, user; need(GetProcessTimes(GetCurrentProcess(), &birth, &exit, &kernel, &user));
+  ULONGLONG creation = ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime;
+  wchar_t name[128]; need(recovery_job_count < 128 && strlen(nonce) == 32 &&
+    swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", nonce, GetCurrentProcessId(), creation, recovery_job_count++) > 0);
+  SetLastError(0); HANDLE job = CreateJobObjectW(attributes, name);
+  DWORD error = GetLastError();
+  if (job && error == ERROR_ALREADY_EXISTS) {
+    if (!CloseHandle(job)) fprintf(stderr, "native-windows-job-cleanup: operation=CloseHandle error=%lu\n", GetLastError());
+    SetLastError(error); need(FALSE);
+  }
+  SetLastError(error); need(job); return job;
+}
+static BOOL preparation_only;
+static wchar_t preparation_directory[4096], preparation_output[4096], preparation_plan[4096];
+static char preparation_plan_pin[65];
+static ULONGLONG preparation_journal_bytes;
+static void preparation_journal(const char *request, unsigned sequence) {
+  size_t size = strlen(request); need(size && size <= 262144 && preparation_journal_bytes+size*2 < 67108864); preparation_journal_bytes += size*2;
+  wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\windows-files-%hs-%u.json", preparation_directory, nonce, sequence) > 0);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE file = CreateFileW(name, GENERIC_WRITE | READ_CONTROL, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL); LocalFree(sd); need(file != INVALID_HANDLE_VALUE);
+  FILETIME created, ended, kernel, user; need(GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user));
+  char prefix[512]; int used = sprintf_s(prefix, sizeof(prefix), "{\"schemaVersion\":1,\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"helper\":{\"pid\":%lu,\"userSid\":\"S-1-5-18\",\"sessionId\":0,\"creationTime\":\"%llu\"},\"commandHex\":\"", candidate, nonce, GetCurrentProcessId(), ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime); DWORD written;
+  need(used > 0 && WriteFile(file, prefix, used, &written, NULL) && written == (DWORD)used);
+  BYTE *bytes = calloc(size*2+1, 1); need(bytes); const char *digits = "0123456789abcdef";
+  for (size_t i = 0; i < size; i++) { bytes[i*2] = digits[((BYTE)request[i])>>4]; bytes[i*2+1] = digits[((BYTE)request[i])&15]; }
+  need(WriteFile(file, bytes, (DWORD)size*2, &written, NULL) && written == size*2 && WriteFile(file, "\"}\n", 3, &written, NULL) && written == 3 && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
+}
+static struct held_file *dependencies[32]; static unsigned dependency_count, dependency_sizes[32];
+static DWORD WINAPI expire(void *unused) { (void)unused; Sleep(preparation_only ? PREPARATION_LIFETIME_MS : CUSTODY_LIFETIME_MS); ExitProcess(124); return 0; }
+static struct entry *slot(const char *value) { ULONGLONG index = number(value); need(index < count && entries[index].file.handle); return &entries[index]; }
+static void inspect(struct entry *entry) {
+  char dacl[65]; security(entry->file.handle, SE_FILE_OBJECT, FALSE, dacl);
+  FILE_ATTRIBUTE_TAG_INFO tag; need(GetFileInformationByHandleEx(entry->file.handle, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+  BY_HANDLE_FILE_INFORMATION info; need(GetFileInformationByHandle(entry->file.handle, &info) && info.nNumberOfLinks == entry->file.links);
+  printf("{\"identity\":\""); file_id(&entry->file); printf("\",\"pathHex\":\""); hex((BYTE *)entry->file.path, wcslen(entry->file.path)*2);
+  printf("\",\"volumeHex\":\""); hex((BYTE *)entry->file.volumeName, wcslen(entry->file.volumeName)*2);
+  printf("\",\"filesystemHex\":\""); hex((BYTE *)entry->file.filesystem, wcslen(entry->file.filesystem)*2);
+  printf("\",\"daclSha256\":\"%s\",\"links\":%lu,\"directory\":%s,\"held\":true,\"reparse\":false}", dacl, entry->file.links, tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY ? "true" : "false");
+}
+static void plan(const wchar_t *name, const char *expected) {
+  struct held_file file = hold(name, FALSE, TRUE, GENERIC_READ); pin(&file, expected);
+  DWORD size; BYTE *bytes = read_file(&file, 262144, &size); need(bytes[size-1] == '\n' && !memchr(bytes, 0, size));
+  char *text = calloc(size+1, 1); need(text); memcpy(text, bytes, size); free(bytes);
+  char *state, *first = strtok_s(text, "\n", &state), extra;
+#ifdef NATIVE_CI_EXPERIMENT
+#define CUSTODY_PLAN_FORMAT "native-experiment-v1 %40s %32s %c"
+#else
+#define CUSTODY_PLAN_FORMAT "native-custody-v1 %40s %32s %c"
+#endif
+  need(first && sscanf_s(first, CUSTODY_PLAN_FORMAT,
+    candidate, 41u, nonce, 33u, &extra, 1u) == 2 &&
+    strlen(candidate) == 40 && strspn(candidate, "0123456789abcdef") == 40 && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
+#undef CUSTODY_PLAN_FORMAT
+  for (char *next = strtok_s(NULL, "\n", &state); next; next = strtok_s(NULL, "\n", &state)) {
+    need(count < SLOTS); struct entry *entry = &entries[count++]; char path[16384];
+    need(sscanf_s(next, "%15s %64s %64s %16383s %c", entry->kind, 16u, entry->pin, 65u, entry->signature, 65u, path, (unsigned)sizeof(path), &extra, 1u) == 4);
+    need(!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "data") || !strcmp(entry->kind, "mutable") || !strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper") || !strcmp(entry->kind, "sdk"));
+    need(!strcmp(entry->kind, "directory") ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
+    need(!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper") ? strlen(entry->signature) == 64 && strspn(entry->signature, "0123456789abcdef") == 64 : !strcmp(entry->signature, "-"));
+    decode(path, entry->path); for (unsigned i = 0; i+1 < count; i++) need(_wcsicmp(entries[i].path, entry->path));
+  }
+  need(count); free(text); close_file(&file);
+}
+static unsigned retain_process(DWORD pid) {
+  need(pid > 0 && pid != GetCurrentProcessId() && process_count < (preparation_only ? 128u : 32u));
+  reader_retain.pid = pid; reader_retain.observedPid = 0; reader_retain.matched = -1; reader_retain.tokenResult = -1;
+  reader_retain.processAccess = PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL | SYNCHRONIZE;
+  reader_retain.tokenAccess = TOKEN_QUERY | TOKEN_DUPLICATE; reader_retain.active = TRUE;
+  HANDLE process = OpenProcess(reader_retain.processAccess, FALSE, pid), token = NULL;
+  DWORD error = GetLastError(); reader_retain.process = !!process;
+  if (process) {
+    reader_retain.observedPid = GetProcessId(process); error = GetLastError();
+    reader_retain.matched = reader_retain.observedPid == pid;
+    if (reader_retain.matched) {
+      reader_retain.tokenResult = !!OpenProcessToken(process, reader_retain.tokenAccess, &token); error = GetLastError();
+    }
+  }
+  SetLastError(error); need(reader_retain.tokenResult == 1); reader_retain.active = FALSE;
+  for (unsigned i = 0; i < process_count; i++) need(GetProcessId(processes[i]) != pid);
+  processes[process_count] = process; tokens[process_count] = token; sessions[process_count] = process_session(process); return process_count++;
+}
+/* Preserve every actual entry, including raw informational attribute bits. */
+static void emit_privilege(LUID_AND_ATTRIBUTES *value) {
+  wchar_t name[128] = {0}; DWORD length = 128;
+  need(LookupPrivilegeNameW(NULL, &value->Luid, name, &length));
+  BOOL valid = length >= 12 && length < 128 && !name[length] && wcslen(name) == length &&
+    !wcsncmp(name, L"Se", 2) && !wcscmp(name + length - 9, L"Privilege");
+  if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  for (DWORD i = 0; i < length; i++) {
+    valid = (name[i] >= L'A' && name[i] <= L'Z') || (name[i] >= L'a' && name[i] <= L'z') || (name[i] >= L'0' && name[i] <= L'9');
+    if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  }
+  printf("{\"luid\":\"%08lx%08lx\",\"name\":\"%ls\",\"attributes\":%lu}", value->Luid.HighPart, value->Luid.LowPart, name, value->Attributes);
+}
+static void process_read(unsigned index) {
+  need(index < process_count); HANDLE process = processes[index], token = tokens[index]; char dacl[65];
+  TOKEN_STATISTICS *before = token_info(token, TokenStatistics); TOKEN_GROUPS *groups = token_info(token, TokenGroups), *restricting = token_info(token, TokenRestrictedSids);
+  if (WaitForSingleObject(process, 0) != WAIT_OBJECT_0) {
+    HANDLE current; need(OpenProcessToken(process, TOKEN_QUERY, &current)); TOKEN_STATISTICS *assigned = token_info(current, TokenStatistics);
+    need(!memcmp(&before->TokenId, &assigned->TokenId, sizeof(LUID)) && process_session(process) == sessions[index] && CloseHandle(current)); free(assigned);
+  }
+  TOKEN_PRIVILEGES *privileges = token_info(token, TokenPrivileges); TOKEN_MANDATORY_LABEL *level = token_info(token, TokenIntegrityLevel);
+  security(process, SE_KERNEL_OBJECT, FALSE, dacl);
+  printf("{\"identity\":"); retained_identity(process, token, sessions[index]); printf(",\"processDaclSha256\":\"%s\",\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"integritySid\":\"", dacl,
+    before->TokenId.HighPart, before->TokenId.LowPart, before->AuthenticationId.HighPart, before->AuthenticationId.LowPart);
+  wchar_t *sid; need(ConvertSidToStringSidW(level->Label.Sid, &sid)); printf("%ls\",\"groups\":[", sid); LocalFree(sid);
+  need(groups->GroupCount <= 128 && restricting->GroupCount <= 128 && privileges->PrivilegeCount <= 128);
+  for (unsigned i = 0; i < groups->GroupCount; i++) { need(ConvertSidToStringSidW(groups->Groups[i].Sid, &sid));
+    printf("%s{\"sid\":\"%ls\",\"attributes\":%lu}", i ? "," : "", sid, groups->Groups[i].Attributes); LocalFree(sid); }
+  printf("],\"restricting\":[");
+  for (unsigned i = 0; i < restricting->GroupCount; i++) { need(ConvertSidToStringSidW(restricting->Groups[i].Sid, &sid)); printf("%s\"%ls\"", i ? "," : "", sid); LocalFree(sid); }
+  printf("],\"privileges\":[");
+  for (unsigned i = 0; i < privileges->PrivilegeCount; i++) { if (i) putchar(','); emit_privilege(&privileges->Privileges[i]); }
+  TOKEN_STATISTICS *after = token_info(token, TokenStatistics); need(!memcmp(&before->ModifiedId, &after->ModifiedId, sizeof(LUID)));
+  printf("],\"retired\":%s}", WaitForSingleObject(process, 0) == WAIT_OBJECT_0 ? "true" : "false");
+  free(before); free(after); free(groups); free(restricting); free(privileges); free(level);
+}
+/* The live independent verifier is not a payload-domain member. Inspect it
+ * through a temporary handle so it cannot obstruct retained-domain retirement. */
+static void verifier_read(const char *pidText, const char *creationText) {
+  DWORD pid = bounded_number(pidText, MAXDWORD); ULONGLONG creation = number(creationText);
+  need(pid && pid != GetCurrentProcessId() && creation);
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  FILETIME started, ended, kernel, user;
+  need(process && GetProcessId(process) == pid && WaitForSingleObject(process, 0) == WAIT_TIMEOUT &&
+    system_process(process) && GetProcessTimes(process, &started, &ended, &kernel, &user) &&
+    (((ULONGLONG)started.dwHighDateTime << 32) | started.dwLowDateTime) == creation);
+  identity(process); need(WaitForSingleObject(process, 0) == WAIT_TIMEOUT && CloseHandle(process));
+}
+static void job_read(HANDLE job) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui; char dacl[65];
+  BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + 32*sizeof(ULONG_PTR)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *members = (void *)bytes;
+  need(QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) &&
+    QueryInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui), NULL) &&
+    QueryInformationJobObject(job, JobObjectBasicProcessIdList, members, sizeof(bytes), NULL) &&
+    members->NumberOfAssignedProcesses == members->NumberOfProcessIdsInList && members->NumberOfProcessIdsInList <= 32);
+  security(job, SE_KERNEL_OBJECT, TRUE, dacl);
+  HANDLE held[32]; unsigned count = members->NumberOfProcessIdsInList;
+  printf("{\"daclSha256\":\"%s\",\"limitFlags\":%lu,\"processLimit\":%lu,\"uiRestrictions\":%lu,\"members\":[", dacl,
+    limits.BasicLimitInformation.LimitFlags, limits.BasicLimitInformation.ActiveProcessLimit, ui.UIRestrictionsClass);
+  for (unsigned i = 0; i < members->NumberOfProcessIdsInList; i++) { HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, (DWORD)members->ProcessIdList[i]); BOOL belongs;
+    need(process && IsProcessInJob(process, job, &belongs) && belongs); held[i] = process; if (i) putchar(','); identity(process); }
+  BYTE next[sizeof(bytes)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *again = (void *)next;
+  need(QueryInformationJobObject(job, JobObjectBasicProcessIdList, again, sizeof(next), NULL) &&
+    again->NumberOfAssignedProcesses == count && again->NumberOfProcessIdsInList == count && !memcmp(again->ProcessIdList, members->ProcessIdList, count*sizeof(ULONG_PTR)));
+  for (unsigned i = 0; i < count; i++) need(CloseHandle(held[i]));
+  printf("]}");
+}
+static void remote(HANDLE process, const void *address, void *bytes, SIZE_T size) { SIZE_T read; need(ReadProcessMemory(process, address, bytes, size, &read) && read == size); }
+#ifndef NATIVE_CI_EXPERIMENT
+struct api_header { ULONG version, size, flags, count, entry, hash, factor; };
+struct api_entry { ULONG flags, name, length, hashed, values, count; };
+struct api_value { ULONG flags, name, length, host, size; };
+static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256], const wchar_t *image, const wchar_t *imported) {
+  typedef NTSTATUS (NTAPI *query)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
+  query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"); PROCESS_BASIC_INFORMATION info;
+  need(get && !get(process, ProcessBasicInformation, &info, sizeof(info), NULL)); void *map;
+  remote(process, (BYTE *)info.PebBaseAddress + 0x68, &map, sizeof(map)); struct api_header header; remote(process, map, &header, sizeof(header));
+  need(header.version == 6 && header.size >= sizeof(header) && header.size <= 1048576 && header.count <= 2048 && header.entry <= header.size &&
+    header.count <= (header.size - header.entry) / sizeof(struct api_entry));
+  BYTE *bytes = calloc(header.size, 1); need(bytes); remote(process, map, bytes, header.size); unsigned found = 0;
+  for (unsigned i = 0; i < header.count; i++) { struct api_entry *entry = (void *)(bytes + header.entry + i*sizeof(*entry));
+    need(entry->length && entry->length <= 510 && entry->name <= header.size && entry->length <= header.size - entry->name && !(entry->length % 2));
+    wchar_t name[256] = {0}; memcpy(name, bytes + entry->name, entry->length);
+    if (_wcsicmp(name, contract)) continue; need(entry->count == 1 && entry->values <= header.size - sizeof(struct api_value));
+    struct api_value *value = (void *)(bytes + entry->values); need(value->length == 0 && value->size && value->size <= 510 && !(value->size % 2) &&
+      value->host <= header.size && value->size <= header.size - value->host); memcpy(host, bytes + value->host, value->size); host[value->size/2] = 0; found++;
+  }
+  free(bytes);
+  if (found != 1) { DWORD error = GetLastError(); fprintf(stderr, "native-windows-api-set: image=%ls import=%ls contract=%ls matches=%u\n", image, imported, contract, found); fflush(stderr); SetLastError(error); }
+  need(found == 1); /* Ambiguous importer-specific API sets stay unsupported. */
+}
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+/* Observe the installed loader; an API-set spelling need not have a namespace
+ * entry when the image supplies a physical forwarding DLL of that name. */
+static struct held_file experiment_import(const wchar_t *name, const wchar_t *image, wchar_t actual[4096]) {
+  /* Resolve API-set contracts through the documented loader without running
+   * DllMain or loading dependencies. Resource-only mapping treats them as files. */
+  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 | DONT_RESOLVE_DLL_REFERENCES;
+  reader_loader.image = image; reader_loader.name = name; reader_loader.flags = flags; reader_loader.active = TRUE;
+  size_t size = wcslen(name);
+  need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
+  HMODULE module = NULL;
+  if (!GetModuleHandleExW(0, name, &module)) module = LoadLibraryExW(name, NULL, flags);
+  need(module);
+  /* Open the observed NT path through GLOBALROOT rather than guessing a DOS alias. */
+  wchar_t canonical[4100], mapped[4100], named[4100], mappedPath[4120], system[4096];
+  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), module, mapped, 4100);
+  need(mappedSize && mappedSize < 4100);
+  DWORD prefix = GetSystemDirectoryW(system, 4096);
+  need(prefix && prefix < 4096 && swprintf_s(mappedPath, 4120, L"\\\\?\\GLOBALROOT%ls", mapped) > 0);
+  HANDLE selected = CreateFileW(mappedPath, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
+  need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+    GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
+  DWORD canonicalSize = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4)); wcscpy_s(actual, 4096, canonical+4);
+  need(!_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
+  DWORD namedSize = GetFinalPathNameByHandleW(selected, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  need(namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
+  struct held_file file = hold(actual, FALSE, FALSE, GENERIC_READ); char dacl[65]; stock_security(file.handle,dacl);
+  need(GetFileInformationByHandleEx(file.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before,&after,sizeof(before)) && CloseHandle(selected) && FreeLibrary(module));
+  reader_loader.active = FALSE;
+  return file;
+}
+static void experiment_loader(const wchar_t *name, const wchar_t *image) {
+  wchar_t actual[4096]; struct held_file file = experiment_import(name, image, actual);
+  DWORD size; BYTE *bytes = read_file(&file, 536870912, &size); char hash[65]; sum(bytes, size, hash); free(bytes);
+  printf("{\"pathHex\":\""); hex((BYTE *)actual, wcslen(actual)*2); printf("\",\"identity\":\""); file_id(&file);
+  printf("\",\"sha256\":\"%s\"}", hash); close_file(&file);
+}
+static BOOL experiment_system_image(const wchar_t *name) {
+  wchar_t system[4096]; DWORD length = GetSystemDirectoryW(system, 4096);
+  need(length && length < 4096);
+  size_t size = wcslen(name);
+  return size > length + 5 && !_wcsnicmp(name, system, length) && name[length] == '\\' &&
+    !wcschr(name+length+1, '\\') && !_wcsicmp(name+size-4, L".dll");
+}
+#endif
+static void process_image(unsigned index, struct entry *entry) {
+  need(index < process_count);
+  wchar_t actual[4096]; DWORD length = 4096; char signatureSha[65];
+  need((!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
+  pin(&entry->file, entry->pin); signature(&entry->file, entry->signature, signatureSha);
+  printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
+  printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
+}
+#ifdef NATIVE_CI_EXPERIMENT
+/* Module enumeration preserves the spelling used to load an image, whereas
+ * hold requires the normalized DOS name. Resolve that producer through an
+ * owned no-write/no-delete handle, never through case folding or an alias guess.
+ * Keep the original parents until the canonical file and parents are retained. */
+static struct held_file hold_loaded_module(wchar_t name[4096]) {
+  need(wcslen(name) > 3 && wcslen(name) < 4096 && name[1] == ':' && name[2] == '\\');
+  HANDLE selected = CreateFileW(name, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after; wchar_t canonical[4100], parent[4096];
+  need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+    !(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+    GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
+  if (!SetHandleInformation(selected, HANDLE_FLAG_INHERIT, 0)) { open_file_refusal(name, "SetHandleInformation", TRUE, FALSE, NULL); need(false); }
+  DWORD size = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!size) { open_file_refusal(name, "GetFinalPathNameByHandleW", TRUE, FALSE, NULL); need(false); }
+  if (size <= 7 || size >= 4100) { open_file_refusal(name, "final-path-size", FALSE, FALSE, &tag); need(false); }
+  if (wcsncmp(canonical, L"\\\\?\\", 4) || canonical[5] != ':' || canonical[6] != '\\') { open_file_refusal(name, "final-path-prefix", FALSE, FALSE, &tag); need(false); }
+  HANDLE parents[32]; unsigned count = 0; wcscpy_s(parent, 4096, name);
+  wchar_t *slash = wcsrchr(parent, '\\'); need(slash); *slash = 0;
+  while (wcslen(parent) > 2) {
+    need(count < 32); HANDLE held = CreateFileW(parent, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    need(held != INVALID_HANDLE_VALUE); parents[count++] = held;
+    need(GetFileInformationByHandleEx(held, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && SetHandleInformation(held, HANDLE_FLAG_INHERIT, 0));
+    slash = wcsrchr(parent, '\\'); need(slash); *slash = 0;
+  }
+  struct held_file file = hold(canonical+4, FALSE, FALSE, GENERIC_READ);
+  need(!memcmp(&before, &file.id, sizeof(before)) && GetFileInformationByHandleEx(selected, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)));
+  wcscpy_s(name, 4096, file.path);
+  BOOL closed = CloseHandle(selected);
+  for (unsigned i = 0; i < count; i++) if (!CloseHandle(parents[i])) closed = FALSE;
+  need(closed); return file;
+}
+#endif
+static DWORD rva(BYTE *bytes, DWORD size, IMAGE_NT_HEADERS64 *pe, DWORD address, DWORD needed) {
+  need(needed <= size); if (address < pe->OptionalHeader.SizeOfHeaders) { need(address <= size-needed); return address; }
+  IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe); need((BYTE *)sections >= bytes && (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size && pe->FileHeader.NumberOfSections <= 96);
+  for (unsigned i = 0; i < pe->FileHeader.NumberOfSections; i++) if (address >= sections[i].VirtualAddress && address - sections[i].VirtualAddress <= sections[i].SizeOfRawData &&
+    needed <= sections[i].SizeOfRawData - (address - sections[i].VirtualAddress)) {
+    ULONGLONG offset = (ULONGLONG)sections[i].PointerToRawData + address - sections[i].VirtualAddress; need(offset <= size-needed); return (DWORD)offset;
+  }
+  need(FALSE); return 0;
+}
+static void loader(unsigned subject, struct entry *image) {
+  need(subject < process_count); HANDLE process = processes[subject]; HMODULE modules[128]; DWORD used;
+  need(EnumProcessModulesEx(process, modules, sizeof(modules), &used, LIST_MODULES_64BIT) && used && used <= sizeof(modules) && used % sizeof(HMODULE) == 0);
+  need(dependency_count < 32); wchar_t (*paths)[4096] = calloc(128, sizeof(*paths));
+  struct held_file *files = calloc(128, sizeof(*files)); need(paths && files); unsigned n = used/sizeof(HMODULE);
+  printf("{\"loaded\":[");
+  for (unsigned i = 0; i < n; i++) { DWORD length = GetModuleFileNameExW(process, modules[i], paths[i], 4096); need(length > 0 && length < 4096);
+#ifdef NATIVE_CI_EXPERIMENT
+    files[i] = hold_loaded_module(paths[i]);
+#else
+    files[i] = hold(paths[i], FALSE, FALSE, GENERIC_READ);
+#endif
+    DWORD size; BYTE *bytes = read_file(&files[i], 536870912, &size); char hash[65], dacl[65], sig[65]; sum(bytes, size, hash); free(bytes);
+    wchar_t mapped[4100], named[4100]; DWORD mappedSize = GetMappedFileNameW(process, modules[i], mapped, 4100), namedSize = GetFinalPathNameByHandleW(files[i].handle, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+    need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
+    security(files[i].handle, SE_FILE_OBJECT, FALSE, dacl); signature(&files[i], NULL, sig);
+#ifdef NATIVE_CI_EXPERIMENT
+    if (experiment_system_image(paths[i])) stock_security(files[i].handle, dacl);
+#endif
+    if (i) putchar(','); printf("{\"pathHex\":\""); hex((BYTE *)paths[i], wcslen(paths[i])*2); printf("\",\"identity\":\""); file_id(&files[i]);
+    printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"links\":%lu}", hash, sig, dacl, files[i].links); }
+  printf("],\"imports\":["); unsigned emitted = 0;
+  for (unsigned source = 0; source < n; source++) {
+#ifdef NATIVE_CI_EXPERIMENT
+  /* Hosted System32 modules and marked helpers are observed above, not a
+   * reconstructed trust graph. Only private runtime images retain import edges. */
+  BOOL isHelper = !strcmp(image->kind, "helper") && !memcmp(&image->file.id, &files[source].id, sizeof(files[source].id));
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && entries[i].file.handle &&
+    !memcmp(&entries[i].file.id, &files[source].id, sizeof(files[source].id))) isHelper = TRUE;
+  if (isHelper || experiment_system_image(paths[source])) continue;
+#endif
+  DWORD size; BYTE *bytes = read_file(&files[source], 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
+  need(size >= 512 && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64));
+  IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew); need(pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+    pe->FileHeader.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64) && pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 14);
+  for (unsigned directory = 0; directory < 2; directory++) {
+    IMAGE_DATA_DIRECTORY table = pe->OptionalHeader.DataDirectory[directory ? IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT : IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!table.Size) { need(!table.VirtualAddress); continue; } DWORD width = directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR), at = rva(bytes, size, pe, table.VirtualAddress, table.Size); BOOL terminated = FALSE;
+    for (unsigned i = 0; (i+1)*width <= table.Size; i++) { DWORD *entry = (void *)(bytes + at + i*width); DWORD nameRva = directory ? entry[1] : entry[3];
+      if (!nameRva) { terminated = TRUE; break; } need(i < 128); if (directory) need(entry[0] == 1); DWORD nameAt = rva(bytes, size, pe, nameRva, 1), length = 0;
+      while (length < 255 && nameAt + length < size && bytes[nameAt+length]) length++; need(length && length < 255 && nameAt+length < size);
+      wchar_t name[256] = {0}, host[256] = {0}; for (unsigned j = 0; j < length; j++) { need(bytes[nameAt+j] >= 32 && bytes[nameAt+j] < 127 && bytes[nameAt+j] != '/' && bytes[nameAt+j] != '\\'); name[j] = bytes[nameAt+j]; }
+      wcscpy_s(host, 256, name);
+#ifndef NATIVE_CI_EXPERIMENT
+      if (!_wcsnicmp(name, L"api-", 4) || !_wcsnicmp(name, L"ext-", 4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot = wcsrchr(contract, '.'); if (dot) *dot = 0; api_host(process, contract, host, paths[source], name); }
+#endif
+      unsigned match = n; for (unsigned j = 0; j < n; j++) if (!_wcsicmp(wcsrchr(paths[j], '\\')+1, host)) { need(match == n); match = j; }
+#ifdef NATIVE_CI_EXPERIMENT
+      if (match == n) {
+        wchar_t actual[4096]; struct held_file resolved = experiment_import(name, paths[source], actual);
+        for (unsigned j = 0; j < n; j++) if (!_wcsicmp(paths[j], actual) && !memcmp(&files[j].id, &resolved.id, sizeof(resolved.id))) { need(match == n); match = j; }
+        close_file(&resolved);
+      }
+#endif
+      need(match < n);
+      need(emitted < 2048); printf("%s{\"source\":%u,\"importHex\":\"", emitted++ ? "," : "", source); hex(bytes+nameAt, length); printf("\",\"resolved\":%u,\"delay\":%s}", match, directory ? "true" : "false");
+    } need(terminated);
+  }
+  free(bytes); }
+  DWORD size; BYTE *bytes = read_file(&image->file, 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
+  need(size >= 512 && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64)); IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew);
+  HMODULE again[128]; DWORD next; need(EnumProcessModulesEx(process, again, sizeof(again), &next, LIST_MODULES_64BIT) && next == used && !memcmp(modules, again, used));
+#ifdef NATIVE_CI_EXPERIMENT
+  printf("],\"importScope\":\"private-runtime\",\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"complete\":true}", pe->OptionalHeader.MajorLinkerVersion, pe->OptionalHeader.MinorLinkerVersion, pe->FileHeader.TimeDateStamp);
+#else
+  printf("],\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"complete\":true}", pe->OptionalHeader.MajorLinkerVersion, pe->OptionalHeader.MinorLinkerVersion, pe->FileHeader.TimeDateStamp);
+#endif
+  free(bytes); free(paths); dependencies[dependency_count] = files; dependency_sizes[dependency_count++] = n;
+}
+static void quoted(wchar_t *command, size_t maximum, const wchar_t *value) {
+  need(wcscat_s(command, maximum, L"\"") == 0); unsigned slashes = 0;
+  for (const wchar_t *at = value;; at++) {
+    if (*at == '\\') { slashes++; continue; }
+    unsigned n = (*at == '"' || !*at) ? slashes*2 : slashes;
+    for (unsigned i = 0; i < n; i++) need(wcscat_s(command, maximum, L"\\") == 0);
+    slashes = 0; if (*at == '"') need(wcscat_s(command, maximum, L"\\") == 0);
+    if (!*at) break; wchar_t text[2] = {*at, 0}; need(wcscat_s(command, maximum, text) == 0);
+  }
+  need(wcscat_s(command, maximum, L"\" ") == 0);
+}
+static void file_root_sharing(struct entry *root, struct entry *base) {
+  need(!strcmp(root->kind, "directory") && !strcmp(base->kind, "directory"));
+  wchar_t named[4096]; need(swprintf_s(named, 4096, L"%ls\\files", base->path) > 0 && !_wcsicmp(named, root->path));
+  char rootDacl[65], baseDacl[65]; security(root->file.handle, SE_FILE_OBJECT, TRUE, rootDacl); security(base->file.handle, SE_FILE_OBJECT, TRUE, baseDacl);
+  /* Share deletion only for the fixed owned substitution root. ReOpenFile
+   * preserves object custody; no pathname lookup or parent lease is released. */
+  HANDLE next = ReOpenFile(root->file.handle,
+    ACCESS_SYSTEM_SECURITY | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC | WRITE_OWNER,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  FILE_ID_INFO id; char after[65];
+  need(next != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(next, FileIdInfo, &id, sizeof(id)) &&
+    !memcmp(&id, &root->file.id, sizeof(id)) && SetHandleInformation(next, HANDLE_FLAG_INHERIT, 0));
+  security(next, SE_FILE_OBJECT, TRUE, after); need(!strcmp(rootDacl, after) && CloseHandle(root->file.handle)); root->file.handle = next;
+}
+/* The shared OS directory is native process setup, never caller-selected input. */
+static void startup_environment(wchar_t environment[4160]) {
+  wchar_t windows[4096];
+  UINT length = GetSystemWindowsDirectoryW(windows, 4096);
+  need(length > 3 && length < 4096 && windows[length] == 0 && wcslen(windows) == length &&
+    ((windows[0] >= L'A' && windows[0] <= L'Z') || (windows[0] >= L'a' && windows[0] <= L'z')) &&
+    windows[1] == L':' && windows[2] == L'\\');
+  for (UINT i = 3; i < length; i++) need(windows[i] >= 32 && !wcschr(L"/:\"<>|?*", windows[i]));
+  static const wchar_t fixed[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=";
+  size_t prefix = sizeof(fixed)/sizeof(fixed[0])-1;
+  need(prefix+length+2 <= 4160);
+  memcpy(environment, fixed, prefix*sizeof(wchar_t));
+  memcpy(environment+prefix, windows, (length+1)*sizeof(wchar_t));
+  environment[prefix+length+1] = 0;
+}
+static void start_helper(char **values, unsigned n) {
+  need(!helper && n >= 8 && (!strcmp(values[2], "file") || !strcmp(values[2], "policy") || !strcmp(values[2], "observer") ||
+    !strcmp(values[2], "build") || !strcmp(values[2], "git") || !strcmp(values[2], "git-policy")));
+  struct entry *image = slot(values[3]); BOOL file = !strcmp(values[2], "file"), observer = !strcmp(values[2], "observer"),
+    compiler = !strcmp(values[2], "build"), git = !strcmp(values[2], "git"), gitPolicy = !strcmp(values[2], "git-policy");
+  need(!strcmp(image->kind, "helper") && !_wcsicmp(wcsrchr(image->path, '\\')+1, file ? L"file-helper.exe" : observer ? L"observer-helper.exe" :
+    compiler ? L"build-helper.exe" : git ? L"git-fixture.exe" : gitPolicy ? L"git-policy.exe" : L"policy-helper.exe"));
+  unsigned argc = bounded_number(values[4], gitPolicy ? 386 : 55); need(argc >= (observer ? 2U : 5U) && n > 5 + argc);
+  wchar_t (*args)[WINDOWS_BUILD_ENVIRONMENT_CAPACITY] = calloc(argc, sizeof(*args)); need(args);
+  for (unsigned i = 0; i < argc; i++) decode_bounded(values[5+i], args[i], observer && i == 1 ? 16385 :
+    compiler && (i == 10 || i == 11 || i == 13) ? WINDOWS_BUILD_ENVIRONMENT_CAPACITY : 4096);
+  need(wcslen(args[0]) == 32); for (unsigned i = 0; i < 32; i++) need(args[0][i] == nonce[i]);
+  unsigned inheritedCount = bounded_number(values[5+argc], gitPolicy ? 128 : 44), first = file ? 1 : observer || compiler || git || gitPolicy ? 0 :
+    (!wcscmp(args[4], L"install-provider") || !wcscmp(args[4], L"remove-provider") ? 6 : 13);
+  need(n == 6 + argc + inheritedCount && (git ? argc == 8 && inheritedCount == 0 && !wcscmp(args[1], L"fixed-commit") :
+    gitPolicy ? inheritedCount >= 3 && argc == 8 + (inheritedCount-2)*3 && (!wcscmp(args[7], L"install") || !wcscmp(args[7], L"remove")) :
+    compiler ? argc == 14 && inheritedCount == 0 : observer ? argc == 2 && inheritedCount == 0 :
+    inheritedCount >= 2 && (file ? argc == 5 && inheritedCount == 2 : argc == first + inheritedCount)));
+  wchar_t environment[4160]; startup_environment(environment);
+  if (file) file_root_sharing(slot(values[6+argc]), slot(values[7+argc]));
+  HANDLE inherited[130]; PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE);
+  HANDLE childIn, childOut; need(CreatePipe(&childIn, &helper_in, &sa, 0) && CreatePipe(&helper_out, &childOut, &sa, 0) &&
+    SetHandleInformation(helper_in, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(helper_out, HANDLE_FLAG_INHERIT, 0));
+  inherited[0] = childIn; inherited[1] = childOut;
+  for (unsigned i = 0; i < inheritedCount; i++) {
+    struct entry *entry = slot(values[6+argc+i]); need(!file || !strcmp(entry->kind, "directory"));
+    HANDLE transfer = entry->file.handle;
+    if (!file && !observer && !compiler && !git && !gitPolicy) {
+      FILE_ID_INFO actual;
+      transfer = ReOpenFile(entry->file.handle, GENERIC_READ | READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+      need(transfer != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(transfer, FileIdInfo, &actual, sizeof(actual)) && !memcmp(&actual, &entry->file.id, sizeof(actual)));
+    }
+    need(DuplicateHandle(GetCurrentProcess(), transfer, GetCurrentProcess(), &inherited[i+2], 0, TRUE, DUPLICATE_SAME_ACCESS));
+    if (transfer != entry->file.handle) need(CloseHandle(transfer));
+    unsigned argument = gitPolicy ? (i < 2 ? 3+i : 8+(i-2)*3) : first+i;
+    need(swprintf_s(args[argument], 4096, L"%llu", (ULONGLONG)(ULONG_PTR)inherited[i+2]) > 0);
+  }
+  SECURITY_ATTRIBUTES private = attributes(sd, FALSE); helper_job = recovery_job(&private);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+  /* Only the sealed compiler controller may leave this Job at child creation.
+   * Its compiler is assigned atomically to a separate no-breakaway Job. */
+  if (compiler) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+  limits.BasicLimitInformation.ActiveProcessLimit = compiler || git ? 32 : 1; JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
+  need(SetInformationJobObject(helper_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(helper_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+  SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); need(size > 0 && size <= 65536);
+  STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size); need(start.lpAttributeList);
+  need(InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &size) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, (inheritedCount+2)*sizeof(HANDLE), NULL, NULL) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &helper_job, sizeof(HANDLE), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = childIn; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = childOut;
+  wchar_t command[32767] = L""; quoted(command, 32767, image->path); for (unsigned i = observer ? 1 : 0; i < argc; i++) quoted(command, 32767, args[i]);
+  wchar_t directory[4096]; wcscpy_s(directory, 4096, image->path); *wcsrchr(directory, '\\') = 0;
+  PROCESS_INFORMATION process; char creatorDacl[65];
+  if (compiler || git) {
+    /* Process/thread DACLs do not govern implicitly created files or children.
+     * Give only these fixed grants a separate System-only creator token. */
+    HANDLE parent, primary, assigned; PACL acl; BOOL present, defaulted;
+    need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &parent) &&
+      DuplicateTokenEx(parent, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT,
+        &private, SecurityImpersonation, TokenPrimary, &primary) && CloseHandle(parent) &&
+      GetSecurityDescriptorDacl(sd, &present, &acl, &defaulted) && present && acl && IsValidAcl(acl));
+    TOKEN_DEFAULT_DACL creation = {acl};
+    need(SetTokenInformation(primary, TokenDefaultDacl, &creation, sizeof(creation)) &&
+      CreateProcessAsUserW(primary, image->path, command, &private, &private, TRUE,
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, directory, &start.StartupInfo, &process) &&
+      CloseHandle(primary) && OpenProcessToken(process.hProcess, TOKEN_QUERY, &assigned));
+    TOKEN_DEFAULT_DACL *actual = token_info(assigned, TokenDefaultDacl);
+    need(actual->DefaultDacl && IsValidAcl(actual->DefaultDacl) && actual->DefaultDacl->AclSize == acl->AclSize &&
+      !memcmp(actual->DefaultDacl, acl, acl->AclSize));
+    sum((BYTE *)actual->DefaultDacl, actual->DefaultDacl->AclSize, creatorDacl); free(actual); need(CloseHandle(assigned));
+  } else need(CreateProcessW(image->path, command, &private, &private, TRUE,
+    CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, directory, &start.StartupInfo, &process));
+  free(args);
+  helper = process.hProcess; helper_thread = process.hThread;
+  helper_file = file;
+  DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList);
+  for (unsigned i = 0; i < inheritedCount+2; i++) need(CloseHandle(inherited[i]));
+  BOOL belongs; char processDacl[65], threadDacl[65]; need(system_process(helper) && IsProcessInJob(helper, helper_job, &belongs) && belongs);
+  security(helper, SE_KERNEL_OBJECT, TRUE, processDacl); security(helper_thread, SE_KERNEL_OBJECT, TRUE, threadDacl); LocalFree(sd);
+  printf("{\"helper\":"); identity(helper); printf(",\"processDaclSha256\":\"%s\",\"threadDaclSha256\":\"%s\",\"inheritedHandleCount\":%u,\"job\":", processDacl, threadDacl, inheritedCount+2); job_read(helper_job);
+  if (compiler || git) printf(",\"creatorDefaultDaclSha256\":\"%s\"", creatorDacl);
+  if (file) printf(",\"fileRootDeleteSharing\":true"); printf("}");
+}
+static void build(void) {
+  typedef LONG (WINAPI *version)(PRTL_OSVERSIONINFOW); RTL_OSVERSIONINFOW os = {sizeof(os)};
+  version read = (version)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"); need(read && !read(&os));
+  HKEY key; wchar_t sdk[4096]; DWORD size = sizeof(sdk), type;
+  need(RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots", 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS &&
+    RegQueryValueExW(key, L"KitsRoot10", NULL, &type, (BYTE *)sdk, &size) == ERROR_SUCCESS && type == REG_SZ && size >= 4 && size <= sizeof(sdk) && sdk[size/2-1] == 0 &&
+    RegCloseKey(key) == ERROR_SUCCESS);
+  printf("{\"major\":%lu,\"minor\":%lu,\"build\":%lu,\"sdkRootHex\":\"", os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber); hex((BYTE *)sdk, size-2); printf("\"}");
+}
+static void audit_recovery_save(void);
+#include "effective-reader.h"
+/* A reviewed certificate is data, not an inherited signing credential. The
+ * compiled image must match the reviewed unsigned pin and every signed image
+ * byte outside checksum/security-directory fields and aligned certificate data.
+ * Only that fixed reviewed publication may replace the unsigned bytes. */
+static void publish_build(char **values, unsigned n) {
+  need(n == 6 && !helpers[0].process && !helpers[1].process); struct entry *root = slot(values[2]), *image = slot(values[5]);
+  need(!strcmp(root->kind, "directory") && !strcmp(image->kind, "helper"));
+  wchar_t leaf[4096], output[4096]; decode(values[3], leaf);
+  need(!wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':') && !_wcsicmp(leaf, wcsrchr(image->path, '\\')+1) && wcscmp(leaf, L".") && wcscmp(leaf, L".."));
+  need(swprintf_s(output, 4096, L"%ls\\%ls", root->path, leaf) > 0);
+  struct held_file target = hold(output, FALSE, TRUE, GENERIC_READ | GENERIC_WRITE);
+  need(strlen(values[4]) == 64); pin(&target, values[4]); pin(&image->file, image->pin);
+  DWORD unsignedSize, signedSize; BYTE *plain = read_file(&target, 134217728, &unsignedSize), *signedBytes = read_file(&image->file, 134217728, &signedSize);
+  IMAGE_DOS_HEADER *dos = (void *)plain, *signedDos = (void *)signedBytes;
+  need(unsignedSize >= 512 && signedSize >= unsignedSize && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 &&
+    (DWORD)dos->e_lfanew <= unsignedSize-sizeof(IMAGE_NT_HEADERS64) && signedDos->e_lfanew == dos->e_lfanew);
+  IMAGE_NT_HEADERS64 *pe = (void *)(plain + dos->e_lfanew), *signedPe = (void *)(signedBytes + dos->e_lfanew);
+  need(pe->Signature == IMAGE_NT_SIGNATURE && signedPe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+    pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 5 &&
+    !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress && !pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].Size);
+  IMAGE_DATA_DIRECTORY cert = signedPe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+  need(cert.VirtualAddress >= unsignedSize && cert.VirtualAddress-unsignedSize < 8 && cert.Size >= 8 && cert.Size <= signedSize && cert.VirtualAddress == signedSize-cert.Size && cert.VirtualAddress%8 == 0 && cert.Size%8 == 0);
+  DWORD certificateOffset = 0;
+  while (certificateOffset < cert.Size) {
+    need(cert.Size-certificateOffset >= 8); WIN_CERTIFICATE *entry = (void *)(signedBytes+cert.VirtualAddress+certificateOffset);
+    need(entry->dwLength >= 8 && entry->dwLength <= cert.Size-certificateOffset && entry->wRevision == WIN_CERT_REVISION_2_0 && entry->wCertificateType == WIN_CERT_TYPE_PKCS_SIGNED_DATA);
+    DWORD aligned = (entry->dwLength+7)&~7u; need(aligned <= cert.Size-certificateOffset);
+    for (DWORD i = entry->dwLength; i < aligned; i++) need(!signedBytes[cert.VirtualAddress+certificateOffset+i]); certificateOffset += aligned;
+  }
+  size_t checksum = (BYTE *)&pe->OptionalHeader.CheckSum-plain, securityOffset = (BYTE *)&pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY]-plain;
+  for (DWORD i = 0; i < unsignedSize; i++) if (!(i >= checksum && i < checksum+4) && !(i >= securityOffset && i < securityOffset+sizeof(IMAGE_DATA_DIRECTORY))) need(plain[i] == signedBytes[i]);
+  for (DWORD i = unsignedSize; i < cert.VirtualAddress; i++) need(!signedBytes[i]);
+  char signatureSha[65]; signature(&image->file, image->signature, signatureSha);
+  LARGE_INTEGER zero = {0}; need(SetFilePointerEx(target.handle, zero, NULL, FILE_BEGIN));
+  DWORD offset = 0; while (offset < signedSize) { DWORD used; need(WriteFile(target.handle, signedBytes+offset, signedSize-offset, &used, NULL) && used); offset += used; }
+  need(SetEndOfFile(target.handle) && FlushFileBuffers(target.handle)); pin(&target, image->pin); signature(&target, image->signature, signatureSha);
+  char dacl[65]; security(target.handle, SE_FILE_OBJECT, TRUE, dacl);
+  FILE_ID_INFO id = target.id; need(CloseHandle(target.handle)); target.handle = open_file(output, FALSE, GENERIC_READ);
+  FILE_ID_INFO after; need(GetFileInformationByHandleEx(target.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&id, &after, sizeof(id)));
+  pin(&target, image->pin); printf("{\"identity\":\""); file_id(&target); printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"writerClosed\":true}", image->pin, signatureSha, dacl);
+  close_file(&target); SecureZeroMemory(plain, unsignedSize); free(plain); free(signedBytes);
+}
+/* An independently admitted reader retains verification subjects and objects.
+ * These operations never launch images or release payloads. */
+struct verify_handle { void *object; ULONG_PTR pid, handle; ULONG access; USHORT trace, type; ULONG flags, reserved; };
+struct verify_handles { ULONG_PTR count, reserved; struct verify_handle entries[1]; };
+static HANDLE verified_jobs[128];
+static wchar_t verification_job_names[32][96];
+static void recovery_job_read(const wchar_t *name) {
+  HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name);
+  if (!job) { need(GetLastError() == ERROR_FILE_NOT_FOUND); printf("{\"absent\":true}"); return; }
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current;
+  need(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses);
+  job_read(job); need(CloseHandle(job));
+}
+static void recovery_jobs(unsigned subject, const char *ownedNonce) {
+  need(preparation_only && subject < process_count && strlen(ownedNonce) == 32 && strspn(ownedNonce, "0123456789abcdef") == 32);
+  FILETIME birth, exit, kernel, user; need(GetProcessTimes(processes[subject], &birth, &exit, &kernel, &user));
+  ULONGLONG creation = ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime;
+  wchar_t name[128]; printf("{\"nonce\":\"%s\",\"identity\":", ownedNonce); retained_identity(processes[subject], tokens[subject], sessions[subject]); printf(",\"jobs\":[");
+  for (unsigned i = 0; i < 128; i++) {
+    need(swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", ownedNonce, GetProcessId(processes[subject]), creation, i) > 0);
+    if (i) putchar(','); recovery_job_read(name);
+  }
+  printf("],\"compilerJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-Compiler-%hs-%lu-%llu", ownedNonce, GetProcessId(processes[subject]), creation) > 0);
+  recovery_job_read(name); putchar('}');
+}
+#ifdef NATIVE_CI_EXPERIMENT
+/* A complete process census, never OpenProcess's error code, proves absence.
+ * An acquired replacement needs a newer held birth and a second complete view. */
+static void cold_release(void) {
+  HANDLE handles[2]={reader_cold.snapshot,reader_cold.process};reader_cold.snapshot=reader_cold.process=NULL;
+  for(unsigned i=0;i<2;i++)if(handles[i]&&!CloseHandle(handles[i])){
+    DWORD error=GetLastError();if(!reader_cold.cleanupFailed)reader_cold.cleanupError=error;reader_cold.cleanupFailed=TRUE;
+  }
+}
+static void cold_require(BOOL ok, const char *operation, DWORD error) {
+  reader_cold.operation=operation;reader_cold.error=error;
+  if(!ok){cold_release();SetLastError(error);need(FALSE);}
+}
+static BOOL cold_census(DWORD pid) {
+  reader_cold.census++;reader_cold.count=reader_cold.found=0;
+  HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);DWORD error=snapshot==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+  if(snapshot!=INVALID_HANDLE_VALUE)reader_cold.snapshot=snapshot;
+  cold_require(snapshot!=INVALID_HANDLE_VALUE,"snapshot",error);
+  PROCESSENTRY32W entry={sizeof(entry)};BOOL ok=Process32FirstW(snapshot,&entry);error=ok?ERROR_SUCCESS:GetLastError();
+  cold_require(ok,"first",error);
+  do{
+    cold_require(++reader_cold.count<=65536,"bound",ERROR_SUCCESS);
+    if(entry.th32ProcessID==pid)cold_require(++reader_cold.found==1,"duplicate",ERROR_SUCCESS);
+    ok=Process32NextW(snapshot,&entry);error=ok?ERROR_SUCCESS:GetLastError();
+  }while(ok);
+  cold_require(error==ERROR_NO_MORE_FILES,"next",error);
+  reader_cold.snapshot=NULL;ok=CloseHandle(snapshot);error=ok?ERROR_SUCCESS:GetLastError();
+  if(!ok){reader_cold.cleanupFailed=TRUE;reader_cold.cleanupError=error;}
+  cold_require(ok,"census-close",error);return reader_cold.found!=0;
+}
+static void cold_process(DWORD pid, ULONGLONG creation) {
+  memset(&reader_cold,0,sizeof(reader_cold));reader_cold.active=TRUE;reader_cold.pid=pid;reader_cold.expected=creation;
+  reader_cold.waited=reader_cold.exitCode=-1;
+  cold_require(preparation_only&&pid&&creation,"arguments",ERROR_SUCCESS);
+  BOOL found=cold_census(pid);
+  if(found){
+    reader_cold.process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);
+    DWORD error=reader_cold.process?ERROR_SUCCESS:GetLastError();
+    if(!reader_cold.process){
+      cold_require(error==ERROR_INVALID_PARAMETER,"open",error);
+      found=cold_census(pid);cold_require(!found,"open",error);
+    }else{
+      reader_cold.observedPid=GetProcessId(reader_cold.process);error=reader_cold.observedPid?ERROR_SUCCESS:GetLastError();
+      cold_require(reader_cold.observedPid==pid,"pid",error);
+      FILETIME birth,exit,kernel,user;BOOL ok=GetProcessTimes(reader_cold.process,&birth,&exit,&kernel,&user);error=ok?ERROR_SUCCESS:GetLastError();
+      cold_require(ok,"times",error);reader_cold.birth=((ULONGLONG)birth.dwHighDateTime<<32)|birth.dwLowDateTime;
+      cold_require(reader_cold.birth>=creation,"birth",ERROR_SUCCESS);
+      if(reader_cold.birth==creation){
+        DWORD waited=WaitForSingleObject(reader_cold.process,0);error=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;reader_cold.waited=waited;
+        cold_require(waited==WAIT_OBJECT_0,"wait",error);
+        DWORD code;ok=GetExitCodeProcess(reader_cold.process,&code);error=ok?ERROR_SUCCESS:GetLastError();
+        cold_require(ok,"exit",error);reader_cold.exitCode=code;
+        cold_require(code<=127&&code!=124,"exit-code",ERROR_SUCCESS);
+      }else{
+        found=cold_census(pid);
+        ok=GetProcessTimes(reader_cold.process,&birth,&exit,&kernel,&user);error=ok?ERROR_SUCCESS:GetLastError();
+        cold_require(ok,"times",error);
+        cold_require((((ULONGLONG)birth.dwHighDateTime<<32)|birth.dwLowDateTime)==reader_cold.birth,"birth",ERROR_SUCCESS);
+      }
+    }
+  }
+  if(!found)printf("{\"complete\":true,\"present\":false}");
+  else{
+    printf("{\"complete\":true,\"present\":true,\"original\":%s,\"identity\":",reader_cold.birth==creation?"true":"false");reader_cold.operation="identity";identity(reader_cold.process);
+    if(reader_cold.birth==creation)printf(",\"signaled\":true,\"exitCode\":%lld",reader_cold.exitCode);putchar('}');
+  }
+  cold_release();cold_require(!reader_cold.cleanupFailed,"process-close",reader_cold.cleanupError);reader_cold.active=FALSE;
+}
+/* Names come from protected original receipts, not a reopened process handle.
+ * Every fixed slot and the controlling Job use the same strict native reader. */
+static void cold_jobs(DWORD pid, ULONGLONG creation, const char *ownedNonce) {
+  need(preparation_only && pid && creation && strlen(ownedNonce) == 32 && strspn(ownedNonce, "0123456789abcdef") == 32);
+  wchar_t name[128]; printf("{\"pid\":%lu,\"creationTime\":\"%llu\",\"nonce\":\"%s\",\"jobs\":[", pid, creation, ownedNonce);
+  for (unsigned i = 0; i < 128; i++) {
+    need(swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", ownedNonce, pid, creation, i) > 0);
+    if (i) putchar(','); recovery_job_read(name);
+  }
+  printf("],\"compilerJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-Compiler-%hs-%lu-%llu", ownedNonce, pid, creation) > 0);
+  recovery_job_read(name); printf(",\"controllingJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-%hs", ownedNonce) > 0);
+  recovery_job_read(name); putchar('}');
+}
+#endif
+static struct verify_handles *handle_inventory(void) {
+  typedef NTSTATUS (NTAPI *query)(ULONG, PVOID, ULONG, PULONG);
+  query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
+  need(get); ULONG size = 65536, used = 0; void *bytes = NULL; NTSTATUS status;
+  do { free(bytes); bytes = calloc(size, 1); need(bytes); status = get(64, bytes, size, &used);
+    if (status == (NTSTATUS)0xc0000004L) { need(size <= 16777216 && used <= 33554432); size = used > size ? used : size*2; }
+  } while (status == (NTSTATUS)0xc0000004L);
+  need(!status && used <= size && used >= offsetof(struct verify_handles, entries)); struct verify_handles *result = bytes;
+  need(result->count <= (used - offsetof(struct verify_handles, entries))/sizeof(struct verify_handle)); return result;
+}
+static BOOL object_type(HANDLE handle, const wchar_t *expected) {
+  typedef NTSTATUS (NTAPI *query)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryObject");
+  BYTE bytes[4096]; ULONG used; need(get && !get(handle, 2, bytes, sizeof(bytes), &used) && used >= sizeof(UNICODE_STRING) && used <= sizeof(bytes));
+  UNICODE_STRING *type = (void *)bytes;
+  need(type->Length <= 128 && (uintptr_t)type->Buffer >= (uintptr_t)bytes &&
+    (uintptr_t)type->Buffer <= (uintptr_t)bytes + used && type->Length <= (uintptr_t)bytes + used - (uintptr_t)type->Buffer);
+  return type->Length == wcslen(expected)*2 && !wcsncmp(type->Buffer, expected, type->Length/2);
+}
+/* Local anchors prove only type relevance, never foreign ownership or membership. */
+static struct verify_handles *creator_inventory(USHORT types[2], BOOL with_thread) {
+  HANDLE anchors[2] = {CreateJobObjectW(NULL, NULL), NULL};
+  if (with_thread) anchors[1] = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
+  unsigned required = with_thread ? 2 : 1, matches[2] = {0}; BOOL valid = TRUE;
+  types[0] = types[1] = 0;
+  for (unsigned a = 0; a < required; a++) {
+    DWORD flags;
+    if (!anchors[a] || anchors[a] == INVALID_HANDLE_VALUE || !GetHandleInformation(anchors[a], &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) || !object_type(anchors[a], a ? L"Thread" : L"Job")) valid = FALSE;
+  }
+  struct verify_handles *list = valid ? handle_inventory() : NULL;
+  if (list) for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetCurrentProcessId()) continue;
+    for (unsigned a = 0; a < required; a++) if (entry->handle == (ULONG_PTR)anchors[a]) {
+      matches[a]++; types[a] = entry->type;
+      if (!entry->type || (entry->flags & 2)) valid = FALSE;
+    }
+  }
+  valid = valid && matches[0] == 1 && (!with_thread || (matches[1] == 1 && types[0] != types[1]));
+  for (unsigned a = 0; a < required; a++) if (anchors[a] && anchors[a] != INVALID_HANDLE_VALUE) {
+    BOOL closed = CloseHandle(anchors[a]); valid = closed && valid;
+  }
+  if (!valid) free(list);
+  need(valid); return list;
+}
+/* GetInstances has no include-hidden flag. Enumerate the scheduler's hidden
+ * running tasks explicitly and select the exact registered path. */
+static LONG task_instances(ITaskService *service, BSTR name, IRunningTask *owned[32]) {
+  wchar_t path[132];need(reader_task&&owned==reader_task->running&&swprintf_s(path,132,L"\\%ls",name)>0);
+  for(unsigned attempt=1;attempt<=3;attempt++){
+    LONG count=0,found=0;BOOL complete=TRUE;reader_scheduler.attempt=attempt;reader_scheduler.index=0;
+    task_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&reader_task->all);need(reader_task->all);
+    task_hr(IRunningTaskCollection_get_Count,reader_task->all,&count);need(count>=0&&count<=4096);
+    for(LONG i=1;i<=count;i++){
+      VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;reader_scheduler.index=i;
+      HRESULT result=IRunningTaskCollection_get_Item(reader_task->all,index,&reader_task->item);
+      if(!task_result(result,"IRunningTaskCollection_get_Item",__LINE__)){complete=FALSE;break;}
+      need(reader_task->item);
+      result=IRunningTask_get_Path(reader_task->item,&reader_task->path);
+      if(!task_result(result,"IRunningTask_get_Path",__LINE__)){complete=FALSE;break;}
+      need(reader_task->path&&reader_task->path[0]==L'\\'&&SysStringLen(reader_task->path)>0&&SysStringLen(reader_task->path)<4096&&SysStringLen(reader_task->path)==wcslen(reader_task->path));
+      if(!_wcsicmp(path,reader_task->path)){
+        /* A stopped snapshot entry is never silently removed from a census. */
+        result=IRunningTask_Refresh(reader_task->item);
+        if(!task_result(result,"IRunningTask_Refresh",__LINE__)){complete=FALSE;break;}
+        need(found<32);owned[found++]=reader_task->item;reader_task->item=NULL;
+      }
+      SysFreeString(reader_task->path);reader_task->path=NULL;
+      if(reader_task->item){IRunningTask_Release(reader_task->item);reader_task->item=NULL;}
+    }
+    task_census_close(!complete);
+    if(complete){reader_scheduler.operation=NULL;reader_scheduler.index=0;return found;}
+    /* Only the documented ended-instance result discards the entire snapshot.
+     * A subsequent full census is mandatory; callers still prove held lifetime. */
+    if(reader_scheduler.result==SCHED_E_TASK_NOT_RUNNING&&attempt<3)continue;
+    SetLastError(reader_scheduler.error);
+    need_hresult_at(reader_scheduler.result,FALSE,reader_scheduler.operation,__FILE__,reader_scheduler.line);
+  }
+  need(FALSE);return 0;
+}
+static DWORD task_parent(HANDLE process) {
+  HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);PROCESSENTRY32W entry={sizeof(entry)};DWORD parent=0;unsigned found=0;
+  need(snapshot!=INVALID_HANDLE_VALUE&&Process32FirstW(snapshot,&entry));
+  do{if(entry.th32ProcessID==GetProcessId(process)){parent=entry.th32ParentProcessID;found++;}}while(Process32NextW(snapshot,&entry));
+  need(GetLastError()==ERROR_NO_MORE_FILES&&found==1&&CloseHandle(snapshot));return parent;
+}
+static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject, BOOL details) {
+  need((!strcmp(kind, "custody") || !strcmp(kind, "prerequisite")) && wcslen(nonceText) == 32 && wcsspn(nonceText, L"0123456789abcdef") == 32);
+  struct task_scope scope={0};need(!reader_task);reader_task=&scope;memset(&reader_scheduler,0,sizeof(reader_scheduler));reader_scheduler.attempt=1;
+  VARIANT empty; VariantInit(&empty);
+  task_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&scope.service);
+  task_hr(ITaskService_Connect, scope.service, empty, empty, empty, empty);
+  scope.root=SysAllocString(L"\\");need(scope.root);task_hr(ITaskService_GetFolder,scope.service,scope.root,&scope.folder);
+  wchar_t name[128]; need(swprintf_s(name, 128, L"%ls%ls", !strcmp(kind, "custody") ? L"NativeProof-Custody-" : L"AgentRunnerPrerequisites-", nonceText) > 0);
+  scope.name=SysAllocString(name);need(scope.name);HRESULT result=ITaskFolder_GetTask(scope.folder,scope.name,&scope.task);BOOL found=task_result(result,"ITaskFolder_GetTask",__LINE__);
+  IRunningTask **running=scope.running;
+  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+    SetLastError(reader_scheduler.error);need_hresult_at(result,!expected,"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);reader_scheduler.operation=NULL;
+    LONG active=task_instances(scope.service,scope.name,running);
+    need(!active); printf("{\"absent\":true}");
+  }
+  else {
+    SetLastError(reader_scheduler.error);need_hresult_at(result,found,"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);need(scope.task);
+    task_hr(IRegisteredTask_get_Path,scope.task,&scope.registeredPath);wchar_t exact[132];need(swprintf_s(exact,132,L"\\%ls",name)>0&&scope.registeredPath&&SysStringLen(scope.registeredPath)==wcslen(exact)&&!_wcsicmp(scope.registeredPath,exact));
+    task_hr(IRegisteredTask_get_Xml,scope.task,&scope.xml);
+    task_hr(IRegisteredTask_GetSecurityDescriptor,scope.task,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,&scope.sd);
+    DWORD a=SysStringByteLen(scope.xml),b=SysStringByteLen(scope.sd);need(a&&a<=262144&&b&&b<=65536);
+    BYTE *bytes=calloc(a+b+8,1);need(bytes);memcpy(bytes,&a,4);memcpy(bytes+4,scope.xml,a);memcpy(bytes+4+a,&b,4);memcpy(bytes+8+a,scope.sd,b);
+    char hash[65];sum(bytes,a+b+8,hash);free(bytes);
+    LONG active=task_instances(scope.service,scope.name,running);
+    LONG registered;task_hr(IRegisteredTask_GetInstances,scope.task,0,&scope.instances);need(scope.instances);task_hr(IRunningTaskCollection_get_Count,scope.instances,&registered);need(registered>=0&&registered<=active);
+    if (expected) {
+      need(!strcmp(kind, "prerequisite") || !strcmp(kind, "custody")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
+      for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
+      if (!strcmp(kind, "prerequisite")) need(heldJob);
+      need(strlen(expected) == 64 && strspn(expected, "0123456789abcdef") == 64 && !strcmp(expected, hash) && !active && subject < process_count && WaitForSingleObject(processes[subject], 0) == WAIT_OBJECT_0);
+      for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
+      for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
+      for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
+      task_hr(ITaskFolder_DeleteTask,scope.folder,scope.name,0);
+      result=ITaskFolder_GetTask(scope.folder,scope.name,&scope.again);task_result(result,"ITaskFolder_GetTask",__LINE__);if(result!=HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))reader_scheduler.operation="ITaskFolder_GetTask";SetLastError(reader_scheduler.error);need_hresult_at(result,result==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);reader_scheduler.operation=NULL;printf("{\"removed\":true,\"sha256\":\"%s\"}",hash);
+    } else if(details){
+      need(subject<process_count&&WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);DWORD parent=task_parent(processes[subject]);
+      printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld,\"registeredInstances\":%ld,\"running\":[",hash,active,registered);
+      for(LONG i=0;i<active;i++){GUID parsed;wchar_t canonical[40];TASK_STATE state;DWORD enginePid;
+        task_hr(IRunningTask_get_InstanceGuid,running[i],&scope.guid);need(scope.guid&&SUCCEEDED(CLSIDFromString(scope.guid,&parsed))&&StringFromGUID2(&parsed,canonical,40));SysFreeString(scope.guid);scope.guid=NULL;
+        task_hr(IRunningTask_get_State,running[i],&state);task_hr(IRunningTask_get_EnginePID,running[i],&enginePid);
+        scope.engine=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,enginePid);HANDLE engine=scope.engine;need(engine&&system_process(engine)&&WaitForSingleObject(engine,0)==WAIT_TIMEOUT);
+        FILETIME a,b,c,d,e,f,g,h;need(GetProcessTimes(engine,&a,&b,&c,&d)&&GetProcessTimes(processes[subject],&e,&f,&g,&h));
+        ULONGLONG engineBirth=((ULONGLONG)a.dwHighDateTime<<32)|a.dwLowDateTime,helperBirth=((ULONGLONG)e.dwHighDateTime<<32)|e.dwLowDateTime;
+        if(i)putchar(',');printf("{\"guid\":\"%ls\",\"state\":%u,\"engine\":",canonical,(unsigned)state);identity(engine);
+        printf(",\"helperLinked\":%s}",(enginePid==GetProcessId(processes[subject])||parent==enginePid)&&engineBirth<=helperBirth?"true":"false");need(WaitForSingleObject(engine,0)==WAIT_TIMEOUT);need(task_engine_close());
+      }
+      need(WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);printf("]}");
+    } else printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld}", hash, active);
+  }
+  BOOL closed=task_close();SetLastError(reader_scheduler.cleanupError);need(closed);memset(&reader_scheduler,0,sizeof(reader_scheduler));
+}
+static HANDLE duplicate_process_owner(unsigned slot) {
+  need(slot < process_count); HANDLE process = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetProcessId(processes[slot]));
+  FILETIME heldCreation, actualCreation, exited, kernel, user;
+  need(process && GetProcessTimes(processes[slot], &heldCreation, &exited, &kernel, &user) &&
+    GetProcessTimes(process, &actualCreation, &exited, &kernel, &user) &&
+    !memcmp(&heldCreation, &actualCreation, sizeof(FILETIME))); return process;
+}
+static void verifier_transfer(unsigned child, unsigned creator) {
+  need(child < process_count && creator < process_count && child != creator && !verified_jobs[child]);
+  HANDLE source = duplicate_process_owner(creator);
+  USHORT types[2]; struct verify_handles *list = creator_inventory(types, TRUE); HANDLE job = NULL, thread = NULL;
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || (entry->type != types[0] && entry->type != types[1])) continue;
+    reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
+    reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
+    reader_transfer.creator = creator; reader_transfer.child = child; reader_transfer.active = TRUE;
+    HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    reader_transfer.active = FALSE;
+    need(object_type(duplicate, entry->type == types[0] ? L"Job" : L"Thread"));
+    if (entry->type == types[0]) {
+      BOOL belongs = FALSE; if (IsProcessInJob(processes[child], duplicate, &belongs) && belongs) { need(!job); job = duplicate; continue; }
+    } else if (GetProcessIdOfThread(duplicate) == GetProcessId(processes[child])) {
+      need(!thread); thread = duplicate; continue;
+    }
+    need(CloseHandle(duplicate));
+  }
+  free(list); need(job && thread && CloseHandle(source)); verified_jobs[child] = job;
+  char dacl[65]; security(thread, SE_KERNEL_OBJECT, TRUE, dacl); need(CloseHandle(thread));
+  printf("{\"threadDaclSha256\":\"%s\",\"job\":", dacl); job_read(job);
+  HANDLE process = duplicate_process_owner(child);
+  list = handle_inventory(); unsigned inherited = 0, pipe_count = 0; char pipe_dacl[2][65]; printf(",\"objects\":[");
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(process) || !(entry->flags & 2)) continue;
+    need(inherited < 130); HANDLE duplicate; need(DuplicateHandle(process, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    if (inherited++) putchar(','); DWORD type = GetFileType(duplicate);
+    if (type == FILE_TYPE_DISK) { FILE_ID_INFO id; need(GetFileInformationByHandleEx(duplicate, FileIdInfo, &id, sizeof(id)));
+      printf("\"%016llx:", id.VolumeSerialNumber); hex(id.FileId.Identifier, 16); putchar('"'); }
+    else { need(type == FILE_TYPE_PIPE && pipe_count < 2); security(duplicate, SE_FILE_OBJECT, TRUE, pipe_dacl[pipe_count++]); printf("null"); }
+    need(CloseHandle(duplicate));
+  }
+  free(list); need(pipe_count == 2 && CloseHandle(process)); printf("],\"inheritedHandleCount\":%u,\"pipeDaclSha256\":[\"%s\",\"%s\"]", inherited, pipe_dacl[0], pipe_dacl[1]);
+  TOKEN_DEFAULT_DACL *creation = token_info(tokens[child], TokenDefaultDacl); need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl));
+  sum((BYTE *)creation->DefaultDacl, creation->DefaultDacl->AclSize, dacl); free(creation);
+  printf(",\"creatorDefaultDaclSha256\":\"%s\"}", dacl);
+}
+/* Read the parked compiler token and inherited kernel handles independently
+ * before its first instruction; expected materialization cannot supply these. */
+static void compiler_policy(unsigned index, unsigned creator) {
+  need(index < process_count && WaitForSingleObject(processes[index], 0) == WAIT_TIMEOUT);
+  TOKEN_DEFAULT_DACL *creation = token_info(tokens[index], TokenDefaultDacl);
+  printf("{\"defaultDacl\":"); acl_read(creation->DefaultDacl); free(creation);
+  HANDLE source = duplicate_process_owner(index); struct verify_handles *list = handle_inventory();
+  unsigned pipes = 0;
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || !(entry->flags & 2)) continue;
+    HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    DWORD type = GetFileType(duplicate); need(type == FILE_TYPE_PIPE); pipes++;
+    need(CloseHandle(duplicate));
+  }
+  free(list); need(CloseHandle(source) && pipes == 3);
+  BOOL belongs; need(creator < process_count && creator != index && verified_jobs[creator] &&
+    WaitForSingleObject(processes[creator], 0) == WAIT_TIMEOUT &&
+    IsProcessInJob(processes[index], verified_jobs[creator], &belongs) && !belongs &&
+    IsProcessInJob(processes[creator], verified_jobs[creator], &belongs) && belongs);
+  source = duplicate_process_owner(creator); USHORT types[2]; list = creator_inventory(types, FALSE); HANDLE compilerJob = NULL;
+  for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || entry->type != types[0]) continue;
+    reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
+    reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
+    reader_transfer.creator = creator; reader_transfer.child = index; reader_transfer.active = TRUE;
+    HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    reader_transfer.active = FALSE;
+    need(object_type(duplicate, L"Job"));
+    BOOL member = FALSE; JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
+    if (IsProcessInJob(processes[index], duplicate, &member) && member &&
+        QueryInformationJobObject(duplicate, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) &&
+        limits.BasicLimitInformation.LimitFlags == 0x2008 && limits.BasicLimitInformation.ActiveProcessLimit == 31) {
+      need(!compilerJob); compilerJob = duplicate;
+    } else need(CloseHandle(duplicate));
+  }
+  free(list); need(CloseHandle(source) && compilerJob);
+  need(IsProcessInJob(processes[creator], compilerJob, &belongs) && !belongs);
+  printf(",\"inheritedHandles\":[\"pipe\",\"pipe\",\"pipe\"],\"compilerJob\":"); job_read(compilerJob);
+  need(CloseHandle(compilerJob)); putchar('}');
+}
+static struct held_file verification_files[128]; static unsigned verification_file_count;
+static void verification_path(const wchar_t *name, const char *pin, const char *signature) {
+  BOOL admitted = FALSE;
+  if (preparation_only && !strcmp(signature, "-")) {
+    size_t prefix = wcslen(preparation_directory);
+    if (!_wcsnicmp(name, preparation_directory, prefix) && name[prefix] == '\\') admitted = TRUE;
+    if (!wcscmp(name, preparation_plan) && !strcmp(pin, preparation_plan_pin)) admitted = TRUE;
+  }
+  for (unsigned i = 0; i < count; i++) {
+    struct entry *entry = &entries[i]; size_t prefix = wcslen(entry->path);
+    if (!_wcsicmp(name, entry->path) && strcmp(entry->kind, "directory") && strcmp(entry->kind, "mutable") && !strcmp(pin, entry->pin) && !strcmp(signature, entry->signature)) admitted = TRUE;
+    if (preparation_only && !strcmp(entry->kind, "helper") && !strcmp(pin, entry->pin) && !strcmp(signature, entry->signature) &&
+        !wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\' &&
+        !wcscmp(wcsrchr(name, '\\')+1, wcsrchr(entry->path, '\\')+1)) admitted = TRUE;
+    /* Dynamic immutable records remain inside an independently approved root.
+     * They can supply data, never executable/signature admission. */
+    if (!strcmp(signature, "-") && !strcmp(entry->kind, "directory") && !_wcsnicmp(name, entry->path, prefix) && name[prefix] == '\\') admitted = TRUE;
+  }
+  need(admitted);
+}
+
+static HANDLE case_token, case_job; static unsigned case_custody;
+static SOCKET case_sockets[8]; static unsigned case_socket_count;
+static struct case_account_record case_record;
+static void case_directory_create(unsigned index, unsigned parent,BOOL report) {
+  need(index < count && parent < count && !entries[index].file.handle && !strcmp(entries[index].kind, "directory") && entries[parent].file.handle);
+  wchar_t name[4096]; wcscpy_s(name, 4096, entries[index].path); wchar_t *leaf = wcsrchr(name, '\\'); need(leaf); *leaf = 0;
+  need(!wcscmp(name, entries[parent].path)); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  need(CreateDirectoryW(entries[index].path, &sa)); LocalFree(sd);
+  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY); if(report) inspect(&entries[index]);
+}
+static void case_directory(unsigned index,unsigned parent) { case_directory_create(index,parent,TRUE); }
+static void case_copy(unsigned target, unsigned source, unsigned parent) {
+  need(target < count && source < count && parent < count && !entries[target].file.handle && entries[source].file.handle && entries[parent].file.handle &&
+    strcmp(entries[target].kind, "directory") && !strcmp(entries[target].kind, entries[source].kind) &&
+    !strcmp(entries[target].pin, entries[source].pin) && !strcmp(entries[target].signature, entries[source].signature));
+  wchar_t name[4096]; wcscpy_s(name, 4096, entries[target].path); wchar_t *leaf = wcsrchr(name, '\\'); need(leaf); *leaf = 0; need(!wcscmp(name, entries[parent].path));
+  pin(&entries[source].file, entries[source].pin); DWORD size; BYTE *bytes = read_file(&entries[source].file, 134217728, &size);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE file = CreateFileW(entries[target].path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL); LocalFree(sd); DWORD written;
+  need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, size, &written, NULL) && written == size && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
+  entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY); pin(&entries[target].file, entries[target].pin);
+  if (strcmp(entries[target].signature, "-")) { char hash[65]; signature(&entries[target].file, entries[target].signature, hash); } inspect(&entries[target]);
+}
+/* Fixed private data files. Bytes and the mutable owned-file exception are
+ * checked against the sealed plan before exclusive creation. */
+static void case_file(unsigned index, unsigned parent, BOOL mutable, const char *hexBytes) {
+  need(index < count && parent < count && !strcmp(entries[index].kind, mutable ? "mutable" : "data") &&
+    !entries[index].file.handle && entries[parent].file.handle && !strcmp(entries[parent].kind, "directory"));
+  wchar_t directory[4096]; wcscpy_s(directory, 4096, entries[index].path);
+  wchar_t *leaf = wcsrchr(directory, '\\'); need(leaf); *leaf++ = 0;
+  BOOL working = (!wcscmp(leaf,L"content.txt") || !wcscmp(leaf,L".git")) && parent==4;
+  BOOL gitMutable = !wcscmp(leaf,L"index") || !wcscmp(leaf,L"proof") || working;
+  need(!wcscmp(directory, entries[parent].path) && (!mutable || (!wcscmp(leaf, L"owned.txt") && parent == 4) ||
+    working || (gitMutable && !wcsncmp(entries[index].path,entries[3].path,wcslen(entries[3].path)) && entries[index].path[wcslen(entries[3].path)]==L'\\')));
+  size_t length = strlen(hexBytes); need(length && length % 2 == 0 && length <= 8192);
+  BYTE bytes[4096]; for (size_t i = 0; i < length / 2; i++) bytes[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  char hash[65]; sum(bytes, (DWORD)(length / 2), hash); need(!strcmp(hash, entries[index].pin));
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+  HANDLE file = CreateFileW(entries[index].path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL);
+  LocalFree(sd); DWORD written;
+  need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, (DWORD)(length / 2), &written, NULL) && written == length / 2 &&
+    FlushFileBuffers(file) && CloseHandle(file));
+  entries[index].file = hold_shared(entries[index].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | ACCESS_SYSTEM_SECURITY, mutable);
+  if(mutable && gitMutable) {
+    HANDLE shared=ReOpenFile(entries[index].file.handle,GENERIC_READ | READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,7,FILE_FLAG_OPEN_REPARSE_POINT);
+    FILE_ID_INFO id; need(shared!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(shared,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&entries[index].file.id,sizeof(id)) && CloseHandle(entries[index].file.handle)); entries[index].file.handle=shared;
+  }
+  pin(&entries[index].file, entries[index].pin); inspect(&entries[index]);
+}
+static void case_account_create(unsigned custody, const char *context) {
+  need(!case_token && custody < count && entries[custody].file.handle && strlen(context) == 64 && strspn(context, "0123456789abcdef") == 64 && !memcmp(context, nonce, 32));
+  need(system_process(GetCurrentProcess())); case_custody = custody; case_record.version = 1;
+  strcpy_s(case_record.context, 65, context); strcpy_s(case_record.nonce, 33, nonce);
+  /* This immutable intent precedes NetUserAdd and all token/Job effects. */
+  HANDLE file = account_file(entries[custody].path, L"account.intent", GENERIC_WRITE, CREATE_NEW); DWORD written;
+  need(WriteFile(file, &case_record, sizeof(case_record), &written, NULL) && written == sizeof(case_record) && FlushFileBuffers(file) && CloseHandle(file));
+  wchar_t name[21], *sid; need(swprintf_s(name, 21, L"np_%.16hs", nonce) > 0); HANDLE base = account(name, entries[custody].path, &sid);
+  wcscpy_s(case_record.accountSid, 256, sid); LocalFree(sid); DWORD random[4];
+  need(BCryptGenRandom(NULL, (BYTE *)random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0);
+  need(swprintf_s(case_record.restrictingSid, 256, L"S-1-5-21-%lu-%lu-%lu-%lu", random[0] | 1, random[1] | 1, random[2] | 1, (random[3] & 0x7fffffff) + 1000) > 0);
+  PSID capability; need(ConvertStringSidToSidW(case_record.restrictingSid, &capability)); case_token = restrict_token(base, capability); need(CloseHandle(base)); LocalFree(capability);
+  account_check(name, case_record.accountSid);
+  file = account_file(entries[custody].path, L"account.record", GENERIC_WRITE, CREATE_NEW);
+  need(WriteFile(file, &case_record, sizeof(case_record), &written, NULL) && written == sizeof(case_record) && FlushFileBuffers(file) && CloseHandle(file));
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE); wchar_t jobName[96];
+  need(swprintf_s(jobName, 96, L"Local\\NativeProof-%hs", nonce) > 0); SetLastError(0); case_job = CreateJobObjectW(&sa, jobName); DWORD jobError = GetLastError(); LocalFree(sd);
+  SetLastError(jobError); need(case_job && jobError != ERROR_ALREADY_EXISTS); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit = 32;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255}; need(SetInformationJobObject(case_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(case_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+  account_job_unused(case_job, "produce");
+  printf("{\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"tokenHandle\":\"%llu\"}", case_record.accountSid, case_record.restrictingSid, context, (ULONGLONG)(ULONG_PTR)case_token);
+}
+static void case_endpoint(BOOL v6, BOOL udp, unsigned port) {
+  need(case_token && case_socket_count < 8 && port >= 1024 && port <= 65535); WSADATA data; need(!WSAStartup(MAKEWORD(2, 2), &data));
+  need(ImpersonateLoggedOnUser(case_token));
+  SOCKET socket = WSASocketW(v6 ? AF_INET6 : AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, udp ? IPPROTO_UDP : IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+  need(socket != INVALID_SOCKET); BOOL exclusive = TRUE; need(!setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, sizeof(exclusive)));
+  if (v6) { BOOL only = TRUE; need(!setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&only, sizeof(only))); struct sockaddr_in6 address = {0}; address.sin6_family = AF_INET6; address.sin6_port = htons((u_short)port); address.sin6_addr = in6addr_loopback; need(!bind(socket, (struct sockaddr *)&address, sizeof(address))); }
+  else { struct sockaddr_in address = {0}; address.sin_family = AF_INET; address.sin_port = htons((u_short)port); address.sin_addr.s_addr = htonl(INADDR_LOOPBACK); need(!bind(socket, (struct sockaddr *)&address, sizeof(address))); }
+  need(RevertToSelf()); case_sockets[case_socket_count++] = socket; printf("{\"bound\":true}");
+}
+static void case_read(void) {
+  need(case_token && case_job); printf("{\"token\":"); effective_token_handle(case_token); printf(",\"job\":"); job_read(case_job); printf(",\"endpoints\":[");
+  for (unsigned i = 0; i < case_socket_count; i++) { struct sockaddr_storage address; int size = sizeof(address), type, typeSize = sizeof(type);
+    need(!getsockname(case_sockets[i], (struct sockaddr *)&address, &size) && !getsockopt(case_sockets[i], SOL_SOCKET, SO_TYPE, (char *)&type, &typeSize));
+    BOOL v6 = address.ss_family == AF_INET6; unsigned port = ntohs(v6 ? ((struct sockaddr_in6 *)&address)->sin6_port : ((struct sockaddr_in *)&address)->sin_port);
+    need(v6 ? IN6_IS_ADDR_LOOPBACK(&((struct sockaddr_in6 *)&address)->sin6_addr) : ((struct sockaddr_in *)&address)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    printf("%s{\"family\":\"%s\",\"protocol\":\"%s\",\"port\":%u}", i ? "," : "", v6 ? "v6" : "v4", type == SOCK_DGRAM ? "udp" : "tcp", port);
+  } printf("]}");
+}
+static void verify_case(unsigned subject, unsigned custody, const char *context, const char *tokenHandle) {
+  need(subject < process_count && custody < count && !strcmp(entries[custody].kind, "directory"));
+  struct case_account_record record = {0}; account_record(entries[custody].path, &record); need(!strcmp(context, record.context));
+  HANDLE base = account_adopt(entries[custody].path, &record); need(CloseHandle(base));
+  HANDLE source = duplicate_process_owner(subject), token; need(system_process(source) && DuplicateHandle(source, (HANDLE)(ULONG_PTR)number(tokenHandle), GetCurrentProcess(), &token, TOKEN_QUERY | TOKEN_DUPLICATE, FALSE, 0));
+  wchar_t *actual = token_sid(token); need(!wcscmp(actual, record.accountSid)); LocalFree(actual);
+  char recordPin[65]; sum((BYTE *)&record, sizeof(record), recordPin);
+  printf("{\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"recordSha256\":\"%s\",\"token\":", record.accountSid, record.restrictingSid, context, recordPin);
+  effective_token_handle(token); need(CloseHandle(token) && CloseHandle(source)); printf(",\"objects\":[");
+  wchar_t root[4096]; wcscpy_s(root, 4096, entries[custody].path); wchar_t *leaf = wcsrchr(root, '\\'); need(leaf && !wcscmp(leaf+1, L"custody")); *leaf = 0;
+  unsigned emitted = 0;
+  for (unsigned i = 0; i < count; i++) if (!_wcsicmp(root, entries[i].path) || (!wcsncmp(root, entries[i].path, wcslen(root)) && entries[i].path[wcslen(root)] == '\\')) {
+    struct entry entry = entries[i]; entry.file = hold(entry.path, !strcmp(entry.kind, "directory"), TRUE, GENERIC_READ | ACCESS_SYSTEM_SECURITY);
+    if (strcmp(entry.kind, "directory")) { pin(&entry.file, entry.pin); if (strcmp(entry.signature, "-")) { char sig[65]; signature(&entry.file, entry.signature, sig); } }
+    if (emitted++) putchar(','); printf("{\"index\":%u,\"object\":", i); inspect(&entry); printf(",\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(entry.file.handle, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); putchar('}'); close_file(&entry.file);
+  } printf("]}");
+}
+static void recovery_principal_empty(const struct case_account_record *record);
+static void case_retire(void) {
+  need((case_token || case_job) && !helpers[0].process && !helpers[1].process && !audit_owned);
+  struct case_account_record held = {0}; account_record(entries[case_custody].path, &held); need(!memcmp(&held, &case_record, sizeof(held)));
+  if (case_job) {
+    /* A newly acquired Job can precede successful limits/UI setup. Retirement
+     * needs its unused accounting, not evidence of completed configuration. */
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0}; SetLastError(ERROR_SUCCESS);
+    BOOL sampled = QueryInformationJobObject(case_job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL);
+    DWORD error = sampled ? ERROR_SUCCESS : GetLastError();
+    if (!sampled || accounting.ActiveProcesses || accounting.TotalProcesses) {
+      fprintf(stderr, "native-windows-job-retire: sampled=%u error=%lu active=%lu total=%lu\n", (unsigned)sampled, error, accounting.ActiveProcesses, accounting.TotalProcesses);
+      fflush(stderr); SetLastError(sampled ? ERROR_INVALID_DATA : error);
+    }
+    need(sampled && !accounting.ActiveProcesses && !accounting.TotalProcesses);
+  }
+  recovery_principal_empty(&case_record);
+  wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", case_record.nonce) > 0); account_check(name, case_record.accountSid);
+  for (unsigned i = 0; i < case_socket_count; i++) need(!closesocket(case_sockets[i]) && !WSACleanup()); case_socket_count = 0;
+  if (case_token) { need(CloseHandle(case_token)); case_token = NULL; }
+  if (case_job) { need(CloseHandle(case_job)); case_job = NULL; }
+  PSID user; need(ConvertStringSidToSidW(case_record.accountSid, &user)); LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy;
+  need(LsaOpenPolicy(NULL, &attributes, POLICY_LOOKUP_NAMES, &policy) == 0 && LsaRemoveAccountRights(policy, user, TRUE, NULL, 0) == 0 && LsaClose(policy) == 0); LocalFree(user);
+  need(NetUserDel(NULL, name) == NERR_Success); printf("{\"retired\":true}");
+}
+static void verify_case_retired(unsigned custody, const char *context) {
+  need(custody < count); struct case_account_record record = {0}; account_record(entries[custody].path, &record); need(!strcmp(context, record.context));
+  wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", record.nonce) > 0); USER_INFO_1 *user;
+  need(NetUserGetInfo(NULL, name, 1, (BYTE **)&user) == NERR_UserNotFound);
+  PSID sid; need(ConvertStringSidToSidW(record.accountSid, &sid)); LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes);
+  LSA_HANDLE policy; LSA_UNICODE_STRING *rights = NULL; ULONG number = 0;
+  need(LsaOpenPolicy(NULL, &attributes, POLICY_LOOKUP_NAMES, &policy) == 0);
+  NTSTATUS status = LsaEnumerateAccountRights(policy, sid, &rights, &number);
+  /* STATUS_OBJECT_NAME_NOT_FOUND is the only accepted missing LSA account;
+   * other errors cannot establish removal of the owned rights. */
+  need((status == 0 && number == 0) || status == (NTSTATUS)0xc0000034L);
+  if (rights) LsaFreeMemory(rights); need(LsaClose(policy) == 0); LocalFree(sid);
+  wchar_t job[96]; need(swprintf_s(job, 96, L"Local\\NativeProof-%hs", record.nonce) > 0); HANDLE handle = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, job);
+  need(!handle && GetLastError() == ERROR_FILE_NOT_FOUND); printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\"}", context);
+}
+/* Finite ownership operations. The launcher owns creation; these retained
+ * objects and short-lived System witnesses own observation and settlement. */
+static PROCESS_INFORMATION ownership_launcher;
+static HANDLE ownership_launcher_token;
+static PROCESS_INFORMATION ownership_owner;
+static HANDLE ownership_owner_input, ownership_owner_output, ownership_owner_job, ownership_owner_token;
+static BOOL ownership_literal;
+static unsigned ownership_stage;
+static HANDLE ownership_control, ownership_frames, ownership_output;
+static HANDLE ownership_processes[32], ownership_tokens[32]; static unsigned ownership_count;
+static BOOL ownership_released, ownership_policy_installed, ownership_creation_verified, ownership_spoofed, access_mode;
+static struct held_file ownership_policy_file, ownership_sentinel;
+static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
+static char ownership_baseline[6][65];
+static BOOL ownership_policy_restored, ownership_policy_possible;
+#ifdef NATIVE_CI_EXPERIMENT
+/* This one-shot state and its unfinished thread remain owned by the fatal
+ * reader until need_at calls ExitProcess. Never free, detach, or close a live
+ * thread's resources. ExitProcess is not independent process-retirement proof. */
+struct refusal_report {
+  unsigned requestStatusRecords;
+  LONGLONG arming; ULONGLONG ready,delivery; BOOL armed,requestBound,interrupted; DWORD handoffError;
+  unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget;
+  unsigned readbackTokens,readbackResources,readbackProbes,readbackUnavailable;BOOL readbackStarted,readbackFinished,readbackClosure;
+};
+static SRWLOCK refusal_lock=SRWLOCK_INIT;
+static struct {
+  BOOL tried,sent,creationVerified,tickStarted,initialized,latched,reaped; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
+  char command[64],source[64],hash[65]; WCHAR image[4096],subject[184]; FILE_ID_INFO imageId;
+  /* Hex transport doubles raw text; reserve 1024 encoded bytes for framing. */
+  HANDLE thread,ready,wake,stop; DWORD createError,armWait,armWaitError,notifyClose,reapError; LONGLONG threadClose;
+  EVT_HANDLE query,subscription; HANDLE notification; struct refusal_report report; DWORD used; char bytes[32256];
+} original_refusal;
+enum release_capture_state { RELEASE_UNSTARTED, RELEASE_UNAVAILABLE, RELEASE_INVALIDATED, RELEASE_USABLE };
+/* Fixed selected-SDK coverage, independent of the seven resources/ten probes.
+ * Unsupported remote namespaces are never replaced by this reader's desktop,
+ * window station, KnownDLL namespace or handle table. */
+static struct {
+  ULONGLONG from,to,birth; DWORD pid,used,examined,cleanup; BOOL bound,closure,published;
+  unsigned state[9]; DWORD error[9]; char bytes[4096];
+} original_startup;
+static const char *startup_classes[] = {"request-status","declared-imports","loader-dependencies","known-dll-objects",
+  "token-privileges","window-station-desktop","inherited-pipes-job","other-kernel-objects","path-ancestors"};
+static const char *startup_states[] = {"missing","observed","empty","unsupported","expired","truncated","failed"};
+/* These are borrowed, continuously retained objects, never newly owned handles.
+ * Only complete pre-release capture publishes identity; dispatch seals its use. */
+static struct release_binding {
+  enum release_capture_state state; BOOL dispatched;
+  HANDLE process,token,image; DWORD pid; ULONGLONG birth,from,to,release;
+  char candidate[41],nonce[33],hash[65]; WCHAR path[4096];
+  FILE_ID_INFO imageId; TOKEN_STATISTICS statistics; struct readback_status status;
+} original_release;
+struct release_image_query {
+  BOOL attempted,succeeded,exitRead; DWORD error,waited,waitError,exitCode,exitError; const char *source;
+};
+static void release_invalidate(void) {
+  refusal_settle();
+  if(original_release.state!=RELEASE_UNSTARTED)original_release.state=RELEASE_INVALIDATED;
+  original_release.dispatched=FALSE;
+}
+static void release_file_closing(struct held_file *file) {
+  if(file->handle&&file->handle==original_release.image)release_invalidate();
+}
+static const char *release_capture_name(void) {
+  return original_release.state==RELEASE_USABLE?"usable":original_release.state==RELEASE_INVALIDATED?"invalidated":original_release.state==RELEASE_UNAVAILABLE?"unavailable":"unstarted";
+}
+struct literal_output_fact {
+  BOOL active, complete, exitRead, exitAttempted;
+  LONG peekResult, readResult;
+  DWORD used, total, markerPhase, markerUsed, available, readBytes, waited, waitError, exitCode, exitError, pipeError, exitWait, exitWaitError;
+  const char *refusal;
+};
+static struct literal_output_fact original_literal_output;
+static DWORD refusal_remaining(void) {
+  ULONGLONG elapsed=GetTickCount64()-original_refusal.tick;
+  return elapsed<30000?(DWORD)(30000-elapsed):0;
+}
+static BOOL ownership_literal_refuse(HANDLE process, const char *reason, DWORD error) {
+  /* A framing failure can precede our normal exit read. Retain an already
+   * available original status without waiting or replacing the capture error. */
+  if(!original_literal_output.exitAttempted&&refusal_remaining()){
+    original_literal_output.exitWait=WaitForSingleObject(process,0);
+    original_literal_output.exitWaitError=original_literal_output.exitWait==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.exitWait==WAIT_OBJECT_0){
+      original_literal_output.exitAttempted=TRUE;
+      original_literal_output.exitRead=GetExitCodeProcess(process,&original_literal_output.exitCode);
+      original_literal_output.exitError=original_literal_output.exitRead?0:GetLastError();
+    }
+  }
+  original_literal_output.refusal=reason;SetLastError(error);return FALSE;
+}
+/* The original retained child and pipe share the collector's R-anchored budget.
+ * Launcher-held writers need not close when that child exits. Drain a buffered
+ * frame before interpreting exit; no EOF barrier or new wait budget is added. */
+static BOOL ownership_literal_read(HANDLE process, HANDLE input, char *bytes, DWORD maximum) {
+  memset(&original_literal_output,0,sizeof(original_literal_output));
+  original_literal_output.active=TRUE;original_literal_output.peekResult=-1;original_literal_output.readResult=-1;
+  original_literal_output.waited=MAXDWORD;original_literal_output.exitWait=MAXDWORD;original_literal_output.refusal="none";
+  BOOL exitObserved=FALSE;
+  for(;;){
+    DWORD remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
+    DWORD available=0;
+    original_literal_output.peekResult=PeekNamedPipe(input,NULL,0,NULL,&available,NULL);
+    original_literal_output.pipeError=original_literal_output.peekResult?0:GetLastError();
+    original_literal_output.available=available;
+    if(!original_literal_output.peekResult)return ownership_literal_refuse(process,"peek",original_literal_output.pipeError);
+    while(available){
+      if(!refusal_remaining())return ownership_literal_refuse(process,"deadline",0);
+      if(original_literal_output.total+1>=maximum)return ownership_literal_refuse(process,"frame-bound",0);
+      BYTE byte;DWORD used=0;
+      original_literal_output.readResult=ReadFile(input,&byte,1,&used,NULL);
+      original_literal_output.pipeError=original_literal_output.readResult?0:GetLastError();
+      original_literal_output.readBytes=used;
+      if(!original_literal_output.readResult)return ownership_literal_refuse(process,"read",original_literal_output.pipeError);
+      if(used!=1)return ownership_literal_refuse(process,"short-read",0);
+      original_literal_output.total++;
+      if(byte<=0||byte>=128)return ownership_literal_refuse(process,"frame-byte",0);
+      available--;
+      if(original_literal_output.markerPhase<2){
+        const char *marker=original_literal_output.markerPhase?"native-argv-wmain-v1\n":"native-argv-entry-v1\n";
+        if(byte!=marker[original_literal_output.markerUsed])return ownership_literal_refuse(process,"marker",0);
+        original_literal_output.markerUsed++;
+        if(byte=='\n'){original_literal_output.markerPhase++;original_literal_output.markerUsed=0;}
+        continue;
+      }
+      if(original_literal_output.complete)return ownership_literal_refuse(process,"trailing-output",0);
+      if(!original_literal_output.used&&byte!='{')return ownership_literal_refuse(process,"frame-start",0);
+      if(byte=='\n'){bytes[original_literal_output.used]=0;original_literal_output.complete=TRUE;continue;}
+      bytes[original_literal_output.used++]=byte;
+    }
+    if(original_literal_output.available)continue;
+    remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
+    original_literal_output.waited=WaitForSingleObject(process,original_literal_output.complete?remaining:0);
+    original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.waited==WAIT_OBJECT_0){
+      /* The child can write and exit between an empty peek and this poll. */
+      if(!exitObserved){exitObserved=TRUE;continue;}
+      original_literal_output.exitAttempted=TRUE;
+      original_literal_output.exitRead=GetExitCodeProcess(process,&original_literal_output.exitCode);
+      original_literal_output.exitError=original_literal_output.exitRead?0:GetLastError();
+      if(!original_literal_output.exitRead)return ownership_literal_refuse(process,"exit",original_literal_output.exitError);
+      if(original_literal_output.complete)return TRUE;
+      return ownership_literal_refuse(process,original_literal_output.markerPhase<2?
+        (original_literal_output.markerUsed?"partial-marker":"no-marker"):
+        (original_literal_output.used?"partial-frame":"no-frame"),0);
+    }
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse(process,"wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT)return ownership_literal_refuse(process,"wait-result",0);
+    if(original_literal_output.complete)return ownership_literal_refuse(process,"deadline",0);
+    remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
+    original_literal_output.waited=WaitForSingleObject(process,remaining<10?remaining:10);
+    original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse(process,"wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT&&original_literal_output.waited!=WAIT_OBJECT_0)return ownership_literal_refuse(process,"wait-result",0);
+    /* Even a signaled wait returns through PeekNamedPipe before exit handling. */
+  }
+}
+static void refusal_publish(const char *line, struct refusal_report *report) {
+  AcquireSRWLockExclusive(&refusal_lock);
+  if(!report)report=&original_refusal.report;
+  report->truncated|=original_refusal.report.truncated;
+  if(line){size_t size=strlen(line);
+    /* Reserve all class summaries and completion even after optional overflow. */
+    if(size>sizeof(original_refusal.bytes)-4097-original_refusal.used)report->truncated=TRUE;
+    else{
+      memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;
+      if(!strncmp(line,"native-windows-original-child: token ",strlen("native-windows-original-child: token ")))report->readbackTokens++;
+      if(!strncmp(line,"native-windows-original-child: resource ",strlen("native-windows-original-child: resource ")))report->readbackResources++;
+    }
+  }
+  original_refusal.report=*report;ReleaseSRWLockExclusive(&refusal_lock);
+}
+static ULONGLONG readback_now(void) {
+  FILETIME time;GetSystemTimePreciseAsFileTime(&time);return ((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;
+}
+static BOOL release_live(HANDLE process, struct readback_status *status) {
+  if(!readback_ready(status,"release-wait"))return FALSE;
+  DWORD waited=WaitForSingleObject(process,0);
+  if(waited==WAIT_FAILED)return readback_fail(status,"win32","release-wait",GetLastError());
+  return waited==WAIT_TIMEOUT||readback_fail(status,"invariant","release-not-live",ERROR_INVALID_DATA);
+}
+static BOOL refusal_hex(const WCHAR *text, char *bytes, size_t capacity);
+static BOOL startup_take(unsigned kind) {
+  if(!refusal_remaining()){original_startup.state[kind]=4;return FALSE;}
+  if(original_startup.examined==64){original_startup.state[kind]=5;return FALSE;}
+  original_startup.examined++;return TRUE;
+}
+static void startup_fact(unsigned kind, const char *format, ...) {
+  char detail[640],line[768];va_list arguments;va_start(arguments,format);
+  int n=vsnprintf(detail,sizeof(detail),format,arguments);va_end(arguments);
+  int size=n>0&&n<sizeof(detail)?snprintf(line,sizeof(line),"native-windows-original-child: evidence class=%u scope=%s original-request=unobserved %s\n",kind,kind==1?"declared-requirements":"snapshot",detail):-1;
+  if(size<=0||size>=sizeof(line)||(DWORD)size>=sizeof(original_startup.bytes)-original_startup.used){original_startup.state[kind]=5;return;}
+  memcpy(original_startup.bytes+original_startup.used,line,size);original_startup.used+=(DWORD)size;original_startup.bytes[original_startup.used]=0;
+}
+/* Same public PE directory/section contracts as the existing import owner,
+ * without its fatal guards. A declaration is never an observed loader access. */
+static BOOL startup_rva(const BYTE *bytes, DWORD size, const IMAGE_NT_HEADERS64 *pe, DWORD value, DWORD length, DWORD *offset) {
+  if(value<pe->OptionalHeader.SizeOfHeaders&&length<=pe->OptionalHeader.SizeOfHeaders-value&&value<=size&&length<=size-value){*offset=value;return TRUE;}
+  const IMAGE_SECTION_HEADER *sections=IMAGE_FIRST_SECTION(pe);
+  for(unsigned i=0;i<pe->FileHeader.NumberOfSections;i++){
+    const IMAGE_SECTION_HEADER *s=sections+i;
+    if(value<s->VirtualAddress)continue;
+    ULONGLONG delta=(ULONGLONG)value-s->VirtualAddress,at=(ULONGLONG)s->PointerToRawData+delta;
+    if(delta<=s->SizeOfRawData&&length<=s->SizeOfRawData-delta&&at<=size&&length<=size-at){*offset=(DWORD)at;return TRUE;}
+  }
+  (void)bytes;return FALSE;
+}
+static void startup_imports(HANDLE image) {
+  struct readback_status status={0};BYTE *bytes=NULL;DWORD used=0;LARGE_INTEGER size;FILE_ID_INFO actual,expected;
+  HANDLE copy=ReOpenFile(image,GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,FILE_FLAG_OPEN_REPARSE_POINT);
+  if(copy==INVALID_HANDLE_VALUE){original_startup.state[1]=6;original_startup.error[1]=GetLastError();return;}
+  BOOL valid=GetFileInformationByHandleEx(image,FileIdInfo,&expected,sizeof(expected))&&GetFileInformationByHandleEx(copy,FileIdInfo,&actual,sizeof(actual));
+  if(!valid){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  if(memcmp(&actual,&expected,sizeof(actual))){original_startup.state[1]=6;goto finished;}
+  if(!GetFileSizeEx(copy,&size)){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  if(size.QuadPart<(LONGLONG)sizeof(IMAGE_DOS_HEADER)){original_startup.state[1]=6;goto finished;}
+  if(size.QuadPart>1048576){original_startup.state[1]=5;goto finished;}
+  bytes=calloc(1,(size_t)size.QuadPart);
+  if(!bytes){original_startup.state[1]=6;goto finished;}
+  if(!refusal_remaining()){original_startup.state[1]=4;goto finished;}
+  if(!ReadFile(copy,bytes,(DWORD)size.QuadPart,&used,NULL)){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  valid=used==size.QuadPart&&((IMAGE_DOS_HEADER *)bytes)->e_magic==IMAGE_DOS_SIGNATURE;
+  LONG offset=((IMAGE_DOS_HEADER *)bytes)->e_lfanew;
+  if(!valid||offset<0||(ULONGLONG)offset+sizeof(IMAGE_NT_HEADERS64)>used){original_startup.state[1]=6;goto finished;}
+  IMAGE_NT_HEADERS64 *pe=(void *)(bytes+offset);
+  valid=pe->Signature==IMAGE_NT_SIGNATURE&&pe->FileHeader.Machine==IMAGE_FILE_MACHINE_AMD64&&pe->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC&&
+    pe->FileHeader.SizeOfOptionalHeader==sizeof(IMAGE_OPTIONAL_HEADER64)&&pe->FileHeader.NumberOfSections<=96&&
+    pe->OptionalHeader.NumberOfRvaAndSizes>IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT&&
+    (ULONGLONG)offset+sizeof(*pe)+(ULONGLONG)pe->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER)<=used;
+  if(!valid){original_startup.state[1]=6;goto finished;}
+  original_startup.state[1]=2;
+  for(unsigned delay=0;delay<2;delay++){
+    IMAGE_DATA_DIRECTORY table=pe->OptionalHeader.DataDirectory[delay?IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT:IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!table.Size&&!table.VirtualAddress)continue;
+    DWORD width=delay?32:sizeof(IMAGE_IMPORT_DESCRIPTOR),at=0;BOOL ended=FALSE;
+    if(!table.VirtualAddress||table.Size<width||!startup_rva(bytes,used,pe,table.VirtualAddress,table.Size,&at)){original_startup.state[1]=6;break;}
+    for(DWORD index=0;index<=table.Size-width;index+=width){
+      if(!startup_take(1))goto finished;
+      const DWORD *entry=(void *)(bytes+at+index);BOOL empty=TRUE;
+      for(unsigned i=0;i<width/sizeof(DWORD);i++)if(entry[i])empty=FALSE;
+      if(empty){ended=TRUE;break;}
+      DWORD name=delay?entry[1]:((const IMAGE_IMPORT_DESCRIPTOR *)entry)->Name,nameAt=0;
+      if(delay&&entry[0]!=1){original_startup.state[1]=3;goto finished;}
+      if(!name||!startup_rva(bytes,used,pe,name,1,&nameAt)){original_startup.state[1]=6;goto finished;}
+      DWORD limit=used-nameAt<256?used-nameAt:256;const BYTE *zero=memchr(bytes+nameAt,0,limit);
+      if(!zero||zero==bytes+nameAt){original_startup.state[1]=6;goto finished;}
+      for(const BYTE *p=bytes+nameAt;p<zero;p++)if(*p<33||*p>126){original_startup.state[1]=6;goto finished;}
+      original_startup.state[1]=1;startup_fact(1,"declared=1 delay=%u name=%s",delay,(const char *)bytes+nameAt);
+      if(original_startup.state[1]==5)goto finished;
+    }
+    if(!ended){original_startup.state[1]=5;break;}
+  }
+finished:
+  free(bytes);readback_close(copy,&status);
+  if(status.closureUncertain){original_startup.closure=TRUE;original_startup.cleanup=status.cleanupValue;}
+}
+static void startup_objects(HANDLE process) {
+  if(!startup_take(6))return;
+  BOOL member=FALSE;BOOL joined=case_job&&IsProcessInJob(process,case_job,&member);LONGLONG error=joined?0:case_job?(LONGLONG)GetLastError():-1;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job={0};BOOL sampled=case_job&&QueryInformationJobObject(case_job,JobObjectBasicAccountingInformation,&job,sizeof(job),NULL);
+  LONGLONG query=sampled?0:case_job?(LONGLONG)GetLastError():-1;SetLastError(ERROR_SUCCESS);DWORD type=ownership_output?GetFileType(ownership_output):FILE_TYPE_UNKNOWN;
+  DWORD pipeError=type==FILE_TYPE_UNKNOWN?GetLastError():0;
+  original_startup.state[6]=joined&&sampled&&ownership_output&&type!=FILE_TYPE_UNKNOWN?1:6;
+  startup_fact(6,"job-member=%lld member-status=%lld accounting-status=%lld active=%lld parent-pipe-type=%lld pipe-status=%lu child-handle-table=unobserved",joined?(LONGLONG)!!member:-1,error,query,sampled?(LONGLONG)job.ActiveProcesses:-1,ownership_output&&type!=FILE_TYPE_UNKNOWN?(LONGLONG)type:-1,pipeError);
+}
+static void startup_capture(const struct release_binding *binding) {
+  memset(&original_startup,0,sizeof(original_startup));original_startup.from=readback_now();
+  original_startup.pid=binding->pid;original_startup.birth=binding->birth;
+  original_startup.state[3]=original_startup.state[5]=original_startup.state[7]=3;
+  struct readback_status status={0};TOKEN_STATISTICS before,after;
+  BOOL first=readback_statistics(binding->token,&before,&status);
+  /* GetTokenInformation/LookupPrivilegeNameW retain names, LUIDs and all bits;
+   * no privilege is enabled and failed output buffers confer no facts. */
+  union { TOKEN_PRIVILEGES alignment; BYTE bytes[4096]; } privileges;DWORD used=0;
+  if(readback_query(binding->token,TokenPrivileges,privileges.bytes,sizeof(privileges.bytes),FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges),&used,&status)){
+    TOKEN_PRIVILEGES *p=(void *)privileges.bytes;
+    if(p->PrivilegeCount>64||p->PrivilegeCount>(used-FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges))/sizeof(LUID_AND_ATTRIBUTES))original_startup.state[4]=6;
+    else{original_startup.state[4]=p->PrivilegeCount?1:2;
+      for(DWORD i=0;i<p->PrivilegeCount&&startup_take(4);i++){
+        WCHAR name[128]={0};DWORD length=128;BOOL got=LookupPrivilegeNameW(NULL,&p->Privileges[i].Luid,name,&length);
+        if(!got){original_startup.state[4]=6;original_startup.error[4]=GetLastError();break;}
+        if(!length||length>=128||name[length]){original_startup.state[4]=6;break;}
+        BOOL valid=TRUE;for(DWORD j=0;j<length;j++)if(!((name[j]>=L'A'&&name[j]<=L'Z')||(name[j]>=L'a'&&name[j]<=L'z')||(name[j]>=L'0'&&name[j]<=L'9')))valid=FALSE;
+        if(!valid){original_startup.state[4]=6;break;}
+        startup_fact(4,"name=%ls luid=%08lx%08lx attributes=%lu",name,(DWORD)p->Privileges[i].Luid.HighPart,p->Privileges[i].Luid.LowPart,p->Privileges[i].Attributes);
+        if(original_startup.state[4]==5)break;
+      }
+    }
+  }else{original_startup.state[4]=refusal_remaining()?6:4;original_startup.error[4]=status.value;}
+  if(refusal_remaining())startup_imports(binding->image);else original_startup.state[1]=4;
+  /* Toolhelp supplies a live module snapshot, not KnownDLL section identity,
+   * loader requirements or the operation that caused startup to fail. */
+  if(startup_take(2)){
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,binding->pid);
+    if(snapshot==INVALID_HANDLE_VALUE){original_startup.state[2]=6;original_startup.error[2]=GetLastError();}
+    else{MODULEENTRY32W module={sizeof(module)};BOOL next=Module32FirstW(snapshot,&module);DWORD error=next?0:GetLastError();
+      original_startup.state[2]=next?1:error==ERROR_NO_MORE_FILES?2:6;
+      while(next){
+        if(module.th32ProcessID!=binding->pid){original_startup.state[2]=6;break;}
+        char encoded[1025];
+        if(!refusal_hex(module.szModule,encoded,sizeof(encoded))){original_startup.state[2]=5;break;}
+        startup_fact(2,"module-utf16=%s base=%llu size=%lu",encoded,(ULONGLONG)(uintptr_t)module.modBaseAddr,module.modBaseSize);
+        if(original_startup.state[2]==5||!startup_take(2))break;
+        next=Module32NextW(snapshot,&module);error=next?0:GetLastError();
+      }
+      if(!next&&error!=ERROR_NO_MORE_FILES){original_startup.state[2]=6;original_startup.error[2]=error;}
+      readback_close(snapshot,&status);
+    }
+  }
+  startup_objects(binding->process);
+  WCHAR path[4096];wcscpy_s(path,4096,binding->path);original_startup.state[8]=2;
+  for(unsigned depth=0;depth<8;depth++){
+    WCHAR *slash=wcsrchr(path,L'\\');if(!slash||slash<path+2){original_startup.state[8]=3;break;}
+    if(slash==path+2)slash[1]=0;else *slash=0;
+    if(!startup_take(8))break;
+    HANDLE file=CreateFileW(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+    if(file==INVALID_HANDLE_VALUE){original_startup.state[8]=6;original_startup.error[8]=GetLastError();break;}
+    FILE_ID_INFO id;FILE_ATTRIBUTE_TAG_INFO tag;
+    BOOL got=GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id))&&GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag));
+    DWORD error=got?0:GetLastError();readback_close(file,&status);
+    if(!got){original_startup.state[8]=6;original_startup.error[8]=error;break;}
+    char identity[33];for(unsigned i=0;i<16;i++)snprintf(identity+2*i,3,"%02x",id.FileId.Identifier[i]);
+    /* Depth selects an ancestor of the already-bound original image path;
+     * avoid repeating that long path at every level of the bounded packet. */
+    original_startup.state[8]=1;startup_fact(8,"depth=%u volume=%llu id=%s attributes=%lu tag=%lu path-source=original-image observer-access=attributes",depth,id.VolumeSerialNumber,identity,tag.FileAttributes,tag.ReparseTag);
+    if(original_startup.state[8]==5)break;
+    if(tag.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT){original_startup.state[8]=3;break;}
+    if(slash==path+2)break;
+    if(depth==7)original_startup.state[8]=5;
+  }
+  BOOL last=readback_statistics(binding->token,&after,&status);
+  original_startup.bound=first&&last&&readback_same(&before,&after)&&readback_same(&before,&binding->statistics)&&release_live(binding->process,&status);
+  if(status.closureUncertain&&!original_startup.closure)original_startup.cleanup=status.cleanupValue;
+  original_startup.closure|=status.closureUncertain;original_startup.to=readback_now();
+  original_startup.bound=original_startup.bound&&original_startup.to>=original_startup.from;
+}
+static void release_capture(void) {
+  int savedErrno=errno;DWORD saved=GetLastError();
+  if(original_release.state!=RELEASE_UNSTARTED){release_invalidate();return;}
+  struct release_binding captured={0};struct readback_status status={0};
+  HANDLE temporary=NULL;BOOL acquired=FALSE,complete=FALSE;TOKEN_STATISTICS current,after;
+  FILETIME created,exited,kernel,user;WCHAR expected[4096];DWORD length=4096,actual;
+  captured.from=readback_now();captured.process=ownership_processes[0];captured.token=ownership_tokens[0];captured.image=entries[6].file.handle;
+  if(!ownership_count||!captured.process||!captured.token||!captured.image){readback_fail(&status,"unavailable","release-unheld",ERROR_INVALID_HANDLE);goto finished;}
+  if(!release_live(captured.process,&status))goto finished;
+  if(!readback_ready(&status,"release-GetProcessId"))goto finished;
+  captured.pid=GetProcessId(captured.process);
+  if(!captured.pid){readback_fail(&status,"win32","release-GetProcessId",GetLastError());goto finished;}
+  if(!readback_ready(&status,"release-GetProcessTimes"))goto finished;
+  if(!GetProcessTimes(captured.process,&created,&exited,&kernel,&user)){readback_fail(&status,"win32","release-GetProcessTimes",GetLastError());goto finished;}
+  captured.birth=((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime;
+  if(captured.pid!=original_refusal.pid||captured.birth!=original_refusal.birth){readback_fail(&status,"invariant","release-birth",ERROR_INVALID_DATA);goto finished;}
+  memset(captured.path,0xff,sizeof(captured.path));memset(expected,0xff,sizeof(expected));
+  if(!readback_ready(&status,"release-image-query"))goto finished;
+  if(!QueryFullProcessImageNameW(captured.process,0,captured.path,&length)){readback_fail(&status,"win32","release-image-query",GetLastError());goto finished;}
+  if(!length||length>=4096||wcsnlen_s(captured.path,4096)!=length){readback_fail(&status,"invariant","release-image-size",ERROR_INVALID_DATA);goto finished;}
+  if(!readback_ready(&status,"release-final-path"))goto finished;
+  actual=GetFinalPathNameByHandleW(captured.image,expected,4096,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+  if(!actual){readback_fail(&status,"win32","release-final-path",GetLastError());goto finished;}
+  if(actual<7||actual>=4096||wcsnlen_s(expected,4096)!=actual||wmemcmp(expected,L"\\\\?\\",4)||
+    expected[5]!=L':'||expected[6]!=L'\\'||_wcsicmp(captured.path,expected+4)){readback_fail(&status,"invariant","release-image-path",ERROR_INVALID_DATA);goto finished;}
+  if(!readback_ready(&status,"release-FileIdInfo"))goto finished;
+  if(!GetFileInformationByHandleEx(captured.image,FileIdInfo,&captured.imageId,sizeof(captured.imageId))){readback_fail(&status,"win32","release-FileIdInfo",GetLastError());goto finished;}
+  if(memcmp(&captured.imageId,&entries[6].file.id,sizeof(captured.imageId))||strnlen_s(candidate,41)!=40||strnlen_s(nonce,33)!=32||strnlen_s(entries[6].pin,65)!=64){readback_fail(&status,"invariant","release-image-pin",ERROR_INVALID_DATA);goto finished;}
+  memcpy(captured.candidate,candidate,sizeof(captured.candidate));memcpy(captured.nonce,nonce,sizeof(captured.nonce));memcpy(captured.hash,entries[6].pin,sizeof(captured.hash));
+  if(!readback_statistics(captured.token,&captured.statistics,&status))goto finished;
+  if(!readback_ready(&status,"OpenProcessToken"))goto finished;
+  acquired=OpenProcessToken(captured.process,TOKEN_QUERY,&temporary);
+  if(!acquired){readback_fail(&status,"win32","OpenProcessToken",GetLastError());goto finished;}
+  if(!readback_statistics(temporary,&current,&status)||!readback_statistics(captured.token,&after,&status))goto finished;
+  if(captured.statistics.TokenType!=TokenPrimary||!readback_same(&captured.statistics,&current)||!readback_same(&captured.statistics,&after)){readback_fail(&status,"invariant","release-token-changed",ERROR_INVALID_DATA);goto finished;}
+  complete=TRUE;
+finished:
+  /* An unsuccessful output parameter is not an acquisition, even if non-null. */
+  if(acquired)readback_close(temporary,&status);
+  if(complete&&!status.closureUncertain)complete=release_live(captured.process,&status);
+  captured.to=readback_now();
+  if(complete&&captured.to<captured.from){complete=FALSE;readback_fail(&status,"invariant","release-interval",ERROR_INVALID_DATA);}
+  if(complete&&!status.failed&&!status.closureUncertain){captured.state=RELEASE_USABLE;captured.status=status;original_release=captured;}
+  else{original_release.state=RELEASE_UNAVAILABLE;original_release.from=captured.from;original_release.to=captured.to;original_release.status=status;}
+  if(original_release.state==RELEASE_USABLE)startup_capture(&original_release);
+  SetLastError(saved);errno=savedErrno;
+}
+static BOOL readback_original(DWORD *pid, ULONGLONG *birth, struct release_image_query *query, struct readback_status *status) {
+  HANDLE process=ownership_processes[0];FILETIME created,exited,kernel,user;WCHAR image[4096];DWORD length=4096;FILE_ID_INFO id;
+  if(!process||!ownership_tokens[0])return readback_fail(status,"unavailable","unheld-original",ERROR_INVALID_HANDLE);
+  if(!readback_ready(status,"GetProcessId"))return FALSE;
+  *pid=GetProcessId(process);
+  if(!*pid)return readback_fail(status,"win32","GetProcessId",GetLastError());
+  if(!readback_ready(status,"GetProcessTimes"))return FALSE;
+  if(!GetProcessTimes(process,&created,&exited,&kernel,&user))return readback_fail(status,"win32","GetProcessTimes",GetLastError());
+  *birth=((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime;
+  if(*pid!=original_refusal.pid||*birth!=original_refusal.birth)return readback_fail(status,"invariant","original-birth",ERROR_INVALID_DATA);
+  if(!readback_ready(status,"QueryFullProcessImageNameW"))return FALSE;
+  memset(image,0xff,sizeof(image));
+  query->attempted=TRUE;query->succeeded=QueryFullProcessImageNameW(process,0,image,&length);query->error=query->succeeded?0:GetLastError();
+  if(query->succeeded){
+    if(!length||length>=4096||wcsnlen_s(image,4096)!=length||
+      (original_release.state==RELEASE_USABLE&&_wcsicmp(image,original_release.path)))return readback_fail(status,"invariant","original-image",ERROR_INVALID_DATA);
+  }else{
+    if(!readback_ready(status,"postmortem-wait"))return FALSE;
+    query->waited=WaitForSingleObject(process,0);query->waitError=query->waited==WAIT_FAILED?GetLastError():0;
+    if(query->waited!=WAIT_OBJECT_0)return readback_fail(status,"win32","postmortem-wait",query->waitError?query->waitError:query->error);
+    if(!readback_ready(status,"postmortem-exit"))return FALSE;
+    query->exitRead=GetExitCodeProcess(process,&query->exitCode);query->exitError=query->exitRead?0:GetLastError();
+    if(!query->exitRead)return readback_fail(status,"win32","postmortem-exit",query->exitError);
+  }
+  if(original_release.state!=RELEASE_USABLE||!original_release.dispatched||!original_refusal.sent||
+    original_release.from>original_release.to||original_release.to>original_release.release||original_release.release!=original_refusal.from||
+    original_refusal.to<original_release.release)return readback_fail(status,"unavailable","release-binding",ERROR_INVALID_DATA);
+  if(strcmp(original_release.candidate,candidate)||strcmp(original_release.nonce,nonce)||original_release.process!=process||
+    original_release.token!=ownership_tokens[0]||original_release.image!=entries[6].file.handle||strcmp(original_release.hash,entries[6].pin)||
+    strcmp(original_release.hash,original_refusal.hash)||*pid!=original_release.pid||*birth!=original_release.birth)
+    return readback_fail(status,"invariant","release-lineage",ERROR_INVALID_DATA);
+  if(!entries[6].file.handle)return readback_fail(status,"unavailable","unheld-image",ERROR_INVALID_HANDLE);
+  if(!readback_ready(status,"image-FileIdInfo"))return FALSE;
+  if(!GetFileInformationByHandleEx(entries[6].file.handle,FileIdInfo,&id,sizeof(id)))return readback_fail(status,"win32","image-FileIdInfo",GetLastError());
+  if(memcmp(&id,&original_refusal.imageId,sizeof(id))||memcmp(&id,&entries[6].file.id,sizeof(id))||memcmp(&id,&original_release.imageId,sizeof(id)))
+    return readback_fail(status,"invariant","original-image-identity",ERROR_INVALID_DATA);
+  query->source=query->succeeded?"queried-image":"release-exited";return TRUE;
+}
+static void readback_resource(const char *role, struct held_file *file, const DWORD *masks, unsigned count, const struct readback_token *metadata, BOOL originalBound, struct refusal_report *report) {
+  ULONGLONG from=readback_now();struct readback_status status={0},probe[3]={{0}};struct readback_object object={0};
+  TOKEN_STATISTICS before,after;BOOL first=readback_statistics(ownership_tokens[0],&before,&status),last,stable;
+  PSECURITY_DESCRIPTOR sd=readback_describe(file->handle,&file->id,case_record.accountSid,case_record.restrictingSid,&object,&status);
+  DWORD granted[3]={0};BOOL allowed[3]={0},api[3]={0};
+  for(unsigned i=0;i<count;i++){
+    if(ownership_tokens[0]&&object.bound&&sd&&refusal_remaining()){
+      report->readbackProbes++;api[i]=readback_access(ownership_tokens[0],sd,masks[i],&granted[i],&allowed[i],&probe[i]);
+    }else readback_fail(&probe[i],"unavailable","not-sampled",0);
+  }
+  last=readback_statistics(ownership_tokens[0],&after,&status);
+  stable=metadata->stable&&first&&last&&readback_same(&before,&after)&&readback_same(&metadata->before,&before);
+  if(first&&last&&!stable)readback_fail(&status,"invariant","token-changed",ERROR_INVALID_DATA);
+  BOOL mic=stable&&(metadata->fields&24)==24&&(metadata->policy&TOKEN_MANDATORY_POLICY_NO_WRITE_UP)&&object.labelValid;
+  DWORD denied=mic?readback_mic(metadata->integrity,metadata->policy,object.level,object.label):0;
+  readback_free(sd,&status);report->readbackClosure|=status.closureUncertain;
+  char identity[33]="unavailable",probes[1536]="",line[6144];DWORD used=0;
+  if(object.identified)for(unsigned i=0;i<16;i++)snprintf(identity+i*2,sizeof(identity)-i*2,"%02x",object.actual.FileId.Identifier[i]);
+  BOOL complete=originalBound&&stable&&object.bound&&object.descriptorHash&&object.daclHash&&object.ownerValid&&object.acesValid&&object.labelValid&&mic&&!status.failed;
+  for(unsigned i=0;i<count;i++){
+    char access[32]="unavailable",mandatory[32]="unavailable";BOOL discretionary=originalBound&&stable&&object.bound&&api[i];
+    if(discretionary)snprintf(access,sizeof(access),"%lu",granted[i]);
+    if(discretionary&&mic)snprintf(mandatory,sizeof(mandatory),"%lu",denied&masks[i]);
+    const char *answer=discretionary&&mic?(allowed[i]&&!(denied&masks[i])?"grant":"deny"):"unavailable";
+    int n=snprintf(probes+used,sizeof(probes)-used," probe%u=requested:%lu,api:%s/%lu,operation:%s,discretionary:%s,granted:%s,mic-denied:%s,authorization:%s,closure-uncertain:%u,cleanup:%s/%lu",
+      i,masks[i],probe[i].failed?probe[i].domain:"win32",probe[i].value,probe[i].failed?probe[i].operation:"AccessCheck",
+      discretionary?(allowed[i]?"grant":"deny"):"unavailable",access,mandatory,answer,!!probe[i].closureUncertain,
+      probe[i].cleanupDomain?probe[i].cleanupDomain:"none",probe[i].cleanupValue);
+    report->readbackClosure|=probe[i].closureUncertain;
+    if(!discretionary||!mic||probe[i].closureUncertain)complete=FALSE;
+    if(n<0||(DWORD)n>=sizeof(probes)-used){report->truncated=TRUE;complete=FALSE;break;}used+=(DWORD)n;
+  }
+  if(!complete)report->readbackUnavailable++;
+  int n=snprintf(line,sizeof(line),"native-windows-original-child: resource role=%s post-refusal=1 sample-from=%llu sample-to=%llu identified=%u bound=%u volume=%llu id=%s descriptor-sha256=%s dacl-sha256=%s owner=%s dacl-present=%u aces-complete=%u aces=%s label-available=%u label-defaulted=%u object-level=%lu label-mask=%lu statistics-read=%u,%u token-stable=%u status=%s/%lu operation=%s closure-uncertain=%u cleanup=%s/%lu%s\n",
+    role,from,readback_now(),!!object.identified,!!object.bound,object.actual.VolumeSerialNumber,identity,
+    object.descriptorHash?object.descriptor:"unavailable",object.daclHash?object.dacl:"unavailable",object.ownerValid?object.owner:"unavailable",
+    !!object.daclPresent,!!object.acesValid,object.aces[0]?object.aces:"unavailable",!!object.labelValid,!!object.labelDefaulted,object.level,object.label,
+    !!first,!!last,!!stable,status.domain?status.domain:"none",status.value,status.operation?status.operation:"none",!!status.closureUncertain,
+    status.cleanupDomain?status.cleanupDomain:"none",status.cleanupValue,probes);
+  if(n>0&&(size_t)n<sizeof(line))refusal_publish(line,report);else{report->truncated=TRUE;refusal_publish(NULL,report);}
+}
+static void readback_collect(struct refusal_report *report) {
+  if(!ownership_literal||strcmp(original_refusal.command,"ownership-output")||!refusal_remaining())return;
+  report->readbackStarted=TRUE;refusal_publish(NULL,report);
+  ULONGLONG from=readback_now(),birth=0;DWORD pid=0;struct readback_status status={0};struct readback_token metadata={0};
+  struct release_image_query imageQuery={0};imageQuery.waited=MAXDWORD;imageQuery.source="unavailable";
+  BOOL bound=readback_original(&pid,&birth,&imageQuery,&status);
+  readback_metadata(ownership_tokens[0],&metadata,&status);
+  if(bound&&(!metadata.stable||!readback_same(&original_release.statistics,&metadata.before)||!readback_same(&original_release.statistics,&metadata.after))){
+    bound=readback_fail(&status,"invariant","release-token-changed",ERROR_INVALID_DATA);imageQuery.source="unavailable";
+  }
+  BOOL principals=(metadata.fields&3)==3&&metadata.restrictingCount==1&&readback_sid_equal(metadata.subject,case_record.accountSid)&&
+    readback_sid_equal(metadata.restricting,case_record.restrictingSid);
+  BOOL usable=bound&&principals&&metadata.stable&&metadata.fields==31&&metadata.before.TokenType==TokenPrimary;
+  report->requestBound=usable;
+  if(!usable)report->readbackUnavailable++;
+  report->readbackClosure|=status.closureUncertain||original_release.status.closureUncertain;
+  const char *captureState=release_capture_name();
+  char line[4096];int n=snprintf(line,sizeof(line),"native-windows-original-child: token post-refusal=1 sample-from=%llu sample-to=%llu binding=%u capture=%s capture-from=%llu capture-to=%llu capture-status=%s/%lu capture-operation=%s capture-closure-uncertain=%u binding-source=%s image-query-attempted=%u image-query-succeeded=%u image-query-error=%lu terminal-wait=%lu terminal-wait-error=%lu terminal-exit-read=%u terminal-exit=%lu terminal-exit-error=%lu pid=%lu birth=%llu fields=%u subject=%s restricting-count=%lu restricting=%s privileges=%lu integrity=%s integrity-level=%lu mandatory-policy=%lu principals-match=%u statistics-read=%u,%u stable=%u token-id=%08lx%08lx authentication-id=%08lx%08lx modified-id=%08lx%08lx after-token-id=%08lx%08lx after-authentication-id=%08lx%08lx after-modified-id=%08lx%08lx type=%u status=%s/%lu operation=%s closure-uncertain=%u cleanup=%s/%lu scope=separate-probes original-request=unobserved first-syscall=unobserved atomic=0 unobserved=window-station,desktop,pipe,job,other-kernel-objects,unheld-ancestors,loader-dependencies\n",
+    from,readback_now(),!!bound,captureState,original_release.from,original_release.to,original_release.status.domain?original_release.status.domain:"none",original_release.status.value,
+    original_release.status.operation?original_release.status.operation:"none",!!original_release.status.closureUncertain,imageQuery.source,!!imageQuery.attempted,!!imageQuery.succeeded,imageQuery.error,
+    imageQuery.waited,imageQuery.waitError,!!imageQuery.exitRead,imageQuery.exitCode,imageQuery.exitError,pid,birth,metadata.fields,metadata.fields&1?metadata.subject:"unavailable",metadata.restrictingCount,
+    metadata.fields&2?(metadata.restricting[0]?metadata.restricting:"none"):"unavailable",metadata.privileges,
+    metadata.fields&8?metadata.integritySid:"unavailable",metadata.integrity,metadata.policy,!!principals,!!metadata.first,!!metadata.last,!!metadata.stable,
+    (DWORD)metadata.before.TokenId.HighPart,metadata.before.TokenId.LowPart,(DWORD)metadata.before.AuthenticationId.HighPart,metadata.before.AuthenticationId.LowPart,
+    (DWORD)metadata.before.ModifiedId.HighPart,metadata.before.ModifiedId.LowPart,(DWORD)metadata.after.TokenId.HighPart,metadata.after.TokenId.LowPart,
+    (DWORD)metadata.after.AuthenticationId.HighPart,metadata.after.AuthenticationId.LowPart,(DWORD)metadata.after.ModifiedId.HighPart,metadata.after.ModifiedId.LowPart,
+    metadata.before.TokenType,status.domain?status.domain:"none",status.value,status.operation?status.operation:"none",!!status.closureUncertain,
+    status.cleanupDomain?status.cleanupDomain:"none",status.cleanupValue);
+  if(n>0&&(size_t)n<sizeof(line))refusal_publish(line,report);else{report->truncated=TRUE;refusal_publish(NULL,report);}
+  const unsigned indices[]={6,4,3,1,2,0};const char *roles[]={"image","workspace","storage","case","custody","outer"};
+  const DWORD image[]={FILE_READ_DATA,FILE_EXECUTE},workspace[]={FILE_TRAVERSE,FILE_LIST_DIRECTORY,FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY},traverse[]={FILE_TRAVERSE},policy[]={FILE_READ_DATA};
+  for(unsigned i=0;i<7;i++){
+    if(!refusal_remaining()){refusal_publish(NULL,report);return;}
+    struct held_file *file=i<6?&entries[indices[i]].file:&ownership_policy_file;
+    readback_resource(i<6?roles[i]:"policy",file,i==0?image:i==1?workspace:i==6?policy:traverse,i==0?2:i==1?3:1,&metadata,usable,report);
+  }
+  report->readbackFinished=TRUE;refusal_publish(NULL,report);
+}
+static int ownership_literal_context(char *output, DWORD maximum, int used) {
+  if(used<=0||!original_literal_output.active)return used;
+  const struct literal_output_fact *value=&original_literal_output;
+  int size=sprintf_s(output+used-1,maximum-used+1," output-refusal=%s output-bytes=%lu output-total=%lu output-entry=%u output-wmain=%u output-marker-bytes=%lu output-complete=%u peek=%ld available=%lu read=%ld read-bytes=%lu pipe-error=%lu output-wait=%lu output-wait-error=%lu exit-read=%u exit=%lu exit-error=%lu exit-poll=%lu exit-poll-error=%lu\n",
+    value->refusal,value->used,value->total,value->markerPhase>=1,value->markerPhase>=2,value->markerUsed,!!value->complete,value->peekResult,value->available,value->readResult,value->readBytes,value->pipeError,value->waited,value->waitError,!!value->exitRead,value->exitCode,value->exitError,value->exitWait,value->exitWaitError);
+  return size>0?used-1+size:-1;
+}
+static void refusal_transport(const char *output, DWORD used) {
+  /* sdk-api c12073e: this GENERIC_WRITE client handle permits PIPE_NOWAIT.
+   * This is a fatal-path immediate write, not asynchronous I/O or a new wait.
+   * Leave the mode in place for the following fatal frame; never retry a short
+   * write, call a guard, or adopt stderr as an authenticated channel. */
+  DWORD mode=PIPE_READMODE_BYTE|PIPE_NOWAIT,written=0;
+  if(used>32256||!SetNamedPipeHandleState(control,&mode,NULL,NULL))return;
+  char frame[65536];
+  int size=sprintf_s(frame,sizeof(frame),"\035{\"phase\":\"reader-diagnostic\",\"sequence\":%lu,\"command\":\"%s\",\"source\":\"%s\",\"line\":%lu,\"lastError\":%lu,\"hex\":\"",original_refusal.sequence,original_refusal.command,original_refusal.source,original_refusal.line,original_refusal.error);
+  if(size<=0||(DWORD)size+used*2+3>sizeof(frame))return;
+  const char digits[]="0123456789abcdef";
+  for(DWORD i=0;i<used;i++){BYTE byte=(BYTE)output[i];frame[size++]=digits[byte>>4];frame[size++]=digits[byte&15];}
+  memcpy(frame+size,"\"}\n",3);size+=3;
+  (void)WriteFile(control,frame,(DWORD)size,&written,NULL);
+}
+static const WCHAR *refusal_text(const EVT_VARIANT *value, const BYTE *buffer, DWORD used) {
+  if(value->Type!=EvtVarTypeString||!value->StringVal)return NULL;
+  uintptr_t start=(uintptr_t)value->StringVal,first=(uintptr_t)buffer,last=first+used;
+  if(start<first||start>=last||(start-first)%sizeof(WCHAR))return NULL;
+  size_t limit=(last-start)/sizeof(WCHAR);
+  return wcsnlen_s(value->StringVal,limit)<limit?value->StringVal:NULL;
+}
+static BOOL refusal_number(const EVT_VARIANT *value, const BYTE *buffer, DWORD used, ULONGLONG *number) {
+  switch(value->Type){
+    case EvtVarTypeByte:*number=value->ByteVal;return TRUE;
+    case EvtVarTypeUInt16:*number=value->UInt16Val;return TRUE;
+    case EvtVarTypeUInt32:case EvtVarTypeHexInt32:*number=value->UInt32Val;return TRUE;
+    case EvtVarTypeUInt64:case EvtVarTypeHexInt64:*number=value->UInt64Val;return TRUE;
+    case EvtVarTypeFileTime:*number=value->FileTimeVal;return TRUE;
+  }
+  const WCHAR *text=refusal_text(value,buffer,used);
+  if(!text||!text[0]||wcslen(text)>20||text[0]==L'-'||text[0]==L'+'||iswspace(text[0]))return FALSE;
+  WCHAR *end;errno=0;ULONGLONG parsed=_wcstoui64(text,&end,0);if(errno||*end)return FALSE;*number=parsed;return TRUE;
+}
+static BOOL refusal_hex(const WCHAR *text, char *bytes, size_t capacity) {
+  bytes[0]=0;if(!text)return TRUE;size_t size=wcslen(text);
+  if(size>(capacity-1)/4)return FALSE;
+  for(size_t i=0;i<size;i++)sprintf_s(bytes+i*4,capacity-i*4,"%04x",(unsigned)text[i]);
+  return TRUE;
+}
+static BOOL refusal_event_time(const EVT_VARIANT *value, const BYTE *buffer, DWORD used, ULONGLONG *ticks) {
+  if(value->Type==EvtVarTypeFileTime){*ticks=value->FileTimeVal;return TRUE;}
+  const WCHAR *text=refusal_text(value,buffer,used);if(!text)return FALSE;
+  size_t length=wcslen(text);if(length<20||length>28||length==21||text[4]!=L'-'||text[7]!=L'-'||text[10]!=L'T'||text[13]!=L':'||text[16]!=L':'||(length!=20&&text[19]!=L'.')||text[length-1]!=L'Z')return FALSE;
+  unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};
+  for(unsigned i=0;i<6;i++)for(unsigned j=0;j<(i?2:4);j++){WCHAR c=text[starts[i]+j];if(c<L'0'||c>L'9')return FALSE;parts[i]=parts[i]*10+c-L'0';}
+  DWORD fraction=0;for(size_t i=20;i<length-1;i++){if(text[i]<L'0'||text[i]>L'9')return FALSE;fraction=fraction*10+text[i]-L'0';}
+  for(size_t i=length==20?0:length-21;i<7;i++)fraction*=10;
+  SYSTEMTIME time={0};time.wYear=(WORD)parts[0];time.wMonth=(WORD)parts[1];time.wDay=(WORD)parts[2];time.wHour=(WORD)parts[3];time.wMinute=(WORD)parts[4];time.wSecond=(WORD)parts[5];FILETIME parsed;
+  if(!SystemTimeToFileTime(&time,&parsed))return FALSE;*ticks=(((ULONGLONG)parsed.dwHighDateTime<<32)|parsed.dwLowDateTime)+fraction;return TRUE;
+}
+static BOOL refusal_time(ULONGLONG ticks, WCHAR text[32]) {
+  FILETIME time={(DWORD)ticks,(DWORD)(ticks>>32)};SYSTEMTIME value;
+  return FileTimeToSystemTime(&time,&value)&&swprintf_s(text,32,L"%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ",value.wYear,value.wMonth,value.wDay,value.wHour,value.wMinute,value.wSecond,ticks%10000000)>0;
+}
+/* Only payload EventData is requested. System/Execution/@ProcessID describes
+ * the logging provider and is deliberately absent from this projection. */
+static void refusal_record(EVT_HANDLE context, EVT_HANDLE event, unsigned channel, struct refusal_report *report) {
+  union { EVT_VARIANT alignment; BYTE bytes[32768]; } buffer;DWORD used=0,count=0;
+  if(!EvtRender(context,event,EvtRenderEventValues,sizeof(buffer.bytes),buffer.bytes,&used,&count)){
+    report->renderError=GetLastError();if(report->renderError==ERROR_INSUFFICIENT_BUFFER)report->truncated=TRUE;else report->malformed++;return;
+  }
+  if(count!=15||used<15*sizeof(EVT_VARIANT)||used>sizeof(buffer.bytes)){report->malformed++;return;}
+  EVT_VARIANT *v=(void *)buffer.bytes;ULONGLONG id=0,version=0,time=0,keywords=0,pid=0,logon=0,mask=0;
+  const unsigned strings[]={0,6,9,10,12,13};
+  for(unsigned i=0;i<6;i++)if(v[strings[i]].Type!=EvtVarTypeNull&&!refusal_text(&v[strings[i]],buffer.bytes,used)){report->malformed++;return;}
+  const WCHAR *provider=refusal_text(&v[0],buffer.bytes,used),*image=refusal_text(&v[6],buffer.bytes,used);
+  const WCHAR *subject=refusal_text(&v[7],buffer.bytes,used),*type=refusal_text(&v[9],buffer.bytes,used),*object=refusal_text(&v[10],buffer.bytes,used);
+  if(v[7].Type!=EvtVarTypeNull&&v[7].Type!=EvtVarTypeSid&&!subject){report->malformed++;return;}
+  const WCHAR *reason=refusal_text(&v[12],buffer.bytes,used);if(!reason)reason=refusal_text(&v[13],buffer.bytes,used);
+  WCHAR subjectText[184]={0};LPWSTR converted=NULL;
+  if(v[7].Type==EvtVarTypeSid){
+    uintptr_t first=(uintptr_t)buffer.bytes,start=(uintptr_t)v[7].SidVal,last=first+used;
+    if(start<first||start>last||last-start<8||GetSidLengthRequired(((SID *)v[7].SidVal)->SubAuthorityCount)>last-start||!IsValidSid(v[7].SidVal)){report->malformed++;return;}
+    if(ConvertSidToStringSidW(v[7].SidVal,&converted)){
+      if(wcslen(converted)<184){wcscpy_s(subjectText,184,converted);subject=subjectText;}else report->truncated=TRUE;
+      if(LocalFree(converted)&&!report->closeError)report->closeError=GetLastError();
+    }else report->malformed++;
+  }
+  if(!provider||!refusal_number(&v[1],buffer.bytes,used,&id)||!refusal_number(&v[2],buffer.bytes,used,&version)||
+    !refusal_event_time(&v[3],buffer.bytes,used,&time)||!refusal_number(&v[4],buffer.bytes,used,&keywords)){report->malformed++;return;}
+  BOOL payload=refusal_number(&v[5],buffer.bytes,used,&pid),hasLogon=refusal_number(&v[8],buffer.bytes,used,&logon),hasMask=refusal_number(&v[11],buffer.bytes,used,&mask);
+  if((!payload&&v[5].Type!=EvtVarTypeNull)||(!hasLogon&&v[8].Type!=EvtVarTypeNull)||(!hasMask&&v[11].Type!=EvtVarTypeNull)){report->malformed++;return;}
+  BOOL interval=time>=original_refusal.from&&time<=original_refusal.to&&time>=original_refusal.birth;
+  BOOL identity=payload&&pid==original_refusal.pid&&image&&!_wcsicmp(image,original_refusal.image);
+  BOOL principal=subject&&original_refusal.subject[0]&&!wcscmp(subject,original_refusal.subject);
+  BOOL security=!channel&&!wcscmp(provider,L"Microsoft-Windows-Security-Auditing")&&id==4656&&version<=1&&(keywords&4503599627370496ULL)&&!(keywords&9007199254740992ULL);
+  BOOL request=type&&type[0]&&wcscmp(type,L"-")&&object&&object[0]&&wcscmp(object,L"-")&&hasMask&&mask&&mask<=MAXDWORD;
+  BOOL capture=report->armed&&report->requestBound&&original_release.state==RELEASE_USABLE&&original_release.dispatched&&
+    original_release.release==original_refusal.from&&original_release.to<=report->ready&&report->ready<=original_refusal.from&&
+    report->delivery>=original_refusal.to&&report->delivery>=time;
+  /* Known Application Error payload schema; other Application/CodeIntegrity
+   * layouts remain explicitly unjoined, even if their execution PID matches. */
+  ULONGLONG birth=0;BOOL application=channel==1&&!wcscmp(provider,L"Application Error")&&id==1000&&!version&&refusal_number(&v[14],buffer.bytes,used,&birth)&&birth==original_refusal.birth;
+  BOOL joined=interval&&identity&&((security&&principal&&request&&capture)||application);
+  char p[1025],im[16385],sub[737],ty[1025],obj[16385],why[16385],line[57344];
+  if(!refusal_hex(provider,p,sizeof(p))||!refusal_hex(image,im,sizeof(im))||!refusal_hex(subject,sub,sizeof(sub))||!refusal_hex(type,ty,sizeof(ty))||!refusal_hex(object,obj,sizeof(obj))||!refusal_hex(reason,why,sizeof(why))){report->truncated=TRUE;return;}
+  int size=sprintf_s(line,sizeof(line),"native-windows-original-child: record channel=%u provider-utf16=%s event=%llu version=%llu time=%llu keywords=%llu pid-available=%u pid=%llu image-utf16=%s subject-utf16=%s logon-available=%u logon=%llu object-type-utf16=%s object-utf16=%s mask-available=%u mask=%llu reason-utf16=%s interval=%u identity=%u principal=%u schema=%u ready=%llu delivery=%llu request-fields=%u capture-bound=%u joined=%u corroboration=%u\n",channel,p,id,version,time,keywords,!!payload,pid,im,sub,!!hasLogon,logon,ty,obj,!!hasMask,mask,why,!!interval,!!identity,!!principal,!!(security||application),report->ready,report->delivery,!!request,!!capture,!!joined,!!(joined&&application));
+  if(size>0){report->records++;report->joined+=!!joined;report->requestStatusRecords+=!!(joined&&security);refusal_publish(line,report);}else report->truncated=TRUE;
+}
+static EVT_HANDLE refusal_render_context(unsigned channel) {
+  const WCHAR *paths[]={L"Event/System/Provider/@Name",L"Event/System/EventID",L"Event/System/Version",L"Event/System/TimeCreated/@SystemTime",L"Event/System/Keywords",L"Event/EventData/Data[@Name='ProcessId']",channel==1?L"Event/EventData/Data[@Name='AppPath']":L"Event/EventData/Data[@Name='ProcessName']",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/EventData/Data[@Name='ObjectType']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='AccessMask']",L"Event/EventData/Data[@Name='AccessReason']",L"Event/EventData/Data[@Name='AccessList']",L"Event/EventData/Data[@Name='ProcessCreationTime']"};
+  return EvtCreateRenderContext(15,paths,EvtRenderContextValues);
+}
+static BOOL refusal_stopped(struct refusal_report *report) {
+  DWORD waited=WaitForSingleObject(original_refusal.stop,0);
+  if(waited==WAIT_TIMEOUT)return FALSE;
+  report->interrupted=TRUE;
+  if(waited==WAIT_FAILED)report->handoffError=GetLastError();
+  else if(waited!=WAIT_OBJECT_0)report->handoffError=ERROR_INVALID_DATA;
+  return TRUE;
+}
+static DWORD WINAPI refusal_worker(void *unused) {
+  struct refusal_report report={0};
+  AcquireSRWLockExclusive(&refusal_lock);report=original_refusal.report;ReleaseSRWLockExclusive(&refusal_lock);
+  EVT_HANDLE subscription=NULL,securityContext=NULL;HANDLE notification=NULL,signals[]={original_refusal.stop,original_refusal.wake};
+  if(refusal_remaining()&&!refusal_stopped(&report)){
+    notification=CreateEventW(NULL,TRUE,FALSE,NULL);original_refusal.notification=notification;
+    if(!notification)report.arming=GetLastError();
+    else if(refusal_remaining()&&!refusal_stopped(&report)){
+      securityContext=refusal_render_context(0);
+      if(!securityContext)report.arming=GetLastError();
+      else if(refusal_remaining()&&!refusal_stopped(&report)){
+        subscription=EvtSubscribe(NULL,notification,L"Security",L"*[System[Provider[@Name='Microsoft-Windows-Security-Auditing'] and EventID=4656 and band(Keywords,4503599627370496)]]",NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);
+        report.arming=subscription?0:GetLastError();
+      }
+    }
+  }
+  if(!refusal_remaining())report.overBudget=TRUE;
+  original_refusal.subscription=subscription;
+  report.armed=subscription!=NULL;report.query[0]=report.arming;
+  if(subscription)report.ready=readback_now();
+  refusal_publish(NULL,&report);
+  if(!SetEvent(original_refusal.ready)){report.handoffError=GetLastError();goto finished;}
+  DWORD waited=WaitForMultipleObjects(2,signals,FALSE,refusal_remaining());
+  DWORD waitError=waited==WAIT_FAILED?GetLastError():0;
+  /* The caller publishes context and the complete refusal before signaling.
+   * Refresh publication flags without resetting native arming evidence. */
+  AcquireSRWLockExclusive(&refusal_lock);report=original_refusal.report;ReleaseSRWLockExclusive(&refusal_lock);
+  if(waited!=WAIT_OBJECT_0+1||!original_refusal.latched){
+    report.interrupted=TRUE;if(waited==WAIT_FAILED)report.handoffError=waitError;
+    if(waited==WAIT_TIMEOUT)report.overBudget=TRUE;goto finished;
+  }
+  readback_collect(&report);
+  const WCHAR *channels[]={L"Security",L"Application",L"Microsoft-Windows-CodeIntegrity/Operational"};
+  WCHAR from[32],to[32];
+  if(!refusal_time(original_refusal.from,from)||!refusal_time(original_refusal.to,to)){report.malformed++;goto finished;}
+  /* Optional existing readback cannot be starved by waiting for Security. */
+  for(unsigned channel=1;channel<3;channel++){
+    if(report.renderError||report.closeError||report.malformed||report.truncated)break;
+    if(refusal_stopped(&report))break;
+    if(!refusal_remaining()||report.examined==64){report.overBudget=TRUE;break;}
+    if(channel){
+      EVT_HANDLE config=EvtOpenChannelConfig(NULL,channels[channel],0);DWORD error=config?ERROR_SUCCESS:GetLastError();EVT_VARIANT enabled={0};DWORD used=0;
+      BOOL read=config&&EvtGetChannelConfigProperty(config,EvtChannelConfigEnabled,0,sizeof(enabled),&enabled,&used);
+      if(config&&!read)error=GetLastError();
+      if(config&&!EvtClose(config)&&!report.closeError)report.closeError=GetLastError();
+      if(!read||used!=sizeof(enabled)||enabled.Type!=EvtVarTypeBoolean||!enabled.BooleanVal){report.query[channel]=error?error:ERROR_NOT_SUPPORTED;refusal_publish(NULL,&report);continue;}
+    }
+    if(report.closeError)break;
+    EVT_HANDLE context=refusal_render_context(channel),query=NULL;WCHAR expression[1024];
+    if(!context){report.query[channel]=GetLastError();refusal_publish(NULL,&report);continue;}
+    int size=swprintf_s(expression,1024,L"*[System[TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]]]",from,to);
+    BOOL attempted=size>0&&refusal_remaining();if(attempted)query=EvtQuery(NULL,channels[channel],expression,EvtQueryChannelPath|EvtQueryReverseDirection);
+    DWORD queryError=query?ERROR_SUCCESS:GetLastError();
+    report.query[channel]=query?ERROR_SUCCESS:attempted?queryError:size<=0?ERROR_INVALID_DATA:ERROR_TIMEOUT;
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.query=query;ReleaseSRWLockExclusive(&refusal_lock);refusal_publish(NULL,&report);
+    while(query&&refusal_remaining()&&report.examined<64&&!report.renderError&&!report.closeError&&!report.malformed&&!report.truncated){
+      if(refusal_stopped(&report))break;
+      EVT_HANDLE event=NULL;DWORD count=0;BOOL next=EvtNext(query,1,&event,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+      if(!next||count!=1||!event){if(error!=ERROR_NO_MORE_ITEMS)report.query[channel]=error?error:ERROR_INVALID_DATA;break;}
+      report.examined++;refusal_publish(NULL,&report);
+      if(refusal_remaining())refusal_record(context,event,channel,&report);else report.overBudget=TRUE;
+      if(!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+    }
+    if(!refusal_remaining()||report.examined==64)report.overBudget=TRUE;
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.query=NULL;ReleaseSRWLockExclusive(&refusal_lock);
+    if(query&&!EvtClose(query)&&!report.closeError)report.closeError=GetLastError();
+    if(!EvtClose(context)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+  }
+  if(report.renderError||report.closeError||report.malformed||report.truncated)goto finished;
+  signals[1]=notification;
+  while(subscription&&!report.interrupted&&!report.requestStatusRecords&&refusal_remaining()&&report.examined<64){
+    waited=WaitForMultipleObjects(2,signals,FALSE,refusal_remaining());
+    if(waited!=WAIT_OBJECT_0+1){
+      if(waited==WAIT_TIMEOUT)report.overBudget=TRUE;
+      else{report.interrupted=TRUE;if(waited==WAIT_FAILED)report.query[0]=GetLastError();}
+      break;
+    }
+    for(;;){
+      if(!refusal_remaining()||report.examined==64)break;
+      if(refusal_stopped(&report))break;
+      /* Reset before enumeration: an arrival after an empty drain keeps its
+       * service notification. An empty queue never proves audit absence. */
+      if(!ResetEvent(notification)){report.query[0]=GetLastError();goto finished;}
+      EVT_HANDLE event=NULL;DWORD count=0;BOOL next=EvtNext(subscription,1,&event,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+      if(!next||count!=1||!event){
+        if(!next&&error==ERROR_NO_MORE_ITEMS)break;
+        report.query[0]=error?error:ERROR_INVALID_DATA;goto finished;
+      }
+      report.examined++;report.delivery=readback_now();
+      if(refusal_remaining())refusal_record(securityContext,event,0,&report);else report.overBudget=TRUE;
+      if(!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+      if(report.requestStatusRecords||report.renderError||report.closeError||report.malformed||report.truncated)goto finished;
+    }
+  }
+  if(!refusal_remaining()||report.examined==64)report.overBudget=TRUE;
+finished:
+  /* EvtSubscribe is cancelled by its owning thread's EvtClose, never EvtCancel. */
+  if(subscription){
+    if(EvtClose(subscription)){original_refusal.subscription=NULL;subscription=NULL;}
+    else if(!report.closeError)report.closeError=GetLastError();
+  }
+  if(securityContext&&!EvtClose(securityContext)&&!report.closeError)report.closeError=GetLastError();
+  /* An uncertain cancellation may still signal its borrowed notification. */
+  if(notification&&!subscription){
+    if(CloseHandle(notification))original_refusal.notification=NULL;
+    else if(!report.closeError)report.closeError=GetLastError();
+  }
+  report.finished=TRUE;refusal_publish(NULL,&report);return 0;
+}
+static void refusal_reap(void) {
+  if(!original_refusal.initialized||original_refusal.reaped)return;
+  if(original_refusal.thread){
+    DWORD waited=WaitForSingleObject(original_refusal.thread,0);
+    if(waited!=WAIT_OBJECT_0){
+      if(waited==WAIT_FAILED)original_refusal.reapError=GetLastError();
+      else if(waited!=WAIT_TIMEOUT)original_refusal.reapError=ERROR_INVALID_DATA;
+      return;
+    }
+  }
+  original_refusal.reaped=TRUE;
+  if(original_refusal.thread)original_refusal.threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();
+  HANDLE handles[]={original_refusal.ready,original_refusal.wake,original_refusal.stop};
+  for(unsigned i=0;i<3;i++)if(handles[i]&&!CloseHandle(handles[i])&&!original_refusal.notifyClose)original_refusal.notifyClose=GetLastError();
+}
+static void refusal_settle(void) {
+  int savedErrno=errno;DWORD saved=GetLastError();
+  if(original_refusal.initialized&&!original_refusal.reaped){
+    if(original_refusal.stop&&!SetEvent(original_refusal.stop)&&!original_refusal.notifyClose)original_refusal.notifyClose=GetLastError();
+    /* No new observation/cleanup deadline. Pending calls keep every resource
+     * and the one-shot state until actual completion or reader-process exit. */
+    refusal_reap();
+  }
+  SetLastError(saved);errno=savedErrno;
+}
+static void refusal_arm(void) {
+  if(original_refusal.initialized)return;
+  int savedErrno=errno;DWORD saved=GetLastError();original_refusal.initialized=TRUE;
+  original_refusal.threadClose=-1;original_refusal.armWait=WAIT_TIMEOUT;
+  original_refusal.report.arming=-1;for(unsigned i=0;i<3;i++)original_refusal.report.query[i]=-1;
+  original_refusal.report.examined=original_startup.examined;
+  wcscpy_s(original_refusal.image,4096,entries[6].path);wcscpy_s(original_refusal.subject,184,case_record.accountSid);
+  original_refusal.imageId=entries[6].file.id;strcpy_s(original_refusal.hash,65,entries[6].pin);
+  original_refusal.createError=ERROR_TIMEOUT;
+  if(refusal_remaining()){
+    original_refusal.ready=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.ready)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.ready&&refusal_remaining()){
+    original_refusal.wake=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.wake)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.wake&&refusal_remaining()){
+    original_refusal.stop=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.stop)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.stop&&refusal_remaining()){
+    original_refusal.thread=CreateThread(NULL,0,refusal_worker,NULL,0,NULL);
+    original_refusal.createError=original_refusal.thread?0:GetLastError();
+  }
+  if(original_refusal.thread){
+    original_refusal.armWait=WaitForSingleObject(original_refusal.ready,refusal_remaining());
+    if(original_refusal.armWait==WAIT_FAILED)original_refusal.armWaitError=GetLastError();
+  }else refusal_reap();
+  SetLastError(saved);errno=savedErrno;
+}
+/* Mandatory summaries use reserved space, even when the worker never starts.
+ * No empty query identifies a first request or supplies missing namespaces. */
+static DWORD startup_publish(char *output, DWORD capacity, DWORD used, const struct refusal_report *report, BOOL published) {
+  BOOL bound=original_startup.bound&&original_startup.pid==original_refusal.pid&&original_startup.birth==original_refusal.birth&&
+    original_release.state==RELEASE_USABLE&&original_release.dispatched&&original_startup.to<=original_release.release;
+  for(unsigned i=0;i<9;i++){
+    unsigned state=original_startup.state[i];DWORD error=original_startup.error[i];
+    BOOL complete=published&&(!i||!original_startup.used||original_startup.published);
+    if(i&&!complete&&state==1)state=5;
+    BOOL closure=i?original_startup.closure:!published||!report->finished||report->closeError;
+    DWORD cleanup=i?original_startup.cleanup:report->closeError;
+    if(!i){
+      state=!published?0:report->overBudget?(refusal_remaining()?5:4):!refusal_remaining()&&!report->requestStatusRecords?4:report->truncated?5:report->query[0]<0?0:
+        report->query[0]==ERROR_NOT_SUPPORTED?3:!report->armed||report->query[0]||report->malformed||report->renderError||report->interrupted||report->handoffError?6:!report->finished?0:report->requestStatusRecords?1:report->closeError?6:4;
+      error=report->query[0]>0?(DWORD)report->query[0]:0;
+    }
+    int size=snprintf(output+used,capacity-used,"native-windows-original-child: coverage class=%u name=%s state=%s status=%lu pid=%lu birth=%llu from=%llu to=%llu bound=%u published=%u closure-uncertain=%u cleanup=%lu first-request=unobserved\n",
+      i,startup_classes[i],startup_states[state],error,i?original_startup.pid:original_refusal.pid,i?original_startup.birth:original_refusal.birth,i?original_startup.from:original_refusal.from,i?original_startup.to:original_refusal.to,!!bound,!!complete,!!closure,cleanup);
+    if(size<=0||(DWORD)size>=capacity-used)return used;
+    used+=(DWORD)size;
+  }
+  return used;
+}
+static void ownership_refusal_collect(const char *source, unsigned line, DWORD error) {
+  if(original_refusal.tried||strcmp(reader_command,"ownership-output")||!ownership_released||!ownership_count)return;
+  int savedErrno=errno;DWORD saved=GetLastError();original_refusal.tried=TRUE;
+  /* Latch the refusal before diagnostics or custody/host disposal can run. */
+  original_refusal.sequence=sequence;original_refusal.line=line;original_refusal.error=error;
+  strcpy_s(original_refusal.command,64,reader_command);strncpy_s(original_refusal.source,64,source,_TRUNCATE);
+  original_refusal.creationVerified=ownership_creation_verified;
+  FILETIME time;GetSystemTimePreciseAsFileTime(&time);original_refusal.to=((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;
+  wcscpy_s(original_refusal.image,4096,entries[6].path);wcscpy_s(original_refusal.subject,184,case_record.accountSid);
+  original_refusal.imageId=entries[6].file.id;strcpy_s(original_refusal.hash,65,entries[6].pin);
+  struct refusal_report report={0};report.arming=-1;for(unsigned i=0;i<3;i++)report.query[i]=-1;
+  report.examined=original_startup.examined;
+  if(!original_refusal.initialized)original_refusal.report=report;
+  char image[16385],subject[737],identity[33],context[20000];
+  for(unsigned i=0;i<16;i++)sprintf_s(identity+i*2,sizeof(identity)-i*2,"%02x",original_refusal.imageId.FileId.Identifier[i]);
+  BOOL encoded=refusal_hex(original_refusal.image,image,sizeof(image))&&refusal_hex(original_refusal.subject,subject,sizeof(subject));
+  int size=encoded?sprintf_s(context,sizeof(context),"native-windows-original-child: context command=%s sequence=%lu source=%s line=%lu error=%lu candidate=%s nonce=%s pid=%lu birth=%llu image-utf16=%s image-volume=%llu image-id=%s image-sha256=%s subject-utf16=%s release=%llu refusal=%llu dispatch-succeeded=%u creation-verified=%u capture=%s capture-from=%llu capture-to=%llu capture-status=%s/%lu capture-operation=%s capture-closure-uncertain=%u resume-time=unavailable\n",original_refusal.command,original_refusal.sequence,original_refusal.source,original_refusal.line,error,candidate,nonce,original_refusal.pid,original_refusal.birth,image,original_refusal.imageId.VolumeSerialNumber,identity,original_refusal.hash,subject,original_refusal.from,original_refusal.to,!!original_refusal.sent,!!original_refusal.creationVerified,release_capture_name(),original_release.from,original_release.to,original_release.status.domain?original_release.status.domain:"none",original_release.status.value,original_release.status.operation?original_release.status.operation:"none",!!original_release.status.closureUncertain):-1;
+  size=ownership_literal_context(context,sizeof(context),size);
+  if(size>0)refusal_publish(context,NULL);else{
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.report.truncated=TRUE;ReleaseSRWLockExclusive(&refusal_lock);
+  }
+  DWORD before=original_refusal.used;
+  if(original_startup.used)refusal_publish(original_startup.bytes,NULL);
+  original_startup.published=original_refusal.used-before==original_startup.used;
+  DWORD createError=original_refusal.initialized?original_refusal.createError:ERROR_INVALID_DATA,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1;
+  if(original_refusal.thread&&!original_refusal.reaped&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.latched=TRUE;ReleaseSRWLockExclusive(&refusal_lock);
+    if(!SetEvent(original_refusal.wake))waitError=GetLastError();
+    else{waited=WaitForSingleObject(original_refusal.thread,refusal_remaining());if(waited==WAIT_FAILED)waitError=GetLastError();}
+  }
+  /* Only an optional query supports the retained query-cancellation path.
+   * Subscription settlement belongs to its owning thread, including expiry. */
+  char output[32256];DWORD used=0;BOOL published=TryAcquireSRWLockExclusive(&refusal_lock);
+  if(published){
+    if(waited!=WAIT_OBJECT_0&&original_refusal.query)canceled=EvtCancel(original_refusal.query)?0:GetLastError();
+    report=original_refusal.report;used=original_refusal.used;memcpy(output,original_refusal.bytes,used);ReleaseSRWLockExclusive(&refusal_lock);
+  }
+  if(!published&&size>0){used=(DWORD)size;memcpy(output,context,used);}
+  refusal_settle();LONGLONG threadClose=original_refusal.threadClose;
+  BOOL unavailable=!report.armed||report.arming!=0||report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
+  BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
+  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||!report.requestStatusRecords||report.interrupted||report.handoffError||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose!=0||original_refusal.notifyClose||original_refusal.reapError||original_refusal.armWaitError||!published||original_startup.closure;
+  const char *readbackState=!published?"unavailable":!report.readbackStarted?"unstarted":report.readbackFinished&&report.readbackTokens==1&&report.readbackResources==7&&report.readbackProbes==10&&!report.readbackUnavailable&&!report.readbackClosure&&!report.truncated?"complete":"partial";
+  used=startup_publish(output,sizeof(output),used,&report,published);
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u armed=%u arming=%lld ready=%llu delivery=%llu interrupted=%u handoff-error=%lu arm-wait=%lu arm-wait-error=%lu notification-close=%lu reap-error=%lu\n",!!report.finished,!!incomplete,!incomplete&&report.examined==original_startup.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0||original_refusal.notifyClose||original_startup.closure),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure,!!report.armed,report.arming,report.ready,report.delivery,!!report.interrupted,report.handoffError,original_refusal.armWait,original_refusal.armWaitError,original_refusal.notifyClose,original_refusal.reapError);
+  if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
+  SetLastError(saved);errno=savedErrno;
+}
+#endif
+static void ownership_failure_fence(DWORD error) {
+  if (!ownership_launcher.hProcess && !ownership_owner.hProcess) return;
+  /* Acquisition can fail while a creator is still suspended, before control
+   * EOF can execute. Fence only the original acquired handles; policy/account
+   * restoration and independent exit/Job proof remain separate. */
+  if (case_job && !TerminateJobObject(case_job, 126))
+    fprintf(stderr, "native-windows-ownership-cleanup: operation=TerminateJobObject error=%lu\n", GetLastError());
+  HANDLE creators[] = {ownership_launcher.hProcess, ownership_owner.hProcess};
+  for (unsigned i = 0; i < 2; i++) if (creators[i]) {
+    DWORD waited = WaitForSingleObject(creators[i], 0);
+    if ((waited == WAIT_TIMEOUT && !TerminateProcess(creators[i], 126)) || (waited != WAIT_TIMEOUT && waited != WAIT_OBJECT_0))
+      fprintf(stderr, "native-windows-ownership-cleanup: operation=TerminateProcess index=%u wait=%lu error=%lu\n", i, waited, GetLastError());
+  }
+  fflush(stderr); SetLastError(error);
+}
+/* Before R there is no payload output. Preserve the launcher's existing error
+ * pipe before the control EOF guard can obscure its original native refusal. */
+static BOOL ownership_failure_write(const char *source, unsigned line, DWORD error) {
+  if (!ownership_output || ownership_released || strncmp(reader_command,"ownership-",10)) return FALSE;
+  BYTE bytes[4096]; DWORD total = 0, available, used; BOOL complete = FALSE;
+  for (;;) {
+    if (!PeekNamedPipe(ownership_output,NULL,0,NULL,&available,NULL)) { complete = GetLastError()==ERROR_BROKEN_PIPE; break; }
+    if (!available) break; /* An idle writer is not a fully captured EOF. */
+    if (total == sizeof(bytes)) break;
+    DWORD size = available < sizeof(bytes)-total ? available : (DWORD)sizeof(bytes)-total;
+    if (!ReadFile(ownership_output,bytes+total,size,&used,NULL) || !used) break;
+    total += used;
+  }
+  if (!total) { SetLastError(error); return FALSE; }
+  /* Raw native facts are context, never admission or retirement authority. */
+  char frame[9216], encoded[8193];
+  for (DWORD i=0;i<total;i++) sprintf_s(encoded+i*2,sizeof(encoded)-i*2,"%02x",bytes[i]);
+  int size = sprintf_s(frame,sizeof(frame),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"launcher\":{\"hex\":\"%s\",\"complete\":%s}}\n",sequence,reader_command,source,line,error,encoded,complete ? "true" : "false");
+  if(size>0)WriteFile(control,frame,(DWORD)size,&used,NULL);
+  WriteFile(GetStdHandle(STD_ERROR_HANDLE),bytes,total,&used,NULL); SetLastError(error); return TRUE;
+}
+static BOOL package_mode;
+static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x1201bf, 0, 0x1200a9};
+static GUID ownership_provider, ownership_layer, ownership_filters[4];
+static UINT64 ownership_filter_ids[4];
+static char ownership_last_job_pin[65];
+static void ownership_keys(void) {
+  GUID *keys[] = {&ownership_provider, &ownership_layer, &ownership_filters[0], &ownership_filters[1], &ownership_filters[2], &ownership_filters[3]};
+  for (unsigned i = 0; i < 6; i++) { char seed[80], hash[65]; BYTE bytes[32];
+    need(sprintf_s(seed, sizeof(seed), "ownership:%s:%u", nonce, i) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), hash);
+    for (unsigned j = 0; j < 32; j++) bytes[j] = (BYTE)(nibble(hash[j*2])*16+nibble(hash[j*2+1])); memcpy(keys[i], bytes, sizeof(GUID)); }
+}
+static void ownership_wfp_security(const GUID *key, unsigned kind) {
+  PSECURITY_DESCRIPTOR sd; SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+  DWORD status = kind == 0 ? FwpmProviderGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd) :
+    kind == 1 ? FwpmSubLayerGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd) :
+    FwpmFilterGetSecurityInfoByKey0(wfp_engine, key, info, NULL, NULL, NULL, NULL, &sd);
+  PACL dacl; BOOL present, defaulted; PSID owner, group, system; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+  need(status == ERROR_SUCCESS && ConvertStringSidToSidW(L"S-1-5-18", &system) &&
+    GetSecurityDescriptorOwner(sd, &owner, &defaulted) && EqualSid(owner, system) &&
+    GetSecurityDescriptorGroup(sd, &group, &defaulted) && EqualSid(group, system) &&
+    GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present && dacl && dacl->AceCount == 1 &&
+    GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
+  ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, 0, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
+    !ace->Header.AceFlags && EqualSid(&ace->SidStart, system) && (ace->Mask == GENERIC_ALL || ace->Mask == FWPM_GENERIC_ALL));
+  LocalFree(system); FwpmFreeMemory0((void **)&sd);
+}
+static void ownership_network_absent(void) {
+  ownership_keys(); wfp_open(); FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  need(FwpmProviderGetByKey0(wfp_engine, &ownership_provider, &provider) == FWP_E_PROVIDER_NOT_FOUND &&
+    FwpmSubLayerGetByKey0(wfp_engine, &ownership_layer, &layer) == FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i = 0; i < 4; i++) need(FwpmFilterGetByKey0(wfp_engine, &ownership_filters[i], &filter) == FWP_E_FILTER_NOT_FOUND);
+}
+struct provider_filter_census {
+  const char *operation; DWORD result, cleanupResult; UINT32 count; BOOL complete;
+};
+/* Snapshot observation and resource ownership are shared; callers own count rules. */
+static struct provider_filter_census provider_filters(GUID *providerKey, UINT32 limit) {
+  struct provider_filter_census census = {0};
+  census.operation = "FwpmFilterCreateEnumHandle0"; census.count = MAXDWORD;
+  HANDLE enumeration = NULL; FWPM_FILTER0 **filters = NULL;
+  census.result = FwpmFilterCreateEnumHandle0(wfp_engine, NULL, &enumeration);
+  if (census.result == ERROR_SUCCESS && enumeration) {
+    /* Match the adjacent global inventory's page size and finite scan budget. */
+    const UINT32 pageSize = 128, scanLimit = 2048; UINT32 scanned = 0;
+    census.count = 0;
+    while (scanned < scanLimit) {
+      UINT32 returned = MAXDWORD; filters = NULL;
+      census.operation = "FwpmFilterEnum0";
+      census.result = FwpmFilterEnum0(wfp_engine, enumeration, pageSize, &filters, &returned);
+      BOOL valid = census.result == ERROR_SUCCESS && returned <= pageSize && (!returned || filters);
+      for (UINT32 i = 0; valid && i < returned; i++) if (!filters[i]) valid = FALSE;
+      if (!valid) break;
+      for (UINT32 i = 0; i < returned; i++) {
+        if (filters[i]->providerKey && IsEqualGUID(filters[i]->providerKey, providerKey)) {
+          if (++census.count == limit) break;
+        }
+      }
+      scanned += returned;
+      if (filters) FwpmFreeMemory0((void **)&filters);
+      filters = NULL;
+      if (census.count == limit) { census.operation = "count"; break; }
+      if (returned < pageSize) { census.complete = TRUE; break; }
+      census.operation = "scan-limit";
+    }
+  }
+  if (filters) FwpmFreeMemory0((void **)&filters);
+  if (enumeration) census.cleanupResult = FwpmFilterDestroyEnumHandle0(wfp_engine, enumeration);
+  return census;
+}
+static BOOL provider_filters_accept(struct provider_filter_census census, BOOL accepted) {
+  BOOL ok = census.complete && accepted && census.cleanupResult == ERROR_SUCCESS;
+  if (!ok) {
+    const char *operation = !census.complete ? census.operation : !accepted ? "count" : "FwpmFilterDestroyEnumHandle0";
+    DWORD result = !census.complete ? census.result : !accepted ? ERROR_SUCCESS : census.cleanupResult;
+    fprintf(stderr, "native-windows-filter-census: operation=%s result=%lu count=%u complete=%d accepted=%d cleanup-result=%lu\n",
+      operation, result, census.count, census.complete, accepted, census.cleanupResult);
+    fflush(stderr); SetLastError(result);
+  }
+  return ok;
+}
+static void ownership_network(BOOL remove, BOOL observe) {
+  ownership_keys(); wfp_open();
+  const GUID *layers[] = {&FWPM_LAYER_ALE_AUTH_CONNECT_V4, &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)");
+  PSID user, restricting; need(ConvertStringSidToSidW(case_record.accountSid, &user) && ConvertStringSidToSidW(case_record.restrictingSid, &restricting));
+  EXPLICIT_ACCESSW access[2] = {0}; PACL acl;
+  for (unsigned i = 0; i < 2; i++) { access[i].grfAccessPermissions = FWP_ACTRL_MATCH_FILTER; access[i].grfAccessMode = GRANT_ACCESS;
+    access[i].Trustee.TrusteeForm = TRUSTEE_IS_SID; access[i].Trustee.ptstrName = i ? restricting : user; }
+  need(SetEntriesInAclW(2, access, NULL, &acl) == ERROR_SUCCESS); SECURITY_DESCRIPTOR match;
+  need(InitializeSecurityDescriptor(&match, SECURITY_DESCRIPTOR_REVISION) && SetSecurityDescriptorDacl(&match, TRUE, acl, FALSE));
+  DWORD size = 0; MakeSelfRelativeSD(&match, NULL, &size); need(size && size <= 4096); BYTE *relative = calloc(size, 1);
+  need(relative && MakeSelfRelativeSD(&match, relative, &size)); FWP_BYTE_BLOB blob = {size, relative};
+  if (!observe) need(FwpmTransactionBegin0(wfp_engine, 0) == ERROR_SUCCESS);
+  if (remove || observe) {
+    FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer;
+    need(FwpmProviderGetByKey0(wfp_engine, &ownership_provider, &provider) == ERROR_SUCCESS && provider->flags == FWPM_PROVIDER_FLAG_PERSISTENT &&
+      !provider->providerData.size && !provider->serviceName && provider->displayData.name && !wcscmp(provider->displayData.name, L"NativeProof ownership") && !provider->displayData.description);
+    need(FwpmSubLayerGetByKey0(wfp_engine, &ownership_layer, &layer) == ERROR_SUCCESS && layer->providerKey &&
+      IsEqualGUID(layer->providerKey, &ownership_provider) && layer->flags == FWPM_SUBLAYER_FLAG_PERSISTENT && layer->weight == 65535 && !layer->providerData.size &&
+      layer->displayData.name && !wcscmp(layer->displayData.name, L"NativeProof ownership") && !layer->displayData.description);
+    FwpmFreeMemory0((void **)&provider); FwpmFreeMemory0((void **)&layer);
+    ownership_wfp_security(&ownership_provider, 0); ownership_wfp_security(&ownership_layer, 1);
+  }
+  if (!remove && !observe) {
+    FWPM_PROVIDER0 provider = {0}; provider.providerKey = ownership_provider; provider.flags = FWPM_PROVIDER_FLAG_PERSISTENT;
+    provider.displayData.name = L"NativeProof ownership";
+    FWPM_SUBLAYER0 layer = {0}; layer.subLayerKey = ownership_layer; layer.providerKey = &ownership_provider;
+    layer.flags = FWPM_SUBLAYER_FLAG_PERSISTENT; layer.weight = 65535; layer.displayData.name = L"NativeProof ownership";
+    need(FwpmProviderAdd0(wfp_engine, &provider, sd) == ERROR_SUCCESS && FwpmSubLayerAdd0(wfp_engine, &layer, sd) == ERROR_SUCCESS);
+  }
+  for (unsigned i = 0; i < 4; i++) {
+    UINT64 weight = 10; FWPM_FILTER_CONDITION0 condition = {0}; condition.fieldKey = FWPM_CONDITION_ALE_USER_ID;
+    condition.matchType = FWP_MATCH_EQUAL; condition.conditionValue.type = FWP_SECURITY_DESCRIPTOR_TYPE; condition.conditionValue.sd = &blob;
+    FWPM_FILTER0 value = {0}; value.filterKey = ownership_filters[i]; value.providerKey = &ownership_provider;
+    value.subLayerKey = ownership_layer; value.layerKey = *layers[i]; value.displayData.name = L"NativeProof ownership deny";
+    value.flags = FWPM_FILTER_FLAG_PERSISTENT | FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT; value.action.type = FWP_ACTION_BLOCK;
+    value.weight.type = FWP_UINT64; value.weight.uint64 = &weight; value.numFilterConditions = 1; value.filterCondition = &condition;
+    if (remove || observe) {
+      FWPM_FILTER0 *actual; need(FwpmFilterGetByKey0(wfp_engine, &value.filterKey, &actual) == ERROR_SUCCESS && actual->providerKey &&
+        IsEqualGUID(actual->providerKey, &ownership_provider) && IsEqualGUID(&actual->subLayerKey, &ownership_layer) && IsEqualGUID(&actual->layerKey, layers[i]) &&
+        actual->flags == value.flags && actual->action.type == value.action.type && actual->weight.type == FWP_UINT64 && actual->weight.uint64 && *actual->weight.uint64 == weight &&
+        !actual->providerData.size && !actual->rawContext && !actual->reserved && actual->displayData.name &&
+        !wcscmp(actual->displayData.name, value.displayData.name) && !actual->displayData.description &&
+        actual->numFilterConditions == 1 && IsEqualGUID(&actual->filterCondition[0].fieldKey, &condition.fieldKey) &&
+        actual->filterCondition[0].matchType == FWP_MATCH_EQUAL && actual->filterCondition[0].conditionValue.type == FWP_SECURITY_DESCRIPTOR_TYPE &&
+        actual->filterCondition[0].conditionValue.sd->size == size && !memcmp(actual->filterCondition[0].conditionValue.sd->data, relative, size));
+      need(!remove || (ownership_filter_ids[i] && actual->filterId == ownership_filter_ids[i]));
+      FwpmFreeMemory0((void **)&actual); ownership_wfp_security(&value.filterKey, 2);
+      if (remove) need(FwpmFilterDeleteByKey0(wfp_engine, &value.filterKey) == ERROR_SUCCESS);
+    } else { UINT64 id; need(FwpmFilterAdd0(wfp_engine, &value, sd, &id) == ERROR_SUCCESS && id); ownership_filter_ids[i] = id; }
+  }
+  /* A complete provider census rejects unplanned additional filters. */
+  if (observe) {
+    struct provider_filter_census census = provider_filters(&ownership_provider, 5);
+    need(provider_filters_accept(census, census.count == 4));
+  }
+  if (remove) need(FwpmSubLayerDeleteByKey0(wfp_engine, &ownership_layer) == ERROR_SUCCESS && FwpmProviderDeleteByKey0(wfp_engine, &ownership_provider) == ERROR_SUCCESS);
+  if (!observe) need(FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
+  free(relative); LocalFree(acl); LocalFree(user); LocalFree(restricting); LocalFree(sd);
+}
+static void policy_recovery_save(unsigned index,PSECURITY_DESCRIPTOR before,PSECURITY_DESCRIPTOR wanted);
+static void policy_network_intent(unsigned kind,const unsigned *ports);
+static void policy_filter_save(unsigned kind);
+static void operation_record(const wchar_t *leaf,unsigned index,const BYTE *bytes,DWORD size);
+static HANDLE ownership_observer;
+static ULONGLONG ownership_observer_birth;
+struct ownership_birth { DWORD pid, observer; ULONGLONG creation, observerCreation; HANDLE process, token; LUID tokenId; };
+static void ownership_bind_observer(DWORD pid, ULONGLONG birth) {
+  need(!ownership_observer && !ownership_launcher.hProcess && pid && birth);
+  ownership_observer = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE | READ_CONTROL | SYNCHRONIZE, FALSE, pid);
+  FILETIME created, ended, kernel, user;
+  need(ownership_observer && system_process(ownership_observer) && WaitForSingleObject(ownership_observer, 0) == WAIT_TIMEOUT &&
+    GetProcessTimes(ownership_observer, &created, &ended, &kernel, &user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth);
+  ownership_observer_birth = birth;
+}
+static void ownership_birth_save(const wchar_t *leaf, HANDLE process, HANDLE *token) {
+  struct ownership_birth birth = {0}; FILETIME created, ended, kernel, user;
+  need(ownership_observer && system_process(process) && GetProcessTimes(process, &created, &ended, &kernel, &user) &&
+    OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, token));
+  birth.pid = GetProcessId(process); birth.creation = ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime;
+  birth.observer = GetProcessId(ownership_observer); birth.observerCreation = ownership_observer_birth;
+  TOKEN_STATISTICS *statistics = token_info(*token, TokenStatistics); birth.tokenId = statistics->TokenId; free(statistics);
+  /* Transfer the original process/token pair before resume and before a reply
+   * can be lost. A birth file alone could not reopen an exited primary token. */
+  need(birth.pid && birth.creation && DuplicateHandle(GetCurrentProcess(), process, ownership_observer, &birth.process,
+    PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL | SYNCHRONIZE, FALSE, 0) &&
+    DuplicateHandle(GetCurrentProcess(), *token, ownership_observer, &birth.token, TOKEN_QUERY | TOKEN_DUPLICATE, FALSE, 0));
+  operation_record(leaf, case_custody, (BYTE *)&birth, sizeof(birth));
+}
+static HKEY policy_registry_owned(unsigned custody,const char *context);
+static void policy_registry_remove(HKEY key);
+static void ownership_baseline_read(unsigned i, char hash[65]) {
+  struct held_file *held = &entries[i+1].file; FILE_ID_INFO id;
+  BOOL read = GetFileInformationByHandleEx(held->handle, FileIdInfo, &id, sizeof(id));
+  DWORD error = read ? ERROR_SUCCESS : GetLastError();
+  const char *operation = "FileIdInfo"; BOOL apiFailure = TRUE;
+  if (!read) goto refused;
+  operation = "identity"; apiFailure = FALSE;
+  if (memcmp(&id, &held->id, sizeof(id))) goto refused;
+  /* Reuse granted query rights. file_sd owns any strict denied-query fallback;
+   * this caller keeps the original handle. */
+  PSECURITY_DESCRIPTOR sd = file_sd(held->handle, SE_FILE_OBJECT);
+  sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); LocalFree(sd); return;
+refused:
+  reader_baseline.active = TRUE; reader_baseline.index = i; reader_baseline.operation = operation;
+  reader_baseline.apiFailure = apiFailure; reader_baseline.cleanupFailed = FALSE; reader_baseline.cleanupError = 0;
+  SetLastError(error); need(FALSE);
+}
+static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
+  struct entry *entry = &entries[i+1]; need(entry->file.handle);
+  /* Borrow the original private capability through install, inspection and
+   * restoration. A fresh open would recheck the policy this handle changes. */
+  HANDLE file = entry->file.handle;
+  FILE_ID_INFO id; need(GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entry->file.id, sizeof(id)));
+  wchar_t text[2048]; DWORD mask = ownership_masks[i];
+  if (!mask) wcscpy_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)");
+  else need(swprintf_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)%ls", mask, case_record.accountSid, mask, case_record.restrictingSid,
+    i == 3 ? L"S:(ML;;NW;;;LW)" : L"") > 0);
+  PSECURITY_DESCRIPTOR wanted = descriptor(text), actual = file_sd(file, SE_FILE_OBJECT); PACL acl, expected; BOOL present, defaulted;
+  need(GetSecurityDescriptorDacl(wanted, &present, &expected, &defaulted) && present && expected);
+  if (restore || inspectOnly) {
+    PSID owner, system; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityDescriptorOwner(actual, &owner, &defaulted) && EqualSid(owner, system) &&
+      GetSecurityDescriptorControl(actual, &flags, &revision) && (flags & SE_DACL_PROTECTED) && GetSecurityDescriptorDacl(actual, &present, &acl, &defaulted) &&
+      present && acl && acl->AclSize == expected->AclSize && !memcmp(acl, expected, acl->AclSize)); LocalFree(system);
+    if (i == 3) { PACL label, expectedLabel; need(GetSecurityDescriptorSacl(actual, &present, &label, &defaulted) && present && label &&
+      GetSecurityDescriptorSacl(wanted, &present, &expectedLabel, &defaulted) && present && expectedLabel && label->AclSize == expectedLabel->AclSize && !memcmp(label, expectedLabel, label->AclSize)); }
+  }
+  if (!inspectOnly) {
+    if (!restore) { need(!ownership_before[i]); char hash[65]; security(file, SE_FILE_OBJECT, TRUE, hash);
+      sum((BYTE *)actual, GetSecurityDescriptorLength(actual), hash); need(!strcmp(hash, ownership_baseline[i]));
+      ownership_before[i] = actual; actual = NULL; ownership_installed[i] = wanted; wanted = NULL;
+      policy_recovery_save(i+1,ownership_before[i],ownership_installed[i]); }
+    PSECURITY_DESCRIPTOR target = restore ? ownership_before[i] : ownership_installed[i]; need(target && GetSecurityDescriptorDacl(target, &present, &acl, &defaulted) && present);
+    need(SetSecurityInfo(file, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) == ERROR_SUCCESS);
+    if (i == 3) { PACL label; need(GetSecurityDescriptorSacl(target, &present, &label, &defaulted));
+      need(SetSecurityInfo(file, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, present ? label : NULL) == ERROR_SUCCESS); }
+  }
+  if (actual) LocalFree(actual); if (wanted) LocalFree(wanted);
+}
+static void ownership_retain(DWORD pid, ULONGLONG birth) {
+  if(!ownership_count)release_invalidate();
+  for (unsigned i = 0; i < ownership_count; i++) if (GetProcessId(ownership_processes[i]) == pid) {
+    FILETIME created, exited, kernel, user; need(GetProcessTimes(ownership_processes[i], &created, &exited, &kernel, &user) &&
+      (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth); return; }
+  need(ownership_count < 32); HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE | READ_CONTROL | SYNCHRONIZE, FALSE, pid), token;
+  FILETIME created, exited, kernel, user;
+  need(process && GetProcessId(process) == pid && GetProcessTimes(process, &created, &exited, &kernel, &user) &&
+    (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
+  wchar_t *sid = token_sid(token); need(!wcscmp(sid, case_record.accountSid) && process_session(process) == 0); LocalFree(sid);
+  BOOL belongs; need(case_job && IsProcessInJob(process, case_job, &belongs) && belongs);
+#ifdef NATIVE_CI_EXPERIMENT
+  if(!ownership_count){original_refusal.pid=pid;original_refusal.birth=birth;}
+#endif
+  ownership_processes[ownership_count] = process; ownership_tokens[ownership_count++] = token;
+}
+static void ownership_job_pin(HANDLE job, char hash[65]) {
+  struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+  for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)job) object = inventory->entries[i].object;
+  need(object); sum((BYTE *)&object, sizeof(object), hash); free(inventory);
+}
+struct ownership_view {
+  struct case_account_record record;
+  HANDLE files[6], token, job, launcher, owner, launcherToken, ownerToken, ownerJob, processes[32], tokens[32];
+  unsigned count; BOOL installed, restored, possible, released, creationVerified, access, package;
+  char baseline[6][65];
+  char imagePin[65], payloadPin[65], jobPin[65];
+  DWORD creator; unsigned sources, sdkCount;
+  struct { HANDLE file; char pin[65]; } pins[128];
+};
+static void ownership_census(struct ownership_view *view) {
+  DWORD ids[65536], bytes; need(EnumProcesses(ids, sizeof(ids), &bytes) && bytes < sizeof(ids));
+  for (unsigned i = 0; i < bytes/sizeof(DWORD); i++) {
+    if (!ids[i] || ids[i] == 4 || ids[i] == GetCurrentProcessId()) continue;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, ids[i]), token;
+    if (!process) { need(GetLastError() == ERROR_INVALID_PARAMETER); continue; }
+    if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) { CloseHandle(process); continue; }
+    need(OpenProcessToken(process, TOKEN_QUERY, &token)); wchar_t *sid = token_sid(token);
+    if (!wcscmp(sid, view->record.accountSid)) {
+      BOOL found = FALSE; FILETIME created, ended, kernel, user; need(GetProcessTimes(process, &created, &ended, &kernel, &user));
+      for (unsigned j = 0; j < view->count; j++) if (GetProcessId(view->processes[j]) == ids[i]) {
+        FILETIME held, unused; need(GetProcessTimes(view->processes[j], &held, &unused, &kernel, &user) && !memcmp(&held, &created, sizeof(held))); found = TRUE; }
+      need(found); /* Inaccessible, unknown or reused members retain exclusion. */
+    }
+    LocalFree(sid); need(CloseHandle(token) && CloseHandle(process));
+  }
+}
+static BOOL ownership_cwd_unicode(const wchar_t *path, unsigned length) {
+  for (unsigned i = 0; i < length; i++) {
+    unsigned unit = path[i]; if (!unit || (unit >= 0xdc00 && unit <= 0xdfff)) return FALSE;
+    if (unit >= 0xd800 && unit <= 0xdbff && (++i == length || path[i] < 0xdc00 || path[i] > 0xdfff)) return FALSE;
+  }
+  return TRUE;
+}
+/* Directory spelling only: borrow the original process and held workspace. */
+static void ownership_cwd(HANDLE process, const void *peb, HANDLE directory) {
+  void *params = NULL; UNICODE_STRING current = {0}; wchar_t path[4096], expected[4096];
+  const char *operation = "parameters-read"; SIZE_T read = 0, wanted = 0; BOOL result = FALSE; DWORD actual = 0, error = 0;
+  for (unsigned stage = 0; stage < 3; stage++) {
+    const void *address = current.Buffer; void *target = path; wanted = current.Length;
+    if (stage == 0) { address = (const BYTE *)peb+0x20; target = &params; wanted = sizeof(params); }
+    if (stage == 1) { address = (BYTE *)params+0x38; target = &current; wanted = sizeof(current); }
+    operation = stage == 0 ? "parameters-read" : stage == 1 ? "directory-read" : "path-read";
+    read = 0; result = ReadProcessMemory(process, address, target, wanted, &read); error = result ? 0 : GetLastError();
+    if (!result || read != wanted) goto refused;
+    if (stage == 1) {
+      operation = "length-bounds";
+      if (!current.Length || current.Length % 2 || current.MaximumLength % 2 || current.Length >= sizeof(path) ||
+          current.Length > current.MaximumLength) goto refused;
+    }
+  }
+  unsigned n = current.Length/sizeof(wchar_t); operation = "observed-unicode";
+  if (!ownership_cwd_unicode(path, n)) goto refused;
+  path[n] = 0; memset(expected, 0xff, sizeof(expected)); operation = "final-path-query";
+  actual = GetFinalPathNameByHandleW(directory, expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); error = actual ? 0 : GetLastError();
+  if (!actual) goto refused;
+  operation = "final-path-bounds"; if (actual <= 4 || actual >= 4096 || expected[actual]) goto refused;
+  operation = "final-path-unicode"; if (!ownership_cwd_unicode(expected, actual)) goto refused;
+  operation = "final-path-prefix"; if (wmemcmp(expected, L"\\\\?\\", 4)) goto refused;
+  unsigned m = actual-4; operation = "mismatch";
+  /* DOS roots keep their separator; relative and UNC spellings are unsupported. */
+  if (n < 3 || m < 3 || path[1] != L':' || path[2] != L'\\' || expected[5] != L':' || expected[6] != L'\\') goto refused;
+  if (n > 4 && path[n-1] == L'\\') n--;
+  if (m > 4 && expected[m+3] == L'\\') m--;
+  if (n != m || _wcsnicmp(path, expected+4, n)) goto refused;
+  return;
+refused:
+  fprintf(stderr, "native-windows-cwd: operation=%s result=%d read=%zu expected=%zu query=%lu length=%hu maximum=%hu last-error=%lu\n",
+    operation, result, read, wanted, actual, current.Length, current.MaximumLength, error);
+  fflush(stderr); SetLastError(error); need(FALSE);
+}
+static void ownership_witness(HANDLE input) {
+  need(system_process(GetCurrentProcess())); require_build(); need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
+  struct ownership_view view; DWORD read; unsigned received = 0; while (received < sizeof(view)) { need(ReadFile(input, (BYTE *)&view+received, sizeof(view)-received, &read, NULL) && read); received += read; }
+  need(view.count <= 32 && view.sources <= 128 && view.sources > 0 && view.sdkCount > 0 && CloseHandle(input));
+  for (unsigned i = 0; i < view.sources; i++) { struct held_file file = {0}; file.handle = view.pins[i].file; BY_HANDLE_FILE_INFORMATION info; need(GetFileInformationByHandle(file.handle, &info) && info.nNumberOfLinks == 1); file.links = 1; pin(&file, view.pins[i].pin); }
+  need(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "InitializeProcThreadAttributeList") && GetProcAddress(GetModuleHandleW(L"advapi32.dll"), "CreateProcessAsUserW"));
+  need(ImpersonateLoggedOnUser(view.token)); SetLastError(0); HANDLE creator = OpenProcess(PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE, FALSE, view.creator); DWORD error = GetLastError();
+  need(!creator && error == ERROR_ACCESS_DENIED && RevertToSelf());
+  package_mode = view.package; if (package_mode) ownership_masks[3] = 0x1200a9;
+  case_record = view.record; strcpy_s(nonce, 33, case_record.nonce);
+  struct case_account_record record = {0}; wchar_t custody[4096]; DWORD length = GetFinalPathNameByHandleW(view.files[1], custody, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  need(length > 4 && length < 4096); account_record(custody+4, &record); need(!memcmp(&record, &view.record, sizeof(record)));
+  wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", record.nonce) > 0); account_check(name, record.accountSid);
+  ownership_census(&view);
+  /* Access also observes this domain before its launch mode is set. Only the
+   * ownership owner acquires these baselines; absence supplies no policy proof. */
+  BOOL baselineOwned = view.baseline[0][0] != 0;
+  for (unsigned i = 0; i < 6; i++) { entries[i+1].file.handle = view.files[i]; need(GetFileInformationByHandleEx(view.files[i], FileIdInfo, &entries[i+1].file.id, sizeof(FILE_ID_INFO)));
+    if (view.installed && !view.access) ownership_acl(i, FALSE, TRUE); else if (!view.access) { char hash[65]; security(view.files[i], SE_FILE_OBJECT, TRUE, hash);
+      if (view.restored || (baselineOwned && !view.possible)) {
+        need(strlen(view.baseline[i]) == 64); ownership_baseline_read(i, hash); need(!strcmp(hash, view.baseline[i])); } } }
+  if (view.installed && !view.access) ownership_network(FALSE, TRUE);
+  if (!view.installed && (view.restored || (baselineOwned && !view.possible)) && !view.access) ownership_network_absent();
+  BOOL launcherSignaled = !view.launcher || WaitForSingleObject(view.launcher, 0) == WAIT_OBJECT_0,
+    ownerSignaled = !view.owner || WaitForSingleObject(view.owner, 0) == WAIT_OBJECT_0, ownerJobEmpty = !view.ownerJob;
+  if (view.launcher && !launcherSignaled) need(system_process(view.launcher));
+  if (view.owner && !ownerSignaled) need(system_process(view.owner));
+  if (view.ownerJob) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(view.ownerJob, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL)); ownerJobEmpty = !accounting.ActiveProcesses; }
+  BOOL jobAbsent = !view.job; unsigned jobHolders = 0; char jobPin[65]; if (view.job) { ownership_job_pin(view.job, jobPin); need(!strcmp(jobPin, view.jobPin));
+    struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)view.job) object = inventory->entries[i].object;
+    need(object); for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].object == object) {
+      need(inventory->entries[i].pid == GetCurrentProcessId() || inventory->entries[i].pid == view.creator || (view.launcher && inventory->entries[i].pid == GetProcessId(view.launcher)) || (view.owner && inventory->entries[i].pid == GetProcessId(view.owner))); jobHolders++; } free(inventory);
+  }
+  else { wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", nonce) > 0); HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name); need(!job && GetLastError() == ERROR_FILE_NOT_FOUND); }
+  printf("{\"verifier\":"); identity(GetCurrentProcess());
+  printf(",\"helpers\":["); if (view.launcher) { printf("{\"role\":\"launcher\",\"identity\":"); retained_identity(view.launcher, view.launcherToken, 0); printf("}"); }
+  if (view.owner) { printf("%s{\"role\":\"custodian\",\"identity\":", view.launcher ? "," : ""); retained_identity(view.owner, view.ownerToken, 0); printf("}"); }
+  printf("],\"ownerSignaled\":%s,\"ownerJobEmpty\":%s", ownerSignaled ? "true" : "false", ownerJobEmpty ? "true" : "false");
+  printf(",\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"jobObjectSha256\":\"%s\",\"jobAbsent\":%s,\"jobHolders\":%u,\"job\":",
+    record.accountSid, record.restrictingSid, record.context, view.jobPin, jobAbsent ? "true" : "false", jobHolders);
+  if (view.job) job_read(view.job); else printf("null");
+  printf(",\"jobAccounting\":");
+  if (view.job) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(view.job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL));
+    printf("{\"activeProcesses\":%lu,\"totalProcesses\":%lu}", accounting.ActiveProcesses, accounting.TotalProcesses);
+  } else printf("null");
+  printf(",\"enumeration\":{\"complete\":true,\"accountSid\":\"%ls\",\"accountReservationVerified\":true,\"capacity\":33,\"truncated\":false,\"processes\":[", record.accountSid);
+  for (unsigned i = 0; i < view.count; i++) {
+    if (i) putchar(','); BOOL belongs = FALSE; if (view.job) need(IsProcessInJob(view.processes[i], view.job, &belongs) && belongs);
+    TOKEN_DEFAULT_DACL *creation = token_info(view.tokens[i], TokenDefaultDacl); ACCESS_ALLOWED_ACE *ace; BYTE system[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(system);
+    need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl) && creation->DefaultDacl->AceCount == 1 &&
+      CreateWellKnownSid(WinLocalSystemSid, NULL, system, &size) && GetAce(creation->DefaultDacl, 0, (void **)&ace) &&
+      ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && ace->Mask == GENERIC_ALL && EqualSid(&ace->SidStart, system)); free(creation);
+    if (WaitForSingleObject(view.processes[i], 0) != WAIT_OBJECT_0) {
+      HANDLE current; need(OpenProcessToken(view.processes[i], TOKEN_QUERY, &current)); TOKEN_STATISTICS *held = token_info(view.tokens[i], TokenStatistics), *actual = token_info(current, TokenStatistics);
+      need(!memcmp(&held->TokenId, &actual->TokenId, sizeof(LUID)) && !memcmp(&held->ModifiedId, &actual->ModifiedId, sizeof(LUID)) && CloseHandle(current)); free(held); free(actual);
+    }
+    if (i == 0) { char hash[65]; security(view.processes[i], SE_KERNEL_OBJECT, TRUE, hash); }
+    printf("{\"identity\":"); retained_identity(view.processes[i], view.tokens[i], 0);
+    printf(",\"heldProcessVerified\":true,\"signaled\":%s,\"inJob\":%s,\"jobObjectSha256\":\"%s\"}", WaitForSingleObject(view.processes[i], 0) == WAIT_OBJECT_0 ? "true" : "false", belongs ? "true" : "false", view.jobPin);
+  }
+  printf("]},\"accountToken\":"); effective_token_handle(view.token); printf(",\"tokens\":["); for (unsigned i = 0; i < view.count; i++) { if (i) putchar(','); effective_token_handle(view.tokens[i]); } printf("],\"objects\":[");
+  for (unsigned i = 0; i < 6; i++) { FILE_ID_INFO id; char text[128], hash[65]; need(GetFileInformationByHandleEx(view.files[i], FileIdInfo, &id, sizeof(id)));
+    /* JS hashes the canonical held file identity string, exactly as provisioning. */
+    struct held_file file = {0}; file.handle = view.files[i]; file.id = id;
+    need(sprintf_s(text, sizeof(text), "%016llx:", id.VolumeSerialNumber) > 0);
+    size_t used = strlen(text); for (unsigned j = 0; j < 16; j++) need(sprintf_s(text+used+j*2, sizeof(text)-used-j*2, "%02x", id.FileId.Identifier[j]) == 2);
+    char quoted[140]; need(sprintf_s(quoted, sizeof(quoted), "\"%s\"", text) > 0); sum((BYTE *)quoted, (DWORD)strlen(quoted), hash);
+    printf("%s{\"identitySha256\":\"%s\",\"mask\":%lu}", i ? "," : "", hash, ownership_masks[i]);
+  }
+  BOOL payloadSignaled = view.count && WaitForSingleObject(view.processes[0], 0) == WAIT_OBJECT_0, suspended = FALSE; DWORD exit = 0;
+  if (view.count && !payloadSignaled && !view.released) {
+    HANDLE threads = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0); need(threads != INVALID_HANDLE_VALUE); THREADENTRY32 thread = {sizeof(thread)}; unsigned matched = 0;
+    need(Thread32First(threads, &thread)); do { if (thread.th32OwnerProcessID == GetProcessId(view.processes[0])) {
+      HANDLE handle = OpenThread(THREAD_QUERY_INFORMATION, FALSE, thread.th32ThreadID); typedef NTSTATUS (NTAPI *query)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+      query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"); ULONG count;
+      need(handle && get && !get(handle, 35, &count, sizeof(count), NULL) && count == 1 && CloseHandle(handle)); matched++; }
+    } while (Thread32Next(threads, &thread)); need(GetLastError() == ERROR_NO_MORE_FILES && matched == 1 && CloseHandle(threads)); suspended = TRUE;
+  }
+  { struct held_file file = {0}; file.handle = view.files[5]; file.links = 1; pin(&file, view.payloadPin); }
+  if (view.count) need(GetExitCodeProcess(view.processes[0], &exit));
+  printf("],\"policyVerified\":%s,\"policyRestored\":%s,\"policyUnchanged\":%s,\"payloadSuspended\":%s,\"payloadSignaled\":%s,\"exitCode\":%lu,\"payloadImageSha256\":\"%s\",\"cwdIdentity\":\"", view.installed ? "true" : "false", view.restored ? "true" : "false", baselineOwned && !view.access && !view.installed && (view.restored || !view.possible) ? "true" : "false", suspended ? "true" : "false", payloadSignaled ? "true" : "false", exit, view.payloadPin);
+  struct held_file cwd = {0}; cwd.handle = view.files[3]; need(GetFileInformationByHandleEx(cwd.handle, FileIdInfo, &cwd.id, sizeof(cwd.id))); file_id(&cwd);
+  if (view.count && !payloadSignaled) {
+    wchar_t path[4096], expected[4096]; DWORD size = 4096; need(QueryFullProcessImageNameW(view.processes[0], 0, path, &size));
+    DWORD actual = GetFinalPathNameByHandleW(view.files[5], expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(actual > 4 && actual < 4096 && !_wcsicmp(path, expected+4));
+    typedef NTSTATUS (NTAPI *query)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG); query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    PROCESS_BASIC_INFORMATION info; need(get && !get(view.processes[0], ProcessBasicInformation, &info, sizeof(info), NULL));
+    ownership_cwd(view.processes[0], info.PebBaseAddress, view.files[3]);
+  }
+  BOOL explicitHandles = TRUE;
+  if (suspended) {
+    struct verify_handles *inventory = handle_inventory(); unsigned count = 0;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetProcessId(view.processes[0])) {
+      HANDLE handle; need(DuplicateHandle(view.processes[0], (HANDLE)inventory->entries[i].handle, GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS));
+      char hash[65]; need(GetFileType(handle) == FILE_TYPE_PIPE); security(handle, SE_FILE_OBJECT, TRUE, hash); need(CloseHandle(handle)); count++; }
+    free(inventory); need(count == 2); ownership_creation_verified = TRUE;
+  }
+  printf("\",\"explicitHandles\":%s,\"creationTimeJob\":%s,\"launcherSignaled\":%s,\"sourceVerified\":true,\"sdkExportsVerified\":true,\"creatorAccessDenied\":true,\"noForeignHandles\":true,\"imageSha256\":\"%s\",\"settled\":true}\n",
+    explicitHandles ? "true" : "false", suspended || view.creationVerified ? "true" : "false", launcherSignaled ? "true" : "false", view.imagePin);
+  need(fflush(stdout) == 0);
+}
+static void ownership_fresh(BOOL outsideControl) {
+  struct ownership_view view = {0}; view.record = case_record; view.count = ownership_count; view.installed = ownership_policy_installed;
+  view.restored = ownership_policy_restored; view.possible = ownership_policy_possible; memcpy(view.baseline, ownership_baseline, sizeof(view.baseline));
+  view.released = ownership_released; view.creationVerified = ownership_creation_verified; view.access = access_mode; view.package = package_mode;
+  for (unsigned i = 0; i < 6; i++) view.files[i] = entries[i+1].file.handle;
+  view.creator = GetCurrentProcessId();
+  /* Mutable case bytes are independently observed effects, not immutable
+   * source pins. Their approved initial digest is checked at case_file. */
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "data") || !strcmp(entries[i].kind, "sdk")) {
+    if (!entries[i].file.handle) entries[i].file = hold(entries[i].path, FALSE, strcmp(entries[i].kind, "sdk") != 0, GENERIC_READ);
+    pin(&entries[i].file, entries[i].pin); view.pins[view.sources].file = entries[i].file.handle; strcpy_s(view.pins[view.sources++].pin, 65, entries[i].pin);
+    if (!strcmp(entries[i].kind, "sdk")) { char hash[65]; stock_security(entries[i].file.handle, hash); view.sdkCount++; }
+  }
+  view.token = case_token; view.job = case_job; view.launcher = ownership_launcher.hProcess; view.owner = ownership_owner.hProcess;
+  view.launcherToken = ownership_launcher_token; view.ownerToken = ownership_owner_token; view.ownerJob = ownership_owner_job;
+  memcpy(view.processes, ownership_processes, sizeof(view.processes)); memcpy(view.tokens, ownership_tokens, sizeof(view.tokens));
+  strcpy_s(view.payloadPin, 65, entries[6].pin); if (case_job) ownership_job_pin(case_job, ownership_last_job_pin); strcpy_s(view.jobPin, 65, ownership_last_job_pin);
+  unsigned image = count; wchar_t self[4096]; DWORD size = GetModuleFileNameW(NULL, self, 4096); need(size && size < 4096);
+  for (unsigned i = 0; i < count; i++) if (!wcscmp(entries[i].path, self) && !strcmp(entries[i].kind, "helper")) image = i;
+  need(image < count); if (!entries[image].file.handle) entries[image].file = hold(entries[image].path, FALSE, TRUE, GENERIC_READ);
+  pin(&entries[image].file, entries[image].pin); char sig[65]; signature(&entries[image].file, entries[image].signature, sig); strcpy_s(view.imagePin, 65, entries[image].pin);
+  memset(&reader_witness_resources, 0, sizeof(reader_witness_resources));
+  HANDLE *inherited = reader_witness_resources.inherited; unsigned n = 0;
+  reader_witness_resources.descriptor = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)");
+  SECURITY_ATTRIBUTES sa = attributes(reader_witness_resources.descriptor, TRUE), private = attributes(reader_witness_resources.descriptor, FALSE);
+  HANDLE input = NULL, output = NULL;
+  need(CreatePipe(&input, &output, &sa, 0)); inherited[n++] = input; reader_witness_resources.input = output;
+  need(CreatePipe(&input, &output, &sa, 0)); reader_witness_resources.output = input; inherited[n++] = output;
+  need(SetHandleInformation(reader_witness_resources.input, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(reader_witness_resources.output, HANDLE_FLAG_INHERIT, 0));
+  HANDLE *handles[] = {&view.files[0], &view.files[1], &view.files[2], &view.files[3], &view.files[4], &view.files[5], &view.token, &view.job, &view.launcher, &view.owner, &view.launcherToken, &view.ownerToken, &view.ownerJob};
+  for (unsigned i = 0; i < sizeof(handles)/sizeof(handles[0]); i++) if (*handles[i]) { HANDLE duplicate = NULL;
+    need(DuplicateHandle(GetCurrentProcess(), *handles[i], GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; *handles[i] = inherited[n++]; }
+  for (unsigned i = 0; i < view.count; i++) for (unsigned j = 0; j < 2; j++) { HANDLE *value = j ? &view.tokens[i] : &view.processes[i];
+    HANDLE duplicate = NULL; need(DuplicateHandle(GetCurrentProcess(), *value, GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; *value = inherited[n++]; }
+  for (unsigned i = 0; i < view.sources; i++) { HANDLE duplicate = NULL; need(n < 208);
+    need(DuplicateHandle(GetCurrentProcess(), view.pins[i].file, GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; view.pins[i].file = inherited[n++]; }
+  reader_witness_resources.job = recovery_job(&private); HANDLE job = reader_witness_resources.job;
+  reader_witness_resources.port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+  need(reader_witness_resources.port && SetHandleInformation(reader_witness_resources.port, HANDLE_FLAG_INHERIT, 0));
+  JOBOBJECT_ASSOCIATE_COMPLETION_PORT association = {0}; association.CompletionKey = (PVOID)(ULONG_PTR)job; association.CompletionPort = reader_witness_resources.port;
+  need(SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &association, sizeof(association)));
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
+  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start);
+  reader_witness_resources.attributes = calloc(1, bytes); start.lpAttributeList = reader_witness_resources.attributes;
+  need(start.lpAttributeList);
+  reader_witness_resources.attributesReady = InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &bytes);
+  need(reader_witness_resources.attributesReady && UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, n*sizeof(HANDLE), NULL, NULL) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = inherited[1];
+  wchar_t command[8192]; need(swprintf_s(command, 8192, L"\"%ls\" --ownership-witness %llu", self, (ULONGLONG)(ULONG_PTR)inherited[0]) > 0);
+  PROCESS_INFORMATION child = {0};
+  BOOL created = CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (outsideControl ? CREATE_BREAKAWAY_FROM_JOB : 0), NULL, NULL, &start.StartupInfo, &child);
+  if (created) reader_witness_resources.child = child;
+  need(created);
+  BOOL closed = TRUE;
+  for (unsigned i = 0; i < n; i++) if (!ownership_witness_handle_close(&inherited[i])) closed = FALSE;
+  if (!closed) { SetLastError(reader_witness_resources.cleanupError); need(FALSE); }
+  DWORD written; need(system_process(child.hProcess) && ResumeThread(child.hThread) == 1 && WriteFile(reader_witness_resources.input, &view, sizeof(view), &written, NULL) && written == sizeof(view));
+  need(ownership_witness_handle_close(&reader_witness_resources.input));
+  char result[65536]; line(reader_witness_resources.output, result, sizeof(result));
+  ULONGLONG started = GetTickCount64();
+  DWORD waited = WaitForSingleObject(child.hProcess, 30000), error = waited == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+  DWORD exit = 0, actual = waited; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
+  BOOL exitRead = FALSE, accountingRead = FALSE, apiFailure = waited == WAIT_FAILED;
+  const char *operation = waited == WAIT_OBJECT_0 ? NULL : "WaitForSingleObject";
+  if (!operation) {
+    exitRead = GetExitCodeProcess(child.hProcess, &exit); error = exitRead ? ERROR_SUCCESS : GetLastError();
+    if (!exitRead) { operation = "GetExitCodeProcess"; actual = exitRead; apiFailure = TRUE; }
+    else if (exit) { operation = "child-exit"; actual = exit; }
+    else {
+      BOOL finalRead = FALSE; unsigned packets = 0;
+      for (;;) {
+        DWORD returned = 0;
+        BOOL sampled = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), &returned);
+        error = sampled ? ERROR_SUCCESS : GetLastError(); accountingRead = sampled && returned == sizeof(accounting);
+        if (!sampled) { operation = "QueryInformationJobObject"; actual = 0; apiFailure = TRUE; break; }
+        if (!accountingRead) { operation = "accounting-size"; actual = returned; break; }
+        if (!accounting.ActiveProcesses) break;
+        if (finalRead) { operation = "ActiveProcesses"; actual = accounting.ActiveProcesses; break; }
+        ULONGLONG elapsed = GetTickCount64() - started;
+        /* Bounds end notification waits, not the final authoritative read.
+         * Job messages are best-effort wakeups and never prove settlement. */
+        if (elapsed >= 30000 || packets >= 16) { finalRead = TRUE; continue; }
+        DWORD message = 0; ULONG_PTR key = 0; LPOVERLAPPED payload = NULL;
+        BOOL received = GetQueuedCompletionStatus(reader_witness_resources.port, &message, &key, &payload, 30000 - (DWORD)elapsed);
+        error = received ? ERROR_SUCCESS : GetLastError();
+        if (!received) {
+          if (error == WAIT_TIMEOUT && !payload) { finalRead = TRUE; continue; }
+          operation = "GetQueuedCompletionStatus"; actual = 0; apiFailure = TRUE; break;
+        }
+        if (key != (ULONG_PTR)job || !((message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO && !payload) ||
+          ((message == JOB_OBJECT_MSG_NEW_PROCESS || message == JOB_OBJECT_MSG_EXIT_PROCESS || message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS) &&
+            (ULONG_PTR)payload == child.dwProcessId))) {
+          operation = "job-notification"; actual = message; break;
+        }
+        packets++;
+      }
+    }
+  }
+  if (operation) {
+    /* Retain only already consumed bytes; the guard emits them before fencing. */
+    reader_witness.active = TRUE; reader_witness.operation = operation;
+    reader_witness.result = actual; reader_witness.error = error; reader_witness.apiFailure = apiFailure; reader_witness.waited = waited;
+    reader_witness.exitAvailable = exitRead; reader_witness.exitCode = exitRead ? exit : 0;
+    reader_witness.accountingAvailable = accountingRead; reader_witness.activeProcesses = accountingRead ? accounting.ActiveProcesses : 0;
+    reader_witness.childBytes = strlen(result);
+    reader_witness.childShown = reader_witness.childBytes < 1024 ? (unsigned)reader_witness.childBytes : 1024;
+    memcpy(reader_witness.child, result, reader_witness.childShown);
+    SetLastError(error); need(FALSE);
+  }
+  BYTE extra; DWORD used; need(!ReadFile(reader_witness_resources.output, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
+  if (outsideControl) { BOOL belongs; need(case_job && IsProcessInJob(child.hProcess, case_job, &belongs) && !belongs); }
+  need(ownership_witness_close());
+  if (ownership_count && !ownership_released) ownership_creation_verified = TRUE;
+  if (outsideControl) printf("{\"ready\":true,\"reachable\":true}"); else printf("%s", result);
+}
+static void ownership_send(const char *value) {
+  need(ownership_control); size_t size = strlen(value); BYTE bytes[32768]; need(size && size%2 == 0 && size <= sizeof(bytes)*2 && (access_mode || size <= 512));
+  for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(value[i*2])*16+nibble(value[i*2+1])); DWORD used;
+
+  if (bytes[0] == 'P') { need(size == 2 && ownership_stage == 1); ownership_stage = 2; }
+  else if (bytes[0] == 'C') { need(size == 132 && ownership_stage == 3 && ownership_policy_installed); ownership_stage = 4; }
+  else if (bytes[0] == 'R') { need(size == 2 && ownership_stage == 5 && ownership_creation_verified && ownership_policy_installed &&
+    ownership_owner.hProcess && WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_TIMEOUT); ownership_stage = 6; }
+  else need(ownership_stage == 6 && (access_mode || (size == 2 && (bytes[0] == 'G' || bytes[0] == 'E' || bytes[0] == 'A' || bytes[0] == 'Q'))));
+#ifdef NATIVE_CI_EXPERIMENT
+  if(size==2&&bytes[0]=='R'){
+    if(!original_refusal.tickStarted){original_refusal.tick=GetTickCount64();original_refusal.tickStarted=TRUE;}
+    if(ownership_literal){release_capture();refusal_arm();}
+    original_refusal.from=readback_now();
+    if(ownership_literal&&original_release.state==RELEASE_USABLE)original_release.release=original_refusal.from;
+  }
+#endif
+  BOOL sent=WriteFile(ownership_control, bytes, (DWORD)size/2, &used, NULL);
+  if(size==2&&bytes[0]=='R'&&(!sent||used!=size/2))release_invalidate();
+  need(sent && used == size/2); if (size == 2 && bytes[0] == 'G' && ownership_spoofed) {
+    char pid[32]; int count = sprintf_s(pid, sizeof(pid), "%lu\n", GetCurrentProcessId()); need(count > 0 && WriteFile(ownership_control, pid, count, &used, NULL) && used == (DWORD)count);
+  }
+  if (size == 2 && bytes[0] == 'E') need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
+  if (size == 2 && bytes[0] == 'R') { need(ownership_creation_verified); ownership_released = TRUE;
+#ifdef NATIVE_CI_EXPERIMENT
+    original_refusal.sent=TRUE;
+    if(ownership_literal&&original_release.state==RELEASE_USABLE)original_release.dispatched=TRUE;
+#endif
+  }
+}
+
+/* A separate sealed System custodian holds the domain and creator objects.
+ * Losing this owner and losing the launcher are distinct native faults. */
+static HANDLE ownership_guard_job, ownership_guard_creator;
+static DWORD WINAPI ownership_guard_deadline(void *unused) {
+  (void)unused; Sleep(120000); TerminateJobObject(ownership_guard_job, 124); TerminateProcess(ownership_guard_creator, 124); ExitProcess(124); return 0;
+}
+static void ownership_guardian(HANDLE job, HANDLE creator) {
+  need(system_process(GetCurrentProcess())); require_build(); char hash[65]; security(job, SE_KERNEL_OBJECT, TRUE, hash); security(creator, SE_KERNEL_OBJECT, TRUE, hash);
+  ownership_guard_job = job; ownership_guard_creator = creator; need(CreateThread(NULL, 0, ownership_guard_deadline, NULL, 0, NULL));
+  printf("{\"owner\":"); identity(GetCurrentProcess()); printf("}\n"); need(fflush(stdout) == 0);
+  char byte; DWORD used; BOOL released = ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &used, NULL) && used == 1 && byte == 'C';
+  if (!released) { need(TerminateJobObject(job, 126)); if (WaitForSingleObject(creator, 0) != WAIT_OBJECT_0) need(TerminateProcess(creator, 126)); }
+  need(CloseHandle(job) && CloseHandle(creator));
+}
+static void ownership_start_owner(void) {
+  wchar_t self[4096], command[8192]; DWORD length = GetModuleFileNameW(NULL, self, 4096); need(length && length < 4096);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
+  HANDLE inherited[4]; need(CreatePipe(&inherited[0], &ownership_owner_input, &sa, 0) && CreatePipe(&ownership_owner_output, &inherited[1], &sa, 0) &&
+    SetHandleInformation(ownership_owner_input, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_owner_output, HANDLE_FLAG_INHERIT, 0) &&
+    DuplicateHandle(GetCurrentProcess(), case_job, GetCurrentProcess(), &inherited[2], 0, TRUE, DUPLICATE_SAME_ACCESS) &&
+    DuplicateHandle(GetCurrentProcess(), ownership_launcher.hProcess, GetCurrentProcess(), &inherited[3], 0, TRUE, DUPLICATE_SAME_ACCESS));
+  ownership_owner_job = recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255}; need(SetInformationJobObject(ownership_owner_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(ownership_owner_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+  SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, size);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &size) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), NULL, NULL) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownership_owner_job, sizeof(HANDLE), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = inherited[1];
+  need(swprintf_s(command, 8192, L"\"%ls\" --ownership-owner %llu %llu", self, (ULONGLONG)(ULONG_PTR)inherited[2], (ULONGLONG)(ULONG_PTR)inherited[3]) > 0);
+  need(CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &start.StartupInfo, &ownership_owner));
+  ownership_birth_save(L"ownership-owner.birth", ownership_owner.hProcess, &ownership_owner_token);
+  for (unsigned i = 0; i < 4; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
+  need(ResumeThread(ownership_owner.hThread) == 1);
+  char frame[4096]; line(ownership_owner_output, frame, sizeof(frame));
+}
+static void ownership_close_owner(void) {
+  if (!ownership_owner.hProcess) { need(!ownership_owner_job); return; }
+  if (WaitForSingleObject(ownership_owner.hProcess, 0) != WAIT_OBJECT_0) { DWORD used; need(ownership_owner_input && WriteFile(ownership_owner_input, "C", 1, &used, NULL) && used == 1); }
+  need(WaitForSingleObject(ownership_owner.hProcess, 30000) == WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job;
+  need(QueryInformationJobObject(ownership_owner_job, JobObjectBasicAccountingInformation, &job, sizeof(job), NULL) && !job.ActiveProcesses);
+}
+static void ownership_launch(char **values, unsigned n) {
+  release_invalidate();
+  need(case_token && case_job && !ownership_launcher.hProcess && !helpers[0].process && !helpers[1].process && n >= 4);
+  unsigned argc = bounded_number(values[2], 64); need(n == argc+3 && argc >= 2); wchar_t command[32767] = L"", temp[4096];
+  quoted(command, 32767, entries[5].path); need(swprintf_s(temp, 4096, L"%hs", nonce) > 0); quoted(command, 32767, temp); quoted(command, 32767, case_record.restrictingSid);
+  quoted(command, 32767, entries[2].path); quoted(command, 32767, entries[3].path); quoted(command, 32767, entries[4].path); quoted(command, 32767, entries[6].path);
+  need(swprintf_s(temp, 4096, L"%hs", entries[6].pin) > 0); quoted(command, 32767, temp);
+  need(swprintf_s(temp, 4096, L"%ls\\policy", entries[2].path) > 0); quoted(command, 32767, temp); quoted(command, 32767, L"pending");
+  wchar_t first[4096]; if (!strcmp(values[3], "-")) first[0] = 0; else decode(values[3], first);
+  access_mode = argc == 2 && !wcscmp(first, L"suite");
+  BOOL literal = !package_mode && !access_mode && wcscmp(first, L"detached") && wcscmp(first, L"reparent") && wcscmp(first, L"nested-job") && wcscmp(first, L"breakaway") && wcscmp(first, L"spoofed-parent") && wcscmp(first, L"wmi") && wcscmp(first, L"com") && wcscmp(first, L"service") && wcscmp(first, L"process-limit") && wcscmp(first, L"cancel") && wcscmp(first, L"owner-loss") && wcscmp(first, L"helper-loss") && wcscmp(first, L"last-handle-close") && wcscmp(first, L"admission-interruption") && wcscmp(first, L"receipt-before") && wcscmp(first, L"receipt-after") && wcscmp(first, L"stale-identity");
+  ownership_literal = literal; ownership_spoofed = !wcscmp(first, L"spoofed-parent");
+  const wchar_t *corpus[] = {L"", L"space value", L"\x03bb\x96ea\xd83d\xde00", L"'\"", L"$(false); & | < > *", L"trailing\\", L"backslash\\\"quote"};
+  need(package_mode ? argc == 6 && !wcscmp(first,L"x") : literal ? argc == sizeof(corpus)/sizeof(corpus[0]) : argc == 2);
+  quoted(command, 32767, package_mode ? L"--package" : access_mode ? L"--access" : literal ? L"--ownership-literal" : L"--ownership");
+  for (unsigned i = 0; i < argc; i++) { if (!strcmp(values[i+3], "-")) temp[0] = 0; else decode(values[i+3], temp);
+    if (package_mode) { if(i==1) need(!wcscmp(temp,L"-y")); if(i==2) need(!wcscmp(temp,L"-bd")); if(i==3) need(!wcscmp(temp,L"-bb0")); if(i==4) need(!wcsncmp(temp,L"-o",2) && temp[3]==L':' && temp[4]==L'\\'); if(i==5) need(temp[1]==L':' && temp[2]==L'\\'); }
+    else if (literal) need(!wcscmp(temp, corpus[i])); else if (i == 1) { need(wcslen(temp) == 32); for (unsigned j = 0; j < 32; j++) need(temp[j] == nonce[j]); }
+    quoted(command, 32767, temp); }
+  char sig[65]; pin(&entries[5].file, entries[5].pin); signature(&entries[5].file, entries[5].signature, sig);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
+  HANDLE inherited[3]; need(CreatePipe(&inherited[0], &ownership_control, &sa, 0) && CreatePipe(&ownership_frames, &inherited[1], &sa, 0) && CreatePipe(&ownership_output, &inherited[2], &sa, 0));
+  need(SetHandleInformation(ownership_control, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_frames, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(ownership_output, HANDLE_FLAG_INHERIT, 0));
+  /* The sealed System creator has separate process custody. Giving it an
+   * ancestor Job would nest the UI-restricted payload Job. Its held process,
+   * protected control EOF and finite source fence creation independently. */
+  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 1, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, bytes);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 1, 0, &bytes) &&
+    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), NULL, NULL));
+  start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = inherited[1]; start.StartupInfo.hStdError = inherited[2];
+  need(CreateProcessW(entries[5].path, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, entries[2].path, &start.StartupInfo, &ownership_launcher));
+  ownership_birth_save(L"ownership-launcher.birth", ownership_launcher.hProcess, &ownership_launcher_token);
+  for (unsigned i = 0; i < 3; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
+  need(ResumeThread(ownership_launcher.hThread) == 1); ownership_start_owner(); printf("{\"helper\":"); retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); printf(",\"owner\":"); retained_identity(ownership_owner.hProcess, ownership_owner_token, 0); printf("}");
+}
+static void ownership_outside_control(const wchar_t *mode) {
+  need(system_process(GetCurrentProcess()));
+  if (!wcscmp(mode, L"service")) { SC_HANDLE handle = OpenSCManagerW(NULL, NULL, SC_MANAGER_CREATE_SERVICE); need(handle && CloseServiceHandle(handle)); }
+  else if (!wcscmp(mode, L"spoofed-parent")) { HANDLE handle = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, GetProcessId(ownership_launcher.hProcess)); need(handle && CloseHandle(handle)); }
+  else if (!wcscmp(mode, L"wmi")) {
+    IWbemLocator *locator; IWbemServices *services; BSTR space = SysAllocString(L"ROOT\\CIMV2"); need(space &&
+      SUCCEEDED(CoCreateInstance(&CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER, &IID_IWbemLocator, (void **)&locator)) &&
+      SUCCEEDED(IWbemLocator_ConnectServer(locator, space, NULL, NULL, NULL, 0, NULL, NULL, &services)));
+    IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(space);
+  } else if (!wcscmp(mode, L"com")) { ITaskService *service; VARIANT empty; VariantInit(&empty);
+    need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+    need_hr(ITaskService_Connect, service, empty, empty, empty, empty); ITaskService_Release(service);
+  } else if (!wcscmp(mode, L"breakaway")) {
+    /* A separately admitted System witness proves CreateProcess availability
+     * with explicit creation-time Job admission outside the restricted Job. */
+    ownership_fresh(TRUE); return;
+  } else need(FALSE);
+  printf("{\"ready\":true,\"reachable\":true}");
+}
+static void access_quiesce(void);
+static void operation_empty(HANDLE job);
+static void ownership_stop(void) {
+  refusal_settle();
+  if (ownership_control) { need(CloseHandle(ownership_control)); ownership_control = NULL; }
+  if (ownership_launcher.hProcess) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0);
+  ownership_close_owner();
+  if (case_job) need(TerminateJobObject(case_job, 126));
+  for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 30000) == WAIT_OBJECT_0);
+  if (case_job) { operation_empty(case_job); need(CloseHandle(case_job)); case_job = NULL; }
+  if (access_mode) access_quiesce();
+  HANDLE pipes[] = {ownership_frames, ownership_output, ownership_owner_output};
+  for (unsigned i = 0; i < 3; i++) { if (!pipes[i]) continue; BYTE data[4096]; DWORD used, total = 0;
+    while (ReadFile(pipes[i], data, sizeof(data), &used, NULL) && used) { total += used; need(total <= 65536); }
+    need(GetLastError() == ERROR_BROKEN_PIPE); }
+  printf("{\"creationSealed\":true,\"helpersSettled\":true}");
+}
+
+/* Access coverage is read by the independently admitted System verifier.
+ * The serving reader exports handle numbers, never coverage conclusions. */
+struct access_view {
+  struct ownership_view domain;
+  unsigned objectCount, indices[44], socketCount;
+  HANDLE objects[44], sockets[8], payloadSockets[8];
+  HANDLE observer, roots[2], payloadRoots[2];
+  WSAPROTOCOL_INFOW socketInfo[8];
+};
+static unsigned access_object_count, access_indices[44];
+static HANDLE access_payload_sockets[8];
+static HANDLE access_payload_roots[2];
+#define ACCESS_ROOT_MASK (FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+static void access_quiesce(void) {
+  /* Case processes can close their duplicates while the System custodian still
+   * holds the original lease. Detach TCP flows without replacing the reserved
+   * socket object/port; later independent tables must show no active flow. */
+  for (unsigned i=0;i<case_socket_count;i++) {
+    SOCKET socket=case_sockets[i]; int type, size=sizeof(type); need(!getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&size));
+    if (type!=SOCK_STREAM) continue;
+    SOCKADDR_STORAGE peer; int length=sizeof(peer);
+    if (getpeername(socket,(SOCKADDR *)&peer,&length)==SOCKET_ERROR) { need(WSAGetLastError()==WSAENOTCONN); continue; }
+    SOCKADDR_STORAGE before, after; int beforeSize=sizeof(before), afterSize=sizeof(after);
+    need(!getsockname(socket,(SOCKADDR *)&before,&beforeSize));
+    GUID id=WSAID_DISCONNECTEX; LPFN_DISCONNECTEX disconnect=NULL; DWORD bytes;
+    need(!WSAIoctl(socket,SIO_GET_EXTENSION_FUNCTION_POINTER,&id,sizeof(id),&disconnect,sizeof(disconnect),&bytes,NULL,NULL) &&
+      bytes==sizeof(disconnect) && disconnect && disconnect(socket,NULL,0,0));
+    need(getpeername(socket,(SOCKADDR *)&peer,&length)==SOCKET_ERROR && WSAGetLastError()==WSAENOTCONN &&
+      !getsockname(socket,(SOCKADDR *)&after,&afterSize) && beforeSize==afterSize && !memcmp(&before,&after,beforeSize));
+  }
+}
+static void access_inventory(char **values, unsigned n) {
+  need(case_token && case_job && !ownership_launcher.hProcess && n >= 13 && n <= 46);
+  access_object_count = n - 2; need(access_object_count >= 11 && access_object_count <= 44);
+  for (unsigned i = 0; i < access_object_count; i++) {
+    unsigned index = bounded_number(values[i + 2], count - 1);
+    need(entries[index].file.handle);
+    for (unsigned j = 0; j < i; j++) need(index != access_indices[j]);
+    access_indices[i] = index;
+  }
+  need(access_indices[0] == 2 && access_indices[1] == 3 && access_indices[2] == 4);
+  BOOL payload = FALSE; for (unsigned i = 10; i < access_object_count; i++) if (access_indices[i] == 6) payload = TRUE;
+  need(payload);
+  printf("{\"bound\":true}");
+}
+/* The serving custody retains baseline and deterministic desired descriptors
+ * before invoking the one-shot policy writer. A lost reader retains exclusion;
+ * reconstruction never treats missing final output as absence of effects. */
+static PSECURITY_DESCRIPTOR access_before[44], access_wanted[44];
+static BOOL access_policy_possible;
+static void access_key(unsigned index, GUID *value) {
+  char seed[128], hash[65]; BYTE bytes[16]; wchar_t text[37];
+  need(sprintf_s(seed, sizeof(seed), "windows-policy:%s:%u", nonce, index) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), hash);
+  for (unsigned i = 0; i < 16; i++) bytes[i] = (BYTE)(nibble(hash[i * 2]) * 16 + nibble(hash[i * 2 + 1]));
+  need(swprintf_s(text, 37, L"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]) == 36);
+  need(UuidFromStringW((RPC_WSTR)text, value) == RPC_S_OK);
+}
+static BOOL access_registry_present(void) {
+  wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", nonce) > 0); HKEY key;
+  LSTATUS result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_READ | KEY_WOW64_64KEY, &key);
+  need(result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND); if (result == ERROR_SUCCESS) need(RegCloseKey(key) == ERROR_SUCCESS);
+  return result == ERROR_SUCCESS;
+}
+static void access_registry_parent(void) {
+  HKEY parent; char hash[65];
+  need(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\NativeProof",0,READ_CONTROL | KEY_WOW64_64KEY,&parent)==ERROR_SUCCESS);
+  security(parent,SE_REGISTRY_KEY,TRUE,hash); need(RegCloseKey(parent)==ERROR_SUCCESS);
+}
+static void access_policy_begin(const wchar_t *profile,const unsigned ports[8]) {
+  need(access_object_count && !access_policy_possible && !ownership_policy_installed && ownership_stage == 3);
+  BOOL writable = !wcscmp(profile, L"workspace-write") || !wcscmp(profile, L"trusted-command"); need(writable || !wcscmp(profile, L"read-only"));
+  access_registry_parent(); need(!access_registry_present()); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0, &key); need(FwpmProviderGetByKey0(wfp_engine, &key, &provider) == FWP_E_PROVIDER_NOT_FOUND);
+  access_key(1, &key); need(FwpmSubLayerGetByKey0(wfp_engine, &key, &layer) == FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); need(FwpmFilterGetByKey0(wfp_engine, &key, &filter) == FWP_E_FILTER_NOT_FOUND); }
+  for (unsigned i = 0; i < access_object_count; i++) {
+    HANDLE file = entries[access_indices[i]].file.handle; char hash[65]; security(file, SE_FILE_OBJECT, TRUE, hash);
+    access_before[i] = file_sd(file, SE_FILE_OBJECT); DWORD read = FILE_GENERIC_READ, edit = read | FILE_GENERIC_WRITE | DELETE;
+    DWORD mask = i == 1 ? FILE_TRAVERSE | READ_CONTROL | SYNCHRONIZE : i == 2 ? read | FILE_TRAVERSE | (writable ? FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY : 0) :
+      i == 3 ? (writable ? edit : read) : i == 4 ? read : i >= 10 ? read | FILE_EXECUTE : 0;
+    wchar_t text[2048]; if (!mask) wcscpy_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)"); else
+      need(swprintf_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)", mask, case_record.accountSid, mask, case_record.restrictingSid) > 0);
+    if (i == 2) { DWORD childMask = writable ? edit : read; wchar_t inherited[1536];
+      need(swprintf_s(inherited, 1536, L"(D;OICIIO;WDWO;;;OW)(A;OICIIO;FA;;;SY)(A;OIIO;0x%lx;;;%ls)(A;OIIO;0x%lx;;;%ls)(A;CIIO;0x%lx;;;%ls)(A;CIIO;0x%lx;;;%ls)",
+        childMask, case_record.accountSid, childMask, case_record.restrictingSid, childMask | FILE_TRAVERSE, case_record.accountSid, childMask | FILE_TRAVERSE, case_record.restrictingSid) > 0);
+      need(!wcscat_s(text, 2048, inherited)); }
+    if (writable && (i == 2 || i == 3)) need(!wcscat_s(text, 2048, L"S:(ML;OICI;NW;;;LW)"));
+    access_wanted[i] = descriptor(text);
+    policy_recovery_save(access_indices[i],access_before[i],access_wanted[i]);
+  }
+  policy_network_intent(2,ports);
+  access_policy_possible = TRUE; printf("{\"possible\":true}");
+}
+static BOOL access_acl_equal(PSECURITY_DESCRIPTOR a, PSECURITY_DESCRIPTOR b, BOOL sacl) {
+  PACL left, right; BOOL lp, rp, defaulted;
+  need((sacl ? GetSecurityDescriptorSacl(a, &lp, &left, &defaulted) : GetSecurityDescriptorDacl(a, &lp, &left, &defaulted)) &&
+    (sacl ? GetSecurityDescriptorSacl(b, &rp, &right, &defaulted) : GetSecurityDescriptorDacl(b, &rp, &right, &defaulted)));
+  return (!lp || !left) && (!rp || !right) ? TRUE : lp && rp && left && right && left->AclSize == right->AclSize && !memcmp(left, right, left->AclSize);
+}
+static void access_policy_installed(const char *hexBytes) {
+  need(access_policy_possible && !ownership_policy_installed && !ownership_released && ownership_stage == 3 && strlen(hexBytes) <= 65536);
+  for (unsigned i = 0; i < access_object_count; i++) { PSECURITY_DESCRIPTOR actual = file_sd(entries[access_indices[i]].file.handle, SE_FILE_OBJECT);
+    need(access_acl_equal(actual, access_wanted[i], FALSE) && access_acl_equal(actual, access_wanted[i], TRUE)); LocalFree(actual); }
+  need(access_registry_present());policy_filter_save(2);
+  wchar_t registryName[256];HKEY registry;FILETIME written;char registryHash[65];
+  need(swprintf_s(registryName,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0 && RegOpenKeyExW(HKEY_LOCAL_MACHINE,registryName,0,KEY_READ|ACCESS_SYSTEM_SECURITY|KEY_WOW64_64KEY,&registry)==ERROR_SUCCESS);
+  security(registry,SE_REGISTRY_KEY,TRUE,registryHash);need(RegQueryInfoKeyW(registry,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,&written)==ERROR_SUCCESS&&RegCloseKey(registry)==ERROR_SUCCESS);
+  BYTE registryRecord[sizeof(written)+65];memcpy(registryRecord,&written,sizeof(written));memcpy(registryRecord+sizeof(written),registryHash,65);
+  operation_record(L"policy-registry.observed",case_custody,registryRecord,sizeof(registryRecord));
+  size_t size = strlen(hexBytes); need(size && !(size % 2)); BYTE *data = calloc(size / 2, 1); need(data);
+  for (size_t i = 0; i < size / 2; i++) data[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
+  need(WriteFile(file, data, (DWORD)size / 2, &used, NULL) && used == size / 2 && FlushFileBuffers(file) && CloseHandle(file)); free(data);
+  wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\policy", entries[case_custody].path) > 0); ownership_policy_file = hold(name, FALSE, TRUE, GENERIC_READ);
+  ownership_policy_installed = TRUE; printf("{\"installed\":true}");
+}
+static void access_policy_restore(void) {
+  need(access_policy_possible && !case_job && !audit_owned && !helpers[0].process && !helpers[1].process);
+  for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 0) == WAIT_OBJECT_0);
+  /* Validate the whole inventory before any setter, accepting only unchanged
+   * baseline or the exact owned installation after an interrupted writer. */
+  for (unsigned i = 0; i < access_object_count; i++) { PSECURITY_DESCRIPTOR actual = file_sd(entries[access_indices[i]].file.handle, SE_FILE_OBJECT);
+    PSID owner, group, oldOwner, oldGroup; BOOL defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(GetSecurityDescriptorOwner(actual, &owner, &defaulted) && GetSecurityDescriptorOwner(access_before[i], &oldOwner, &defaulted) && EqualSid(owner, oldOwner) &&
+      GetSecurityDescriptorGroup(actual, &group, &defaulted) && GetSecurityDescriptorGroup(access_before[i], &oldGroup, &defaulted) && EqualSid(group, oldGroup) &&
+      GetSecurityDescriptorControl(actual, &flags, &revision) && (flags & SE_DACL_PROTECTED) &&
+      (access_acl_equal(actual, access_before[i], FALSE) || access_acl_equal(actual, access_wanted[i], FALSE)) &&
+      (access_acl_equal(actual, access_before[i], TRUE) || access_acl_equal(actual, access_wanted[i], TRUE))); LocalFree(actual); }
+  GUID key; FWPM_FILTER0 *filter; wfp_open(); for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); need(FwpmFilterGetByKey0(wfp_engine, &key, &filter) == FWP_E_FILTER_NOT_FOUND); }
+  GUID providerKey, layerKey; access_key(0, &providerKey); access_key(1, &layerKey); FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer;
+  DWORD p = FwpmProviderGetByKey0(wfp_engine, &providerKey, &provider), l = FwpmSubLayerGetByKey0(wfp_engine, &layerKey, &layer);
+  need((p == FWP_E_PROVIDER_NOT_FOUND && l == FWP_E_SUBLAYER_NOT_FOUND) || (p == ERROR_SUCCESS && l == ERROR_SUCCESS));
+  if (p == ERROR_SUCCESS) {
+    need(provider->flags == 1 && !provider->providerData.size && !provider->serviceName && layer->flags == 1 && layer->weight == 65535 &&
+      layer->providerKey && IsEqualGUID(layer->providerKey, &providerKey) && !layer->providerData.size); FwpmFreeMemory0((void **)&provider); FwpmFreeMemory0((void **)&layer);
+    ownership_wfp_security(&providerKey, 0); ownership_wfp_security(&layerKey, 1);
+  }
+  HKEY registry = policy_registry_owned(case_custody,case_record.context);
+  if (p == ERROR_SUCCESS) need(FwpmTransactionBegin0(wfp_engine, 0) == ERROR_SUCCESS && FwpmSubLayerDeleteByKey0(wfp_engine, &layerKey) == ERROR_SUCCESS &&
+    FwpmProviderDeleteByKey0(wfp_engine, &providerKey) == ERROR_SUCCESS && FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
+  if (registry) { if (registry_key) { need(RegCloseKey(registry_key) == ERROR_SUCCESS); registry_key = NULL; }
+    if (registry_changed) { need(CloseHandle(registry_changed)); registry_changed = NULL; }
+    policy_registry_remove(registry); }
+  for (unsigned i = 0; i < access_object_count; i++) { PACL dacl, sacl; BOOL present, defaulted;
+    need(GetSecurityDescriptorDacl(access_before[i], &present, &dacl, &defaulted) && present &&
+      GetSecurityDescriptorSacl(access_before[i], &present, &sacl, &defaulted));
+    set_file_security(entries[access_indices[i]].file.handle, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION |
+      SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION, dacl, present ? sacl : NULL);
+    LocalFree(access_before[i]); LocalFree(access_wanted[i]); access_before[i] = access_wanted[i] = NULL;
+  }
+  if (ownership_policy_file.handle) close_file(&ownership_policy_file);
+  access_policy_possible = ownership_policy_installed = FALSE; ownership_policy_restored = TRUE; printf("{\"restored\":true}");
+}
+static void access_state(DWORD verifierPid, ULONGLONG verifierBorn) {
+  HANDLE observer = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, verifierPid); FILETIME created, ended, kernel, user;
+  need(observer && system_process(observer) && GetProcessTimes(observer, &created, &ended, &kernel, &user) &&
+    (((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime) == verifierBorn && WaitForSingleObject(observer, 0) == WAIT_TIMEOUT && CloseHandle(observer));
+  need(case_token && access_object_count);
+  struct access_view view = {0};
+  view.observer = helpers[1].process;
+  for (unsigned i = 0; i < 2; i++) { view.roots[i] = entries[i + 1].file.handle; view.payloadRoots[i] = access_payload_roots[i]; }
+  view.domain.record = case_record; view.domain.count = ownership_count;
+  view.domain.token = case_token; view.domain.job = case_job ? case_job : (job_count == 1 ? jobs[0] : NULL);
+  view.domain.launcher = ownership_launcher.hProcess; view.domain.owner = ownership_owner.hProcess;
+  view.domain.launcherToken = ownership_launcher_token; view.domain.ownerToken = ownership_owner_token;
+  view.domain.ownerJob = ownership_owner_job; view.domain.creator = GetCurrentProcessId();
+  for (unsigned i = 0; i < ownership_count; i++) { view.domain.processes[i] = ownership_processes[i]; view.domain.tokens[i] = ownership_tokens[i]; }
+  view.objectCount = access_object_count;
+  for (unsigned i = 0; i < access_object_count; i++) { view.indices[i] = access_indices[i]; view.objects[i] = entries[access_indices[i]].file.handle; }
+  view.socketCount = case_socket_count; for (unsigned i = 0; i < case_socket_count; i++) { view.sockets[i] = (HANDLE)case_sockets[i]; view.payloadSockets[i] = access_payload_sockets[i];
+    need(!WSADuplicateSocketW(case_sockets[i], verifierPid, &view.socketInfo[i])); }
+  printf("{\"hex\":\""); hex((BYTE *)&view, sizeof(view)); printf("\"}");
+}
+static HANDLE access_duplicate(HANDLE source, HANDLE original) {
+  HANDLE actual; need(original && DuplicateHandle(source, original, GetCurrentProcess(), &actual, 0, FALSE, DUPLICATE_SAME_ACCESS)); return actual;
+}
+static BOOL access_bfe_running(void) {
+  SC_HANDLE manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT); need(manager);
+  SC_HANDLE service = OpenServiceW(manager, L"BFE", SERVICE_QUERY_STATUS); need(service);
+  SERVICE_STATUS_PROCESS status; DWORD size;
+  need(QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status), &size) && size == sizeof(status));
+  need(CloseServiceHandle(service) && CloseServiceHandle(manager)); return status.dwCurrentState == SERVICE_RUNNING;
+}
+static BOOL access_member_pid(struct ownership_view *view, DWORD pid) {
+  for (unsigned i = 0; i < view->count; i++) if (GetProcessId(view->processes[i]) == pid) return TRUE;
+  return FALSE;
+}
+static void access_flows(struct ownership_view *view) {
+  unsigned emitted = 0; printf("[");
+  for (unsigned version = 0; version < 2; version++) {
+    ULONG family = version ? AF_INET6 : AF_INET; DWORD size = 0;
+    DWORD status = GetExtendedTcpTable(NULL, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0);
+    need(status == ERROR_INSUFFICIENT_BUFFER && size && size <= 16777216); BYTE *bytes = calloc(size, 1); need(bytes);
+    need(GetExtendedTcpTable(bytes, &size, FALSE, family, TCP_TABLE_OWNER_PID_ALL, 0) == NO_ERROR);
+    DWORD count = *(DWORD *)bytes; need(count <= 65536);
+    for (DWORD i = 0; i < count; i++) {
+      DWORD pid, local, remote, state;
+      if (version) { MIB_TCP6ROW_OWNER_PID *row = &((MIB_TCP6TABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; remote = row->dwRemotePort; state = row->dwState; }
+      else { MIB_TCPROW_OWNER_PID *row = &((MIB_TCPTABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; remote = row->dwRemotePort; state = row->dwState; }
+      if (access_member_pid(view, pid) || (pid==view->creator && state!=MIB_TCP_STATE_CLOSED && state!=MIB_TCP_STATE_LISTEN && state!=MIB_TCP_STATE_TIME_WAIT))
+        printf("%s{\"family\":\"%s\",\"protocol\":\"tcp\",\"pid\":%lu,\"state\":%lu,\"localPort\":%u,\"remotePort\":%u}", emitted++ ? "," : "", version ? "v6" : "v4", pid, state, ntohs((USHORT)local), ntohs((USHORT)remote));
+    }
+    free(bytes); size = 0;
+    status = GetExtendedUdpTable(NULL, &size, FALSE, family, UDP_TABLE_OWNER_PID, 0);
+    need(status == ERROR_INSUFFICIENT_BUFFER && size && size <= 16777216); bytes = calloc(size, 1); need(bytes);
+    need(GetExtendedUdpTable(bytes, &size, FALSE, family, UDP_TABLE_OWNER_PID, 0) == NO_ERROR); count = *(DWORD *)bytes; need(count <= 65536);
+    for (DWORD i = 0; i < count; i++) {
+      DWORD pid, local;
+      if (version) { MIB_UDP6ROW_OWNER_PID *row = &((MIB_UDP6TABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; }
+      else { MIB_UDPROW_OWNER_PID *row = &((MIB_UDPTABLE_OWNER_PID *)bytes)->table[i]; pid = row->dwOwningPid; local = row->dwLocalPort; }
+      if (access_member_pid(view, pid)) printf("%s{\"family\":\"%s\",\"protocol\":\"udp\",\"pid\":%lu,\"state\":0,\"localPort\":%u,\"remotePort\":0}", emitted++ ? "," : "", version ? "v6" : "v4", pid, ntohs((USHORT)local));
+    }
+    free(bytes);
+  }
+  printf("]");
+}
+static void verify_access(unsigned subject, unsigned custody, const char *context, const char *hexBytes) {
+  need(subject < process_count && custody < count && strlen(hexBytes) == sizeof(struct access_view) * 2);
+  struct access_view view; for (unsigned i = 0; i < sizeof(view); i++) ((BYTE *)&view)[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
+  need(view.objectCount >= 11 && view.objectCount <= 44 && view.socketCount <= 8 && view.domain.count <= 32);
+  struct case_account_record record = {0}; account_record(entries[custody].path, &record);
+  need(!strcmp(context, record.context) && !memcmp(&record, &view.domain.record, sizeof(record)));
+  case_record = record; strcpy_s(nonce, 33, record.nonce);
+  HANDLE source = duplicate_process_owner(subject); need(system_process(source) && view.domain.creator == GetProcessId(source));
+  access_registry_parent();
+  view.domain.token = access_duplicate(source, view.domain.token);
+  wchar_t *sid = token_sid(view.domain.token); need(!wcscmp(sid, record.accountSid)); LocalFree(sid);
+  if (view.domain.job) view.domain.job = access_duplicate(source, view.domain.job);
+  if (view.domain.launcher) view.domain.launcher = access_duplicate(source, view.domain.launcher);
+  if (view.domain.owner) view.domain.owner = access_duplicate(source, view.domain.owner);
+  if (view.domain.ownerJob) view.domain.ownerJob = access_duplicate(source, view.domain.ownerJob);
+  for (unsigned i = 0; i < view.domain.count; i++) {
+    view.domain.processes[i] = access_duplicate(source, view.domain.processes[i]); view.domain.tokens[i] = access_duplicate(source, view.domain.tokens[i]);
+    sid = token_sid(view.domain.tokens[i]); need(!wcscmp(sid, record.accountSid)); LocalFree(sid);
+    if (WaitForSingleObject(view.domain.processes[i], 0) != WAIT_OBJECT_0) {
+      HANDLE current; need(OpenProcessToken(view.domain.processes[i], TOKEN_QUERY, &current));
+      TOKEN_STATISTICS *before = token_info(view.domain.tokens[i], TokenStatistics), *after = token_info(current, TokenStatistics);
+      need(!memcmp(&before->TokenId, &after->TokenId, sizeof(LUID)) && !memcmp(&before->ModifiedId, &after->ModifiedId, sizeof(LUID)) &&
+        process_session(view.domain.processes[i]) == 0 && CloseHandle(current)); free(before); free(after);
+    }
+  }
+  ownership_census(&view.domain);
+  printf("{\"accountSid\":\"%ls\",\"restrictingSid\":\"%ls\",\"contextSha256\":\"%s\",\"bfeRunning\":%s,\"token\":",
+    record.accountSid, record.restrictingSid, context, access_bfe_running() ? "true" : "false");
+  effective_token_handle(view.domain.token); printf(",\"creator\":"); retained_identity(source,tokens[subject],sessions[subject]); printf(",\"job\":");
+  if (view.domain.job) job_read(view.domain.job); else {
+    wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", record.nonce) > 0);
+    HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, name); need(!job && GetLastError() == ERROR_FILE_NOT_FOUND); printf("null");
+  }
+  printf(",\"fileRoots\":["); unsigned roots = 0;
+  for (unsigned r = 0; r < 2; r++) if (view.payloadRoots[r] && view.domain.count && WaitForSingleObject(view.domain.processes[0], 0) == WAIT_TIMEOUT) {
+    HANDLE root = access_duplicate(source, view.roots[r]), actual = access_duplicate(view.domain.processes[0], view.payloadRoots[r]);
+    FILE_ID_INFO expected, observed; FILE_ATTRIBUTE_TAG_INFO tag; char hash[65];
+    need(GetFileInformationByHandleEx(root, FileIdInfo, &expected, sizeof(expected)) &&
+      GetFileInformationByHandleEx(actual, FileIdInfo, &observed, sizeof(observed)) && !memcmp(&expected, &observed, sizeof(expected)) &&
+      GetFileInformationByHandleEx(actual, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+    security(root, SE_FILE_OBJECT, TRUE, hash);
+    wchar_t name[4096]; DWORD size = GetFinalPathNameByHandleW(root, name, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    need(size > 4 && size < 4096 && !_wcsicmp(name + 4, entries[r + 1].path));
+    struct verify_handles *inventory = handle_inventory(); BOOL found = FALSE;
+    for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetProcessId(view.domain.processes[0]) &&
+      inventory->entries[i].handle == (ULONG_PTR)view.payloadRoots[r]) { need(inventory->entries[i].access == ACCESS_ROOT_MASK); found = TRUE; }
+    need(found); free(inventory); struct held_file file = {0}; file.handle = actual; file.id = observed;
+    printf("%s{\"index\":%u,\"identity\":\"", roots++ ? "," : "", r + 1); file_id(&file); printf("\",\"accessMask\":%lu}", (DWORD)ACCESS_ROOT_MASK);
+    need(CloseHandle(root) && CloseHandle(actual));
+  }
+  printf("],\"members\":[");
+  for (unsigned i = 0; i < view.domain.count; i++) {
+    BOOL signaled = WaitForSingleObject(view.domain.processes[i], 0) == WAIT_OBJECT_0, belongs = FALSE;
+    if (!signaled) need(view.domain.job && IsProcessInJob(view.domain.processes[i], view.domain.job, &belongs) && belongs);
+    if (i) putchar(','); printf("{\"identity\":"); retained_identity(view.domain.processes[i], view.domain.tokens[i], 0);
+    printf(",\"signaled\":%s,\"inJob\":%s,\"token\":", signaled ? "true" : "false", belongs ? "true" : "false");
+    effective_token_handle(view.domain.tokens[i]);
+    TOKEN_DEFAULT_DACL *dacl = token_info(view.domain.tokens[i], TokenDefaultDacl); ACCESS_ALLOWED_ACE *ace; BYTE system[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(system);
+    need(dacl->DefaultDacl && dacl->DefaultDacl->AceCount == 1 && GetAce(dacl->DefaultDacl, 0, (void **)&ace) && CreateWellKnownSid(WinLocalSystemSid, NULL, system, &size) &&
+      ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && ace->Mask == GENERIC_ALL && EqualSid(&ace->SidStart, system)); free(dacl); printf("}");
+  }
+  BOOL ownerEmpty = TRUE;
+  if (view.domain.ownerJob) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(view.domain.ownerJob, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL)); ownerEmpty = !accounting.ActiveProcesses; }
+  printf("],\"observerAbsent\":%s,\"creationSealed\":%s,\"objects\":[", view.observer ? "false" : "true", ownerEmpty && (!view.domain.launcher || WaitForSingleObject(view.domain.launcher, 0) == WAIT_OBJECT_0) &&
+    (!view.domain.owner || WaitForSingleObject(view.domain.owner, 0) == WAIT_OBJECT_0) ? "true" : "false");
+  struct verify_handles *inventory = handle_inventory();
+  for (unsigned i = 0; i < view.objectCount; i++) {
+    unsigned index = view.indices[i]; need(index < count); HANDLE file = access_duplicate(source, view.objects[i]);
+    wchar_t name[4096]; DWORD size = GetFinalPathNameByHandleW(file, name, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    need(size > 4 && size < 4096 && !_wcsicmp(name + 4, entries[index].path));
+    FILE_ATTRIBUTE_TAG_INFO tag; BY_HANDLE_FILE_INFORMATION info; struct held_file held = {0}; held.handle = file;
+    need(GetFileInformationByHandleEx(file, FileIdInfo, &held.id, sizeof(held.id)) && GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileInformationByHandle(file, &info) && info.nNumberOfLinks == 1);
+    void *object = NULL; unsigned foreign = 0;
+    for (ULONG_PTR j = 0; j < inventory->count; j++) if (inventory->entries[j].pid == GetProcessId(source) && inventory->entries[j].handle == (ULONG_PTR)view.objects[i]) object = inventory->entries[j].object;
+    need(object);
+    for (ULONG_PTR j = 0; j < inventory->count; j++) if (inventory->entries[j].object == object && inventory->entries[j].pid != GetCurrentProcessId() && inventory->entries[j].pid != GetProcessId(source) &&
+      (inventory->entries[j].access & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))) foreign++;
+    printf("%s{\"index\":%u,\"identity\":\"", i ? "," : "", index); file_id(&held);
+    printf("\",\"foreignWritableHandles\":%u,\"parents\":[", foreign);
+    struct held_file parents = hold_shared(entries[index].path, !!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY), FALSE, GENERIC_READ, TRUE);
+    for (unsigned j = 0; j < parents.count; j++) { if (j) putchar(','); FILE_ID_INFO id; need(GetFileInformationByHandleEx(parents.parents[j], FileIdInfo, &id, sizeof(id))); struct held_file parent = {0}; parent.handle = parents.parents[j]; parent.id = id;
+      printf("\""); file_id(&parent); printf("\""); }
+    printf("],\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); printf("}"); close_file(&parents); need(CloseHandle(file));
+  }
+  free(inventory); printf("],\"flows\":"); access_flows(&view.domain); printf(",\"endpoints\":[");
+  char socketPins[8][65]; BOOL payloadSocketVerified[8] = {0};
+  WSADATA socketData; need(!WSAStartup(MAKEWORD(2, 2), &socketData));
+  for (unsigned i = 0; i < view.socketCount; i++) {
+    SOCKET socket = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &view.socketInfo[i], 0, WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+    struct verify_handles *sockets = handle_inventory(); void *original = NULL, *actual = NULL, *payload = NULL;
+    for (ULONG_PTR j = 0; j < sockets->count; j++) {
+      if (sockets->entries[j].pid == GetProcessId(source) && sockets->entries[j].handle == (ULONG_PTR)view.sockets[i]) original = sockets->entries[j].object;
+      if (sockets->entries[j].pid == GetCurrentProcessId() && sockets->entries[j].handle == (ULONG_PTR)socket) actual = sockets->entries[j].object;
+      if (view.domain.count && sockets->entries[j].pid == GetProcessId(view.domain.processes[(i%2 && view.domain.count==2) ? 1 : 0]) && sockets->entries[j].handle == (ULONG_PTR)view.payloadSockets[i]) payload = sockets->entries[j].object;
+    }
+    need(original && original == actual && (!view.domain.count || WaitForSingleObject(view.domain.processes[0], 0) == WAIT_OBJECT_0 || !view.payloadSockets[i] || payload == original));
+    for (ULONG_PTR j = 0; j < sockets->count; j++) if (sockets->entries[j].object == original)
+      need(sockets->entries[j].pid == GetProcessId(source) || sockets->entries[j].pid == GetCurrentProcessId() ||
+        access_member_pid(&view.domain,(DWORD)sockets->entries[j].pid));
+    char seed[128]; need(sprintf_s(seed, sizeof(seed), "%s:%p", context, original) > 0); sum((BYTE *)seed, (DWORD)strlen(seed), socketPins[i]);
+    payloadSocketVerified[i] = view.domain.count && WaitForSingleObject(view.domain.processes[0], 0) == WAIT_TIMEOUT && payload == original; free(sockets);
+    SOCKADDR_STORAGE address; int size = sizeof(address), type, typeSize = sizeof(type), exclusive, optionSize = sizeof(exclusive);
+    need(!getsockname((SOCKET)socket, (SOCKADDR *)&address, &size) && !getsockopt((SOCKET)socket, SOL_SOCKET, SO_TYPE, (char *)&type, &typeSize) &&
+      !getsockopt((SOCKET)socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, &optionSize) && exclusive);
+    BOOL v6 = address.ss_family == AF_INET6; need(v6 ? IN6_IS_ADDR_LOOPBACK(&((SOCKADDR_IN6 *)&address)->sin6_addr) : ((SOCKADDR_IN *)&address)->sin_addr.s_addr == htonl(INADDR_LOOPBACK));
+    if (v6) { int only, bytes = sizeof(only); need(!getsockopt((SOCKET)socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&only, &bytes) && only); }
+    printf("%s{\"family\":\"%s\",\"protocol\":\"%s\",\"port\":%u}", i ? "," : "", v6 ? "v6" : "v4", type == SOCK_DGRAM ? "udp" : "tcp",
+      ntohs(v6 ? ((SOCKADDR_IN6 *)&address)->sin6_port : ((SOCKADDR_IN *)&address)->sin_port)); need(!closesocket((SOCKET)socket));
+  }
+  printf("],\"reservations\":[");
+  for (unsigned i = 0; i < view.socketCount; i++) printf("%s{\"identitySha256\":\"%s\",\"payloadVerified\":%s}", i ? "," : "", socketPins[i], payloadSocketVerified[i] ? "true" : "false");
+  BOOL registryPresent = access_registry_present(); printf("],\"registryPresent\":%s,\"registry\":", registryPresent ? "true" : "false");
+  if (!registryPresent) printf("null"); else {
+    wchar_t name[256]; HKEY key; need(swprintf_s(name,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0 &&
+      RegOpenKeyExW(HKEY_LOCAL_MACHINE,name,0,READ_CONTROL | ACCESS_SYSTEM_SECURITY | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY,&key)==ERROR_SUCCESS);
+    BYTE bytes[8192]; ULONG used; typedef NTSTATUS (NTAPI *query_key)(HANDLE,ULONG,void *,ULONG,ULONG *);
+    query_key query=(query_key)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryKey"); need(query && !query(key,3,bytes,sizeof(bytes),&used));
+    DWORD length=*(DWORD *)bytes; need(used>=4 && used<=sizeof(bytes) && length && length<=used-4 && !(length%2)); DWORD children, values; FILETIME written;
+    need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written)==ERROR_SUCCESS);
+    PSECURITY_DESCRIPTOR sd=file_sd(key,SE_REGISTRY_KEY); printf("{\"nameHex\":\""); hex(bytes+4,length);
+    printf("\",\"children\":%lu,\"values\":%lu,\"written\":\"%08lx%08lx\",\"security\":",children,values,written.dwHighDateTime,written.dwLowDateTime);
+    sd_read(sd); printf("}"); LocalFree(sd); need(RegCloseKey(key)==ERROR_SUCCESS);
+  }
+  printf(",\"ownedWfp\":{");
+  wfp_open(); BOOL exists[54]={0}; GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0, &key); DWORD present = FwpmProviderGetByKey0(wfp_engine, &key, &provider); need(present == ERROR_SUCCESS || present == FWP_E_PROVIDER_NOT_FOUND);
+  exists[0]=present==ERROR_SUCCESS; printf("\"provider\":%s,", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&provider);
+  access_key(1, &key); present = FwpmSubLayerGetByKey0(wfp_engine, &key, &layer); need(present == ERROR_SUCCESS || present == FWP_E_SUBLAYER_NOT_FOUND);
+  exists[1]=present==ERROR_SUCCESS; printf("\"sublayer\":%s,\"filters\":[", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&layer);
+  for (unsigned i = 0; i < 52; i++) { access_key(i + 2, &key); present = FwpmFilterGetByKey0(wfp_engine, &key, &filter); need(present == ERROR_SUCCESS || present == FWP_E_FILTER_NOT_FOUND);
+    exists[i+2]=present==ERROR_SUCCESS; printf("%s%s", i ? "," : "", present == ERROR_SUCCESS ? "true" : "false"); if (!present) FwpmFreeMemory0((void **)&filter); }
+  printf("],\"observations\":{\"provider\":");
+  for (unsigned i=0;i<54;i++) { access_key(i,&key); RPC_CSTR text; need(UuidToStringA(&key,&text)==RPC_S_OK);
+    if (i==1) printf(",\"sublayer\":"); if (i==2) printf(",\"filters\":["); if (i>2) putchar(',');
+    if (exists[i]) effective_wfp((char *)text,i<2 ? i : 2); else printf("null"); need(RpcStringFreeA(&text)==RPC_S_OK);
+  } printf("]}}}"); need(!WSACleanup());
+  for (unsigned i = 0; i < view.domain.count; i++) need(CloseHandle(view.domain.processes[i]) && CloseHandle(view.domain.tokens[i]));
+  HANDLE handles[] = {view.domain.token, view.domain.job, view.domain.launcher, view.domain.owner, view.domain.ownerJob, source};
+  for (unsigned i = 0; i < sizeof(handles) / sizeof(handles[0]); i++) if (handles[i]) need(CloseHandle(handles[i]));
+}
+/* Fixed outside controls are private native objects. No operator callback or
+ * timeout can acknowledge availability, policy authority or a socket owner. */
+struct access_control_view {
+  struct case_account_record record;
+  unsigned kind, index;
+  HANDLE object, peer, peerToken, payload, peerJob;
+  WSAPROTOCOL_INFOW socketInfo;
+  wchar_t target[4096]; char id[64];
+};
+static HANDLE access_pipe, access_alpc;
+static BOOL access_controls_ready, access_rpc_ready;
+static volatile LONG access_controls_closed;
+static SOCKET access_listeners[16]; static unsigned access_listener_count;
+struct access_peer_owner { PROCESS_INFORMATION process; HANDLE token, job, input, output; wchar_t home[4096]; struct case_account_record record; HANDLE sockets[8]; WSAPROTOCOL_INFOW infos[8]; };
+static struct access_peer_owner access_private_peer, access_other_peer;
+static struct access_control_view access_controls[38]; static unsigned access_control_count;
+static SOCKET access_foreign_socket = INVALID_SOCKET;
+static void access_peer_command(struct access_peer_owner *peer, const wchar_t *operation, const wchar_t *first, const wchar_t *second, char *reply, DWORD capacity) {
+  const wchar_t *words[] = {operation, first, second}; char command[16384]; DWORD used = 0, written;
+  for (unsigned i=0;i<3 && words[i];i++) { if (i) command[used++]=' '; const BYTE *bytes=(const BYTE *)words[i]; DWORD length=(DWORD)wcslen(words[i])*2;
+    need(used+length*2+1<sizeof(command)); for (DWORD j=0;j<length;j++) need(sprintf_s(command+used+j*2,sizeof(command)-used-j*2,"%02x",bytes[j]) == 2); used+=length*2; }
+  command[used++]='\n'; need(WriteFile(peer->input,command,used,&written,NULL) && written==used); line(peer->output,reply,capacity); need(strstr(reply,nonce));
+}
+static ULONGLONG access_reply_handle(const char *reply) {
+  const char *value=strstr(reply,"\"handle\":\""); need(value); value+=10; char *end; ULONGLONG handle=_strtoui64(value,&end,10); need(handle && *end=='"'); return handle;
+}
+static void access_start_peer(struct access_peer_owner *peer, BOOL other) {
+  need(access_mode && ownership_released && !access_controls_closed && !peer->process.hProcess);
+  PSECURITY_DESCRIPTOR privateSd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES private=attributes(privateSd,FALSE), inherited=attributes(privateSd,TRUE);
+  HANDLE primary=case_token; wchar_t executable[4096], cwd[4096]; wcscpy_s(executable,4096,entries[6].path); wcscpy_s(cwd,4096,entries[4].path);
+  if (other) {
+    need(swprintf_s(peer->home,4096,L"%ls\\access-peer",entries[2].path)>0 && CreateDirectoryW(peer->home,&private));
+    char seed[128]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",case_record.context)>0); peer->record.version=1; sum((BYTE *)seed,(DWORD)strlen(seed),peer->record.context); memcpy(peer->record.nonce,peer->record.context,32);
+    HANDLE intent=account_file(peer->home,L"account.intent",GENERIC_WRITE,CREATE_NEW); DWORD written;
+    need(WriteFile(intent,&peer->record,sizeof(peer->record),&written,NULL) && written==sizeof(peer->record) && FlushFileBuffers(intent) && CloseHandle(intent));
+    wchar_t name[21], *sid; need(swprintf_s(name,21,L"np_%.16hs",peer->record.nonce)>0); primary=account(name,peer->home,&sid); wcscpy_s(peer->record.accountSid,256,sid); LocalFree(sid);
+    wcscpy_s(peer->record.restrictingSid,256,case_record.restrictingSid);
+    HANDLE record=account_file(peer->home,L"account.record",GENERIC_WRITE,CREATE_NEW);
+    need(WriteFile(record,&peer->record,sizeof(peer->record),&written,NULL) && written==sizeof(peer->record) && FlushFileBuffers(record) && CloseHandle(record));
+    TOKEN_PRIVILEGES *privileges=token_info(primary,TokenPrivileges); LUID notify; need(privileges->PrivilegeCount<=64 && LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify)); LUID_AND_ATTRIBUTES remove[64]; unsigned count=0;
+    for (DWORD i=0;i<privileges->PrivilegeCount;i++) if (memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))) remove[count++]=privileges->Privileges[i];
+    TOKEN_GROUPS *groups=token_info(primary,TokenGroups); need(groups->GroupCount<=128); SID_AND_ATTRIBUTES disabled[128]; unsigned disabledCount=0; for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & (SE_GROUP_INTEGRITY | SE_GROUP_USE_FOR_DENY_ONLY))) disabled[disabledCount++]=groups->Groups[i];
+    HANDLE reduced; need(count<=64 && CreateRestrictedToken(primary,0,disabledCount,disabled,count,remove,0,NULL,&reduced) && CloseHandle(primary)); primary=reduced; free(privileges); free(groups);
+    wchar_t text[2048]; need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;FRFX;;;%ls)",peer->record.accountSid)>0); PSECURITY_DESCRIPTOR readable=descriptor(text); SECURITY_ATTRIBUTES readableSa=attributes(readable,FALSE);
+    PACL acl; BOOL present,defaulted; need(GetSecurityDescriptorDacl(readable,&present,&acl,&defaulted) && present);
+    struct held_file home=hold(peer->home,TRUE,TRUE,FILE_LIST_DIRECTORY | WRITE_DAC); need(SetSecurityInfo(home.handle,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,NULL,acl,NULL)==ERROR_SUCCESS); close_file(&home);
+    for (unsigned i=0;i<access_object_count;i++) { struct entry *entry=&entries[access_indices[i]];
+      if (i<10 && access_indices[i]!=6) continue; if (!strcmp(entry->kind,"directory") || !strcmp(entry->kind,"data")) continue;
+      const wchar_t *leaf=wcsrchr(entry->path,'\\'); need(leaf && swprintf_s(executable,4096,L"%ls%ls",peer->home,leaf)>0); DWORD size; BYTE *bytes=read_file(&entry->file,134217728,&size);
+      HANDLE file=CreateFileW(executable,GENERIC_WRITE,0,&readableSa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,NULL);
+      need(file!=INVALID_HANDLE_VALUE && WriteFile(file,bytes,size,&written,NULL) && written==size && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
+      struct held_file copied=hold_shared(executable,FALSE,FALSE,GENERIC_READ,FALSE); pin(&copied,entry->pin); char signaturePin[65]; signature(&copied,entry->signature,signaturePin); close_file(&copied);
+    }
+    const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); need(leaf && swprintf_s(executable,4096,L"%ls%ls",peer->home,leaf)>0); wcscpy_s(cwd,4096,peer->home); LocalFree(readable);
+    peer->job=recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
+    JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(SetInformationJobObject(peer->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(peer->job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  } else peer->job=case_job;
+  PACL defaultDacl; BOOL present,defaulted; need(GetSecurityDescriptorDacl(privateSd,&present,&defaultDacl,&defaulted) && present); TOKEN_DEFAULT_DACL creation={defaultDacl}; need(SetTokenInformation(primary,TokenDefaultDacl,&creation,sizeof(creation)));
+  HANDLE pipes[2]; need(CreatePipe(&pipes[0],&peer->input,&inherited,0) && CreatePipe(&peer->output,&pipes[1],&inherited,0) && SetHandleInformation(peer->input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(peer->output,HANDLE_FLAG_INHERIT,0));
+  SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size); STARTUPINFOEXW start={0}; start.StartupInfo.cb=sizeof(start); start.lpAttributeList=calloc(1,size);
+  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList,2,0,&size) && UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,pipes,sizeof(pipes),NULL,NULL) && UpdateProcThreadAttribute(start.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&peer->job,sizeof(HANDLE),NULL,NULL));
+  start.StartupInfo.dwFlags=STARTF_USESTDHANDLES; start.StartupInfo.hStdInput=pipes[0]; start.StartupInfo.hStdOutput=start.StartupInfo.hStdError=pipes[1]; wchar_t command[8192];
+  need(swprintf_s(command,8192,L"\"%ls\" controls %hs",executable,nonce)>0); wchar_t environment[2]={0,0};
+  need(CreateProcessAsUserW(primary,executable,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,cwd,&start.StartupInfo,&peer->process));
+  need(CloseHandle(pipes[0]) && CloseHandle(pipes[1]) && OpenProcessToken(peer->process.hProcess,TOKEN_QUERY | TOKEN_DUPLICATE,&peer->token));
+  if (!other) { need(ownership_count==1); ownership_processes[1]=peer->process.hProcess; ownership_tokens[1]=peer->token; ownership_count=2; }
+  else need(CloseHandle(primary));
+  DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(privateSd);
+}
+static void access_peers(BOOL activate,DWORD verifierPid) {
+  if (!activate) { need(ownership_count==1); access_start_peer(&access_private_peer,FALSE); access_start_peer(&access_other_peer,TRUE); }
+  else { need(ownership_count==2 && ResumeThread(access_private_peer.process.hThread)==1 && ResumeThread(access_other_peer.process.hThread)==1);
+  for (unsigned i=0;i<8;i++) { WSAPROTOCOL_INFOW info; wchar_t encoded[sizeof(info)*2+1], index[4]; char reply[4096];
+    SOCKET socket=case_sockets[i];
+    if (i%2) {
+      need(!WSADuplicateSocketW(socket,GetProcessId(access_private_peer.process.hProcess),&info)); for (unsigned j=0;j<sizeof(info);j++) need(swprintf_s(encoded+j*2,3,L"%02x",((BYTE *)&info)[j])==2);
+      need(swprintf_s(index,4,L"%u",i)>0); access_peer_command(&access_private_peer,L"socket",index,encoded,reply,sizeof(reply)); access_payload_sockets[i]=(HANDLE)(ULONG_PTR)access_reply_handle(reply);
+      wchar_t verifier[16]; need(swprintf_s(verifier,16,L"%lu",verifierPid)>0); access_peer_command(&access_private_peer,L"serve",index,verifier,reply,sizeof(reply)); need(strstr(reply,"\"phase\":\"ready\""));
+    }
+  }
+  }
+  printf("{\"privatePeer\":"); retained_identity(access_private_peer.process.hProcess,access_private_peer.token,0); printf(",\"otherPeer\":"); retained_identity(access_other_peer.process.hProcess,access_other_peer.token,0); printf("}");
+}
+
+static int RPC_ENTRY access_rpc_auth(RPC_BINDING_HANDLE binding, unsigned long operation) {
+  (void)operation; if (RpcImpersonateClient(binding) != RPC_S_OK) return FALSE;
+  HANDLE token = NULL; BOOL allowed = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+  if (allowed) { wchar_t *sid = token_sid(token); allowed = !wcscmp(sid, L"S-1-5-18"); LocalFree(sid); need(CloseHandle(token)); }
+  need(RpcRevertToSelf() == RPC_S_OK); return allowed;
+}
+static void RPC_ENTRY access_rpc_dispatch(PRPC_MESSAGE message) {
+  (void)message; RpcRaiseException(RPC_S_ACCESS_DENIED);
+}
+static RPC_DISPATCH_FUNCTION access_rpc_functions[] = {access_rpc_dispatch};
+static RPC_DISPATCH_TABLE access_rpc_table = {1, access_rpc_functions, 0};
+static RPC_SERVER_INTERFACE access_rpc_interface = {
+  sizeof(RPC_SERVER_INTERFACE), {{0x2dd5c390,0x3bd3,0x4ea1,{0x9d,0x68,0x1f,0x75,0x80,0x16,0x66,0x10}},{1,0}},
+  {{0x8a885d04,0x1ceb,0x11c9,{0x9f,0xe8,0x08,0x00,0x2b,0x10,0x48,0x60}},{2,0}},
+  &access_rpc_table, 0, NULL, NULL, NULL, 0
+};
+struct access_echo { SOCKET socket; };
+static struct access_echo access_echoes[16];
+static DWORD WINAPI access_echo(void *data) {
+  SOCKET listener = ((struct access_echo *)data)->socket; int type, size = sizeof(type); need(!getsockopt(listener,SOL_SOCKET,SO_TYPE,(char *)&type,&size));
+  for (unsigned i = 0; i < 64; i++) {
+    SOCKET socket = listener; SOCKADDR_STORAGE peer; int length = sizeof(peer);
+    if (type == SOCK_STREAM) { socket = accept(listener,NULL,NULL); if (socket == INVALID_SOCKET) return 0; }
+    char bytes[32]; int used = type == SOCK_DGRAM ? recvfrom(socket,bytes,32,0,(SOCKADDR *)&peer,&length) : recv(socket,bytes,32,MSG_WAITALL);
+    if (used == SOCKET_ERROR) { if (socket != listener) closesocket(socket); return 0; }
+    if (used == 32 && !memcmp(bytes,nonce,32)) need((type == SOCK_DGRAM ? sendto(socket,bytes,32,0,(SOCKADDR *)&peer,length) : send(socket,bytes,32,0)) == 32);
+    if (socket != listener) need(!closesocket(socket));
+  }
+  return 0;
+}
+static HANDLE access_echo_threads[16], access_alpc_thread;
+struct access_port_message {
+  union { struct { USHORT dataLength,totalLength; } lengths; ULONG length; } first;
+  union { struct { USHORT type,offset; } fields; ULONG zero; } second;
+  CLIENT_ID client; ULONG messageId; SIZE_T view;
+};
+C_ASSERT(sizeof(struct access_port_message) == 40);
+struct access_alpc_message { struct access_port_message header; char bytes[32]; };
+static DWORD WINAPI access_alpc_accept(void *unused) {
+  (void)unused;
+  typedef NTSTATUS (NTAPI *receive_message)(HANDLE,ULONG,void *,void *,void *,SIZE_T *,void *,LARGE_INTEGER *);
+  typedef NTSTATUS (NTAPI *accept_port)(PHANDLE,HANDLE,ULONG,POBJECT_ATTRIBUTES,void *,void *,void *,void *,BOOLEAN);
+  receive_message receive = (receive_message)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcSendWaitReceivePort");
+  accept_port accept = (accept_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcAcceptConnectPort"); need(receive && accept);
+  for (unsigned accepted = 0; accepted < 64;) { struct access_alpc_message message = {0}; SIZE_T size = sizeof(message); LARGE_INTEGER timeout; timeout.QuadPart = -10000000;
+    NTSTATUS result = receive(access_alpc,0,NULL,NULL,&message,&size,NULL,&timeout);
+    if (result == (NTSTATUS)0x00000102) { if (access_controls_closed) return 0; continue; }
+    if (result < 0 && access_controls_closed) return 0;
+    need(result == 0 && size <= sizeof(message) && message.header.first.lengths.dataLength == 32 && !memcmp(message.bytes,nonce,32));
+    HANDLE connection = NULL; need(accept(&connection,access_alpc,0,NULL,NULL,NULL,&message,NULL,TRUE) == 0 && connection && CloseHandle(connection)); accepted++;
+  }
+  return 0;
+}
+static void access_control_objects(void) {
+  need(access_mode && ownership_stage == 5 && !access_controls_ready && !access_controls_closed);
+  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE); wchar_t name[256];
+  need(swprintf_s(name, 256, L"\\\\.\\pipe\\NativeProof-%hs", nonce) > 0);
+  access_pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 64, 64, 0, &sa); need(access_pipe != INVALID_HANDLE_VALUE);
+  need(swprintf_s(name, 256, L"\\RPC Control\\NativeProof-%hs", nonce) > 0);
+  UNICODE_STRING portName = {(USHORT)(wcslen(name) * sizeof(wchar_t)), (USHORT)(wcslen(name) * sizeof(wchar_t)), name};
+  OBJECT_ATTRIBUTES object = {sizeof(object), NULL, &portName, OBJ_CASE_INSENSITIVE, sd, NULL};
+  typedef NTSTATUS (NTAPI *create_port)(PHANDLE, POBJECT_ATTRIBUTES, void *);
+  struct access_port_attributes { ULONG flags; SECURITY_QUALITY_OF_SERVICE qos;
+    SIZE_T messageLength, bandwidth, pool, section, view, total; ULONG duplicates, reserved; } attributes = {0};
+  C_ASSERT(sizeof(struct access_port_attributes) == 72);
+  attributes.qos.Length = sizeof(attributes.qos); attributes.qos.ImpersonationLevel = SecurityImpersonation;
+  attributes.qos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING; attributes.qos.EffectiveOnly = TRUE;
+  attributes.messageLength = sizeof(struct access_alpc_message);
+  create_port create = (create_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtAlpcCreatePort");
+  need(create && create(&access_alpc, &object, &attributes) == 0 && access_alpc);
+  need(swprintf_s(name, 256, L"NativeProof-%hs", nonce) > 0 && RpcMgmtSetAuthorizationFn(access_rpc_auth) == RPC_S_OK &&
+    RpcServerUseProtseqEpW((RPC_WSTR)L"ncalrpc", 1, (RPC_WSTR)name, sd) == RPC_S_OK &&
+    RpcServerRegisterIfEx((RPC_IF_HANDLE)&access_rpc_interface, NULL, NULL, RPC_IF_AUTOLISTEN | RPC_IF_ALLOW_LOCAL_ONLY, 1, NULL) == RPC_S_OK);
+  access_alpc_thread = CreateThread(NULL,0,access_alpc_accept,NULL,0,NULL); need(access_alpc_thread);
+  access_rpc_ready = access_controls_ready = TRUE; LocalFree(sd); printf("{\"ready\":true}");
+}
+static void access_control_state(const char *id, DWORD verifierPid) {
+  need(access_controls_ready && !access_controls_closed && strlen(id) > 0 && strlen(id) < 64);
+  struct access_control_view view = {0}; view.record = case_record; view.payload=ownership_count ? ownership_processes[0] : NULL; strcpy_s(view.id, 64, id);
+  for (unsigned i=0;i<access_control_count;i++) if (!strcmp(access_controls[i].id,id)) { view=access_controls[i]; goto export_control; }
+  const char *fileIds[] = {"metadata-write", "pointer-write", "pointer-delete", "pointer-replace", "parent-delete", "parent-replace", "custody", "checkout", "configuration", "credentials", "outside-write"};
+  const unsigned slots[] = {5,4,4,4,2,2,0,6,7,8,9}; BOOL found = FALSE;
+  for (unsigned i = 0; i < sizeof(slots)/sizeof(slots[0]); i++) if (!strcmp(id, fileIds[i])) {
+    view.kind = 1; view.index = access_indices[slots[i]]; view.object = entries[view.index].file.handle; wcscpy_s(view.target, 4096, entries[view.index].path); found = TRUE; break;
+  }
+  if (!found && !strcmp(id, "registry")) { view.kind = 2; need(swprintf_s(view.target, 4096, L"HKLM\\SOFTWARE\\NativeProof\\%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "host-pipe")) { view.kind = 3; view.object = access_pipe; need(swprintf_s(view.target, 4096, L"\\\\.\\pipe\\NativeProof-%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "alpc")) { view.kind = 4; view.object = access_alpc; need(swprintf_s(view.target, 4096, L"\\RPC Control\\NativeProof-%hs", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "rpc")) { view.kind = 5; need(swprintf_s(view.target, 4096, L"ncalrpc:[NativeProof-%hs]", nonce) > 0); found = TRUE; }
+  if (!found && !strcmp(id, "com")) { view.kind = 6; wcscpy_s(view.target, 4096, L"TaskScheduler"); found = TRUE; }
+  if (!found && !strcmp(id, "wmi")) { view.kind = 7; wcscpy_s(view.target, 4096, L"ROOT\\CIMV2"); found = TRUE; }
+  if (!found && !strcmp(id, "delegation")) { view.kind = 8; view.object = ownership_launcher.hProcess; need(swprintf_s(view.target, 4096, L"%lu", GetProcessId(ownership_launcher.hProcess)) > 0); found = TRUE; }
+  if (!found) {
+    /* Socket controls are created with fixed bind families and independently
+     * read endpoints. The caller cannot supply arbitrary server code. */
+    view.kind = 9; BOOL v6 = strstr(id, "-v6-") != NULL, udp = strstr(id, "-udp") != NULL;
+    need((strstr(id, "-v4-") || v6) && (strstr(id, "-tcp") || udp));
+    BOOL wildcard = !strncmp(id, "wildcard-listener-", 18), routed = !strncmp(id, "host-network-", 13), cross = !strncmp(id, "cross-allocation-", 17), foreign = !strncmp(id, "foreign-sender-", 15);
+    need(wildcard || routed || cross || foreign || !strncmp(id, "host-listener-", 14));
+    if (foreign) {
+      unsigned index = (v6 ? 4 : 0) + (udp ? 2 : 0) + 1; need(index < case_socket_count && ownership_count == 2 && access_payload_sockets[index]);
+      view.object = (HANDLE)case_sockets[index]; view.peer = ownership_processes[1]; view.peerToken = ownership_tokens[1];
+      need(!WSADuplicateSocketW(case_sockets[index], verifierPid, &view.socketInfo));
+    } else {
+      need(access_listener_count < 16); WSADATA data; need(!WSAStartup(MAKEWORD(2,2), &data));
+      SOCKET socket = WSASocketW(v6 ? AF_INET6 : AF_INET, udp ? SOCK_DGRAM : SOCK_STREAM, udp ? IPPROTO_UDP : IPPROTO_TCP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+      BOOL exclusive = TRUE; need(!setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, sizeof(exclusive)));
+      if (v6) need(!setsockopt(socket, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&exclusive, sizeof(exclusive)));
+      SOCKADDR_STORAGE address = {0}; unsigned length;
+      if (v6) { SOCKADDR_IN6 *a = (void *)&address; a->sin6_family = AF_INET6; a->sin6_addr = wildcard ? in6addr_any : in6addr_loopback; length = sizeof(*a); }
+      else { SOCKADDR_IN *a = (void *)&address; a->sin_family = AF_INET; a->sin_addr.s_addr = htonl(wildcard ? INADDR_ANY : INADDR_LOOPBACK); length = sizeof(*a); }
+      if (routed) {
+        ULONG bytes = 0; need(GetAdaptersAddresses(v6 ? AF_INET6 : AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, NULL, &bytes) == ERROR_BUFFER_OVERFLOW && bytes && bytes <= 1048576);
+        IP_ADAPTER_ADDRESSES *adapters = calloc(bytes, 1); need(adapters && GetAdaptersAddresses(v6 ? AF_INET6 : AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, NULL, adapters, &bytes) == NO_ERROR);
+        BOOL reached = FALSE; for (IP_ADAPTER_ADDRESSES *adapter = adapters; adapter && !reached; adapter = adapter->Next) if (adapter->OperStatus == IfOperStatusUp && adapter->IfType != IF_TYPE_SOFTWARE_LOOPBACK)
+          for (IP_ADAPTER_UNICAST_ADDRESS *item = adapter->FirstUnicastAddress; item; item = item->Next) if (item->Address.lpSockaddr->sa_family == (v6 ? AF_INET6 : AF_INET) &&
+            item->DadState == IpDadStatePreferred && (!v6 || (!IN6_IS_ADDR_LINKLOCAL(&((SOCKADDR_IN6 *)item->Address.lpSockaddr)->sin6_addr) && !((SOCKADDR_IN6 *)item->Address.lpSockaddr)->sin6_scope_id))) {
+            need(item->Address.iSockaddrLength == (int)length); memcpy(&address, item->Address.lpSockaddr, length); reached = TRUE; break; }
+        free(adapters); need(reached);
+      }
+      if (cross) {
+        need(access_other_peer.process.hProcess && WaitForSingleObject(access_other_peer.process.hProcess,0)==WAIT_TIMEOUT && !closesocket(socket) && !WSACleanup());
+        char reply[4096]; access_peer_command(&access_other_peer,L"listen",v6 ? L"v6" : L"v4",udp ? L"udp" : L"tcp",reply,sizeof(reply));
+        view.object=(HANDLE)(ULONG_PTR)access_reply_handle(reply); view.peer=access_other_peer.process.hProcess; view.peerToken=access_other_peer.token;
+        goto retain_control;
+      }
+      need(!bind(socket, (SOCKADDR *)&address, length) && (udp || !listen(socket, 2)));
+      access_listeners[access_listener_count] = socket; access_echoes[access_listener_count].socket = socket;
+      access_echo_threads[access_listener_count] = CreateThread(NULL,0,access_echo,&access_echoes[access_listener_count],0,NULL); need(access_echo_threads[access_listener_count]);
+      access_listener_count++; view.object = (HANDLE)socket;
+      need(!WSADuplicateSocketW(socket, verifierPid, &view.socketInfo));
+    }
+  }
+retain_control:
+  need(access_control_count < 38); access_controls[access_control_count++]=view;
+export_control:
+  if (view.kind==9 && !strncmp(id,"cross-allocation-",17)) {
+    wchar_t pid[16],handle[32]; char reply[4096]; need(swprintf_s(pid,16,L"%lu",verifierPid)>0 && swprintf_s(handle,32,L"%llu",(ULONGLONG)(ULONG_PTR)view.object)>0);
+    access_peer_command(&access_other_peer,L"socket-info",pid,handle,reply,sizeof(reply)); const char *bytes=strstr(reply,"\"hex\":\""); need(bytes); bytes+=7;
+    for (unsigned i=0;i<sizeof(view.socketInfo);i++) ((BYTE *)&view.socketInfo)[i]=(BYTE)(nibble(bytes[i*2])*16+nibble(bytes[i*2+1])); need(bytes[sizeof(view.socketInfo)*2]=='"');
+  } else if (view.kind==9) need(!WSADuplicateSocketW((SOCKET)view.object,verifierPid,&view.socketInfo));
+  printf("{\"hex\":\""); hex((BYTE *)&view, sizeof(view)); printf("\"}");
+}
+static void verify_access_control(unsigned subject, unsigned custody, const char *id, const char *hexBytes) {
+  need(subject < process_count && custody < count && strlen(hexBytes) == sizeof(struct access_control_view)*2);
+  struct access_control_view view; for (unsigned i = 0; i < sizeof(view); i++) ((BYTE *)&view)[i] = (BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  struct case_account_record record; account_record(entries[custody].path, &record); need(!memcmp(&record, &view.record, sizeof(record)) && !strcmp(view.id, id));
+  HANDLE source = duplicate_process_owner(subject); need(system_process(source)); char targetPin[65], sourcePin[65];
+  BOOL available = FALSE; unsigned kind = view.kind;
+  if (kind == 1) {
+    need(view.index < count && !_wcsicmp(view.target, entries[view.index].path)); HANDLE file = access_duplicate(source, view.object); struct held_file held = {0}; held.handle = file;
+    need(GetFileInformationByHandleEx(file, FileIdInfo, &held.id, sizeof(held.id))); char text[128];
+    need(sprintf_s(text, sizeof(text), "%016llx:", held.id.VolumeSerialNumber) > 0); for (unsigned i = 0; i < 16; i++) need(sprintf_s(text+17+i*2, sizeof(text)-17-i*2, "%02x", held.id.FileId.Identifier[i]) == 2);
+    sum((BYTE *)text, (DWORD)strlen(text), targetPin); PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT); PACL dacl; BOOL present, defaulted; PSID owner, system;
+    need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityDescriptorOwner(sd, &owner, &defaulted) && EqualSid(owner, system) &&
+      GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present && dacl);
+    HANDLE original, token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &original) && DuplicateToken(original, SecurityImpersonation, &token));
+    GENERIC_MAPPING map = {FILE_GENERIC_READ,FILE_GENERIC_WRITE,FILE_GENERIC_EXECUTE,FILE_ALL_ACCESS}; BYTE privileges[65536]; DWORD size = sizeof(privileges), granted; BOOL allowed;
+    need(AccessCheck(sd, token, MAXIMUM_ALLOWED, &map, (PPRIVILEGE_SET)privileges, &size, &granted, &allowed) && allowed && (granted & FILE_ALL_ACCESS) == FILE_ALL_ACCESS);
+    available = TRUE; LocalFree(system); LocalFree(sd); need(CloseHandle(original) && CloseHandle(token) && CloseHandle(file));
+  } else if (kind == 2) {
+    wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", record.nonce) > 0); HKEY key;
+    need(RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_ALL_ACCESS | KEY_WOW64_64KEY, &key) == ERROR_SUCCESS);
+    DWORD children, values; FILETIME written; need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written) == ERROR_SUCCESS && !children && !values && RegCloseKey(key) == ERROR_SUCCESS);
+    /* JS derives the same registry identity from independently read native
+     * name and write time, retaining those fields instead of approving a hash. */
+    strcpy_s(targetPin, 65, ""); available = TRUE;
+  } else if (kind == 3 || kind == 4) {
+    HANDLE handle = access_duplicate(source, view.object); PSECURITY_DESCRIPTOR sd; char hash[65];
+    need(GetSecurityInfo(handle,kind == 3 ? SE_FILE_OBJECT : SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,NULL,NULL,NULL,NULL,&sd) == ERROR_SUCCESS);
+    security(handle, kind == 3 ? SE_FILE_OBJECT : SE_KERNEL_OBJECT, TRUE, hash);
+    if (kind == 3) { HANDLE client = CreateFileW(view.target,GENERIC_READ | GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL); DWORD used; char bytes[32]; need(client != INVALID_HANDLE_VALUE && WriteFile(client,record.nonce,32,&used,NULL) && used==32 && ReadFile(handle,bytes,32,&used,NULL) && used==32 && !memcmp(bytes,record.nonce,32) && WriteFile(handle,bytes,32,&used,NULL) && used==32 && ReadFile(client,bytes,32,&used,NULL) && used==32 && !memcmp(bytes,record.nonce,32) && CloseHandle(client) && DisconnectNamedPipe(handle)); }
+    else { typedef NTSTATUS (NTAPI *connect_port)(PHANDLE,PUNICODE_STRING,POBJECT_ATTRIBUTES,void *,ULONG,PSID,void *,PULONG,void *,void *,LARGE_INTEGER *);
+      connect_port connect = (connect_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcConnectPort"); UNICODE_STRING name = {(USHORT)(wcslen(view.target)*2),(USHORT)(wcslen(view.target)*2),view.target};
+      HANDLE client = NULL; struct access_alpc_message message={0}; message.header.first.lengths.dataLength=32; message.header.first.lengths.totalLength=sizeof(message); memcpy(message.bytes,record.nonce,32); ULONG used=sizeof(message); LARGE_INTEGER timeout; timeout.QuadPart = -100000000;
+      need(connect && connect(&client,&name,NULL,NULL,0,NULL,&message,&used,NULL,NULL,&timeout) == 0 && client && used==sizeof(message) && !memcmp(message.bytes,record.nonce,32) && CloseHandle(client)); }
+    sum((BYTE *)sd, GetSecurityDescriptorLength(sd), targetPin); LocalFree(sd); need(CloseHandle(handle)); available = TRUE;
+  } else if (kind == 5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target, &binding) == RPC_S_OK && RpcMgmtIsServerListening(binding) == RPC_S_OK && RpcBindingFree(&binding) == RPC_S_OK);
+    sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
+  } else if (kind == 6 || kind == 7) {
+    if (kind == 6) { ITaskService *service; VARIANT empty; VariantInit(&empty);
+      need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
+      need_hr(ITaskService_Connect, service, empty, empty, empty, empty); ITaskService_Release(service); }
+    else { IWbemLocator *locator; IWbemServices *services; BSTR name = SysAllocString(L"ROOT\\CIMV2"); need(name && SUCCEEDED(CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator)) && SUCCEEDED(IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services))); IWbemServices_Release(services); IWbemLocator_Release(locator); SysFreeString(name); }
+    sum((BYTE *)view.target, (DWORD)wcslen(view.target)*sizeof(wchar_t), targetPin); available = TRUE;
+  } else if (kind == 8) {
+    HANDLE process = access_duplicate(source, view.object), token; need(system_process(process) && OpenProcessToken(process, TOKEN_DUPLICATE | TOKEN_IMPERSONATE, &token));
+    sum((BYTE *)view.target,(DWORD)wcslen(view.target)*sizeof(wchar_t),targetPin); need(CloseHandle(process) && CloseHandle(token)); available = TRUE;
+  } else need(kind == 9);
+  need(available || kind == 9); DWORD denialCode=0;
+  if (kind>=3 && kind<=8) {
+    HANDLE payload=access_duplicate(source,view.payload), token; need(WaitForSingleObject(payload,0)==WAIT_TIMEOUT && OpenProcessToken(payload,TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE,&token)); wchar_t *sid=token_sid(token); need(!wcscmp(sid,record.accountSid)); LocalFree(sid);
+    need(ImpersonateLoggedOnUser(token));
+    if (kind==3) { HANDLE client=CreateFileW(view.target,GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL); denialCode=GetLastError(); need(client==INVALID_HANDLE_VALUE && denialCode==ERROR_ACCESS_DENIED); }
+    else if (kind==4) { typedef NTSTATUS (NTAPI *connect_port)(PHANDLE,PUNICODE_STRING,POBJECT_ATTRIBUTES,void *,ULONG,PSID,void *,PULONG,void *,void *,LARGE_INTEGER *); connect_port connect=(connect_port)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtAlpcConnectPort"); UNICODE_STRING name={(USHORT)(wcslen(view.target)*2),(USHORT)(wcslen(view.target)*2),view.target}; HANDLE client=NULL; LARGE_INTEGER timeout; timeout.QuadPart=-10000000; need(connect && connect(&client,&name,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL,&timeout)==(NTSTATUS)0xc0000022 && !client); denialCode=5; }
+    else if (kind==5) { RPC_BINDING_HANDLE binding; need(RpcBindingFromStringBindingW((RPC_WSTR)view.target,&binding)==RPC_S_OK); denialCode=RpcMgmtIsServerListening(binding); need(denialCode==RPC_S_ACCESS_DENIED && RpcBindingFree(&binding)==RPC_S_OK); }
+    else if (kind==6) { ITaskService *service=NULL; VARIANT empty; VariantInit(&empty);
+      const char *operation="CoCreateInstance"; HRESULT result=CoCreateInstance(&CLSID_TaskScheduler,NULL,CLSCTX_INPROC_SERVER,&IID_ITaskService,(void **)&service); unsigned callLine=__LINE__;
+      if (SUCCEEDED(result)) { operation="ITaskService_Connect"; callLine=__LINE__; result=ITaskService_Connect(service,empty,empty,empty,empty); ITaskService_Release(service); }
+      denialCode=(DWORD)result; need_hresult_at(result, denialCode==0x80070005, operation, __FILE__, callLine); }
+    else if (kind==7) { IWbemLocator *locator=NULL; IWbemServices *services=NULL; BSTR name=SysAllocString(L"ROOT\\CIMV2"); need(name); HRESULT result=CoCreateInstance(&CLSID_WbemLocator,NULL,CLSCTX_INPROC_SERVER,&IID_IWbemLocator,(void **)&locator); if (SUCCEEDED(result)) { result=IWbemLocator_ConnectServer(locator,name,NULL,NULL,NULL,0,NULL,NULL,&services); if (services) IWbemServices_Release(services); IWbemLocator_Release(locator); } SysFreeString(name); denialCode=(DWORD)result; need(denialCode==0x80070005 || denialCode==0x80041003); }
+    else { HANDLE process=access_duplicate(source,view.object), delegated=NULL; need(!OpenProcessToken(process,TOKEN_DUPLICATE | TOKEN_IMPERSONATE,&delegated) && !delegated && GetLastError()==ERROR_ACCESS_DENIED && CloseHandle(process)); denialCode=5; }
+    need(RevertToSelf() && CloseHandle(token) && CloseHandle(payload));
+  }
+  printf("{\"id\":\"%s\",\"nonce\":\"%s\",\"controller\":", id, record.nonce); retained_identity(source, tokens[subject], sessions[subject]);
+  printf(",\"kind\":%u,\"denialCode\":%lu,\"targetHex\":\"",kind,denialCode); hex((BYTE *)view.target,(DWORD)wcslen(view.target)*sizeof(wchar_t));
+  printf("\",\"targetIdentitySha256\":\"%s\",\"endpoint\":",kind == 9 ? "" : targetPin);
+  if (kind != 9) printf("null"); else {
+    WSADATA data; need(!WSAStartup(MAKEWORD(2,2),&data)); SOCKET socket = WSASocketW(FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,&view.socketInfo,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket != INVALID_SOCKET);
+    SOCKADDR_STORAGE address; int length = sizeof(address), type, size = sizeof(type), exclusive, option = sizeof(exclusive);
+    need(!getsockname(socket,(SOCKADDR *)&address,&length) && !getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&size) && !getsockopt(socket,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,(char *)&exclusive,&option) && exclusive);
+    BOOL v6 = address.ss_family == AF_INET6; need(v6 || address.ss_family == AF_INET); wchar_t bindAddress[64], destination[64];
+    need(InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&address)->sin6_addr : (void *)&((SOCKADDR_IN *)&address)->sin_addr,bindAddress,64));
+    wcscpy_s(destination,64,!wcscmp(bindAddress,L"0.0.0.0") ? L"127.0.0.1" : !wcscmp(bindAddress,L"::") ? L"::1" : bindAddress);
+    unsigned port = ntohs(v6 ? ((SOCKADDR_IN6 *)&address)->sin6_port : ((SOCKADDR_IN *)&address)->sin_port); need(port >= 1024);
+    HANDLE socketOwner=source; if (view.peer && !strncmp(id,"cross-allocation-",17)) socketOwner=access_duplicate(source,view.peer);
+    struct verify_handles *handles = handle_inventory(); void *original = NULL, *actual = NULL;
+    for (ULONG_PTR i = 0; i < handles->count; i++) { if (handles->entries[i].pid == GetProcessId(socketOwner) && handles->entries[i].handle == (ULONG_PTR)view.object) original = handles->entries[i].object;
+      if (handles->entries[i].pid == GetCurrentProcessId() && handles->entries[i].handle == (ULONG_PTR)socket) actual = handles->entries[i].object; }
+    need(original && original == actual); free(handles); if (socketOwner!=source) need(CloseHandle(socketOwner)); char seed[128]; need(sprintf_s(seed,sizeof(seed),"%s:%p",record.context,actual)>0); sum((BYTE *)seed,(DWORD)strlen(seed),sourcePin);
+    if (strncmp(id,"foreign-sender-",15)) {
+      SOCKET client = WSASocketW(v6 ? AF_INET6 : AF_INET,type,type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP,NULL,0,WSA_FLAG_NO_HANDLE_INHERIT); need(client != INVALID_SOCKET);
+      DWORD timeout = 10000; need(!setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,(char *)&timeout,sizeof(timeout)) && !setsockopt(client,SOL_SOCKET,SO_SNDTIMEO,(char *)&timeout,sizeof(timeout)));
+      if (v6) need(InetPtonW(AF_INET6,destination,&((SOCKADDR_IN6 *)&address)->sin6_addr) == 1); else need(InetPtonW(AF_INET,destination,&((SOCKADDR_IN *)&address)->sin_addr) == 1);
+      if (type == SOCK_STREAM) need(!connect(client,(SOCKADDR *)&address,length));
+      need((type == SOCK_DGRAM ? sendto(client,record.nonce,32,0,(SOCKADDR *)&address,length) : send(client,record.nonce,32,0)) == 32);
+      char echo[32]; need((type == SOCK_DGRAM ? recvfrom(client,echo,32,0,NULL,NULL) : recv(client,echo,32,MSG_WAITALL)) == 32 && !memcmp(echo,record.nonce,32) && !closesocket(client));
+    }
+    printf("{\"family\":\"%s\",\"protocol\":\"%s\",\"address\":\"%ls\",\"bindAddress\":\"%ls\",\"port\":%u,\"socketIdentitySha256\":\"%s\",\"identity\":",v6?"v6":"v4",type==SOCK_DGRAM?"udp":"tcp",destination,bindAddress,port,sourcePin);
+    if (view.peer) { HANDLE peer = access_duplicate(source,view.peer), token = access_duplicate(source,view.peerToken); need(WaitForSingleObject(peer,0)==WAIT_TIMEOUT);
+      if (!strncmp(id,"cross-allocation-",17)) { wchar_t home[4096], name[21]; struct case_account_record other; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other);
+        char seed[128],expected[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",record.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected); need(!strcmp(other.context,expected) && swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); account_check(name,other.accountSid);
+        wchar_t *sid=token_sid(token); need(!wcscmp(sid,other.accountSid) && wcscmp(sid,record.accountSid)); LocalFree(sid); TOKEN_GROUPS *groups=token_info(token,TokenGroups); TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); LUID notify; need(LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify) && privileges->PrivilegeCount<=1);
+        for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); free(privileges); for (DWORD i=0;i<groups->GroupCount;i++) need(!(groups->Groups[i].Attributes & SE_GROUP_ENABLED) || (groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)); free(groups);
+        wchar_t image[4096]; DWORD length=4096; need(QueryFullProcessImageNameW(peer,0,image,&length)); const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); wchar_t wanted[4096]; need(leaf && swprintf_s(wanted,4096,L"%ls%ls",home,leaf)>0 && !_wcsicmp(wanted,image)); struct held_file held=hold_shared(image,FALSE,FALSE,GENERIC_READ,FALSE); pin(&held,entries[6].pin); char pin[65]; signature(&held,entries[6].signature,pin); close_file(&held);
+      }
+      retained_identity(peer,token,0); need(CloseHandle(peer)&&CloseHandle(token)); }
+    else retained_identity(source,tokens[subject],sessions[subject]); printf("}"); need(!closesocket(socket)&&!WSACleanup());
+  }
+  printf("}"); need(CloseHandle(source));
+}
+
+static void verify_access_socket(unsigned subject, const char *context, const char *handle, const char *hexBytes) {
+  need(subject<process_count && strlen(context)==64 && strlen(hexBytes)==sizeof(WSAPROTOCOL_INFOW)*2);
+  HANDLE process=duplicate_process_owner(subject); need(WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+  WSAPROTOCOL_INFOW info; for (unsigned i=0;i<sizeof(info);i++) ((BYTE *)&info)[i]=(BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  WSADATA data; need(!WSAStartup(MAKEWORD(2,2),&data)); SOCKET socket=WSASocketW(FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,FROM_PROTOCOL_INFO,&info,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket!=INVALID_SOCKET);
+  struct verify_handles *inventory=handle_inventory(); void *original=NULL,*actual=NULL;
+  for (ULONG_PTR i=0;i<inventory->count;i++) { if (inventory->entries[i].pid==GetProcessId(process) && inventory->entries[i].handle==(ULONG_PTR)number(handle)) original=inventory->entries[i].object;
+    if (inventory->entries[i].pid==GetCurrentProcessId() && inventory->entries[i].handle==(ULONG_PTR)socket) actual=inventory->entries[i].object; }
+  need(original && original==actual); free(inventory); char seed[128],pin[65]; need(sprintf_s(seed,sizeof(seed),"%s:%p",context,actual)>0); sum((BYTE *)seed,(DWORD)strlen(seed),pin);
+  SOCKADDR_STORAGE local,remote; int size=sizeof(local),remoteSize=sizeof(remote),type,typeSize=sizeof(type); need(!getsockname(socket,(SOCKADDR *)&local,&size) && !getsockopt(socket,SOL_SOCKET,SO_TYPE,(char *)&type,&typeSize));
+  BOOL v6=local.ss_family==AF_INET6; need(v6 || local.ss_family==AF_INET); wchar_t address[64];
+  need(InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&local)->sin6_addr : (void *)&((SOCKADDR_IN *)&local)->sin_addr,address,64));
+  printf("{\"identity\":"); retained_identity(process,tokens[subject],sessions[subject]); printf(",\"socketIdentitySha256\":\"%s\",\"protocol\":\"%s\",\"family\":\"%s\",\"localAddress\":\"%ls\",\"localPort\":%u,\"remote\":",pin,type==SOCK_DGRAM ? "udp" : "tcp",v6 ? "v6" : "v4",address,ntohs(v6 ? ((SOCKADDR_IN6 *)&local)->sin6_port : ((SOCKADDR_IN *)&local)->sin_port));
+  if (getpeername(socket,(SOCKADDR *)&remote,&remoteSize)) { need(WSAGetLastError()==WSAENOTCONN); printf("null"); }
+  else { need(remote.ss_family==local.ss_family && InetNtopW(v6 ? AF_INET6 : AF_INET,v6 ? (void *)&((SOCKADDR_IN6 *)&remote)->sin6_addr : (void *)&((SOCKADDR_IN *)&remote)->sin_addr,address,64));
+    printf("{\"address\":\"%ls\",\"port\":%u}",address,ntohs(v6 ? ((SOCKADDR_IN6 *)&remote)->sin6_port : ((SOCKADDR_IN *)&remote)->sin_port)); }
+  printf("}"); need(!closesocket(socket) && !WSACleanup() && CloseHandle(process));
+}
+static void access_foreign(const char *id,DWORD verifierPid) {
+  need(access_mode && !access_controls_closed && access_foreign_socket==INVALID_SOCKET && !strncmp(id,"foreign-sender-",15)); BOOL v6=strstr(id,"-v6-")!=NULL,udp=strstr(id,"-udp")!=NULL;
+  unsigned index=(v6 ? 4 : 0)+(udp ? 2 : 0)+1; SOCKADDR_STORAGE remote,local; int length=sizeof(remote); need(index<case_socket_count && !getsockname(case_sockets[index],(SOCKADDR *)&remote,&length));
+  local=remote; if (v6) ((SOCKADDR_IN6 *)&local)->sin6_port=0; else ((SOCKADDR_IN *)&local)->sin_port=0;
+  SOCKET socket=WSASocketW(v6 ? AF_INET6 : AF_INET,udp ? SOCK_DGRAM : SOCK_STREAM,udp ? IPPROTO_UDP : IPPROTO_TCP,NULL,0,WSA_FLAG_NO_HANDLE_INHERIT); need(socket!=INVALID_SOCKET && !bind(socket,(SOCKADDR *)&local,length));
+  access_foreign_socket=socket; u_long nonblocking=1; need(!ioctlsocket(socket,FIONBIO,&nonblocking)); int result=udp ? sendto(socket,nonce,32,0,(SOCKADDR *)&remote,length) : connect(socket,(SOCKADDR *)&remote,length);
+  DWORD error=result==SOCKET_ERROR ? WSAGetLastError() : 0; need(udp ? (result==32 || error==WSAEACCES) : (result==SOCKET_ERROR && (error==WSAEACCES || error==WSAEWOULDBLOCK)));
+  WSAPROTOCOL_INFOW info; need(!WSADuplicateSocketW(socket,verifierPid,&info)); printf("{\"identity\":"); identity(GetCurrentProcess()); printf(",\"handle\":\"%llu\",\"nativeCode\":%lu,\"hex\":\"",(ULONGLONG)socket,error); hex((BYTE *)&info,sizeof(info)); printf("\"}");
+}
+static void access_controls_stop(void) {
+  need(access_mode); InterlockedExchange(&access_controls_closed,TRUE); /* Fence new sockets/peers before termination. */
+  if (access_foreign_socket!=INVALID_SOCKET) { need(!closesocket(access_foreign_socket)); access_foreign_socket=INVALID_SOCKET; }
+  if (access_other_peer.process.hProcess) {
+    need(TerminateJobObject(access_other_peer.job,126) && WaitForSingleObject(access_other_peer.process.hProcess,30000)==WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    need(QueryInformationJobObject(access_other_peer.job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL) && !accounting.ActiveProcesses);
+    wchar_t name[21]; need(swprintf_s(name,21,L"np_%.16hs",access_other_peer.record.nonce)>0); account_check(name,access_other_peer.record.accountSid);
+    struct ownership_view view={0}; view.record=access_other_peer.record; view.count=1; view.processes[0]=access_other_peer.process.hProcess; view.tokens[0]=access_other_peer.token; ownership_census(&view);
+    PSID sid; need(ConvertStringSidToSidW(access_other_peer.record.accountSid,&sid)); LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0 && LsaRemoveAccountRights(policy,sid,TRUE,NULL,0)==0 && LsaClose(policy)==0); LocalFree(sid); need(NetUserDel(NULL,name)==NERR_Success);
+  }
+  for (unsigned i=0;i<access_listener_count;i++) { need(!closesocket(access_listeners[i])); need(WaitForSingleObject(access_echo_threads[i],10000)==WAIT_OBJECT_0 && CloseHandle(access_echo_threads[i]) && !WSACleanup()); }
+  access_listener_count=0;
+  if (access_pipe && access_pipe!=INVALID_HANDLE_VALUE) { need(CloseHandle(access_pipe)); access_pipe=NULL; }
+  if (access_alpc) { need(CloseHandle(access_alpc)); access_alpc=NULL; need(WaitForSingleObject(access_alpc_thread,10000)==WAIT_OBJECT_0 && CloseHandle(access_alpc_thread)); }
+  if (access_rpc_ready) { need(RpcServerUnregisterIf((RPC_IF_HANDLE)&access_rpc_interface,NULL,TRUE)==RPC_S_OK); access_rpc_ready=FALSE; }
+  printf("{\"fenced\":true}");
+}
+
+static void verify_access_peer_retired(unsigned subject,unsigned custody) {
+  need(subject<process_count && custody<count && verified_jobs[subject] && WaitForSingleObject(processes[subject],0)==WAIT_OBJECT_0); JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job; need(QueryInformationJobObject(verified_jobs[subject],JobObjectBasicAccountingInformation,&job,sizeof(job),NULL) && !job.ActiveProcesses); struct case_account_record original,other; account_record(entries[custody].path,&original);
+  wchar_t home[4096],name[21]; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other);
+  char seed[128],expected[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",original.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected); need(!strcmp(other.context,expected));
+  wchar_t *sid=token_sid(tokens[subject]); need(!wcscmp(sid,other.accountSid)); LocalFree(sid); struct ownership_view census={0}; census.record=other; ownership_census(&census);
+  need(swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); USER_INFO_1 *user; need(NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+  PSID userSid; need(ConvertStringSidToSidW(other.accountSid,&userSid)); LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG count=0;
+  need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS status=LsaEnumerateAccountRights(policy,userSid,&rights,&count); need((status==0 && count==0) || status==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(userSid);
+  printf("{\"retired\":true,\"accountAbsent\":true,\"rightsAbsent\":true,\"contextSha256\":\"%s\"}",original.context);
+}
+
+static void verify_access_peer_policy(unsigned sourceSlot,unsigned custody,unsigned subject,const char *hexBytes) {
+  need(sourceSlot<process_count && subject<process_count && custody<count && strlen(hexBytes)==sizeof(struct access_control_view)*2); struct access_control_view view;
+  for (unsigned i=0;i<sizeof(view);i++) ((BYTE *)&view)[i]=(BYTE)(nibble(hexBytes[i*2])*16+nibble(hexBytes[i*2+1]));
+  struct case_account_record record; account_record(entries[custody].path,&record); need(!memcmp(&record,&view.record,sizeof(record)) && view.kind<=1);
+  HANDLE source=duplicate_process_owner(sourceSlot); need(system_process(source)); HANDLE process=access_duplicate(source,view.peer),token=access_duplicate(source,view.peerToken),job=access_duplicate(source,view.peerJob);
+  FILETIME created,held,exited,kernel,user; need(GetProcessId(process)==GetProcessId(processes[subject]) && GetProcessTimes(process,&created,&exited,&kernel,&user) && GetProcessTimes(processes[subject],&held,&exited,&kernel,&user) && !memcmp(&created,&held,sizeof(created)) && WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+  wchar_t expected[4096],actual[4096],home[4096],name[21]; DWORD length=4096; wchar_t *sid=token_sid(token);
+  if (view.kind) { struct case_account_record other; need(swprintf_s(home,4096,L"%ls\\access-peer",entries[custody].path)>0); account_record(home,&other); char seed[128],pin[65]; need(sprintf_s(seed,sizeof(seed),"%s:access-peer",record.context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),pin); need(!strcmp(other.context,pin) && !wcscmp(sid,other.accountSid) && swprintf_s(name,21,L"np_%.16hs",other.nonce)>0); account_check(name,other.accountSid);
+    const wchar_t *leaf=wcsrchr(entries[6].path,'\\'); need(leaf && swprintf_s(expected,4096,L"%ls%ls",home,leaf)>0);
+  } else { need(!wcscmp(sid,record.accountSid)); wcscpy_s(expected,4096,entries[6].path); }
+  LocalFree(sid); need(QueryFullProcessImageNameW(process,0,actual,&length) && !_wcsicmp(actual,expected)); struct held_file file=hold_shared(actual,FALSE,FALSE,GENERIC_READ,FALSE); pin(&file,entries[6].pin); char sig[65]; signature(&file,entries[6].signature,sig); close_file(&file);
+  TOKEN_GROUPS *groups=token_info(token,TokenGroups); TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); LUID notify; need(LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify));
+  for (DWORD i=0;i<groups->GroupCount;i++) need(!(groups->Groups[i].Attributes & SE_GROUP_ENABLED) || (groups->Groups[i].Attributes & SE_GROUP_INTEGRITY));
+  if (view.kind) { need(privileges->PrivilegeCount<=1); for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); }
+  else {
+    change_notify_privilege(token);
+    for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) need(groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY);
+  }
+  free(groups); free(privileges);
+  BOOL belongs; need(IsProcessInJob(process,job,&belongs) && belongs); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui;
+  need(QueryInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits),NULL) && limits.BasicLimitInformation.LimitFlags==0x2008 && limits.BasicLimitInformation.ActiveProcessLimit==(view.kind ? 1U : 32U) && QueryInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui),NULL) && ui.UIRestrictionsClass==255);
+  HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0); need(threads!=INVALID_HANDLE_VALUE); THREADENTRY32 thread={sizeof(thread)}; unsigned found=0; need(Thread32First(threads,&thread));
+  do { if (thread.th32OwnerProcessID==GetProcessId(process)) { HANDLE handle=OpenThread(THREAD_QUERY_INFORMATION,FALSE,thread.th32ThreadID); typedef NTSTATUS (NTAPI *query)(HANDLE,ULONG,PVOID,ULONG,PULONG); query get=(query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationThread"); ULONG suspendCount; need(handle && get && !get(handle,35,&suspendCount,sizeof(suspendCount),NULL) && suspendCount==1 && CloseHandle(handle)); found++; } } while (Thread32Next(threads,&thread)); need(GetLastError()==ERROR_NO_MORE_FILES && found==1 && CloseHandle(threads));
+  if (view.kind) { need(!verified_jobs[subject]); verified_jobs[subject]=job; } else need(CloseHandle(job));
+  printf("{\"parked\":true,\"imageSha256\":\"%s\",\"signatureSha256\":\"%s\"}",entries[6].pin,sig); need(CloseHandle(process) && CloseHandle(token) && CloseHandle(source));
+}
+static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required);
+static void recovery_audit(unsigned custody,const char *context,const char *caseNonce,BOOL verifyOnly);
+static void recovery_policy(unsigned custody,const char *context,const char *caseNonce);
+static void ownership_births(unsigned custody,const char *context);
+static void verification(char **values, unsigned n) {
+    if (!strcmp(values[0]+7,"access-peer-policy")) { need(n==6); verify_access_peer_policy(bounded_number(values[2],127),bounded_number(values[3],count-1),bounded_number(values[4],127),values[5]);
+    } else if (!strcmp(values[0]+7,"access-peer-retired")) { need(n==4); verify_access_peer_retired(bounded_number(values[2],127),bounded_number(values[3],count-1));
+    } else if (!strcmp(values[0]+7, "socket")) { need(n==6); verify_access_socket(bounded_number(values[2],127),values[3],values[4],values[5]);
+    } else if (!strcmp(values[0]+7, "access-control")) { need(n == 6); verify_access_control(bounded_number(values[2],127),bounded_number(values[3],count-1),values[4],values[5]);
+    } else if (!strcmp(values[0]+7, "receipt")) {
+      need(n == 5 && strlen(values[4]) == 64); unsigned custody = bounded_number(values[2], count - 1), index = bounded_number(values[3], 4095);
+      wchar_t name[96]; need(swprintf_s(name, 96, L"ownership-%u.json", index) > 0);
+      HANDLE file = account_file(entries[custody].path, name, GENERIC_READ, OPEN_EXISTING); BYTE bytes[16384]; DWORD used; LARGE_INTEGER size;
+      need(GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= sizeof(bytes) && ReadFile(file, bytes, (DWORD)size.QuadPart, &used, NULL) && used == size.QuadPart);
+      char hash[65]; sum(bytes, used, hash); need(!strcmp(hash, values[4]) && CloseHandle(file)); printf("{\"hex\":\""); hex(bytes, used); printf("\"}");
+    } else if (!strcmp(values[0]+7, "access")) { need(n == 6); verify_access(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
+    } else if (!strcmp(values[0]+7, "case")) { need(n == 6); verify_case(bounded_number(values[2], 127), bounded_number(values[3], count-1), values[4], values[5]);
+    } else if (!strcmp(values[0]+7, "case-retired")) { need(n == 4); verify_case_retired(bounded_number(values[2], count-1), values[3]);
+    } else if (!strcmp(values[0]+7, "case-recover")) {
+      need(n == 6); recovery_case(bounded_number(values[2], count-1), values[3], values[4], bounded_number(values[5], 1));
+    } else if (!strcmp(values[0]+7, "ownership-births")) {
+      need(n == 4); ownership_births(bounded_number(values[2], count-1), values[3]);
+    } else if (!strcmp(values[0]+7, "policy-recover")) {
+      need(n==5);recovery_policy(bounded_number(values[2],count-1),values[3],values[4]);
+    } else if (!strcmp(values[0]+7, "audit-recover") || !strcmp(values[0]+7, "audit-check")) {
+      need(n==5);recovery_audit(bounded_number(values[2],count-1),values[3],values[4],!strcmp(values[0]+7,"audit-check"));
+    } else if (!strcmp(values[0]+7, "recovery-object")) {
+      need(n == 3); struct entry entry = entries[bounded_number(values[2], count-1)];
+      entry.file = hold_shared(entry.path, !strcmp(entry.kind,"directory"), TRUE, GENERIC_READ | ACCESS_SYSTEM_SECURITY, !strcmp(entry.kind,"mutable"));
+      printf("{\"object\":"); inspect(&entry); printf(",\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(entry.file.handle, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); putchar('}'); close_file(&entry.file);
+    } else if (!strcmp(values[0]+7, "recovery-jobs")) { need(n == 4); recovery_jobs(bounded_number(values[2], 127), values[3]);
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(values[0]+7, "cold-process")) { need(n == 4); cold_process(bounded_number(values[2], MAXDWORD), number(values[3]));
+    } else if (!strcmp(values[0]+7, "cold-jobs")) { need(n == 5); cold_jobs(bounded_number(values[2], MAXDWORD), number(values[3]), values[4]);
+#endif
+    } else if (!strcmp(values[0]+7, "subjects")) {
+      need(n == 2); printf("{\"identities\":[");
+      for (unsigned i = 0; i < process_count; i++) { if (i) putchar(','); retained_identity(processes[i], tokens[i], sessions[i]); }
+      printf("],\"jobs\":[");
+      for (unsigned i = 0; i < job_count; i++) printf("%s%u", i ? "," : "", i);
+      printf("]}");
+    } else if (!strcmp(values[0]+7, "file")) {
+      need(n == 6); wchar_t name[4096]; decode(values[2], name); verification_path(name, values[3], values[4]); DWORD maximum = bounded_number(values[5], 134217728); need(maximum && verification_file_count < 128); BOOL stock = stock_entry(name, values[3]), bridge = bridge_entry(name, values[3]); struct held_file file = hold(name, FALSE, !(stock || bridge), GENERIC_READ);
+      LARGE_INTEGER length; need(GetFileSizeEx(file.handle, &length) && length.QuadPart > 0 && length.QuadPart <= maximum); pin(&file, values[3]); char dacl[65], sig[65]; if (stock) stock_security(file.handle, dacl); else if (bridge) bridge_security(file.handle, dacl); else security(file.handle, SE_FILE_OBJECT, TRUE, dacl);
+      printf("{\"identity\":\""); file_id(&file); printf("\",\"sha256\":\"%s\",\"daclSha256\":\"%s\",\"signatureSha256\":", values[3], dacl);
+      if (!strcmp(values[4], "-")) printf("null"); else { signature(&file, values[4], sig); printf("\"%s\"", sig); }
+      printf(",\"slot\":%u,\"bytes\":%llu}", verification_file_count, (ULONGLONG)length.QuadPart); verification_files[verification_file_count++] = file;
+    } else if (!strcmp(values[0]+7, "sharing")) {
+      need(n == 3); wchar_t name[4096]; decode(values[2], name);
+      BOOL admitted = FALSE; for (unsigned i = 0; i < count; i++) { size_t prefix = wcslen(entries[i].path);
+        if (!_wcsicmp(name, entries[i].path) || (!strcmp(entries[i].kind, "directory") && !_wcsnicmp(name, entries[i].path, prefix) && name[prefix] == '\\')) admitted = TRUE;
+      } need(admitted);
+      HANDLE handle = CreateFileW(name, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+      FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO id;
+      need(handle != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+        !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileInformationByHandleEx(handle, FileIdInfo, &id, sizeof(id)));
+      printf("{\"identity\":\"%016llx:", id.VolumeSerialNumber); hex(id.FileId.Identifier, 16); printf("\"}"); need(CloseHandle(handle));
+    } else if (!strcmp(values[0]+7, "retain")) {
+      need(n == 4); DWORD pid = bounded_number(values[2], MAXDWORD); need(pid); unsigned index = process_count;
+      for (unsigned i = 0; i < process_count; i++) if (GetProcessId(processes[i]) == pid) { index = i; break; }
+      if (index == process_count) index = retain_process(pid);
+      FILETIME created, exited, kernel, user; need(GetProcessTimes(processes[index], &created, &exited, &kernel, &user) &&
+        (((ULONGLONG)created.dwHighDateTime << 32) | created.dwLowDateTime) == number(values[3]));
+      printf("{\"slot\":%u,\"process\":", index); process_read(index); putchar('}');
+    } else if (!strcmp(values[0]+7, "process")) { need(n == 3); process_read(bounded_number(values[2], 127));
+    } else if (!strcmp(values[0]+7, "compiler-policy")) { need(n == 4); compiler_policy(bounded_number(values[2], 127), bounded_number(values[3], 127));
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(values[0]+7, "runtime")) {
+      need(n == 6); unsigned subject = bounded_number(values[2], 127), index = bounded_number(values[3], 127);
+      need(subject < process_count && index < verification_file_count);
+      struct held_file *file = &verification_files[index];
+      verification_path(file->path, values[4], values[5]);
+      /* The admitted primary is a helper, not a private-runtime import root.
+       * Reuse its owner's held file and process; no slot or handle is transferred. */
+      struct entry image = {0}; strcpy_s(image.kind, sizeof(image.kind), "helper");
+      strcpy_s(image.pin, sizeof(image.pin), values[4]); strcpy_s(image.signature, sizeof(image.signature), values[5]);
+      wcscpy_s(image.path, 4096, file->path); image.file = *file;
+      printf("{\"processImage\":"); process_image(subject, &image);
+      printf(",\"imageIdentity\":\""); file_id(file); printf("\",\"loader\":"); loader(subject, &image); putchar('}');
+#endif
+    } else if (!strcmp(values[0]+7, "image")) {
+      need(n == 5); unsigned index = bounded_number(values[2], 127); need(index < process_count); wchar_t name[4096]; DWORD size = 4096;
+      need(QueryFullProcessImageNameW(processes[index], 0, name, &size) && size && size < 4096);
+      verification_path(name, values[3], values[4]);
+      BOOL stock = stock_entry(name, values[3]), bridge = bridge_entry(name, values[3]); need(verification_file_count < 128); struct held_file file = hold(name, FALSE, !(stock || bridge), GENERIC_READ); pin(&file, values[3]); char sig[65], dacl[65]; if (stock) stock_security(file.handle, dacl); else if (bridge) bridge_security(file.handle, dacl); signature(&file, values[4], sig);
+      printf("{\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"pathHex\":\"", values[3], sig); hex((BYTE *)name, wcslen(name)*2); printf("\"}"); verification_files[verification_file_count++] = file;
+    } else if (!strcmp(values[0]+7, "task")) { need(n == 4); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, NULL, 0, FALSE);
+    } else if (!strcmp(values[0]+7, "task-instance")) { need(n == 4); wchar_t name[64]; decode_bounded(values[2],name,64);verifier_task("custody",name,NULL,bounded_number(values[3],process_count-1),TRUE);
+    } else if (!strcmp(values[0]+7, "process-exit")) {need(n==3);unsigned slot=bounded_number(values[2],process_count-1);DWORD code;need(WaitForSingleObject(processes[slot],0)==WAIT_OBJECT_0&&GetExitCodeProcess(processes[slot],&code));printf("{\"exitCode\":%lu}",code);
+    } else if (!strcmp(values[0]+7, "transfer")) { need(n == 4); verifier_transfer(bounded_number(values[2], 127), bounded_number(values[3], 127));
+    } else if (!strcmp(values[0]+7, "job")) { need(n == 3); unsigned index = bounded_number(values[2], 127); need(index < process_count);
+      if (verified_jobs[index]) job_read(verified_jobs[index]); else printf("{\"absent\":true}");
+    } else if (!strcmp(values[0]+7, "read")) {
+      need(n == 5); unsigned index = bounded_number(values[2], 127); DWORD offset = bounded_number(values[3], 8388608), size = bounded_number(values[4], 32768); need(index < verification_file_count && size && offset <= 8388608-size);
+      struct held_file *file = &verification_files[index]; FILE_ID_INFO before, after; LARGE_INTEGER length, position; position.QuadPart = offset;
+      need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &before, sizeof(before)) && !memcmp(&before, &file->id, sizeof(before)) &&
+        GetFileSizeEx(file->handle, &length) && length.QuadPart > 0 && length.QuadPart <= 8388608 && offset <= length.QuadPart && size <= length.QuadPart-offset && SetFilePointerEx(file->handle, position, NULL, FILE_BEGIN));
+      BYTE bytes[32768]; DWORD used = 0; while (used < size) { DWORD read; need(ReadFile(file->handle, bytes+used, size-used, &read, NULL) && read); used += read; }
+      need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(after)));
+      printf("{\"hex\":\""); hex(bytes, size); printf("\"}");
+    } else if (!strcmp(values[0]+7, "task-remove")) {
+      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 127), FALSE);
+    } else if (!strcmp(values[0]+7, "job-open")) {
+      need(n == 3 && job_count < 32); wchar_t name[96]; decode_bounded(values[2], name, 96); need(!wcsncmp(name, L"Local\\NativeProof-", 18) && wcslen(name) == 50 && wcsspn(name+18, L"0123456789abcdef") == 32);
+      HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); wcscpy_s(verification_job_names[job_count], 96, name); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); putchar('}');
+    } else if (!strcmp(values[0]+7, "job-read")) { need(n == 4); unsigned index = bounded_number(values[2], 127); wchar_t name[96]; decode_bounded(values[3], name, 96); need(index < job_count && !wcscmp(name, verification_job_names[index])); job_read(jobs[index]);
+    } else need(FALSE);
+
+}
+/* This lane is a System file custodian and independent observer, never a
+ * compiler/payload owner. A single upload/read slot bounds private memory. */
+static struct held_file preparation_read;
+static struct held_file preparation_root;
+static BYTE *preparation_bytes;
+static DWORD preparation_size, preparation_written;
+static char preparation_pin[65];
+static HANDLE preparation_writer;
+static wchar_t preparation_file[4096];
+static wchar_t (*preparation_names)[260];
+static unsigned preparation_name_count, preparation_name_offset, preparation_name_capacity;
+static void package_file_command(char **v,unsigned n);
+static unsigned package_files_close(void);
+static void package_verify_archive(void);
+static void release_pe_file(struct held_file *file);
+static void preparation_command(char **v, unsigned n) {
+  need(preparation_only);
+#ifdef NATIVE_CI_EXPERIMENT
+  if (!strcmp(v[0], "prepare-experiment-volume")) {
+    need(n == 3); wchar_t name[4096]; decode(v[2], name);
+    wchar_t expected[4096];
+    wchar_t drive = preparation_directory[0] == L'C' ? L'D' : L'C';
+    need(swprintf_s(expected, 4096, L"%lc:\\NativeProof-%hs-%hs", drive, candidate, nonce) > 0 && !wcscmp(name, expected));
+    PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+    need(CreateDirectoryW(name, &sa)); LocalFree(sd);
+    struct held_file other = hold(name, TRUE, TRUE, FILE_LIST_DIRECTORY), local = hold(preparation_directory, TRUE, TRUE, FILE_LIST_DIRECTORY);
+    need(other.id.VolumeSerialNumber != local.id.VolumeSerialNumber);
+    printf("{\"identity\":\""); file_id(&other); printf("\",\"distinctVolume\":true}");
+    close_file(&other); close_file(&local); return;
+  }
+  if (!strcmp(v[0], "prepare-experiment-loader")) {
+    need(n == 4); wchar_t name[4096], image[4096]; decode(v[2], name); decode(v[3], image); experiment_loader(name, image); return;
+  }
+#endif
+  if (!strcmp(v[0], "prepare-package-bind")) {
+    need(n==2 && !package_mode && count>9 && !strcmp(entries[0].kind,"directory") && !strcmp(entries[9].kind,"directory"));
+    wchar_t parent[4096]; wcscpy_s(parent,4096,entries[9].path); wchar_t *leaf=wcsrchr(parent,L'\\'); need(leaf); *leaf=0;
+    need(!_wcsicmp(parent,entries[0].path) && _wcsicmp(entries[9].path,preparation_output));
+    package_mode=TRUE; printf("{\"bound\":true}");
+  } else if (!strcmp(v[0], "prepare-package-file")) {
+    need(n>=4 && package_mode && count>9 && !strcmp(entries[9].kind,"directory"));
+    /* Read-only observer lane; no publication writer or payload admission. */
+    need(!strcmp(v[2],"hold") || !strcmp(v[2],"read") || !strcmp(v[2],"observe") || !strcmp(v[2],"directory"));
+    if(!entries[9].file.handle) entries[9].file=hold(entries[9].path,TRUE,TRUE,FILE_LIST_DIRECTORY);
+    package_file_command(v,n);
+  } else if (!strcmp(v[0], "prepare-package-archive")) {
+    need(n==2 && package_mode && count>9 && !strcmp(entries[9].kind,"directory"));
+    if(!entries[9].file.handle) entries[9].file=hold(entries[9].path,TRUE,TRUE,FILE_LIST_DIRECTORY); package_verify_archive();
+  } else if (!strcmp(v[0], "prepare-package-close")) {
+    need(n==2 && package_mode); printf("{\"closedHandles\":%u}",package_files_close());
+  } else if (!strcmp(v[0], "prepare-list")) {
+    need(n == 3 || (n == 4 && !strcmp(v[3], "provider"))); unsigned offset = bounded_number(v[2], 1048576);
+    if (!offset) {
+      need(!preparation_names); preparation_name_capacity = 128;
+      preparation_names = calloc(preparation_name_capacity, sizeof(*preparation_names)); need(preparation_names); preparation_name_count = preparation_name_offset = 0;
+      wchar_t pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\*.json", preparation_directory) > 0);
+      WIN32_FIND_DATAW data; HANDLE search = FindFirstFileW(pattern, &data);
+      if (search == INVALID_HANDLE_VALUE) need(GetLastError() == ERROR_FILE_NOT_FOUND);
+      else {
+        do { if (wcsncmp(data.cFileName, L"windows-", 8) && (n != 4 || wcsncmp(data.cFileName, L"provider-", 9))) continue;
+          need(preparation_name_count < 1048576 && !(data.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+          wcsspn(data.cFileName, L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(data.cFileName));
+          if (preparation_name_count == preparation_name_capacity) {
+            unsigned capacity = min(preparation_name_capacity * 2, 1048576);
+            void *grown = realloc(preparation_names, capacity * sizeof(*preparation_names)); need(grown);
+            preparation_names = grown; preparation_name_capacity = capacity;
+          }
+          wcscpy_s(preparation_names[preparation_name_count++], 260, data.cFileName);
+        } while (FindNextFileW(search, &data));
+        need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(search));
+      }
+    }
+    need(preparation_names && offset == preparation_name_offset && offset <= preparation_name_count);
+    unsigned end = min(offset+128, preparation_name_count); printf("{\"names\":[");
+    for (unsigned i = offset; i < end; i++) { if (i > offset) putchar(','); putchar('"'); hex((BYTE *)preparation_names[i], wcslen(preparation_names[i])*2); putchar('"'); }
+    printf("],\"complete\":%s}", end == preparation_name_count ? "true" : "false"); preparation_name_offset = end;
+    if (end == preparation_name_count) { free(preparation_names); preparation_names = NULL; }
+  } else if (!strcmp(v[0], "prepare-batch")) {
+    need(n>=3 && n<=18); unsigned total=0,emitted=0,deferredCount=0; wchar_t deferred[16][260]; printf("{\"records\":[");
+    for (unsigned i=2;i<n;i++) {
+      wchar_t leaf[260],name[4096]; decode_bounded(v[i],leaf,260); size_t length=wcslen(leaf);
+      need(length>13 && !wcsncmp(leaf,L"windows-",8) && !wcscmp(leaf+length-5,L".json") &&
+        wcsspn(leaf,L"abcdefghijklmnopqrstuvwxyz0123456789-.")==length && swprintf_s(name,4096,L"%ls\\%ls",preparation_directory,leaf)>0);
+      struct held_file file=hold(name,FALSE,TRUE,GENERIC_READ); LARGE_INTEGER size;
+      need(GetFileSizeEx(file.handle,&size) && size.QuadPart>0 && size.QuadPart<=1048576);
+      if (size.QuadPart>60000-total) { wcscpy_s(deferred[deferredCount++],260,leaf); close_file(&file); continue; }
+      DWORD used; BYTE *bytes=read_file(&file,(DWORD)size.QuadPart,&used); need(used==size.QuadPart); total+=used;
+      char hash[65],dacl[65]; sum(bytes,used,hash); security(file.handle,SE_FILE_OBJECT,TRUE,dacl);
+      FILE_ID_INFO again; need(GetFileInformationByHandleEx(file.handle,FileIdInfo,&again,sizeof(again)) && !memcmp(&again,&file.id,sizeof(again)));
+      if (emitted++) putchar(','); printf("{\"nameHex\":\""); hex((BYTE *)leaf,wcslen(leaf)*2); printf("\",\"identity\":\""); file_id(&file);
+      printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"hex\":\"",dacl,hash); hex(bytes,used); printf("\"}"); SecureZeroMemory(bytes,used); free(bytes); close_file(&file);
+    }
+    printf("],\"deferred\":["); for (unsigned i=0;i<deferredCount;i++) { if(i) putchar(','); putchar('"'); hex((BYTE *)deferred[i],wcslen(deferred[i])*2); putchar('"'); } printf("]}");
+  } else if (!strcmp(v[0], "prepare-directory")) {
+    need(n == 4); wchar_t name[4096]; decode(v[2], name); BOOL build = !wcscmp(name, preparation_output);
+    need(!wcscmp(name, preparation_directory) || build);
+    if (number(v[3])) {
+      need(build); DWORD existing = GetFileAttributesW(name);
+      if (existing == INVALID_FILE_ATTRIBUTES) {
+        need(GetLastError() == ERROR_FILE_NOT_FOUND); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+        need(CreateDirectoryW(name, &sa)); LocalFree(sd);
+      }
+    }
+    struct held_file file = hold(name, TRUE, TRUE, FILE_LIST_DIRECTORY); char dacl[65]; security(file.handle, SE_FILE_OBJECT, TRUE, dacl);
+    printf("{\"identity\":\""); file_id(&file); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true}", dacl); close_file(&file);
+  } else if (!strcmp(v[0], "prepare-read")
+#ifdef NATIVE_CI_EXPERIMENT
+      || !strcmp(v[0], "prepare-experiment-input")
+#endif
+  ) {
+    need(n == 6 && !preparation_read.handle && !preparation_bytes && !preparation_writer); wchar_t name[4096]; decode(v[2], name);
+    BOOL snapshot = number(v[5]) == 1; need(number(v[5]) <= 1); DWORD maximum = bounded_number(v[4], 536870912); need(maximum);
+    BOOL experimentInput = FALSE;
+#ifdef NATIVE_CI_EXPERIMENT
+    experimentInput = !strcmp(v[0], "prepare-experiment-input");
+    if (experimentInput) {
+      need(!snapshot && !strcmp(v[3], "-"));
+      const wchar_t *leaf = wcsrchr(name, '\\'), *extension = leaf ? wcsrchr(leaf, '.') : NULL;
+      need(extension && (!_wcsicmp(extension, L".h") || !_wcsicmp(extension, L".lib") || !_wcsicmp(extension, L".exe") || !_wcsicmp(extension, L".dll")));
+      wchar_t system[4096]; DWORD length = GetSystemDirectoryW(system, 4096); need(length && length < 4096);
+      const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
+      need(wcslen(name) > 3 && name[1] == ':' && (installed_git_runtime(name) || !wcsncmp(name+2, msvc, wcslen(msvc)) ||
+        !wcsncmp(name+2, sdk, wcslen(sdk)) ||
+        (!_wcsnicmp(name, system, length) && name[length] == '\\' && leaf == name+length && !_wcsicmp(extension, L".dll"))));
+    }
+#endif
+    if (snapshot) {
+      need(!wcsncmp(name, preparation_output, wcslen(preparation_output)) && name[wcslen(preparation_output)] == '\\');
+      const wchar_t *leaf = wcsrchr(name, '\\')+1; BOOL found = FALSE;
+      for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && !wcscmp(leaf, wcsrchr(entries[i].path, '\\')+1)) found = TRUE;
+      need(found && strlen(v[3]) == 64);
+    } else if (strcmp(v[3], "-")) {
+      BOOL admitted = !wcscmp(name, preparation_plan) && !strcmp(v[3], preparation_plan_pin);
+      for (unsigned i = 0; i < count; i++) if (!wcscmp(entries[i].path, name) && !strcmp(entries[i].pin, v[3])) admitted = TRUE;
+      size_t prefix = wcslen(preparation_directory); if (!wcsncmp(name, preparation_directory, prefix) && name[prefix] == '\\') admitted = TRUE;
+      need(admitted);
+    }
+    else if (!experimentInput) { need(!wcsncmp(name, preparation_directory, wcslen(preparation_directory)) && name[wcslen(preparation_directory)] == '\\'); }
+    BOOL stock = experimentInput || (!snapshot && stock_entry(name, v[3])), bridge = !snapshot && bridge_entry(name, v[3]); preparation_read = hold(name, FALSE, !(stock || bridge), GENERIC_READ); preparation_bytes = read_file(&preparation_read, maximum, &preparation_size);
+    char hash[65], dacl[65]; sum(preparation_bytes, preparation_size, hash); need(!strcmp(v[3], "-") || !strcmp(v[3], hash));
+    if (stock) stock_security(preparation_read.handle, dacl); else if (bridge) bridge_security(preparation_read.handle, dacl); else security(preparation_read.handle, SE_FILE_OBJECT, TRUE, dacl);
+    printf("{\"identity\":\""); file_id(&preparation_read); printf("\",\"daclSha256\":\"%s\",\"protectedParents\":true,\"sha256\":\"%s\",\"bytes\":%lu,\"slot\":0}", dacl, hash, preparation_size);
+  }
+#ifdef NATIVE_CI_EXPERIMENT
+  else if (!strcmp(v[0], "prepare-experiment-pe")) {
+    need(n == 2 && preparation_read.handle); release_pe_file(&preparation_read);
+  }
+  else if (!strcmp(v[0], "prepare-experiment-signature")) {
+    need(n == 2 && preparation_read.handle && preparation_bytes);
+    char actual[65]; signature(&preparation_read, NULL, actual);
+    printf("{\"signatureSha256\":\"%s\"}", actual);
+  }
+#endif
+  else if (!strcmp(v[0], "prepare-bytes")) {
+    need(n == 5 && !number(v[2]) && preparation_bytes); DWORD offset = bounded_number(v[3], 536870912), size = bounded_number(v[4], 32768);
+    need(size && offset <= preparation_size && size <= preparation_size-offset); printf("{\"hex\":\""); hex(preparation_bytes+offset, size); printf("\"}");
+  } else if (!strcmp(v[0], "prepare-release")) {
+    need(n == 3 && !number(v[2]) && preparation_bytes); close_file(&preparation_read); memset(&preparation_read, 0, sizeof(preparation_read));
+    SecureZeroMemory(preparation_bytes, preparation_size); free(preparation_bytes); preparation_bytes = NULL; printf("{\"closed\":true}");
+  } else if (!strcmp(v[0], "prepare-write")) {
+    need(n == 5 && !preparation_writer && !preparation_bytes); wchar_t leaf[4096]; decode(v[2], leaf);
+    need(((!wcsncmp(leaf, L"windows-", 8) && wcslen(leaf) > 13) || (!wcsncmp(leaf, L"provider-", 9) && wcslen(leaf) > 14)) && !wcscmp(leaf+wcslen(leaf)-5, L".json") && wcsspn(leaf,L"abcdefghijklmnopqrstuvwxyz0123456789-.") == wcslen(leaf));
+    preparation_size = bounded_number(v[3], 1048576); need(preparation_size && strlen(v[4]) == 64); strcpy_s(preparation_pin, 65, v[4]); preparation_written = 0;
+    need(swprintf_s(preparation_file, 4096, L"%ls\\%ls", preparation_directory, leaf) > 0);
+    PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
+    preparation_writer = CreateFileW(preparation_file, GENERIC_WRITE | READ_CONTROL, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, NULL); LocalFree(sd);
+    need(preparation_writer != INVALID_HANDLE_VALUE); char dacl[65]; security(preparation_writer, SE_FILE_OBJECT, TRUE, dacl); printf("{\"created\":true}");
+  } else if (!strcmp(v[0], "prepare-chunk")) {
+    need(n == 4 && preparation_writer && number(v[2]) == preparation_written); size_t size = strlen(v[3]); need(size && !(size%2) && size <= 65536 && size/2 <= preparation_size-preparation_written);
+    BYTE bytes[32768]; for (unsigned i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(v[3][i*2])*16+nibble(v[3][i*2+1])); DWORD used;
+    need(WriteFile(preparation_writer, bytes, (DWORD)size/2, &used, NULL) && used == size/2); preparation_written += used; SecureZeroMemory(bytes, sizeof(bytes)); printf("{\"written\":%lu}", used);
+  } else if (!strcmp(v[0], "prepare-seal")) {
+    need(n == 2 && preparation_writer && preparation_written == preparation_size && FlushFileBuffers(preparation_writer) && CloseHandle(preparation_writer)); preparation_writer = NULL;
+    struct held_file file = hold(preparation_file, FALSE, TRUE, GENERIC_READ); pin(&file, preparation_pin); close_file(&file);
+    printf("{\"sha256\":\"%s\",\"writerClosed\":true}", preparation_pin);
+  } else need(FALSE);
+}
+/* The package extractor receives only pipes. System custody exclusively creates
+ * reviewed data below one held publication root; it never executes that data. */
+struct package_file { HANDLE handle; FILE_ID_INFO id; wchar_t *path; BOOL writer,created,directory; struct held_file *held; };
+static struct package_file package_files[4097], package_dirs[65536];
+static unsigned package_file_count,package_dir_count; static BOOL package_files_closed;
+static BYTE *package_archive; static DWORD package_archive_used; static BOOL package_archive_possible;
+static void package_path(const wchar_t *path) {
+  size_t root=wcslen(entries[9].path); need(package_mode && root && !_wcsnicmp(path,entries[9].path,root) && (!path[root] || path[root]=='\\') && wcslen(path)<4096);
+  need(!wcschr(path+3,L':')); const wchar_t *part=path+3;
+  while(*part) { const wchar_t *end=wcschr(part,L'\\'); size_t n=end ? (size_t)(end-part) : wcslen(part);
+    need(n && n<=240 && part[n-1]!=L'.' && part[n-1]!=L' ');
+    for(size_t i=0;i<n;i++) need(part[i]>=32 && part[i]!=127 && !wcschr(L"<>\"|?*",part[i]));
+    wchar_t leaf[241]; wcsncpy_s(leaf,241,part,n); wchar_t *dot=wcschr(leaf,L'.'); if(dot) *dot=0;
+    need(_wcsicmp(leaf,L"con") && _wcsicmp(leaf,L"prn") && _wcsicmp(leaf,L"aux") && _wcsicmp(leaf,L"nul") &&
+      !(wcslen(leaf)==4 && (!_wcsnicmp(leaf,L"com",3) || !_wcsnicmp(leaf,L"lpt",3)) && iswdigit(leaf[3])));
+    if(!end) break; part=end+1;
+  }
+}
+static void package_observation(struct package_file *file) {
+  BY_HANDLE_FILE_INFORMATION info; FILE_ID_INFO id; BYTE basic[40]; wchar_t path[4100]; char dacl[65];
+  need(GetFileInformationByHandle(file->handle,&info) && !(info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) &&
+    ((info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)!=0)==file->directory && (file->directory || info.nNumberOfLinks==1) &&
+    GetFileInformationByHandleEx(file->handle,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)) &&
+    GetFileInformationByHandleEx(file->handle,FileBasicInfo,basic,sizeof(basic)));
+  DWORD size=GetFinalPathNameByHandleW(file->handle,path,4100,FILE_NAME_NORMALIZED|VOLUME_NAME_DOS);
+  need(size>4 && size<4100 && !_wcsicmp(path+4,file->path)); security(file->handle,SE_FILE_OBJECT,TRUE,dacl);
+  PSECURITY_DESCRIPTOR sd=file_sd(file->handle,SE_FILE_OBJECT); PACL acl; BOOL present,defaulted; void *raw;
+  need(GetSecurityDescriptorDacl(sd,&present,&acl,&defaulted) && present && acl && acl->AceCount==1 && GetAce(acl,0,&raw));
+  ACCESS_ALLOWED_ACE *ace=raw; need(ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags);
+  memset(basic+8,0,8); memset(basic+36,0,4);
+  printf("{\"fileHex\":\""); hex((BYTE *)file->path,wcslen(file->path)*2); printf("\",\"identity\":\""); hex((BYTE *)&id,sizeof(id));
+  printf("\",\"bytes\":%llu,\"links\":1,\"metadata\":\"",((ULONGLONG)info.nFileSizeHigh<<32)|info.nFileSizeLow); hex(basic,sizeof(basic));
+  printf("\",\"security\":{\"owner\":\"S-1-5-18\",\"protected\":true,\"sddl\":\"%s\",\"rules\":[{\"sid\":\"S-1-5-18\",\"rights\":%lu,\"allow\":true,\"inherited\":false}]},\"access\":\"%s\",\"share\":%u}",dacl,ace->Mask,file->writer?"write":"read",file->directory?3:1); LocalFree(sd);
+}
+static struct package_file *package_directory(const wchar_t *path, BOOL create) {
+  package_path(path); for(unsigned i=0;i<package_dir_count;i++) if(!_wcsicmp(path,package_dirs[i].path)) return &package_dirs[i];
+  need(package_dir_count<65536); BOOL born=FALSE;
+  if(_wcsicmp(path,entries[9].path)) { wchar_t parent[4096]; wcscpy_s(parent,4096,path); *wcsrchr(parent,L'\\')=0; package_directory(parent,create);
+    DWORD existing=GetFileAttributesW(path); if(existing==INVALID_FILE_ATTRIBUTES) { need(create && GetLastError()==ERROR_FILE_NOT_FOUND);
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE); need(CreateDirectoryW(path,&sa)); LocalFree(sd); born=TRUE; } }
+  struct held_file held=hold(path,TRUE,TRUE,FILE_LIST_DIRECTORY); FILE_CASE_SENSITIVE_INFO sensitive;
+  need(GetFileInformationByHandleEx(held.handle,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive)) && !sensitive.Flags);
+  struct package_file *file=&package_dirs[package_dir_count++]; file->handle=held.handle; file->id=held.id; file->path=_wcsdup(path); file->directory=TRUE; file->created=born; file->held=malloc(sizeof(held)); need(file->path && file->held); *file->held=held; return file;
+}
+static void package_file_command(char **v,unsigned n) {
+  need(package_mode && !package_files_closed && n>=4 && entries[9].file.handle); wchar_t path[4096]; decode(v[3],path); package_path(path);
+  BOOL directory=!strcmp(v[2],"directory") || !strcmp(v[2],"directory-create");
+  if(directory) {
+    need(n==4); BOOL create=!strcmp(v[2],"directory-create");
+    if(create) { need(_wcsicmp(path,entries[9].path) && GetFileAttributesW(path)==INVALID_FILE_ATTRIBUTES && GetLastError()==ERROR_FILE_NOT_FOUND); }
+    struct package_file *file=package_directory(path,create);
+    if(create) { package_observation(file); return; }
+    wchar_t pattern[4096]; need(swprintf_s(pattern,4096,L"%ls\\*",path)>0); WIN32_FIND_DATAW data; HANDLE search=FindFirstFileW(pattern,&data); unsigned count=0;
+    printf("{\"namesHex\":["); if(search==INVALID_HANDLE_VALUE) need(GetLastError()==ERROR_FILE_NOT_FOUND);
+    else { do { if(!wcscmp(data.cFileName,L".") || !wcscmp(data.cFileName,L"..")) continue;
+      need(++count<=4096 && !(data.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) && !data.cAlternateFileName[0]); if(count>1) putchar(','); putchar('"'); hex((BYTE *)data.cFileName,wcslen(data.cFileName)*2); putchar('"');
+    } while(FindNextFileW(search,&data)); need(GetLastError()==ERROR_NO_MORE_FILES && FindClose(search)); }
+    printf("],\"object\":"); package_observation(file); putchar('}'); return;
+  }
+  wchar_t parent[4096]; wcscpy_s(parent,4096,path); *wcsrchr(parent,L'\\')=0; package_directory(parent,!strcmp(v[2],"create"));
+  struct package_file *file=NULL; for(unsigned i=0;i<package_file_count;i++) if(!_wcsicmp(path,package_files[i].path)) file=&package_files[i];
+  if(!strcmp(v[2],"create")) {
+    need(n==4 && !file && package_file_count<4097); PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+    HANDLE handle=CreateFileW(path,GENERIC_READ|GENERIC_WRITE|READ_CONTROL|FILE_READ_ATTRIBUTES|ACCESS_SYSTEM_SECURITY,FILE_SHARE_READ,&sa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); LocalFree(sd); need(handle!=INVALID_HANDLE_VALUE);
+    file=&package_files[package_file_count++]; file->handle=handle; file->path=_wcsdup(path); file->writer=file->created=TRUE; need(file->path && GetFileInformationByHandleEx(handle,FileIdInfo,&file->id,sizeof(file->id)));
+  } else if(!file) {
+    need(!strcmp(v[2],"hold") && package_file_count<4097); struct held_file held=hold(path,FALSE,TRUE,GENERIC_READ);
+    file=&package_files[package_file_count++]; file->handle=held.handle; file->id=held.id; file->path=_wcsdup(path); file->held=malloc(sizeof(held)); need(file->path && file->held); *file->held=held;
+  }
+  if(!strcmp(v[2],"write")) {
+    need(n==6 && file->writer); ULONGLONG offset=number(v[4]); size_t size=strlen(v[5]); need(size && !(size%2) && size<=65536); BYTE bytes[32768]; DWORD used; LARGE_INTEGER length,position;
+    need(GetFileSizeEx(file->handle,&length) && (ULONGLONG)length.QuadPart==offset && offset+size/2<=536870912);
+    for(size_t i=0;i<size/2;i++) bytes[i]=(BYTE)(nibble(v[5][i*2])*16+nibble(v[5][i*2+1])); position.QuadPart=offset;
+    need(SetFilePointerEx(file->handle,position,NULL,FILE_BEGIN) && WriteFile(file->handle,bytes,(DWORD)size/2,&used,NULL) && used==size/2); SecureZeroMemory(bytes,sizeof(bytes));
+  } else if(!strcmp(v[2],"seal")) {
+    need(n==4 && file->writer && FlushFileBuffers(file->handle));
+    HANDLE intermediate=CreateFileW(path,GENERIC_READ|READ_CONTROL|FILE_READ_ATTRIBUTES|ACCESS_SYSTEM_SECURITY,3,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL); FILE_ID_INFO id;
+    need(intermediate!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(intermediate,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)) && CloseHandle(file->handle));
+    struct held_file sealed=hold(path,FALSE,TRUE,GENERIC_READ); need(!memcmp(&sealed.id,&file->id,sizeof(id)) && CloseHandle(intermediate)); file->handle=sealed.handle; file->writer=FALSE; file->held=malloc(sizeof(sealed)); need(file->held); *file->held=sealed;
+  } else if(!strcmp(v[2],"read")) {
+    need(n==6 && !file->writer); ULONGLONG offset=number(v[4]); DWORD count=bounded_number(v[5],32768),used; BYTE bytes[32768]; LARGE_INTEGER position; position.QuadPart=offset;
+    need(count && SetFilePointerEx(file->handle,position,NULL,FILE_BEGIN) && ReadFile(file->handle,bytes,count,&used,NULL));
+    printf("{\"hex\":\""); hex(bytes,used); printf("\",\"object\":"); package_observation(file); putchar('}'); return;
+  } else need(n==4 && (!strcmp(v[2],"create") || !strcmp(v[2],"hold") || !strcmp(v[2],"observe")));
+  WIN32_FIND_STREAM_DATA stream; HANDLE search=FindFirstStreamW(path,FindStreamInfoStandard,&stream,0);
+  need(search!=INVALID_HANDLE_VALUE && !wcscmp(stream.cStreamName,L"::$DATA") && !FindNextStreamW(search,&stream) && GetLastError()==ERROR_HANDLE_EOF && FindClose(search));
+  package_observation(file);
+}
+static void package_verify_archive(void) {
+  wchar_t path[4096]; need(package_mode && entries[9].file.handle && swprintf_s(path,4096,L"%ls\\archive",entries[9].path)>0); package_path(path);
+  struct held_file file=hold(path,FALSE,TRUE,GENERIC_READ); DWORD size; BYTE *bytes=read_file(&file,59958024,&size); char pin[65];
+  need(size==59958024); sum(bytes,size,pin); SecureZeroMemory(bytes,size); free(bytes);
+  need(!strcmp(pin,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1"));
+  printf("{\"bytes\":59958024,\"sha256\":\"%s\",\"identity\":\"",pin); file_id(&file); printf("\"}"); close_file(&file);
+}
+/* Seal only the independently held owned objects, after the entire extractor
+ * Job is empty. No grant to an extraction principal survives publication. */
+static void package_seal_publication(void) {
+  need(package_mode && !package_files_closed && !case_job && !ownership_control && ownership_count &&
+    ownership_launcher.hProcess && ownership_owner.hProcess &&
+    WaitForSingleObject(ownership_launcher.hProcess,0)==WAIT_OBJECT_0 && WaitForSingleObject(ownership_owner.hProcess,0)==WAIT_OBJECT_0);
+  for(unsigned i=0;i<ownership_count;i++) need(WaitForSingleObject(ownership_processes[i],0)==WAIT_OBJECT_0);
+  wchar_t jobName[96]; need(swprintf_s(jobName,96,L"Local\\NativeProof-%hs",nonce)>0);
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!job && GetLastError()==ERROR_FILE_NOT_FOUND);
+  for(unsigned lane=0;lane<2;lane++) {
+    unsigned total=lane ? package_dir_count : package_file_count;
+    for(unsigned i=0;i<total;i++) {
+      struct package_file *file=lane ? &package_dirs[i] : &package_files[i]; need(!file->writer);
+      char before[65],actual[65]; security(file->handle,SE_FILE_OBJECT,TRUE,before);
+      HANDLE handle=open_file(file->path,file->directory,WRITE_DAC); FILE_ID_INFO id;
+      need(GetFileInformationByHandleEx(handle,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file->id,sizeof(id)));
+      security(handle,SE_FILE_OBJECT,TRUE,actual); need(!strcmp(before,actual));
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FRFX;;;SY)"); PACL acl; BOOL present,defaulted;
+      need(GetSecurityDescriptorDacl(sd,&present,&acl,&defaulted) && present && acl &&
+        SetSecurityInfo(handle,SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,NULL,NULL,acl,NULL)==ERROR_SUCCESS && CloseHandle(handle)); LocalFree(sd);
+    }
+  }
+}
+static unsigned package_files_close(void) {
+  unsigned total=package_file_count+package_dir_count; package_files_closed=TRUE;
+  if(package_archive) { SecureZeroMemory(package_archive,59958024); free(package_archive); package_archive=NULL; }
+  for(unsigned i=0;i<package_file_count;i++) { if(package_files[i].held) { close_file(package_files[i].held); free(package_files[i].held); } else need(CloseHandle(package_files[i].handle)); free(package_files[i].path); }
+  for(unsigned i=0;i<package_dir_count;i++) { need(package_dirs[i].held); close_file(package_dirs[i].held); free(package_dirs[i].held); free(package_dirs[i].path); }
+  package_file_count=package_dir_count=0; return total;
+}
+
+/* Fixed file/Git/release operations. These resources are held by the System
+ * custodian, independently of protocol producers and all case workers. */
+static wchar_t operation_id[64]; static unsigned operation_slots[128], operation_count;
+static BOOL operation_fenced, operation_closed[SLOTS];
+static HANDLE file_objects[5]; static FILE_ID_INFO file_ids[5];
+static void operation_no_creators(void);
+struct operation_record_header { DWORD version,index,size; FILE_ID_INFO object; char context[65],sha256[65]; };
+static void operation_record(const wchar_t *leaf,unsigned index,const BYTE *bytes,DWORD size) {
+  need(case_token && size && size<=262144 && index<count);
+  struct operation_record_header header={0},actual={0};
+  header.version=1; header.index=index; header.size=size; strcpy_s(header.context,65,case_record.context);
+  need(GetFileInformationByHandleEx(entries[index].file.handle,FileIdInfo,&header.object,sizeof(header.object))); sum(bytes,size,header.sha256);
+  HANDLE file=account_file(entries[case_custody].path,leaf,GENERIC_WRITE,CREATE_NEW); DWORD used;
+  need(WriteFile(file,&header,sizeof(header),&used,NULL) && used==sizeof(header) && WriteFile(file,bytes,size,&used,NULL) && used==size && FlushFileBuffers(file) && CloseHandle(file));
+  file=account_file(entries[case_custody].path,leaf,GENERIC_READ,OPEN_EXISTING); BYTE *read=calloc(size,1); need(read);
+  need(ReadFile(file,&actual,sizeof(actual),&used,NULL) && used==sizeof(actual) && !memcmp(&actual,&header,sizeof(header)) && ReadFile(file,read,size,&used,NULL) && used==size && !memcmp(bytes,read,size) && CloseHandle(file));
+  SecureZeroMemory(read,size); free(read);
+}
+static BOOL policy_saved[SLOTS];
+struct policy_recovery_pair { DWORD before,wanted; };
+struct policy_recovery_network { DWORD version,kind,ports[8]; };
+static void policy_recovery_save(unsigned index,PSECURITY_DESCRIPTOR before,PSECURITY_DESCRIPTOR wanted) {
+  need(index<count && before && wanted);if(policy_saved[index])return;
+  struct policy_recovery_pair pair={GetSecurityDescriptorLength(before),GetSecurityDescriptorLength(wanted)};
+  DWORD size=sizeof(pair)+pair.before+pair.wanted;need(size<=262144);BYTE *bytes=calloc(size,1);need(bytes);
+  memcpy(bytes,&pair,sizeof(pair));memcpy(bytes+sizeof(pair),before,pair.before);memcpy(bytes+sizeof(pair)+pair.before,wanted,pair.wanted);
+  wchar_t leaf[64];need(swprintf_s(leaf,64,L"policy-%u.baseline",index)>0);operation_record(leaf,index,bytes,size);free(bytes);policy_saved[index]=TRUE;
+}
+static void policy_network_intent(unsigned kind,const unsigned *ports) {
+  struct policy_recovery_network value={0};value.version=1;value.kind=kind;need(kind==1||kind==2);
+  if(kind==2)for(unsigned i=0;i<8;i++){need(ports[i]>=1024&&ports[i]<=65535);for(unsigned j=0;j<i;j++)need(ports[i]!=ports[j]);value.ports[i]=ports[i];}
+  operation_record(L"policy-network.intent",case_custody,(BYTE *)&value,sizeof(value));
+}
+struct policy_recovery_filters { DWORD kind,count; UINT64 ids[52]; };
+static void policy_filter_save(unsigned kind) {
+  struct policy_recovery_filters value={0};value.kind=kind;value.count=kind==1?4:52;need(kind==1||kind==2);
+  ownership_keys();for(unsigned i=0;i<value.count;i++){GUID key;if(kind==1)key=ownership_filters[i];else access_key(i+2,&key);FWPM_FILTER0 *filter;
+    need(FwpmFilterGetByKey0(wfp_engine,&key,&filter)==ERROR_SUCCESS&&filter->filterId);
+    if(kind==1)need(filter->filterId==ownership_filter_ids[i]);value.ids[i]=filter->filterId;FwpmFreeMemory0((void **)&filter);}
+  operation_record(L"policy-filters.observed",case_custody,(BYTE *)&value,sizeof(value));
+}
+static BYTE *policy_record_read(unsigned custody,const wchar_t *leaf,unsigned index,const char *context,DWORD *size) {
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\%ls",entries[custody].path,leaf)>0);
+  if(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES){need(GetLastError()==ERROR_FILE_NOT_FOUND);return NULL;}
+  HANDLE file=account_file(entries[custody].path,leaf,GENERIC_READ,OPEN_EXISTING);struct operation_record_header header;LARGE_INTEGER length;DWORD used;
+  need(GetFileSizeEx(file,&length)&&length.QuadPart>sizeof(header)&&length.QuadPart<=sizeof(header)+262144&&
+    ReadFile(file,&header,sizeof(header),&used,NULL)&&used==sizeof(header)&&header.version==1&&header.index==index&&
+    header.context[64]==0&&header.sha256[64]==0&&!strcmp(header.context,context)&&header.size==length.QuadPart-sizeof(header));
+  BYTE *bytes=calloc(header.size,1);need(bytes&&ReadFile(file,bytes,header.size,&used,NULL)&&used==header.size&&CloseHandle(file));
+  FILE_ID_INFO actual;need(GetFileInformationByHandleEx(entries[index].file.handle,FileIdInfo,&actual,sizeof(actual))&&!memcmp(&actual,&header.object,sizeof(actual)));
+  char hash[65];sum(bytes,header.size,hash);need(!strcmp(hash,header.sha256));*size=header.size;return bytes;
+}
+static void ownership_births(unsigned custody, const char *context) {
+  need(preparation_only && custody == 2 && strlen(context) == 64);
+  struct case_account_record record = {0}; account_record(entries[custody].path, &record); need(!strcmp(record.context, context));
+  BOOL opened = !entries[custody].file.handle;
+  if (opened) entries[custody].file = hold(entries[custody].path, TRUE, TRUE, GENERIC_READ);
+  const wchar_t *leaves[] = {L"ownership-launcher.birth", L"ownership-owner.birth"};
+  struct ownership_birth births[2]; unsigned slots[2]; FILETIME created, ended, kernel, user;
+  need(GetProcessTimes(GetCurrentProcess(), &created, &ended, &kernel, &user));
+  ULONGLONG observerBirth = ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime;
+  for (unsigned i = 0; i < 2; i++) { DWORD size; BYTE *bytes = policy_record_read(custody, leaves[i], custody, context, &size);
+    need(bytes && size == sizeof(births[i])); memcpy(&births[i], bytes, size); free(bytes);
+    struct ownership_birth *birth = &births[i];
+    need(birth->pid && birth->creation && birth->observer == GetCurrentProcessId() && birth->observerCreation == observerBirth &&
+      object_type(birth->process, L"Process") && object_type(birth->token, L"Token") && GetProcessId(birth->process) == birth->pid &&
+      GetProcessTimes(birth->process, &created, &ended, &kernel, &user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth->creation);
+    TOKEN_STATISTICS *statistics = token_info(birth->token, TokenStatistics); need(!memcmp(&statistics->TokenId, &birth->tokenId, sizeof(LUID))); free(statistics);
+    wchar_t *sid = token_sid(birth->token); DWORD *session = token_info(birth->token, TokenSessionId);
+    need(!wcscmp(sid, L"S-1-5-18") && !*session); LocalFree(sid); free(session);
+    unsigned index = process_count;
+    for (unsigned j = 0; j < process_count; j++) if (GetProcessId(processes[j]) == birth->pid) { index = j; break; }
+    if (index == process_count) { need(process_count < 128); processes[index] = birth->process; tokens[index] = birth->token; sessions[index] = 0; process_count++; }
+    else need(processes[index] == birth->process && tokens[index] == birth->token);
+    slots[i] = index;
+  }
+  need(births[0].pid != births[1].pid);
+  if (opened) close_file(&entries[custody].file);
+  /* Import original held custody, never reopen an exited primary token. The
+   * caller still needs fresh process/whole-Job/exit observations to retire it. */
+  printf("{\"helper\":"); retained_identity(processes[slots[0]], tokens[slots[0]], sessions[slots[0]]);
+  printf(",\"owner\":"); retained_identity(processes[slots[1]], tokens[slots[1]], sessions[slots[1]]); printf("}");
+}
+static HKEY policy_registry_owned(unsigned custody,const char *context) {
+  if(!access_registry_present())return NULL;
+  DWORD size;BYTE *identity=policy_record_read(custody,L"policy-registry.observed",custody,context,&size);
+  need(identity&&size==sizeof(FILETIME)+65&&identity[size-1]==0);
+  wchar_t name[256];HKEY key;FILETIME written;char hash[65];DWORD children,values;
+  need(swprintf_s(name,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0&&
+    RegOpenKeyExW(HKEY_LOCAL_MACHINE,name,0,KEY_ALL_ACCESS|ACCESS_SYSTEM_SECURITY|KEY_WOW64_64KEY,&key)==ERROR_SUCCESS);
+  security(key,SE_REGISTRY_KEY,TRUE,hash);
+  need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written)==ERROR_SUCCESS&&
+    !children&&!values&&!memcmp(identity,&written,sizeof(written))&&!strcmp((char *)identity+sizeof(written),hash));
+  free(identity);return key;
+}
+static void policy_registry_remove(HKEY key) {
+  /* Delete the verified object through its handle. A replacement under the
+   * original name must never acquire deletion authority from that name. */
+  typedef NTSTATUS (NTAPI *delete_key)(HANDLE);
+  delete_key remove=(delete_key)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtDeleteKey");
+  need(remove&&!remove(key)&&RegCloseKey(key)==ERROR_SUCCESS);
+  need(!access_registry_present());
+}
+struct policy_recovery_sentinel { FILE_ID_INFO object;char sha256[65],security[65]; };
+static BOOL policy_sentinel_saved;
+static void policy_sentinel_save(void) {
+  if(policy_sentinel_saved)return;struct policy_recovery_sentinel value={0};
+  need(GetFileInformationByHandleEx(ownership_sentinel.handle,FileIdInfo,&value.object,sizeof(value.object)));
+  DWORD size;BYTE *bytes=read_file(&ownership_sentinel,64,&size);need(size==64&&!memcmp(bytes,case_record.context,64));sum(bytes,size,value.sha256);free(bytes);
+  security(ownership_sentinel.handle,SE_FILE_OBJECT,TRUE,value.security);
+  operation_record(L"outside-sentinel.observed",0,(BYTE *)&value,sizeof(value));policy_sentinel_saved=TRUE;
+}
+static void recovery_sentinel(unsigned custody,const char *context) {
+  need(!entries[0].file.handle);entries[0].file=hold(entries[0].path,TRUE,TRUE,GENERIC_READ);
+  DWORD size;BYTE *bytes=policy_record_read(custody,L"outside-sentinel.observed",0,context,&size);
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\outside-%hs.sentinel",entries[0].path,context)>0);
+  if(!bytes){need(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);close_file(&entries[0].file);return;}
+  struct policy_recovery_sentinel saved;need(size==sizeof(saved));memcpy(&saved,bytes,size);free(bytes);need(saved.sha256[64]==0&&saved.security[64]==0);
+  struct held_file file=hold(name,FALSE,TRUE,GENERIC_READ);char hash[65];need(!memcmp(&file.id,&saved.object,sizeof(saved.object)));pin(&file,saved.sha256);
+  security(file.handle,SE_FILE_OBJECT,TRUE,hash);need(!strcmp(hash,saved.security));close_file(&file);close_file(&entries[0].file);
+}
+/* One protected, self-contained baseline precedes every audit setter. Raw
+ * descriptors remain in System-only custody; Node retains only receipt joins. */
+struct audit_recovery_header {
+  DWORD version,objects,categories,sidSize,payload;
+  char candidate[41],nonce[33],context[65],sha256[65];
+  BYTE sid[SECURITY_MAX_SID_SIZE];
+  GUID keys[128]; AUDIT_POLICY_INFORMATION system[128];
+};
+struct audit_recovery_object { DWORD index,baseline,wanted; FILE_ID_INFO identity; };
+static void audit_recovery_save(void) {
+  need(case_token && audit_object_count && audit_count && audit_sid);
+  BYTE *bytes=calloc(1048576,1);need(bytes);struct audit_recovery_header *header=(void *)bytes;
+  header->version=1;header->objects=audit_object_count;header->categories=audit_count;header->sidSize=GetLengthSid(audit_sid);
+  need(header->sidSize<=sizeof(header->sid));memcpy(header->sid,audit_sid,header->sidSize);
+  strcpy_s(header->candidate,41,candidate);strcpy_s(header->nonce,33,nonce);strcpy_s(header->context,65,case_record.context);
+  memcpy(header->keys,audit_categories,audit_count*sizeof(GUID));memcpy(header->system,audit_system,audit_count*sizeof(*audit_system));
+  DWORD size=sizeof(*header);
+  for(unsigned i=0;i<audit_object_count;i++) {
+    struct audit_recovery_object item={0};item.index=(DWORD)(audit_objects[i].entry-entries);
+    item.baseline=GetSecurityDescriptorLength(audit_objects[i].baseline);item.wanted=audit_objects[i].wanted->AclSize;
+    need(item.index<count && size+sizeof(item)+item.baseline+item.wanted<=1048576 &&
+      GetFileInformationByHandleEx(entries[item.index].file.handle,FileIdInfo,&item.identity,sizeof(item.identity)));
+    memcpy(bytes+size,&item,sizeof(item));size+=sizeof(item);
+    memcpy(bytes+size,audit_objects[i].baseline,item.baseline);size+=item.baseline;
+    memcpy(bytes+size,audit_objects[i].wanted,item.wanted);size+=item.wanted;
+  }
+  header->payload=size-sizeof(*header);sum(bytes+sizeof(*header),header->payload,header->sha256);
+  HANDLE file=account_file(entries[case_custody].path,L"audit-recovery.baseline",GENERIC_WRITE,CREATE_NEW);DWORD used;
+  need(WriteFile(file,bytes,size,&used,NULL)&&used==size&&FlushFileBuffers(file)&&CloseHandle(file));
+  file=account_file(entries[case_custody].path,L"audit-recovery.baseline",GENERIC_READ,OPEN_EXISTING);BYTE *actual=calloc(size,1);LARGE_INTEGER length;need(actual);
+  need(GetFileSizeEx(file,&length)&&length.QuadPart==size&&ReadFile(file,actual,size,&used,NULL)&&used==size&&!memcmp(actual,bytes,size)&&CloseHandle(file));
+  SecureZeroMemory(bytes,size);SecureZeroMemory(actual,size);free(bytes);free(actual);
+}
+static void recovery_principal_empty(const struct case_account_record *record) {
+  struct ownership_view census={0};census.record=*record;ownership_census(&census);
+  for(unsigned i=0;i<process_count;i++)need(WaitForSingleObject(processes[i],0)==WAIT_OBJECT_0);
+  wchar_t name[96];need(swprintf_s(name,96,L"Local\\NativeProof-%hs",record->nonce)>0);
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY|READ_CONTROL,FALSE,name);
+  if(!job){need(GetLastError()==ERROR_FILE_NOT_FOUND);return;}
+  char hash[65];security(job,SE_KERNEL_OBJECT,TRUE,hash);
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;BYTE buffer[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)];JOBOBJECT_BASIC_PROCESS_ID_LIST *members=(void *)buffer;
+  need(QueryInformationJobObject(job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL)&&!accounting.ActiveProcesses&&
+    QueryInformationJobObject(job,JobObjectBasicProcessIdList,members,sizeof(buffer),NULL)&&!members->NumberOfAssignedProcesses&&!members->NumberOfProcessIdsInList&&CloseHandle(job));
+}
+static void recovery_audit(unsigned custody,const char *context,const char *caseNonce,BOOL verifyOnly) {
+  need(preparation_only && custody==2 && strlen(context)==64 && strlen(caseNonce)==32 && !audit_owned);
+  struct case_account_record account={0};account_record(entries[custody].path,&account);
+  need(!strcmp(account.context,context)&&!strcmp(account.nonce,caseNonce));
+  recovery_principal_empty(&account);
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\audit-recovery.baseline",entries[custody].path)>0);
+  DWORD attributes=GetFileAttributesW(name);
+  if(attributes==INVALID_FILE_ATTRIBUTES) {
+    need(!verifyOnly&&GetLastError()==ERROR_FILE_NOT_FOUND);PSID sid;need(ConvertStringSidToSidW(account.accountSid,&sid)&&!audit_principal_exists(sid));LocalFree(sid);
+    printf("{\"restored\":true,\"admission\":\"not-started\"}");return;
+  }
+  HANDLE file=account_file(entries[custody].path,L"audit-recovery.baseline",GENERIC_READ,OPEN_EXISTING);LARGE_INTEGER length;DWORD used;
+  need(GetFileSizeEx(file,&length)&&length.QuadPart>=sizeof(struct audit_recovery_header)&&length.QuadPart<=1048576);
+  BYTE *bytes=calloc((size_t)length.QuadPart,1);need(bytes&&ReadFile(file,bytes,(DWORD)length.QuadPart,&used,NULL)&&used==length.QuadPart&&CloseHandle(file));
+  struct audit_recovery_header *header=(void *)bytes;char hash[65];
+  need(header->version==1 && header->objects && header->objects<=44 && header->categories && header->categories<=128 &&
+    header->candidate[40]==0 && header->nonce[32]==0 && header->context[64]==0 && header->sha256[64]==0 &&
+    !strcmp(header->candidate,candidate)&&!strcmp(header->nonce,caseNonce)&&!strcmp(header->context,context)&&
+    header->payload==used-sizeof(*header)&&header->sidSize<=sizeof(header->sid)&&IsValidSid(header->sid)&&GetLengthSid(header->sid)==header->sidSize);
+  PSID sid;need(ConvertStringSidToSidW(account.accountSid,&sid)&&EqualSid(sid,header->sid));LocalFree(sid);
+  sum(bytes+sizeof(*header),header->payload,hash);need(!strcmp(hash,header->sha256));
+  audit_count=header->categories;memcpy(audit_categories,header->keys,audit_count*sizeof(GUID));audit_enumerate();
+  need(AuditQuerySystemPolicy(audit_categories,audit_count,&audit_system)&&!memcmp(audit_system,header->system,audit_count*sizeof(*audit_system)));
+  char journalHash[65];sum(bytes,used,journalHash);
+  need(swprintf_s(name,4096,L"%ls\\audit-recovery.restored",entries[custody].path)>0);
+  BOOL completed=GetFileAttributesW(name)!=INVALID_FILE_ATTRIBUTES;
+  if(completed) {
+    HANDLE marker=account_file(entries[custody].path,L"audit-recovery.restored",GENERIC_READ,OPEN_EXISTING);char saved[65];DWORD count;LARGE_INTEGER size;
+    need(GetFileSizeEx(marker,&size)&&size.QuadPart==65&&ReadFile(marker,saved,65,&count,NULL)&&count==65&&!memcmp(saved,journalHash,65)&&CloseHandle(marker));
+  } else need(GetLastError()==ERROR_FILE_NOT_FOUND);
+  if(verifyOnly||completed) {
+    need(!audit_principal_exists(header->sid));AuditFree(audit_system);audit_system=NULL;SecureZeroMemory(bytes,used);free(bytes);
+    printf("{\"restored\":true,\"admission\":\"possible\"}");return;
+  }
+  audit_sid=LocalAlloc(LPTR,header->sidSize);need(audit_sid);memcpy(audit_sid,header->sid,header->sidSize);
+  DWORD offset=sizeof(*header);audit_object_count=header->objects;
+  for(unsigned i=0;i<audit_object_count;i++) {
+    struct audit_recovery_object item;need(offset+sizeof(item)<=used);memcpy(&item,bytes+offset,sizeof(item));offset+=sizeof(item);
+    need(item.index<count && item.baseline>=SECURITY_DESCRIPTOR_MIN_LENGTH && item.baseline<=65536 && item.wanted>=sizeof(ACL) && item.wanted<=65535 &&
+      item.baseline+item.wanted<=used-offset);
+    for(unsigned j=0;j<i;j++)need(audit_objects[j].entry!=&entries[item.index]);
+    struct entry *entry=&entries[item.index];need(!entry->file.handle);
+    entry->file=hold_shared(entry->path,!strcmp(entry->kind,"directory"),FALSE,GENERIC_READ|ACCESS_SYSTEM_SECURITY,!strcmp(entry->kind,"mutable"));
+    need(!memcmp(&entry->file.id,&item.identity,sizeof(item.identity))&&entry->file.links==1);audit_objects[i].entry=entry;
+    PSECURITY_DESCRIPTOR baseline=LocalAlloc(LPTR,item.baseline);PACL wanted=LocalAlloc(LPTR,item.wanted);need(baseline&&wanted);
+    memcpy(baseline,bytes+offset,item.baseline);offset+=item.baseline;memcpy(wanted,bytes+offset,item.wanted);offset+=item.wanted;
+    need(IsValidSecurityDescriptor(baseline)&&GetSecurityDescriptorLength(baseline)==item.baseline&&IsValidAcl(wanted)&&wanted->AclSize==item.wanted);
+    PACL before;BOOL present,defaulted;need(GetSecurityDescriptorSacl(baseline,&present,&before,&defaulted));
+    audit_objects[i].baseline=baseline;audit_objects[i].wanted=wanted;
+    if(present&&before){audit_objects[i].before=LocalAlloc(LPTR,before->AclSize);need(audit_objects[i].before);memcpy(audit_objects[i].before,before,before->AclSize);}
+  }
+  need(offset==used);SecureZeroMemory(bytes,used);free(bytes);
+  /* The caller's protected recovery command and independently proved drain
+   * precede this write. Every current descriptor must still be baseline/owned. */
+  recovery_principal_empty(&account);audit_used=audit_owned=TRUE;audit_restore(FALSE);
+  recovery_principal_empty(&account);
+  for(unsigned i=0;i<audit_object_count;i++)close_file(&audit_objects[i].entry->file);
+  HANDLE marker=account_file(entries[custody].path,L"audit-recovery.restored",GENERIC_WRITE,CREATE_NEW);DWORD written;
+  need(WriteFile(marker,journalHash,65,&written,NULL)&&written==65&&FlushFileBuffers(marker)&&CloseHandle(marker));
+  printf("{\"restored\":true,\"admission\":\"possible\"}");
+}
+static unsigned operation_creations;
+struct operation_creation { DWORD version,sequence,image,pid,session; ULONGLONG birth; wchar_t job[128],sid[256]; };
+static struct operation_creation operation_creation_intent(unsigned image) {
+  struct operation_creation intent={0}; intent.version=1; intent.sequence=operation_creations++; intent.image=image;
+  need(intent.sequence<128 && swprintf_s(intent.job,128,L"NativeProof-Operation-%hs-%u",nonce,intent.sequence)>0);
+  wchar_t leaf[64]; need(swprintf_s(leaf,64,L"operation-%u.intent",intent.sequence)>0); operation_record(leaf,image,(BYTE *)&intent,sizeof(intent)); return intent;
+}
+static HANDLE operation_creation_job(struct operation_creation *intent,SECURITY_ATTRIBUTES *attributes) {
+  SetLastError(ERROR_SUCCESS);
+  HANDLE job=CreateJobObjectW(attributes,intent->job); need(job && GetLastError()!=ERROR_ALREADY_EXISTS); return job;
+}
+static void operation_creation_birth(struct operation_creation *intent,HANDLE process,HANDLE token) {
+  FILETIME born,ended,kernel,user; need(GetProcessTimes(process,&born,&ended,&kernel,&user));
+  intent->pid=GetProcessId(process); intent->session=process_session(process); intent->birth=((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime;
+  wchar_t *sid=token_sid(token); wcscpy_s(intent->sid,256,sid); LocalFree(sid);
+  wchar_t leaf[64]; need(swprintf_s(leaf,64,L"operation-%u.birth",intent->sequence)>0); operation_record(leaf,intent->image,(BYTE *)intent,sizeof(*intent));
+}
+static void git_baselines(void);
+static unsigned operation_slot(unsigned position) { need(position < operation_count); unsigned index=operation_slots[position]; need(index<count && entries[index].file.handle); return index; }
+static void operation_stop_job(HANDLE job) {
+  BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *members=(void *)bytes;
+  need(QueryInformationJobObject(job,JobObjectBasicProcessIdList,members,sizeof(bytes),NULL) && members->NumberOfAssignedProcesses==members->NumberOfProcessIdsInList && members->NumberOfProcessIdsInList<=32);
+  HANDLE held[32]={0};
+  for(unsigned i=0;i<members->NumberOfProcessIdsInList;i++) { BOOL joined; held[i]=OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,FALSE,(DWORD)members->ProcessIdList[i]);
+    need(held[i] && IsProcessInJob(held[i],job,&joined) && joined); }
+  need(TerminateJobObject(job,126));
+  for(unsigned i=0;i<members->NumberOfProcessIdsInList;i++) need(WaitForSingleObject(held[i],5000)==WAIT_OBJECT_0 && CloseHandle(held[i]));
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION final; need(QueryInformationJobObject(job,JobObjectBasicAccountingInformation,&final,sizeof(final),NULL) && !final.ActiveProcesses);
+}
+static void operation_bind(char **v,unsigned n) {
+  need(!*operation_id && case_token && case_job && n>=4); decode_bounded(v[2],operation_id,64); operation_count=bounded_number(v[3],126); need(n==4+operation_count);
+  need(!wcsncmp(operation_id,L"files.",6) || !wcscmp(operation_id,L"git.fixed") || !wcscmp(operation_id,L"git.ordinary") || !wcscmp(operation_id,L"release"));
+  for(unsigned i=0;i<operation_count;i++) { operation_slots[i]=bounded_number(v[4+i],count-1); need(entries[operation_slots[i]].file.handle); }
+  if(!wcsncmp(operation_id,L"files.",6)) {
+    need(operation_count==5 && operation_slots[0]==2); file_objects[0]=entries[operation_slot(0)].file.handle; file_objects[1]=entries[operation_slot(1)].file.handle;
+    file_root_sharing(&entries[operation_slot(1)],&entries[operation_slot(0)]); file_objects[1]=entries[operation_slot(1)].file.handle;
+    HANDLE retained; need(DuplicateHandle(GetCurrentProcess(),file_objects[1],GetCurrentProcess(),&retained,0,FALSE,DUPLICATE_SAME_ACCESS)); file_objects[1]=retained;
+    for(unsigned i=0;i<2;i++) need(GetFileInformationByHandleEx(file_objects[i],FileIdInfo,&file_ids[i],sizeof(file_ids[i])));
+  }
+  if(!wcscmp(operation_id,L"git.ordinary")) git_baselines();
+  printf("{\"bound\":true}");
+}
+typedef NTSTATUS (NTAPI *operation_create)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
+static HANDLE operation_open(HANDLE parent,const wchar_t *name,BOOL directory,ACCESS_MASK access,BOOL optional) {
+  operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile"); need(create && parent && *name && !wcschr(name,'\\') && !wcschr(name,':'));
+  UNICODE_STRING text={(USHORT)(wcslen(name)*2),(USHORT)(wcslen(name)*2),(PWSTR)name}; OBJECT_ATTRIBUTES oa={sizeof(oa),parent,&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE result=NULL;
+  NTSTATUS status=create(&result,access | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,1,0x200000 | 0x20 | (directory ? 1 : 0x40),NULL,0);
+  if(optional && status==(NTSTATUS)0xc0000034L) return NULL; need(!status && result && SetHandleInformation(result,HANDLE_FLAG_INHERIT,0)); return result;
+}
+static void operation_identity(HANDLE file) { struct held_file value={0}; value.handle=file; need(GetFileInformationByHandleEx(file,FileIdInfo,&value.id,sizeof(value.id))); file_id(&value); }
+static void operation_bytes(HANDLE file) {
+  LARGE_INTEGER size,zero={0}; BYTE bytes[4096]; DWORD read; need(GetFileSizeEx(file,&size) && size.QuadPart>=0 && size.QuadPart<=sizeof(bytes) && SetFilePointerEx(file,zero,NULL,FILE_BEGIN) && ReadFile(file,bytes,(DWORD)size.QuadPart,&read,NULL) && read==size.QuadPart); hex(bytes,read);
+}
+static void operation_file(HANDLE file,HANDLE named,BOOL directory,const wchar_t *name) {
+  FILE_ID_INFO id,current; FILE_ATTRIBUTE_TAG_INFO tag; FILE_STANDARD_INFO info; char dacl[65];
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(named,FileIdInfo,&current,sizeof(current)) && !memcmp(&id,&current,sizeof(id)) &&
+    GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+    GetFileInformationByHandleEx(file,FileStandardInfo,&info,sizeof(info)) && !!info.Directory==directory);
+  security(file,SE_FILE_OBJECT,TRUE,dacl);
+  typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+  query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); need(query); BYTE buffer[4096]; IO_STATUS_BLOCK io;
+  NTSTATUS status=query(file,&io,buffer,sizeof(buffer),(FILE_INFORMATION_CLASS)21);
+  need(status==(NTSTATUS)0xc0000034L || (!status && ((FILE_NAME_INFO *)buffer)->FileNameLength==0));
+  need(!query(file,&io,buffer,sizeof(buffer),(FILE_INFORMATION_CLASS)22));
+  if(directory) { FILE_CASE_SENSITIVE_INFO sensitive; need(!io.Information && GetFileInformationByHandleEx(file,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive)) && !sensitive.Flags); }
+  else { DWORD *stream=(void *)buffer; need(io.Information>=38 && !stream[0] && stream[1]==14 && !wmemcmp((wchar_t *)(buffer+24),L"::$DATA",7)); }
+  wchar_t canonical[4096]; DWORD length=GetFinalPathNameByHandleW(named,canonical,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096 && !wcscmp(wcsrchr(canonical,'\\')+1,name));
+  printf("{\"identity\":\""); operation_identity(file); printf("\",\"namedIdentity\":\""); operation_identity(named);
+  printf("\",\"ownerSid\":\"S-1-5-18\",\"systemOnlyDacl\":true,\"protectedDacl\":true,\"noReparse\":true,\"canonicalName\":true,\"noShortAlias\":true,\"defaultStreamsOnly\":true,\"kind\":\"%s\",\"caseSensitive\":false,\"links\":%lu,\"bytes\":",directory ? "directory" : "file",info.NumberOfLinks);
+  if(directory) printf("null"); else { putchar('"'); operation_bytes(file); putchar('"'); } putchar('}');
+}
+static void file_view(void) {
+  need(!wcsncmp(operation_id,L"files.",6)); const wchar_t *names[]={L"custody",L"files",L"allocation",L"value",L".pending"};
+  HANDLE current[5]={file_objects[0],operation_open(file_objects[0],L"files",TRUE,FILE_LIST_DIRECTORY,FALSE),NULL,NULL,NULL};
+  current[2]=operation_open(current[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,TRUE);
+  if(current[2]) { current[3]=operation_open(current[2],L"value",FALSE,GENERIC_READ,TRUE); current[4]=operation_open(current[2],L".pending",FALSE,GENERIC_READ,TRUE); }
+  const char *keys[]={"base","root","allocation","leaf","temporary"}; putchar('{');
+  for(unsigned i=0;i<5;i++) {
+    if(i) putchar(','); printf("\"%s\":",keys[i]);
+    if(!current[i]) { printf("null"); if(i>=2 && file_objects[i]) { need(CloseHandle(file_objects[i])); file_objects[i]=NULL; } continue; }
+    FILE_ID_INFO id; need(GetFileInformationByHandleEx(current[i],FileIdInfo,&id,sizeof(id)));
+    if(!file_objects[i]) { need(DuplicateHandle(GetCurrentProcess(),current[i],GetCurrentProcess(),&file_objects[i],0,FALSE,DUPLICATE_SAME_ACCESS)); file_ids[i]=id; }
+    else if(memcmp(&file_ids[i],&id,sizeof(id))) {
+      /* Only a completed replacement may retire the old leaf. Substitution
+       * controls use a separate reader and never repin their saved identity. */
+      need(i==3 && file_objects[4] && !memcmp(&file_ids[4],&id,sizeof(id))); need(CloseHandle(file_objects[i]));
+      need(DuplicateHandle(GetCurrentProcess(),current[i],GetCurrentProcess(),&file_objects[i],0,FALSE,DUPLICATE_SAME_ACCESS)); file_ids[i]=id;
+    }
+    operation_file(file_objects[i],current[i],i<3,names[i]);
+  }
+  putchar('}'); for(unsigned i=1;i<5;i++) if(current[i]) need(CloseHandle(current[i]));
+}
+static void release_pe_file(struct held_file *file) {
+  DWORD size; BYTE *bytes=read_file(file,536870912,&size); IMAGE_DOS_HEADER *dos=(void *)bytes;
+  need(size>=512 && dos->e_magic==IMAGE_DOS_SIGNATURE && dos->e_lfanew>=64 && (DWORD)dos->e_lfanew<=size-sizeof(IMAGE_NT_HEADERS64));
+  IMAGE_NT_HEADERS64 *pe=(void *)(bytes+dos->e_lfanew); need(pe->Signature==IMAGE_NT_SIGNATURE && pe->FileHeader.Machine==IMAGE_FILE_MACHINE_AMD64 &&
+    pe->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->FileHeader.SizeOfOptionalHeader>=sizeof(IMAGE_OPTIONAL_HEADER64) && pe->OptionalHeader.NumberOfRvaAndSizes>=14);
+  printf("{\"dll\":%s,\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"imports\":[",pe->FileHeader.Characteristics & IMAGE_FILE_DLL ? "true" : "false",pe->OptionalHeader.MajorLinkerVersion,pe->OptionalHeader.MinorLinkerVersion,pe->FileHeader.TimeDateStamp);
+  unsigned emitted=0;
+  for(unsigned directory=0;directory<2;directory++) {
+    IMAGE_DATA_DIRECTORY table=pe->OptionalHeader.DataDirectory[directory ? IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT : IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!table.Size) { need(!table.VirtualAddress); continue; } DWORD width=directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR),at=rva(bytes,size,pe,table.VirtualAddress,table.Size); BOOL terminated=FALSE;
+    for(unsigned i=0;(i+1)*width<=table.Size;i++) { DWORD *item=(void *)(bytes+at+i*width),nameRva=directory ? item[1] : item[3];
+      if(!nameRva) { terminated=TRUE; break; } need(i<128); if(directory) need(item[0]==1); DWORD nameAt=rva(bytes,size,pe,nameRva,1),length=0;
+      while(length<255 && nameAt+length<size && bytes[nameAt+length]) length++; need(length && length<255 && nameAt+length<size);
+      wchar_t name[256]={0}; for(unsigned j=0;j<length;j++) { need((bytes[nameAt+j]>='a' && bytes[nameAt+j]<='z') || (bytes[nameAt+j]>='A' && bytes[nameAt+j]<='Z') || (bytes[nameAt+j]>='0' && bytes[nameAt+j]<='9') || strchr("_.-",bytes[nameAt+j])); name[j]=bytes[nameAt+j]; }
+      need(emitted<256);
+#ifdef NATIVE_CI_EXPERIMENT
+      printf("%s{\"name\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,directory ? "true" : "false");
+#else
+      wchar_t host[256]={0};
+      wcscpy_s(host,256,name); if(!_wcsnicmp(name,L"api-",4) || !_wcsnicmp(name,L"ext-",4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot=wcsrchr(contract,'.'); if(dot) *dot=0; api_host(GetCurrentProcess(),contract,host,file->path,name); }
+      printf("%s{\"name\":\"%ls\",\"host\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,host,directory ? "true" : "false");
+#endif
+    } need(terminated);
+  }
+  printf("],\"complete\":true}"); free(bytes);
+}
+static void release_pe(unsigned index) {
+  need(index<count && entries[index].file.handle); release_pe_file(&entries[index].file);
+}
+static void operation_empty(HANDLE job) {
+  JOBOBJECT_BASIC_PROCESS_ID_LIST members={0}; need(QueryInformationJobObject(job,JobObjectBasicProcessIdList,&members,sizeof(members),NULL) && !members.NumberOfAssignedProcesses && !members.NumberOfProcessIdsInList);
+}
+struct file_worker { PROCESS_INFORMATION process; HANDLE job,input,output,token; BYTE request[16]; DWORD request_size; };
+static struct file_worker file_workers[3]; static unsigned file_worker_count;
+struct file_read { FILE_ID_INFO identity; DWORD links,size; BYTE bytes[4096]; };
+static struct file_read file_old_read;
+static void worker_write(HANDLE pipe,const void *bytes,DWORD size) { DWORD used; need(WriteFile(pipe,bytes,size,&used,NULL) && used==size); }
+static void worker_read(HANDLE pipe,void *bytes,DWORD size) { DWORD used; need(ReadFile(pipe,bytes,size,&used,NULL) && used==size); }
+static struct file_read worker_file(HANDLE file) {
+  struct file_read value={0}; LARGE_INTEGER size,zero={0}; BY_HANDLE_FILE_INFORMATION info;
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&value.identity,sizeof(value.identity)) && GetFileInformationByHandle(file,&info) && GetFileSizeEx(file,&size) && size.QuadPart>=0 && size.QuadPart<=4096 &&
+    SetFilePointerEx(file,zero,NULL,FILE_BEGIN) && ReadFile(file,value.bytes,(DWORD)size.QuadPart,&value.size,NULL) && value.size==size.QuadPart); value.links=info.nNumberOfLinks; return value;
+}
+static void file_read_json(struct file_read *read) {
+  printf("{\"identity\":\"%016llx:",read->identity.VolumeSerialNumber); hex(read->identity.FileId.Identifier,16);
+  printf("\",\"bytes\":\""); hex(read->bytes,read->size); printf("\",\"links\":%lu,\"code\":0}",read->links);
+}
+/* Only inherited directory/pipe handles and finite commands enter this worker.
+ * Its parent retains the Job, primary token and birth identity before release. */
+static int file_worker_main(int argc,wchar_t **argv) {
+  need(argc==4); HANDLE root=(HANDLE)(ULONG_PTR)_wcstoui64(argv[3],NULL,10); need(root && SetHandleInformation(root,HANDLE_FLAG_INHERIT,0));
+  HANDLE input=GetStdHandle(STD_INPUT_HANDLE),output=GetStdHandle(STD_OUTPUT_HANDLE); need(GetFileType(input)==FILE_TYPE_PIPE && GetFileType(output)==FILE_TYPE_PIPE);
+  BOOL member; need(IsProcessInJob(GetCurrentProcess(),NULL,&member) && member); wchar_t mode=argv[2][0]; need(wcslen(argv[2])==1 && wcschr(L"PR012",mode));
+  BYTE ready='A'; HANDLE old=NULL;
+  if(mode=='R') { HANDLE allocation=operation_open(root,L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); old=operation_open(allocation,L"value",FALSE,GENERIC_READ,FALSE); need(CloseHandle(allocation)); }
+  worker_write(output,&ready,1);
+  BYTE command;
+  for(unsigned i=0;i<32;i++) {
+    worker_read(input,&command,1);
+    if(command=='Q') { if(old) need(CloseHandle(old)); need(CloseHandle(root)); return 0; }
+    if(mode=='P') {
+      need(command=='P'); operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile");
+      UNICODE_STRING text={20,20,L"allocation"}; OBJECT_ATTRIBUTES oa={sizeof(oa),root,&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE file=NULL;
+      NTSTATUS status=create(&file,FILE_LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,1,0x200021,NULL,0);
+      DWORD code=status==(NTSTATUS)0xc0000022L ? ERROR_ACCESS_DENIED : 0; need(code==ERROR_ACCESS_DENIED && !file); worker_write(output,&code,sizeof(code)); continue;
+    }
+    if(mode>=L'0' && mode<=L'2') {
+      need(command=='W'); const BYTE requests[3][7]={{0,'o','l','d',255},{0,'n','e','w',0,255},{'s','e','c','o','n','d'}}; const DWORD sizes[]={5,6,6};
+      unsigned index=(unsigned)(mode-L'0'); worker_write(output,requests[index],sizes[index]); continue;
+    }
+    need(mode=='R' && (command=='N' || command=='O')); HANDLE file=old,allocation=NULL;
+    if(command=='N') { allocation=operation_open(root,L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); file=operation_open(allocation,L"value",FALSE,GENERIC_READ,FALSE); }
+    struct file_read read=worker_file(file); worker_write(output,&read,sizeof(read));
+    if(command=='N') need(CloseHandle(file) && CloseHandle(allocation));
+  }
+  return 126;
+}
+static void file_start_worker(struct file_worker *worker,wchar_t mode,BOOL restricted) {
+  need(!worker->process.hProcess && !operation_fenced); unsigned image=operation_slot(3); need(!wcscmp(wcsrchr(entries[image].path,'\\')+1,L"custody-reader.exe"));
+  pin(&entries[image].file,entries[image].pin); char signaturePin[65]; signature(&entries[image].file,entries[image].signature,signaturePin);
+  struct operation_creation intent=operation_creation_intent(image);
+  PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,TRUE),private=attributes(sd,FALSE); HANDLE childIn,childOut,root;
+  need(CreatePipe(&childIn,&worker->input,&sa,0) && CreatePipe(&worker->output,&childOut,&sa,0) && SetHandleInformation(worker->input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(worker->output,HANDLE_FLAG_INHERIT,0) &&
+    DuplicateHandle(GetCurrentProcess(),file_objects[1],GetCurrentProcess(),&root,FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,TRUE,0));
+  worker->job=operation_creation_job(&intent,&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=1;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(SetInformationJobObject(worker->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(worker->job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  HANDLE inherited[]={childIn,childOut,root}; SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size); STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup);
+  startup.lpAttributeList=calloc(1,size); need(startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList,2,0,&size) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL) && UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,&worker->job,sizeof(worker->job),NULL,NULL));
+  startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=childIn; startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=childOut;
+  wchar_t command[32767]=L"",argument[64]; quoted(command,32767,entries[image].path); quoted(command,32767,L"--file-worker"); argument[0]=mode; argument[1]=0; quoted(command,32767,argument);
+  need(swprintf_s(argument,64,L"%llu",(ULONGLONG)(ULONG_PTR)root)>0); quoted(command,32767,argument);
+  wchar_t environment[]=L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
+  if(restricted) need(CreateProcessAsUserW(case_token,entries[image].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,entries[2].path,&startup.StartupInfo,&worker->process));
+  else need(CreateProcessW(entries[image].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,environment,entries[2].path,&startup.StartupInfo,&worker->process));
+  need(OpenProcessToken(worker->process.hProcess,TOKEN_QUERY,&worker->token));
+  operation_creation_birth(&intent,worker->process.hProcess,worker->token);
+  wchar_t *sid=token_sid(worker->token); need(!wcscmp(sid,restricted ? case_record.accountSid : L"S-1-5-18")); LocalFree(sid);
+  BOOL member; need(IsProcessInJob(worker->process.hProcess,worker->job,&member) && member && process_session(worker->process.hProcess)==0);
+  DeleteProcThreadAttributeList(startup.lpAttributeList); free(startup.lpAttributeList); need(CloseHandle(childIn) && CloseHandle(childOut) && CloseHandle(root)); LocalFree(sd);
+  need(ResumeThread(worker->process.hThread)==1 && CloseHandle(worker->process.hThread)); worker->process.hThread=NULL; BYTE ready; worker_read(worker->output,&ready,1); need(ready=='A');
+}
+static void file_stop_worker(struct file_worker *worker) {
+  need(worker->process.hProcess); BYTE command='Q'; worker_write(worker->input,&command,1); DWORD code;
+  need(WaitForSingleObject(worker->process.hProcess,5000)==WAIT_OBJECT_0 && GetExitCodeProcess(worker->process.hProcess,&code) && !code); operation_empty(worker->job);
+  need(CloseHandle(worker->input) && CloseHandle(worker->output)); worker->input=worker->output=NULL;
+}
+static void file_drop_worker(struct file_worker *worker) { need(CloseHandle(worker->process.hProcess) && CloseHandle(worker->token) && CloseHandle(worker->job)); memset(worker,0,sizeof(*worker)); }
+static void file_workers_retire(void) {
+  need(operation_fenced);
+  /* Partial admission may own a suspended process without a ready frame. Its
+   * held Job closes that entire creation domain; no PID/name-wide kill occurs. */
+  for(unsigned i=0;i<3;i++) {
+    struct file_worker *worker=&file_workers[i];
+    if(worker->job) operation_stop_job(worker->job);
+    if(worker->process.hProcess) need(WaitForSingleObject(worker->process.hProcess,5000)==WAIT_OBJECT_0 && CloseHandle(worker->process.hProcess));
+    if(worker->process.hThread) need(CloseHandle(worker->process.hThread));
+    if(worker->token) need(CloseHandle(worker->token));
+    if(worker->input) need(CloseHandle(worker->input));
+    if(worker->output) need(CloseHandle(worker->output));
+    if(worker->job) need(CloseHandle(worker->job)); memset(worker,0,sizeof(*worker));
+  }
+  file_worker_count=0; printf("{\"noLiveMembers\":true,\"helpersSettled\":true}");
+}
+static void file_private(void) {
+  need(!file_worker_count && file_objects[2]); struct file_worker worker={0}; file_start_worker(&worker,'P',TRUE);
+  HANDLE control=operation_open(file_objects[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE); FILE_ID_INFO id; need(GetFileInformationByHandleEx(control,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_ids[2],sizeof(id)) && CloseHandle(control));
+  BYTE command='P'; worker_write(worker.input,&command,1); DWORD code; worker_read(worker.output,&code,sizeof(code)); need(code==ERROR_ACCESS_DENIED);
+  HANDLE impersonation; need(DuplicateTokenEx(worker.token,TOKEN_QUERY | TOKEN_IMPERSONATE,NULL,SecurityImpersonation,TokenImpersonation,&impersonation) && SetThreadToken(NULL,impersonation));
+  operation_create create=(operation_create)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateFile"); UNICODE_STRING text={20,20,L"allocation"}; OBJECT_ATTRIBUTES oa={sizeof(oa),file_objects[1],&text,0,NULL,NULL}; IO_STATUS_BLOCK io; HANDLE denied=NULL;
+  NTSTATUS status=create(&denied,FILE_LIST_DIRECTORY | READ_CONTROL | SYNCHRONIZE,&oa,&io,NULL,FILE_ATTRIBUTE_NORMAL,7,1,0x200021,NULL,0); need(RevertToSelf() && CloseHandle(impersonation) && status==(NTSTATUS)0xc0000022L && !denied);
+  file_stop_worker(&worker); printf("{\"identity\":"); retained_identity(worker.process.hProcess,worker.token,0);
+  printf(",\"ready\":true,\"reachable\":true,\"attempted\":true,\"allowed\":false,\"nativeCode\":5,\"exitCode\":0,\"signal\":null,\"settled\":true,\"tokenVerified\":true,\"jobVerified\":true}"); file_drop_worker(&worker);
+}
+static unsigned file_publication_count,file_publication_active; static char file_publication_outcomes[3][9],file_publication_ids[3][50];
+static void file_publication_command(const BYTE *bytes,size_t size) {
+  if(file_worker_count!=3 || size<8 || memcmp(bytes,"publish ",8)) return;
+  need(file_publication_count<3 && !file_publication_active && size<8193);
+  char command[8193],kind[16],parent[50],leaf[50],pending[50],request[8193],extra; memcpy(command,bytes,size); command[size]=0;
+  need(sscanf_s(command,"%15s %49s %49s %49s %8192s %c",kind,(unsigned)sizeof(kind),parent,(unsigned)sizeof(parent),leaf,(unsigned)sizeof(leaf),pending,(unsigned)sizeof(pending),request,(unsigned)sizeof(request),&extra,1)==5);
+  struct file_worker *worker=&file_workers[file_publication_count]; need(strlen(request)==worker->request_size*2);
+  for(unsigned i=0;i<worker->request_size;i++) need(nibble(request[i*2])*16+nibble(request[i*2+1])==worker->request[i]);
+  file_publication_active=file_publication_count+1;
+}
+static void file_publication_frame(const char *frame) {
+  if(!file_publication_active || (!strstr(frame,"\"phase\":\"complete\"") && !strstr(frame,"\"phase\":\"exists\""))) return;
+  unsigned index=file_publication_active-1; need(index==file_publication_count && strstr(frame,nonce));
+  HANDLE parent=operation_open(file_objects[1],L"allocation",TRUE,FILE_LIST_DIRECTORY,FALSE),leaf=operation_open(parent,L"value",FALSE,GENERIC_READ,FALSE);
+  struct file_read read=worker_file(leaf); need(read.size==file_workers[0].request_size && !memcmp(read.bytes,file_workers[0].request,read.size));
+  char id[50]; sprintf_s(id,50,"%016llx:",read.identity.VolumeSerialNumber); for(unsigned i=0;i<16;i++) sprintf_s(id+17+i*2,50-17-i*2,"%02x",read.identity.FileId.Identifier[i]);
+  need(strstr(frame,id)); strcpy_s(file_publication_ids[index],50,id);
+  strcpy_s(file_publication_outcomes[index],9,strstr(frame,"\"phase\":\"complete\"") ? "complete" : "exists");
+  need(CloseHandle(leaf) && CloseHandle(parent)); file_publication_active=0; file_publication_count++;
+}
+
+static void file_publishers_start(void) {
+  need(!file_worker_count && !file_objects[3]); const BYTE requests[3][7]={{0,'o','l','d',255},{0,'n','e','w',0,255},{'s','e','c','o','n','d'}}; DWORD sizes[]={5,6,6};
+  for(unsigned i=0;i<3;i++) { file_start_worker(&file_workers[i],(wchar_t)(L'0'+i),FALSE); file_worker_count++; memcpy(file_workers[i].request,requests[i],sizes[i]); file_workers[i].request_size=sizes[i]; BYTE command='W'; worker_write(file_workers[i].input,&command,1); }
+  for(unsigned i=0;i<3;i++) { BYTE reply[16]; worker_read(file_workers[i].output,reply,sizes[i]); need(!memcmp(reply,requests[i],sizes[i])); }
+  printf("{\"ready\":true,\"overlapped\":true,\"requestsAcknowledged\":3,\"callers\":["); for(unsigned i=0;i<3;i++) { if(i) putchar(','); identity(file_workers[i].process.hProcess); } printf("]}");
+}
+static void file_publishers_finish(void) {
+  need(file_worker_count==3); BOOL complete=file_publication_count==3 && !file_publication_active;
+  printf("{\"complete\":%s,\"settled\":true,\"overlapped\":true,\"requests\":[",complete ? "true" : "false");
+  for(unsigned i=0;i<3;i++) { struct file_worker *worker=&file_workers[i]; file_stop_worker(worker); char hash[65]; sum(worker->request,worker->request_size,hash);
+    if(i<file_publication_count) {
+      printf("%s{\"identity\":",i ? "," : ""); retained_identity(worker->process.hProcess,worker->token,0); printf(",\"bytesSha256\":\"%s\",\"leaf\":\"%s\"",hash,file_publication_ids[i]);
+      printf(",\"outcome\":\"%s\",\"nativeEventSha256\":\"%s\"}",file_publication_outcomes[i],hash);
+    } file_drop_worker(worker);
+  } printf("]}"); file_worker_count=0;
+}
+static void file_reader_start(void) {
+  need(!file_worker_count && file_objects[3]); file_start_worker(&file_workers[0],'R',FALSE); file_worker_count=1; BYTE command='O'; worker_write(file_workers[0].input,&command,1); worker_read(file_workers[0].output,&file_old_read,sizeof(file_old_read));
+  printf("{\"reader\":"); identity(file_workers[0].process.hProcess); printf(",\"ready\":true}");
+}
+static void file_reader_read(void) { need(file_worker_count==1); struct file_read read; BYTE command='N'; worker_write(file_workers[0].input,&command,1); worker_read(file_workers[0].output,&read,sizeof(read)); file_read_json(&read); }
+static void file_reader_finish(void) {
+  need(file_worker_count==1); BYTE command='O'; worker_write(file_workers[0].input,&command,1); struct file_read read; worker_read(file_workers[0].output,&read,sizeof(read));
+  need(!memcmp(&read.identity,&file_old_read.identity,sizeof(read.identity)) && read.size==file_old_read.size && !memcmp(read.bytes,file_old_read.bytes,read.size));
+  file_stop_worker(&file_workers[0]); printf("{\"reader\":"); retained_identity(file_workers[0].process.hProcess,file_workers[0].token,0); printf(",\"oldHeld\":"); file_read_json(&read);
+  printf(",\"ready\":true,\"overlapped\":true,\"complete\":true,\"settled\":true,\"dropped\":false}"); file_drop_worker(&file_workers[0]); file_worker_count=0;
+}
+typedef NTSTATUS (NTAPI *operation_set)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+struct operation_rename_name { ULONG flags; HANDLE parent; ULONG length; wchar_t name[64]; };
+struct operation_link_name { BOOLEAN replace; HANDLE parent; ULONG length; wchar_t name[16]; };
+_Static_assert(offsetof(struct operation_rename_name,name)==20 && offsetof(struct operation_link_name,name)==20,"NT name ABI");
+static wchar_t file_control_kind[32]; static unsigned file_control_target;
+static HANDLE file_control_object; static FILE_ID_INFO file_control_id;
+static char file_control_before[65],file_control_others[65],file_control_foreign[65],file_control_installed[65],file_control_saved[65],file_control_baseline[65]; static BOOL file_control_continued; static DWORD file_last_exit, file_control_sequence;
+static void operation_sum(HANDLE file,char hash[65]) { struct file_read value=worker_file(file); sum(value.bytes,value.size,hash); }
+static void file_others(unsigned omitted,char hash[65]) {
+  BYTE bytes[5*(sizeof(FILE_ID_INFO)+65+65)]={0}; DWORD used=0;
+  for(unsigned i=0;i<5;i++) if(i!=omitted && file_objects[i]) {
+    FILE_ID_INFO id; char securityPin[65],dataPin[65]={0}; need(GetFileInformationByHandleEx(file_objects[i],FileIdInfo,&id,sizeof(id)));
+    security(file_objects[i],SE_FILE_OBJECT,TRUE,securityPin); if(i>=3) operation_sum(file_objects[i],dataPin);
+    memcpy(bytes+used,&id,sizeof(id)); used+=sizeof(id); memcpy(bytes+used,securityPin,65); used+=65; memcpy(bytes+used,dataPin,65); used+=65;
+  } sum(bytes,used,hash);
+}
+static void operation_rename(HANDLE file,HANDLE parent,const wchar_t *name) {
+  struct operation_rename_name target={0}; IO_STATUS_BLOCK io;
+  target.parent=parent; target.length=(DWORD)wcslen(name)*2; need(target.length<sizeof(target.name)); memcpy(target.name,name,target.length);
+  operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file,&io,&target,offsetof(struct operation_rename_name,name)+target.length,(FILE_INFORMATION_CLASS)65));
+}
+static HANDLE control_mutation_handle(HANDLE source) {
+  FILE_ID_INFO before,after; need(GetFileInformationByHandleEx(source,FileIdInfo,&before,sizeof(before)));
+  HANDLE result=ReOpenFile(source,DELETE | FILE_READ_ATTRIBUTES | READ_CONTROL | FILE_WRITE_ATTRIBUTES | GENERIC_READ | GENERIC_WRITE,7,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  need(result!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(result,FileIdInfo,&after,sizeof(after)) && !memcmp(&before,&after,sizeof(before))); return result;
+}
+static void control_fingerprint(HANDLE source,char hash[65]) {
+  HANDLE file=ReOpenFile(source,GENERIC_READ | READ_CONTROL | ACCESS_SYSTEM_SECURITY,7,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+  FILE_ID_INFO id; FILE_STANDARD_INFO standard; FILE_ATTRIBUTE_TAG_INFO tag;
+  need(file!=INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(file,FileStandardInfo,&standard,sizeof(standard)) && GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)));
+  BYTE material[32768]={0}; DWORD used=0;
+  memcpy(material+used,&id,sizeof(id)); used+=sizeof(id);
+  memcpy(material+used,&standard.NumberOfLinks,sizeof(standard.NumberOfLinks)); used+=sizeof(standard.NumberOfLinks);
+  memcpy(material+used,&tag,sizeof(tag)); used+=sizeof(tag);
+  if(standard.Directory && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    FILE_CASE_SENSITIVE_INFO sensitive; need(GetFileInformationByHandleEx(file,FileCaseSensitiveInfo,&sensitive,sizeof(sensitive))); memcpy(material+used,&sensitive.Flags,sizeof(sensitive.Flags)); used+=sizeof(sensitive.Flags);
+  }
+  PSECURITY_DESCRIPTOR sd=file_sd(file,SE_FILE_OBJECT); DWORD size=GetSecurityDescriptorLength(sd); need(size && size<=65536);
+  char securityPin[65]; sum((BYTE *)sd,size,securityPin); LocalFree(sd); memcpy(material+used,securityPin,65); used+=65;
+  wchar_t name[4096]; DWORD length=GetFinalPathNameByHandleW(file,name,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096);
+  memcpy(material+used,name,length*2); used+=length*2;
+  if(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    need(DeviceIoControl(file,FSCTL_GET_REPARSE_POINT,NULL,0,material+used,16384,&size,NULL) && size && size<=16384); used+=size;
+  } else {
+    if(!standard.Directory) { struct file_read bytes=worker_file(file); memcpy(material+used,bytes.bytes,bytes.size); used+=bytes.size; }
+    typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+    query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); BYTE bytes[4096]={0}; IO_STATUS_BLOCK io;
+    need(query && !query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)22) && io.Information<=sizeof(bytes)); memcpy(material+used,bytes,io.Information); used+=(DWORD)io.Information;
+    NTSTATUS status=query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)21); need(status==(NTSTATUS)0xc0000034L || (!status && io.Information<=sizeof(bytes)));
+    if(!status) { memcpy(material+used,bytes,io.Information); used+=(DWORD)io.Information; }
+  }
+  need(used<=sizeof(material) && CloseHandle(file)); sum(material,used,hash);
+}
+static void control_summary(HANDLE file,BOOL applied) {
+  FILE_ID_INFO id; FILE_STANDARD_INFO standard; FILE_ATTRIBUTE_TAG_INFO tag; char bytes[65];
+  need(GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id)) && GetFileInformationByHandleEx(file,FileStandardInfo,&standard,sizeof(standard)) && GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag)));
+  if(!standard.Directory && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) operation_sum(file,bytes); else sum((BYTE *)&id,sizeof(id),bytes);
+  printf("{\"identity\":\""); operation_identity(file); printf("\",\"kind\":\"%s\",\"bytesSha256\":\"%s\",\"links\":%lu",standard.Directory ? "directory" : "file",bytes,standard.NumberOfLinks);
+  if(applied && !wcscmp(file_control_kind,L"case")) {
+    wchar_t name[4096]; DWORD length=GetFinalPathNameByHandleW(file,name,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(length && length<4096 && !wcscmp(wcsrchr(name,L'\\')+1,L"Value")); printf(",\"name\":\"Value\"");
+  }
+  if(applied && (!wcscmp(file_control_kind,L"short-name") || !wcscmp(file_control_kind,L"stream"))) {
+    typedef NTSTATUS (NTAPI *query_file)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+    query_file query=(query_file)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationFile"); BYTE bytes[4096]; IO_STATUS_BLOCK io; need(query);
+    if(!wcscmp(file_control_kind,L"short-name")) {
+      need(!query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)21) && ((FILE_NAME_INFO *)bytes)->FileNameLength==14 && !wmemcmp(((FILE_NAME_INFO *)bytes)->FileName,L"VALUE~1",7)); printf(",\"alternateName\":\"VALUE~1\"");
+    } else {
+      need(!query(file,&io,bytes,sizeof(bytes),(FILE_INFORMATION_CLASS)22)); unsigned at=0,count=0; BOOL ordinary=FALSE,control=FALSE;
+      for(;;) { need(at+24<=io.Information && count++<2); DWORD *entry=(void *)(bytes+at),length=entry[1]; need(!(length%2) && length && at+24+length<=io.Information); wchar_t *name=(void *)(bytes+at+24);
+        if(length==14 && !wmemcmp(name,L"::$DATA",7)) ordinary=TRUE;
+        else { need(length==28 && !wmemcmp(name,L":control:$DATA",14)); control=TRUE; }
+        if(!entry[0]) break; need(entry[0]>=24+length && at+entry[0]>at); at+=entry[0];
+      } need(count==2 && ordinary && control); printf(",\"streams\":2");
+    }
+  }
+  if(applied && (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    need(tag.ReparseTag==(!wcscmp(file_control_kind,L"symlink") ? IO_REPARSE_TAG_SYMLINK : IO_REPARSE_TAG_MOUNT_POINT));
+    printf(",\"reparse\":\"%s\"",!wcscmp(file_control_kind,L"symlink") ? "symlink" : "junction");
+    if(!wcscmp(file_control_kind,L"cross-volume")) { printf(",\"targetIdentity\":\""); operation_identity(entries[operation_slot(4)].file.handle); putchar('"'); }
+  } putchar('}');
+}
+static void control_reparse(HANDLE file,const wchar_t *target,BOOL symlink) {
+  struct { ULONG tag; USHORT length,reserved; USHORT subOffset,subLength,printOffset,printLength; ULONG flags; wchar_t path[4096]; } buffer={0};
+  wchar_t substitute[4096]; need(swprintf_s(substitute,4096,L"\\??\\%ls",target)>0); unsigned chars=(unsigned)wcslen(substitute);
+  unsigned offset=symlink ? 20 : 16, substituteBytes=(chars+1)*2, targetBytes=((unsigned)wcslen(target)+1)*2;
+  /* Both names share the reparse payload; bounding either path alone does not
+   * bound their combined copy into this fixed native buffer. */
+  need(substituteBytes<=sizeof(buffer)-offset && targetBytes<=sizeof(buffer)-offset-substituteBytes);
+  buffer.tag=symlink ? IO_REPARSE_TAG_SYMLINK : IO_REPARSE_TAG_MOUNT_POINT; buffer.subLength=(USHORT)(chars*2); buffer.printOffset=(USHORT)((chars+1)*2); buffer.printLength=(USHORT)(wcslen(target)*2);
+  BYTE *paths=(BYTE *)&buffer + offset; memcpy(paths,substitute,substituteBytes); memcpy(paths+buffer.printOffset,target,targetBytes);
+  buffer.length=(USHORT)((symlink ? 12 : 8)+buffer.printOffset+buffer.printLength+2); DWORD used;
+  need(DeviceIoControl(file,FSCTL_SET_REPARSE_POINT,&buffer,8+buffer.length,NULL,0,&used,NULL));
+}
+static void file_control_apply(const wchar_t *kind) {
+  need(!*file_control_kind && file_objects[2] && file_objects[3] && file_objects[4]);
+  need(!wcscmp(kind,L"root") || !wcscmp(kind,L"parent") || !wcscmp(kind,L"junction") || !wcscmp(kind,L"symlink") || !wcscmp(kind,L"case") || !wcscmp(kind,L"stream") || !wcscmp(kind,L"hardlink") || !wcscmp(kind,L"short-name") || !wcscmp(kind,L"cross-volume"));
+  wcscpy_s(file_control_kind,32,kind); file_control_target=!wcscmp(kind,L"root") ? 1 : (!wcscmp(kind,L"parent") || !wcscmp(kind,L"junction") || !wcscmp(kind,L"cross-volume")) ? 2 : 3;
+  HANDLE original=file_objects[file_control_target]; FILE_ID_INFO id; need(GetFileInformationByHandleEx(original,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_ids[file_control_target],sizeof(id)));
+  control_fingerprint(original,file_control_baseline);
+  if(file_control_target==3) operation_sum(original,file_control_before); else sum((BYTE *)&id,sizeof(id),file_control_before);
+  file_others(file_control_target,file_control_others); file_control_continued=FALSE; file_last_exit=STILL_ACTIVE;
+  struct { FILE_ID_INFO saved; wchar_t kind[32]; char baseline[65],others[65]; } intent={0}; intent.saved=id; wcscpy_s(intent.kind,32,kind); strcpy_s(intent.baseline,65,file_control_baseline); strcpy_s(intent.others,65,file_control_others);
+  wchar_t record[64]; need(file_control_sequence<64 && swprintf_s(record,64,L"file-control-%u.intent",file_control_sequence)>0); operation_record(record,operation_slot(1),(BYTE *)&intent,sizeof(intent));
+  const wchar_t *leaf=file_control_target==1 ? L"files" : file_control_target==2 ? L"allocation" : L"value";
+  HANDLE parent=file_control_target==1 ? file_objects[0] : file_control_target==2 ? file_objects[1] : file_objects[2];
+  BOOL substitution=file_control_target<3 || !wcscmp(kind,L"symlink");
+  HANDLE mutation=control_mutation_handle(original);
+  if(substitution) {
+    operation_rename(mutation,parent,L".saved"); wchar_t path[4096],base[4096]; DWORD size=GetFinalPathNameByHandleW(parent,base,4096,FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(size>4 && size<4096 && swprintf_s(path,4096,L"%ls\\%ls",base+4,leaf)>0);
+    PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+    if(file_control_target<3) need(CreateDirectoryW(path,&sa));
+    file_control_object=CreateFileW(path,GENERIC_READ | GENERIC_WRITE | DELETE | READ_CONTROL | FILE_WRITE_ATTRIBUTES,7,&sa,file_control_target<3 ? OPEN_EXISTING : CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,NULL);
+    LocalFree(sd); need(file_control_object!=INVALID_HANDLE_VALUE);
+    if(!wcscmp(kind,L"junction") || !wcscmp(kind,L"symlink") || !wcscmp(kind,L"cross-volume")) {
+      unsigned target=operation_slot(!wcscmp(kind,L"cross-volume") ? 4 : 2);
+      if(!wcscmp(kind,L"cross-volume")) { FILE_ID_INFO foreign; need(GetFileInformationByHandleEx(entries[target].file.handle,FileIdInfo,&foreign,sizeof(foreign)) && foreign.VolumeSerialNumber!=id.VolumeSerialNumber); sum((BYTE *)&foreign,sizeof(foreign),file_control_foreign); }
+      control_reparse(file_control_object,entries[target].path,!wcscmp(kind,L"symlink"));
+    }
+  } else {
+    file_control_object=mutation; mutation=NULL;
+    if(!wcscmp(kind,L"case")) operation_rename(file_control_object,parent,L"Value");
+    else if(!wcscmp(kind,L"short-name")) need(SetFileShortNameW(file_control_object,L"VALUE~1"));
+    else if(!wcscmp(kind,L"stream")) {
+      wchar_t path[4096]; need(swprintf_s(path,4096,L"%ls\\files\\allocation\\value:control",entries[2].path)>0); HANDLE stream=CreateFileW(path,GENERIC_WRITE,7,NULL,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); need(stream!=INVALID_HANDLE_VALUE && FlushFileBuffers(stream) && CloseHandle(stream));
+    } else if(!wcscmp(kind,L"hardlink")) {
+      struct operation_link_name link={0}; link.parent=parent; link.length=12; wcscpy_s(link.name,16,L".alias"); IO_STATUS_BLOCK io;
+      operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file_control_object,&io,&link,offsetof(struct operation_link_name,name)+link.length,(FILE_INFORMATION_CLASS)11));
+    }
+  }
+  if(mutation) need(CloseHandle(mutation)); need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&file_control_id,sizeof(file_control_id)));
+  control_fingerprint(file_control_object,file_control_installed);
+  control_fingerprint(original,file_control_saved);
+  struct { FILE_ID_INFO applied; char installed[65],saved[65]; } installed={0}; installed.applied=file_control_id; strcpy_s(installed.installed,65,file_control_installed); strcpy_s(installed.saved,65,file_control_saved);
+  need(swprintf_s(record,64,L"file-control-%u.installed",file_control_sequence++)>0); operation_record(record,operation_slot(1),(BYTE *)&installed,sizeof(installed));
+  printf("{\"ready\":true,\"applied\":"); control_summary(file_control_object,TRUE); putchar('}');
+}
+static void file_control_read(void) {
+  need(*file_control_kind && file_control_continued && file_last_exit==126 && !helpers[0].process); FILE_ID_INFO id; need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_control_id,sizeof(id)));
+  char others[65]; file_others(file_control_target,others); need(!strcmp(others,file_control_others));
+  printf("{\"continued\":true,\"rejected\":true,\"attempted\":true,\"ready\":true,\"reachable\":true,\"exitCode\":126,\"signal\":null,\"nativeDecision\":\"reject-%s\",\"before\":",file_control_target<3 && (!wcscmp(file_control_kind,L"root") || !wcscmp(file_control_kind,L"parent")) ? "identity" : !wcscmp(file_control_kind,L"junction") || !wcscmp(file_control_kind,L"symlink") || !wcscmp(file_control_kind,L"cross-volume") ? "reparse" : !wcscmp(file_control_kind,L"case") ? "case" : !wcscmp(file_control_kind,L"stream") ? "stream" : !wcscmp(file_control_kind,L"hardlink") ? "hardlink" : "short-name");
+  printf("{\"identity\":\""); operation_identity(file_objects[file_control_target]); printf("\",\"bytesSha256\":\"%s\",\"links\":1}",file_control_before);
+  printf(",\"saved\":"); control_summary(file_objects[file_control_target],FALSE); printf(",\"applied\":"); control_summary(file_control_object,TRUE); printf(",\"after\":"); control_summary(file_control_object,TRUE);
+  printf(",\"othersBeforeSha256\":\"%s\",\"othersAfterSha256\":\"%s\"",file_control_others,others);
+  if(!wcscmp(file_control_kind,L"cross-volume")) { FILE_ID_INFO foreign; need(GetFileInformationByHandleEx(entries[operation_slot(4)].file.handle,FileIdInfo,&foreign,sizeof(foreign))); char hash[65]; sum((BYTE *)&foreign,sizeof(foreign),hash); need(!strcmp(hash,file_control_foreign));
+    printf(",\"foreignTarget\":{\"before\":{\"identity\":\""); operation_identity(entries[operation_slot(4)].file.handle); printf("\",\"kind\":\"directory\",\"stateSha256\":\"%s\"},\"after\":{\"identity\":\"",hash); operation_identity(entries[operation_slot(4)].file.handle); printf("\",\"kind\":\"directory\",\"stateSha256\":\"%s\"}}",hash); }
+  putchar('}');
+}
+static void operation_remove(HANDLE file) { ULONG flags=3; IO_STATUS_BLOCK io; operation_set set=(operation_set)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtSetInformationFile"); need(set && !set(file,&io,&flags,sizeof(flags),(FILE_INFORMATION_CLASS)64)); }
+static void file_control_restore(void) {
+  need(*file_control_kind && !helpers[0].process && !file_worker_count); operation_empty(case_job); FILE_ID_INFO id; need(GetFileInformationByHandleEx(file_control_object,FileIdInfo,&id,sizeof(id)) && !memcmp(&id,&file_control_id,sizeof(id)));
+  char installed[65],others[65],saved[65]; control_fingerprint(file_control_object,installed); control_fingerprint(file_objects[file_control_target],saved); file_others(file_control_target,others);
+  need(!strcmp(installed,file_control_installed) && !strcmp(saved,file_control_saved) && !strcmp(others,file_control_others));
+  HANDLE parent=file_control_target==1 ? file_objects[0] : file_control_target==2 ? file_objects[1] : file_objects[2]; const wchar_t *name=file_control_target==1 ? L"files" : file_control_target==2 ? L"allocation" : L"value";
+  if(file_control_target<3 || !wcscmp(file_control_kind,L"symlink")) { operation_remove(file_control_object); need(CloseHandle(file_control_object)); file_control_object=NULL; HANDLE source=control_mutation_handle(file_objects[file_control_target]); operation_rename(source,parent,name); need(CloseHandle(source)); }
+  else if(!wcscmp(file_control_kind,L"case")) operation_rename(file_control_object,parent,L"value");
+  else if(!wcscmp(file_control_kind,L"short-name")) need(SetFileShortNameW(file_control_object,L""));
+  else if(!wcscmp(file_control_kind,L"hardlink")) { HANDLE alias=operation_open(parent,L".alias",FALSE,DELETE,FALSE); operation_remove(alias); need(CloseHandle(alias)); }
+  else { wchar_t path[4096]; need(swprintf_s(path,4096,L"%ls\\files\\allocation\\value:control",entries[2].path)>0); HANDLE stream=CreateFileW(path,DELETE,7,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL); need(stream!=INVALID_HANDLE_VALUE); operation_remove(stream); need(CloseHandle(stream)); }
+  if(file_control_object) need(CloseHandle(file_control_object)); file_control_object=NULL;
+  control_fingerprint(file_objects[file_control_target],saved); need(!strcmp(saved,file_control_baseline)); *file_control_kind=0;
+  printf("{\"ownedOnly\":true,\"foreignPreserved\":true,\"priorRetirementVerified\":true}");
+}
+static void operation_authority(void) {
+  need(system_process(GetCurrentProcess()) && case_token && case_job); operation_empty(case_job); char hash[65];
+  operation_no_creators();
+  for(unsigned i=1;i<=6;i++) security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  wchar_t name[21]; need(swprintf_s(name,21,L"np_%.16hs",nonce)>0); account_check(name,case_record.accountSid);
+  wchar_t filesystem[32]; DWORD flags,maximum; need(GetVolumeInformationByHandleW(entries[2].file.handle,NULL,0,NULL,&maximum,&flags,filesystem,32) && !wcscmp(filesystem,L"NTFS") &&
+    (flags & (FILE_PERSISTENT_ACLS | FILE_SUPPORTS_HARD_LINKS | FILE_SUPPORTS_OPEN_BY_FILE_ID))==(FILE_PERSISTENT_ACLS | FILE_SUPPORTS_HARD_LINKS | FILE_SUPPORTS_OPEN_BY_FILE_ID));
+  unsigned sdk=0; for(unsigned i=0;i<count;i++) if(!strcmp(entries[i].kind,"sdk")) { need(entries[i].file.handle); pin(&entries[i].file,entries[i].pin); sdk++; } need(sdk);
+  printf("{\"systemOnly\":true,\"soleParentAuthority\":true,\"noLiveMembers\":true,\"sdkAndLoaderVerified\":true,\"ntfsSemanticsVerified\":true}");
+}
+/* Git has separate execution and read-grant inventories. Baselines are held
+ * before the first write, and partial installation restores only exact owned
+ * descriptors. The fixed System helper never receives an ordinary grant. */
+static PSECURITY_DESCRIPTOR git_before[SLOTS],git_wanted[SLOTS];
+static BOOL git_base_possible,git_network_owned;
+static char git_job_pin[65];
+static BOOL git_inventory(unsigned index) {
+  for(unsigned i=4;i<operation_count;i++) if(operation_slots[i]==index) return TRUE; return FALSE;
+}
+static void git_acl(unsigned index,DWORD mask,BOOL install) {
+  need(index<count && entries[index].file.handle);
+  wchar_t text[2048]; need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+  PSECURITY_DESCRIPTOR wanted=descriptor(text); BOOL present,defaulted; PACL acl;
+  need(GetSecurityDescriptorDacl(wanted,&present,&acl,&defaulted) && present && acl);
+  if(install) {
+    if(!git_before[index]) { char hash[65]; wchar_t leaf[64]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash); git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
+      need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index])); }
+    need(!git_wanted[index]); git_wanted[index]=wanted; wanted=NULL;
+    policy_recovery_save(index,git_before[index],git_wanted[index]);
+    set_file_security(entries[index].file.handle,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,acl);
+  } else {
+    PSECURITY_DESCRIPTOR actual=file_sd(entries[index].file.handle,SE_FILE_OBJECT); PACL read; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    need(GetSecurityDescriptorControl(actual,&flags,&revision) && (flags & SE_DACL_PROTECTED) &&
+      GetSecurityDescriptorDacl(actual,&present,&read,&defaulted) && present && read && read->AclSize==acl->AclSize && !memcmp(read,acl,acl->AclSize));
+    LocalFree(actual);
+  }
+  if(wanted) LocalFree(wanted);
+}
+static void git_baselines(void) {
+  need(!wcsncmp(operation_id,L"git.",4) && operation_count>=7);
+  for(unsigned i=4;i<operation_count;i++) {
+    unsigned index=operation_slot(i); need(!git_before[index]);
+    char hash[65]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash);
+    git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
+    wchar_t leaf[64]; need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index]));
+    FILE_STANDARD_INFO info;need(GetFileInformationByHandleEx(entries[index].file.handle,FileStandardInfo,&info,sizeof(info)));
+    wchar_t text[2048];DWORD mask=FILE_GENERIC_READ|(info.Directory?FILE_TRAVERSE:0);
+    need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+    PSECURITY_DESCRIPTOR wanted=descriptor(text);policy_recovery_save(index,git_before[index],wanted);LocalFree(wanted);
+  }
+}
+static void git_base_install(void) {
+  need(!wcscmp(operation_id,L"git.ordinary") && !git_base_possible && !helpers[0].process); operation_empty(case_job); git_base_possible=TRUE;
+  unsigned parents[]={1,3,4}; for(unsigned i=0;i<3;i++) git_acl(parents[i],FILE_GENERIC_READ | FILE_TRAVERSE,TRUE);
+  git_acl(6,FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE); git_acl(operation_slot(0),FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE);
+  /* Only reviewed private DLL copies receive this principal's read/execute
+   * grant. Stock DLL ACLs and all unrelated images remain unchanged. */
+  for(unsigned i=0;i<count;i++) {
+    const wchar_t *leaf=wcsrchr(entries[i].path,L'\\');
+    if(!strcmp(entries[i].kind,"image") && entries[i].file.handle && leaf && wcslen(leaf)>4 && !_wcsicmp(leaf+wcslen(leaf)-4,L".dll") &&
+      !wcsncmp(entries[i].path,entries[3].path,wcslen(entries[3].path)) && entries[i].path[wcslen(entries[3].path)]==L'\\') git_acl(i,FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,TRUE);
+  }
+  unsigned pointer=count; wchar_t name[4096]; need(swprintf_s(name,4096,L"%ls\\.git",entries[4].path)>0);
+  for(unsigned i=4;i<operation_count;i++) if(!wcscmp(entries[operation_slot(i)].path,name)) pointer=operation_slot(i);
+  /* The read-grant helper intentionally excludes the pointer, whose base
+   * policy remains separate from metadata authority. */
+  if(pointer==count) for(unsigned i=0;i<count;i++) if(entries[i].file.handle && !wcscmp(entries[i].path,name)) pointer=i;
+  need(pointer<count && !git_inventory(pointer)); git_acl(pointer,FILE_GENERIC_READ,TRUE);
+  ownership_network_absent();policy_network_intent(1,NULL); ownership_network(FALSE,FALSE);policy_filter_save(1); git_network_owned=TRUE;
+  printf("{\"installed\":true}");
+}
+static void operation_no_creators(void) {
+  struct verify_handles *list=handle_inventory();
+  HANDLE owned[SLOTS+5]; unsigned ownedCount=0;
+  for(unsigned i=1;i<count;i++) if(entries[i].file.handle && (!wcscmp(entries[i].path,entries[1].path) ||
+    (!wcsncmp(entries[i].path,entries[1].path,wcslen(entries[1].path)) && entries[i].path[wcslen(entries[1].path)]==L'\\'))) owned[ownedCount++]=entries[i].file.handle;
+  if(!wcsncmp(operation_id,L"files.",6)) for(unsigned i=0;i<5;i++) if(file_objects[i]) owned[ownedCount++]=file_objects[i];
+  for(unsigned i=0;i<ownedCount;i++) {
+    void *object=NULL; for(ULONG_PTR j=0;j<list->count;j++) if(list->entries[j].pid==GetCurrentProcessId() && list->entries[j].handle==(ULONG_PTR)owned[i]) object=list->entries[j].object;
+    need(object);
+    for(ULONG_PTR j=0;j<list->count;j++) if(list->entries[j].object==object && list->entries[j].pid!=GetCurrentProcessId() &&
+      (!helpers[0].process || list->entries[j].pid!=GetProcessId(helpers[0].process)) &&
+      (list->entries[j].access & (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER))) need(FALSE);
+  }
+  free(list);
+}
+static void git_hooks_empty(void) {
+  wchar_t name[4096]; need(swprintf_s(name,4096,L"%ls\\*",entries[operation_slot(2)].path)>0);
+  WIN32_FIND_DATAW entry; HANDLE search=FindFirstFileW(name,&entry); need(search!=INVALID_HANDLE_VALUE);
+  do { need(!wcscmp(entry.cFileName,L".") || !wcscmp(entry.cFileName,L"..")); } while(FindNextFileW(search,&entry));
+  need(GetLastError()==ERROR_NO_MORE_FILES && FindClose(search));
+}
+static void git_policy_read(void) {
+  need(!wcsncmp(operation_id,L"git.",4)); git_hooks_empty(); operation_no_creators();
+  if(git_base_possible) {
+    need(git_network_owned); ownership_network(FALSE,TRUE);
+    for(unsigned i=4;i<operation_count;i++) {
+      unsigned index=operation_slot(i); FILE_STANDARD_INFO info; need(GetFileInformationByHandleEx(entries[index].file.handle,FileStandardInfo,&info,sizeof(info)));
+      git_acl(index,FILE_GENERIC_READ | (info.Directory ? FILE_TRAVERSE : 0),FALSE);
+    }
+  }
+  unsigned git=operation_slot(0); pin(&entries[git].file,entries[git].pin); char sig[65]; signature(&entries[git].file,entries[git].signature,sig);
+  for(unsigned i=1;i<count;i++) if(entries[i].file.handle && !wcsncmp(entries[i].path,entries[1].path,wcslen(entries[1].path))) {
+    char hash[65]; if(!git_base_possible || !git_before[i]) security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  }
+  if(helpers[0].job) ownership_job_pin(helpers[0].job,git_job_pin);
+  else if(!*git_job_pin) ownership_job_pin(case_job,git_job_pin);
+  printf("{\"complete\":true,\"privateParents\":true,\"hooksEmpty\":true,\"noForeignCreators\":true,\"noPrincipalFlows\":true,\"gitClosureVerified\":true,\"soleMetadataAuthority\":true,\"privateCreatorDaclVerified\":true,\"jobIdentitySha256\":\"%s\"}",git_job_pin);
+}
+static void git_restore(void) {
+  need(!helpers[0].process && operation_fenced); operation_empty(case_job);
+  if(audit_owned) audit_restore(FALSE);
+  for(unsigned i=0;i<count;i++) if(git_before[i]) {
+    PSECURITY_DESCRIPTOR actual=file_sd(entries[i].file.handle,SE_FILE_OBJECT); PACL current,before,wanted=NULL; BOOL present,defaulted;
+    need(GetSecurityDescriptorDacl(actual,&present,&current,&defaulted) && present && current &&
+      GetSecurityDescriptorDacl(git_before[i],&present,&before,&defaulted) && present && before);
+    if(git_wanted[i]) need(GetSecurityDescriptorDacl(git_wanted[i],&present,&wanted,&defaulted) && present && wanted);
+    else if(git_inventory(i)) {
+      FILE_STANDARD_INFO info; need(GetFileInformationByHandleEx(entries[i].file.handle,FileStandardInfo,&info,sizeof(info)));
+      wchar_t text[2048]; DWORD mask=FILE_GENERIC_READ | (info.Directory ? FILE_TRAVERSE : 0);
+      need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+      git_wanted[i]=descriptor(text); need(GetSecurityDescriptorDacl(git_wanted[i],&present,&wanted,&defaulted) && present);
+    }
+    need((current->AclSize==before->AclSize && !memcmp(current,before,current->AclSize)) ||
+      (wanted && current->AclSize==wanted->AclSize && !memcmp(current,wanted,current->AclSize)));
+    /* Owner, group, SACL and protection must also remain unchanged. */
+    PSID a,b; SECURITY_DESCRIPTOR_CONTROL af,bf; DWORD revision;
+    need(GetSecurityDescriptorOwner(actual,&a,&defaulted) && GetSecurityDescriptorOwner(git_before[i],&b,&defaulted) && EqualSid(a,b) &&
+      GetSecurityDescriptorGroup(actual,&a,&defaulted) && GetSecurityDescriptorGroup(git_before[i],&b,&defaulted) && EqualSid(a,b) &&
+      GetSecurityDescriptorControl(actual,&af,&revision) && GetSecurityDescriptorControl(git_before[i],&bf,&revision) && (af & ~SE_SACL_PRESENT)==(bf & ~SE_SACL_PRESENT));
+    PACL ac,bc; BOOL ap,bp; need(GetSecurityDescriptorSacl(actual,&ap,&ac,&defaulted) && GetSecurityDescriptorSacl(git_before[i],&bp,&bc,&defaulted) &&
+      ((!ac && !bc) || (ap && bp && ac && bc && ac->AclSize==bc->AclSize && !memcmp(ac,bc,ac->AclSize))));
+    set_file_security(entries[i].file.handle,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,before); LocalFree(actual);
+    char hash[65]; security(entries[i].file.handle,SE_FILE_OBJECT,TRUE,hash);
+  }
+  if(git_network_owned) { ownership_network(TRUE,FALSE); ownership_network_absent(); git_network_owned=FALSE; }
+  printf("{\"unchangedInstalled\":true,\"restored\":true}");
+}
+static void git_creator_token(HANDLE token,BOOL system) {
+  wchar_t *sid=token_sid(token); need(!wcscmp(sid,system ? L"S-1-5-18" : case_record.accountSid)); LocalFree(sid);
+  TOKEN_GROUPS *restricted=token_info(token,TokenRestrictedSids);
+  if(system) need(!restricted->GroupCount);
+  else { PSID expected; need(ConvertStringSidToSidW(case_record.restrictingSid,&expected) && restricted->GroupCount==1 && EqualSid(restricted->Groups[0].Sid,expected)); LocalFree(expected); }
+  free(restricted);
+  TOKEN_DEFAULT_DACL *creation=token_info(token,TokenDefaultDacl); need(creation->DefaultDacl && IsValidAcl(creation->DefaultDacl));
+  if(system) {
+    ACCESS_ALLOWED_ACE *ace; PSID expected; need(ConvertStringSidToSidW(L"S-1-5-18",&expected) && creation->DefaultDacl->AceCount==1 &&
+      GetAce(creation->DefaultDacl,0,(void **)&ace) && ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags &&
+      ace->Mask==GENERIC_ALL && EqualSid(&ace->SidStart,expected)); LocalFree(expected);
+  } else {
+    TOKEN_MANDATORY_LABEL *label=token_info(token,TokenIntegrityLevel); DWORD rid=*GetSidSubAuthority(label->Label.Sid,*GetSidSubAuthorityCount(label->Label.Sid)-1);
+    need(rid==SECURITY_MANDATORY_LOW_RID); free(label);
+    change_notify_privilege(token);
+    TOKEN_GROUPS *groups=token_info(token,TokenGroups); need(groups->GroupCount<=128);
+    for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) need((groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) && !(groups->Groups[i].Attributes & SE_GROUP_ENABLED));
+    free(groups);
+  }
+  free(creation);
+}
+static unsigned git_subject(DWORD pid,ULONGLONG birth) {
+  unsigned slot=process_count; for(unsigned i=0;i<process_count;i++) if(GetProcessId(processes[i])==pid) {
+    FILETIME created,ended,kernel,user; need(GetProcessTimes(processes[i],&created,&ended,&kernel,&user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime)==birth); slot=i;
+  } need(slot<process_count); return slot;
+}
+static void git_child(DWORD pid,ULONGLONG birth,BOOL retired) {
+  unsigned slot=git_subject(pid,birth); need(sessions[slot]==0); git_creator_token(tokens[slot],TRUE);
+  if(retired) { DWORD code; need(WaitForSingleObject(processes[slot],0)==WAIT_OBJECT_0 && GetExitCodeProcess(processes[slot],&code) && !code); printf("{\"settled\":true}"); return; }
+  BOOL member; need(helpers[0].job && IsProcessInJob(processes[slot],helpers[0].job,&member) && member);
+  HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0); THREADENTRY32 entry={sizeof(entry)}; unsigned matched=0; need(threads!=INVALID_HANDLE_VALUE && Thread32First(threads,&entry));
+  do { if(entry.th32OwnerProcessID==pid) {
+    HANDLE thread=OpenThread(THREAD_QUERY_INFORMATION,FALSE,entry.th32ThreadID); ULONG suspended=0;
+    typedef NTSTATUS (NTAPI *query)(HANDLE,ULONG,PVOID,ULONG,PULONG);
+    query read=(query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtQueryInformationThread");
+    need(thread && read && !read(thread,35,&suspended,sizeof(suspended),NULL) && suspended==1 && CloseHandle(thread)); matched++;
+  } } while(Thread32Next(threads,&entry)); need(GetLastError()==ERROR_NO_MORE_FILES && matched==1 && CloseHandle(threads));
+  struct verify_handles *handles=handle_inventory(); HANDLE process=duplicate_process_owner(slot); unsigned inherited=0;
+  for(ULONG_PTR i=0;i<handles->count;i++) if(handles->entries[i].pid==pid && (handles->entries[i].flags & 2)) {
+    HANDLE value; need(DuplicateHandle(process,(HANDLE)handles->entries[i].handle,GetCurrentProcess(),&value,0,FALSE,DUPLICATE_SAME_ACCESS) &&
+      GetFileType(value)==FILE_TYPE_PIPE && CloseHandle(value)); inherited++;
+  } need(inherited==2 && CloseHandle(process)); free(handles); ownership_job_pin(helpers[0].job,git_job_pin);
+  printf("{\"suspended\":true,\"bornInJob\":true,\"noForeignHandles\":true,\"privateCreatorDaclVerified\":true,\"parentsVerified\":true,\"jobIdentitySha256\":\"%s\"}",git_job_pin);
+}
+
+/* Ordinary attempts execute the checked-in finite fixture with the retained
+ * restricted token and a creation-time nested Job. The independent custodian
+ * repeats AccessCheck against the held target and token: exit codes alone
+ * never establish denial. */
+static void git_access(HANDLE token,HANDLE file,DWORD mask,BOOL expected) {
+  PSECURITY_DESCRIPTOR sd=file_sd(file,SE_FILE_OBJECT); HANDLE impersonation;
+  need(DuplicateTokenEx(token,TOKEN_QUERY | TOKEN_IMPERSONATE,NULL,SecurityImpersonation,TokenImpersonation,&impersonation));
+  GENERIC_MAPPING mapping={FILE_GENERIC_READ,FILE_GENERIC_WRITE,FILE_GENERIC_EXECUTE,FILE_ALL_ACCESS};
+  MapGenericMask(&mask,&mapping); BYTE buffer[4096]; DWORD used=sizeof(buffer),granted; BOOL allowed;
+  need(AccessCheck(sd,impersonation,mask,&mapping,(PPRIVILEGE_SET)buffer,&used,&granted,&allowed) && allowed==expected && CloseHandle(impersonation)); LocalFree(sd);
+}
+/* The same per-principal audit/SACL owner serves finite Git attempts. A pull
+ * subscription is admitted before release; contiguous record IDs and native
+ * XML decoding reject loss/clear and join failure events to retained births. */
+static void git_audit_install(void) {
+  need(git_base_possible && !operation_fenced && !helpers[0].process); operation_empty(case_job); operation_no_creators();
+  audit_enumerate(); AUDIT_POLICY_INFORMATION *policy; need(AuditQuerySystemPolicy(audit_categories,audit_count,&policy)); char hash[65];
+  sum((BYTE *)policy,audit_count*sizeof(*policy),hash);
+  operation_record(L"git-audit-system.baseline",case_custody,(BYTE *)policy,audit_count*sizeof(*policy)); AuditFree(policy);
+  TOKEN_USER *user=token_info(case_token,TokenUser); need(!audit_principal_exists(user->User.Sid));
+  operation_record(L"git-audit-principal.baseline",case_custody,(BYTE *)user->User.Sid,GetLengthSid(user->User.Sid)); free(user);
+  char arguments[93][65],*values[93]; for(unsigned i=0;i<93;i++) values[i]=arguments[i]; strcpy_s(arguments[3],65,hash);
+  unsigned total=0; for(unsigned i=0;i<count;i++) if(git_before[i]) {
+    need(total<44); sprintf_s(arguments[5+total*2],65,"%u",i);
+    PSECURITY_DESCRIPTOR sd=file_sd(entries[i].file.handle,SE_FILE_OBJECT); sum((BYTE *)sd,GetSecurityDescriptorLength(sd),arguments[6+total*2]);
+    wchar_t leaf[64]; need(swprintf_s(leaf,64,L"git-audit-%u.baseline",i)>0); operation_record(leaf,i,(BYTE *)sd,GetSecurityDescriptorLength(sd)); LocalFree(sd); total++;
+  }
+  sprintf_s(arguments[4],65,"%u",total); audit_install_token(case_token,values,5+total*2,FALSE); printf("{\"installed\":true}");
+}
+static struct xml_result git_event(EVT_HANDLE event) {
+  DWORD size=0,used,properties; need(!EvtRender(NULL,event,EvtRenderEventXml,0,NULL,&size,&properties) && GetLastError()==ERROR_INSUFFICIENT_BUFFER && size && size<=262144 && !(size%2));
+  BYTE *bytes=calloc(size,1); need(bytes && EvtRender(NULL,event,EvtRenderEventXml,size,bytes,&used,&properties) && used==size);
+  size_t length=wcslen((wchar_t *)bytes)*2; need(length+2==size); char *encoded=calloc(length*2+1,1); need(encoded);
+  const char *digits="0123456789abcdef"; for(unsigned i=0;i<length;i++) { encoded[i*2]=digits[bytes[i]>>4]; encoded[i*2+1]=digits[bytes[i]&15]; }
+  struct xml_result result=xml_parse(encoded); free(bytes); free(encoded); need(result.event); return result;
+}
+static const wchar_t *git_field(struct xml_result *event,const wchar_t *name) {
+  for(unsigned i=0;i<event->count;i++) if(!wcscmp(event->fields[i].name,name)) return event->fields[i].value; return L"";
+}
+static ULONGLONG git_numeric(const wchar_t *value,unsigned radix) { wchar_t *end; need(*value); ULONGLONG result=_wcstoui64(value,&end,radix); need(!*end); return result; }
+static void git_event_drop(struct xml_result *event) { SecureZeroMemory(event->fields,96*sizeof(*event->fields)); free(event->fields); }
+struct git_audit_window { EVT_HANDLE subscription; HANDLE ready; ULONGLONG record; };
+static struct git_audit_window git_audit_start(void) {
+  need(audit_owned); EVT_HANDLE query=EvtQuery(NULL,L"Security",L"*",EvtQueryChannelPath | EvtQueryReverseDirection),event; DWORD count;
+  need(query && EvtNext(query,1,&event,0,0,&count) && count==1); struct xml_result parsed=git_event(event);
+  ULONGLONG record=git_numeric(git_field(&parsed,L"EventRecordID"),10); git_event_drop(&parsed);
+  EVT_HANDLE bookmark=EvtCreateBookmark(NULL); need(bookmark && EvtUpdateBookmark(bookmark,event) && EvtClose(event) && EvtClose(query));
+  HANDLE ready=CreateEventW(NULL,TRUE,FALSE,NULL); need(ready);
+  EVT_HANDLE subscription=EvtSubscribe(NULL,ready,L"Security",L"*",bookmark,NULL,NULL,EvtSubscribeStartAfterBookmark | EvtSubscribeStrict);
+  need(subscription && EvtClose(bookmark)); struct git_audit_window result={subscription,ready,record}; return result;
+}
+static void git_audit_finish(struct git_audit_window *window,HANDLE actor,const wchar_t *image,const wchar_t *target,DWORD access,BOOL failure,char hash[65]) {
+  FILETIME born,ended,kernel,user; need(GetProcessTimes(actor,&born,&ended,&kernel,&user)); DWORD pid=GetProcessId(actor);
+  ULONGLONG lower=((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime,upper=((ULONGLONG)ended.dwHighDateTime<<32)|ended.dwLowDateTime;
+  BOOL matched=FALSE; unsigned records=0; BYTE (*material)[32]=calloc(8192,32); need(material); DWORD remaining=5000; ULONGLONG started=GetTickCount64();
+  for(;;) {
+    EVT_HANDLE events[32]; DWORD count=0;
+    if(!EvtNext(window->subscription,32,events,0,0,&count)) {
+      need(GetLastError()==ERROR_NO_MORE_ITEMS);
+      if(matched) break;
+      ULONGLONG elapsed=GetTickCount64()-started; need(elapsed<remaining && WaitForSingleObject(window->ready,remaining-(DWORD)elapsed)==WAIT_OBJECT_0 && ResetEvent(window->ready)); continue;
+    }
+    for(unsigned i=0;i<count;i++) {
+      struct xml_result parsed=git_event(events[i]); ULONGLONG id=git_numeric(git_field(&parsed,L"EventRecordID"),10),kind=git_numeric(git_field(&parsed,L"EventID"),10);
+      need(id==window->record+1 && records<8192 && kind!=1101 && kind!=1102); window->record=id;
+      char recordPin[65]; sum((BYTE *)parsed.fields,parsed.count*sizeof(*parsed.fields),recordPin);
+      for(unsigned j=0;j<32;j++) material[records][j]=(BYTE)(nibble(recordPin[j*2])*16+nibble(recordPin[j*2+1])); records++;
+      if(kind==4656 && !wcscmp(git_field(&parsed,L"Provider"),L"Microsoft-Windows-Security-Auditing") &&
+        !wcscmp(git_field(&parsed,L"SubjectUserSid"),case_record.accountSid) &&
+        git_numeric(git_field(&parsed,L"ProcessId"),0)==pid && !_wcsicmp(git_field(&parsed,L"ProcessName"),image)) {
+        const wchar_t *name=git_field(&parsed,L"ObjectName"); BOOL same=!_wcsicmp(name,target);
+        if(!same && (!wcscmp(wcsrchr(target,L'\\')+1,L"index"))) {
+          size_t parent=(size_t)(wcsrchr(target,L'\\')-target); same=!_wcsnicmp(name,target,parent) && !wcscmp(name+parent,L"\\index.lock");
+        }
+        unsigned year,month,day,hour,minute,second,fraction; SYSTEMTIME time={0}; FILETIME instant;
+        need(swscanf_s(git_field(&parsed,L"TimeCreated"),L"%u-%u-%uT%u:%u:%u.%7uZ",&year,&month,&day,&hour,&minute,&second,&fraction)==7 && fraction<10000000);
+        time.wYear=(WORD)year; time.wMonth=(WORD)month; time.wDay=(WORD)day; time.wHour=(WORD)hour; time.wMinute=(WORD)minute; time.wSecond=(WORD)second;
+        need(SystemTimeToFileTime(&time,&instant)); ULONGLONG stamp=(((ULONGLONG)instant.dwHighDateTime<<32)|instant.dwLowDateTime)+fraction;
+        ULONGLONG keywords=git_numeric(git_field(&parsed,L"Keywords"),0),mask=git_numeric(git_field(&parsed,L"AccessMask"),0);
+        if(same && stamp>=lower && stamp<=upper && (mask & access)==access &&
+          (keywords & (failure ? 0x0010000000000000ULL : 0x0020000000000000ULL))) matched=TRUE;
+      }
+      git_event_drop(&parsed); need(EvtClose(events[i]));
+    }
+  }
+  need(matched && records && EvtClose(window->subscription) && CloseHandle(window->ready)); sum((BYTE *)material,records*sizeof(*material),hash); SecureZeroMemory(material,8192*32); free(material);
+}
+
+static void git_ordinary(char **v,unsigned n) {
+  need(n==5 && !wcscmp(operation_id,L"git.ordinary") && !operation_fenced && git_base_possible && git_network_owned && !helpers[0].process);
+  wchar_t profile[32],operation[32],parent[64]; decode_bounded(v[2],profile,32); decode_bounded(v[3],operation,32); decode_bounded(v[4],parent,64);
+  need(!wcscmp(profile,L"read-only") || !wcscmp(profile,L"workspace-write") || !wcscmp(profile,L"trusted-command"));
+  need(wcslen(parent)==40 && wcsspn(parent,L"0123456789abcdef")==40);
+  BOOL git=!wcscmp(operation,L"inspect") || !wcscmp(operation,L"git-add") || !wcscmp(operation,L"git-commit");
+  BOOL inspect=!wcscmp(operation,L"inspect"),pointer=!wcsncmp(operation,L"pointer-",8);
+  need(git || pointer || !wcscmp(operation,L"metadata-write") || !wcscmp(operation,L"ref-write"));
+  if(pointer) need(!wcscmp(operation,L"pointer-write") || !wcscmp(operation,L"pointer-delete") || !wcscmp(operation,L"pointer-replace"));
+  operation_empty(case_job); git_hooks_empty(); operation_no_creators(); ownership_network(FALSE,TRUE);
+  wchar_t target[4096]; need(swprintf_s(target,4096,L"%ls\\%ls",pointer ? entries[4].path : entries[operation_slot(1)].path,
+    pointer ? L".git" : !wcscmp(operation,L"ref-write") ? L"refs\\heads\\proof" : inspect ? L"HEAD" : L"index")>0);
+  unsigned targetSlot=count; for(unsigned i=0;i<count;i++) if(entries[i].file.handle && !wcscmp(entries[i].path,target)) targetSlot=i;
+  need(targetSlot<count); HANDLE targetFile=entries[targetSlot].file.handle;
+  DWORD desired=!wcscmp(operation,L"pointer-delete") || !wcscmp(operation,L"pointer-replace") ? DELETE : FILE_WRITE_DATA;
+  HANDLE system; need(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY | TOKEN_DUPLICATE,&system)); git_access(system,targetFile,inspect ? FILE_READ_DATA : desired,TRUE); need(CloseHandle(system));
+  git_access(case_token,targetFile,inspect ? FILE_READ_DATA : desired,inspect);
+  struct git_audit_window audit=git_audit_start();
+  char before[65],after[65],targetPin[65],jobPin[65]; operation_sum(targetFile,before); sum((BYTE *)&entries[targetSlot].file.id,sizeof(FILE_ID_INFO),targetPin);
+  PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,TRUE),private=attributes(sd,FALSE);
+  HANDLE childIn,childOut,input,output; need(CreatePipe(&childIn,&input,&sa,0) && CreatePipe(&output,&childOut,&sa,0) &&
+    SetHandleInformation(input,HANDLE_FLAG_INHERIT,0) && SetHandleInformation(output,HANDLE_FLAG_INHERIT,0));
+  struct operation_creation intent=operation_creation_intent(6);
+  HANDLE job=operation_creation_job(&intent,&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=0x2008; limits.BasicLimitInformation.ActiveProcessLimit=32;
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui={255}; need(job && SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) && SetInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui)));
+  HANDLE inherited[]={childIn,childOut},ownedJobs[]={case_job,job}; SIZE_T size=0; InitializeProcThreadAttributeList(NULL,2,0,&size);
+  STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.lpAttributeList=calloc(1,size);
+  need(startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList,2,0,&size) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL) &&
+    UpdateProcThreadAttribute(startup.lpAttributeList,0,PROC_THREAD_ATTRIBUTE_JOB_LIST,ownedJobs,sizeof(ownedJobs),NULL,NULL));
+  startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=childIn; startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=childOut;
+  wchar_t command[32767]=L"",nonceText[33]; for(unsigned i=0;i<33;i++) nonceText[i]=nonce[i];
+  const wchar_t *args[]={entries[6].path,nonceText,operation,entries[operation_slot(0)].path,entries[operation_slot(1)].path,entries[4].path,entries[operation_slot(2)].path,parent,L"test(fixture): record owned edit"};
+  for(unsigned i=0;i<9;i++) quoted(command,32767,args[i]);
+  wchar_t environment[]=L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0"; PROCESS_INFORMATION fixture={0}; HANDLE fixtureToken;
+  need(CreateProcessAsUserW(case_token,entries[6].path,command,&private,&private,TRUE,CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+    environment,entries[4].path,&startup.StartupInfo,&fixture) && OpenProcessToken(fixture.hProcess,TOKEN_QUERY | TOKEN_DUPLICATE,&fixtureToken));
+  operation_creation_birth(&intent,fixture.hProcess,fixtureToken);
+  DeleteProcThreadAttributeList(startup.lpAttributeList); free(startup.lpAttributeList); need(CloseHandle(childIn) && CloseHandle(childOut)); LocalFree(sd);
+  git_creator_token(fixtureToken,FALSE); BOOL member; need(IsProcessInJob(fixture.hProcess,job,&member) && member && IsProcessInJob(fixture.hProcess,case_job,&member) && member);
+  need(ResumeThread(fixture.hThread)==1 && CloseHandle(fixture.hThread)); fixture.hThread=NULL;
+  char frame[4096]; line(output,frame,sizeof(frame)); need(strstr(frame,nonce) && strstr(frame,"\"phase\":\"ready\"")); worker_write(input,"P\n",2);
+  line(output,frame,sizeof(frame)); need(strstr(frame,nonce)); HANDLE actor=fixture.hProcess,actorToken=fixtureToken;
+  if(git) {
+    need(strstr(frame,"\"phase\":\"child\"") && strstr(frame,"\"suspended\":true")); char *start=strstr(frame,"\"pid\":"); unsigned long pid; unsigned long long birth;
+    need(start && sscanf_s(start,"\"pid\":%lu,\"creationTime\":\"%llu\"",&pid,&birth)==2);
+    actor=OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | SYNCHRONIZE,FALSE,pid);
+    FILETIME created,ended,kernel,user; need(actor && GetProcessTimes(actor,&created,&ended,&kernel,&user) && (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime)==birth &&
+      OpenProcessToken(actor,TOKEN_QUERY | TOKEN_DUPLICATE,&actorToken) && IsProcessInJob(actor,job,&member) && member && IsProcessInJob(actor,case_job,&member) && member);
+    git_creator_token(actorToken,FALSE); wchar_t path[4096]; DWORD length=4096; need(QueryFullProcessImageNameW(actor,0,path,&length) && !wcscmp(path,entries[operation_slot(0)].path));
+    pin(&entries[operation_slot(0)].file,entries[operation_slot(0)].pin); char signaturePin[65]; signature(&entries[operation_slot(0)].file,entries[operation_slot(0)].signature,signaturePin);
+    git_access(actorToken,targetFile,inspect ? FILE_READ_DATA : desired,inspect); worker_write(input,"P\n",2);
+  } else need(strstr(frame,"\"phase\":\"denied\"") && strstr(frame,"\"nativeCode\":5"));
+  need(CloseHandle(input)); DWORD exit,actorExit; need(WaitForSingleObject(fixture.hProcess,25000)==WAIT_OBJECT_0 &&
+    WaitForSingleObject(actor,0)==WAIT_OBJECT_0 && GetExitCodeProcess(fixture.hProcess,&exit) && GetExitCodeProcess(actor,&actorExit) &&
+    (inspect ? !exit && !actorExit : git ? (exit==1 || exit==128) && actorExit==exit : !exit));
+  operation_empty(job); operation_empty(case_job); ownership_job_pin(job,jobPin);
+  BYTE trailing; DWORD used; need(!ReadFile(output,&trailing,1,&used,NULL) && GetLastError()==ERROR_BROKEN_PIPE && !used && CloseHandle(output));
+  operation_sum(targetFile,after); need(!strcmp(before,after)); operation_no_creators(); ownership_network(FALSE,TRUE);
+  char eventPin[65]; git_audit_finish(&audit,actor,git ? entries[operation_slot(0)].path : entries[6].path,target,inspect ? FILE_READ_DATA : desired,!inspect,eventPin);
+  printf("{\"identity\":"); retained_identity(actor,actorToken,0);
+  printf(",\"tokenVerified\":true,\"bornInJob\":true,\"noBreakaway\":true,\"settled\":true,\"basePolicyVerified\":true,\"closureVerified\":true,\"decisionVerified\":true,\"auditComplete\":true,\"auditSha256\":\"%s\",\"lossCount\":0,\"jobIdentitySha256\":\"%s\",\"code\":%lu",eventPin,jobPin,exit);
+  if(inspect) printf(",\"head\":\"%ls\"",parent);
+  else { printf(",\"attempted\":true,\"allowed\":false,\"exitCode\":%lu,\"signal\":null,\"nativeCode\":5,\"nativeDecision\":\"deny-metadata-write\",\"beforeSha256\":\"%s\",\"afterSha256\":\"%s\",\"targetIdentitySha256\":\"%s\",\"control\":{\"identity\":",exit,before,after,targetPin); identity(GetCurrentProcess());
+    printf(",\"ready\":true,\"reachable\":true,\"readyBeforeAttempt\":true,\"settled\":true,\"operation\":\"%ls\",\"nativeCode\":0,\"targetIdentitySha256\":\"%s\"}",operation,targetPin);
+  }
+  putchar('}'); if(git) need(CloseHandle(actor) && CloseHandle(actorToken)); need(CloseHandle(fixture.hProcess) && CloseHandle(fixtureToken) && CloseHandle(job));
+}
+
+static BOOL operation_dispatch(char **v,unsigned n) {
+  if(!strcmp(v[0],"operation-bind")) operation_bind(v,n);
+  else if(!strcmp(v[0],"operation-authority")) { need(n==2); operation_authority(); }
+  else if(!strcmp(v[0],"operation-fence")) { need(n==2 && *operation_id); operation_fenced=TRUE; printf("{\"fenced\":true}"); }
+  else if(!strcmp(v[0],"operation-helper-retire")) {
+    need(n==2 && operation_fenced && !helpers[1].process);
+    if(helpers[0].process) {
+      operation_stop_job(helpers[0].job); need(WaitForSingleObject(helpers[0].process,5000)==WAIT_OBJECT_0);
+      if(helpers[0].thread) { need(CloseHandle(helpers[0].thread)); helpers[0].thread=NULL; }
+      BYTE bytes[4096]; DWORD used,total=0;
+      while(ReadFile(helpers[0].output,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=2097152); }
+      need(GetLastError()==ERROR_BROKEN_PIPE);
+    }
+    printf("{\"helpersSettled\":true}");
+  }
+  else if(!strcmp(v[0],"file-view")) { need(n==2); file_view(); }
+  else if(!strcmp(v[0],"file-private")) { need(n==2); file_private(); }
+  else if(!strcmp(v[0],"file-workers-retire")) { need(n==2); file_workers_retire(); }
+  else if(!strcmp(v[0],"file-recovery-retirement")) {
+    need(n==2 && !wcsncmp(operation_id,L"files.",6) && !helpers[1].process && !file_worker_count); operation_empty(case_job);
+    if(helpers[0].process) {
+      need(helpers[0].file && system_process(helpers[0].process));
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account; need(QueryInformationJobObject(helpers[0].job,JobObjectBasicAccountingInformation,&account,sizeof(account),NULL) && account.ActiveProcesses==1);
+    }
+    /* The session checks prior retirement before opening its recovery helper,
+     * then again at deletion. Only that admitted System helper may be live. */
+    for(unsigned i=0;i<process_count;i++) if(!helpers[0].process || GetProcessId(processes[i])!=GetProcessId(helpers[0].process)) need(WaitForSingleObject(processes[i],0)==WAIT_OBJECT_0);
+    printf("{\"noLiveMembers\":true,\"helpersSettled\":true,\"admissionsClosed\":true}");
+  }
+  else if(!strcmp(v[0],"file-publishers-start")) { need(n==2); file_publishers_start(); }
+  else if(!strcmp(v[0],"file-publishers-finish")) { need(n==2); file_publishers_finish(); }
+  else if(!strcmp(v[0],"file-reader-start")) { need(n==2); file_reader_start(); }
+  else if(!strcmp(v[0],"file-reader-read")) { need(n==2); file_reader_read(); }
+  else if(!strcmp(v[0],"file-reader-finish")) { need(n==2); file_reader_finish(); }
+  else if(!strcmp(v[0],"file-control")) { need(n==3); wchar_t kind[32]; decode_bounded(v[2],kind,32); file_control_apply(kind); }
+  else if(!strcmp(v[0],"file-control-read")) { need(n==2); file_control_read(); }
+  else if(!strcmp(v[0],"file-control-restore")) { need(n==2); file_control_restore(); }
+  else if(!strcmp(v[0],"git-policy-read")) { need(n==2); git_policy_read(); }
+  else if(!strcmp(v[0],"git-policy-install")) { need(n==2); git_base_install(); }
+  else if(!strcmp(v[0],"git-audit-install")) { need(n==2); git_audit_install(); }
+  else if(!strcmp(v[0],"git-policy-restore")) { need(n==2); git_restore(); }
+  else if(!strcmp(v[0],"git-ordinary")) git_ordinary(v,n);
+  else if(!strcmp(v[0],"git-child") || !strcmp(v[0],"git-child-retired")) { need(n==4); wchar_t birth[32]; decode_bounded(v[3],birth,32); need(wcsspn(birth,L"0123456789")==wcslen(birth)); git_child(bounded_number(v[2],MAXDWORD),_wcstoui64(birth,NULL,10),!strcmp(v[0],"git-child-retired")); }
+  else if(!strcmp(v[0],"operation-retirement")) { need(n==2 && !helpers[0].process); operation_empty(case_job); printf("{\"noLiveMembers\":true,\"helpersSettled\":true,\"admissionsClosed\":true}"); }
+#ifdef NATIVE_CI_EXPERIMENT
+  else if(!strcmp(v[0],"release-import")) { need(n==4 && *operation_id && !operation_fenced); wchar_t name[4096]; decode(v[2],name); unsigned image=bounded_number(v[3],count-1); need(entries[image].file.handle); experiment_loader(name,entries[image].path); }
+#endif
+  else if(!strcmp(v[0],"release-pe")) { need(n==3); release_pe(bounded_number(v[2],count-1)); }
+  else if(!strcmp(v[0],"release-build")) { need(n==3); unsigned index=bounded_number(v[2],count-1); LARGE_INTEGER size; need(entries[index].file.handle && GetFileSizeEx(entries[index].file.handle,&size) && size.QuadPart>0 && size.QuadPart<=536870912); printf("{\"bytes\":%llu}",(ULONGLONG)size.QuadPart); }
+  else if(!strcmp(v[0],"release-close")) { need(n==3); unsigned index=bounded_number(v[2],count-1); need(!operation_closed[index] && entries[index].file.handle); close_file(&entries[index].file); memset(&entries[index].file,0,sizeof(entries[index].file)); operation_closed[index]=TRUE; printf("{\"index\":%u,\"closed\":true}",index); }
+  else if(!strcmp(v[0],"operation-closed")) { need(n==2); unsigned emitted=0; putchar('['); for(unsigned i=0;i<count;i++) if(operation_closed[i]) { need(!entries[i].file.handle); printf("%s%u",emitted++ ? "," : "",i); } putchar(']'); }
+  else return FALSE;
+  return TRUE;
+}
+/* Recovery derives the same finite WFP graph as the original writer. A
+ * transaction validates every object before removing any publicly visible rule. */
+static void recovery_filter(unsigned index,const GUID *layer,unsigned family,unsigned protocol,int local,int remote,BOOL principal,FWP_ACTION_TYPE action,UINT64 weight,FWP_BYTE_BLOB *token,UINT64 identity) {
+  GUID key;access_key(index+2,&key);FWPM_FILTER0 *actual;need(FwpmFilterGetByKey0(wfp_engine,&key,&actual)==ERROR_SUCCESS);
+  GUID provider,sublayer;access_key(0,&provider);access_key(1,&sublayer);
+  need(actual->filterId==identity&&actual->providerKey&&IsEqualGUID(actual->providerKey,&provider)&&IsEqualGUID(&actual->subLayerKey,&sublayer)&&IsEqualGUID(&actual->layerKey,layer)&&
+    actual->flags==(FWPM_FILTER_FLAG_PERSISTENT|FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT)&&actual->action.type==action&&actual->weight.type==FWP_UINT64&&actual->weight.uint64&&*actual->weight.uint64==weight&&
+    !actual->providerData.size&&!actual->rawContext&&!actual->reserved&&actual->displayData.name&&!wcscmp(actual->displayData.name,L"NativeProof owned policy")&&!actual->displayData.description);
+  FWPM_FILTER_CONDITION0 expected[6]={0};unsigned count=0;
+  if(principal){expected[count].fieldKey=FWPM_CONDITION_ALE_USER_ID;expected[count].conditionValue.type=FWP_SECURITY_DESCRIPTOR_TYPE;expected[count++].conditionValue.sd=token;}
+  if(protocol){expected[count].fieldKey=FWPM_CONDITION_IP_PROTOCOL;expected[count].conditionValue.type=FWP_UINT8;expected[count++].conditionValue.uint8=(UINT8)protocol;}
+  FWP_BYTE_ARRAY16 address={0};address.byteArray16[15]=1;
+  for(unsigned side=0;side<2;side++){int port=side?remote:local;if(port<0)continue;
+    expected[count].fieldKey=side?FWPM_CONDITION_IP_REMOTE_ADDRESS:FWPM_CONDITION_IP_LOCAL_ADDRESS;expected[count].conditionValue.type=family==4?FWP_UINT32:FWP_BYTE_ARRAY16_TYPE;
+    if(family==4)expected[count].conditionValue.uint32=0x7f000001;else expected[count].conditionValue.byteArray16=&address;count++;
+    expected[count].fieldKey=side?FWPM_CONDITION_IP_REMOTE_PORT:FWPM_CONDITION_IP_LOCAL_PORT;expected[count].conditionValue.type=FWP_UINT16;expected[count++].conditionValue.uint16=(UINT16)port;
+  }
+  need(actual->numFilterConditions==count);
+  for(unsigned i=0;i<count;i++){unsigned matches=0;for(unsigned j=0;j<count;j++)if(IsEqualGUID(&expected[i].fieldKey,&actual->filterCondition[j].fieldKey)){
+      FWP_CONDITION_VALUE0 *a=&actual->filterCondition[j].conditionValue,*b=&expected[i].conditionValue;need(++matches==1&&actual->filterCondition[j].matchType==FWP_MATCH_EQUAL&&a->type==b->type);
+      if(b->type==FWP_UINT8)need(a->uint8==b->uint8);else if(b->type==FWP_UINT16)need(a->uint16==b->uint16);else if(b->type==FWP_UINT32)need(a->uint32==b->uint32);
+      else if(b->type==FWP_BYTE_ARRAY16_TYPE)need(a->byteArray16&&!memcmp(a->byteArray16,b->byteArray16,16));
+      else need(b->type==FWP_SECURITY_DESCRIPTOR_TYPE&&a->sd&&a->sd->size==b->sd->size&&!memcmp(a->sd->data,b->sd->data,b->sd->size));
+    }need(matches==1);}
+  FwpmFreeMemory0((void **)&actual);ownership_wfp_security(&key,2);
+}
+static void recovery_access_network(const struct policy_recovery_network *plan,const struct policy_recovery_filters *identities) {
+  GUID providerKey,layerKey;access_key(0,&providerKey);access_key(1,&layerKey);wfp_open();
+  need(FwpmTransactionBegin0(wfp_engine,0)==ERROR_SUCCESS);
+  FWPM_PROVIDER0 *provider;FWPM_SUBLAYER0 *layer;DWORD p=FwpmProviderGetByKey0(wfp_engine,&providerKey,&provider),l=FwpmSubLayerGetByKey0(wfp_engine,&layerKey,&layer);
+  need((p==FWP_E_PROVIDER_NOT_FOUND&&l==FWP_E_SUBLAYER_NOT_FOUND)||(p==ERROR_SUCCESS&&l==ERROR_SUCCESS));
+  if(p==ERROR_SUCCESS){need(provider->flags==FWPM_PROVIDER_FLAG_PERSISTENT&&!provider->providerData.size&&!provider->serviceName&&provider->displayData.name&&!wcscmp(provider->displayData.name,L"NativeProof private provider")&&!provider->displayData.description&&
+      layer->providerKey&&IsEqualGUID(layer->providerKey,&providerKey)&&layer->flags==FWPM_SUBLAYER_FLAG_PERSISTENT&&layer->weight==65535&&!layer->providerData.size&&layer->displayData.name&&!wcscmp(layer->displayData.name,L"NativeProof private sublayer")&&!layer->displayData.description);
+    FwpmFreeMemory0((void **)&provider);FwpmFreeMemory0((void **)&layer);ownership_wfp_security(&providerKey,0);ownership_wfp_security(&layerKey,1);}
+  struct provider_filter_census census = provider_filters(&providerKey, 53);
+  UINT32 count = census.count;
+  need(provider_filters_accept(census, count == 0 || (p == ERROR_SUCCESS && count == 52)));
+  if(count){
+    need(identities&&identities->kind==2&&identities->count==52);
+    PSID user,restricting;need(ConvertStringSidToSidW(case_record.accountSid,&user)&&ConvertStringSidToSidW(case_record.restrictingSid,&restricting));
+    EXPLICIT_ACCESSW access[2]={0};PACL acl;for(unsigned i=0;i<2;i++){access[i].grfAccessPermissions=FWP_ACTRL_MATCH_FILTER;access[i].grfAccessMode=GRANT_ACCESS;access[i].Trustee.TrusteeForm=TRUSTEE_IS_SID;access[i].Trustee.ptstrName=i?restricting:user;}
+    need(SetEntriesInAclW(2,access,NULL,&acl)==ERROR_SUCCESS);SECURITY_DESCRIPTOR sd;need(InitializeSecurityDescriptor(&sd,SECURITY_DESCRIPTOR_REVISION)&&SetSecurityDescriptorDacl(&sd,TRUE,acl,FALSE));
+    DWORD size=0;MakeSelfRelativeSD(&sd,NULL,&size);need(size&&size<=4096);BYTE *relative=calloc(size,1);need(relative&&MakeSelfRelativeSD(&sd,relative,&size));FWP_BYTE_BLOB token={size,relative};
+    const GUID *layers[]={&FWPM_LAYER_ALE_AUTH_CONNECT_V4,&FWPM_LAYER_ALE_AUTH_CONNECT_V6,&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};unsigned index=0;
+    for(unsigned i=0;i<4;i++){unsigned family=i%2?6:4;recovery_filter(index,layers[i],family,0,-1,-1,TRUE,FWP_ACTION_BLOCK,10,&token,identities->ids[index]);index++;
+      for(unsigned protocol=0;protocol<2;protocol++){unsigned offset=(family==4?0:4)+protocol*2,ip=protocol?17:6;
+        for(unsigned port=0;port<2;port++)for(unsigned side=0;side<2;side++){recovery_filter(index,layers[i],family,ip,side?-1:plan->ports[offset+port],side?plan->ports[offset+port]:-1,FALSE,FWP_ACTION_BLOCK,50,&token,identities->ids[index]);index++;}
+        recovery_filter(index,layers[i],family,ip,plan->ports[offset],plan->ports[offset+1],TRUE,FWP_ACTION_PERMIT,100,&token,identities->ids[index]);index++;recovery_filter(index,layers[i],family,ip,plan->ports[offset+1],plan->ports[offset],TRUE,FWP_ACTION_PERMIT,100,&token,identities->ids[index]);index++;
+      }}
+    need(index==52);free(relative);LocalFree(acl);LocalFree(user);LocalFree(restricting);
+    for(unsigned i=0;i<52;i++){GUID key;access_key(i+2,&key);need(FwpmFilterDeleteByKey0(wfp_engine,&key)==ERROR_SUCCESS);}
+  }
+  if(p==ERROR_SUCCESS)need(FwpmSubLayerDeleteByKey0(wfp_engine,&layerKey)==ERROR_SUCCESS&&FwpmProviderDeleteByKey0(wfp_engine,&providerKey)==ERROR_SUCCESS);
+  need(FwpmTransactionCommit0(wfp_engine)==ERROR_SUCCESS);
+}
+static void recovery_policy(unsigned custody,const char *context,const char *caseNonce) {
+  need(preparation_only&&custody==2&&strlen(context)==64&&strlen(caseNonce)==32&&!audit_owned);
+  struct case_account_record saved=case_record;account_record(entries[custody].path,&case_record);need(!strcmp(case_record.context,context)&&!strcmp(case_record.nonce,caseNonce));
+  recovery_principal_empty(&case_record);
+  char savedNonce[33];strcpy_s(savedNonce,33,nonce);strcpy_s(nonce,33,caseNonce);
+  HANDLE held[SLOTS]={0};PSECURITY_DESCRIPTOR before[SLOTS]={0},wanted[SLOTS]={0};
+  for(unsigned i=0;i<count;i++){
+    wchar_t leaf[64],name[4096];need(swprintf_s(leaf,64,L"policy-%u.baseline",i)>0&&swprintf_s(name,4096,L"%ls\\%ls",entries[custody].path,leaf)>0);
+    if(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES){need(GetLastError()==ERROR_FILE_NOT_FOUND);continue;}
+    need(!entries[i].file.handle);entries[i].file=hold_shared(entries[i].path,!strcmp(entries[i].kind,"directory"),FALSE,GENERIC_READ|ACCESS_SYSTEM_SECURITY,!strcmp(entries[i].kind,"mutable"));
+    DWORD size;BYTE *bytes=policy_record_read(custody,leaf,i,context,&size);need(bytes&&size>=sizeof(struct policy_recovery_pair));struct policy_recovery_pair pair;memcpy(&pair,bytes,sizeof(pair));
+    need(pair.before>=SECURITY_DESCRIPTOR_MIN_LENGTH&&pair.wanted>=SECURITY_DESCRIPTOR_MIN_LENGTH&&pair.before<=65536&&pair.wanted<=65536&&sizeof(pair)+pair.before+pair.wanted==size);
+    before[i]=LocalAlloc(LPTR,pair.before);wanted[i]=LocalAlloc(LPTR,pair.wanted);need(before[i]&&wanted[i]);memcpy(before[i],bytes+sizeof(pair),pair.before);memcpy(wanted[i],bytes+sizeof(pair)+pair.before,pair.wanted);free(bytes);
+    need(IsValidSecurityDescriptor(before[i])&&GetSecurityDescriptorLength(before[i])==pair.before&&IsValidSecurityDescriptor(wanted[i])&&GetSecurityDescriptorLength(wanted[i])==pair.wanted);
+    PSECURITY_DESCRIPTOR current=file_sd(entries[i].file.handle,SE_FILE_OBJECT);PSID a,b;BOOL def;SECURITY_DESCRIPTOR_CONTROL flags,old;DWORD revision;
+    need(GetSecurityDescriptorOwner(current,&a,&def)&&GetSecurityDescriptorOwner(before[i],&b,&def)&&EqualSid(a,b)&&GetSecurityDescriptorGroup(current,&a,&def)&&GetSecurityDescriptorGroup(before[i],&b,&def)&&EqualSid(a,b)&&
+      GetSecurityDescriptorControl(current,&flags,&revision)&&GetSecurityDescriptorControl(before[i],&old,&revision)&&!((flags^old)&(SE_DACL_PROTECTED|SE_SACL_PROTECTED))&&
+      (access_acl_equal(current,before[i],FALSE)||access_acl_equal(current,wanted[i],FALSE))&&(access_acl_equal(current,before[i],TRUE)||access_acl_equal(current,wanted[i],TRUE)));LocalFree(current);
+    held[i]=entries[i].file.handle;
+  }
+  BOOL openedCustody=!entries[custody].file.handle;if(openedCustody)entries[custody].file=hold(entries[custody].path,TRUE,TRUE,GENERIC_READ);
+  DWORD size;BYTE *bytes=policy_record_read(custody,L"policy-network.intent",custody,context,&size);struct policy_recovery_network network={0};
+  if(bytes){need(size==sizeof(network));memcpy(&network,bytes,size);free(bytes);need(network.version==1&&(network.kind==1||network.kind==2));if(network.kind==2)for(unsigned i=0;i<8;i++){need(network.ports[i]>=1024&&network.ports[i]<=65535);for(unsigned j=0;j<i;j++)need(network.ports[i]!=network.ports[j]);}}
+  struct policy_recovery_filters identities={0};BOOL identitiesPresent=FALSE;
+  bytes=policy_record_read(custody,L"policy-filters.observed",custody,context,&size);
+  if(bytes){need(size==sizeof(identities));memcpy(&identities,bytes,size);free(bytes);need(identities.kind==network.kind&&identities.count==(network.kind==1?4:52));for(unsigned i=0;i<identities.count;i++){need(identities.ids[i]);for(unsigned j=0;j<i;j++)need(identities.ids[i]!=identities.ids[j]);}identitiesPresent=TRUE;}
+  HKEY registry=network.kind==2?policy_registry_owned(custody,context):NULL;
+  if(network.kind==1){ownership_keys();FWPM_PROVIDER0 *provider;wfp_open();DWORD status=FwpmProviderGetByKey0(wfp_engine,&ownership_provider,&provider);if(status==ERROR_SUCCESS){FwpmFreeMemory0((void **)&provider);need(identitiesPresent);memcpy(ownership_filter_ids,identities.ids,sizeof(ownership_filter_ids));ownership_network(FALSE,TRUE);ownership_network(TRUE,FALSE);}else need(status==FWP_E_PROVIDER_NOT_FOUND);ownership_network_absent();}
+  else if(network.kind==2)recovery_access_network(&network,identitiesPresent?&identities:NULL);
+  if(registry)policy_registry_remove(registry);
+  for(unsigned i=0;i<count;i++)if(before[i]){PACL dacl,sacl;BOOL present,def;SECURITY_DESCRIPTOR_CONTROL flags;DWORD revision;need(GetSecurityDescriptorDacl(before[i],&present,&dacl,&def)&&present&&GetSecurityDescriptorSacl(before[i],&present,&sacl,&def)&&GetSecurityDescriptorControl(before[i],&flags,&revision));
+    set_file_security(held[i],DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION|(flags&SE_DACL_PROTECTED?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION)|(flags&SE_SACL_PROTECTED?PROTECTED_SACL_SECURITY_INFORMATION:UNPROTECTED_SACL_SECURITY_INFORMATION),dacl,present?sacl:NULL);
+    PSECURITY_DESCRIPTOR actual=file_sd(held[i],SE_FILE_OBJECT);need(GetSecurityDescriptorLength(actual)==GetSecurityDescriptorLength(before[i])&&!memcmp(actual,before[i],GetSecurityDescriptorLength(actual)));LocalFree(actual);LocalFree(before[i]);LocalFree(wanted[i]);close_file(&entries[i].file);
+  }
+  recovery_principal_empty(&case_record);
+  if(openedCustody)close_file(&entries[custody].file);strcpy_s(nonce,33,savedNonce);case_record=saved;
+  printf("{\"restored\":true}");
+}
+/* Cold recovery uses the independently approved observer's case plan. Node
+ * first proves original creators and observers retired through held births or
+ * acknowledged cold census/Job/task reads. Neither PID-open failure nor a saved
+ * completion supplies that proof. This lane still rejoins the account, whole
+ * Job and private objects; it never opens a final helper or executes a payload. */
+static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required) {
+  need(preparation_only && custody == 2 && count >= 9 && !strcmp(entries[custody].kind,"directory") &&
+    strlen(context)==64 && strspn(context,"0123456789abcdef")==64 && strlen(caseNonce)==32 &&
+    strspn(caseNonce,"0123456789abcdef")==32 && !memcmp(context,caseNonce,32));
+  char savedNonce[33]; strcpy_s(savedNonce,33,nonce); strcpy_s(nonce,33,caseNonce);
+  wchar_t name[21], jobName[96], recordName[4096];
+  need(swprintf_s(name,21,L"np_%.16hs",caseNonce)>0 && swprintf_s(jobName,96,L"Local\\NativeProof-%hs",caseNonce)>0 &&
+    swprintf_s(recordName,4096,L"%ls\\account.record",entries[custody].path)>0);
+  DWORD attributes = GetFileAttributesW(recordName); BOOL recorded = attributes != INVALID_FILE_ATTRIBUTES;
+  if (!recorded) need((GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND) && !required);
+  struct case_account_record record={0}; if (recorded) { account_record(entries[custody].path,&record); need(!strcmp(record.context,context) && !strcmp(record.nonce,caseNonce)); }
+  USER_INFO_1 *user=NULL; NET_API_STATUS status=NetUserGetInfo(NULL,name,1,(BYTE **)&user);
+  need(status==NERR_UserNotFound || (recorded && status==NERR_Success)); if (user) NetApiBufferFree(user);
+  /* An installed or changed baseline retains exclusion. Its owning restoration
+   * must complete before account removal; recovery never overwrites it. */
+  for (unsigned i=1;i<count;i++) {
+    size_t root=wcslen(entries[1].path); if (wcsncmp(entries[i].path,entries[1].path,root) ||
+      (entries[i].path[root] && entries[i].path[root]!='\\')) continue;
+    DWORD present=GetFileAttributesW(entries[i].path);
+    if (present==INVALID_FILE_ATTRIBUTES) { need(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND); continue; }
+    struct held_file file=hold_shared(entries[i].path,!strcmp(entries[i].kind,"directory"),TRUE,GENERIC_READ | ACCESS_SYSTEM_SECURITY,!strcmp(entries[i].kind,"mutable"));
+    if(strcmp(entries[i].kind,"directory")&&strcmp(entries[i].kind,"mutable"))pin(&file,entries[i].pin);
+    PSECURITY_DESCRIPTOR sd=file_sd(file.handle,SE_FILE_OBJECT); PACL sacl; BOOL has,defaulted;
+    need(GetSecurityDescriptorSacl(sd,&has,&sacl,&defaulted));
+    if (has && sacl) for (unsigned j=0;j<sacl->AceCount;j++) { ACE_HEADER *ace; need(GetAce(sacl,j,(void **)&ace) && ace->AceType==SYSTEM_MANDATORY_LABEL_ACE_TYPE); }
+    LocalFree(sd); close_file(&file);
+  }
+  if(recorded)recovery_sentinel(custody,context);
+  ownership_network_absent(); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
+  access_key(0,&key); need(FwpmProviderGetByKey0(wfp_engine,&key,&provider)==FWP_E_PROVIDER_NOT_FOUND);
+  access_key(1,&key); need(FwpmSubLayerGetByKey0(wfp_engine,&key,&layer)==FWP_E_SUBLAYER_NOT_FOUND);
+  for (unsigned i=0;i<52;i++) { access_key(i+2,&key); need(FwpmFilterGetByKey0(wfp_engine,&key,&filter)==FWP_E_FILTER_NOT_FOUND); }
+  need(!access_registry_present());
+  PSID sid=NULL; if (recorded) { need(ConvertStringSidToSidW(record.accountSid,&sid) && !audit_principal_exists(sid)); }
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | READ_CONTROL,FALSE,jobName);
+  if (!job) need(GetLastError()==ERROR_FILE_NOT_FOUND);
+  else { char pin[65]; security(job,SE_KERNEL_OBJECT,TRUE,pin); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui;
+    need(QueryInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits),NULL) && limits.BasicLimitInformation.LimitFlags==0x2008 &&
+      limits.BasicLimitInformation.ActiveProcessLimit==32 && QueryInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui),NULL) && ui.UIRestrictionsClass==255); }
+  if (status==NERR_Success) {
+    account_check(name,record.accountSid); HANDLE census=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0); need(census!=INVALID_HANDLE_VALUE);
+    PROCESSENTRY32W entry={sizeof(entry)}; unsigned members=0; need(Process32FirstW(census,&entry));
+    do { if (!entry.th32ProcessID) continue; HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,FALSE,entry.th32ProcessID);
+      if (!process) { need(GetLastError()==ERROR_INVALID_PARAMETER); continue; } HANDLE token; need(OpenProcessToken(process,TOKEN_QUERY,&token));
+      wchar_t *actual=token_sid(token); if (!wcscmp(actual,record.accountSid)) { BOOL belongs;
+        need(job && ++members<=32 && process_session(process)==0 && IsProcessInJob(process,job,&belongs) && belongs); }
+      LocalFree(actual); need(CloseHandle(token) && CloseHandle(process));
+    } while (Process32NextW(census,&entry)); need(GetLastError()==ERROR_NO_MORE_FILES && CloseHandle(census));
+    /* A reopened name is observation only, never termination authority. */
+    need(!members);if (job) operation_empty(job);
+    LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0 && LsaRemoveAccountRights(policy,sid,TRUE,NULL,0)==0 && LsaClose(policy)==0);
+    need(NetUserDel(NULL,name)==NERR_Success);
+  }
+  if (job) { operation_empty(job); need(CloseHandle(job)); }
+  HANDLE absent=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!absent && GetLastError()==ERROR_FILE_NOT_FOUND);
+  for (unsigned i=0;i<128;i++) { wchar_t operation[128]; need(swprintf_s(operation,128,L"NativeProof-Operation-%hs-%u",caseNonce,i)>0);
+    absent=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,operation); need(!absent && GetLastError()==ERROR_FILE_NOT_FOUND); }
+  need(NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+  if (sid) { LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG number=0;
+    need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS result=LsaEnumerateAccountRights(policy,sid,&rights,&number);
+    need((result==0 && !number) || result==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(sid); }
+  if (recorded) {
+    struct ownership_view census={0}; census.record=record; ownership_census(&census);
+    wchar_t peerHome[4096], peerFile[4096];
+    need(swprintf_s(peerHome,4096,L"%ls\\access-peer",entries[custody].path)>0 &&
+      swprintf_s(peerFile,4096,L"%ls\\account.record",peerHome)>0);
+    DWORD present=GetFileAttributesW(peerFile);
+    if (present!=INVALID_FILE_ATTRIBUTES) {
+      struct case_account_record peer={0}; account_record(peerHome,&peer); char seed[128], expected[65];
+      need(sprintf_s(seed,sizeof(seed),"%s:access-peer",context)>0); sum((BYTE *)seed,(DWORD)strlen(seed),expected);
+      need(!strcmp(peer.context,expected) && !memcmp(peer.nonce,expected,32) && !wcscmp(peer.restrictingSid,record.restrictingSid));
+      census.record=peer; ownership_census(&census);
+      need(swprintf_s(name,21,L"np_%.16hs",peer.nonce)>0 && NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound);
+      PSID peerSid; need(ConvertStringSidToSidW(peer.accountSid,&peerSid));
+      LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights=NULL; ULONG number=0;
+      need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0); NTSTATUS result=LsaEnumerateAccountRights(policy,peerSid,&rights,&number);
+      need((result==0 && !number) || result==(NTSTATUS)0xc0000034L); if (rights) LsaFreeMemory(rights); need(LsaClose(policy)==0); LocalFree(peerSid);
+    } else {
+      need(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND);
+      /* An unacknowledged peer account cannot be guessed from its directory. */
+      need(swprintf_s(peerFile,4096,L"%ls\\account.intent",peerHome)>0 && GetFileAttributesW(peerFile)==INVALID_FILE_ATTRIBUTES &&
+        (GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND));
+    }
+  }
+  strcpy_s(nonce,33,savedNonce);
+  printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\",\"policyRestored\":true,\"auditDrained\":true,\"readersClosed\":true}",context);
+}
+static void reader_environment(void) {
+  wchar_t environment[4160]; startup_environment(environment);
+  need(SetEnvironmentStringsW(environment));
+}
+int wmain(int argc, wchar_t **argv) {
+  if(argc==4 && !wcscmp(argv[1],L"--file-worker")) return file_worker_main(argc,argv);
+  if (argc == 3 && !wcscmp(argv[1], L"--ownership-witness")) {
+    wchar_t *end; ULONGLONG input = _wcstoui64(argv[2], &end, 10); need(input && !*end && _setmode(_fileno(stdout), _O_BINARY) != -1);
+    ownership_witness((HANDLE)(ULONG_PTR)input); return 0;
+  }
+  if (argc == 4 && !wcscmp(argv[1], L"--ownership-owner")) {
+    wchar_t *a, *b; ULONGLONG job = _wcstoui64(argv[2], &a, 10), creator = _wcstoui64(argv[3], &b, 10);
+    need(job && creator && !*a && !*b && _setmode(_fileno(stdout), _O_BINARY) != -1); ownership_guardian((HANDLE)(ULONG_PTR)job, (HANDLE)(ULONG_PTR)creator); return 0;
+  }
+  preparation_only = argc == 10 && !wcscmp(argv[1], L"--observe");
+  need((preparation_only || (argc == 8 && !wcscmp(argv[1], L"--serve"))) && system_process(GetCurrentProcess()));
+  runner_sid = argv[6];
+  if (preparation_only) { wcscpy_s(preparation_directory, 4096, argv[8]); wcscpy_s(preparation_output, 4096, argv[9]); wcscpy_s(preparation_plan, 4096, argv[2]); }
+  require_build();
+  reader_environment();
+  need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
+  need_hr(CoInitializeEx, NULL, COINIT_MULTITHREADED);
+  wchar_t *end; errno = 0; DWORD bridge = wcstoul(argv[7], &end, 10);
+  need(bridge && !errno && *argv[7] >= '0' && *argv[7] <= '9' && !*end && wcslen(argv[4]) == 32);
+  control = CreateFileW(argv[5], GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL); DWORD server;
+  need(control != INVALID_HANDLE_VALUE && GetNamedPipeServerProcessId(control, &server) && server == bridge);
+  HANDLE peer = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, server), token; need(peer && OpenProcessToken(peer, TOKEN_QUERY, &token));
+  wchar_t *sid = token_sid(token); need(!wcscmp(sid, argv[6])); LocalFree(sid); CloseHandle(token);
+  /* Scheduled console entries may have CRT descriptor -2. Establish descriptor
+   * 1 before replacing it with the sole authenticated private pipe. */
+  FILE *stream; need(!_wfreopen_s(&stream, L"NUL", L"wb", stdout) && stream == stdout && _fileno(stdout) >= 0);
+  HANDLE out; need(DuplicateHandle(GetCurrentProcess(), control, GetCurrentProcess(), &out, 0, FALSE, DUPLICATE_SAME_ACCESS));
+  int fd = _open_osfhandle((intptr_t)out, _O_BINARY); need(fd >= 0 && _dup2(fd, _fileno(stdout)) == 0 && _close(fd) == 0);
+  printf("{\"helper\":"); identity(GetCurrentProcess()); printf(",\"peer\":"); identity(peer); puts("}"); fflush(stdout); CloseHandle(peer);
+  reader_diagnostics_ready = TRUE;
+  char input[262144]; line(control, input, sizeof(input));
+  if(!strcmp(input,"X")){need(fflush(stdout)==0&&CloseHandle(control));CoUninitialize();return 0;}
+  need(!strcmp(input, "P"));
+  char hash[65]; need(wcslen(argv[3]) == 64); for (unsigned i = 0; i < 64; i++) hash[i] = (char)argv[3][i]; hash[64] = 0;
+  plan(argv[2], hash);
+  if (preparation_only) {
+    BOOL output = FALSE; for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "directory") && !wcscmp(entries[i].path, preparation_output)) output = TRUE;
+    need(output); preparation_root = hold(preparation_directory, TRUE, TRUE, FILE_LIST_DIRECTORY);
+    strcpy_s(preparation_plan_pin, 65, hash); for (unsigned i = 0; i < 32; i++) nonce[i] = (char)argv[4][i];
+  }
+  else for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
+  printf("{\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"entries\":%u}\n", candidate, nonce, count); fflush(stdout);
+  for (unsigned operations = 0; operations < (package_mode ? 1048576U : 32768U); operations++) {
+    line(control, input, sizeof(input));
+    size_t commandLength = strcspn(input, " ");
+    strcpy_s(reader_command, sizeof(reader_command), "unparsed");
+    if (commandLength && commandLength < sizeof(reader_command) && strspn(input, "abcdefghijklmnopqrstuvwxyz0123456789-") == commandLength) {
+      memcpy(reader_command, input, commandLength); reader_command[commandLength] = 0;
+    }
+    if (preparation_only) preparation_journal(input, sequence+1); char *values[520], *state; unsigned n = 0;
+    for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 520); values[n++] = value; }
+    need(n >= 2 && number(values[1]) == ++sequence);
+    need(!preparation_only || !strncmp(values[0], "verify-", 7) || !strncmp(values[0], "prepare-", 8) || !strcmp(values[0], "finish"));
+    helper_lane = 0;
+    if (n >= 3 && !strcmp(values[0], "helper-start")) helper_lane = !strcmp(values[2], "observer") ? 1 : 0;
+    else if (!strncmp(values[0], "helper-", 7)) { need(n >= 3); helper_lane = bounded_number(values[2], 1); }
+    printf("{\"sequence\":%u,\"value\":", sequence);
+    if (!strncmp(values[0], "prepare-", 8)) { preparation_command(values, n);
+    } else if (!strncmp(values[0], "verify-", 7)) { verification(values, n);
+    } else if (!strcmp(values[0], "case-directory")) { need(n == 4 && !preparation_only); case_directory(bounded_number(values[2], count-1), bounded_number(values[3], count-1));
+    } else if (!strcmp(values[0], "case-copy")) { need(n == 5 && !preparation_only); case_copy(bounded_number(values[2], count-1), bounded_number(values[3], count-1), bounded_number(values[4], count-1));
+    } else if (!strcmp(values[0], "case-file")) { need(n == 6 && !preparation_only); case_file(bounded_number(values[2], count-1), bounded_number(values[3], count-1), bounded_number(values[4], 1), values[5]);
+    } else if (!strcmp(values[0], "case-account")) { need(n == 4 && !preparation_only); case_account_create(bounded_number(values[2], count-1), values[3]);
+    } else if (!strcmp(values[0], "case-endpoint")) { need(n == 5 && !preparation_only); need(!strcmp(values[2], "v4") || !strcmp(values[2], "v6")); need(!strcmp(values[3], "tcp") || !strcmp(values[3], "udp")); case_endpoint(!strcmp(values[2], "v6"), !strcmp(values[3], "udp"), bounded_number(values[4], 65535));
+    } else if (!strcmp(values[0], "case-partial-retire")) {
+      need(n==2 && !preparation_only && !helpers[0].process && !helpers[1].process && !audit_owned && !ownership_policy_installed && !ownership_launcher.hProcess);
+      if (case_token || case_job) case_retire(); else {
+        need(!case_token && !case_job); wchar_t name[21], jobName[96]; USER_INFO_1 *user;
+        need(swprintf_s(name,21,L"np_%.16hs",nonce)>0 && NetUserGetInfo(NULL,name,1,(BYTE **)&user)==NERR_UserNotFound &&
+          swprintf_s(jobName,96,L"Local\\NativeProof-%hs",nonce)>0);
+        HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY,FALSE,jobName); need(!job && GetLastError()==ERROR_FILE_NOT_FOUND);
+        printf("{\"retired\":true}");
+      }
+    } else if (!strcmp(values[0], "access-inventory")) { need(!preparation_only); access_inventory(values, n);
+    } else if (!strcmp(values[0], "access-policy-begin")) { need(n == 11 && !preparation_only); wchar_t profile[32]; unsigned ports[8];decode_bounded(values[2], profile, 32);for(unsigned i=0;i<8;i++)ports[i]=bounded_number(values[3+i],65535);access_policy_begin(profile,ports);
+    } else if (!strcmp(values[0], "access-policy-installed")) { need(n == 3 && !preparation_only); access_policy_installed(values[2]);
+    } else if (!strcmp(values[0], "access-policy-restore")) { need(n == 2 && !preparation_only); access_policy_restore();
+    } else if (!strcmp(values[0], "access-jobs-close")) {
+      need(n == 2 && !preparation_only && !case_job && !audit_owned && !helpers[0].process && !helpers[1].process);
+      for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+        need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) && !accounting.ActiveProcesses && CloseHandle(jobs[i])); jobs[i] = NULL; }
+      job_count = 0; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "access-controls")) { need(n == 2 && !preparation_only); access_control_objects();
+    } else if ((!strcmp(values[0], "access-peers") || !strcmp(values[0], "access-peers-park"))) { need(n==3 && !preparation_only); access_peers(!strcmp(values[0], "access-peers"),bounded_number(values[2],MAXDWORD));
+    } else if (!strcmp(values[0], "access-control")) { need(n == 4 && !preparation_only); access_control_state(values[2],bounded_number(values[3],MAXDWORD));
+    } else if (!strcmp(values[0],"access-peer-state")) {
+      need(n==3 && access_mode && ownership_count==2); unsigned other=bounded_number(values[2],1); struct access_peer_owner *peer=other ? &access_other_peer : &access_private_peer;
+      struct access_control_view view={0}; view.record=case_record; view.peer=peer->process.hProcess; view.peerToken=peer->token; view.peerJob=peer->job; view.kind=other; printf("{\"hex\":\""); hex((BYTE *)&view,sizeof(view)); printf("\"}");
+    } else if (!strcmp(values[0], "access-controls-stop")) { need(n==2 && !preparation_only); access_controls_stop();
+    } else if (!strcmp(values[0], "access-foreign")) { need(n==4 && !preparation_only); access_foreign(values[2],bounded_number(values[3],MAXDWORD));
+    } else if (!strcmp(values[0], "access-foreign-close")) { need(n==2 && access_foreign_socket!=INVALID_SOCKET && !closesocket(access_foreign_socket)); access_foreign_socket=INVALID_SOCKET; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "access-state")) { need(n == 4 && !preparation_only); access_state(bounded_number(values[2], MAXDWORD), number(values[3]));
+    } else if (!strcmp(values[0], "access-peer-result")) {
+      need(n==3 && ownership_count==2); unsigned index=bounded_number(values[2],3); char reply[4096]; line(access_private_peer.output,reply,sizeof(reply));
+      char expected[64]; need(sprintf_s(expected,sizeof(expected),"\"index\":%u",index*2+1)>0 && strstr(reply,nonce) && strstr(reply,expected) && strstr(reply,"\"phase\":\"served\""));
+      printf("{\"hex\":\""); hex((BYTE *)reply,(DWORD)strlen(reply)); printf("\"}");
+    } else if (!strcmp(values[0],"access-controls-drain")) {
+      need(n==2 && access_mode && access_controls_closed && !case_job); struct access_peer_owner *peers[]={&access_private_peer,&access_other_peer};
+      for (unsigned i=0;i<2;i++) if (peers[i]->process.hProcess) { struct access_peer_owner *peer=peers[i]; need(WaitForSingleObject(peer->process.hProcess,0)==WAIT_OBJECT_0 && CloseHandle(peer->input)); peer->input=NULL;
+        BYTE bytes[4096]; DWORD used,total=0; while (ReadFile(peer->output,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=65536); } need(GetLastError()==ERROR_BROKEN_PIPE && CloseHandle(peer->output) && CloseHandle(peer->process.hThread)); peer->output=NULL; peer->process.hThread=NULL;
+        if (i) { need(CloseHandle(peer->process.hProcess) && CloseHandle(peer->token) && CloseHandle(peer->job)); peer->process.hProcess=peer->token=peer->job=NULL; }
+      } printf("{\"drained\":true}");
+    } else if (!strcmp(values[0], "access-reservation")) {
+      need(n==4 && access_mode && ownership_count==2); unsigned index=bounded_number(values[2],7), member=index%2 ? 1 : 0; need(index<case_socket_count && access_payload_sockets[index]);
+      WSAPROTOCOL_INFOW info; need(!WSADuplicateSocketW(case_sockets[index],bounded_number(values[3],MAXDWORD),&info)); printf("{\"identity\":"); retained_identity(ownership_processes[member],ownership_tokens[member],0);
+      printf(",\"handle\":\"%llu\",\"hex\":\"",(ULONGLONG)(ULONG_PTR)access_payload_sockets[index]); hex((BYTE *)&info,sizeof(info)); printf("\"}");
+    } else if (!strcmp(values[0], "access-transfer-root")) {
+      need(n == 3 && access_mode && ownership_released && ownership_count >= 1);
+      unsigned index = bounded_number(values[2], 1);
+      need(!access_payload_roots[index] &&
+        WaitForSingleObject(ownership_processes[0], 0) == WAIT_TIMEOUT);
+      HANDLE root = ReOpenFile(entries[index + 1].file.handle, ACCESS_ROOT_MASK, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); FILE_ID_INFO before, after;
+      need(root != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(entries[index + 1].file.handle, FileIdInfo, &before, sizeof(before)) &&
+        GetFileInformationByHandleEx(root, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)) &&
+        DuplicateHandle(GetCurrentProcess(), root, ownership_processes[0], &access_payload_roots[index], ACCESS_ROOT_MASK, FALSE, 0) && CloseHandle(root));
+      printf("{\"handle\":\"%llu\"}", (ULONGLONG)(ULONG_PTR)access_payload_roots[index]);
+    } else if (!strcmp(values[0], "access-transfer-socket")) {
+      need(n == 3 && access_mode && ownership_released && ownership_count >= 1); unsigned index = bounded_number(values[2], 7); need(index < case_socket_count);
+      need(WaitForSingleObject(ownership_processes[0], 0) == WAIT_TIMEOUT); WSAPROTOCOL_INFOW info;
+      need(!WSADuplicateSocketW(case_sockets[index], GetProcessId(ownership_processes[0]), &info)); printf("{\"hex\":\""); hex((BYTE *)&info, sizeof(info)); printf("\"}");
+    } else if (!strcmp(values[0], "access-register-socket")) {
+      need(n == 4 && access_mode && ownership_released && ownership_count >= 1); unsigned index = bounded_number(values[2], 7); need(index < case_socket_count && !access_payload_sockets[index]);
+      HANDLE remote = (HANDLE)(ULONG_PTR)number(values[3]); struct verify_handles *inventory = handle_inventory(); void *source = NULL, *target = NULL;
+      for (ULONG_PTR i = 0; i < inventory->count; i++) {
+        if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)case_sockets[index]) source = inventory->entries[i].object;
+        if (inventory->entries[i].pid == GetProcessId(ownership_processes[0]) && inventory->entries[i].handle == (ULONG_PTR)remote) target = inventory->entries[i].object;
+      }
+      need(source && source == target); free(inventory); access_payload_sockets[index] = remote; printf("{\"registered\":true}");
+    } else if (!strcmp(values[0], "case-read")) { need(n == 2 && !preparation_only); case_read();
+    } else if (!preparation_only && operation_dispatch(values,n)) {
+
+    } else if (!strcmp(values[0], "package-file")) { package_file_command(values,n);
+    } else if (!strcmp(values[0], "package-publication-seal")) { need(n==2); package_seal_publication(); printf("{\"sealed\":true}");
+    } else if (!strcmp(values[0], "package-files-close")) { need(n==2 && package_mode); unsigned total=package_files_close(); printf("{\"closedHandles\":%u}",total);
+    } else if (!strcmp(values[0], "package-archive-verify")) { need(n==2); package_verify_archive();
+    } else if (!strcmp(values[0], "package-archive-begin")) {
+      need(n==2 && package_mode && !package_archive_possible && !entries[9].file.handle); package_archive_possible=TRUE;
+      package_archive=calloc(59958024,1); need(package_archive); package_archive_used=0; printf("{\"offset\":0}");
+    } else if (!strcmp(values[0], "package-archive-chunk")) {
+      need(n==4 && package_archive && number(values[2])==package_archive_used); size_t size=strlen(values[3]);
+      need(size && !(size%2) && size<=98304 && size/2<=59958024-package_archive_used);
+      for(size_t i=0;i<size/2;i++) package_archive[package_archive_used+i]=(BYTE)(nibble(values[3][i*2])*16+nibble(values[3][i*2+1]));
+      package_archive_used+=(DWORD)size/2; printf("{\"offset\":%lu}",package_archive_used);
+    } else if (!strcmp(values[0], "package-archive-seal")) {
+      need(n==2 && package_archive && package_archive_used==59958024); char pin[65]; sum(package_archive,package_archive_used,pin);
+      need(!strcmp(pin,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1"));
+      case_directory_create(9,0,FALSE);
+      wchar_t file[4096],content[4096]; need(swprintf_s(file,4096,L"%ls\\archive",entries[9].path)>0 && swprintf_s(content,4096,L"%ls\\content",entries[9].path)>0);
+      PSECURITY_DESCRIPTOR sd=descriptor(L"O:SYG:SYD:P(A;;FA;;;SY)"); SECURITY_ATTRIBUTES sa=attributes(sd,FALSE);
+      HANDLE archive=CreateFileW(file,GENERIC_WRITE|FILE_READ_ATTRIBUTES,0,&sa,CREATE_NEW,FILE_FLAG_OPEN_REPARSE_POINT,NULL); DWORD used; FILE_ID_INFO archive_id;
+      need(archive!=INVALID_HANDLE_VALUE && WriteFile(archive,package_archive,package_archive_used,&used,NULL) && used==package_archive_used && FlushFileBuffers(archive) && GetFileInformationByHandleEx(archive,FileIdInfo,&archive_id,sizeof(archive_id)) && CloseHandle(archive)); LocalFree(sd);
+      SecureZeroMemory(package_archive,package_archive_used); free(package_archive); package_archive=NULL; package_directory(content,TRUE);
+      printf("{\"bytes\":59958024,\"sha256\":\"%s\",\"directoryIdentity\":\"",pin); file_id(&entries[9].file); printf("\",\"archiveIdentity\":\"%016llx:",archive_id.VolumeSerialNumber); hex(archive_id.FileId.Identifier,16); printf("\"}");
+    } else if (!strcmp(values[0], "package-archive-send")) {
+      need(n==3 && package_mode && ownership_stage==6 && ownership_count && ownership_policy_installed); wchar_t path[4096]; decode(values[2],path); package_path(path);
+      wchar_t expected[4096]; need(swprintf_s(expected,4096,L"%ls\\archive",entries[9].path)>0 && !_wcsicmp(expected,path));
+      struct held_file file=hold(path,FALSE,TRUE,GENERIC_READ); LARGE_INTEGER length;
+      need(GetFileSizeEx(file.handle,&length) && length.QuadPart==59958024); pin(&file,"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1");
+      /* Hashing consumes this same held reader; stream only after rewinding it. */
+      LARGE_INTEGER zero={0}; need(SetFilePointerEx(file.handle,zero,NULL,FILE_BEGIN));
+      BYTE bytes[49152]; DWORD used,written; ULONGLONG total=0;
+      while(ReadFile(file.handle,bytes,sizeof(bytes),&used,NULL) && used) { total+=used; need(total<=59958024 && WriteFile(ownership_control,bytes,used,&written,NULL) && written==used); }
+      need(total==59958024); close_file(&file); printf("{\"bytes\":59958024,\"sha256\":\"eceb5e061aa90df2f69ddd3e90f0030e1b8037a7829934bc40e4be1caa1accc1\"}");
+    } else if (!strcmp(values[0], "package-bind")) {
+      need(n==2 && !preparation_only && !case_token && !ownership_launcher.hProcess && count>9 && !strcmp(entries[9].kind,"directory"));
+      package_mode=TRUE; ownership_masks[3]=0x1200a9; printf("{\"bound\":true}");
+    } else if (!strcmp(values[0], "package-send")) {
+      need(n==3 && package_mode && ownership_stage==6 && ownership_count && ownership_policy_installed);
+      size_t size=strlen(values[2]); need(size && !(size%2) && size<=98304); BYTE bytes[49152]; DWORD used;
+      for(size_t i=0;i<size/2;i++) bytes[i]=(BYTE)(nibble(values[2][i*2])*16+nibble(values[2][i*2+1]));
+      need(WriteFile(ownership_control,bytes,(DWORD)size/2,&used,NULL) && used==size/2); SecureZeroMemory(bytes,sizeof(bytes)); printf("{\"sent\":true}");
+    } else if (!strcmp(values[0], "package-completion")) {
+      need(n==2 && package_mode && ownership_count && WaitForSingleObject(ownership_processes[0],30000)==WAIT_OBJECT_0); DWORD exit;
+      need(GetExitCodeProcess(ownership_processes[0],&exit)); printf("{\"exitCode\":%lu}",exit);
+    } else if (!strcmp(values[0], "ownership-observer")) {
+      need(n == 4 && !preparation_only && case_token && case_job);
+      ownership_bind_observer(bounded_number(values[2], MAXDWORD), number(values[3])); printf("{\"bound\":true}");
+    } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
+    } else if (!strcmp(values[0], "ownership-control") || !strcmp(values[0], "ownership-output")) {
+      need(n == 2 && ownership_launcher.hProcess); char bytes[98304]; BOOL captured=FALSE;
+#ifdef NATIVE_CI_EXPERIMENT
+      if(!strcmp(values[0],"ownership-output")&&ownership_literal){
+        need(ownership_released&&ownership_creation_verified&&ownership_count&&ownership_processes[0]);
+        need(ownership_literal_read(ownership_processes[0],ownership_output,bytes,16384));refusal_settle();captured=TRUE;
+      }
+#endif
+      if(!captured)line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, package_mode ? sizeof(bytes) : 16384);
+      if (!strcmp(values[0], "ownership-control")) {
+        need(strstr(bytes, nonce));
+        if (strstr(bytes, "\"phase\":\"helper\"")) { need(ownership_stage == 0); ownership_stage = 1; }
+        else if (strstr(bytes, "\"phase\":\"setup\"")) { need(ownership_stage == 2); ownership_stage = 3; }
+        else { need(strstr(bytes, "\"phase\":\"ready\"") && ownership_stage == 4); ownership_stage = 5; }
+      }
+      if (!captured && !strcmp(values[0], "ownership-output") && ownership_literal) need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
+      printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes));
+      if (!strcmp(values[0], "ownership-output")) hex((BYTE *)"\n", 1);
+      printf("\"}");
+    } else if (!strcmp(values[0], "ownership-send")) { need(n == 3); ownership_send(values[2]); printf("{\"sent\":true}");
+    } else if (!strcmp(values[0], "ownership-retain")) { need(n == 4); ownership_retain(bounded_number(values[2], MAXDWORD), number(values[3])); printf("{\"retained\":true}");
+
+    } else if (!strcmp(values[0], "ownership-reconstruct")) {
+      need(n == 2 && case_token); static char jobPin[65];
+      if (case_job) {
+        ownership_job_pin(case_job, jobPin); strcpy_s(ownership_last_job_pin, 65, jobPin);
+        BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)]; JOBOBJECT_BASIC_PROCESS_ID_LIST *members = (void *)bytes;
+        need(QueryInformationJobObject(case_job, JobObjectBasicProcessIdList, members, sizeof(bytes), NULL) && members->NumberOfAssignedProcesses == members->NumberOfProcessIdsInList && members->NumberOfProcessIdsInList <= 32);
+        for (unsigned i = 0; i < members->NumberOfProcessIdsInList; i++) {
+          HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)members->ProcessIdList[i]); FILETIME created, ended, kernel, user;
+          need(process && GetProcessTimes(process, &created, &ended, &kernel, &user)); ownership_retain(GetProcessId(process), ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime); need(CloseHandle(process));
+        }
+      } else strcpy_s(jobPin, 65, ownership_last_job_pin);
+      printf("{\"helper\":"); if (ownership_launcher.hProcess) retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); else printf("null");
+      printf(",\"owner\":"); if (ownership_owner.hProcess) retained_identity(ownership_owner.hProcess, ownership_owner_token, 0); else printf("null");
+      printf(",\"jobObjectSha256\":\"%s\",\"members\":[", jobPin);
+      for (unsigned i = 0; i < ownership_count; i++) { if (i) putchar(','); retained_identity(ownership_processes[i], ownership_tokens[i], 0); } printf("]}");
+    } else if (!strcmp(values[0], "ownership-witness")) { need(n == 2 && case_token); ownership_fresh(FALSE);
+    } else if (!strcmp(values[0], "ownership-receipt")) {
+      need((n == 4 || n == 5) && case_token && bounded_number(values[2], 4095) < 4096 && strlen(values[3]) == 64 && strspn(values[3], "0123456789abcdef") == 64);
+      wchar_t leaf[96]; need(swprintf_s(leaf, 96, L"ownership-%hs.json", values[2]) > 0);
+      if (n == 5) { size_t size = strlen(values[4]); need(size && !(size%2) && size <= 32768); BYTE data[16384];
+        for (size_t i = 0; i < size/2; i++) data[i] = (BYTE)(nibble(values[4][i*2])*16+nibble(values[4][i*2+1]));
+        char hash[65]; sum(data, (DWORD)size/2, hash); need(!strcmp(hash, values[3])); HANDLE file = account_file(entries[case_custody].path, leaf, GENERIC_WRITE, CREATE_NEW); DWORD used;
+        need(WriteFile(file, data, (DWORD)size/2, &used, NULL) && used == size/2 && FlushFileBuffers(file) && CloseHandle(file)); }
+      HANDLE file = account_file(entries[case_custody].path, leaf, GENERIC_READ, OPEN_EXISTING); BYTE data[16384]; DWORD used; LARGE_INTEGER size;
+      need(GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart <= sizeof(data) && ReadFile(file, data, (DWORD)size.QuadPart, &used, NULL) && used == size.QuadPart);
+      char hash[65]; sum(data, used, hash); need(!strcmp(hash, values[3]) && CloseHandle(file)); printf("{\"hex\":\""); hex(data, used); printf("\"}");
+    } else if (!strcmp(values[0], "ownership-policy")) {
+      need(n == 3 && case_token && case_job && ownership_stage == 3 && !ownership_released && !ownership_policy_installed);
+      ownership_policy_possible = TRUE;
+      size_t size = strlen(values[2]); BYTE data[16384]; need(size && !(size%2) && size <= sizeof(data)*2);
+      for (size_t i = 0; i < size/2; i++) data[i] = (BYTE)(nibble(values[2][i*2])*16+nibble(values[2][i*2+1]));
+      HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
+      need(WriteFile(file, data, (DWORD)size/2, &used, NULL) && used == size/2 && FlushFileBuffers(file) && CloseHandle(file));
+      wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\policy", entries[case_custody].path) > 0); ownership_policy_file = hold(name, FALSE, TRUE, GENERIC_READ);
+      ownership_network_absent();policy_network_intent(1,NULL);
+      ownership_network(FALSE, FALSE);policy_filter_save(1); for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, FALSE); ownership_policy_installed = TRUE; printf("{\"installed\":true}");
+    } else if (!strcmp(values[0], "ownership-outside")) {
+      need(n == 2 && case_token); struct case_account_record record = {0}; account_record(entries[case_custody].path, &record); need(!memcmp(&record, &case_record, sizeof(record)));
+      if (!ownership_sentinel.handle) {
+        need(!ownership_launcher.hProcess); wchar_t leaf[128], name[4096]; need(swprintf_s(leaf, 128, L"outside-%hs.sentinel", record.context) > 0);
+        for (unsigned i = 0; i < 6; i++) ownership_baseline_read(i, ownership_baseline[i]);
+        HANDLE file = account_file(entries[0].path, leaf, GENERIC_WRITE, CREATE_NEW); DWORD used;
+        need(WriteFile(file, record.context, 64, &used, NULL) && used == 64 && FlushFileBuffers(file) && CloseHandle(file));
+        need(swprintf_s(name, 4096, L"%ls\\%ls", entries[0].path, leaf) > 0); ownership_sentinel = hold(name, FALSE, TRUE, GENERIC_READ);
+      }
+      policy_sentinel_save();
+      char sentinelHash[65]; DWORD sentinelSize; BYTE *sentinel = read_file(&ownership_sentinel, 64, &sentinelSize); need(sentinelSize == 64); sum(sentinel, sentinelSize, sentinelHash); free(sentinel);
+      char hash[65]; sum((BYTE *)&record, sizeof(record), hash); printf("{\"record\":\"%s\",\"sentinel\":{\"identity\":\"", hash); file_id(&ownership_sentinel); printf("\",\"sha256\":\"%s\"},\"objects\":[", sentinelHash);
+      for (unsigned i = 1; i <= 6; i++) { if (i > 1) putchar(','); putchar('"'); file_id(&entries[i].file); putchar('"'); }
+      printf("],\"assets\":["); for (unsigned i = 5; i <= 6; i++) { pin(&entries[i].file, entries[i].pin); printf("%s\"%s\"", i == 6 ? "," : "", entries[i].pin); } printf("]}");
+    } else if (!strcmp(values[0], "ownership-outside-control")) { need(n == 3); wchar_t mode[64]; decode_bounded(values[2], mode, 64); ownership_outside_control(mode);
+    } else if (!strcmp(values[0], "ownership-stale")) {
+      need(n == 4 && ownership_count && bounded_number(values[2], MAXDWORD) == GetProcessId(ownership_processes[0])); FILETIME started, ended, kernel, user;
+      need(GetProcessTimes(ownership_processes[0], &started, &ended, &kernel, &user) && (((ULONGLONG)started.dwHighDateTime<<32)|started.dwLowDateTime) != number(values[3]));
+      printf("{\"rejected\":true,\"current\":"); retained_identity(ownership_processes[0], ownership_tokens[0], 0); printf("}");
+    } else if (!strcmp(values[0], "ownership-arm")) {
+      need(n == 3 && ownership_launcher.hProcess); wchar_t mode[64]; decode_bounded(values[2], mode, 64);
+      BOOL early = !wcscmp(mode, L"admission-interruption") || !wcscmp(mode, L"receipt-before") || !wcscmp(mode, L"receipt-after");
+      BOOL exited = ownership_count && WaitForSingleObject(ownership_processes[0], 0) == WAIT_OBJECT_0;
+      if (!early && !exited) { ownership_send("41"); char bytes[16384]; line(ownership_output, bytes, sizeof(bytes));
+        need(strstr(bytes, "\"phase\":\"armed\"") && strstr(bytes, nonce)); }
+      if (!wcscmp(mode, L"last-handle-close")) {
+        struct verify_handles *inventory = handle_inventory(); void *object = NULL;
+        for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].pid == GetCurrentProcessId() && inventory->entries[i].handle == (ULONG_PTR)case_job) object = inventory->entries[i].object;
+        need(object); for (ULONG_PTR i = 0; i < inventory->count; i++) if (inventory->entries[i].object == object)
+          need(inventory->entries[i].pid == GetCurrentProcessId() || inventory->entries[i].pid == GetProcessId(ownership_launcher.hProcess) || inventory->entries[i].pid == GetProcessId(ownership_owner.hProcess)); free(inventory);
+        ownership_close_owner();
+        ownership_send("51"); char bytes[4096]; line(ownership_frames, bytes, sizeof(bytes)); need(strstr(bytes, "\"phase\":\"job-closed\"") && strstr(bytes, nonce));
+        need(CloseHandle(case_job)); case_job = NULL;
+        for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 30000) == WAIT_OBJECT_0);
+      }
+      printf("{\"armed\":true,\"fixtureAcknowledged\":%s,\"holderInventoryComplete\":true}", early ? "false" : "true");
+    } else if (!strcmp(values[0], "ownership-fire")) {
+      need(n == 3 && ownership_launcher.hProcess); wchar_t mode[64]; decode_bounded(values[2], mode, 64);
+      if (!wcscmp(mode, L"owner-loss")) { need(TerminateProcess(ownership_owner.hProcess, 126) && WaitForSingleObject(ownership_owner.hProcess, 30000) == WAIT_OBJECT_0); }
+      else if (!wcscmp(mode, L"helper-loss")) need(TerminateProcess(ownership_launcher.hProcess, 126));
+      else { need(ownership_control && CloseHandle(ownership_control)); ownership_control = NULL; }
+      if (wcscmp(mode, L"owner-loss")) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0); printf("{\"acknowledged\":true}");
+    } else if (!strcmp(values[0],"access-fault-arm") || !strcmp(values[0],"access-fault-fire")) {
+      need(n==3 && access_mode && ownership_released); wchar_t fault[32]; decode_bounded(values[2],fault,32); BOOL owner=!wcscmp(fault,L"owner-loss"); need(owner || !wcscmp(fault,L"helper-loss"));
+      HANDLE process=owner ? ownership_owner.hProcess : ownership_launcher.hProcess, token=owner ? ownership_owner_token : ownership_launcher_token; need(process && token && WaitForSingleObject(process,0)==WAIT_TIMEOUT);
+      BOOL fire=!strcmp(values[0],"access-fault-fire"); if (fire) need(TerminateProcess(process,126) && WaitForSingleObject(process,30000)==WAIT_OBJECT_0);
+      printf("{\"identity\":"); retained_identity(process,token,0); printf(",\"signaled\":%s}",fire ? "true" : "false");
+    } else if (!strcmp(values[0], "ownership-stop")) { need(n == 2); ownership_stop();
+    } else if (!strcmp(values[0], "ownership-restore")) {
+      need(n == 2 && !case_job);
+      if (ownership_policy_installed) {
+        ownership_network(FALSE, TRUE); for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, TRUE);
+        ownership_network(TRUE, FALSE); for (unsigned i = 0; i < 6; i++) { ownership_acl(i, TRUE, FALSE); LocalFree(ownership_before[i]); LocalFree(ownership_installed[i]); ownership_before[i] = ownership_installed[i] = NULL; }
+        close_file(&ownership_policy_file); ownership_policy_installed = FALSE;
+      } else {
+        /* A pre-C refusal releases no policy authority. Prove the complete
+         * original baseline and filter absence rather than inventing install. */
+        need(!ownership_policy_possible); ownership_network_absent();
+        for (unsigned i = 0; i < 6; i++) { char hash[65]; ownership_baseline_read(i, hash); need(strlen(ownership_baseline[i]) == 64 && !strcmp(hash, ownership_baseline[i])); }
+      }
+      ownership_policy_restored = TRUE; printf("{\"restored\":true}");
+    } else if (!strcmp(values[0], "ownership-account-retire")) {
+      need(n == 2 && !case_job && !ownership_policy_installed && ownership_policy_restored && case_token);
+      need(!ownership_launcher.hProcess || WaitForSingleObject(ownership_launcher.hProcess, 0) == WAIT_OBJECT_0);
+      need(!ownership_owner.hProcess || WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_OBJECT_0);
+      recovery_principal_empty(&case_record);
+      release_invalidate();
+      for (unsigned i = 0; i < ownership_count; i++) need(WaitForSingleObject(ownership_processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(ownership_processes[i]) && CloseHandle(ownership_tokens[i])); ownership_count = 0;
+      HANDLE *handles[] = {&ownership_owner.hProcess, &ownership_owner.hThread, &ownership_owner_token, &ownership_owner_input, &ownership_owner_output, &ownership_owner_job,
+        &ownership_launcher_token, &ownership_launcher.hProcess, &ownership_launcher.hThread, &ownership_frames, &ownership_output, &ownership_observer};
+      for (unsigned i = 0; i < sizeof(handles)/sizeof(handles[0]); i++) if (*handles[i]) { need(CloseHandle(*handles[i])); *handles[i] = NULL; }
+      if (access_mode) { for (unsigned i=0;i<case_socket_count;i++) need(!closesocket(case_sockets[i]) && !WSACleanup()); case_socket_count=0; }
+      need(CloseHandle(case_token)); case_token = NULL;
+      wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", case_record.nonce) > 0); account_check(name, case_record.accountSid);
+      PSID sid; need(ConvertStringSidToSidW(case_record.accountSid, &sid)); LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy;
+      need(LsaOpenPolicy(NULL, &attributes, POLICY_LOOKUP_NAMES, &policy) == 0 && LsaRemoveAccountRights(policy, sid, TRUE, NULL, 0) == 0 && LsaClose(policy) == 0); LocalFree(sid);
+      need(NetUserDel(NULL, name) == NERR_Success); printf("{\"retired\":true}");
+    } else if (!strcmp(values[0], "case-retire")) { need(n == 2 && !preparation_only && !ownership_launcher.hProcess && !ownership_policy_possible); case_retire();
+    } else if (!strcmp(values[0], "open")) {
+      need(n == 3); unsigned index = bounded_number(values[2], count-1); need(!entries[index].file.handle); struct entry *entry = &entries[index];
+      /* Directory helpers mutate children, not the held root. DELETE access
+       * would conflict with later ancestor reads that also deny share-delete. */
+      BOOL directory = !strcmp(entry->kind, "directory"), stock = stock_entry(entry->path, entry->pin), bridge = bridge_entry(entry->path, entry->pin); entry->file = hold_shared(entry->path, directory, !(stock || bridge),
+        (stock || bridge) ? GENERIC_READ : ACCESS_SYSTEM_SECURITY | (directory ? FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | WRITE_DAC | WRITE_OWNER : GENERIC_READ | WRITE_DAC | WRITE_OWNER), !strcmp(entry->kind, "mutable"));
+      if (stock) { char dacl[65]; stock_security(entry->file.handle, dacl); }
+      if (bridge) { char dacl[65]; bridge_security(entry->file.handle, dacl); }
+      if (!directory) pin(&entry->file, entry->pin); if (!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) { char signatureSha[65]; signature(&entry->file, entry->signature, signatureSha); }
+      inspect(entry);
+    } else if (!strcmp(values[0], "inspect")) { need(n == 3); inspect(slot(values[2]));
+    } else if (!strcmp(values[0], "read")) { need(n == 5); struct entry *entry = slot(values[2]); ULONGLONG offset = number(values[3]), size = number(values[4]);
+      need(size > 0 && size <= 65536 && offset <= 536870912-size); LARGE_INTEGER at; at.QuadPart = offset; BYTE bytes[65536]; DWORD used;
+      need(SetFilePointerEx(entry->file.handle, at, NULL, FILE_BEGIN) && ReadFile(entry->file.handle, bytes, (DWORD)size, &used, NULL) && used == size);
+      printf("{\"hex\":\""); hex(bytes, used); printf("\"}");
+    } else if (!strcmp(values[0], "signature")) { need(n == 3); char actual[65]; struct entry *entry = slot(values[2]); signature(&entry->file, entry->signature, actual); printf("{\"sha256\":\"%s\"}", actual);
+    } else if (!strcmp(values[0], "process-open")) { need(n == 3); unsigned index = retain_process(bounded_number(values[2], MAXDWORD)); printf("{\"slot\":%u,\"observation\":", index); process_read(index); printf("}");
+    } else if (!strcmp(values[0], "process")) { need(n == 3); process_read(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0], "process-image")) {
+      need(n == 4); unsigned index = bounded_number(values[2], 31); need(index < process_count); struct entry *entry = slot(values[3]);
+      process_image(index, entry);
+    } else if (!strcmp(values[0], "verifier")) { need(n == 4); verifier_read(values[2], values[3]);
+    } else if (!strcmp(values[0], "job-open")) { need(n == 3 && job_count < 32); wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", nonce) > 0);
+      HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); printf("}");
+    } else if (!strcmp(values[0], "job")) { need(n == 3 && number(values[2]) < job_count); job_read(jobs[number(values[2])]);
+    } else if (!strcmp(values[0], "loader")) { need(n == 4); loader(bounded_number(values[2], 31), slot(values[3]));
+    } else if (!strcmp(values[0], "build")) { need(n == 2); build();
+    } else if (!strcmp(values[0], "publish-build")) { publish_build(values, n);
+    } else if (!strcmp(values[0], "effective-token")) { need(n == 3); effective_token(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0], "acl")) { need(n == 4); effective_acl(bounded_number(values[2], 31), slot(values[3]));
+    } else if (!strcmp(values[0], "registry")) { need(n == 3); effective_registry(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0], "wfp")) { need(n == 4); effective_wfp(values[3], bounded_number(values[2], 2));
+    } else if (!strcmp(values[0], "wfp-inventory")) { need(n == 2); wfp_inventory();
+    } else if (!strcmp(values[0], "wfp-global")) { need(n == 3); wfp_global(values[2]);
+    } else if (!strcmp(values[0], "barrier")) { need(n == 4); wchar_t name[4096]; decode(values[3], name); struct held_file file = relative_hold(slot(values[2]), name, FALSE); barrier_read(&file, TRUE); close_file(&file);
+    } else if (!strcmp(values[0], "file")) { need(n == 3); barrier_read(&slot(values[2])->file, FALSE);
+    } else if (!strcmp(values[0], "parents")) { need(n == 3); struct entry *entry = slot(values[2]); putchar('[');
+      for (unsigned i = 0; i < entry->file.count; i++) { struct held_file parent = {0}; parent.handle = entry->file.parents[i];
+        need(GetFileInformationByHandleEx(parent.handle, FileIdInfo, &parent.id, sizeof(parent.id))); if (i) putchar(','); putchar('"'); file_id(&parent); putchar('"'); } putchar(']');
+    } else if (!strcmp(values[0], "tree")) { need(n == 3); unsigned total = 0, emitted = 0; putchar('['); tree_read(slot(values[2]), L"", 0, &total, &emitted); putchar(']');
+    } else if (!strcmp(values[0], "audit-snapshot")) { need(n == 3); audit_snapshot(bounded_number(values[2], 31));
+    } else if (!strcmp(values[0], "audit-install")) { audit_install(values, n);
+    } else if (!strcmp(values[0], "audit-restore")) { need(n == 2); audit_restore(TRUE);
+    } else if (!strcmp(values[0], "xml")) { need(n == 3); xml_decode(values[2]);
+    } else if (!strcmp(values[0], "helper-start")) { start_helper(values, n);
+    } else if (!strcmp(values[0], "helper-release")) { need(n == 3 && helper_thread && ResumeThread(helper_thread) == 1); need(CloseHandle(helper_thread)); helper_thread = NULL; printf("{\"released\":true}");
+    } else if (!strcmp(values[0], "helper-close-input")) { need(n == 3 && helper && !helper_thread && helper_in && CloseHandle(helper_in)); helper_in = NULL; printf("{\"closed\":true}");
+    } else if (!strcmp(values[0], "helper-send")) { need(n == 4 && helper && !helper_thread && helper_in); size_t size = strlen(values[3]); BYTE bytes[16384]; need(size && size%2 == 0 && size <= sizeof(bytes)*2);
+      for (size_t i = 0; i < size/2; i++) bytes[i] = (BYTE)(nibble(values[3][i*2])*16 + nibble(values[3][i*2+1])); DWORD used;
+      if(helper_file) file_publication_command(bytes,size/2);
+      if(helper_file && *file_control_kind) { need(size/2==sizeof("continue - - - -\n")-1 && !memcmp(bytes,"continue - - - -\n",sizeof("continue - - - -\n")-1)); file_control_continued=TRUE; }
+      need(WriteFile(helper_in, bytes, (DWORD)(size/2), &used, NULL) && used == size/2); printf("{\"sent\":true}");
+    } else if (!strcmp(values[0], "helper-read")) { need(n == 3 && helper && !helper_thread); char bytes[16384]; line(helper_out, bytes, sizeof(bytes)); if(helper_file) file_publication_frame(bytes); printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes)); printf("\"}");
+    } else if (!strcmp(values[0], "helper-bytes")) { need(n == 4 && helper && !helper_thread); DWORD size = bounded_number(values[3], 16384), used; BYTE bytes[16384];
+      need(size && ReadFile(helper_out, bytes, size, &used, NULL) && used && used <= size); printf("{\"hex\":\""); hex(bytes, used); printf("\"}"); SecureZeroMemory(bytes, used);
+    } else if (!strcmp(values[0], "helper-stop")) {
+      need(n == 3 && access_mode && helper && helper_job);
+      if (helper_in) { need(CloseHandle(helper_in)); helper_in = NULL; }
+      need(TerminateJobObject(helper_job, 126) && WaitForSingleObject(helper, 30000) == WAIT_OBJECT_0);
+      if (helper_thread) { need(CloseHandle(helper_thread)); helper_thread = NULL; }
+      BYTE bytes[4096]; DWORD used, total = 0; while (ReadFile(helper_out, bytes, sizeof(bytes), &used, NULL) && used) { total += used; need(total <= 2097152); }
+      need(GetLastError() == ERROR_BROKEN_PIPE); printf("{\"stopped\":true,\"drained\":true}");
+    } else if (!strcmp(values[0], "helper-finish")) { need(n == 3 && helper && !helper_thread && WaitForSingleObject(helper, 0) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(helper, &exit) && (exit == 0 || ((helper_file || access_mode || operation_fenced) && exit == 126)));
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts; need(QueryInformationJobObject(helper_job, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && accounts.ActiveProcesses == 0);
+      BYTE extra; DWORD used = 0; need(!ReadFile(helper_out, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && used == 0);
+      if(helper_file) file_last_exit=exit;
+      need(CloseHandle(helper) && CloseHandle(helper_job) && (!helper_in || CloseHandle(helper_in)) && CloseHandle(helper_out)); helper = helper_job = helper_in = helper_out = NULL; helper_file = FALSE;
+      printf("{\"retired\":true,\"members\":0,\"drained\":true,\"exitCode\":%lu}", exit);
+    } else if (!strcmp(values[0], "finish")) {
+      need(!preparation_writer && !preparation_bytes && !preparation_names && !case_token && !case_job && !case_socket_count && !ownership_launcher.hProcess && !ownership_policy_installed);
+      need(n == 2 && !helpers[0].process && !helpers[1].process && !audit_owned); if (ownership_sentinel.handle) close_file(&ownership_sentinel); for (unsigned i = 0; i < process_count; i++) { need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0 && CloseHandle(tokens[i]) && CloseHandle(processes[i])); }
+      for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && current.ActiveProcesses == 0 && CloseHandle(jobs[i])); }
+      for (unsigned i = 0; i < verification_file_count; i++) close_file(&verification_files[i]);
+      need(!file_worker_count && !*file_control_kind); for(unsigned i=1;i<5;i++) if(file_objects[i]) need(CloseHandle(file_objects[i]));
+      for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses && CloseHandle(verified_jobs[i])); }
+      for (unsigned i = 0; i < count; i++) if (entries[i].file.handle) close_file(&entries[i].file);
+      for (unsigned i = 0; i < dependency_count; i++) { for (unsigned j = 0; j < dependency_sizes[i]; j++) close_file(&dependencies[i][j]); free(dependencies[i]); }
+      for (unsigned i = 0; i < catalog_count; i++) close_file(&catalogs[i]);
+      if (wfp_engine) need(FwpmEngineClose0(wfp_engine) == ERROR_SUCCESS);
+      if (registry_key) need(RegCloseKey(registry_key) == ERROR_SUCCESS && CloseHandle(registry_changed));
+      if (preparation_only) close_file(&preparation_root);
+      CoUninitialize();
+      printf("{\"closed\":true}}\n"); fflush(stdout); need(CloseHandle(control)); return 0;
+    } else need(FALSE);
+    printf("}\n"); need(fflush(stdout) == 0);
+  }
+  need(FALSE); return 126;
+}

@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "artifactRoot": "LOCAL_ARTIFACTS",
+  "maxEventLogBytes": 536870912,
   "availabilityRetryMaxDelayMs": 1800000,
   "providerInactivityTimeoutMs": 1800000,
   "clientAttribution": {

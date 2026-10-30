@@ -1,0 +1,2823 @@
+/* Separate Windows x64 CI experiment. No LocalSystem/account/WFP setup. */
+#define WIN32_LEAN_AND_MEAN
+#define COBJMACROS
+#define UNICODE
+#define _UNICODE
+#define _WIN32_WINNT 0x0A00
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <userenv.h>
+#include <sddl.h>
+#include <aclapi.h>
+#include <bcrypt.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdarg.h>
+#include <errno.h>
+#include <wchar.h>
+#include <fcntl.h>
+#include <io.h>
+#ifndef NATIVE_COMMAND_EXPERIMENT
+#include <initguid.h>
+#include <fwpmu.h>
+#pragma comment(lib, "fwpuclnt.lib")
+#endif
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "userenv.lib")
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "ws2_32.lib")
+#ifndef _WIN64
+#error Matching Windows x64 compilation is required.
+#endif
+
+static HANDLE ownedJob;
+static SRWLOCK jobLock = SRWLOCK_INIT;
+static PSID userSid, appSid;
+static WCHAR *userText, *appText;
+static const WCHAR *root, *nonce;
+static BOOL unreceiptedProfile;
+static const WCHAR *role;
+static const WCHAR *nullProbeCase = L"shadow";
+static const WCHAR *workspaceIdentity, *workspaceNativeHex;
+static BOOL workspaceEntered, retainUnsettledMap;
+static const WCHAR *workspaceRole;
+static BOOL workspace_case(const WCHAR *value) {
+  return !wcscmp(value, L"null-probe") || !wcscmp(value, L"read") || !wcscmp(value, L"edit");
+}
+struct diagnosis { const char *operation, *domain; DWORD value; };
+static struct diagnosis first_failure, cleanup_failure;
+static SRWLOCK diagnosisLock = SRWLOCK_INIT;
+static SRWLOCK diagnosticOutputLock = SRWLOCK_INIT;
+/* Parent ownership survives every partial setup and failure path. */
+static struct launch_transport {
+  HANDLE in, write, read, out, errorRead, errorWrite;
+  HANDLE gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite;
+  HANDLE cwd;
+  HANDLE workspacePhysical, workspaceLogical;
+  HANDLE executable, expectedExecutable, writer, diagnosticWriter;
+  PROCESS_INFORMATION child;
+  PSECURITY_DESCRIPTOR security;
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes;
+  BOOL attributesReady, writerReleased, diagnosticWriterReleased;
+} transport;
+#ifndef NATIVE_COMMAND_EXPERIMENT
+static DWORD wfpChildPid;
+static ULONGLONG wfpChildBirth;
+static char wfpImageHash[65], wfpImageId[50];
+static BOOL wfpSnapshotTaken, wfpCleanupFailed;
+static HANDLE wfpEngine, wfpToken;
+static TOKEN_STATISTICS wfpTokenIdentity;
+static ULONGLONG wfpPreparedAt, wfpPreparedTick, wfpOwnerBirth;
+static USHORT wfpRemotePort, wfpLocalPort;
+/* Data only: the payload receives no process handle or additional capability. */
+struct socket_target { DWORD version, pid; ULONGLONG birth; LUID token, authentication, modified; };
+_Static_assert(sizeof(struct socket_target) == 40, "Fixed socket destination");
+struct socket_offer { struct socket_target target; WSAPROTOCOL_INFOW source, protocol; };
+struct socket_import { struct socket_offer offer; struct socket_target creator, effective; struct sockaddr_in local; };
+_Static_assert(1 + sizeof(struct socket_import) <= 4096, "Bounded socket import");
+struct socket_control_offer { DWORD error; ULONGLONG end; struct socket_offer offer; };
+static struct socket_target wfpTarget;
+static struct socket_target wfpDestination, wfpEffective, socketCreation;
+static struct sockaddr_in wfpLocal;
+static WSAPROTOCOL_INFOW wfpProtocol;
+static volatile LONG wfpTargetReady, wfpTransferReady, wfpDuplicateReleased;
+static volatile LONG wfpObserverReady, wfpAttemptReleased, wfpClosureReady, wfpClosureReleased;
+static volatile LONG wfpControlSeen;
+static DWORD wfpTransferError;
+static WORD socketVersion, socketHighVersion;
+static ULONGLONG wfpTransferEnd;
+static BOOL wfp_close(void);
+#endif
+static SRWLOCK transportLock = SRWLOCK_INIT;
+static BOOL settle_transport(void);
+static BOOL settle_null_map(void);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+static BOOL command_preflight_close(BOOL keepBroker);
+static void command_observe_failure(void);
+#endif
+static volatile LONG failing;
+static void remember(const char *operation, const char *domain, DWORD value) {
+  AcquireSRWLockExclusive(&diagnosisLock);
+  if (!first_failure.operation) first_failure = (struct diagnosis){operation, domain, value};
+  ReleaseSRWLockExclusive(&diagnosisLock);
+}
+static void cleanup_error(const char *operation, const char *domain, DWORD value) {
+  AcquireSRWLockExclusive(&diagnosisLock);
+  if (!cleanup_failure.operation) cleanup_failure = (struct diagnosis){operation, domain, value};
+  ReleaseSRWLockExclusive(&diagnosisLock);
+}
+static BOOL close_job(BOOL emergency) {
+  AcquireSRWLockExclusive(&jobLock); HANDLE job = ownedJob; ownedJob = NULL;
+  BOOL ok = TRUE;
+  if (job && emergency && !TerminateJobObject(job, 126)) {
+    DWORD error = GetLastError(); remember("job-terminate", "win32", error); cleanup_error("job-terminate", "win32", error); ok = FALSE;
+  }
+  if (job && !CloseHandle(job)) {
+    DWORD error = GetLastError(); remember("job-close", "win32", error); cleanup_error("job-close", "win32", error); ok = FALSE;
+  }
+  ReleaseSRWLockExclusive(&jobLock); return ok;
+}
+static void failure(DWORD code) {
+  /* Let the first owner finish bounded draining instead of truncating it. */
+  if (InterlockedCompareExchange(&failing, 1, 0)) Sleep(INFINITE);
+  AcquireSRWLockShared(&diagnosisLock); struct diagnosis first = first_failure; ReleaseSRWLockShared(&diagnosisLock);
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows: operation=%s domain=%s value=%lu\n", first.operation, first.domain, first.value); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  command_observe_failure();
+#endif
+  close_job(TRUE);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  command_preflight_close(FALSE);
+#endif
+  settle_transport();
+  settle_null_map();
+  if (unreceiptedProfile) {
+    WCHAR profile[80]; swprintf_s(profile, 80, L"native.feasibility.%ls", nonce);
+    HRESULT status = DeleteAppContainerProfile(profile);
+    if (FAILED(status)) cleanup_error("profile-delete", "hresult", (DWORD)status);
+  }
+  AcquireSRWLockShared(&diagnosisLock); struct diagnosis cleanup = cleanup_failure; ReleaseSRWLockShared(&diagnosisLock);
+  if (cleanup.operation) {
+    AcquireSRWLockExclusive(&diagnosticOutputLock);
+    fprintf(stderr, "native-windows-cleanup: operation=%s domain=%s value=%lu\n", cleanup.operation, cleanup.domain, cleanup.value); fflush(stderr);
+    ReleaseSRWLockExclusive(&diagnosticOutputLock);
+  }
+  if (retainUnsettledMap) Sleep(INFINITE); /* Keep uncertain holder resources in custody. */
+  ExitProcess(code);
+}
+static void invariant_value(BOOL ok, const char *operation, DWORD value) {
+  if (!ok) { remember(operation, "invariant", value); failure(126); }
+}
+static void invariant(BOOL ok, const char *operation) { invariant_value(ok, operation, 0); }
+/* A predicate has no GetLastError contract. Reached native calls use the
+ * API-specific checks below, capturing their result before any cleanup. */
+static void need(bool ok) { invariant(ok, "helper-invariant"); }
+static void win32_check(BOOL ok, const char *operation) {
+  if (!ok) { DWORD error = GetLastError(); remember(operation, "win32", error); failure(126); }
+}
+static void status_check(DWORD status, const char *operation) {
+  if (status != ERROR_SUCCESS) { remember(operation, "win32", status); failure(126); }
+}
+static void nt_check(NTSTATUS status, const char *operation) {
+  if (status < 0) { remember(operation, "ntstatus", (DWORD)status); failure(126); }
+}
+static void hresult_check(HRESULT status, const char *operation) {
+  if (FAILED(status)) {
+    remember(operation, "hresult", (DWORD)status);
+    failure(status == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || status == E_NOTIMPL ? 78 : 126);
+  }
+}
+static BOOL close_handle(HANDLE handle, const char *operation) {
+  if (CloseHandle(handle)) return TRUE;
+  DWORD error = GetLastError(); remember(operation, "win32", error); cleanup_error(operation, "win32", error); return FALSE;
+}
+static BOOL release_handle(HANDLE *slot, const char *operation) {
+  HANDLE handle = *slot; *slot = NULL;
+  return !handle || handle == INVALID_HANDLE_VALUE || close_handle(handle, operation);
+}
+static BOOL release_forwarder(HANDLE thread, BOOL *released) {
+  if (!thread || *released) return TRUE;
+  *released = TRUE;
+  DWORD suspended = ResumeThread(thread), value = suspended == (DWORD)-1 ? GetLastError() : 0;
+  if (suspended == 1) return TRUE;
+  const char *domain = suspended == (DWORD)-1 ? "win32" : "invariant";
+  remember("forward-release", domain, value); cleanup_error("forward-release", domain, value); return FALSE;
+}
+static BOOL close_transport_setup(void) {
+  BOOL ok = TRUE;
+  if (!release_handle(&transport.workspacePhysical, "file-close")) ok = FALSE;
+  if (!release_handle(&transport.workspaceLogical, "file-close")) ok = FALSE;
+  if (!release_handle(&transport.cwd, "file-close")) ok = FALSE;
+  if (transport.attributesReady) DeleteProcThreadAttributeList(transport.attributes);
+  free(transport.attributes); transport.attributes = NULL; transport.attributesReady = FALSE;
+  LocalFree(transport.security); transport.security = NULL;
+  HANDLE *pipes[] = {&transport.in, &transport.out, &transport.errorWrite};
+  for (unsigned i = 0; i < 3; i++) if (!release_handle(pipes[i], "pipe-close")) ok = FALSE;
+  HANDLE *nulls[] = {&transport.gitInput, &transport.gitOutput};
+  for (unsigned i = 0; i < 2; i++) if (!release_handle(nulls[i], "git-null-close")) ok = FALSE;
+  HANDLE *diagnostics[] = {&transport.gitDiagnosticRead, &transport.gitDiagnosticWrite};
+  for (unsigned i = 0; i < 2; i++) if (!release_handle(diagnostics[i], "git-diagnostic-close")) ok = FALSE;
+  return ok;
+}
+static BOOL transport_wait(HANDLE handle, ULONGLONG expires, const char *operation) {
+  if (!handle) return TRUE;
+  ULONGLONG now = GetTickCount64();
+  DWORD waited = WaitForSingleObject(handle, now < expires ? (DWORD)(expires - now) : 0);
+  if (waited == WAIT_OBJECT_0) return TRUE;
+  const char *domain = waited == WAIT_FAILED ? "win32" : "invariant";
+  DWORD value = waited == WAIT_FAILED ? GetLastError() : 0;
+  remember(operation, domain, value); cleanup_error(operation, domain, value); return FALSE;
+}
+static BOOL settle_transport(void) {
+  AcquireSRWLockExclusive(&transportLock);
+  BOOL ok = close_transport_setup();
+  if (!release_handle(&transport.write, "pipe-close")) ok = FALSE;
+  ULONGLONG expires = GetTickCount64() + 8000;
+  if (!transport_wait(transport.child.hProcess, expires, "process-wait")) ok = FALSE;
+  HANDLE *threads[] = {&transport.writer, &transport.diagnosticWriter};
+  HANDLE *reads[] = {&transport.read, &transport.errorRead};
+  BOOL *released[] = {&transport.writerReleased, &transport.diagnosticWriterReleased};
+  for (unsigned i = 0; i < 2; i++) {
+    if (!release_forwarder(*threads[i], released[i])) ok = FALSE;
+    /* A forwarding failure has no pending I/O on its own thread. */
+    if (*threads[i] && GetThreadId(*threads[i]) != GetCurrentThreadId() &&
+        !transport_wait(*threads[i], expires, "forward-wait")) {
+      ok = FALSE;
+      /* ExitProcess will settle a still-running forwarder; never close its
+       * active pipe and mistake that uncertainty for independent retirement. */
+      continue;
+    }
+    if (!release_handle(reads[i], "forward-close")) ok = FALSE;
+    if (!release_handle(threads[i], "forward-close")) ok = FALSE;
+  }
+  if (!release_handle(&transport.child.hThread, "thread-close")) ok = FALSE;
+  if (!release_handle(&transport.child.hProcess, "process-close")) ok = FALSE;
+  if (!release_handle(&transport.executable, "executable-close")) ok = FALSE;
+  if (!release_handle(&transport.expectedExecutable, "executable-close")) ok = FALSE;
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  /* A timed-out diagnostic reader may still own WFP API calls. Its process
+   * must retire before those resources can be considered independently closed. */
+  if (!transport.diagnosticWriter && !wfp_close()) ok = FALSE;
+#endif
+  ReleaseSRWLockExclusive(&transportLock); return ok;
+}
+/* FILE_TYPE_UNKNOWN is not itself an API error; only its captured last-error
+ * distinguishes failure from a successful but unsupported device type. */
+static void file_type(HANDLE handle, DWORD expected, const char *operation) {
+  SetLastError(ERROR_SUCCESS); DWORD type = GetFileType(handle), error = GetLastError();
+  if (type == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS) { remember(operation, "win32", error); failure(126); }
+  invariant_value(type == expected, operation, type);
+}
+static DWORD WINAPI deadline(void *unused) {
+  (void)unused; Sleep(90000);
+  if (workspaceRole && !wcscmp(role, L"null-map")) {
+    retainUnsettledMap = TRUE; remember("null-retirement", "invariant", 0); failure(124);
+  }
+  ExitProcess(124); /* Closure never supplies a PASS. */
+  return 0;
+}
+static ULONGLONG number(const WCHAR *value) {
+  WCHAR *end; ULONGLONG n = _wcstoui64(value, &end, 10);
+  invariant(*value && wcsspn(value, L"0123456789") == wcslen(value) && !*end && n, "argument-number"); return n;
+}
+static void name(WCHAR out[4096], const WCHAR *relative) { invariant(swprintf_s(out, 4096, L"%ls\\%ls", root, relative) > 0, "path-bound"); }
+static void ack(char expected) { char value; DWORD size; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &value, 1, &size, NULL), "ack-read"); invariant(size == 1 && value == expected, "ack-value"); }
+static void *info(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
+  DWORD size = 0; BOOL queried = GetTokenInformation(token, kind, NULL, 0, &size); DWORD error = queried ? ERROR_SUCCESS : GetLastError();
+  if (!queried && error != ERROR_INSUFFICIENT_BUFFER) {
+    remember("token-size", "win32", error); failure(error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED ? 78 : 126);
+  }
+  invariant(!queried && size && size <= 65536, "token-size");
+  void *value = calloc(1, size); invariant(value != NULL, "token-allocation");
+  win32_check(GetTokenInformation(token, kind, value, size, &size), "token-read"); return value;
+}
+static void principal(void) {
+  HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "principal-token");
+  TOKEN_USER *user = info(token, TokenUser); invariant(IsValidSid(user->User.Sid), "principal-sid"); userSid = malloc(GetLengthSid(user->User.Sid));
+  invariant(userSid != NULL, "principal-allocation"); win32_check(CopySid(GetLengthSid(user->User.Sid), userSid, user->User.Sid), "principal-sid");
+  win32_check(ConvertSidToStringSidW(userSid, &userText), "principal-sid");
+  DWORD *container = info(token, TokenIsAppContainer); invariant(!*container, "principal-container"); free(container); free(user); win32_check(CloseHandle(token), "token-close");
+}
+static ULONGLONG creation(HANDLE process) {
+  FILETIME c, e, k, u; win32_check(GetProcessTimes(process, &c, &e, &k, &u), "process-time");
+  ULARGE_INTEGER time; time.LowPart = c.dwLowDateTime; time.HighPart = c.dwHighDateTime; return time.QuadPart;
+}
+static void identity(HANDLE process) {
+  HANDLE token; win32_check(OpenProcessToken(process, TOKEN_QUERY, &token), "process-token"); TOKEN_USER *user = info(token, TokenUser);
+  DWORD *session = info(token, TokenSessionId); WCHAR *sid;
+  win32_check(ConvertSidToStringSidW(user->User.Sid, &sid), "process-sid");
+  DWORD pid = GetProcessId(process); win32_check(pid != 0, "process-id");
+  printf("{\"pid\":%lu,\"creationTime\":\"%llu\",\"sessionId\":%lu,\"userSid\":\"%ls\"}", pid, creation(process), *session, sid);
+  free(user); free(session); LocalFree(sid); win32_check(CloseHandle(token), "token-close");
+}
+static void container(HANDLE process) {
+  HANDLE token; win32_check(OpenProcessToken(process, TOKEN_QUERY, &token), "container-token");
+  DWORD *active = info(token, TokenIsAppContainer); TOKEN_APPCONTAINER_INFORMATION *app = info(token, TokenAppContainerSid);
+  TOKEN_GROUPS *caps = info(token, TokenCapabilities); TOKEN_USER *user = info(token, TokenUser);
+  invariant(*active == 1 && app->TokenAppContainer && EqualSid(app->TokenAppContainer, appSid) && caps->GroupCount == 0 && EqualSid(user->User.Sid, userSid), "container-identity");
+  free(active); free(app); free(caps); free(user); win32_check(CloseHandle(token), "token-close");
+}
+static PSECURITY_DESCRIPTOR descriptor(DWORD grant, BOOL directory) {
+  WCHAR sddl[1024];
+  if (grant) invariant(swprintf_s(sddl, 1024, L"O:%lsD:P(A;%ls;FA;;;%ls)(A;%ls;0x%08lx;;;%ls)", userText, directory ? L"OICI" : L"", userText, directory ? L"OICI" : L"", grant, appText) > 0, "security-descriptor");
+  else invariant(swprintf_s(sddl, 1024, L"O:%lsD:P(A;%ls;FA;;;%ls)", userText, directory ? L"OICI" : L"", userText) > 0, "security-descriptor");
+  PSECURITY_DESCRIPTOR sd; win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL), "security-descriptor"); return sd;
+}
+static PSECURITY_DESCRIPTOR kernel_descriptor(void) {
+  WCHAR sddl[512]; invariant(swprintf_s(sddl, 512, L"O:%lsD:P(A;;GA;;;%ls)", userText, userText) > 0, "security-descriptor");
+  PSECURITY_DESCRIPTOR sd; win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL), "security-descriptor"); return sd;
+}
+static void protect(const WCHAR *file, DWORD grant, BOOL directory) {
+  PSECURITY_DESCRIPTOR sd = descriptor(grant, directory);
+  win32_check(SetFileSecurityW(file, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd), "file-protect"); LocalFree(sd);
+}
+static void acl(HANDLE object, SE_OBJECT_TYPE type, BOOL private) {
+  PSID owner; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+  status_check(GetSecurityInfo(object, type, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd), "acl-read");
+  invariant(owner && IsValidSid(owner) && EqualSid(owner, userSid), "acl-owner");
+  invariant(dacl && IsValidAcl(dacl), "acl-entries");
+  win32_check(GetSecurityDescriptorControl(sd, &flags, &revision), "acl-control");
+  invariant((flags & SE_DACL_PROTECTED) && dacl->AceCount == (private ? 1 : 2), "acl-entries");
+  for (DWORD i = 0; i < dacl->AceCount; i++) {
+    ACCESS_ALLOWED_ACE *ace; win32_check(GetAce(dacl, i, (void **)&ace), "acl-entry");
+    invariant(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !(ace->Header.AceFlags & (INHERITED_ACE | INHERIT_ONLY_ACE)), "acl-entry");
+    invariant(EqualSid(&ace->SidStart, i == 0 ? userSid : appSid), "acl-sid");
+    invariant(i ? (ace->Mask & (WRITE_DAC | WRITE_OWNER | DELETE)) == 0 : (ace->Mask == FILE_ALL_ACCESS || ace->Mask == GENERIC_ALL || (type == SE_KERNEL_OBJECT && (ace->Mask == JOB_OBJECT_ALL_ACCESS || ace->Mask == PROCESS_ALL_ACCESS || ace->Mask == THREAD_ALL_ACCESS))), "acl-mask");
+  }
+  LocalFree(sd);
+}
+#ifndef NATIVE_COMMAND_EXPERIMENT
+/* Socket transfer needs source-process access, not observer-process access.
+ * Both creator and independent verifier read back this exact protected DACL. */
+static void socket_source_acl(HANDLE process) {
+  PSID owner = NULL; PACL dacl = NULL; PSECURITY_DESCRIPTOR sd = NULL;
+  SECURITY_DESCRIPTOR_CONTROL flags = 0; DWORD revision = 0;
+  DWORD status = GetSecurityInfo(process, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd);
+  BOOL valid = FALSE;
+  if (!status) {
+    if (!GetSecurityDescriptorControl(sd, &flags, &revision)) status = GetLastError();
+    else if (owner && IsValidSid(owner) && EqualSid(owner, userSid) && dacl && IsValidAcl(dacl) && (flags & SE_DACL_PROTECTED) && dacl->AceCount == 2) {
+      valid = TRUE;
+      for (DWORD i = 0; i < 2; i++) {
+        ACCESS_ALLOWED_ACE *ace = NULL;
+        if (!GetAce(dacl, i, (void **)&ace)) { status = GetLastError(); valid = FALSE; break; }
+        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE || ace->Header.AceFlags ||
+            !IsValidSid(&ace->SidStart) || !EqualSid(&ace->SidStart, i ? appSid : userSid) ||
+            (i ? ace->Mask != PROCESS_DUP_HANDLE : (ace->Mask != GENERIC_ALL && ace->Mask != PROCESS_ALL_ACCESS))) valid = FALSE;
+      }
+    }
+  }
+  if (sd) LocalFree(sd);
+  status_check(status, "socket-source-acl"); invariant(valid, "socket-source-acl");
+}
+static void socket_source_grant(HANDLE process) {
+  acl(process, SE_KERNEL_OBJECT, TRUE);
+  WCHAR sddl[1024]; invariant(swprintf_s(sddl, 1024, L"O:%lsD:P(A;;GA;;;%ls)(A;;0x%08lx;;;%ls)", userText, userText, (DWORD)PROCESS_DUP_HANDLE, appText) > 0, "socket-source-descriptor");
+  PSECURITY_DESCRIPTOR sd = NULL;
+  win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL), "socket-source-descriptor");
+  PACL dacl = NULL; BOOL present = FALSE, defaulted = FALSE;
+  BOOL read = GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
+  DWORD status = read ? ERROR_INVALID_DATA : GetLastError();
+  if (read && present && !defaulted && dacl)
+    status = SetSecurityInfo(process, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL);
+  LocalFree(sd); status_check(status, "socket-source-grant"); socket_source_acl(process);
+}
+#endif
+/* Opening a non-reparse object is not canonical path evidence. */
+static HANDLE openfile(const WCHAR *path, DWORD access) {
+  HANDLE h = CreateFileW(path, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  win32_check(h != INVALID_HANDLE_VALUE, "file-open"); FILE_ATTRIBUTE_TAG_INFO tag;
+  win32_check(GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)), "file-tag"); invariant(!(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "file-tag");
+  return h;
+}
+static HANDLE file(const WCHAR *path, DWORD access) {
+  HANDLE h = openfile(path, access);
+  WCHAR actual[4096]; DWORD size = GetFinalPathNameByHandleW(h, actual, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  win32_check(size != 0, "file-path"); invariant(size > 4 && size < 4096 && !wcsncmp(actual, L"\\\\?\\", 4) && !_wcsicmp(actual + 4, path), "file-path"); return h;
+}
+static void fileid(HANDLE h, char out[50]) {
+  FILE_ID_INFO id; FILE_STANDARD_INFO standard;
+  win32_check(GetFileInformationByHandleEx(h, FileIdInfo, &id, sizeof(id)), "file-id");
+  win32_check(GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof(standard)), "file-shape");
+  invariant(id.VolumeSerialNumber && !standard.DeletePending && (standard.Directory || standard.NumberOfLinks == 1), "file-shape");
+  snprintf(out, 50, "%016llx:", id.VolumeSerialNumber); BYTE nonzero = 0;
+  for (unsigned i = 0; i < 16; i++) { nonzero |= id.FileId.Identifier[i]; snprintf(out + 17 + i * 2, 3, "%02x", id.FileId.Identifier[i]); } invariant(nonzero, "file-id");
+}
+#define FILE_HASH_LIMIT 134217728ULL
+#ifdef NATIVE_COMMAND_EXPERIMENT
+#define PROVIDER_IMAGE_HASH_LIMIT 536870912ULL
+#endif
+static void hashfile_bounded(HANDLE h, char out[65], ULONGLONG limit) {
+  LARGE_INTEGER length, zero = {0}; win32_check(GetFileSizeEx(h, &length), "file-size");
+  invariant(length.QuadPart >= 0 && (ULONGLONG)length.QuadPart <= limit, "file-size"); win32_check(SetFilePointerEx(h, zero, NULL, FILE_BEGIN), "file-seek");
+  BCRYPT_ALG_HANDLE algorithm; BCRYPT_HASH_HANDLE hash;
+  nt_check(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0), "hash-open"); nt_check(BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0), "hash-create");
+  BYTE bytes[8192], sum[32]; DWORD size; ULONGLONG total = 0;
+  do { win32_check(ReadFile(h, bytes, sizeof(bytes), &size, NULL), "hash-read"); total += size; invariant(total <= (ULONGLONG)length.QuadPart, "file-size"); nt_check(BCryptHashData(hash, bytes, size, 0), "hash-update"); } while (size);
+  invariant(total == (ULONGLONG)length.QuadPart, "file-size"); nt_check(BCryptFinishHash(hash, sum, 32, 0), "hash-final");
+  for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]); nt_check(BCryptDestroyHash(hash), "hash-close"); nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
+}
+static void hashfile(HANDLE h, char out[65]) { hashfile_bounded(h, out, FILE_HASH_LIMIT); }
+#ifdef NATIVE_COMMAND_EXPERIMENT
+/* Only the held pinned provider image uses the existing 512 MiB input ceiling. */
+static void hash_provider_image(HANDLE h, char out[65]) { hashfile_bounded(h, out, PROVIDER_IMAGE_HASH_LIMIT); }
+#endif
+static void hashbytes(const void *bytes, DWORD size, char out[65]) {
+  BCRYPT_ALG_HANDLE algorithm; BYTE sum[32];
+  nt_check(BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0), "hash-open");
+  nt_check(BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, size, sum, sizeof(sum)), "hash-final");
+  for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
+  nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
+}
+/* Failure-only observations must not enter the fatal guards. Hash the complete
+ * bounded value, encode only its first 64 bytes, and retain independent closure. */
+struct diagnostic_blob { DWORD size, encoded; NTSTATUS status, closed; char hash[65], hex[129]; };
+static void diagnostic_blob_read(const BYTE *bytes, DWORD size, struct diagnostic_blob *value) {
+  DWORD saved = GetLastError(); int savedErrno = errno;
+  memset(value, 0, sizeof(*value)); value->size = size;
+  strcpy_s(value->hash, sizeof(value->hash), "-"); strcpy_s(value->hex, sizeof(value->hex), "-");
+  value->status = (NTSTATUS)0xc000000d;
+  if (bytes && size <= 8192) {
+    BCRYPT_ALG_HANDLE algorithm = NULL; BYTE sum[32];
+    value->encoded = size < 64 ? size : 64;
+    for (DWORD i = 0; i < value->encoded; i++) snprintf(value->hex + 2*i, 3, "%02x", bytes[i]);
+    value->status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+    /* A failed open's output grants no ownership, even if non-null. */
+    BOOL acquired = value->status >= 0 && algorithm != NULL;
+    if (value->status >= 0 && !algorithm) value->status = (NTSTATUS)0xc0000008;
+    if (acquired) value->status = BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, size, sum, sizeof(sum));
+    if (value->status >= 0) for (unsigned i = 0; i < 32; i++) snprintf(value->hash + 2*i, 3, "%02x", sum[i]);
+    if (acquired) value->closed = BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (value->closed < 0) cleanup_error("hash-provider-close", "ntstatus", (DWORD)value->closed);
+  }
+  SetLastError(saved); errno = savedErrno;
+}
+/* Reserve framing for a caller-owned incomplete marker within the same 4 KiB.
+ * A failed optional write cannot recurse into failure() or consume its carrier. */
+static void diagnostic_write(FILE *output, DWORD *used, BOOL *incomplete, const char *format, ...) {
+  if (*incomplete) return;
+  DWORD saved = GetLastError(); int savedErrno = errno; char line[2048]; va_list args;
+  va_start(args, format); int size = vsnprintf(line, sizeof(line), format, args); va_end(args);
+  if (size <= 0 || size >= (int)sizeof(line)) *incomplete = TRUE;
+  else {
+    /* These streams retain Windows CRT text mode. Charge translated CRLF bytes
+     * as well as the complete formatted row, before publishing any prefix. */
+    DWORD encoded = (DWORD)size;
+    for (int i = 0; i < size; i++) if (line[i] == '\n') encoded++;
+    if (encoded > 4096 - 128 - *used) *incomplete = TRUE;
+    else { *used += encoded; if (fwrite(line, 1, size, output) != (size_t)size) *incomplete = TRUE; }
+  }
+  SetLastError(saved); errno = savedErrno;
+}
+/* Confined trusted checks own their immutable expected image before validation. */
+static HANDLE expected_executable(const WCHAR *path) {
+  HANDLE h = CreateFileW(path, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  transport.expectedExecutable = h; win32_check(h != INVALID_HANDLE_VALUE, "executable-open");
+  FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
+  invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)), "executable-tag"); acl(h, SE_FILE_OBJECT, FALSE);
+  char id[50]; fileid(h, id);
+  WCHAR actual[4096]; DWORD size = GetFinalPathNameByHandleW(h, actual, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  win32_check(size != 0, "file-path"); invariant(size > 4 && size < 4096 && !wcsncmp(actual, L"\\\\?\\", 4) && !_wcsicmp(actual + 4, path), "file-path"); return h;
+}
+/* Native equality binds the process to this held image, never to an alias. */
+static DWORD native_image(HANDLE executable, WCHAR path[4096]) {
+  DWORD size = GetFinalPathNameByHandleW(executable, path, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  win32_check(size != 0, "file-path"); invariant(size < 4096, "file-path"); return size;
+}
+/* Both readers emit the complete record from one held object and check closure. */
+static void emit_held_file(HANDLE h, BOOL private) {
+  acl(h, SE_FILE_OBJECT, private); char id[50], hash[65]; fileid(h, id);
+  FILE_STANDARD_INFO standard; win32_check(GetFileInformationByHandleEx(h, FileStandardInfo, &standard, sizeof(standard)), "file-shape");
+  printf("{\"identity\":\"%s\",\"private\":%s,\"sha256\":", id, private ? "true" : "false");
+  if (standard.Directory) printf("null"); else { hashfile(h, hash); printf("\"%s\"", hash); } putchar('}'); win32_check(CloseHandle(h), "file-close");
+}
+static void emitfile(const WCHAR *path, BOOL private) {
+  emit_held_file(file(path, GENERIC_READ), private);
+}
+/* Only bundle's five fixed Git objects use restricted observation. The
+ * supervisor joins these records to trusted canonical reads before release. */
+static void observe_git_file(const WCHAR *path) {
+  emit_held_file(openfile(path, GENERIC_READ), FALSE);
+}
+struct profile_record { DWORD magic; WCHAR nonce[33], sid[184]; char rootId[50], intentHash[65]; };
+static struct profile_record record;
+static void recordio(const WCHAR *relative, void *bytes, DWORD size, BOOL write) {
+  WCHAR path[4096]; name(path, relative);
+  PSECURITY_DESCRIPTOR sd = descriptor(0, FALSE); SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+  HANDLE h = write ? CreateFileW(path, GENERIC_WRITE | READ_CONTROL, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL) : file(path, GENERIC_READ);
+  win32_check(h != INVALID_HANDLE_VALUE, "receipt-open"); LocalFree(sd); acl(h, SE_FILE_OBJECT, TRUE); DWORD used;
+  if (write) {
+    win32_check(WriteFile(h, bytes, size, &used, NULL), "receipt-write"); invariant(used == size, "receipt-size"); win32_check(FlushFileBuffers(h), "receipt-flush");
+  } else {
+    LARGE_INTEGER length; win32_check(GetFileSizeEx(h, &length), "receipt-size"); invariant(length.QuadPart == size, "receipt-size");
+    win32_check(ReadFile(h, bytes, size, &used, NULL), "receipt-read"); invariant(used == size, "receipt-size");
+  }
+  win32_check(CloseHandle(h), "receipt-close");
+}
+static void profile_name(WCHAR out[80]) { invariant(swprintf_s(out, 80, L"native.feasibility.%ls", nonce) > 0, "profile-name"); }
+static void derive(void) {
+  WCHAR profile[80]; profile_name(profile); HRESULT hr = DeriveAppContainerSidFromAppContainerName(profile, &appSid);
+  hresult_check(hr, "profile-derive"); win32_check(ConvertSidToStringSidW(appSid, &appText), "profile-sid");
+}
+static LONG mapping(HKEY *key) {
+  WCHAR path[512]; need(swprintf_s(path, 512, L"Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppContainer\\Mappings\\%ls", appText) > 0);
+  return RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, key);
+}
+static void profile_observe(void) {
+  HKEY key; need(mapping(&key) == ERROR_SUCCESS); WCHAR actual[80], expected[80]; DWORD type, size = sizeof(actual); profile_name(expected);
+  need(RegQueryValueExW(key, L"Moniker", NULL, &type, (BYTE *)actual, &size) == ERROR_SUCCESS && type == REG_SZ && size >= 2 && size <= sizeof(actual) && actual[size / 2 - 1] == 0 && !_wcsicmp(actual, expected) && RegCloseKey(key) == ERROR_SUCCESS);
+  printf("{\"profileObserved\":true,\"sid\":\"%ls\"}\n", appText);
+}
+static void owned_profile(void) {
+  recordio(L"control\\profile.bin", &record, sizeof(record), FALSE);
+  invariant(record.nonce[32] == 0 && record.sid[183] == 0 && record.rootId[49] == 0 && record.intentHash[64] == 0, "profile-receipt");
+  HANDLE h = file(root, 0); char id[50]; fileid(h, id); win32_check(CloseHandle(h), "file-close");
+  invariant(record.magic == 0x4e463031 && !wcscmp(record.nonce, nonce) && !wcscmp(record.sid, appText) && !strcmp(record.rootId, id), "profile-binding");
+  WCHAR path[4096]; name(path, L"control\\intent.json"); h = file(path, GENERIC_READ); acl(h, SE_FILE_OBJECT, TRUE); char pin[65]; hashfile(h, pin); invariant(!strcmp(pin, record.intentHash), "profile-intent"); win32_check(CloseHandle(h), "file-close");
+}
+static void profile_create(const WCHAR *pin) {
+  WCHAR path[4096], profile[80]; name(path, L"control\\intent.json"); HANDLE intent = file(path, GENERIC_READ); acl(intent, SE_FILE_OBJECT, TRUE);
+  char hash[65]; hashfile(intent, hash); need(wcslen(pin) == 64);
+  for (unsigned i = 0; i < 64; i++) need(pin[i] == hash[i]); need(CloseHandle(intent));
+  HANDLE base = file(root, 0); acl(base, SE_FILE_OBJECT, TRUE); fileid(base, record.rootId); need(CloseHandle(base));
+  profile_name(profile); PSID created = NULL;
+  HKEY key; LONG existing = mapping(&key);
+  if (existing == ERROR_SUCCESS) { RegCloseKey(key); puts("{\"created\":false,\"profileUnowned\":true}"); ExitProcess(78); }
+  if (existing == ERROR_ACCESS_DENIED || existing == ERROR_NOT_SUPPORTED) { puts("{\"created\":false,\"profileUnowned\":true}"); ExitProcess(78); }
+  need(existing == ERROR_FILE_NOT_FOUND);
+  HRESULT hr = CreateAppContainerProfile(profile, profile, L"Bounded native experiment", NULL, 0, &created);
+  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) { puts("{\"created\":false,\"profileUnowned\":true}"); ExitProcess(78); }
+  if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) || hr == E_NOTIMPL || hr == E_ACCESSDENIED) ExitProcess(78);
+  need(SUCCEEDED(hr) && created && EqualSid(created, appSid)); unreceiptedProfile = TRUE; FreeSid(created);
+  record.magic = 0x4e463031; wcscpy_s(record.nonce, 33, nonce); wcscpy_s(record.sid, 184, appText); strcpy_s(record.intentHash, 65, hash);
+  /* A crash before this durable receipt leaves exclusion, never deletion authority. */
+  recordio(L"control\\profile.bin", &record, sizeof(record), TRUE);
+  unreceiptedProfile = FALSE;
+  printf("{\"created\":true,\"sid\":\"%ls\"}\n", appText);
+}
+static unsigned treeEntries;
+static void grant_tree(const WCHAR *path, DWORD rights) {
+  need(++treeEntries <= 512);
+  DWORD attr = GetFileAttributesW(path); need(attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_REPARSE_POINT));
+  BOOL directory = !!(attr & FILE_ATTRIBUTE_DIRECTORY); protect(path, rights, directory);
+  if (directory) {
+    WCHAR pattern[4096]; need(swprintf_s(pattern, 4096, L"%ls\\*", path) > 0); WIN32_FIND_DATAW entry; HANDLE scan = FindFirstFileW(pattern, &entry); need(scan != INVALID_HANDLE_VALUE);
+    unsigned count = 0;
+    do { if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) continue; need(++count <= 256);
+      WCHAR child[4096]; need(swprintf_s(child, 4096, L"%ls\\%ls", path, entry.cFileName) > 0); grant_tree(child, rights);
+    } while (FindNextFileW(scan, &entry)); need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(scan));
+  }
+}
+static void grants(BOOL editing) {
+  owned_profile(); WCHAR path[4096];
+  protect(root, FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FALSE);
+  name(path, L"build"); grant_tree(path, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+  name(path, L"workspace"); grant_tree(path, FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
+  name(path, L"workspace\\edited.txt"); protect(path, FILE_GENERIC_READ | (editing ? FILE_GENERIC_WRITE : 0), FALSE);
+  puts("{\"granted\":true}");
+}
+static void append(WCHAR *line, size_t *offset, WCHAR value) { invariant(*offset < 32766, "argv-bound"); line[(*offset)++] = value; line[*offset] = 0; }
+/* Same literal UCRT quoting recipe as launcher.c; no shell interpretation. */
+static void argument(WCHAR *line, size_t *offset, const WCHAR *value) {
+  if (*offset) append(line, offset, L' '); append(line, offset, L'"'); size_t slashes = 0;
+  for (size_t i = 0;; i++) { if (value[i] == L'\\') { slashes++; continue; }
+    if (!value[i] || value[i] == L'"') slashes *= 2;
+    while (slashes) { append(line, offset, L'\\'); slashes--; } if (!value[i]) break;
+    if (value[i] == L'"') append(line, offset, L'\\'); append(line, offset, value[i]); }
+  append(line, offset, L'"');
+}
+static HANDLE original_owned(DWORD pid, ULONGLONG time, DWORD rights, HANDLE *slot) {
+  HANDLE h = OpenProcess(rights | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (slot) *slot = h;
+  win32_check(h != NULL, "process-open"); invariant(creation(h) == time, "process-time"); WCHAR image[4096], self[4096]; DWORD size = 4096;
+  win32_check(QueryFullProcessImageNameW(h, PROCESS_NAME_NATIVE, image, &size), "original-image-query"); invariant(size > 0 && size < 4096, "original-image-bound");
+  DWORD selfSize = GetModuleFileNameW(NULL, self, 4096); win32_check(selfSize != 0, "original-self-query");
+  invariant(selfSize < 4096, "original-self-bound"); WCHAR expected[4096]; name(expected, L"build\\helper.exe"); invariant(!_wcsicmp(self, expected), "original-image-equal");
+  HANDLE executable = expected_executable(expected); native_image(executable, self);
+  invariant(!_wcsicmp(image, self), "original-image-equal"); if (!release_handle(&transport.expectedExecutable, "executable-close")) failure(126); return h;
+}
+static HANDLE original(DWORD pid, ULONGLONG time, DWORD rights) { return original_owned(pid, time, rights, NULL); }
+static HANDLE duplicate(HANDLE source, const WCHAR *raw, DWORD access) {
+  HANDLE h; win32_check(DuplicateHandle(source, (HANDLE)(ULONG_PTR)number(raw), GetCurrentProcess(), &h, access, FALSE, 0), "handle-duplicate"); return h;
+}
+static void limits(HANDLE job) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION value; win32_check(QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &value, sizeof(value), NULL), "job-query");
+  invariant(value.BasicLimitInformation.LimitFlags == (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS) && value.BasicLimitInformation.ActiveProcessLimit == 8, "job-limits");
+  acl(job, SE_KERNEL_OBJECT, TRUE);
+}
+static HANDLE members[8]; static unsigned memberCount;
+static void census(HANDLE job) {
+  union { JOBOBJECT_BASIC_PROCESS_ID_LIST alignment; BYTE bytes[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST) + 8 * sizeof(ULONG_PTR)]; } storage;
+  JOBOBJECT_BASIC_PROCESS_ID_LIST *list = (void *)storage.bytes;
+  need(QueryInformationJobObject(job, JobObjectBasicProcessIdList, list, sizeof(storage), NULL) && list->NumberOfAssignedProcesses == list->NumberOfProcessIdsInList && list->NumberOfProcessIdsInList <= 8);
+  memberCount = list->NumberOfProcessIdsInList;
+  for (unsigned i = 0; i < memberCount; i++) { need(list->ProcessIdList[i] && list->ProcessIdList[i] <= MAXDWORD);
+    members[i] = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, (DWORD)list->ProcessIdList[i]); BOOL admitted;
+    need(members[i] && IsProcessInJob(members[i], job, &admitted) && admitted); container(members[i]); }
+}
+struct settled_record { DWORD magic, count, pid[8]; ULONGLONG time[8]; WCHAR nonce[33]; };
+struct launch_intent { DWORD magic, pid; ULONGLONG time; WCHAR nonce[33]; };
+static void assert_retired(DWORD pid, ULONGLONG time) {
+  need(pid && time); HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (h) { need(creation(h) != time || WaitForSingleObject(h, 0) == WAIT_OBJECT_0); need(CloseHandle(h)); }
+  else need(GetLastError() == ERROR_INVALID_PARAMETER);
+}
+static void done(const WCHAR *caseId) {
+  struct settled_record value = {0}; value.magic = 0x4e46444e; value.count = memberCount; wcscpy_s(value.nonce, 33, nonce);
+  for (unsigned i = 0; i < memberCount; i++) { need(WaitForSingleObject(members[i], 8000) == WAIT_OBJECT_0); value.pid[i] = GetProcessId(members[i]); value.time[i] = creation(members[i]); }
+  WCHAR path[128]; need(swprintf_s(path, 128, L"control\\%ls.done", caseId) > 0); recordio(path, &value, sizeof(value), TRUE);
+}
+struct forwarding { HANDLE *pipe; BOOL diagnostic; };
+#define IMAGE_PREFIX "native-windows-image:"
+#define IMAGE_INCOMPLETE IMAGE_PREFIX " incomplete\n"
+#define IMAGE_LIMIT 36864
+#define CWD_PREFIX "native-windows-cwd:"
+#define CWD_INCOMPLETE CWD_PREFIX " incomplete\n"
+#define CWD_LIMIT 8192
+#define TCP_PREFIX "native-windows-tcp:"
+#define TCP_INCOMPLETE TCP_PREFIX " incomplete\n"
+#define TCP_LIMIT 2048
+#define WFP_PREFIX "native-windows-wfp:"
+#define WFP_INCOMPLETE WFP_PREFIX " incomplete\n"
+#define WFP_LIMIT 4096
+static BOOL wfp_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(WFP_PREFIX) - 1;
+  return size >= sizeof("native-windows-w") - 1 && !memcmp(line, WFP_PREFIX, size < prefix ? size : prefix);
+}
+#ifndef NATIVE_COMMAND_EXPERIMENT
+#define SOCKET_PREFIX "native-windows-socket: "
+#define SOCKET_CONTROL_PREFIX "native-windows-socket-control: "
+_Static_assert(2 * sizeof(struct socket_import) + sizeof(SOCKET_PREFIX) + 2 <= 4096, "Bounded socket transfer line");
+_Static_assert(2 * sizeof(struct socket_control_offer) + sizeof(SOCKET_CONTROL_PREFIX) + 2 <= 4096, "Bounded control transfer line");
+static void socket_control_receive(const BYTE *line, DWORD size);
+static void socket_transfer_refusal(const BYTE *line, DWORD size);
+static void wfp_prepare(const BYTE *line, DWORD size);
+static void socket_export(void);
+static BOOL socket_command(char command);
+static void socket_transfer_controls(const struct socket_offer *original, DWORD error, ULONGLONG end);
+static void wfp_snapshot(const BYTE *line, DWORD size);
+#endif
+static BOOL image_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(IMAGE_PREFIX) - 1;
+  return size >= sizeof("native-windows-i") - 1 && !memcmp(line, IMAGE_PREFIX, size < prefix ? size : prefix);
+}
+static BOOL cwd_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(CWD_PREFIX) - 1;
+  return size >= sizeof("native-windows-c") - 1 && !memcmp(line, CWD_PREFIX, size < prefix ? size : prefix);
+}
+static BOOL tcp_line(const BYTE *line, DWORD size) {
+  DWORD prefix = sizeof(TCP_PREFIX) - 1;
+  return size >= sizeof("native-windows-t") - 1 && !memcmp(line, TCP_PREFIX, size < prefix ? size : prefix);
+}
+static void image_write(const char *line, DWORD size) {
+  DWORD used; AcquireSRWLockExclusive(&diagnosticOutputLock);
+  BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, size, &used, NULL); DWORD error = written ? 0 : GetLastError();
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+  if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+  invariant(used == size, "diagnostic-forward-write-size");
+}
+static struct forwarding stdoutForward = {&transport.read, FALSE}, stderrForward = {&transport.errorRead, TRUE};
+static DWORD WINAPI forward(void *parameter) {
+  struct forwarding *stream = parameter; HANDLE pipe = *stream->pipe;
+  BYTE bytes[4096], line[4096]; DWORD size, used, total = 0, at = 0, raw = 0, observations[4] = {0};
+  BOOL rawComplete = FALSE, unusable[4] = {FALSE, FALSE, FALSE, FALSE}; const char *discard = NULL;
+  const char *incomplete[] = {IMAGE_INCOMPLETE, CWD_INCOMPLETE, TCP_INCOMPLETE, WFP_INCOMPLETE}; const DWORD limits[] = {IMAGE_LIMIT, CWD_LIMIT, TCP_LIMIT, WFP_LIMIT};
+  for (;;) {
+    if (!ReadFile(pipe, bytes, sizeof(bytes), &size, NULL)) {
+      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember(stream->diagnostic ? "diagnostic-forward-read" : "forward-read", "win32", error); failure(126); } break;
+    }
+    invariant(size > 0, "forward-read-size");
+    if (!stream->diagnostic) {
+      invariant(size <= 65536 - total, "forward-bound"); total += size;
+      win32_check(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, size, &used, NULL), "forward-write"); invariant(used == size, "forward-write-size");
+      continue;
+    }
+    for (DWORD i = 0; i < size; i++) {
+      if (discard) { if (bytes[i] == '\n') discard = NULL; continue; }
+      int observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : wfp_line(line, at) ? 3 : -1;
+      if (at == sizeof(line) && observation >= 0) {
+        at = (DWORD)strlen(incomplete[observation]); memcpy(line, incomplete[observation], at);
+        discard = bytes[i] != '\n' ? incomplete[observation] : NULL;
+      } else {
+        invariant(at < sizeof(line), "diagnostic-forward-bound");
+        line[at++] = bytes[i];
+        if (bytes[i] != '\n') continue;
+      }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+      if (at >= sizeof(SOCKET_CONTROL_PREFIX) - 1 && !memcmp(line, SOCKET_CONTROL_PREFIX, sizeof(SOCKET_CONTROL_PREFIX) - 1)) {
+        socket_control_receive(line, at); at = 0; continue;
+      }
+      /* Consume the fixed Winsock transfer in the held launcher, never as a
+       * diagnostic or a payload-supplied acceptance record. Exactly one is legal. */
+      if (at >= sizeof(SOCKET_PREFIX) - 1 && !memcmp(line, SOCKET_PREFIX, sizeof(SOCKET_PREFIX) - 1)) {
+        wfp_prepare(line, at); at = 0; continue;
+      }
+      if (tcp_line(line, at)) socket_transfer_refusal(line, at);
+#endif
+      /* Hex diagnostics are output only; strict failures retain their own budget. */
+      observation = image_line(line, at) ? 0 : cwd_line(line, at) ? 1 : tcp_line(line, at) ? 2 : wfp_line(line, at) ? 3 : -1;
+      if (observation >= 0) {
+        if (unusable[observation]) { at = 0; continue; }
+        if (at > limits[observation] - observations[observation]) {
+          at = (DWORD)strlen(incomplete[observation]); memcpy(line, incomplete[observation], at);
+          unusable[observation] = TRUE;
+        } else observations[observation] += at;
+      } else if (at >= 23 && !memcmp(line, "native-windows-output: ", 23)) {
+        DWORD end = at - 1; if (end > 23 && line[end - 1] == '\r') end--;
+        invariant(!rawComplete && end > 23 && !((end - 23) % 2), "diagnostic-forward-bound");
+        for (DWORD j = 23; j < end; j++) invariant((line[j] >= '0' && line[j] <= '9') || (line[j] >= 'a' && line[j] <= 'f'), "diagnostic-forward-bound");
+        DWORD count = (end - 23) / 2;
+        invariant(count <= 65536 - raw, "diagnostic-forward-bound"); raw += count;
+      } else if (at >= 27 && !memcmp(line, "native-windows-output-end: ", 27)) {
+        DWORD end = at - 1; if (end > 27 && line[end - 1] == '\r') end--;
+        invariant((end == 35 && !memcmp(line + 27, "complete", 8)) || (end == 34 && !memcmp(line + 27, "partial", 7)) || (end == 36 && !memcmp(line + 27, "truncated", 9)), "diagnostic-forward-bound");
+        invariant(!rawComplete, "diagnostic-forward-bound"); rawComplete = TRUE;
+      } else {
+        invariant(at <= 4096 - total, "diagnostic-forward-bound"); total += at;
+      }
+      /* Raw complete lines retain the payload's CRLF without CRT translation. */
+      AcquireSRWLockExclusive(&diagnosticOutputLock);
+      BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, at, &used, NULL); DWORD error = written ? 0 : GetLastError();
+      ReleaseSRWLockExclusive(&diagnosticOutputLock);
+      if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+      invariant(used == at, "diagnostic-forward-write-size");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+      if (observation == 3) {
+        if (wfpSnapshotTaken) image_write(WFP_INCOMPLETE, sizeof(WFP_INCOMPLETE) - 1);
+        else { wfpSnapshotTaken = TRUE; wfp_snapshot(line, at); }
+      }
+#endif
+      at = 0;
+    }
+  }
+  const char *tail = discard ? discard : image_line(line, at) ? IMAGE_INCOMPLETE : cwd_line(line, at) ? CWD_INCOMPLETE : tcp_line(line, at) ? TCP_INCOMPLETE : wfp_line(line, at) ? WFP_INCOMPLETE : NULL;
+  if (tail) image_write(tail, (DWORD)strlen(tail));
+  else invariant(!at, "diagnostic-forward-eof"); return 0;
+}
+/* Match the bounded literal caller-directory grammar without expanding paths
+ * or granting access. WCHAR paths remain unchanged in the Unicode block. */
+static BOOL caller_directory(const WCHAR *value, DWORD size) {
+  if (size <= 3 || size >= 4096 || value[size] || value[1] != L':' || value[2] != L'\\' ||
+      !((value[0] >= L'A' && value[0] <= L'Z') || (value[0] >= L'a' && value[0] <= L'z'))) return FALSE;
+  const WCHAR *part = value + 3;
+  for (DWORD i = 3; i <= size; i++) {
+    WCHAR c = value[i];
+    if (!c || c == L'\\') {
+      size_t length = (size_t)(value + i - part);
+      if (!length || value[i - 1] == L' ' || value[i - 1] == L'.') return FALSE;
+      if ((length == 3 || (length > 3 && part[3] == L'.')) &&
+          (!_wcsnicmp(part, L"CON", 3) || !_wcsnicmp(part, L"PRN", 3) ||
+           !_wcsnicmp(part, L"AUX", 3) || !_wcsnicmp(part, L"NUL", 3))) return FALSE;
+      if ((length == 4 || (length > 4 && part[4] == L'.')) && part[3] >= L'1' && part[3] <= L'9' &&
+          (!_wcsnicmp(part, L"COM", 3) || !_wcsnicmp(part, L"LPT", 3))) return FALSE;
+      part = value + i + 1;
+    } else {
+      if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x2028 || c == 0x2029 || wcschr(L"<>\"|?*:/", c)) return FALSE;
+      if (c >= 0xd800 && c <= 0xdbff) {
+        if (i + 1 >= size || value[i + 1] < 0xdc00 || value[i + 1] > 0xdfff) return FALSE;
+        i++;
+      } else if (c >= 0xdc00 && c <= 0xdfff) return FALSE;
+    }
+  }
+  return TRUE;
+}
+#ifndef NATIVE_COMMAND_EXPERIMENT
+static struct socket_target socket_target(void) {
+  struct socket_target value = {0}; value.version = 1; value.pid = GetCurrentProcessId(); value.birth = creation(GetCurrentProcess());
+  HANDLE token = NULL; TOKEN_STATISTICS statistics; DWORD used, container;
+  win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "observer-owner-token");
+  win32_check(GetTokenInformation(token, TokenStatistics, &statistics, sizeof(statistics), &used), "observer-owner-token");
+  invariant(used == sizeof(statistics) && statistics.TokenType == TokenPrimary, "observer-owner-token");
+  win32_check(GetTokenInformation(token, TokenIsAppContainer, &container, sizeof(container), &used), "observer-owner-token");
+  invariant(used == sizeof(container) && !container, "observer-owner-token");
+  win32_check(CloseHandle(token), "observer-owner-close");
+  value.token = statistics.TokenId; value.authentication = statistics.AuthenticationId; value.modified = statistics.ModifiedId; return value;
+}
+static void socket_target_binding(const struct socket_target *expected) {
+  struct socket_target actual = socket_target();
+  invariant(!memcmp(expected, &actual, sizeof(actual)), "observer-owner-binding");
+  DWORD waited = WaitForSingleObject(GetCurrentProcess(), 0); win32_check(waited != WAIT_FAILED, "observer-owner-wait");
+  invariant(waited == WAIT_TIMEOUT, "observer-owner-binding");
+}
+#endif
+static void child_environment(WCHAR environment[8192]) {
+  WCHAR local[4096] = {0}, windows[4096] = {0}, actual[4096] = {0};
+  DWORD localSize = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 4096);
+  if (!localSize) { DWORD error = GetLastError(); remember("local-appdata", "win32", error); failure(78); }
+  if (!caller_directory(local, localSize)) { remember("local-appdata", "invariant", 0); failure(78); }
+  DWORD windowsSize = GetEnvironmentVariableW(L"SystemRoot", windows, 4096);
+  UINT actualSize = GetWindowsDirectoryW(actual, 4096); win32_check(actualSize != 0, "windows-directory");
+  invariant(caller_directory(windows, windowsSize) && caller_directory(actual, actualSize) && !_wcsicmp(windows, actual), "windows-directory");
+  // Git opens its configuration itself, so inherited NUL handles cannot help.
+  // The launcher fixes cwd to workspace; this empty file stays in its read ACL.
+  const WCHAR *pairs[] = {L"GIT_CONFIG_GLOBAL=.git/runner-global.conf", L"GIT_CONFIG_NOSYSTEM=1", L"GIT_OPTIONAL_LOCKS=0", L"GIT_TERMINAL_PROMPT=0"};
+  size_t at = 0; int n;
+  for (unsigned i = 0; i < 4; i++) {
+    invariant(at < 8192 && wcslen(pairs[i]) + 2 <= 8192 - at, "environment-bound");
+    n = swprintf_s(environment + at, 8192 - at, L"%ls", pairs[i]); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  }
+  invariant(at < 8192 && wcslen(L"LOCALAPPDATA=") + localSize + 2 <= 8192 - at, "environment-bound");
+  n = swprintf_s(environment + at, 8192 - at, L"LOCALAPPDATA=%ls", local); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
+    wfpTarget = socket_target(); WCHAR encoded[2 * sizeof(wfpTarget) + 1];
+    for (unsigned i = 0; i < sizeof(wfpTarget); i++) swprintf_s(encoded + 2*i, 3, L"%02x", ((const BYTE *)&wfpTarget)[i]);
+    n = swprintf_s(environment + at, 8192 - at, L"NATIVE_FEASIBILITY_SOCKET_OWNER=%ls", encoded);
+    invariant(n > 0 && (size_t)n + 2 <= 8192 - at, "environment-bound"); at += (size_t)n + 1;
+  }
+#endif
+  invariant(at < 8192 && wcslen(L"SystemRoot=") + windowsSize + 2 <= 8192 - at, "environment-bound");
+  n = swprintf_s(environment + at, 8192 - at, L"SystemRoot=%ls", windows); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  invariant(at < 8192, "environment-bound"); environment[at] = 0;
+}
+/* Same closed block as feasibility-git.js. The outside status control must use
+ * these paths too; a host-profile success cannot stand in for confined Git. */
+static DWORD git_environment(WCHAR environment[32767], const WCHAR *workspace, const WCHAR *metadata) {
+  WCHAR windows[4096], build[4096], config[4096], search[8192];
+  DWORD windowsSize = GetEnvironmentVariableW(L"SystemRoot", windows, 4096);
+  invariant(caller_directory(windows, windowsSize), "windows-directory");
+  name(build, L"build"); invariant(swprintf_s(config, 4096, L"%ls\\runner-global.conf", metadata) > 0, "environment-bound");
+  invariant(swprintf_s(search, 8192, L"%ls;%ls\\System32", build, windows) > 0, "environment-bound");
+  const WCHAR *keys[] = {L"GIT_ATTR_NOSYSTEM", L"GIT_CONFIG_GLOBAL", L"GIT_CONFIG_NOSYSTEM", L"GIT_OPTIONAL_LOCKS", L"GIT_TERMINAL_PROMPT", L"HOME", L"LANG", L"LC_ALL", L"LOCALAPPDATA", L"PATH", L"SystemRoot", L"TEMP", L"TMP", L"USERPROFILE", L"XDG_CONFIG_HOME"};
+  const WCHAR *values[] = {L"1", config, L"1", L"0", L"0", workspace, L"C", L"C", workspace, search, windows, workspace, workspace, workspace, workspace};
+  size_t at = 0;
+  for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    invariant(wcslen(keys[i]) + wcslen(values[i]) + 3 <= 32767 - at, "environment-bound");
+    int n = swprintf_s(environment + at, 32767 - at, L"%ls=%ls", keys[i], values[i]); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
+  }
+  environment[at++] = 0; return (DWORD)(at * sizeof(WCHAR));
+}
+static void git_output(const char *bytes, DWORD size) {
+  static const char hex[] = "0123456789abcdef";
+  char line[23 + 2 * 1024 + 1]; memcpy(line, "native-windows-output: ", 23);
+  for (DWORD offset = 0; offset < size;) {
+    DWORD count = size - offset; if (count > 1024) count = 1024;
+    for (DWORD i = 0; i < count; i++) { BYTE byte = (BYTE)bytes[offset + i]; line[23 + 2 * i] = hex[byte >> 4]; line[24 + 2 * i] = hex[byte & 15]; }
+    DWORD length = 23 + 2 * count + 1, used; line[length - 1] = '\n';
+    AcquireSRWLockExclusive(&diagnosticOutputLock);
+    BOOL written = WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, length, &used, NULL); DWORD error = written ? 0 : GetLastError();
+    ReleaseSRWLockExclusive(&diagnosticOutputLock);
+    if (!written) { remember("diagnostic-forward-write", "win32", error); failure(126); }
+    invariant(used == length, "diagnostic-forward-write-size"); offset += count;
+  }
+}
+static void git_output_end(const char *status) {
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows-output-end: %s\n", status); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+static void git_image_binding(const WCHAR *expected, DWORD expectedSize, const WCHAR *actual, BOOL queried, DWORD capacity, DWORD flags, DWORD size, DWORD error) {
+  char line[2200], errorText[16] = "unavailable"; static const char hex[] = "0123456789abcdef";
+  BOOL available = queried && size > 0 && size < capacity;
+  if (!queried) sprintf_s(errorText, sizeof(errorText), "%lu", error);
+  int length = sprintf_s(line, sizeof(line), IMAGE_PREFIX " query=%u capacity=%lu flags=%lu length=%lu error=%s expected=%lu actual=%u\n", (unsigned)!!queried, capacity, flags, size, errorText, expectedSize, (unsigned)!!available);
+  invariant(length > 0, "helper-invariant"); image_write(line, (DWORD)length);
+  for (unsigned path = 0; path < 2; path++) {
+    if (path && !available) continue;
+    const WCHAR *value = path ? actual : expected; DWORD count = path ? size : expectedSize;
+    for (DWORD offset = 0; offset < count;) {
+      DWORD chunk = count - offset; if (chunk > 512) chunk = 512;
+      length = sprintf_s(line, sizeof(line), IMAGE_PREFIX " %s ", path ? "actual" : "expected"); invariant(length > 0, "helper-invariant");
+      for (DWORD i = 0; i < chunk; i++) for (unsigned nibble = 0; nibble < 4; nibble++) line[length++] = hex[(value[offset + i] >> (12 - 4 * nibble)) & 15];
+      line[length++] = '\n'; image_write(line, (DWORD)length); offset += chunk;
+    }
+  }
+  image_write(IMAGE_PREFIX " end\n", sizeof(IMAGE_PREFIX " end\n") - 1);
+}
+struct cwd_result { const char *outcome; DWORD length, error; WCHAR text[MAX_PATH]; };
+static void cwd_query(struct cwd_result *result, DWORD length) {
+  result->error = length ? 0 : GetLastError();
+  result->length = length; result->outcome = !length ? "failed" : length >= MAX_PATH ? "oversized" : "success";
+}
+/* Payload observation only: the suspended Git child receives its map later. */
+static void observe_cwd(void) {
+  struct cwd_result calls[5] = {0}; const char *names[] = {"current", "open", "dos", "nt", "long"};
+  DWORD pid = GetCurrentProcessId(); FILETIME birth, exit, kernel, user;
+  BOOL born = GetProcessTimes(GetCurrentProcess(), &birth, &exit, &kernel, &user);
+  DWORD birthError = born ? 0 : GetLastError(); BOOL closed = TRUE; const char *closure = "not-attempted";
+  cwd_query(&calls[0], GetCurrentDirectoryW(MAX_PATH, calls[0].text));
+  if (calls[0].length > 0 && calls[0].length < MAX_PATH) {
+    transport.cwd = CreateFileW(calls[0].text, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    calls[1].error = transport.cwd == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+    calls[1].outcome = transport.cwd == INVALID_HANDLE_VALUE ? "failed" : "success";
+    if (transport.cwd != INVALID_HANDLE_VALUE) {
+      cwd_query(&calls[2], GetFinalPathNameByHandleW(transport.cwd, calls[2].text, MAX_PATH, 0));
+      cwd_query(&calls[3], GetFinalPathNameByHandleW(transport.cwd, calls[3].text, MAX_PATH, VOLUME_NAME_NT));
+      closed = release_handle(&transport.cwd, "file-close"); closure = closed ? "success" : "failed";
+      if (closed && (!calls[2].length || calls[2].length >= MAX_PATH))
+        cwd_query(&calls[4], GetLongPathNameW(calls[0].text, calls[4].text, MAX_PATH));
+    } else transport.cwd = NULL;
+  }
+  char line[1400], birthText[32] = "unavailable", errorText[16] = "unavailable";
+  if (born) sprintf_s(birthText, sizeof(birthText), "%llu", ((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime);
+  else sprintf_s(errorText, sizeof(errorText), "%lu", birthError);
+  int length = sprintf_s(line, sizeof(line), CWD_PREFIX " pid=%lu birth=%s error=%s context=%s capacity=%u\n", pid, birthText, errorText, workspaceEntered ? "payload-private-workspace-rooted" : "payload-original", (unsigned)MAX_PATH);
+  invariant(length > 0, "helper-invariant"); image_write(line, (DWORD)length);
+  static const char hex[] = "0123456789abcdef";
+  for (unsigned i = 0; i < 5; i++) {
+    const char *outcome = calls[i].outcome ? calls[i].outcome : "not-attempted";
+    char returned[16] = "unavailable"; strcpy_s(errorText, sizeof(errorText), "unavailable");
+    if (calls[i].outcome && i != 1) sprintf_s(returned, sizeof(returned), "%lu", calls[i].length);
+    if (!strcmp(outcome, "failed")) sprintf_s(errorText, sizeof(errorText), "%lu", calls[i].error);
+    length = sprintf_s(line, sizeof(line), CWD_PREFIX " %s outcome=%s length=%s error=%s utf16=", names[i], outcome, returned, errorText);
+    invariant(length > 0, "helper-invariant");
+    if (i != 1 && !strcmp(outcome, "success"))
+      for (DWORD unit = 0; unit < calls[i].length; unit++) for (unsigned nibble = 0; nibble < 4; nibble++) line[length++] = hex[(calls[i].text[unit] >> (12 - 4 * nibble)) & 15];
+    line[length++] = '\n'; image_write(line, (DWORD)length);
+  }
+  length = sprintf_s(line, sizeof(line), CWD_PREFIX " end close=%s\n", closure); invariant(length > 0, "helper-invariant"); image_write(line, (DWORD)length);
+  if (!closed) failure(126);
+}
+/* Drain and publish already-read bytes while retaining the original bounds. */
+static DWORD git_wait(HANDLE process, HANDLE pipe, char diagnostic[65537], DWORD *capturedBytes) {
+  DWORD captured = 0; ULONGLONG expires = GetTickCount64() + 8000; BOOL ended = FALSE;
+  for (;;) {
+    invariant(GetTickCount64() < expires, "git-process-wait");
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) {
+      DWORD error = GetLastError(); if (error != ERROR_BROKEN_PIPE) { remember("git-diagnostic-read", "win32", error); failure(126); }
+    }
+    if (available) {
+      if (available > 65536 - captured) git_output_end("truncated");
+      invariant(available <= 65536 - captured, "git-diagnostic-bound"); DWORD used;
+      win32_check(ReadFile(pipe, diagnostic + captured, available, &used, NULL), "git-diagnostic-read");
+      invariant(used > 0 && used <= available, "git-diagnostic-bound");
+      git_output(diagnostic + captured, used); captured += used; continue;
+    }
+    if (ended) break;
+    DWORD waited = WaitForSingleObject(process, 10);
+    if (waited == WAIT_FAILED) win32_check(FALSE, "git-process-wait");
+    invariant(waited == WAIT_TIMEOUT || waited == WAIT_OBJECT_0, "git-process-wait"); ended = waited == WAIT_OBJECT_0;
+  }
+  diagnostic[captured] = 0; *capturedBytes = captured; DWORD code; win32_check(GetExitCodeProcess(process, &code), "git-process-status"); return code;
+}
+/* Capture shape and line classes are private observations, not fatal templates.
+ * Never let an embedded NUL hide a suffix or an incomplete line become a template. */
+static const char *git_stderr_shape(const char *text, DWORD captured) {
+  if (!captured) return "git-stderr-empty";
+  for (DWORD i = 0; i < captured; i++) {
+    unsigned char byte = (unsigned char)text[i];
+    if (!byte || byte == 127 || (byte < 32 && byte != '\t' && byte != '\n' && byte != '\r') ||
+        (byte == '\r' && (i + 1 == captured || text[i + 1] != '\n'))) return "git-stderr-invalid";
+  }
+  const struct { const char *prefix, *complete, *partial; } classes[] = {
+    {"fatal: ", "git-stderr-fatal", "git-stderr-fatal-partial"},
+    {"error: ", "git-stderr-error", "git-stderr-error-partial"},
+    {"warning: ", "git-stderr-warning", "git-stderr-warning-partial"},
+  };
+  unsigned selected = 3;
+  for (DWORD at = 0; at < captured; at++) if (!at || text[at - 1] == '\n') {
+    for (unsigned i = 0; i < selected; i++) {
+      size_t prefix = strlen(classes[i].prefix);
+      if (prefix <= captured - at && !memcmp(text + at, classes[i].prefix, prefix)) { selected = i; break; }
+    }
+  }
+  BOOL complete = text[captured - 1] == '\n';
+  return selected < 3 ? (complete ? classes[selected].complete : classes[selected].partial)
+    : complete ? "git-stderr-other" : "git-stderr-other-partial";
+}
+/* Serialize delivery to the private child stdin. A short write consumes its phase;
+ * neither the command nor a partial binary carrier may be replayed. */
+static void owner_write(const void *bytes, DWORD size) {
+  DWORD sent = 0; AcquireSRWLockExclusive(&transportLock);
+  if (InterlockedCompareExchange(&failing, 0, 0)) {
+    ReleaseSRWLockExclusive(&transportLock); failure(126);
+  }
+  BOOL written = WriteFile(transport.write, bytes, size, &sent, NULL); DWORD error = written ? 0 : GetLastError();
+  if (!written) remember("owner-write", "win32", error);
+  else if (sent != size) remember("owner-write-size", "invariant", 0);
+  ReleaseSRWLockExclusive(&transportLock);
+  if (!written) failure(126);
+  invariant(sent == size, "owner-write-size");
+}
+static void launch(int argc, WCHAR **argv) {
+  WCHAR environment[8192] = {0}; child_environment(environment);
+  owned_profile(); const WCHAR *caseId = argv[4], *image = argv[5];
+  BOOL isArgv = !wcscmp(caseId, L"argv"); invariant(isArgv || !wcscmp(caseId, L"null-probe") || !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit") || !wcscmp(caseId, L"cancel") || !wcscmp(caseId, L"owner-loss") || !wcscmp(caseId, L"final-handle-close"), "launch-case");
+  WCHAR expected[4096]; name(expected, isArgv ? L"build\\argv-fixture.exe" : L"build\\helper.exe"); invariant(!_wcsicmp(image, expected), "launch-image");
+  HANDLE executable = CreateFileW(image, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL); transport.executable = executable; win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
+  FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
+  invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
+  native_image(executable, expected);
+  PSECURITY_DESCRIPTOR sd = kernel_descriptor(); transport.security = sd; SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+  ownedJob = CreateJobObjectW(&sa, NULL); win32_check(ownedJob != NULL, "job-create"); JOBOBJECT_EXTENDED_LIMIT_INFORMATION bounds = {0};
+  bounds.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS; bounds.BasicLimitInformation.ActiveProcessLimit = 8;
+  win32_check(SetInformationJobObject(ownedJob, JobObjectExtendedLimitInformation, &bounds, sizeof(bounds)), "job-config"); limits(ownedJob);
+  sa.bInheritHandle = TRUE;
+  win32_check(CreatePipe(&transport.in, &transport.write, &sa, 0), "stdin-pipe");
+  win32_check(CreatePipe(&transport.read, &transport.out, &sa, 0), "stdout-pipe");
+  win32_check(CreatePipe(&transport.errorRead, &transport.errorWrite, &sa, 4096), "stderr-pipe");
+  win32_check(SetHandleInformation(transport.write, HANDLE_FLAG_INHERIT, 0), "stdin-inherit");
+  win32_check(SetHandleInformation(transport.read, HANDLE_FLAG_INHERIT, 0), "stdout-inherit");
+  win32_check(SetHandleInformation(transport.errorRead, HANDLE_FLAG_INHERIT, 0), "stderr-inherit");
+  BOOL gitIo = !wcscmp(caseId, L"null-probe") || !wcscmp(caseId, L"read") || !wcscmp(caseId, L"edit");
+  HANDLE gitInput = NULL, gitOutput = NULL, gitDiagnosticRead = NULL, gitDiagnosticWrite = NULL;
+  if (gitIo) {
+    // AppContainer cannot open NUL. Pass only the already opened null-device
+    // handles, not device ACL changes, ambient file handles or protocol pipes.
+    SECURITY_ATTRIBUTES nullAttributes = {sizeof(nullAttributes), NULL, TRUE};
+    gitInput = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    transport.gitInput = gitInput;
+    win32_check(gitInput != INVALID_HANDLE_VALUE, "git-null-input");
+    gitOutput = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &nullAttributes, OPEN_EXISTING, 0, NULL);
+    transport.gitOutput = gitOutput;
+    win32_check(gitOutput != INVALID_HANDLE_VALUE, "git-null-output");
+    win32_check(CreatePipe(&transport.gitDiagnosticRead, &transport.gitDiagnosticWrite, &sa, 65536), "git-diagnostic-pipe");
+    gitDiagnosticRead = transport.gitDiagnosticRead; gitDiagnosticWrite = transport.gitDiagnosticWrite;
+  }
+  SECURITY_CAPABILITIES capabilities = {0}; capabilities.AppContainerSid = appSid;
+  SIZE_T size = 0; BOOL sized = InitializeProcThreadAttributeList(NULL, 3, 0, &size); DWORD sizeError = GetLastError();
+  if (!sized && sizeError != ERROR_INSUFFICIENT_BUFFER) { remember("attribute-size", "win32", sizeError); failure(126); }
+  invariant(!sized && size && size <= 65536, "attribute-size");
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); transport.attributes = attributes;
+  HANDLE handles[] = {transport.in, transport.out, transport.errorWrite, gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite};
+  invariant(attributes != NULL, "attribute-allocation"); win32_check(InitializeProcThreadAttributeList(attributes, 3, 0, &size), "attribute-init");
+  transport.attributesReady = TRUE;
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &capabilities, sizeof(capabilities), NULL, NULL), "attribute-security");
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &ownedJob, sizeof(ownedJob), NULL, NULL), "attribute-job");
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, (gitIo ? 7 : 3) * sizeof(HANDLE), NULL, NULL), "attribute-handles");
+  WCHAR line[32767] = {0}, workspace[4096]; size_t offset = 0;
+  argument(line, &offset, image); for (int i = 6; i < argc; i++) argument(line, &offset, argv[i]); name(workspace, L"workspace");
+  if (gitIo) {
+    WCHAR value[32]; invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitInput) > 0, "argv-bound"); argument(line, &offset, value);
+    invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitOutput) > 0, "argv-bound"); argument(line, &offset, value);
+    invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitDiagnosticRead) > 0, "argv-bound"); argument(line, &offset, value);
+    invariant(swprintf_s(value, 32, L"%llu", (ULONGLONG)(ULONG_PTR)gitDiagnosticWrite) > 0, "argv-bound"); argument(line, &offset, value);
+  }
+  STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup.StartupInfo.hStdInput = transport.in; startup.StartupInfo.hStdOutput = transport.out; startup.StartupInfo.hStdError = transport.errorWrite;
+  PROCESS_INFORMATION child = {0};
+  sa.bInheritHandle = FALSE;
+  WCHAR recordName[128]; invariant(swprintf_s(recordName, 128, L"control\\%ls.intent", caseId) > 0, "launch-intent");
+  struct launch_intent intent = {0}; intent.magic = 0x4e46494e; intent.pid = GetCurrentProcessId(); intent.time = creation(GetCurrentProcess()); wcscpy_s(intent.nonce, 33, nonce);
+  recordio(recordName, &intent, sizeof(intent), TRUE);
+  BOOL launched = CreateProcessW(image, line, &sa, &sa, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+      environment, workspace, &startup.StartupInfo, &child); DWORD launchError = launched ? 0 : GetLastError(); transport.child = child;
+  if (!launched) { DWORD error = launchError; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
+    remember("process-create", "win32", error);
+    invariant(!child.hProcess && !child.hThread, "launch-absence"); win32_check(QueryInformationJobObject(ownedJob, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL), "launch-accounting"); invariant(!account.TotalProcesses && !account.ActiveProcesses, "launch-absence");
+    ULONGLONG absent[] = {0, 0}; invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record"); recordio(recordName, absent, sizeof(absent), TRUE); done(caseId);
+    close_job(FALSE); failure(error == ERROR_NOT_SUPPORTED || error == ERROR_PRIVILEGE_NOT_HELD ? 78 : 126); }
+  if (!close_transport_setup()) failure(126);
+  container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, ownedJob, &member), "process-job"); invariant(member, "process-job");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  wfpChildPid = GetProcessId(child.hProcess); wfpChildBirth = creation(child.hProcess);
+  if (workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
+    ULONGLONG port = number(argv[9]); invariant(port <= 65535, "tcp-endpoint"); wfpRemotePort = (USHORT)port;
+  }
+  hashfile(transport.executable, wfpImageHash); fileid(transport.executable, wfpImageId);
+#endif
+  WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, PROCESS_NAME_NATIVE, actual, &actualSize), "launch-image-query"); invariant(actualSize > 0 && actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, expected), "launch-image-equal");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) socket_source_grant(child.hProcess);
+#endif
+  invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
+  ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
+  printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
+  printf(",\"job\":\"%llu\",\"process\":\"%llu\",\"thread\":\"%llu\",\"sid\":\"%ls\",\"image\":", (ULONGLONG)(ULONG_PTR)ownedJob, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread, appText); emitfile(image, FALSE); puts("}"); fflush(stdout);
+  transport.writer = CreateThread(NULL, 0, forward, &stdoutForward, CREATE_SUSPENDED, NULL); win32_check(transport.writer != NULL, "forward-create");
+  transport.diagnosticWriter = CreateThread(NULL, 0, forward, &stderrForward, CREATE_SUSPENDED, NULL); win32_check(transport.diagnosticWriter != NULL, "forward-create");
+  AcquireSRWLockExclusive(&transportLock);
+  BOOL started = release_forwarder(transport.writer, &transport.writerReleased);
+  if (!release_forwarder(transport.diagnosticWriter, &transport.diagnosticWriterReleased)) started = FALSE;
+  ReleaseSRWLockExclusive(&transportLock);
+  if (!started) failure(126);
+  BOOL canceled = FALSE;
+  if (!wcscmp(nullProbeCase, L"workspace-rooted")) {
+    char action; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &action, 1, &used, NULL), "ack-read");
+    invariant(used == 1 && (action == 'R' || action == 'N'), "ack-value"); canceled = action == 'N';
+    if (canceled) { win32_check(TerminateProcess(transport.child.hProcess, 127), "null-cancel"); puts("{\"event\":\"payload-canceled\"}"); }
+  } else ack('R');
+  if (!canceled) {
+    AcquireSRWLockExclusive(&transportLock);
+    if (InterlockedCompareExchange(&failing, 0, 0)) {
+      ReleaseSRWLockExclusive(&transportLock); failure(126);
+    }
+    DWORD suspended = ResumeThread(transport.child.hThread), releaseError = suspended == (DWORD)-1 ? GetLastError() : 0;
+    if (suspended != 1) remember("process-release", suspended == (DWORD)-1 ? "win32" : "invariant", releaseError);
+    BOOL threadClosed = release_handle(&transport.child.hThread, "thread-close");
+    ReleaseSRWLockExclusive(&transportLock);
+    if (suspended == (DWORD)-1) failure(126);
+    invariant(suspended == 1, "process-release"); if (!threadClosed) failure(126);
+  }
+  char command; DWORD used;
+  for (;;) {
+    win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &used, NULL), "owner-read"); if (!used) break;
+    if (command == 'Q') {
+      BOOL closed = close_job(FALSE);
+      if (!settle_transport()) closed = FALSE;
+      if (!closed || InterlockedCompareExchange(&failing, 0, 0)) failure(126); puts("{\"event\":\"closed\"}"); return;
+    }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+    if (socket_command(command)) continue;
+#endif
+    owner_write(&command, 1);
+  }
+  invariant(FALSE, "owner-channel"); /* Unacknowledged owner loss retains unsettled cleanup. */
+}
+static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BOOL final, BOOL git) {
+  BOOL rooted = !wcscmp(role, L"workspace-settle") || !wcscmp(role, L"workspace-cancel");
+  if (rooted) invariant(workspace_case(args[6]) && !wcscmp(args[7], L"workspace-rooted"), "helper-arguments");
+  owned_profile(); HANDLE source = original((DWORD)number(args[0]), number(args[1]), PROCESS_DUP_HANDLE | (watch && !final ? PROCESS_TERMINATE : 0));
+  HANDLE job = duplicate(source, args[2], JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | READ_CONTROL);
+  if (git) {
+    win32_check(CloseHandle(source), "process-close"); source = original((DWORD)number(args[7]), number(args[8]), PROCESS_DUP_HANDLE);
+    BOOL member; win32_check(IsProcessInJob(source, job, &member), "process-job"); invariant(member, "process-job"); container(source);
+  }
+  HANDLE child = duplicate(source, args[3], PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | READ_CONTROL);
+  invariant(creation(child) == number(args[4]), "process-time"); limits(job); BOOL member;
+  win32_check(IsProcessInJob(child, job, &member), "process-job"); invariant(member, "process-job");
+  win32_check(IsProcessInJob(GetCurrentProcess(), job, &member), "process-job"); invariant(!member, "process-job");
+  DWORD wait = WaitForSingleObject(child, 0); win32_check(wait != WAIT_FAILED, "process-wait");
+  invariant(wait == WAIT_TIMEOUT || wait == WAIT_OBJECT_0, "process-wait");
+  if (wait == WAIT_TIMEOUT) container(child);
+  else invariant(!suspended && !watch && (!terminate || rooted), "process-wait");
+  if (suspended) {
+#ifndef NATIVE_COMMAND_EXPERIMENT
+    if (!git && (!wcscmp(args[6], L"read") || !wcscmp(args[6], L"edit"))) socket_source_acl(child);
+    else
+#endif
+    acl(child, SE_KERNEL_OBJECT, TRUE);
+    WCHAR expected[4096], actual[4096], native[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
+    HANDLE executable = expected_executable(expected); native_image(executable, native);
+    win32_check(QueryFullProcessImageNameW(child, PROCESS_NAME_NATIVE, actual, &size), "verifier-image-query"); invariant(size > 0 && size < 4096, "verifier-image-bound"); invariant(!_wcsicmp(actual, native), "verifier-image-equal");
+    HANDLE thread = duplicate(source, args[5], THREAD_QUERY_INFORMATION | READ_CONTROL); acl(thread, SE_KERNEL_OBJECT, TRUE); typedef LONG (WINAPI *query)(HANDLE, ULONG, void *, ULONG, ULONG *);
+    HMODULE module = GetModuleHandleW(L"ntdll.dll"); win32_check(module != NULL, "thread-query");
+    query get = (query)GetProcAddress(module, "NtQueryInformationThread"); ULONG count;
+    if (!get) { DWORD error = GetLastError(); remember("thread-query", "win32", error); failure(78); }
+    LONG status = get(thread, 35, &count, sizeof(count), NULL);
+    if (status == (LONG)0xc0000003) { remember("thread-query", "ntstatus", (DWORD)status); failure(78); }
+    nt_check(status, "thread-query"); invariant(status == 0 && count == 1, "thread-state");
+    DWORD threadPid = GetProcessIdOfThread(thread); win32_check(threadPid != 0, "thread-process");
+    DWORD childPid = GetProcessId(child); win32_check(childPid != 0, "process-id");
+    invariant(threadPid == childPid, "thread-process"); win32_check(CloseHandle(thread), "thread-close");
+    printf("{\"admitted\":true,\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"child\":", appText); identity(child); printf(",\"verifier\":"); identity(GetCurrentProcess()); printf(",\"image\":"); emit_held_file(executable, FALSE); transport.expectedExecutable = NULL; puts("}");
+  } else {
+    census(job); need(memberCount <= (rooted ? 8 : 2));
+    if (watch) {
+      need(memberCount == 2);
+      if (final) { HANDLE observation; need(DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &observation, PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, 0) && CloseHandle(source) && CloseHandle(job)); source = observation; job = NULL; }
+      printf("{\"event\":\"witness-ready\",\"owner\":"); identity(GetCurrentProcess());
+      printf(",\"job\":\"%llu\",\"process\":\"%llu\",\"child\":", (ULONGLONG)(ULONG_PTR)job, (ULONGLONG)(ULONG_PTR)child); identity(child);
+      printf(",\"jobHeld\":%s,\"members\":[", final ? "false" : "true");
+      for (unsigned i = 0; i < memberCount; i++) { if (i) putchar(','); identity(members[i]); } puts("]}"); fflush(stdout);
+      ack('A');
+      if (final) { ack('W'); done(args[6]); puts("{\"retired\":true,\"jobHeld\":false}"); }
+      else { need(TerminateProcess(source, 125) && WaitForSingleObject(source, 8000) == WAIT_OBJECT_0); puts("{\"event\":\"owner-lost\"}"); fflush(stdout); ack('W'); }
+    } else {
+      if (terminate && rooted) need(TerminateJobObject(job, 127));
+      else if (terminate) { need(memberCount == 2); printf("{\"event\":\"recovery-ready\",\"verifier\":"); identity(GetCurrentProcess()); printf(",\"members\":[");
+        for (unsigned i = 0; i < memberCount; i++) { if (i) putchar(','); identity(members[i]); } puts("]}"); ack('A'); need(TerminateJobObject(job, 137)); }
+      if (!memberCount) { members[0] = child; memberCount = 1; }
+      for (unsigned i = 0; i < memberCount; i++) need(WaitForSingleObject(members[i], 8000) == WAIT_OBJECT_0);
+      JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account;
+      need(QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &account, sizeof(account), NULL) && !account.ActiveProcesses);
+      if (!terminate) { DWORD exitCode; need(GetExitCodeProcess(child, &exitCode) && (!exitCode || (rooted && exitCode == 127))); }
+      done(args[6]);
+      if (rooted) { printf("{\"retired\":true,\"jobEmpty\":true,\"verifier\":"); identity(GetCurrentProcess());
+        printf(",\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"}}\n", GetProcessId(child), creation(child)); }
+      else puts("{\"retired\":true,\"jobEmpty\":true}");
+    }
+    for (unsigned i = 0; i < memberCount; i++) if (members[i] != child) need(CloseHandle(members[i]));
+  }
+  if (job) win32_check(CloseHandle(job), "job-close"); win32_check(CloseHandle(child), "process-close"); win32_check(CloseHandle(source), "process-close");
+}
+#ifndef NATIVE_COMMAND_EXPERIMENT
+/* A fixed binary carrier preserves actual socket reads, independently of TCP
+ * receipts and their budget. Zero storage after a failed read is never a tuple. */
+struct wfp_tuple {
+  DWORD magic, pid; ULONGLONG birth, started, ended;
+  DWORD localStatus, remoteStatus, localAddress, remoteAddress;
+  USHORT localPort, remotePort; DWORD localFamily, remoteFamily, localSize, remoteSize; BOOL attempted;
+};
+_Static_assert(sizeof(struct wfp_tuple) == 72, "Fixed socket carrier size");
+_Static_assert(sizeof(WSAPROTOCOL_INFOW) <= 1024, "Bounded Winsock transfer");
+static ULONGLONG wfp_time(FILETIME time) {
+  ULARGE_INTEGER value; value.LowPart = time.dwLowDateTime; value.HighPart = time.dwHighDateTime; return value.QuadPart;
+}
+static ULONGLONG wfp_now(void) { FILETIME time; GetSystemTimeAsFileTime(&time); return wfp_time(time); }
+static void wfp_tuple(SOCKET socket, ULONGLONG started, BOOL attempted) {
+  struct wfp_tuple value = {0}; FILETIME born, exited, kernel, user;
+  if (!GetProcessTimes(GetCurrentProcess(), &born, &exited, &kernel, &user)) { fputs(WFP_INCOMPLETE, stderr); fflush(stderr); return; }
+  value.magic = 0x57465031; value.pid = GetCurrentProcessId(); value.birth = wfp_time(born);
+  value.started = started; value.ended = wfp_now(); value.attempted = attempted;
+  struct sockaddr_in local = {0}, remote = {0}; int localSize = sizeof(local), remoteSize = sizeof(remote);
+  int localResult = getsockname(socket, (struct sockaddr *)&local, &localSize);
+  value.localStatus = localResult == SOCKET_ERROR ? (DWORD)WSAGetLastError() : 0;
+  int remoteResult = getpeername(socket, (struct sockaddr *)&remote, &remoteSize);
+  value.remoteStatus = remoteResult == SOCKET_ERROR ? (DWORD)WSAGetLastError() : 0;
+  if (!localResult) { value.localSize = localSize; value.localFamily = local.sin_family; value.localAddress = ntohl(local.sin_addr.s_addr); value.localPort = ntohs(local.sin_port); }
+  if (!remoteResult) { value.remoteSize = remoteSize; value.remoteFamily = remote.sin_family; value.remoteAddress = ntohl(remote.sin_addr.s_addr); value.remotePort = ntohs(remote.sin_port); }
+  fputs(WFP_PREFIX " tuple=", stderr);
+  for (unsigned i = 0; i < sizeof(value); i++) fprintf(stderr, "%02x", ((const BYTE *)&value)[i]);
+  fputc('\n', stderr); fflush(stderr);
+}
+static BOOL wfp_blob(const FWP_BYTE_BLOB *blob) {
+  return blob && blob->data && blob->size >= 2 && blob->size <= 8192 && !(blob->size % sizeof(WCHAR)) &&
+    !blob->data[blob->size - 1] && !blob->data[blob->size - 2];
+}
+/* Installed collection state is observed, never enabled by this helper. */
+static void wfp_collection_observe(DWORD status, const FWP_VALUE0 *collection) {
+  DWORD saved = GetLastError(); FWP_VALUE0 *keywords = NULL;
+  DWORD queried = FwpmEngineGetOption0(wfpEngine, FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS, &keywords);
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_prepare collection-status=%lu type=%d value=%lld keywords-status=%lu keywords-type=%d keywords=%llu\n",
+    status, !status && collection ? (int)collection->type : -1,
+    !status && collection && collection->type == FWP_UINT32 ? (LONGLONG)collection->uint32 : -1,
+    queried, !queried && keywords ? (int)keywords->type : -1,
+    !queried && keywords ? (keywords->type == FWP_UINT32 ? (ULONGLONG)keywords->uint32 :
+      keywords->type == FWP_UINT64 && keywords->uint64 ? *keywords->uint64 : 0ULL) : 0ULL);
+  fflush(stderr); ReleaseSRWLockExclusive(&diagnosticOutputLock);
+  if (keywords) FwpmFreeMemory0((void **)&keywords);
+  SetLastError(saved);
+}
+/* FWPM_NET_EVENT_CLASSIFY_DROP2.msFwpDirection uses packet encodings,
+ * distinct from the FWP_DIRECTION enum used by the receipt contract. */
+enum wfp_packet_direction {
+  WFP_PACKET_INBOUND = 0x3900,
+  WFP_PACKET_OUTBOUND = 0x3901,
+  WFP_PACKET_FORWARD = 0x3902
+};
+struct wfp_match { UINT64 filterId; UINT16 layerId; GUID filterKey, layerKey, providerKey, calloutKey, calloutProviderKey; UINT32 direction, actionType, flags; ULONGLONG time; };
+static void wfp_key(FILE *output, const GUID *key) { for (unsigned i = 0; i < sizeof(*key); i++) fprintf(output, "%02x", ((const BYTE *)key)[i]); }
+/* A classify DROP can name a terminating callout rather than a literal BLOCK.
+ * Resolve that exact filter and its provider; never infer action from a key. */
+static DWORD wfp_filter(HANDLE engine, const FWPM_FILTER0 *filter, const FWPM_LAYER0 *layer, GUID *providerKey, GUID *calloutKey, GUID *calloutProviderKey, const char **operation, const char **predicate) {
+  const GUID empty = {0}; FWPM_PROVIDER0 *provider = NULL, *calloutProvider = NULL; FWPM_CALLOUT0 *callout = NULL; DWORD status = ERROR_INVALID_DATA;
+  *operation = "none"; *predicate = "filter-provider";
+  if (!filter->providerKey || !memcmp(filter->providerKey, &empty, sizeof(empty))) return status;
+  *predicate = "filter-action";
+  if (filter->action.type != FWP_ACTION_BLOCK && filter->action.type != FWP_ACTION_CALLOUT_TERMINATING) return status;
+  *operation = "FwpmProviderGetByKey0"; *predicate = "filter-provider";
+  status = FwpmProviderGetByKey0(engine, filter->providerKey, &provider); if (status) goto closed;
+  *predicate = "filter-provider-binding";
+  if (!provider || memcmp(&provider->providerKey, filter->providerKey, sizeof(GUID))) { status = ERROR_INVALID_DATA; goto closed; }
+  *providerKey = provider->providerKey; *calloutKey = empty; *calloutProviderKey = empty;
+  if (filter->action.type == FWP_ACTION_CALLOUT_TERMINATING) {
+    *operation = "FwpmCalloutGetByKey0"; *predicate = "callout";
+    status = FwpmCalloutGetByKey0(engine, &filter->action.calloutKey, &callout); if (status) goto closed;
+    *predicate = "callout-binding";
+    if (!callout || !callout->providerKey || memcmp(&callout->calloutKey, &filter->action.calloutKey, sizeof(GUID)) ||
+        memcmp(&callout->applicableLayer, &layer->layerKey, sizeof(GUID)) ||
+        !memcmp(callout->providerKey, &empty, sizeof(empty)) || !memcmp(&callout->calloutKey, &empty, sizeof(empty))) { status = ERROR_INVALID_DATA; goto closed; }
+    *operation = "FwpmProviderGetByKey0"; *predicate = "callout-provider";
+    status = FwpmProviderGetByKey0(engine, callout->providerKey, &calloutProvider); if (status) goto closed;
+    *predicate = "callout-provider-binding";
+    if (!calloutProvider || memcmp(&calloutProvider->providerKey, callout->providerKey, sizeof(GUID))) { status = ERROR_INVALID_DATA; goto closed; }
+    *calloutKey = callout->calloutKey; *calloutProviderKey = calloutProvider->providerKey;
+  }
+closed:
+  if (provider) FwpmFreeMemory0((void **)&provider);
+  if (calloutProvider) FwpmFreeMemory0((void **)&calloutProvider);
+  if (callout) FwpmFreeMemory0((void **)&callout);
+  return status;
+}
+static BOOL wfp_close(void) {
+  BOOL ok = !wfpCleanupFailed;
+  if (wfpEngine) {
+    HANDLE engine = wfpEngine; wfpEngine = NULL; DWORD status = FwpmEngineClose0(engine);
+    if (status) { remember("observer-engine-close", "win32", status); cleanup_error("observer-engine-close", "win32", status); ok = FALSE; }
+  }
+  if (!release_handle(&wfpToken, "observer-token-close")) ok = FALSE;
+  return ok;
+}
+static void wfp_binding(void) {
+  invariant(!wcscmp(role, L"launch") && workspaceRole && wfpRemotePort && ownedJob &&
+    transport.child.hProcess && transport.executable && GetProcessId(transport.child.hProcess) == wfpChildPid &&
+    creation(transport.child.hProcess) == wfpChildBirth && WaitForSingleObject(transport.child.hProcess, 0) == WAIT_TIMEOUT, "observer-child");
+  BOOL inJob = FALSE; win32_check(IsProcessInJob(transport.child.hProcess, ownedJob, &inJob), "observer-job"); invariant(inJob, "observer-job");
+  container(transport.child.hProcess);
+  WCHAR expected[4096], actual[4096]; native_image(transport.executable, expected);
+  DWORD size = 4096; win32_check(QueryFullProcessImageNameW(transport.child.hProcess, PROCESS_NAME_NATIVE, actual, &size), "observer-image");
+  invariant(size && size < 4096 && !_wcsicmp(expected, actual), "observer-image");
+}
+static BOOL socket_protocol(const WSAPROTOCOL_INFOW *value) {
+  const GUID empty = {0};
+  return value->iAddressFamily == AF_INET && value->iSocketType == SOCK_STREAM && value->iProtocol == IPPROTO_TCP &&
+    value->dwCatalogEntryId && memcmp(&value->ProviderId, &empty, sizeof(empty)) &&
+    value->ProtocolChain.ChainLen > 0 && value->ProtocolChain.ChainLen <= MAX_PROTOCOL_CHAIN;
+}
+static BOOL socket_protocol_same(const WSAPROTOCOL_INFOW *a, const WSAPROTOCOL_INFOW *b) {
+  /* Destination-specific provider storage is opaque and excluded from joins. */
+  return socket_protocol(a) && socket_protocol(b) && a->dwCatalogEntryId == b->dwCatalogEntryId &&
+    !memcmp(&a->ProviderId, &b->ProviderId, sizeof(GUID)) && a->ProtocolChain.ChainLen == b->ProtocolChain.ChainLen &&
+    !memcmp(a->ProtocolChain.ChainEntries, b->ProtocolChain.ChainEntries, a->ProtocolChain.ChainLen * sizeof(DWORD)) &&
+    a->dwServiceFlags1 == b->dwServiceFlags1 && a->dwServiceFlags2 == b->dwServiceFlags2 &&
+    a->dwServiceFlags3 == b->dwServiceFlags3 && a->dwServiceFlags4 == b->dwServiceFlags4 && a->dwProviderFlags == b->dwProviderFlags &&
+    a->iVersion == b->iVersion && a->iMinSockAddr == b->iMinSockAddr && a->iMaxSockAddr == b->iMaxSockAddr &&
+    a->iProtocolMaxOffset == b->iProtocolMaxOffset && a->iNetworkByteOrder == b->iNetworkByteOrder &&
+    a->iSecurityScheme == b->iSecurityScheme && a->dwMessageSize == b->dwMessageSize;
+}
+/* Latch the original source refusal before a malformed control carrier or lost
+ * acknowledgment can fail the launcher. This grants no observer admission. */
+static void socket_transfer_refusal(const BYTE *line, DWORD size) {
+  const char *prefix = TCP_PREFIX " transfer={\"error\":"; DWORD offset = (DWORD)strlen(prefix);
+  if (size <= offset || memcmp(line, prefix, offset) || !workspaceRole ||
+    (wcscmp(workspaceRole, L"read") && wcscmp(workspaceRole, L"edit")) ||
+    !InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0)) return;
+  ULONGLONG error = 0; unsigned digits = 0;
+  while (offset < size && line[offset] >= '0' && line[offset] <= '9' && digits < 10) {
+    error = error * 10 + line[offset++] - '0'; digits++;
+  }
+  const char *suffix = ",\"winsock\":["; DWORD suffixSize = (DWORD)strlen(suffix);
+  if (digits && error && error <= MAXDWORD && size - offset >= suffixSize && !memcmp(line + offset, suffix, suffixSize) && !wfpTransferError) {
+    wfpTransferError = (DWORD)error;
+    remember("observer-transfer", "win32", (DWORD)error);
+  }
+}
+/* -1 means an observation was not attempted. Successful short reads leave the
+ * associated value unavailable, rather than interpreting zero-filled storage. */
+struct socket_token_observation {
+  LONGLONG status[5]; TOKEN_STATISTICS statistics; DWORD container;
+  BOOL statisticsRead, containerRead, restricted;
+};
+static void socket_token_observe(HANDLE process, struct socket_token_observation *value, BOOL effective) {
+  HANDLE token = NULL; DWORD used = 0;
+  BOOL opened = effective ? OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token) : OpenProcessToken(process, TOKEN_QUERY, &token);
+  value->status[0] = opened ? 0 : GetLastError();
+  if (!opened) return;
+  BOOL read = GetTokenInformation(token, TokenStatistics, &value->statistics, sizeof(value->statistics), &used);
+  value->status[1] = read ? 0 : GetLastError();
+  value->statisticsRead = read && used == sizeof(value->statistics);
+  used = 0; read = GetTokenInformation(token, TokenIsAppContainer, &value->container, sizeof(value->container), &used);
+  value->status[2] = read ? 0 : GetLastError();
+  value->containerRead = read && used == sizeof(value->container);
+  SetLastError(ERROR_SUCCESS); value->restricted = IsTokenRestricted(token);
+  value->status[3] = value->restricted ? 0 : GetLastError();
+  BOOL closed = CloseHandle(token); DWORD error = closed ? 0 : GetLastError();
+  value->status[4] = error;
+  if (!closed) cleanup_error("observer-diagnostic-token-close", "win32", error);
+}
+static void socket_status(LONGLONG value) {
+  if (value < 0) fputs("null", stderr); else fprintf(stderr, "%llu", (ULONGLONG)value);
+}
+static void socket_token_write(const struct socket_token_observation *value) {
+  fputs("{\"status\":[", stderr);
+  for (unsigned i = 0; i < 5; i++) { if (i) fputc(',', stderr); socket_status(value->status[i]); }
+  fputs("],\"identity\":", stderr);
+  if (value->statisticsRead) {
+    const TOKEN_STATISTICS *s = &value->statistics;
+    fprintf(stderr, "[\"%08lx%08lx\",\"%08lx%08lx\",\"%08lx%08lx\",%u,",
+      (DWORD)s->TokenId.HighPart, s->TokenId.LowPart, (DWORD)s->AuthenticationId.HighPart, s->AuthenticationId.LowPart,
+      (DWORD)s->ModifiedId.HighPart, s->ModifiedId.LowPart, (unsigned)s->TokenType);
+    if (s->TokenType == TokenImpersonation) fprintf(stderr, "%u]", (unsigned)s->ImpersonationLevel); else fputs("null]", stderr);
+  } else fputs("null", stderr);
+  fputs(",\"appContainer\":", stderr);
+  if (value->containerRead) fprintf(stderr, "%lu", value->container); else fputs("null", stderr);
+  fprintf(stderr, ",\"restricted\":%s}", value->status[0] || value->status[3] ? "null" : value->restricted ? "true" : "false");
+}
+/* Observe the original failed call without a second transfer or new payload
+ * rights. These diagnostic reads cannot diagnose which parameter caused 10022.
+ * Close every acquired diagnostic handle before writing optional output. */
+static void socket_transfer_observe(SOCKET socket, const struct socket_offer *offer, DWORD error) {
+  struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};
+  struct socket_token_observation effective = {{-1, -1, -1, -1, -1}};
+  /* Sample the actual original option, not an option on either unbound control.
+   * Keep this ordinary diagnostic outside the fixed transfer/control grammar. */
+  BOOL exclusive = FALSE; int exclusiveSize = sizeof(exclusive);
+  int exclusiveResult = getsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, &exclusiveSize);
+  DWORD exclusiveStatus = exclusiveResult == SOCKET_ERROR ? WSAGetLastError() : 0;
+  /* SIO_GET_QOS only reads the original socket. An unsupported/short query
+   * leaves QoS unknown; it never proves the documented sharing prerequisite. */
+  QOS qos = {0}; DWORD qosBytes = 0;
+  int qosResult = WSAIoctl(socket, SIO_GET_QOS, NULL, 0, &qos, sizeof(qos), &qosBytes, NULL, NULL);
+  DWORD qosStatus = qosResult == SOCKET_ERROR ? WSAGetLastError() : 0;
+  FILETIME born = {0}, exited, kernel, user; LONGLONG timeStatus = -1, closeStatus = -1;
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, offer->target.pid);
+  DWORD openStatus = process ? 0 : GetLastError();
+  if (process) {
+    BOOL read = GetProcessTimes(process, &born, &exited, &kernel, &user); timeStatus = read ? 0 : GetLastError();
+    socket_token_observe(process, &destination, FALSE);
+    BOOL closed = CloseHandle(process); DWORD closeError = closed ? 0 : GetLastError(); closeStatus = closeError;
+    if (!closed) cleanup_error("observer-diagnostic-process-close", "win32", closeError);
+  }
+  socket_token_observe(GetCurrentProcess(), &source, FALSE);
+  socket_token_observe(GetCurrentProcess(), &effective, TRUE);
+  /* Identity controls do not test current-token access to the self process
+   * object. Probe only the documented duplication right, never the observer. */
+  DWORD selfPid = GetCurrentProcessId();
+  HANDLE self = OpenProcess(PROCESS_DUP_HANDLE, FALSE, selfPid);
+  DWORD selfStatus = self ? 0 : GetLastError(); LONGLONG selfClose = -1;
+  if (self) {
+    BOOL closed = CloseHandle(self); DWORD closeError = closed ? 0 : GetLastError(); selfClose = closeError;
+    if (!closed) cleanup_error("observer-diagnostic-process-close", "win32", closeError);
+  }
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_transfer api=WSADuplicateSocketW error=%lu option=SO_EXCLUSIVEADDRUSE status=%lu size=",
+    error, exclusiveStatus);
+  if (!exclusiveStatus) fprintf(stderr, "%d", exclusiveSize); else fputs("unavailable", stderr);
+  fputs(" value=", stderr);
+  if (!exclusiveStatus && exclusiveSize == sizeof(exclusive)) fprintf(stderr, "%u", (unsigned)exclusive);
+  else fputs("unavailable", stderr);
+  fputc('\n', stderr); fflush(stderr);
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_transfer api=OpenProcess original-error=%lu pid=%lu access=%lu status=%lu close=",
+    error, selfPid, (DWORD)PROCESS_DUP_HANDLE, selfStatus);
+  socket_status(selfClose); fputc('\n', stderr); fflush(stderr);
+  fprintf(stderr, TCP_PREFIX " transfer={\"error\":%lu,\"winsock\":[%u,%u],\"creationFlags\":0,\"destination\":{\"pid\":%lu,\"access\":%lu,\"status\":[%lu,",
+    error, (unsigned)socketVersion, (unsigned)socketHighVersion, offer->target.pid, (DWORD)PROCESS_QUERY_LIMITED_INFORMATION, openStatus);
+  socket_status(timeStatus); fputc(',', stderr); socket_status(closeStatus);
+  fputs("],\"birth\":", stderr);
+  if (!timeStatus) fprintf(stderr, "\"%llu\"", wfp_time(born)); else fputs("null", stderr);
+  fputs(",\"token\":", stderr); socket_token_write(&destination);
+  fprintf(stderr, "},\"source\":{\"pid\":%lu,\"token\":", GetCurrentProcessId()); socket_token_write(&source);
+  fputs(",\"effective\":", stderr); socket_token_write(&effective);
+  fprintf(stderr, "},\"qos\":[%lu,", qosStatus); socket_status(qosResult == SOCKET_ERROR ? -1 : (LONGLONG)qosBytes); fputc(',', stderr);
+  if (qosResult != SOCKET_ERROR && qosBytes == sizeof(qos)) fprintf(stderr, "%lu,%lu,%lu", qos.SendingFlowspec.ServiceType, qos.ReceivingFlowspec.ServiceType, qos.ProviderSpecific.len);
+  else fputs("null,null,null", stderr);
+  fputs("],\"provider\":\"", stderr);
+  /* Public numeric protocol fields, GUID, catalog and complete chain only;
+   * never inspect, synthesize or publish provider-private transfer storage. */
+  _Static_assert(offsetof(WSAPROTOCOL_INFOW, dwProviderReserved) == 112, "Public protocol prefix");
+  for (unsigned i = 0; i < offsetof(WSAPROTOCOL_INFOW, dwProviderReserved); i++) fprintf(stderr, "%02x", ((const BYTE *)&offer->source)[i]);
+  fputs("\"}\n", stderr); fflush(stderr);
+}
+static void socket_target_write(FILE *output, const struct socket_target *target) {
+  fprintf(output, "{\"pid\":%lu,\"creationTime\":\"%llu\",\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"modifiedId\":\"%08lx%08lx\"}",
+    target->pid, target->birth, (DWORD)target->token.HighPart, target->token.LowPart,
+    (DWORD)target->authentication.HighPart, target->authentication.LowPart, (DWORD)target->modified.HighPart, target->modified.LowPart);
+}
+static void socket_transfer_identity(FILE *output) {
+  fputs("\"transfer\":{\"direction\":\"child-self\",\"creator\":", output); socket_target_write(output, &wfpDestination);
+  fputs(",\"effective\":", output); socket_target_write(output, &wfpEffective);
+  fputs(",\"appContainer\":true,\"destination\":", output); socket_target_write(output, &wfpDestination);
+  fputs(",\"socket\":\"original\",\"providerId\":\"", output); wfp_key(output, &wfpProtocol.ProviderId);
+  fprintf(output, "\",\"catalogId\":%lu,\"creationFlags\":0,\"addressFamily\":%d,\"socketType\":%d,\"protocol\":%d}",
+    wfpProtocol.dwCatalogEntryId, wfpProtocol.iAddressFamily, wfpProtocol.iSocketType, wfpProtocol.iProtocol);
+}
+static void wfp_identity(FILE *output) {
+  fprintf(output, "\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"owner\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"sid\":\"%ls\",\"userSid\":\"%ls\",\"image\":{\"identity\":\"%s\",\"sha256\":\"%s\",\"private\":false},\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"preparedAt\":\"%llu\",\"exclusive\":true,",
+    wfpChildPid, wfpChildBirth, GetCurrentProcessId(), wfpOwnerBirth, appText, userText, wfpImageId, wfpImageHash,
+    (DWORD)wfpTokenIdentity.TokenId.HighPart, wfpTokenIdentity.TokenId.LowPart,
+    (DWORD)wfpTokenIdentity.AuthenticationId.HighPart, wfpTokenIdentity.AuthenticationId.LowPart, wfpPreparedAt);
+  socket_transfer_identity(output);
+}
+/* Primary-token creation in the child avoids inheriting a privileged creator
+ * socket. An impersonation observation cannot establish ALE ownership. */
+static DWORD socket_app_token(HANDLE token, TOKEN_STATISTICS *statistics) {
+  DWORD used = 0, active = 0;
+  BYTE appBytes[sizeof(TOKEN_APPCONTAINER_INFORMATION) + SECURITY_MAX_SID_SIZE];
+  BYTE userBytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+  TOKEN_GROUPS capabilities;
+  if (!GetTokenInformation(token, TokenStatistics, statistics, sizeof(*statistics), &used)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  if (used != sizeof(*statistics)) return ERROR_INVALID_DATA;
+  if (!GetTokenInformation(token, TokenIsAppContainer, &active, sizeof(active), &used)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  if (used != sizeof(active) || active != 1) return ERROR_INVALID_DATA;
+  if (!GetTokenInformation(token, TokenAppContainerSid, appBytes, sizeof(appBytes), &used)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  TOKEN_APPCONTAINER_INFORMATION *app = (void *)appBytes;
+  if (used < sizeof(*app) || !app->TokenAppContainer || !IsValidSid(app->TokenAppContainer) || !EqualSid(app->TokenAppContainer, appSid)) return ERROR_INVALID_DATA;
+  if (!GetTokenInformation(token, TokenUser, userBytes, sizeof(userBytes), &used)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  TOKEN_USER *user = (void *)userBytes;
+  if (used < sizeof(*user) || !IsValidSid(user->User.Sid) || !EqualSid(user->User.Sid, userSid)) return ERROR_INVALID_DATA;
+  if (!GetTokenInformation(token, TokenCapabilities, &capabilities, sizeof(capabilities), &used)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  return used >= sizeof(DWORD) && capabilities.GroupCount == 0 ? 0 : ERROR_INVALID_DATA;
+}
+static void socket_destination_binding(void) {
+  wfp_binding(); HANDLE token = NULL; TOKEN_STATISTICS statistics;
+  win32_check(OpenProcessToken(transport.child.hProcess, TOKEN_QUERY, &token), "observer-token");
+  DWORD status = socket_app_token(token, &statistics);
+  if (status) remember("observer-token", "win32", status);
+  BOOL closed = close_handle(token, "observer-token-close"); status_check(status, "observer-token");
+  invariant(closed && statistics.TokenType == TokenPrimary &&
+    !memcmp(&statistics.TokenId, &wfpDestination.token, sizeof(LUID)) &&
+    !memcmp(&statistics.AuthenticationId, &wfpDestination.authentication, sizeof(LUID)) &&
+    !memcmp(&statistics.ModifiedId, &wfpDestination.modified, sizeof(LUID)), "observer-owner-binding");
+}
+static DWORD socket_primary_identity(struct socket_target *value) {
+  HANDLE thread = NULL, token = NULL; TOKEN_STATISTICS statistics; DWORD status = 0;
+  if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &thread)) {
+    remember("observer-token", "invariant", 0);
+    close_handle(thread, "observer-token-close"); return ERROR_INVALID_DATA;
+  }
+  status = GetLastError(); if (status != ERROR_NO_TOKEN) return status ? status : ERROR_INVALID_DATA;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) { DWORD error = GetLastError(); return error ? error : ERROR_INVALID_DATA; }
+  status = socket_app_token(token, &statistics);
+  if (!status && statistics.TokenType != TokenPrimary) status = ERROR_INVALID_DATA;
+  if (status) remember("observer-token", "win32", status);
+  BOOL closed = close_handle(token, "observer-token-close");
+  if (status) return status;
+  if (!closed) return ERROR_INVALID_DATA;
+  *value = (struct socket_target){1, GetCurrentProcessId(), creation(GetCurrentProcess()), statistics.TokenId, statistics.AuthenticationId, statistics.ModifiedId};
+  return 0;
+}
+static void socket_original(const struct socket_import *packet) {
+  socket_target_binding(&wfpTarget);
+  win32_check(OpenProcessToken(transport.child.hProcess, TOKEN_QUERY, &wfpToken), "observer-token");
+  status_check(socket_app_token(wfpToken, &wfpTokenIdentity), "observer-token");
+  invariant(wfpTokenIdentity.TokenType == TokenPrimary, "observer-token");
+  wfpDestination = (struct socket_target){1, wfpChildPid, wfpChildBirth, wfpTokenIdentity.TokenId, wfpTokenIdentity.AuthenticationId, wfpTokenIdentity.ModifiedId};
+  invariant(!memcmp(&packet->creator, &wfpDestination, sizeof(wfpDestination)) &&
+    !memcmp(&packet->effective, &wfpDestination, sizeof(wfpDestination)), "observer-owner-binding");
+  wfpEffective = wfpDestination; wfpLocal = packet->local;
+  invariant(wfpLocal.sin_family == AF_INET && ntohl(wfpLocal.sin_addr.s_addr) == INADDR_LOOPBACK && wfpLocal.sin_port, "observer-local");
+  wfpLocalPort = ntohs(wfpLocal.sin_port);
+  socket_destination_binding();
+}
+static void socket_export(void) {
+  socket_target_binding(&wfpTarget); socket_destination_binding();
+  invariant(!wfpPreparedAt, "observer-once");
+  invariant(GetTickCount64() < wfpTransferEnd, "tcp-deadline");
+  struct socket_import packet = {0}; packet.creator = wfpDestination; packet.effective = wfpEffective;
+  packet.offer.target = wfpDestination; packet.offer.source = wfpProtocol; packet.local = wfpLocal;
+  socket_destination_binding(); socket_target_binding(&wfpTarget);
+  invariant(GetTickCount64() < wfpTransferEnd, "tcp-deadline");
+  BYTE bytes[1 + sizeof(packet)]; bytes[0] = 'D'; memcpy(bytes + 1, &packet, sizeof(packet));
+  owner_write(bytes, sizeof(bytes));
+}
+static void wfp_prepare(const BYTE *line, DWORD size) {
+  invariant(!wfpTransferError, "observer-once");
+  wfp_binding(); invariant(!wfpPreparedAt && !wfpEngine, "observer-once");
+  DWORD offset = sizeof(SOCKET_PREFIX) - 1, end = size - 1; if (end && line[end - 1] == '\r') end--;
+  struct socket_import packet = {0};
+  invariant(size && line[size - 1] == '\n' && end == offset + 2 * sizeof(packet), "observer-carrier");
+  for (unsigned i = 0; i < sizeof(packet); i++) {
+    BYTE a = line[offset + 2 * i], b = line[offset + 2 * i + 1];
+    invariant(((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) && ((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')), "observer-carrier");
+    ((BYTE *)&packet)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
+  }
+  struct socket_offer offer = packet.offer;
+  invariant(InterlockedCompareExchange(&wfpTargetReady, 0, 0) && !memcmp(&offer.target, &wfpTarget, sizeof(wfpTarget)), "observer-owner-binding");
+  socket_target_binding(&offer.target);
+  invariant(socket_protocol(&offer.source), "observer-protocol");
+  if (!InterlockedCompareExchange(&wfpTransferReady, 0, 0)) {
+    const WSAPROTOCOL_INFOW empty = {0};
+    invariant(!memcmp(&offer.protocol, &empty, sizeof(empty)), "observer-protocol");
+    wfpTransferEnd = GetTickCount64() + 5000;
+    socket_original(&packet); wfpProtocol = offer.source;
+    InterlockedExchange(&wfpTransferReady, 1);
+    printf("{\"event\":\"tcp-transfer-ready\",\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"owner\":{\"pid\":%lu,\"creationTime\":\"%llu\"},", wfpChildPid, wfpChildBirth, wfpTarget.pid, wfpTarget.birth);
+    socket_transfer_identity(stdout); puts("}"); return;
+  }
+  invariant(InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
+  invariant(socket_protocol_same(&offer.source, &wfpProtocol) && socket_protocol_same(&offer.source, &offer.protocol), "observer-protocol");
+  invariant(!memcmp(&packet.creator, &wfpDestination, sizeof(wfpDestination)) &&
+    !memcmp(&packet.effective, &wfpDestination, sizeof(wfpDestination)) &&
+    !memcmp(&packet.local, &wfpLocal, sizeof(wfpLocal)), "observer-owner-binding");
+  socket_destination_binding(); socket_target_binding(&offer.target);
+  DWORD peerStatus = WSAENOTCONN; /* The child checked its original socket before this carrier. */
+  status_check(FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &wfpEngine), "observer-engine");
+  invariant(wfpEngine != NULL, "observer-engine");
+  FWP_VALUE0 *collection = NULL; DWORD status = FwpmEngineGetOption0(wfpEngine, FWPM_ENGINE_COLLECT_NET_EVENTS, &collection);
+  BOOL enabled = !status && collection && collection->type == FWP_UINT32 && collection->uint32 == 1;
+  wfp_collection_observe(status, collection);
+  if (collection) FwpmFreeMemory0((void **)&collection); status_check(status, "observer-collection"); invariant(enabled, "observer-collection");
+  wfpOwnerBirth = creation(GetCurrentProcess()); wfpPreparedAt = wfp_now(); wfpPreparedTick = GetTickCount64();
+  InterlockedExchange(&wfpObserverReady, 1);
+  fputs("{\"event\":\"tcp-observer-ready\",", stdout); wfp_identity(stdout);
+  printf(",\"local\":{\"address\":2130706433,\"port\":%u},\"requested\":{\"address\":2130706433,\"port\":%u},\"collectionEnabled\":true,\"peerStatus\":%lu}\n", wfpLocalPort, wfpRemotePort, peerStatus); fflush(stdout);
+}
+static BOOL socket_command(char command) {
+  if (!strchr("ODTU", command) || !command) return FALSE;
+  invariant(workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit")), "observer-owner-once");
+  if (command == 'O') {
+    invariant(!InterlockedCompareExchange(&wfpTargetReady, 0, 0), "observer-owner-once");
+    socket_target_binding(&wfpTarget); InterlockedExchange(&wfpTargetReady, 1);
+  } else if (command == 'D') {
+    invariant(InterlockedCompareExchange(&wfpTransferReady, 0, 0) && !InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
+    socket_target_binding(&wfpTarget); InterlockedExchange(&wfpDuplicateReleased, 1);
+    socket_export(); return TRUE;
+  } else {
+    if (command == 'T') {
+      invariant(InterlockedCompareExchange(&wfpObserverReady, 0, 0) && !InterlockedCompareExchange(&wfpAttemptReleased, 0, 0), "observer-owner-once");
+      invariant(GetTickCount64() < wfpTransferEnd, "tcp-deadline");
+      socket_destination_binding(); socket_target_binding(&wfpTarget);
+      InterlockedExchange(&wfpAttemptReleased, 1);
+    } else {
+      invariant(InterlockedCompareExchange(&wfpAttemptReleased, 0, 0) &&
+        InterlockedCompareExchange(&wfpClosureReady, 0, 0) && !InterlockedCompareExchange(&wfpClosureReleased, 0, 0), "observer-owner-once");
+      socket_destination_binding(); socket_target_binding(&wfpTarget);
+      InterlockedExchange(&wfpClosureReleased, 1);
+    }
+  }
+  owner_write(&command, 1); return TRUE;
+}
+/* Anonymous stdin has one reader. Check availability and the existing budget
+ * before the one-byte read, so an interrupted observer cannot strand a socket. */
+static BOOL tcp_ack(char expected, ULONGLONG end, struct diagnosis *problem) {
+  HANDLE pipe = GetStdHandle(STD_INPUT_HANDLE);
+  for (;;) {
+    if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+    DWORD available = 0;
+    if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) {
+      *problem = (struct diagnosis){"ack-read", "win32", GetLastError()}; return FALSE;
+    }
+    if (available) {
+      char value = 0; DWORD size = 0;
+      if (!ReadFile(pipe, &value, 1, &size, NULL)) { *problem = (struct diagnosis){"ack-read", "win32", GetLastError()}; return FALSE; }
+      if (size != 1 || value != expected) { *problem = (struct diagnosis){"ack-value", "invariant", 0}; return FALSE; }
+      return TRUE;
+    }
+    Sleep(1);
+  }
+}
+/* Controls never reuse the original socket or its observer state. Status slots:
+ * identity/create/nonblocking/exclusive/provider/duplicate/import/import-close/
+ * source-close/ack/budget. Null means unattempted, zero means checked success. */
+static DWORD socket_control_identity(struct socket_target *value, BOOL appContainer) {
+  HANDLE token = NULL; TOKEN_STATISTICS statistics; DWORD used = 0, container = 0, status = 0;
+  FILETIME born, exited, kernel, user;
+  value->version = 1; value->pid = GetCurrentProcessId();
+  if (!GetProcessTimes(GetCurrentProcess(), &born, &exited, &kernel, &user)) return GetLastError();
+  value->birth = wfp_time(born);
+  if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+    status = GetLastError(); if (status != ERROR_NO_TOKEN) return status;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return GetLastError();
+  }
+  if (!GetTokenInformation(token, TokenStatistics, &statistics, sizeof(statistics), &used)) status = GetLastError();
+  else if (used != sizeof(statistics)) status = ERROR_INVALID_DATA;
+  else {
+    status = 0; value->token = statistics.TokenId; value->authentication = statistics.AuthenticationId; value->modified = statistics.ModifiedId;
+    if (!GetTokenInformation(token, TokenIsAppContainer, &container, sizeof(container), &used)) status = GetLastError();
+    else if (used != sizeof(container) || !!container != !!appContainer) status = ERROR_INVALID_DATA;
+  }
+  if (!CloseHandle(token)) {
+    DWORD error = GetLastError(); cleanup_error("observer-diagnostic-token-close", "win32", error); if (!status) status = error;
+  }
+  return status;
+}
+static void socket_control_write(unsigned kind, unsigned side, const struct socket_target *target, const LONGLONG status[11]) {
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, TCP_PREFIX " control=[%u,%u,%lu,", kind, side, target->pid);
+  if (target->birth) fprintf(stderr, "\"%llu\"", target->birth); else fputs("null", stderr);
+  fputs(",[", stderr);
+  for (unsigned i = 0; i < 11; i++) { if (i) fputc(',', stderr); socket_status(status[i]); }
+  fputs("]]\n", stderr); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+static void socket_control_close(SOCKET socket, LONGLONG *status) {
+  *status = closesocket(socket) == SOCKET_ERROR ? WSAGetLastError() : 0;
+  if (*status) cleanup_error("observer-control-close", "win32", (DWORD)*status);
+}
+static DWORD socket_control_protocol(SOCKET socket, const WSAPROTOCOL_INFOW *expected, WSAPROTOCOL_INFOW *actual) {
+  int size = sizeof(*actual);
+  if (getsockopt(socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)actual, &size) == SOCKET_ERROR) return WSAGetLastError();
+  return size == sizeof(*actual) && socket_protocol_same(actual, expected) ? 0 : ERROR_INVALID_DATA;
+}
+static void socket_control_receive(const BYTE *line, DWORD size) {
+  DWORD offset = sizeof(SOCKET_CONTROL_PREFIX) - 1, end = size - 1; if (end && line[end - 1] == '\r') end--;
+  struct socket_control_offer control = {0};
+  invariant(size && line[size - 1] == '\n' && end == offset + 2 * sizeof(control), "observer-carrier");
+  for (unsigned i = 0; i < sizeof(control); i++) {
+    BYTE a = line[offset + 2*i], b = line[offset + 2*i + 1];
+    invariant(((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) && ((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')), "observer-carrier");
+    ((BYTE *)&control)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
+  }
+  invariant(control.error && control.error == wfpTransferError && InterlockedCompareExchange(&wfpTargetReady, 0, 0) &&
+    InterlockedCompareExchange(&wfpTransferReady, 0, 0) && InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0) &&
+    !wfpPreparedAt && !memcmp(&control.offer.target, &wfpTarget, sizeof(wfpTarget)), "observer-owner-binding");
+  invariant(!InterlockedCompareExchange(&wfpControlSeen, 1, 0), "observer-owner-once");
+  ULONGLONG now = GetTickCount64();
+  invariant(control.end && (control.end <= now || control.end - now <= 5000), "observer-carrier");
+  wfp_binding();
+  LONGLONG status[11] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+  struct socket_target actualTarget = {0}; WSAPROTOCOL_INFOW actual = {0}; SOCKET imported = INVALID_SOCKET;
+  status[10] = now >= control.end ? WAIT_TIMEOUT : 0;
+  if (!status[10]) status[0] = socket_control_identity(&actualTarget, FALSE);
+  if (!status[0] && memcmp(&actualTarget, &wfpTarget, sizeof(wfpTarget))) status[0] = ERROR_INVALID_DATA;
+  if (!status[0]) {
+    status[4] = socket_protocol_same(&control.offer.source, &wfpProtocol) && socket_protocol_same(&control.offer.source, &control.offer.protocol) ? 0 : ERROR_INVALID_DATA;
+    status[10] = GetTickCount64() >= control.end ? WAIT_TIMEOUT : 0;
+    if (!status[4] && !status[10]) {
+      imported = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &control.offer.protocol, 0, 0);
+      status[6] = imported == INVALID_SOCKET ? WSAGetLastError() : 0;
+      if (imported != INVALID_SOCKET) {
+        status[4] = socket_control_protocol(imported, &control.offer.source, &actual);
+        BOOL exclusive = FALSE; int length = sizeof(exclusive);
+        int result = getsockopt(imported, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, &length);
+        status[3] = result == SOCKET_ERROR ? WSAGetLastError() : length == sizeof(exclusive) && exclusive ? 0 : ERROR_INVALID_DATA;
+        socket_control_close(imported, &status[7]);
+      }
+    }
+  }
+  if (status[6] < 0) cleanup_error("observer-control-import", "invariant", 0);
+  else if (status[6]) cleanup_error("observer-control-import", "win32", (DWORD)status[6]);
+  /* V acknowledges the completed control attempt, including refusal; never D/T/U.
+   * The sole source descriptor is closed independently by the source. */
+  status[10] = GetTickCount64() >= control.end ? WAIT_TIMEOUT : 0;
+  DWORD sent = 0; AcquireSRWLockExclusive(&transportLock);
+  BOOL written = WriteFile(transport.write, "V", 1, &sent, NULL); DWORD error = written ? 0 : GetLastError();
+  ReleaseSRWLockExclusive(&transportLock);
+  status[9] = written && sent == 1 ? 0 : 1;
+  if (status[9]) cleanup_error("observer-control-ack", "win32", !written ? error : ERROR_WRITE_FAULT);
+  socket_control_write(1, 1, &control.offer.target, status);
+}
+static void socket_transfer_controls(const struct socket_offer *original, DWORD error, ULONGLONG end) {
+  BOOL appContainer = !wcscmp(role, L"bundle");
+  struct socket_target source = {0}; DWORD identity = socket_control_identity(&source, appContainer);
+  /* Self first: a destination acknowledgment may exhaust the remaining budget. */
+  for (unsigned kind = 0; kind < (original->target.pid == source.pid ? 1 : 2); kind++) {
+    struct socket_control_offer control = {0}; control.error = error; control.end = end;
+    control.offer.target = kind ? original->target : source;
+    SOCKET socket = INVALID_SOCKET, imported = INVALID_SOCKET;
+    LONGLONG status[11] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+    WSAPROTOCOL_INFOW actual = {0}, selection = original->source; struct socket_target current = {0}; u_long nonblocking = 1; BOOL exclusive = TRUE;
+    status[0] = identity;
+    status[10] = GetTickCount64() >= end ? WAIT_TIMEOUT : 0;
+    if (identity || status[10]) goto closed;
+    socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, &selection, 0, 0);
+    status[1] = socket == INVALID_SOCKET ? WSAGetLastError() : 0;
+    if (socket == INVALID_SOCKET) goto closed;
+    status[2] = ioctlsocket(socket, FIONBIO, &nonblocking) == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (status[2]) goto closed;
+    status[3] = setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof(exclusive)) == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (status[3]) goto closed;
+    status[4] = socket_control_protocol(socket, &original->source, &control.offer.source);
+    if (status[4]) goto closed;
+    status[0] = socket_control_identity(&current, appContainer);
+    if (!status[0] && memcmp(&source, &current, sizeof(source))) status[0] = ERROR_INVALID_DATA;
+    status[10] = GetTickCount64() >= end ? WAIT_TIMEOUT : 0;
+    if (status[0] || status[10]) goto closed;
+    status[5] = WSADuplicateSocketW(socket, control.offer.target.pid, &control.offer.protocol) == SOCKET_ERROR ? WSAGetLastError() : 0;
+    if (status[5]) goto closed;
+    status[10] = GetTickCount64() >= end ? WAIT_TIMEOUT : 0;
+    if (status[10]) { cleanup_error("observer-control-ack", "invariant", 0); goto closed; }
+    if (!kind) {
+      imported = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &control.offer.protocol, 0, 0);
+      status[6] = imported == INVALID_SOCKET ? WSAGetLastError() : 0;
+      if (status[6]) cleanup_error("observer-control-import", "win32", (DWORD)status[6]);
+      if (imported != INVALID_SOCKET) {
+        status[4] = socket_control_protocol(imported, &control.offer.source, &actual);
+        socket_control_close(imported, &status[7]);
+      }
+    } else if (!appContainer) {
+      /* This direction has no control-import receiver. Never consume the
+       * destination ticket here or report a pipe acknowledgment as import. */
+      status[9] = 1; cleanup_error("observer-control-ack", "invariant", 0);
+    } else {
+      fputs(SOCKET_CONTROL_PREFIX, stderr);
+      for (unsigned i = 0; i < sizeof(control); i++) fprintf(stderr, "%02x", ((BYTE *)&control)[i]);
+      fputc('\n', stderr); fflush(stderr);
+      struct diagnosis acknowledgment = {0};
+      BOOL received = !ferror(stderr) && tcp_ack('V', end, &acknowledgment);
+      status[9] = received ? 0 : 1;
+      if (!received) cleanup_error("observer-control-ack", acknowledgment.operation ? acknowledgment.domain : "win32", acknowledgment.operation ? acknowledgment.value : ERROR_WRITE_FAULT);
+    }
+closed:
+    if (socket != INVALID_SOCKET) socket_control_close(socket, &status[8]);
+    status[10] = GetTickCount64() >= end ? WAIT_TIMEOUT : 0;
+    socket_control_write(kind, 0, &control.offer.target, status);
+  }
+}
+/* Check the demonstrated source authority under the actual effective token.
+ * This opens only the current process, not the privileged destination. */
+static BOOL socket_source_ready(struct diagnosis *problem) {
+  HANDLE process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId());
+  if (!process) { *problem = (struct diagnosis){"observer-source-open", "win32", GetLastError()}; return FALSE; }
+  if (!CloseHandle(process)) {
+    DWORD error = GetLastError(); *problem = (struct diagnosis){"observer-source-close", "win32", error};
+    cleanup_error("observer-source-close", "win32", error); return FALSE;
+  }
+  return TRUE;
+}
+static BOOL socket_packet(struct socket_import *packet, ULONGLONG end, struct diagnosis *problem) {
+  HANDLE pipe = GetStdHandle(STD_INPUT_HANDLE); DWORD at = 0;
+  while (at < sizeof(*packet)) {
+    if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+    DWORD available = 0, used = 0;
+    if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) { *problem = (struct diagnosis){"ack-read", "win32", GetLastError()}; return FALSE; }
+    if (!available) { Sleep(1); continue; }
+    DWORD remaining = (DWORD)sizeof(*packet) - at, size = available < remaining ? available : remaining;
+    if (!ReadFile(pipe, (BYTE *)packet + at, size, &used, NULL)) { *problem = (struct diagnosis){"ack-read", "win32", GetLastError()}; return FALSE; }
+    if (!used || used > size) { *problem = (struct diagnosis){"observer-carrier", "invariant", 0}; return FALSE; } at += used;
+  }
+  return TRUE;
+}
+static BOOL wfp_transfer(SOCKET *socket, ULONGLONG end, struct diagnosis *problem, BOOL *transferred) {
+  if (wcscmp(role, L"bundle") || !workspaceRole || wcscmp(workspaceRole, L"null-probe") == 0) return TRUE;
+  struct socket_offer offer = {0}; WCHAR target[2 * sizeof(offer.target) + 1];
+  SetLastError(ERROR_SUCCESS);
+  DWORD count = GetEnvironmentVariableW(L"NATIVE_FEASIBILITY_SOCKET_OWNER", target, sizeof(target) / sizeof(WCHAR));
+  if (!count) { *problem = (struct diagnosis){"observer-owner", "win32", GetLastError()}; return FALSE; }
+  if (count != 2 * sizeof(offer.target) || wcsspn(target, L"0123456789abcdef") != count) { *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE; }
+  for (unsigned i = 0; i < sizeof(offer.target); i++) {
+    WCHAR a = target[2*i], b = target[2*i + 1];
+    ((BYTE *)&offer.target)[i] = (BYTE)(((a <= L'9' ? a - L'0' : a - L'a' + 10) << 4) | (b <= L'9' ? b - L'0' : b - L'a' + 10));
+  }
+  if (offer.target.version != 1 || !offer.target.pid || offer.target.pid == GetCurrentProcessId() || !offer.target.birth) {
+    *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE;
+  }
+  int protocolSize = sizeof(offer.source);
+  if (getsockopt(*socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&offer.source, &protocolSize) == SOCKET_ERROR) {
+    *problem = (struct diagnosis){"observer-protocol", "win32", WSAGetLastError()}; return FALSE;
+  }
+  if (protocolSize != sizeof(offer.source) || !socket_protocol(&offer.source)) { *problem = (struct diagnosis){"observer-protocol", "invariant", 0}; return FALSE; }
+  if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+  if (!socket_source_ready(problem)) return FALSE;
+  struct socket_import observed = {0}; observed.offer = offer; observed.creator = socketCreation; observed.effective = socketCreation;
+  int localSize = sizeof(observed.local);
+  if (getsockname(*socket, (struct sockaddr *)&observed.local, &localSize) == SOCKET_ERROR) { *problem = (struct diagnosis){"observer-local", "win32", WSAGetLastError()}; return FALSE; }
+  if (localSize != sizeof(observed.local)) { *problem = (struct diagnosis){"observer-local", "invariant", 0}; return FALSE; }
+  fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(observed); i++) fprintf(stderr, "%02x", ((BYTE *)&observed)[i]); fputc('\n', stderr); fflush(stderr);
+  if (ferror(stderr)) { *problem = (struct diagnosis){"observer-carrier", "invariant", 0}; return FALSE; }
+  *transferred = TRUE; /* Preserve the held child socket through observer closure, including partial input. */
+  if (!tcp_ack('D', end, problem)) return FALSE;
+  struct socket_import packet = {0}; struct socket_target current = {0};
+  if (!socket_packet(&packet, end, problem)) return FALSE;
+  DWORD status = socket_primary_identity(&current);
+  if (status) { *problem = (struct diagnosis){"observer-token", "win32", status}; return FALSE; }
+  const WSAPROTOCOL_INFOW empty = {0};
+  if (memcmp(&socketCreation, &current, sizeof(current)) || memcmp(&packet.creator, &current, sizeof(current)) ||
+      memcmp(&packet.offer.target, &current, sizeof(current)) || memcmp(&packet.effective, &current, sizeof(current)) ||
+      memcmp(&packet.local, &observed.local, sizeof(packet.local)) ||
+      !socket_protocol_same(&packet.offer.source, &offer.source) || memcmp(&packet.offer.protocol, &empty, sizeof(empty))) {
+    *problem = (struct diagnosis){"observer-owner-binding", "invariant", 0}; return FALSE;
+  }
+  if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+  struct socket_offer shared = {0}; shared.target = current; shared.source = offer.source;
+  if (WSADuplicateSocketW(*socket, current.pid, &shared.protocol) == SOCKET_ERROR) {
+    DWORD error = WSAGetLastError(); *problem = (struct diagnosis){"observer-transfer", "win32", error};
+    remember("observer-transfer", "win32", error);
+    socket_transfer_observe(*socket, &shared, error);
+    socket_transfer_controls(&shared, error, end); return FALSE;
+  }
+  if (!socket_protocol_same(&shared.source, &shared.protocol)) { *problem = (struct diagnosis){"observer-protocol", "invariant", 0}; return FALSE; }
+  SOCKET imported = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &shared.protocol, 0, 0);
+  if (imported == INVALID_SOCKET) { *problem = (struct diagnosis){"observer-socket", "win32", WSAGetLastError()}; return FALSE; }
+  /* Self-import is a control, never the descriptor used by the attempt. Keep
+   * the original creation/token association through connect and observation. */
+  WSAPROTOCOL_INFOW importedProtocol = {0};
+  DWORD importedStatus = socket_control_protocol(imported, &shared.source, &importedProtocol);
+  if (importedStatus) remember("observer-protocol", "win32", importedStatus);
+  if (closesocket(imported) == SOCKET_ERROR) {
+    DWORD error = WSAGetLastError(); cleanup_error("tcp-close", "win32", error);
+    *problem = importedStatus ? (struct diagnosis){"observer-protocol", "win32", importedStatus} : (struct diagnosis){"tcp-close", "win32", error}; return FALSE;
+  }
+  if (importedStatus) { *problem = (struct diagnosis){"observer-protocol", "win32", importedStatus}; return FALSE; }
+  status = socket_control_protocol(*socket, &packet.offer.source, &offer.source);
+  if (status) { *problem = (struct diagnosis){"observer-protocol", "win32", status}; return FALSE; }
+  BOOL exclusive = FALSE; int size = sizeof(exclusive); struct sockaddr_in local = {0}, remote = {0};
+  if (getsockopt(*socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&exclusive, &size) == SOCKET_ERROR) { *problem = (struct diagnosis){"tcp-exclusive", "win32", WSAGetLastError()}; return FALSE; }
+  if (size != sizeof(exclusive) || !exclusive) { *problem = (struct diagnosis){"tcp-exclusive", "invariant", 0}; return FALSE; }
+  size = sizeof(local);
+  if (getsockname(*socket, (struct sockaddr *)&local, &size) == SOCKET_ERROR) { *problem = (struct diagnosis){"observer-local", "win32", WSAGetLastError()}; return FALSE; }
+  if (size != sizeof(local) || local.sin_family != AF_INET || local.sin_family != packet.local.sin_family ||
+      local.sin_addr.s_addr != htonl(INADDR_LOOPBACK) || local.sin_addr.s_addr != packet.local.sin_addr.s_addr || !local.sin_port || local.sin_port != packet.local.sin_port) {
+    *problem = (struct diagnosis){"observer-local", "invariant", 0}; return FALSE;
+  }
+  size = sizeof(remote); int result = getpeername(*socket, (struct sockaddr *)&remote, &size); DWORD error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  if (result != SOCKET_ERROR || error != WSAENOTCONN) { *problem = (struct diagnosis){"observer-unconnected", "invariant", 0}; return FALSE; }
+  struct socket_target after = {0}; status = socket_primary_identity(&after);
+  if (status || memcmp(&current, &after, sizeof(after))) { *problem = (struct diagnosis){"observer-owner-binding", "invariant", 0}; return FALSE; }
+  if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+  observed.offer.protocol = shared.protocol;
+  fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(observed); i++) fprintf(stderr, "%02x", ((BYTE *)&observed)[i]); fputc('\n', stderr); fflush(stderr);
+  if (ferror(stderr)) { *problem = (struct diagnosis){"observer-carrier", "invariant", 0}; return FALSE; }
+  if (!tcp_ack('T', end, problem)) return FALSE;
+  /* T may have been delayed or interrupted. Check the effective identity at
+   * the actual connect boundary, not just at socket creation or observer setup. */
+  status = socket_primary_identity(&after);
+  if (status) { *problem = (struct diagnosis){"observer-token", "win32", status}; return FALSE; }
+  if (memcmp(&current, &after, sizeof(after))) { *problem = (struct diagnosis){"observer-owner-binding", "invariant", 0}; return FALSE; }
+  return TRUE;
+}
+/* One read-only comparison removes only the AppId selection. It shares the
+ * original interval, engine, deadline and 256-event budget; no row is evidence
+ * of denial. A full page is explicitly incomplete, never absence. */
+struct wfp_event_fact {
+  UINT32 type, flags; ULONGLONG time, filter; UINT16 layer, localPort, remotePort;
+  LONG drop, loopback; DWORD direction, version, protocol; BOOL valid;
+  char local[33], remote[33]; struct diagnostic_blob app, user, package;
+};
+static BOOL wfp_fact(const FWPM_NET_EVENT2 *event, struct wfp_event_fact *value) {
+  memset(value, 0, sizeof(*value)); value->drop = -1;
+  strcpy_s(value->local, sizeof(value->local), "-"); strcpy_s(value->remote, sizeof(value->remote), "-");
+  diagnostic_blob_read(NULL, 0, &value->app); diagnostic_blob_read(NULL, 0, &value->user); diagnostic_blob_read(NULL, 0, &value->package);
+  if (!event || (unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) return FALSE;
+  const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+  value->valid = TRUE; value->type = event->type; value->flags = h->flags; value->time = wfp_time(h->timeStamp);
+  value->version = h->flags & FWPM_NET_EVENT_FLAG_IP_VERSION_SET ? h->ipVersion : MAXDWORD;
+  value->protocol = h->flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET ? h->ipProtocol : MAXDWORD;
+  if (h->flags & FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET) value->localPort = h->localPort;
+  if (h->flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) value->remotePort = h->remotePort;
+  if (h->flags & (FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET | FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET)) {
+    if (value->version != FWP_IP_VERSION_V4 && value->version != FWP_IP_VERSION_V6) value->valid = FALSE;
+    else {
+      if (h->flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) {
+        if (value->version == FWP_IP_VERSION_V4) snprintf(value->local, sizeof(value->local), "%08x", h->localAddrV4);
+        else for (unsigned i = 0; i < 16; i++) snprintf(value->local + 2*i, 3, "%02x", h->localAddrV6.byteArray16[i]);
+      }
+      if (h->flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) {
+        if (value->version == FWP_IP_VERSION_V4) snprintf(value->remote, sizeof(value->remote), "%08x", h->remoteAddrV4);
+        else for (unsigned i = 0; i < 16; i++) snprintf(value->remote + 2*i, 3, "%02x", h->remoteAddrV6.byteArray16[i]);
+      }
+    }
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+    diagnostic_blob_read(h->appId.data, h->appId.size, &value->app);
+    if (!wfp_blob(&h->appId)) value->valid = FALSE;
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) {
+    if (h->userId && IsValidSid(h->userId) && GetLengthSid(h->userId) <= SECURITY_MAX_SID_SIZE) diagnostic_blob_read(h->userId, GetLengthSid(h->userId), &value->user);
+    else value->valid = FALSE;
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) {
+    if (h->packageSid && IsValidSid(h->packageSid) && GetLengthSid(h->packageSid) <= SECURITY_MAX_SID_SIZE) diagnostic_blob_read(h->packageSid, GetLengthSid(h->packageSid), &value->package);
+    else value->valid = FALSE;
+  }
+  if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) {
+    const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
+    value->drop = drop != NULL;
+    if (!drop) value->valid = FALSE;
+    else {
+      value->filter = drop->filterId; value->layer = drop->layerId; value->direction = drop->msFwpDirection; value->loopback = drop->isLoopback;
+      if (!drop->filterId || !drop->layerId || (drop->msFwpDirection != WFP_PACKET_INBOUND && drop->msFwpDirection != WFP_PACKET_OUTBOUND && drop->msFwpDirection != WFP_PACKET_FORWARD) || (drop->isLoopback != TRUE && drop->isLoopback != FALSE)) value->valid = FALSE;
+    }
+  }
+  if (value->app.closed < 0 || value->user.closed < 0 || value->package.closed < 0) wfpCleanupFailed = TRUE;
+  return value->valid;
+}
+struct wfp_availability { BOOL attempted, read, complete, truncated; DWORD createStatus, readStatus, closeStatus; UINT32 count, interval, appIdSet, appId, drop, candidates;
+  struct { LONG app, user, package, endpoint; DWORD flags; } comparisons[8]; struct wfp_tuple tuple;
+  struct wfp_event_fact facts[8]; struct diagnostic_blob expected[3];
+};
+static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE0 *selected, const FWP_BYTE_BLOB *appId, ULONGLONG deadline, UINT32 remaining, struct wfp_availability *value) {
+  DWORD saved = GetLastError(); HANDLE enumeration = NULL; FWPM_NET_EVENT2 **events = NULL; UINT32 scanned = 0;
+  FWPM_NET_EVENT_ENUM_TEMPLATE0 query = *selected; query.numFilterConditions = 0; query.filterCondition = NULL;
+  do {
+    if (!remaining || GetTickCount64() >= deadline) break;
+    value->attempted = TRUE;
+    diagnostic_blob_read(appId->data, appId->size, &value->expected[0]);
+    diagnostic_blob_read(userSid, GetLengthSid(userSid), &value->expected[1]);
+    diagnostic_blob_read(appSid, GetLengthSid(appSid), &value->expected[2]);
+    for (unsigned i = 0; i < 3; i++) if (value->expected[i].closed < 0) wfpCleanupFailed = TRUE;
+    if (GetTickCount64() >= deadline) break;
+    value->createStatus = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration);
+    if (value->createStatus || !enumeration || GetTickCount64() >= deadline) break;
+    UINT32 limit = remaining > 64 ? 64 : remaining, count = 0;
+    value->read = TRUE;
+    value->readStatus = FwpmNetEventEnum2(engine, enumeration, limit, &events, &count);
+    value->count = count;
+    if (value->readStatus || count > limit || (count && !events)) break;
+    scanned = count;
+    if (GetTickCount64() >= deadline) break;
+    value->complete = count < limit;
+    for (UINT32 i = 0; i < count; i++) {
+      if (GetTickCount64() >= deadline) { value->complete = FALSE; break; }
+      const FWPM_NET_EVENT2 *event = events[i];
+      if (!event || (unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) { value->complete = FALSE; break; }
+      const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+      ULONGLONG time = wfp_time(h->timeStamp);
+      if (time < wfp_time(query.startTime) || time > wfp_time(query.endTime)) continue;
+      value->interval++;
+      if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) value->drop++;
+      if (h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+        if (!wfp_blob(&h->appId)) { value->complete = FALSE; }
+        else {
+          value->appIdSet++;
+          if (h->appId.size == appId->size && !memcmp(h->appId.data, appId->data, appId->size)) value->appId++;
+        }
+      }
+      if(value->candidates==8){value->truncated=TRUE;continue;}
+      unsigned at=value->candidates++;value->comparisons[at].app=value->comparisons[at].user=value->comparisons[at].package=value->comparisons[at].endpoint=-1;
+      if (!wfp_fact(event, &value->facts[at])) value->complete = FALSE;
+      if (GetTickCount64() >= deadline) { value->complete = FALSE; break; }
+      value->comparisons[at].flags=h->flags;
+      if((h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && wfp_blob(&h->appId))value->comparisons[at].app=h->appId.size==appId->size && !memcmp(h->appId.data,appId->data,appId->size);
+      if((h->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) && h->userId && IsValidSid(h->userId) && GetLengthSid(h->userId)<=SECURITY_MAX_SID_SIZE)value->comparisons[at].user=EqualSid(h->userId,userSid);
+      if((h->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) && h->packageSid && IsValidSid(h->packageSid) && GetLengthSid(h->packageSid)<=SECURITY_MAX_SID_SIZE)value->comparisons[at].package=EqualSid(h->packageSid,appSid);
+      DWORD fields=FWPM_NET_EVENT_FLAG_IP_VERSION_SET|FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET|FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET|FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET|FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET|FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET;
+      if((h->flags & fields)==fields)value->comparisons[at].endpoint=h->ipVersion==FWP_IP_VERSION_V4 && h->ipProtocol==IPPROTO_TCP && h->localAddrV4==value->tuple.localAddress && h->remoteAddrV4==value->tuple.remoteAddress && h->localPort==value->tuple.localPort && h->remotePort==value->tuple.remotePort;
+    }
+  } while (FALSE);
+  if (events) FwpmFreeMemory0((void **)&events);
+  if (enumeration) { value->closeStatus = FwpmNetEventDestroyEnumHandle0(engine, enumeration); enumeration = NULL; }
+  if (value->closeStatus) {
+    wfpCleanupFailed = TRUE;
+    remember("observer-enum-close", "win32", value->closeStatus); cleanup_error("observer-enum-close", "win32", value->closeStatus);
+  }
+  SetLastError(saved); return scanned;
+}
+static void wfp_facts_write(const struct wfp_availability *value) {
+  if (!value->attempted) return;
+  DWORD used = 0; BOOL incomplete = value->truncated || !value->complete;
+  /* A scan can be incomplete while its captured rows still deserve projection. */
+  BOOL exhausted = FALSE;
+  diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact binding pid=%lu birth=%llu image-id=%s image-hash=%s started=%llu ended=%llu requested=2130706433:%u local=%lu:%u remote=%lu:%u\n",
+    value->tuple.pid, value->tuple.birth, wfpImageId, wfpImageHash, value->tuple.started, value->tuple.ended,
+    wfpRemotePort, value->tuple.localAddress, value->tuple.localPort, value->tuple.remoteAddress, value->tuple.remotePort);
+  for (unsigned i = 0; i < 3; i++) {
+    const struct diagnostic_blob *blob = &value->expected[i];
+    diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact expected=%u bytes=%lu encoded=%lu status=%ld close=%ld hash=%s hex=%s\n", i, blob->size, blob->encoded, blob->status, blob->closed, blob->hash, blob->hex);
+  }
+  for (unsigned i = 0; i < value->candidates; i++) {
+    const struct wfp_event_fact *row = &value->facts[i];
+    diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact candidate=%u valid=%u type=%u time=%llu flags=%u version=%lu protocol=%lu local=%s:%u remote=%s:%u drop=%ld filter=%llu layer=%u direction=%lu loopback=%ld app=%ld user=%ld package=%ld endpoint=%ld\n",
+      i, !!row->valid, row->type, row->time, row->flags, row->version, row->protocol, row->local, row->localPort, row->remote, row->remotePort,
+      row->drop, row->filter, row->layer, row->direction, row->loopback, value->comparisons[i].app, value->comparisons[i].user, value->comparisons[i].package, value->comparisons[i].endpoint);
+    const struct diagnostic_blob *blobs[] = {&row->app, &row->user, &row->package};
+    for (unsigned j = 0; j < 3; j++) {
+      const struct diagnostic_blob *blob = blobs[j];
+      diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact candidate=%u field=%u bytes=%lu encoded=%lu status=%ld close=%ld hash=%s hex=%s\n", i, j, blob->size, blob->encoded, blob->status, blob->closed, blob->hash, blob->hex);
+    }
+  }
+  if (incomplete || exhausted) fputs("native-windows-socket-input: caller=wfp_fact incomplete\n", stderr);
+}
+static void wfp_snapshot(const BYTE *line, DWORD size) {
+  const char *prefix = WFP_PREFIX " tuple="; DWORD offset = (DWORD)strlen(prefix);
+  struct wfp_tuple tuple = {0};
+  if (!size || line[size - 1] != '\n') return;
+  DWORD end = size - 1; if (end && line[end - 1] == '\r') end--;
+  if (end != offset + sizeof(tuple) * 2 || memcmp(line, prefix, offset)) return;
+  for (unsigned i = 0; i < sizeof(tuple); i++) {
+    BYTE a = line[offset + i * 2], b = line[offset + i * 2 + 1];
+    if (!((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) || !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f'))) return;
+    ((BYTE *)&tuple)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
+  }
+  HANDLE engine = NULL, enumeration = NULL; FWP_BYTE_BLOB *appId = NULL; FWPM_NET_EVENT2 **events = NULL;
+  FWPM_FILTER0 *filter = NULL; FWPM_LAYER0 *layer = NULL; struct wfp_match matches[8]; unsigned matched = 0;
+  DWORD status = 0, enumClose = 0, engineClose = 0; BOOL enumClosed = FALSE, engineClosed = FALSE, complete = FALSE, socketBound = FALSE, tupleBound = FALSE;
+  const char *api = "binding", *predicate = "binding";
+  unsigned rejected[5] = {0}, principalRejected[3] = {0}, refreshed = 0;
+  struct wfp_availability availability = {0};
+  availability.tuple=tuple;
+  UINT32 scanned = 0;
+  DWORD flags = 0, direction = 0, action = 0, queryBytes = 0; UINT64 filterId = 0; UINT16 layerId = 0;
+  const char *reason = "binding"; FILETIME born, exited, kernel, user;
+  if (wcscmp(role, L"launch") || !workspaceRole || (wcscmp(workspaceRole, L"read") && wcscmp(workspaceRole, L"edit")) || !ownedJob ||
+      !transport.child.hProcess || !transport.executable || !wfpChildPid || tuple.magic != 0x57465031 || tuple.pid != wfpChildPid ||
+      tuple.birth != wfpChildBirth || tuple.started < tuple.birth || tuple.ended < tuple.started || tuple.ended - tuple.started > 60000000 || tuple.ended > wfp_now()) goto closed;
+  api = "GetProcessTimes";
+  if (!GetProcessTimes(transport.child.hProcess, &born, &exited, &kernel, &user)) { status = GetLastError(); goto closed; }
+  api = "GetProcessId"; DWORD childPid = GetProcessId(transport.child.hProcess); if (!childPid) { status = GetLastError(); goto closed; }
+  if (wfp_time(born) != tuple.birth || childPid != tuple.pid) goto closed;
+  WCHAR image[4096]; name(image, L"build\\helper.exe");
+  /* Verify live custody before acquiring local observer resources. Refusal
+   * here still leaves the engine/token with their ordinary cleanup owner. */
+  if (wfpPreparedAt) {
+    socket_destination_binding(); socket_target_binding(&wfpTarget);
+    engine = wfpEngine; wfpEngine = NULL;
+  }
+  api = "FwpmGetAppIdFromFileName0";
+  status = FwpmGetAppIdFromFileName0(image, &appId); if (status) { reason = "api"; goto closed; }
+  predicate = "app-id"; if (!wfp_blob(appId)) { reason = "fields"; goto closed; }
+  queryBytes = appId->size;
+  if (!wfpPreparedAt) { api = "FwpmEngineOpen0"; status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &engine); }
+  if (status) { reason = "api"; goto closed; }
+  if (!engine) { reason = "fields"; goto closed; }
+  FWPM_FILTER_CONDITION0 condition = {0}; condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+  condition.matchType = FWP_MATCH_EQUAL; condition.conditionValue.type = FWP_BYTE_BLOB_TYPE; condition.conditionValue.byteBlob = appId;
+  FWPM_NET_EVENT_ENUM_TEMPLATE0 query = {0}; query.startTime.dwLowDateTime = (DWORD)tuple.started; query.startTime.dwHighDateTime = (DWORD)(tuple.started >> 32);
+  query.endTime.dwLowDateTime = (DWORD)tuple.ended; query.endTime.dwHighDateTime = (DWORD)(tuple.ended >> 32);
+  query.numFilterConditions = 1; query.filterCondition = &condition;
+  tupleBound = tuple.attempted == TRUE && !tuple.localStatus && !tuple.remoteStatus && tuple.localSize == sizeof(struct sockaddr_in) &&
+    tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.localFamily == AF_INET && tuple.remoteFamily == AF_INET &&
+    tuple.localAddress == INADDR_LOOPBACK && tuple.remoteAddress == INADDR_LOOPBACK && tuple.localPort && tuple.remotePort;
+  if (wfpPreparedAt) {
+    /* The trusted child is parked on the same exclusive socket until U. Its
+     * primary birth/token and the kernel DROP independently join this tuple. */
+    BOOL localBound = tuple.localAddress == ntohl(wfpLocal.sin_addr.s_addr) && tuple.localPort == ntohs(wfpLocal.sin_port);
+    /* A pending connect may expose its requested peer through getpeername.
+     * Neither that read nor ENOTCONN supplies a connect completion or denial. */
+    BOOL peerBound = (tuple.remoteStatus == WSAENOTCONN && !tuple.remoteSize && !tuple.remoteFamily && !tuple.remoteAddress && !tuple.remotePort) ||
+      (!tuple.remoteStatus && tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.remoteFamily == AF_INET &&
+        tuple.remoteAddress == INADDR_LOOPBACK && tuple.remotePort == wfpRemotePort);
+    socketBound = tuple.attempted == TRUE && localBound && peerBound && !tuple.localStatus && tuple.localSize == sizeof(struct sockaddr_in) &&
+      tuple.localFamily == AF_INET && tuple.localAddress == INADDR_LOOPBACK && tuple.localPort == wfpLocalPort && tuple.started >= wfpPreparedAt &&
+      tuple.ended - tuple.started <= 50000000 && GetTickCount64() - wfpPreparedTick < 5000;
+  }
+  ULONGLONG deadline = GetTickCount64() + 5000;
+  reason = tupleBound || socketBound ? "empty" : "binding";
+  for (;;) {
+    api = "FwpmNetEventCreateEnumHandle0";
+    status = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration); if (status) { reason = "api"; goto closed; }
+    if (!enumeration) { reason = "fields"; goto closed; }
+    for (unsigned page = 0; page < 4; page++) {
+      if (scanned == 256) { reason = "exhausted"; goto closed; }
+      UINT32 limit = 256 - scanned; if (limit > 64) limit = 64;
+      UINT32 count = 0; api = "FwpmNetEventEnum2"; status = FwpmNetEventEnum2(engine, enumeration, limit, &events, &count);
+      if (status) { reason = "api"; goto closed; }
+      if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+      if (count > limit || (count && !events)) { reason = "fields"; goto closed; }
+      scanned += count;
+      for (UINT32 i = 0; i < count; i++) {
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        predicate = "event-pointer"; flags = direction = action = 0; filterId = 0; layerId = 0;
+        FWPM_NET_EVENT2 *event = events[i]; if (!event) { reason = "fields"; goto closed; }
+        predicate = "event-type";
+        if ((unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) { reason = "fields"; goto closed; }
+        if ((!tupleBound && !socketBound) || event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) { rejected[0]++; continue; }
+        const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+        predicate = "header-flags"; flags = h->flags;
+        const UINT32 required = FWPM_NET_EVENT_FLAG_IP_VERSION_SET | FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
+          FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
+          FWPM_NET_EVENT_FLAG_APP_ID_SET | FWPM_NET_EVENT_FLAG_USER_ID_SET | FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET;
+        if ((h->flags & required) != required || (h->flags & ~(required | FWPM_NET_EVENT_FLAG_SCOPE_ID_SET | FWPM_NET_EVENT_FLAG_REAUTH_REASON_SET))) { reason = "fields"; goto closed; }
+        /* SDK event addresses/ports are host order; socket values were normalized above. */
+        predicate = "endpoints";
+        if (h->ipVersion != FWP_IP_VERSION_V4 || h->ipProtocol != IPPROTO_TCP || h->localAddrV4 != tuple.localAddress ||
+            h->remoteAddrV4 != (socketBound ? INADDR_LOOPBACK : tuple.remoteAddress) || h->localPort != tuple.localPort || h->remotePort != (socketBound ? wfpRemotePort : tuple.remotePort)) { rejected[1]++; continue; }
+        predicate = "interval"; ULONGLONG time = wfp_time(h->timeStamp); if (time < tuple.started || time > tuple.ended) { rejected[2]++; continue; }
+        predicate = "principal-fields";
+        if (!wfp_blob(&h->appId) || !h->userId || !h->packageSid || !IsValidSid(h->userId) || !IsValidSid(h->packageSid) ||
+            GetLengthSid(h->userId) > SECURITY_MAX_SID_SIZE || GetLengthSid(h->packageSid) > SECURITY_MAX_SID_SIZE) { reason = "fields"; goto closed; }
+        predicate = "principal-binding";
+        if (h->appId.size != appId->size || memcmp(h->appId.data, appId->data, appId->size) || !EqualSid(h->userId, userSid) || !EqualSid(h->packageSid, appSid)) {
+          if (h->appId.size != appId->size || memcmp(h->appId.data, appId->data, appId->size)) principalRejected[0]++;
+          if (!EqualSid(h->userId, userSid)) principalRejected[1]++;
+          if (!EqualSid(h->packageSid, appSid)) principalRejected[2]++;
+          rejected[3]++; continue;
+        }
+        const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
+        predicate = "drop-fields";
+        if (drop) { filterId = drop->filterId; layerId = drop->layerId; direction = drop->msFwpDirection; }
+        if (!drop) { predicate = "drop-pointer"; reason = "fields"; goto closed; }
+        if (!drop->filterId) { predicate = "drop-filter"; reason = "fields"; goto closed; }
+        if (!drop->layerId) { predicate = "drop-layer"; reason = "fields"; goto closed; }
+        if (drop->isLoopback != TRUE) { predicate = "drop-loopback"; reason = "fields"; goto closed; }
+        if (drop->msFwpDirection != WFP_PACKET_INBOUND && drop->msFwpDirection != WFP_PACKET_OUTBOUND && drop->msFwpDirection != WFP_PACKET_FORWARD) { predicate = "drop-direction"; reason = "fields"; goto closed; }
+        if (drop->vSwitchId.size) { predicate = "drop-vswitch"; reason = "fields"; goto closed; }
+        api = "FwpmFilterGetById0"; status = FwpmFilterGetById0(engine, drop->filterId, &filter); if (status) { reason = "lookup"; goto closed; }
+        api = "FwpmLayerGetById0"; status = FwpmLayerGetById0(engine, drop->layerId, &layer); if (status) { reason = "lookup"; goto closed; }
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        predicate = "filter-layer-binding";
+        if (!filter || !layer || filter->filterId != drop->filterId || layer->layerId != drop->layerId ||
+            memcmp(&filter->layerKey, &layer->layerKey, sizeof(GUID))) { reason = "fields"; goto closed; }
+        predicate = "layer-direction";
+        if (drop->msFwpDirection == WFP_PACKET_FORWARD ||
+            (socketBound && (drop->msFwpDirection != WFP_PACKET_OUTBOUND || memcmp(&layer->layerKey, &FWPM_LAYER_ALE_AUTH_CONNECT_V4, sizeof(GUID))))) {
+          rejected[4]++;
+          FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer); continue;
+        }
+        GUID providerKey = {0}, calloutKey = {0}, calloutProviderKey = {0};
+        predicate = "provider-action"; action = filter->action.type;
+        if (socketBound) {
+          api = "wfp_filter";
+          status = wfp_filter(engine, filter, layer, &providerKey, &calloutKey, &calloutProviderKey, &api, &predicate); if (status) { reason = "lookup"; goto closed; }
+        } else if (filter->action.type != FWP_ACTION_BLOCK) { reason = "fields"; goto closed; }
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        if (matched == 8) { reason = "exhausted"; goto closed; }
+        /* Only this receipt projection uses FWP_DIRECTION. Diagnostics retain
+         * the raw packet value; forwarding events never enter a match. */
+        UINT32 receiptDirection = drop->msFwpDirection == WFP_PACKET_OUTBOUND ? FWP_DIRECTION_OUTBOUND : FWP_DIRECTION_INBOUND;
+        matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, providerKey, calloutKey, calloutProviderKey, receiptDirection, filter->action.type, h->flags, time};
+        predicate = "matched";
+        FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer);
+      }
+      if (events) FwpmFreeMemory0((void **)&events);
+      if (count < limit) { complete = TRUE; reason = tupleBound || socketBound ? "empty" : "binding"; break; }
+      reason = "exhausted";
+    }
+    if (!complete || matched) break;
+    /* An enum is a snapshot of events logged before its creation. An empty
+     * snapshot is not a delivery barrier. Reopen the same AppId/time query while
+     * the original socket and token are still held, within the existing bound. */
+    enumClose = FwpmNetEventDestroyEnumHandle0(engine, enumeration); enumeration = NULL; enumClosed = TRUE;
+    if (enumClose) { reason = "api"; goto closed; }
+    /* A timed-out socket binding still needs event-availability attribution.
+     * This comparison cannot authorize another acceptance-query refresh. */
+    if (wfpPreparedAt && !availability.attempted)
+      scanned += wfp_availability(engine, &query, appId, deadline, 256 - scanned, &availability);
+    if (!socketBound || GetTickCount64() >= deadline) break;
+    Sleep(1);
+    refreshed++;
+    if (GetTickCount64() >= deadline) break;
+    complete = FALSE;
+  }
+closed:
+  if (filter) FwpmFreeMemory0((void **)&filter); if (layer) FwpmFreeMemory0((void **)&layer);
+  if (events) FwpmFreeMemory0((void **)&events); if (appId) FwpmFreeMemory0((void **)&appId);
+  if (enumeration) { enumClose = FwpmNetEventDestroyEnumHandle0(engine, enumeration); enumClosed = TRUE; }
+  if (engine) { engineClose = FwpmEngineClose0(engine); engineClosed = TRUE; }
+  BOOL tokenClose = release_handle(&wfpToken, "observer-token-close");
+  if (enumClose || engineClose || !tokenClose) wfpCleanupFailed = TRUE;
+  if (enumClose) { remember("observer-enum-close", "win32", enumClose); cleanup_error("observer-enum-close", "win32", enumClose); }
+  if (engineClose) { remember("observer-engine-close", "win32", engineClose); cleanup_error("observer-engine-close", "win32", engineClose); }
+  BOOL observed = complete && matched && !status && !enumClose && !engineClose && tokenClose && !availability.closeStatus && !wfpCleanupFailed;
+  /* Publish settlement readiness before the frame, after the census and its
+   * cleanup attempts. U permits closure even for an unproved result, never
+   * denial admission; retain the actual completion and separate uncertainty. */
+  if (wfpPreparedAt && InterlockedCompareExchange(&wfpAttemptReleased, 0, 0))
+    InterlockedExchange(&wfpClosureReady, 1);
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_snapshot api=%s predicate=%s tuple=%u socket=%u started=%llu ended=%llu app-id-bytes=%lu rejected=%u,%u,%u,%u,%u matched=%u refresh=%u flags=%lu filter=%llu layer=%u direction=%lu action=%lu\n",
+    api, predicate, !!tupleBound, !!socketBound, tuple.started, tuple.ended, queryBytes,
+    rejected[0], rejected[1], rejected[2], rejected[3], rejected[4], matched, refreshed, flags, filterId, layerId, direction, action);
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_snapshot selection=interval-only attempted=%u read=%u complete=%u create-status=%lu read-status=%lu close-status=%lu count=%u interval=%u app-id-fields=%u app-id=%u drop=%u scanned=%u principal-rejected=%u,%u,%u\n",
+    !!availability.attempted, !!availability.read, !!availability.complete, availability.createStatus, availability.readStatus, availability.closeStatus,
+    availability.count, availability.interval, availability.appIdSet, availability.appId, availability.drop, scanned, principalRejected[0], principalRejected[1], principalRejected[2]);
+  wfp_facts_write(&availability);
+  fprintf(stderr,"native-windows-socket-input: caller=wfp_availability truncated=%u\n",!!availability.truncated);
+  for (unsigned output = 0; output < (wfpPreparedAt ? 2u : 1u); output++) {
+    FILE *stream = output ? stdout : stderr;
+    if (output) {
+      fputs("{\"event\":\"tcp-attribution\",", stream); wfp_identity(stream);
+      fprintf(stream, ",\"requested\":{\"address\":2130706433,\"port\":%u},\"local\":{\"address\":%lu,\"port\":%u},\"localStatus\":%lu,\"peerStatus\":%lu,\"peer\":", wfpRemotePort, tuple.localAddress, tuple.localPort, tuple.localStatus, tuple.remoteStatus);
+      if (!tuple.remoteStatus && tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.remoteFamily == AF_INET)
+        fprintf(stream, "{\"address\":%lu,\"port\":%u}", tuple.remoteAddress, tuple.remotePort);
+      else fputs("null", stream);
+      fprintf(stream, ",\"startedAt\":\"%llu\",\"endedAt\":\"%llu\",\"socketHeld\":%s,\"tokenClosed\":%s,", tuple.started, tuple.ended, socketBound ? "true" : "false", tokenClose ? "true" : "false");
+    } else fputs(WFP_PREFIX " snapshot={", stream);
+    BOOL accepted = observed && (output ? socketBound : tupleBound);
+    fprintf(stream, "\"status\":\"%s\",\"reason\":\"%s\",\"nativeStatus\":%lu,\"enumClose\":", accepted ? "matched" : status == FWP_E_NET_EVENTS_DISABLED ? "disabled" : "unproved", accepted ? "none" : reason, status);
+    if (enumClosed) fprintf(stream, "%lu", enumClose); else fputs("null", stream);
+    fputs(",\"engineClose\":", stream); if (engineClosed) fprintf(stream, "%lu", engineClose); else fputs("null", stream);
+    if (!output) fprintf(stream, ",\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"sid\":\"%ls\",\"userSid\":\"%ls\",\"image\":{\"identity\":\"%s\",\"sha256\":\"%s\",\"private\":false}", wfpChildPid, wfpChildBirth, appText, userText, wfpImageId, wfpImageHash);
+    fputs(",\"matches\":[", stream);
+    for (unsigned i = 0; accepted && i < matched; i++) {
+      struct wfp_match *m = &matches[i]; if (i) fputc(',', stream);
+      fprintf(stream, "{\"filterId\":\"%llu\",\"layerId\":%u,\"direction\":%u,\"actionType\":%u,\"flags\":%u,\"isLoopback\":true,\"time\":\"%llu\",\"filterKey\":\"", m->filterId, m->layerId, m->direction, m->actionType, m->flags, m->time);
+      wfp_key(stream, &m->filterKey); fputs("\",\"layerKey\":\"", stream); wfp_key(stream, &m->layerKey);
+      if (output) {
+        fputs("\",\"providerKey\":\"", stream); wfp_key(stream, &m->providerKey);
+        fputs("\",\"calloutKey\":", stream);
+        if (m->actionType == FWP_ACTION_CALLOUT_TERMINATING) { fputc('"', stream); wfp_key(stream, &m->calloutKey); fputc('"', stream); }
+        else fputs("null", stream);
+        fputs(",\"calloutProviderKey\":", stream);
+        if (m->actionType == FWP_ACTION_CALLOUT_TERMINATING) { fputc('"', stream); wfp_key(stream, &m->calloutProviderKey); fputc('"', stream); }
+        else fputs("null", stream);
+        fputc('}', stream);
+      } else fputs("\"}", stream);
+    }
+    fputs("]}\n", stream); fflush(stream);
+  }
+  ReleaseSRWLockExclusive(&diagnosticOutputLock);
+}
+/* Read documented provider facts from the original socket at the immediate
+ * connect result. Restriction information has no supported query here.
+ * Failed/short reads stay unavailable and change no predicate. */
+static void tcp_socket_observe(SOCKET socket, DWORD connected) {
+  int saved = WSAGetLastError();
+  WSAPROTOCOL_INFOW protocol = {0}; int protocolSize = sizeof(protocol);
+  int result = getsockopt(socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&protocol, &protocolSize);
+  DWORD protocolStatus = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  AcquireSRWLockExclusive(&diagnosticOutputLock);
+  fprintf(stderr, "native-windows-socket-input: caller=tcp_connection connect=%lu restricted=unavailable", connected);
+  fprintf(stderr, " protocol-status=%lu protocol-size=%d provider=", protocolStatus, protocolSize);
+  if (!protocolStatus && protocolSize == sizeof(protocol) && socket_protocol(&protocol)) {
+    wfp_key(stderr, &protocol.ProviderId);
+    fprintf(stderr, " catalog=%lu flags=%lu chain=%d", protocol.dwCatalogEntryId, protocol.dwServiceFlags1, protocol.ProtocolChain.ChainLen);
+  } else fputs("unavailable", stderr);
+  fputs(" creator=", stderr);
+  if (socketCreation.version == 1 && socketCreation.pid == GetCurrentProcessId()) socket_target_write(stderr, &socketCreation);
+  else fputs("unavailable", stderr);
+  fprintf(stderr, " consumer=%lu\n", GetCurrentProcessId()); fflush(stderr);
+  ReleaseSRWLockExclusive(&diagnosticOutputLock); WSASetLastError(saved);
+}
+#else
+#define wfp_tuple(socket, started, attempted) ((void)(socket), (void)(started), (void)(attempted))
+#define wfp_now() 0ULL
+#define wfp_transfer(socket, end, problem, transferred) ((void)(socket), (void)(end), (void)(problem), (void)(transferred), TRUE)
+#define tcp_socket_observe(socket, connected) ((void)(socket), (void)(connected))
+#endif
+/* Observations have no receipt authority. Failed diagnostic output only makes
+ * this separately bounded capture incomplete; it cannot replace a native cause. */
+static void tcp_observe(const char *api, const char *phase, DWORD value) {
+  fprintf(stderr, TCP_PREFIX " api=%s phase=%s value=%lu\n", api, phase, value); fflush(stderr);
+}
+static void tcp_detail(const char *api, DWORD value) {
+  fprintf(stderr, "native-windows-socket-input: caller=tcp_connection api=%s value=%lu\n", api, value); fflush(stderr);
+}
+static struct { const char *phase; int selected; } tcp_progress;
+static struct diagnosis tcp_original;
+static BOOL tcp_original_receipt;
+static void tcp_attempt_begin(const struct diagnosis *problem, BOOL receipt) {
+  tcp_original=*problem;tcp_original_receipt=receipt;
+}
+/* Same original socket/interval as the tuple carrier. No subscription is added:
+ * the documented subscription contract alone cannot promise event generation. */
+static void tcp_attempt_observe(SOCKET socket, ULONGLONG started, BOOL attempted, const struct diagnosis *settlement, BOOL closed, int closeError) {
+  int saved=WSAGetLastError(),savedErrno=errno;FILETIME born={0},exited,kernel,user;
+  BOOL read=GetProcessTimes(GetCurrentProcess(),&born,&exited,&kernel,&user);DWORD error=read?0:GetLastError();
+  fprintf(stderr,"native-windows-socket-input: caller=original_attempt pid=%lu birth=%llu birth-status=%lu socket=%llu started=%llu ended=%llu attempted=%u native-operation=%s native-domain=%s native-value=%lu native-error-receipt=%u settlement-operation=%s settlement-domain=%s settlement-value=%lu socket-closed=%u close-error=%d classify-allow=unobserved generation=unproved\n",
+    GetCurrentProcessId(),read?((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime:0,error,(ULONGLONG)socket,started,wfp_now(),!!attempted,
+    tcp_original.operation?tcp_original.operation:"none",tcp_original.domain?tcp_original.domain:"none",tcp_original.value,!!tcp_original_receipt,
+    settlement->operation?settlement->operation:"none",settlement->domain?settlement->domain:"none",settlement->value,!!closed,closeError);
+  fflush(stderr);WSASetLastError(saved);errno=savedErrno;
+}
+static void tcp_deadline_observe(SOCKET socket) {
+  int saved=WSAGetLastError(),savedErrno=errno,completed=0,size=sizeof(completed);
+  int result=getsockopt(socket,SOL_SOCKET,SO_ERROR,(char *)&completed,&size),error=result==SOCKET_ERROR?WSAGetLastError():0;
+  fprintf(stderr,"native-windows-socket-input: caller=tcp_deadline phase=%s select=%d query=%d size=%d so-error=%lld\n",tcp_progress.phase,tcp_progress.selected,error,size,result!=SOCKET_ERROR&&size==sizeof(completed)?(LONGLONG)completed:-1);
+  fflush(stderr);WSASetLastError(saved);errno=savedErrno;
+}
+static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis *problem, BOOL *observed) {
+  fd_set ready, exceptional; FD_ZERO(&ready); FD_ZERO(&exceptional); FD_SET(socket, &ready); FD_SET(socket, &exceptional);
+  if (!*observed) tcp_observe("select", "enter", 0);
+  ULONGLONG now = GetTickCount64();
+  if (now >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return 0; }
+  ULONGLONG remaining = end - now;
+  TIMEVAL wait = {(long)(remaining / 1000), (long)((remaining % 1000) * 1000)};
+  int result = select(0, writing ? NULL : &ready, writing ? &ready : NULL, &exceptional, &wait);
+  int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  tcp_progress.selected=result;
+  if (result == SOCKET_ERROR) *problem = (struct diagnosis){"tcp-select", "win32", (DWORD)error};
+  if (!*observed && result > 0) tcp_detail("select-readiness", (FD_ISSET(socket, &ready) ? 1 : 0) | (FD_ISSET(socket, &exceptional) ? 2 : 0));
+  if (!*observed) { tcp_observe("select", result == SOCKET_ERROR ? "failed" : "complete", (DWORD)(result == SOCKET_ERROR ? error : result)); *observed = TRUE; }
+  if (result == SOCKET_ERROR) return 0;
+  if (!result || GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return 0; }
+  int flags = (FD_ISSET(socket, &ready) ? 1 : 0) | (FD_ISSET(socket, &exceptional) ? 2 : 0);
+  if (!flags) *problem = (struct diagnosis){"tcp-ready", "invariant", 0};
+  return flags;
+}
+static int tcp_connection(const WCHAR *address, const char *text) {
+  tcp_progress.phase="setup";tcp_progress.selected=-2;
+  struct sockaddr_in endpoint = {0}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons((u_short)number(address)); endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  ULONGLONG end = GetTickCount64() + 5000;
+  ULONGLONG started = wfp_now(); BOOL attempted = FALSE;
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (!wcscmp(role, L"bundle") && workspaceRole && wcscmp(workspaceRole, L"null-probe"))
+    status_check(socket_primary_identity(&socketCreation), "observer-token");
+#endif
+  tcp_observe("WSASocketW", "enter", 0);
+  SOCKET socket = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+  if (socket == INVALID_SOCKET) {
+    int error = WSAGetLastError(); tcp_observe("WSASocketW", "failed", (DWORD)error);
+    wfp_tuple(socket, started, attempted);
+    fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr); invariant(error != 0, "tcp-ready"); return error;
+  }
+  tcp_observe("WSASocketW", "complete", 0);
+  struct diagnosis problem = {0}; BOOL nativeReceipt = FALSE, selected = FALSE, transferred = FALSE; u_long mode = 1;
+  tcp_observe("ioctlsocket", "enter", 0);
+  if (ioctlsocket(socket, FIONBIO, &mode) == SOCKET_ERROR) { int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-nonblocking", "win32", (DWORD)error}; goto done; }
+  tcp_observe("ioctlsocket", "complete", 0);
+  if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
+  /* The held ephemeral tuple cannot be shared by another socket's event. */
+  BOOL exclusive = TRUE; tcp_observe("setsockopt", "enter", 0);
+  if (setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof(exclusive)) == SOCKET_ERROR) {
+    int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-exclusive", "win32", (DWORD)error}; goto done;
+  }
+  tcp_observe("setsockopt", "complete", 0);
+  struct sockaddr_in local = {0}; local.sin_family = AF_INET; local.sin_port = htons(0); local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  tcp_observe("bind", "enter", 0);
+  if (bind(socket, (struct sockaddr *)&local, sizeof(local)) == SOCKET_ERROR) {
+    int error = WSAGetLastError(); problem = (struct diagnosis){"tcp-bind", "win32", (DWORD)error};
+    tcp_observe("bind", "failed", (DWORD)error); goto done;
+  }
+  tcp_observe("bind", "complete", 0);
+  if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
+  if (!wfp_transfer(&socket, end, &problem, &transferred)) goto done;
+  if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
+  tcp_observe("connect", "enter", 0);
+  tcp_progress.phase="connect";
+  started = wfp_now(); attempted = TRUE;
+  int connected = connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint));
+  int connectError = connected == SOCKET_ERROR ? WSAGetLastError() : 0;
+  tcp_socket_observe(socket, (DWORD)connectError);
+  if (connected == SOCKET_ERROR) {
+    int error = connectError;
+    if (error != WSAEWOULDBLOCK) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)error}; tcp_observe("connect", "failed", (DWORD)error); nativeReceipt = error != 0 && GetTickCount64() < end; goto done; }
+    tcp_observe("connect", "pending", (DWORD)error);
+    int ready = tcp_wait(socket, TRUE, end, &problem, &selected); if (!ready) goto done;
+    int completed = 0, size = sizeof(completed);
+    tcp_observe("getsockopt", "enter", 0);
+    if (getsockopt(socket, SOL_SOCKET, SO_ERROR, (char *)&completed, &size) == SOCKET_ERROR) { int actual = WSAGetLastError(); problem = (struct diagnosis){"tcp-completion", "win32", (DWORD)actual}; goto done; }
+    tcp_observe("getsockopt", "complete", (DWORD)completed);
+    tcp_detail("SO_ERROR-size", (DWORD)size);
+    if (size != sizeof(completed)) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+    if (completed) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)completed}; nativeReceipt = GetTickCount64() < end; goto done; }
+    if (ready != 1) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+  }
+  tcp_observe("connect", "complete", 0); tcp_observe("transaction", "enter", 0); char reply[32];
+  for (unsigned receive = 0; receive < 2; receive++) {
+    tcp_progress.phase=receive?"receive":"send";
+    int at = 0; BOOL entered = FALSE;
+    while (at < 32) {
+      int ready = tcp_wait(socket, !receive, end, &problem, &selected); if (!ready) goto done;
+      if (ready != 1) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
+      if (!entered) { tcp_observe(receive ? "recv" : "send", "enter", 0); entered = TRUE; }
+      int used = receive ? recv(socket, reply + at, 32 - at, 0) : send(socket, text + at, 32 - at, 0);
+      if (used == SOCKET_ERROR) {
+        int error = WSAGetLastError(); if (error == WSAEWOULDBLOCK) continue;
+        problem = (struct diagnosis){receive ? "tcp-receive" : "tcp-send", "win32", (DWORD)error}; goto done;
+      }
+      if (used <= 0 || used > 32 - at) { problem = (struct diagnosis){receive && !used ? "tcp-eof" : "tcp-progress", "invariant", 0}; goto done; }
+      at += used;
+    }
+    tcp_observe(receive ? "recv" : "send", "complete", 0);
+  }
+  if (GetTickCount64() >= end) problem = (struct diagnosis){"tcp-deadline", "invariant", 0};
+  else if (memcmp(reply, text, 32)) problem = (struct diagnosis){"tcp-nonce", "invariant", 0};
+done:
+  tcp_attempt_begin(&problem,nativeReceipt);
+  if(problem.operation&&!strcmp(problem.operation,"tcp-deadline"))tcp_deadline_observe(socket);
+  if (problem.operation) {
+    if (!nativeReceipt) remember(problem.operation, problem.domain, problem.value);
+    tcp_observe("transaction", "failed", problem.value);
+  }
+  wfp_tuple(socket, started, attempted);
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (transferred) {
+    struct diagnosis acknowledgment = {0};
+    /* Keep original but unattempted sockets alive through independent
+     * observer closure too. The original response window ends at 15000 ms. */
+    if (!tcp_ack('U', end + 10000, &acknowledgment)) {
+      if (problem.operation) remember(problem.operation, problem.domain, problem.value);
+      remember(acknowledgment.operation, acknowledgment.domain, acknowledgment.value);
+      problem = acknowledgment; nativeReceipt = FALSE;
+    }
+  }
+#endif
+  if (socket != INVALID_SOCKET) tcp_observe("closesocket", "enter", 0);
+  BOOL closed = socket == INVALID_SOCKET || closesocket(socket) != SOCKET_ERROR; int closeError = closed ? 0 : WSAGetLastError();
+  if (!closed) {
+    if (problem.operation) remember(problem.operation, problem.domain, problem.value);
+    remember("tcp-close", "win32", (DWORD)closeError); cleanup_error("tcp-close", "win32", (DWORD)closeError);
+  }
+  if (socket != INVALID_SOCKET) tcp_observe("closesocket", closed ? "complete" : "failed", (DWORD)closeError);
+  tcp_attempt_observe(socket,started,attempted,&problem,closed,closeError);
+  fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr);
+  if (!closed || (problem.operation && !nativeReceipt)) failure(126);
+  return nativeReceipt ? (int)problem.value : 0;
+}
+static int connection(BOOL tcp, const WCHAR *address, const WCHAR *value) {
+  char text[33]; need(wcslen(value) == 32); for (unsigned i = 0; i < 32; i++) text[i] = (char)value[i]; text[32] = 0;
+  if (tcp) return tcp_connection(address, text);
+  HANDLE pipe = CreateFileW(address, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL); if (pipe == INVALID_HANDLE_VALUE) return (int)GetLastError();
+  char reply[32]; DWORD used, at = 0; need(WriteFile(pipe, text, 32, &used, NULL) && used == 32);
+  while (at < 32) { need(ReadFile(pipe, reply + at, 32 - at, &used, NULL) && used); at += used; }
+  need(!memcmp(reply, text, 32) && CloseHandle(pipe)); return 0;
+}
+static void attempt(const char *operation) { printf("{\"event\":\"attempt\",\"operation\":\"%s\"}\n", operation); fflush(stdout); }
+static void receipt(const char *operation, DWORD error) { printf("{\"event\":\"completed\",\"operation\":\"%s\",\"error\":%lu}\n", operation, error); fflush(stdout); }
+static void write_attempt(const char *operation, const WCHAR *relative, BOOL create) {
+  WCHAR path[4096]; name(path, relative); attempt(operation);
+  HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, create ? CREATE_NEW : OPEN_EXISTING, 0, NULL); DWORD error = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+  if (h != INVALID_HANDLE_VALUE) {
+    char bytes[32]; for (unsigned i = 0; i < 32; i++) bytes[i] = (char)nonce[i]; DWORD size;
+    win32_check(WriteFile(h, bytes, 32, &size, NULL), "bundle-write"); invariant_value(size == 32, "bundle-write-size", size);
+    win32_check(SetEndOfFile(h), "bundle-truncate"); if (!close_handle(h, "file-close")) failure(126);
+  } receipt(operation, error);
+}
+static void write_controls(void) {
+  owned_profile(); const WCHAR *paths[] = {L"workspace\\edited.txt", L"workspace\\.git\\index", L"workspace\\.git\\refs\\heads\\fixture", L"control\\sentinel", L"outside\\sentinel"};
+  for (unsigned i = 0; i < 5; i++) { WCHAR path[4096]; name(path, paths[i]); HANDLE h = file(path, GENERIC_READ | GENERIC_WRITE); acl(h, SE_FILE_OBJECT, i >= 3);
+    LARGE_INTEGER length, zero = {0}; need(GetFileSizeEx(h, &length) && length.QuadPart > 0 && length.QuadPart <= 65536); BYTE bytes[65536]; DWORD used;
+    need(ReadFile(h, bytes, (DWORD)length.QuadPart, &used, NULL) && used == length.QuadPart && SetFilePointerEx(h, zero, NULL, FILE_BEGIN) && WriteFile(h, bytes, used, &used, NULL) && used == length.QuadPart && FlushFileBuffers(h) && CloseHandle(h)); }
+  WCHAR lock[4096]; name(lock, L"workspace\\.git\\index.lock"); PSECURITY_DESCRIPTOR sd = descriptor(0, FALSE); SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+  HANDLE h = CreateFileW(lock, GENERIC_WRITE | DELETE, 0, &sa, CREATE_NEW, 0, NULL); LocalFree(sd); FILE_DISPOSITION_INFO disposition = {TRUE};
+  need(h != INVALID_HANDLE_VALUE && SetFileInformationByHandle(h, FileDispositionInfo, &disposition, sizeof(disposition)) && CloseHandle(h)); puts("{\"writesReady\":true,\"indexMutationReady\":true}");
+}
+/* The private alias is admitted only against the independently held proof
+ * supplied before payload creation. Keep both directory handles through Git. */
+static void workspace_cwd(const WCHAR *workspace) {
+  WCHAR expected[1024], physical[4096], logical[4096]; char physicalId[50], logicalId[50];
+  size_t length = wcslen(workspaceNativeHex);
+  invariant(wcslen(workspaceIdentity) == 49 && length && length % 4 == 0 && length / 4 < 1024 &&
+    wcsspn(workspaceNativeHex, L"0123456789abcdef") == length, "file-path");
+  for (size_t i = 0; i < length / 4; i++) { WCHAR unit[5] = {0}; wmemcpy(unit, workspaceNativeHex + i * 4, 4); expected[i] = (WCHAR)wcstoul(unit, NULL, 16); invariant(expected[i] != 0, "file-path"); }
+  expected[length / 4] = 0;
+  HANDLE *handles[] = {&transport.workspacePhysical, &transport.workspaceLogical}; const WCHAR *names[] = {workspace, L"W:\\"};
+  WCHAR *paths[] = {physical, logical}; char *ids[] = {physicalId, logicalId};
+  for (unsigned i = 0; i < 2; i++) {
+    *handles[i] = CreateFileW(names[i], READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    win32_check(*handles[i] != INVALID_HANDLE_VALUE, "file-open"); FILE_ATTRIBUTE_TAG_INFO tag; FILE_STANDARD_INFO standard;
+    win32_check(GetFileInformationByHandleEx(*handles[i], FileAttributeTagInfo, &tag, sizeof(tag)), "file-tag"); invariant(!(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "file-tag");
+    win32_check(GetFileInformationByHandleEx(*handles[i], FileStandardInfo, &standard, sizeof(standard)), "file-shape"); invariant(standard.Directory && !standard.DeletePending, "file-shape");
+    fileid(*handles[i], ids[i]); DWORD nativeSize = GetFinalPathNameByHandleW(*handles[i], paths[i], 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+    win32_check(nativeSize != 0, "file-path"); invariant(nativeSize < 4096, "file-path");
+  }
+  invariant(!strcmp(physicalId, logicalId) && !_wcsicmp(physical, logical) && !_wcsicmp(physical, expected), "file-path");
+  for (unsigned i = 0; i < 49; i++) invariant(workspaceIdentity[i] == physicalId[i], "file-id");
+  win32_check(SetCurrentDirectoryW(L"W:\\"), "file-path"); workspaceEntered = TRUE;
+}
+static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput, const WCHAR *nullOutput, const WCHAR *errorRead, const WCHAR *errorWrite) {
+  BOOL probe = !wcscmp(role, L"null-probe"), owned = probe || workspaceRole;
+  /* Git receives only its admitted NUL/diagnostic handles, never this reader. */
+  win32_check(SetHandleInformation(GetStdHandle(STD_INPUT_HANDLE), HANDLE_FLAG_INHERIT, 0), "stdin-inherit");
+  puts("{\"event\":\"ready\"}"); ack('A');
+  if (!probe) { attempt("inspect"); WCHAR path[4096]; name(path, L"workspace\\inspection.txt");
+  HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); char bytes[32]; DWORD used;
+  win32_check(h != INVALID_HANDLE_VALUE, "bundle-open");
+  win32_check(ReadFile(h, bytes, 32, &used, NULL), "bundle-read"); invariant_value(used == 32, "bundle-read-size", used);
+  if (!close_handle(h, "file-close")) failure(126);
+  for (unsigned i = 0; i < 32; i++) invariant(bytes[i] == (char)nonce[i], "bundle-nonce"); receipt("inspect", 0);
+  write_attempt("edit", L"workspace\\edited.txt", FALSE); }
+  attempt("git-status");
+  WCHAR git[4096], workspace[4096], metadata[4096], config[4096], repositoryConfig[4096], line[32767] = {0}, environment[32767] = {0};
+  name(git, L"build\\git.exe"); name(workspace, L"workspace"); name(metadata, L"workspace\\.git"); name(config, L"workspace\\.git\\runner-global.conf");
+  name(repositoryConfig, L"workspace\\.git\\config");
+  const WCHAR *args[] = {git, L"-c", L"core.fsmonitor=false", L"-c", L"safe.directory=.", L"--git-dir", L".git", L"--work-tree", L".", L"status", L"--porcelain"};
+  size_t offset = 0; for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) argument(line, &offset, args[i]);
+  DWORD environmentSize = git_environment(environment, workspace, metadata);
+  HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "container-token");
+  /* The global SID views alias these owned buffers through the later TCP
+   * primary-token/self-import checks, not just the Git launch. */
+  TOKEN_USER *ownUser = info(token, TokenUser); TOKEN_APPCONTAINER_INFORMATION *ownApp = info(token, TokenAppContainerSid);
+  userSid = ownUser->User.Sid; appSid = ownApp->TokenAppContainer;
+  invariant(IsValidSid(userSid) && appSid && IsValidSid(appSid), "container-identity");
+  win32_check(ConvertSidToStringSidW(userSid, &userText), "process-sid");
+  win32_check(ConvertSidToStringSidW(appSid, &appText), "process-sid"); win32_check(CloseHandle(token), "token-close");
+  HANDLE executable = CreateFileW(git, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  transport.executable = executable;
+  win32_check(executable != INVALID_HANDLE_VALUE, "executable-open");
+  FILE_ATTRIBUTE_TAG_INFO tag; win32_check(GetFileInformationByHandleEx(executable, FileAttributeTagInfo, &tag, sizeof(tag)), "executable-tag");
+  invariant(!(tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)), "executable-tag"); acl(executable, SE_FILE_OBJECT, FALSE);
+  WCHAR expected[4096]; const DWORD expectedSize = native_image(executable, expected);
+  HANDLE input = (HANDLE)(ULONG_PTR)number(nullInput), output = (HANDLE)(ULONG_PTR)number(nullOutput);
+  if (owned) { transport.gitInput = input; transport.gitOutput = output; }
+  invariant(input != output && input != GetStdHandle(STD_INPUT_HANDLE) && output != GetStdHandle(STD_OUTPUT_HANDLE), "git-null-input");
+  file_type(input, FILE_TYPE_CHAR, "git-null-input-type"); file_type(output, FILE_TYPE_CHAR, "git-null-output-type");
+  DWORD flags; win32_check(GetHandleInformation(input, &flags), "git-null-input"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-input");
+  win32_check(GetHandleInformation(output, &flags), "git-null-output"); invariant(flags & HANDLE_FLAG_INHERIT, "git-null-output");
+  SIZE_T size = 0; BOOL queried = InitializeProcThreadAttributeList(NULL, 1, 0, &size); DWORD error = GetLastError();
+  if (!queried && error != ERROR_INSUFFICIENT_BUFFER) { remember("git-attribute-size", "win32", error); failure(126); }
+  invariant(!queried && size && size <= 65536, "git-attribute-size");
+  HANDLE diagnosticRead = (HANDLE)(ULONG_PTR)number(errorRead), diagnosticWrite = (HANDLE)(ULONG_PTR)number(errorWrite);
+  if (owned) { transport.gitDiagnosticRead = diagnosticRead; transport.gitDiagnosticWrite = diagnosticWrite; }
+  invariant(diagnosticRead != diagnosticWrite && diagnosticRead != input && diagnosticRead != output && diagnosticWrite != input && diagnosticWrite != output && diagnosticRead != GetStdHandle(STD_INPUT_HANDLE) && diagnosticWrite != GetStdHandle(STD_OUTPUT_HANDLE), "git-diagnostic-bound");
+  file_type(diagnosticRead, FILE_TYPE_PIPE, "git-diagnostic-read-type"); file_type(diagnosticWrite, FILE_TYPE_PIPE, "git-diagnostic-write-type");
+  win32_check(GetHandleInformation(diagnosticWrite, &flags), "git-diagnostic-inherit"); invariant(flags & HANDLE_FLAG_INHERIT, "git-diagnostic-inherit");
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = malloc(size); HANDLE allow[] = {input, output, diagnosticWrite};
+  if (owned) transport.attributes = attributes;
+  invariant(attributes != NULL, "git-attribute-allocation");
+  win32_check(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "git-attribute-init");
+  if (owned) transport.attributesReady = TRUE;
+  win32_check(UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, allow, sizeof(allow), NULL, NULL), "git-attribute-handles");
+  STARTUPINFOEXW startup = {0}; startup.StartupInfo.cb = sizeof(startup); startup.lpAttributeList = attributes; startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = input; startup.StartupInfo.hStdOutput = output; startup.StartupInfo.hStdError = diagnosticWrite;
+  char commandHash[65], environmentHash[65]; hashbytes(line, (DWORD)(wcslen(line) * sizeof(WCHAR)), commandHash); hashbytes(environment, environmentSize, environmentHash);
+  PROCESS_INFORMATION child = {0}; PSECURITY_DESCRIPTOR sd = kernel_descriptor(); SECURITY_ATTRIBUTES security = {sizeof(security), sd, FALSE};
+  if (owned) transport.security = sd;
+  if (workspaceRole) workspace_cwd(workspace);
+  if (owned) observe_cwd();
+  BOOL launched = CreateProcessW(git, line, &security, &security, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, environment, workspaceEntered ? L"W:\\" : workspace, &startup.StartupInfo, &child);
+  DWORD launchError = launched ? 0 : GetLastError(); if (owned) transport.child = child;
+  if (!launched) { remember("git-process-create", "win32", launchError); failure(126); } LocalFree(sd);
+  DeleteProcThreadAttributeList(attributes); free(attributes);
+  if (owned) { transport.security = NULL; transport.attributes = NULL; transport.attributesReady = FALSE; }
+  if (owned) {
+    if (!release_handle(&transport.gitInput, "git-null-close") || !release_handle(&transport.gitOutput, "git-null-close") ||
+      !release_handle(&transport.gitDiagnosticWrite, "git-diagnostic-close")) failure(126);
+  } else {
+    win32_check(CloseHandle(input), "git-null-close"); win32_check(CloseHandle(output), "git-null-close");
+    win32_check(CloseHandle(diagnosticWrite), "git-diagnostic-close");
+  }
+  container(child.hProcess); BOOL member; win32_check(IsProcessInJob(child.hProcess, NULL, &member), "process-job"); invariant(member, "process-job");
+  WCHAR actual[4096]; const DWORD imageCapacity = 4096, imageFlags = PROCESS_NAME_NATIVE; DWORD actualSize = imageCapacity;
+  BOOL imageQueried = QueryFullProcessImageNameW(child.hProcess, imageFlags, actual, &actualSize); DWORD imageError = imageQueried ? 0 : GetLastError();
+  BOOL imageEqual = imageQueried && actualSize > 0 && actualSize < imageCapacity && !_wcsicmp(actual, expected);
+  if (!imageQueried) remember("git-image-query", "win32", imageError);
+  else if (!actualSize || actualSize >= imageCapacity) remember("git-image-bound", "invariant", 0);
+  else if (!imageEqual) remember("git-image-equal", "invariant", 0);
+  git_image_binding(expected, expectedSize, actual, imageQueried, imageCapacity, imageFlags, actualSize, imageError);
+  if (!imageQueried) SetLastError(imageError);
+  win32_check(imageQueried, "git-image-query"); invariant(actualSize > 0 && actualSize < 4096, "git-image-bound"); invariant(imageEqual, "git-image-equal");
+  printf("{\"event\":\"git-started\",\"suspended\":true,\"capabilities\":0,\"sid\":\"%ls\",\"process\":\"%llu\",\"thread\":\"%llu\",\"owner\":", appText, (ULONGLONG)(ULONG_PTR)child.hProcess, (ULONGLONG)(ULONG_PTR)child.hThread); identity(GetCurrentProcess());
+  printf(",\"child\":"); identity(child.hProcess); printf(",\"image\":"); observe_git_file(git); printf(",\"cwd\":"); observe_git_file(workspace);
+  printf(",\"metadata\":"); observe_git_file(metadata); printf(",\"config\":"); observe_git_file(config);
+  printf(",\"repositoryConfig\":"); observe_git_file(repositoryConfig);
+  printf(",\"commandSha256\":\"%s\",\"environmentSha256\":\"%s\"", commandHash, environmentHash);
+  if (workspaceRole && wcscmp(workspaceRole, L"null-probe")) printf(",\"workspaceRole\":\"%ls\"", workspaceRole);
+  if (workspaceEntered) printf(",\"logicalCwd\":\"W:\\\\\",\"workspaceBinding\":{\"identity\":\"%ls\",\"nativePathUtf16\":\"%ls\"}", workspaceIdentity, workspaceNativeHex);
+  puts("}"); fflush(stdout);
+  BOOL ran = TRUE;
+  if (owned) { char action; DWORD used; win32_check(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &action, 1, &used, NULL), "ack-read");
+    invariant(used == 1 && (action == 'G' || action == 'N'), "ack-value");
+    if (!wcscmp(nullProbeCase, L"no-shadow-control")) action = 'N';
+    ran = action == 'G'; }
+  else ack('G');
+  if (ran) { DWORD suspended = ResumeThread(child.hThread); win32_check(suspended != (DWORD)-1, "process-release"); invariant(suspended == 1, "process-release"); }
+  else win32_check(TerminateProcess(child.hProcess, 127), "null-cancel");
+  if (probe) printf("{\"event\":\"git-probe-release\",\"ran\":%s}\n", ran ? "true" : "false");
+  char diagnostic[65537] = {0}; DWORD captured = 0, code = git_wait(child.hProcess, diagnosticRead, diagnostic, &captured);
+  git_output_end("complete");
+  if (probe) {
+    printf("{\"event\":\"git-probe-result\",\"ran\":%s,\"exitCode\":", ran ? "true" : "false");
+    if (ran) printf("%lu", code); else printf("null");
+    printf(",\"terminationExitCode\":"); if (ran) printf("null"); else printf("%lu", code);
+    printf(",\"stderrBytes\":%lu}\n", captured);
+    BOOL closed = release_handle(&transport.gitDiagnosticRead, "git-diagnostic-close");
+    if (!release_handle(&transport.child.hThread, "git-thread-close")) closed = FALSE;
+    if (!release_handle(&transport.child.hProcess, "git-process-close")) closed = FALSE;
+    if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
+    if (!release_handle(&transport.workspacePhysical, "file-close")) closed = FALSE;
+    if (!release_handle(&transport.workspaceLogical, "file-close")) closed = FALSE;
+    if (!closed) failure(126);
+    LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; return;
+  }
+  if (code != 0) {
+    const char *reason = "git-process-exit";
+    const char *shape = git_stderr_shape(diagnostic, captured);
+    const struct { const char *prefix, *suffix, *reason; BOOL terminal; } reasons[] = {
+      {"fatal: detected dubious ownership in repository", NULL, "git-dubious-owner", FALSE},
+      {"fatal: not a git repository", NULL, "git-repository-read", FALSE},
+      {"fatal: unable to read config file", NULL, "git-config-read", FALSE},
+      {"fatal: could not determine current user name", NULL, "git-user-name", FALSE},
+      {"fatal: unable to look up current user in the passwd file", NULL, "git-user-name", FALSE},
+      {"fatal: $HOME not set", NULL, "git-home-missing", FALSE},
+      {"fatal: unable to access", NULL, "git-path-read", FALSE},
+      {"fatal: Unable to read current working directory", NULL, "git-cwd-read", FALSE},
+      // abspath.c die_errno forms: retain the exact delimiters and error tail.
+      {"fatal: unable to get current working directory: ", "", "git-cwd-read", FALSE},
+      {"fatal: Invalid path '", "': ", "git-path-normalize", FALSE},
+      // Git for Windows v2.55.0.windows.5 mingw.c/setup.c/read-cache.c.
+      // wrapper.c mmap_os_err() is empty on Windows; die_errno adds ": " and errno text.
+      {"fatal: could not get long path for '", "'", "git-path-normalize", TRUE},
+      {"fatal: cannot chdir to '", "': ", "git-cwd-read", FALSE},
+      {"fatal: cannot come back to cwd: ", "", "git-cwd-read", FALSE},
+      {"fatal: ", ": index file open failed: ", "git-index-read", FALSE},
+      {"fatal: ", ": cannot stat the open index: ", "git-index-read", FALSE},
+      {"fatal: ", ": unable to map index file: ", "git-index-read", FALSE},
+      // Remaining pinned forms: empty terminal suffixes mean exact plain die lines.
+      {"fatal: unable to set up work tree using invalid config", "", "git-config-read", TRUE},
+      {"fatal: unknown error occurred while reading the configuration files", "", "git-config-read", TRUE},
+      {"fatal: this operation must be run in a work tree", "", "git-repository-read", TRUE},
+      {"fatal: ", ": index file smaller than expected", "git-index-read", TRUE},
+      {"fatal: index file corrupt", "", "git-index-read", TRUE},
+      {"fatal: unable to create load_cache_entries thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to join load_cache_entries thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to create load_index_extensions thread: ", "", "git-index-read", FALSE},
+      {"fatal: unable to join load_index_extensions thread: ", "", "git-index-read", FALSE},
+      {"fatal: write failure on standard output: ", "", "git-stdio-io", FALSE},
+      {"fatal: unknown write failure on standard output", "", "git-stdio-io", TRUE},
+      {"fatal: close failed on standard output: ", "", "git-stdio-io", FALSE},
+      {"fatal: could not open '/dev/null' for reading and writing: ", "", "git-stdio-io", FALSE},
+      {"fatal: unable to get random bytes", "", "git-random-read", TRUE},
+      {"fatal: unable to initialize winsock subsystem, error ", "%d", "git-winsock-init", TRUE},
+      {"fatal: Could not initialize winansi pipe name", "", "git-console-init", TRUE},
+      {"fatal: CreateNamedPipe failed: ", "", "git-console-init", FALSE},
+      {"fatal: CreateFile for named pipe failed: ", "", "git-console-init", FALSE},
+      {"fatal: CreateThread(console_thread) failed: ", "", "git-console-init", FALSE},
+      {"fatal: atexit(winansi_exit) failed: ", "", "git-console-init", FALSE},
+    };
+    // Warnings can precede a fatal line. An unterminated capture is unknown;
+    // Raw transport is independent; only this strict grammar classifies evidence.
+    if (captured && diagnostic[captured - 1] == '\n' && strcmp(shape, "git-stderr-invalid")) for (char *at = diagnostic; *at;) {
+      char *end = strchr(at, '\n'); if (!end) break;
+      char *last = end; if (last > at && last[-1] == '\r') last--;
+      for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
+        size_t prefix = strlen(reasons[i].prefix);
+        if ((size_t)(last - at) < prefix || strncmp(at, reasons[i].prefix, prefix)) continue;
+        if (reasons[i].suffix) {
+          if (!strcmp(reasons[i].suffix, "%d")) {
+            // Source %d renders a canonical signed 32-bit decimal; keep it private.
+            char *number = at + prefix; BOOL negative = number < last && *number == '-';
+            if (negative) number++;
+            if (number == last || (*number == '0' && (negative || number + 1 != last))) continue;
+            DWORD value = 0, limit = negative ? 2147483648UL : 2147483647UL;
+            char *digit = number;
+            for (; digit < last && *digit >= '0' && *digit <= '9'; digit++) {
+              DWORD next = (DWORD)(*digit - '0');
+              if (value > (limit - next) / 10) break;
+              value = value * 10 + next;
+            }
+            if (digit != last) continue;
+          } else {
+            size_t size = strlen(reasons[i].suffix);
+            if ((size_t)(last - at) < prefix + size) continue;
+            if (reasons[i].terminal && !size && (size_t)(last - at) != prefix) continue;
+            char *suffix = reasons[i].terminal ? last - size : strstr(at + prefix, reasons[i].suffix);
+            if (!suffix || suffix + size > last ||
+                (reasons[i].terminal ? memcmp(suffix, reasons[i].suffix, size) : suffix + size == last)) continue;
+          }
+        }
+        reason = reasons[i].reason; break;
+      }
+      if (strcmp(reason, "git-process-exit")) break;
+      at = end + 1;
+    }
+    if (!strcmp(reason, "git-process-exit")) reason = shape;
+    remember(reason, "exit", code);
+  }
+  BOOL closed = release_handle(&transport.gitDiagnosticRead, "git-diagnostic-close");
+  if (!release_handle(&transport.child.hThread, "git-thread-close")) closed = FALSE;
+  if (!release_handle(&transport.child.hProcess, "git-process-close")) closed = FALSE;
+  if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
+  if (code || !closed) failure(126);
+  if (!release_handle(&transport.workspacePhysical, "file-close") || !release_handle(&transport.workspaceLogical, "file-close")) failure(126);
+  receipt("git-status", 0);
+  write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
+  write_attempt("control", L"control\\sentinel", FALSE); write_attempt("outside", L"outside\\sentinel", FALSE);
+  attempt("tcp");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (workspaceRole && wcscmp(workspaceRole, L"null-probe")) ack('O');
+#endif
+  receipt("tcp", connection(TRUE, port, nonce)); attempt("pipe"); receipt("pipe", connection(FALSE, pipe, nonce));
+  LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL;
+}
+static void fault(void) {
+  WCHAR image[4096], line[8192]; need(GetModuleFileNameW(NULL, image, 4096));
+  need(swprintf_s(line, 8192, L"\"%ls\" park", image) > 0); STARTUPINFOW startup = {0}; startup.cb = sizeof(startup); PROCESS_INFORMATION child;
+  need(CreateProcessW(image, line, NULL, NULL, FALSE, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, NULL, NULL, &startup, &child));
+  printf("{\"event\":\"fault-ready\",\"descendant\":"); identity(child.hProcess); puts("}"); fflush(stdout);
+  ack('F'); puts("{\"event\":\"fault-ack\"}"); fflush(stdout); Sleep(INFINITE);
+}
+static HANDLE storage_parent(void) {
+  WCHAR path[4096]; name(path, L"storage"); HANDLE h = CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  FILE_ATTRIBUTE_TAG_INFO tag; WCHAR actual[4096]; DWORD size;
+  need(h != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)) && (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT));
+  size = GetFinalPathNameByHandleW(h, actual, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(size > 4 && size < 4096 && !wcsncmp(actual, L"\\\\?\\", 4) && !_wcsicmp(actual + 4, path)); acl(h, SE_FILE_OBJECT, TRUE); return h;
+}
+static void storage(void) {
+  owned_profile(); WCHAR parent[4096], leaf[4096], saved[4096]; name(parent, L"storage"); name(leaf, L"storage\\leaf"); name(saved, L"storage\\saved");
+  HANDLE owner = storage_parent(); char parentId[50]; fileid(owner, parentId);
+  PSECURITY_DESCRIPTOR sd = descriptor(0, FALSE); SECURITY_ATTRIBUTES sa = {sizeof(sa), sd, FALSE};
+  HANDLE held = CreateFileW(leaf, GENERIC_READ | GENERIC_WRITE | DELETE | READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa, CREATE_NEW, 0, NULL); LocalFree(sd); need(held != INVALID_HANDLE_VALUE);
+  DWORD used; need(WriteFile(held, "owned", 5, &used, NULL) && used == 5 && FlushFileBuffers(held)); acl(held, SE_FILE_OBJECT, TRUE); char id[50]; fileid(held, id);
+  printf("{\"event\":\"allocated\",\"identity\":\"%s\",\"parent\":\"%s\",\"owner\":", id, parentId); identity(GetCurrentProcess()); puts("}"); fflush(stdout);
+  char command; need(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &command, 1, &used, NULL) && used == 1 && (command == 'N' || command == 'S'));
+  HANDLE named = file(leaf, GENERIC_READ); acl(named, SE_FILE_OBJECT, TRUE); char actual[50]; fileid(named, actual); need(CloseHandle(named));
+  if (command == 'N') { need(!strcmp(actual, id)); FILE_DISPOSITION_INFO disposition = {TRUE}; need(SetFileInformationByHandle(held, FileDispositionInfo, &disposition, sizeof(disposition))); }
+  else need(strcmp(actual, id));
+  printf("{\"event\":\"cleanup\",\"removed\":%s}\n", command == 'N' ? "true" : "false"); need(CloseHandle(held) && CloseHandle(owner));
+}
+static void remove_owned(const WCHAR *relative, const WCHAR *expected, const WCHAR *expectedParent) {
+  owned_profile(); need(!wcscmp(relative, L"storage\\leaf") || !wcscmp(relative, L"storage\\saved"));
+  HANDLE authority = storage_parent(); char parentId[50]; fileid(authority, parentId); need(wcslen(expectedParent) == 49); for (unsigned i = 0; i < 49; i++) need(expectedParent[i] == parentId[i]);
+  WCHAR path[4096]; name(path, relative); HANDLE h = file(path, DELETE); acl(h, SE_FILE_OBJECT, TRUE); char id[50]; fileid(h, id); need(wcslen(expected) == 49);
+  for (unsigned i = 0; i < 49; i++) need(expected[i] == id[i]); FILE_DISPOSITION_INFO disposition = {TRUE}; need(SetFileInformationByHandle(h, FileDispositionInfo, &disposition, sizeof(disposition)) && CloseHandle(h) && CloseHandle(authority)); puts("{\"removed\":true}");
+}
+static void profile_delete(void) {
+  owned_profile(); WCHAR pattern[4096]; name(pattern, L"control\\*.intent"); WIN32_FIND_DATAW entry; HANDLE scan = FindFirstFileW(pattern, &entry);
+  if (scan != INVALID_HANDLE_VALUE) {
+    unsigned count = 0;
+    do { need(++count <= 6); WCHAR relative[128]; need(swprintf_s(relative, 128, L"control\\%ls", entry.cFileName) > 0);
+      struct launch_intent intent; recordio(relative, &intent, sizeof(intent), FALSE);
+      need(intent.magic == 0x4e46494e && intent.nonce[32] == 0 && !wcscmp(intent.nonce, nonce)); assert_retired(intent.pid, intent.time);
+      WCHAR *dot = wcsrchr(relative, L'.'); need(dot && !wcscmp(dot, L".intent")); wcscpy_s(dot, 8, L".launch");
+      ULONGLONG child[2]; recordio(relative, child, sizeof(child), FALSE);
+      wcscpy_s(dot, 6, L".done");
+      struct settled_record settled; recordio(relative, &settled, sizeof(settled), FALSE); need(settled.magic == 0x4e46444e && settled.count <= 8 && settled.nonce[32] == 0 && !wcscmp(settled.nonce, nonce));
+      need(child[0] <= MAXDWORD && (child[0] ? child[1] && settled.count : !child[1] && !settled.count));
+      BOOL matched = !child[0];
+      for (unsigned i = 0; i < settled.count; i++) {
+        matched |= settled.pid[i] == child[0] && settled.time[i] == child[1];
+        assert_retired(settled.pid[i], settled.time[i]);
+      } need(matched);
+    } while (FindNextFileW(scan, &entry)); need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(scan));
+  } else need(GetLastError() == ERROR_FILE_NOT_FOUND);
+  name(pattern, L"storage\\*"); scan = FindFirstFileW(pattern, &entry); need(scan != INVALID_HANDLE_VALUE);
+  do { need(!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")); } while (FindNextFileW(scan, &entry));
+  need(GetLastError() == ERROR_NO_MORE_FILES && FindClose(scan));
+  WCHAR profile[80]; profile_name(profile); need(SUCCEEDED(DeleteAppContainerProfile(profile))); puts("{\"deleted\":true}");
+}
+static void profile_absent(void) {
+  HKEY key; LONG error = mapping(&key);
+  if (error == ERROR_SUCCESS) { RegCloseKey(key); need(0); } need(error == ERROR_FILE_NOT_FOUND); puts("{\"absent\":true}");
+}
+static void process_retired(const WCHAR *pid, const WCHAR *time) {
+  ULONGLONG value = number(pid); need(value <= MAXDWORD); assert_retired((DWORD)value, number(time)); puts("{\"retired\":true}");
+}
+static void host_environment(const WCHAR *key, const WCHAR *expected, WCHAR *value, DWORD capacity, const char *operation) {
+  SetLastError(ERROR_SUCCESS); DWORD size = GetEnvironmentVariableW(key, value, capacity);
+  if (!size) { DWORD error = GetLastError(); if (error != ERROR_SUCCESS) { remember(operation, "win32", error); failure(126); } }
+  invariant(size && size < capacity && !wcscmp(value, expected), operation);
+}
+#ifdef NATIVE_COMMAND_EXPERIMENT
+#include "feasibility-command.h"
+#else
+#include "feasibility-null-probe.h"
+#endif
+#ifdef NATIVE_COMMAND_EXPERIMENT
+static BOOL settle_null_map(void) { return TRUE; }
+#endif
+int wmain(int argc, WCHAR **argv) {
+  if (_setmode(_fileno(stdout), _O_BINARY) == -1) { int error = errno; remember("stdout-mode", "errno", (DWORD)error); failure(126); }
+  invariant(argc >= 2, "helper-arguments"); setvbuf(stdout, NULL, _IONBF, 0);
+  role = argv[1];
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  if (!wcsncmp(role, L"command-", 8)) return command_main(argc, argv);
+#endif
+  if (!wcscmp(argv[1], L"park") && argc == 2) { HANDLE token; need(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)); DWORD *active = info(token, TokenIsAppContainer); BOOL member; need(*active && IsProcessInJob(GetCurrentProcess(), NULL, &member) && member && CloseHandle(token)); free(active); Sleep(60000); return 124; }
+  invariant(argc >= 4, "helper-arguments"); root = argv[2]; nonce = argv[3]; invariant(wcslen(nonce) == 32 && wcsspn(nonce, L"0123456789abcdef") == 32, "helper-nonce");
+  if (!wcscmp(role, L"null-probe") || !wcscmp(role, L"null-map")) {
+    BOOL probe = !wcscmp(role, L"null-probe"); invariant(argc >= (probe ? 7 : 14), "helper-arguments");
+    nullProbeCase = argv[probe ? 6 : 13];
+    BOOL rooted = !wcscmp(nullProbeCase, L"workspace-rooted"); invariant(argc == (probe ? (rooted ? 13 : 11) : 14), "helper-arguments");
+    if (rooted) { workspaceRole = probe ? L"null-probe" : argv[10]; invariant(workspace_case(workspaceRole), "helper-arguments"); }
+    if (probe && rooted) { workspaceIdentity = argv[7]; workspaceNativeHex = argv[8]; }
+  } else if (!wcscmp(role, L"launch") && argc >= 5 && !wcscmp(argv[4], L"null-probe")) {
+    invariant(argc >= 12, "helper-arguments"); nullProbeCase = argv[11]; invariant(argc == (!wcscmp(nullProbeCase, L"workspace-rooted") ? 14 : 12), "helper-arguments");
+    if (!wcscmp(nullProbeCase, L"workspace-rooted")) workspaceRole = L"null-probe";
+  } else if (!wcscmp(role, L"launch") && argc >= 5 && (!wcscmp(argv[4], L"read") || !wcscmp(argv[4], L"edit"))) {
+    invariant(argc == 14 && !wcscmp(argv[6], L"bundle") && !wcscmp(argv[7], root) && !wcscmp(argv[8], nonce) && !wcscmp(argv[11], argv[4]), "helper-arguments");
+    workspaceRole = argv[4]; nullProbeCase = L"workspace-rooted";
+  } else if (!wcscmp(role, L"bundle")) {
+    invariant(argc == 13 && (!wcscmp(argv[6], L"read") || !wcscmp(argv[6], L"edit")), "helper-arguments");
+    workspaceRole = argv[6]; nullProbeCase = L"workspace-rooted"; workspaceIdentity = argv[7]; workspaceNativeHex = argv[8];
+  }
+  invariant(!wcscmp(nullProbeCase, L"shadow") || !wcscmp(nullProbeCase, L"no-shadow-control") || !wcscmp(nullProbeCase, L"no-shadow-mapped") || !wcscmp(nullProbeCase, L"workspace-rooted"), "helper-arguments");
+  BOOL payload = !wcscmp(argv[1], L"null-probe") || !wcscmp(argv[1], L"bundle") || !wcscmp(argv[1], L"fault");
+  if (payload) {
+    HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "payload-token");
+    DWORD *active = info(token, TokenIsAppContainer); invariant(*active, "payload-container");
+    TOKEN_GROUPS *caps = info(token, TokenCapabilities); invariant_value(!caps->GroupCount, "payload-capabilities", caps->GroupCount);
+    BOOL member; win32_check(IsProcessInJob(GetCurrentProcess(), NULL, &member), "payload-job"); invariant(member, "payload-job");
+    win32_check(CloseHandle(token), "token-close"); free(active); free(caps);
+  }
+  if (!payload) {
+    WCHAR ci[8], actions[8], worker[32], os[16];
+    host_environment(L"CI", L"true", ci, 8, "host-ci"); host_environment(L"GITHUB_ACTIONS", L"true", actions, 8, "host-actions");
+    host_environment(L"RUNNER_ENVIRONMENT", L"github-hosted", worker, 32, "host-worker"); host_environment(L"RUNNER_OS", L"Windows", os, 16, "host-os"); principal(); derive();
+  }
+  HANDLE timer = CreateThread(NULL, 0, deadline, NULL, 0, NULL); win32_check(timer != NULL, "deadline-create"); win32_check(CloseHandle(timer), "thread-close"); WSADATA sockets; status_check((DWORD)WSAStartup(MAKEWORD(2, 2), &sockets), "winsock-start");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  socketVersion = sockets.wVersion; socketHighVersion = sockets.wHighVersion;
+#endif
+  if (!wcscmp(argv[1], L"seal") && argc == 4) { protect(root, 0, TRUE); WCHAR path[4096]; name(path, L"control"); grant_tree(path, 0); name(path, L"storage"); grant_tree(path, 0); name(path, L"outside"); grant_tree(path, 0); puts("{\"sealed\":true}"); }
+  else if (!wcscmp(argv[1], L"profile-create") && argc == 5) profile_create(argv[4]);
+  else if (!wcscmp(argv[1], L"profile-delete") && argc == 4) profile_delete();
+  else if (!wcscmp(argv[1], L"profile-absent") && argc == 4) profile_absent();
+  else if (!wcscmp(argv[1], L"profile-observe") && argc == 4) { owned_profile(); profile_observe(); }
+  else if (!wcscmp(argv[1], L"process-retired") && argc == 6) process_retired(argv[4], argv[5]);
+  else if (!wcscmp(argv[1], L"grants") && argc == 5) { need(!wcscmp(argv[4], L"edit") || !wcscmp(argv[4], L"read")); grants(!wcscmp(argv[4], L"edit")); }
+  else if (!wcscmp(argv[1], L"write-controls") && argc == 4) write_controls();
+  else if (!wcscmp(argv[1], L"launch") && argc >= 6) launch(argc, argv);
+  else if ((!wcscmp(argv[1], L"inspect") || !wcscmp(argv[1], L"settle") || !wcscmp(argv[1], L"recover") || !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness")) && argc == 11)
+    observe(argv + 4, !wcscmp(argv[1], L"inspect"), !wcscmp(argv[1], L"recover"), !wcscmp(argv[1], L"hold") || !wcscmp(argv[1], L"witness"), !wcscmp(argv[1], L"witness"), FALSE);
+  else if (!wcscmp(argv[1], L"git-inspect") && argc == 13) observe(argv + 4, TRUE, FALSE, FALSE, FALSE, TRUE);
+  else if ((!wcscmp(role, L"workspace-settle") || !wcscmp(role, L"workspace-cancel")) && argc == 12) observe(argv + 4, FALSE, !wcscmp(role, L"workspace-cancel"), FALSE, FALSE, FALSE);
+  else if (!wcscmp(argv[1], L"bundle") && argc == 13) bundle(argv[4], argv[5], argv[9], argv[10], argv[11], argv[12]);
+  else if (!wcscmp(argv[1], L"null-probe")) { unsigned offset = !wcscmp(nullProbeCase, L"workspace-rooted") ? 2 : 0; bundle(argv[4], argv[5], argv[7 + offset], argv[8 + offset], argv[9 + offset], argv[10 + offset]); }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  else if (!wcscmp(argv[1], L"null-map") && argc == 14) null_map(argv + 4);
+  else if (!wcscmp(role, L"workspace-proof") && argc == 5 && workspace_case(argv[4])) { workspaceRole = argv[4]; null_workspace_record(); }
+#endif
+  else if (!wcscmp(argv[1], L"fault") && argc == 4) fault();
+  else if ((!wcscmp(argv[1], L"control") || !wcscmp(argv[1], L"control-closed")) && argc == 6) {
+    BOOL tcp = !wcscmp(argv[4], L"tcp"); need(tcp || !wcscmp(argv[4], L"pipe")); int error = connection(tcp, argv[5], nonce);
+    if (!wcscmp(argv[1], L"control")) { need(!error); puts("{\"ready\":true}"); }
+    else { need(error == (tcp ? WSAECONNREFUSED : ERROR_FILE_NOT_FOUND)); puts("{\"closed\":true}"); }
+  } else if (!wcscmp(argv[1], L"files") && argc >= 5 && argc <= 12) {
+    owned_profile(); putchar('['); for (int i = 4; i < argc; i++) { if (i > 4) putchar(','); WCHAR path[4096]; name(path, argv[i]); emitfile(path, !wcsncmp(argv[i], L"control\\", 8) || !wcsncmp(argv[i], L"outside\\", 8) || !wcsncmp(argv[i], L"storage", 7)); } puts("]");
+  } else if (!wcscmp(argv[1], L"storage") && argc == 4) storage();
+  else if (!wcscmp(argv[1], L"remove") && argc == 7) remove_owned(argv[4], argv[5], argv[6]);
+  else if (!wcscmp(argv[1], L"replacement") && argc == 4) { owned_profile(); char bytes[] = "substitute"; recordio(L"storage\\leaf", bytes, 10, TRUE); puts("{\"created\":true}"); }
+  else invariant(FALSE, "helper-role");
+  if (WSACleanup() == SOCKET_ERROR) { int error = WSAGetLastError(); remember("winsock-cleanup", "win32", (DWORD)error); cleanup_error("winsock-cleanup", "win32", (DWORD)error); failure(126); }
+  invariant(!ferror(stdout), "stdout-write"); return 0;
+}

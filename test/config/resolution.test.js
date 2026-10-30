@@ -9,6 +9,76 @@ import {
   resolvePipelineConfiguration,
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
+import {
+  DEFAULT_MAX_EVENT_LOG_BYTES,
+  MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
+} from "../../src/state/index.js";
+
+test("journal capacity validates bytes and resolves project over root with legacy defaults", () => {
+  const root = parseRunnerConfiguration(
+    '{"schemaVersion":1,"defaultBackend":"codex"}',
+  );
+  assert.equal(root.maxEventLogBytes, 536_870_912);
+  assert.equal(DEFAULT_MAX_EVENT_LOG_BYTES, root.maxEventLogBytes);
+  assert.equal(MAX_EVENT_LOG_BYTES, 2_147_483_647);
+  const configured = { ...root, maxEventLogBytes: 4096 };
+  for (const value of [1, 8192, MAX_EVENT_LOG_BYTES]) {
+    const project = parseProjectConfiguration(
+      JSON.stringify({ schemaVersion: 1, maxEventLogBytes: value }),
+      configured,
+    );
+    assert.equal(
+      resolvePipelineConfiguration("plan-execution", configured)
+        .maxEventLogBytes,
+      4096,
+    );
+    assert.equal(
+      resolvePipelineConfiguration(
+        "plan-execution",
+        configured,
+        {},
+        {},
+        null,
+        project,
+      ).maxEventLogBytes,
+      value,
+    );
+  }
+  assert.equal(
+    resolvePipelineConfiguration("plan-execution", root).maxEventLogBytes,
+    DEFAULT_MAX_EVENT_LOG_BYTES,
+  );
+  for (const value of [
+    null,
+    true,
+    "8192",
+    "512 MiB",
+    0,
+    -1,
+    1.5,
+    MAX_EVENT_LOG_BYTES + 1,
+    NaN,
+    Infinity,
+    -Infinity,
+  ]) {
+    const source = JSON.stringify({
+      schemaVersion: 1,
+      maxEventLogBytes: value,
+    });
+    assert.throws(() => normalizeMaxEventLogBytes(value), /maxEventLogBytes/u);
+    assert.throws(() => parseRunnerConfiguration(source), /maxEventLogBytes/u);
+    assert.throws(
+      () => parseProjectConfiguration(source, root),
+      /maxEventLogBytes/u,
+    );
+  }
+  assert.throws(
+    () =>
+      parseRunnerConfiguration('{"schemaVersion":1,"maxEventLogBytes":1e999}'),
+    /maxEventLogBytes/u,
+  );
+});
 
 test("availability policy resolves a strict common ceiling before freezing", () => {
   const runner = parseRunnerConfiguration(
@@ -140,6 +210,7 @@ test("role resolution normalizes configuration objects", () => {
   });
 
   assert.deepEqual(resolved, {
+    maxEventLogBytes: DEFAULT_MAX_EVENT_LOG_BYTES,
     artifactRoot: "LOCAL_ARTIFACTS",
     availabilityPolicy: { initialDelayMs: 5_000, maxDelayMs: 1_800_000 },
     providerInactivityTimeoutMs: 1_800_000,

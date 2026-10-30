@@ -90,6 +90,7 @@ const FAILURE_FIELDS = Object.freeze([
   "processOutcome",
   "availabilityReason",
   "disposition",
+  "reconstruction",
 ]);
 const PROCESS_OUTCOME_FIELDS = Object.freeze(["exitCode", "signal"]);
 const CAPABILITY_FIELDS = Object.freeze([
@@ -341,7 +342,23 @@ export function normalizeFailureRecord(value, failureClasses = []) {
         value.effect === "started" ||
         value.retry !== "terminal" ||
         value.processOutcome !== undefined ||
-        Object.hasOwn(value, "availabilityReason")))
+        Object.hasOwn(value, "availabilityReason"))) ||
+    (Object.hasOwn(value, "reconstruction") &&
+      (!isRecord(value.reconstruction) ||
+        !hasExactFields(value.reconstruction, ["schemaVersion", "kind"]) ||
+        value.reconstruction.schemaVersion !== 1 ||
+        value.reconstruction.kind !== "completed_turn_acquisition" ||
+        value.failureClass === ADAPTER_FAILURE_CLASS ||
+        value.checkpoint !== "turn" ||
+        value.outcome !== "rejected" ||
+        value.effect !== "possible" ||
+        value.retry !== "terminal" ||
+        [
+          "commitExecutor",
+          "processOutcome",
+          "availabilityReason",
+          "disposition",
+        ].some((field) => Object.hasOwn(value, field))))
   ) {
     throw new TypeError("Adapter failure record is invalid.");
   }
@@ -351,6 +368,9 @@ export function normalizeFailureRecord(value, failureClasses = []) {
     outcome: value.outcome,
     effect: value.effect,
     retry: value.retry,
+    ...(Object.hasOwn(value, "reconstruction")
+      ? { reconstruction: Object.freeze({ ...value.reconstruction }) }
+      : {}),
     ...(Object.hasOwn(value, "availabilityReason")
       ? { availabilityReason: value.availabilityReason }
       : {}),
@@ -461,6 +481,7 @@ export function createAdapterContract({
   AdapterError,
   backendName,
   failureClasses = [],
+  reconstructionClasses = [],
 }) {
   const errorPrefix = backendName.toUpperCase();
 
@@ -468,6 +489,14 @@ export function createAdapterContract({
     throw new TypeError(`${backendName} failure classes are invalid.`);
   }
   const supportedFailureClasses = Object.freeze([...failureClasses]);
+  if (
+    !isFailureClassList(reconstructionClasses) ||
+    reconstructionClasses.some((value) => !failureClasses.includes(value))
+  )
+    throw new TypeError(`${backendName} reconstruction classes are invalid.`);
+  const supportedReconstructionClasses = Object.freeze([
+    ...reconstructionClasses,
+  ]);
 
   function optionsError(message) {
     return new AdapterError(message, {
@@ -797,7 +826,15 @@ export function createAdapterContract({
           diagnosticClass: EFFORT_DIAGNOSTIC_CLASS,
         },
       ),
-    failure: (value) => normalizeFailureRecord(value, supportedFailureClasses),
+    failure(value) {
+      const record = normalizeFailureRecord(value, supportedFailureClasses);
+      if (
+        record.reconstruction !== undefined &&
+        !supportedReconstructionClasses.includes(record.failureClass)
+      )
+        throw new TypeError("Adapter reconstruction evidence is unsupported.");
+      return record;
+    },
     normalizeExecutionOptions,
     normalizeRequest,
   });

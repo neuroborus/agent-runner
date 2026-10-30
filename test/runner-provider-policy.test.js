@@ -665,6 +665,91 @@ test("CLI and MCP project one fixed authentication recovery action", async () =>
   );
 });
 
+test("CLI and MCP share redacted readiness categories and COMMIT recovery", async () => {
+  for (const [diagnosticClass, category] of [
+    ["commit_readiness_workspace_change", "workspace change"],
+    ["commit_readiness_git_operation", "forbidden Git operation"],
+    ["commit_readiness_invalid_result", "did not return exactly"],
+    ["operation_local_commit", "could not be verified"],
+    ["unknown_class", "could not be verified"],
+    [undefined, "could not be verified"],
+  ]) {
+    const fixture = projectionFixture(undefined);
+    fixture.run.pipelineState.pendingCommit = null;
+    fixture.run.pause = {
+      reason: "commit_failed",
+      code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      resumeState: "COMMIT",
+      ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+      explanation: "DO_NOT_PROJECT_RAW_EXPLANATION",
+      evidence: ["DO_NOT_PROJECT_RAW_EVIDENCE"],
+      command: "DO_NOT_PROJECT_COMMAND",
+      output: "DO_NOT_PROJECT_OUTPUT",
+      identity: "DO_NOT_PROJECT_IDENTITY",
+      path: "DO_NOT_PROJECT_PATH",
+    };
+    let output = "";
+    const runner = {
+      async status() {
+        return fixture;
+      },
+    };
+    assert.equal(
+      await main(["status", "--run", fixture.run.runId], {
+        runner,
+        stdout: {
+          write(value) {
+            output += value;
+          },
+        },
+        stderr: { write() {} },
+      }),
+      0,
+    );
+    const control = createMcpControlPlane({
+      issueReporter: {},
+      runner,
+      runStore: {
+        async inspectRunLeaseOwner() {
+          return { status: "none" };
+        },
+      },
+    });
+    const status = await control.runStatus({ runId: fixture.run.runId });
+    assert.ok(status.pause.explanation.includes(category));
+    assert.ok(output.includes(status.pause.explanation));
+    if (diagnosticClass?.startsWith("commit_readiness_")) {
+      assert.match(status.pause.explanation, /Repair the installed adapter/u);
+      assert.doesNotMatch(
+        status.pause.explanation,
+        /Restore.*content|Correct readiness guidance|Correct the provider readiness response/u,
+      );
+    }
+    if (diagnosticClass === "commit_readiness_workspace_change") {
+      assert.match(
+        status.pause.explanation,
+        /does not prove.*content changed/u,
+      );
+      assert.match(status.pause.explanation, /Preserve resumable workspace/u);
+      assert.match(
+        status.pause.explanation,
+        /supported runner reconciliation/u,
+      );
+    }
+    assert.deepEqual(status.pause.nextActions, [
+      { type: "resume", action: null },
+    ]);
+    assert.equal(status.pause.resumeState, "COMMIT");
+    for (const entry of status.pause.evidence)
+      assert.ok(output.includes(entry));
+    assert.equal(
+      status.pause.evidence.length,
+      diagnosticClass?.startsWith("commit_readiness_") ? 3 : 0,
+    );
+    assert.doesNotMatch(JSON.stringify({ output, status }), /DO_NOT_PROJECT/u);
+  }
+});
+
 test("Runner recreation retains frozen availability policy and rejects provider policy drift", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-policy-resume-"));
   const projectPath = join(root, "project");

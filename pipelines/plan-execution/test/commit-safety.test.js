@@ -254,6 +254,15 @@ test("renews a policy-rejected commit authorization after Git proves no effect",
         const error = new Error("The adapter rejected the commit request.");
         error.code = "ERR_FAKE_LOCAL_COMMIT_POLICY";
         error.effectStarted = false;
+        error.diagnosticClass = "DO_NOT_RETAIN_RAW_CLASS";
+        error.failure = {
+          failureClass: "commit_readiness_git_operation",
+          checkpoint: "commit",
+          outcome: "ambiguous",
+          effect: "possible",
+          retry: "terminal",
+          commitExecutor: "not_started",
+        };
         throw error;
       }
     },
@@ -266,6 +275,17 @@ test("renews a policy-rejected commit authorization after Git proves no effect",
   assert.equal(paused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
   assert.equal(paused.pause.resumeState, "COMMIT");
   assert.equal(paused.pipelineState.pendingCommit, null);
+  assert.equal(paused.pause.diagnosticClass, "commit_readiness_git_operation");
+  const recorded = fixture.transitions.find(
+    ({ options }) =>
+      options?.activity?.kind === "pre-effect-rejection-recorded",
+  );
+  assert.equal(
+    recorded.patch.pipelineState.pendingCommit.preEffectRejection
+      .diagnosticClass,
+    "commit_readiness_git_operation",
+  );
+  assert.doesNotMatch(JSON.stringify(paused), /DO_NOT_RETAIN/u);
   assert.equal(
     fixture.transitions.findLast(
       ({ options }) => options?.activity?.kind === "authorization-retired",
@@ -286,55 +306,77 @@ test("renews a policy-rejected commit authorization after Git proves no effect",
 });
 
 test("preserves pre-effect proof across interrupted Git verification", async (t) => {
-  let rejectCommit = true;
-  let interruptVerification = true;
-  const fixture = await createFixture(t, {
-    onCommitVerify() {
-      if (interruptVerification) {
-        interruptVerification = false;
-        const error = new Error("Git verification was interrupted.");
-        error.code = "ERR_FAKE_COMMIT_VERIFICATION";
-        throw error;
-      }
-    },
-    onRoleRun(_role, request) {
-      if (request.access === "local-commit" && rejectCommit) {
-        rejectCommit = false;
-        const error = new Error("The adapter rejected the commit request.");
-        error.code = "ERR_FAKE_LOCAL_COMMIT_POLICY";
-        error.effectStarted = false;
-        throw error;
-      }
-    },
-  });
+  for (const diagnosticClass of [
+    undefined,
+    "commit_readiness_invalid_result",
+  ]) {
+    let rejectCommit = true;
+    let interruptVerification = true;
+    const fixture = await createFixture(t, {
+      onCommitVerify() {
+        if (interruptVerification) {
+          interruptVerification = false;
+          const error = new Error("Git verification was interrupted.");
+          error.code = "ERR_FAKE_COMMIT_VERIFICATION";
+          throw error;
+        }
+      },
+      onRoleRun(_role, request) {
+        if (request.access === "local-commit" && rejectCommit) {
+          rejectCommit = false;
+          const error = new Error("The adapter rejected the commit request.");
+          error.code = "ERR_FAKE_LOCAL_COMMIT_POLICY";
+          error.effectStarted = false;
+          error.diagnosticClass = "commit_readiness_git_operation";
+          if (diagnosticClass !== undefined)
+            error.failure = {
+              failureClass: diagnosticClass,
+              checkpoint: "commit",
+              outcome: "rejected",
+              effect: "none",
+              retry: "terminal",
+              commitExecutor: "not_started",
+            };
+          throw error;
+        }
+      },
+    });
 
-  const verificationPaused = await fixture.run();
+    const verificationPaused = await fixture.run();
 
-  assert.equal(verificationPaused.pause.reason, "commit_failed");
-  assert.equal(verificationPaused.pause.code, "ERR_FAKE_COMMIT_VERIFICATION");
-  assert.deepEqual(
-    verificationPaused.pipelineState.pendingCommit.preEffectRejection,
-    {
-      code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
-      recoverable: false,
-    },
-  );
+    assert.equal(verificationPaused.pause.reason, "commit_failed");
+    assert.equal(verificationPaused.pause.code, "ERR_FAKE_COMMIT_VERIFICATION");
+    assert.deepEqual(
+      verificationPaused.pipelineState.pendingCommit.preEffectRejection,
+      {
+        code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+        recoverable: false,
+        ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+      },
+    );
 
-  const rejectionPaused = await fixture.run();
+    const rejectionPaused = await fixture.run();
 
-  assert.equal(rejectionPaused.pause.reason, "commit_failed");
-  assert.equal(rejectionPaused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
-  assert.equal(rejectionPaused.pipelineState.pendingCommit, null);
+    assert.equal(rejectionPaused.pause.reason, "commit_failed");
+    assert.equal(rejectionPaused.pause.code, "ERR_FAKE_LOCAL_COMMIT_POLICY");
+    assert.equal(rejectionPaused.pipelineState.pendingCommit, null);
+    assert.equal(rejectionPaused.pause.diagnosticClass, diagnosticClass);
+    assert.equal(
+      fixture.calls.worker.filter(({ access }) => access === "local-commit")
+        .length,
+      1,
+    );
 
-  const completed = await fixture.run();
+    const completed = await fixture.run();
 
-  assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.deepEqual(
-    fixture.calls.worker
-      .filter(({ access }) => access === "local-commit")
-      .map(({ authorizationId }) => authorizationId),
-    ["commit-1", "commit-2"],
-  );
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.deepEqual(
+      fixture.calls.worker
+        .filter(({ access }) => access === "local-commit")
+        .map(({ authorizationId }) => authorizationId),
+      ["commit-1", "commit-2"],
+    );
+  }
 });
 
 test("persists authentication proof before retiring a commit authorization", async (t) => {

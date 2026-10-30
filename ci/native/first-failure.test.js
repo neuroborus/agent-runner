@@ -1,0 +1,866 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import path from "node:path";
+import test from "node:test";
+import {
+  initializeNativeJob,
+  normalizeNativeJob,
+  nativeCleanupFailure,
+  renderNativeJob,
+  aggregateNativeEvidence,
+} from "./index.js";
+import {
+  assertNativePreparationInputs,
+  captureNativeFirstFailure,
+  nativeFailureDetails,
+  nativePreparationError,
+  nativeJobHasPossibleEffects,
+  normalizeNativeFirstFailure,
+  persistNativeFirstFailure,
+  rejoinNativeFirstFailure,
+  loadNativeFirstFailure,
+  renderNativeFailures,
+} from "./first-failure.js";
+import { acquireSystemCIInputs } from "./system-ci.js";
+import { observationDigest } from "./observation.js";
+import {
+  createNativeDiagnosticWriter,
+  attemptNativeBuilds,
+  hasUnsettledNativeBuild,
+  diagnosticCommand,
+  withNativeDiagnostics,
+} from "./diagnostics.js";
+import { readLinuxDiagnostic } from "./linux/channel.js";
+import { normalizeLinuxControllerFailure } from "./linux/diagnostics.js";
+import { runLinuxCommandController } from "./linux/command-controller.js";
+
+test("fixed compiler batches retain every settled failure, bounded output and the original cause", async () => {
+  const first = Object.assign(new Error("first compiler failure"), {
+      code: 1,
+      signal: null,
+      stderr: "x".repeat(70000),
+    }),
+    second = Object.assign(new Error("later linker failure"), {
+      code: 1120,
+      signal: null,
+      stdout: "later compiler output",
+    });
+  const attempted = [],
+    diagnostics = [];
+  await assert.rejects(
+    withNativeDiagnostics(
+      () =>
+        attemptNativeBuilds(
+          "build-fixture",
+          [first, second, null].map((error, index) => ({
+            name: String(index),
+            run: async () => {
+              attempted.push(index);
+              if (error) throw error;
+              return { stdout: "last build output" };
+            },
+          })),
+        ),
+      (owner, value) => diagnostics.push({ owner, value }),
+    ),
+    (error) => error === first,
+  );
+  assert.deepEqual(attempted, [0, 1, 2]);
+  const records = JSON.parse(diagnostics.at(-1).value.stderr).builds;
+  assert.deepEqual(
+    records.map(({ status }) => status),
+    ["FAIL", "FAIL", "BUILT"],
+  );
+  assert.equal(records[0].stderr.length, 65536);
+  assert.equal(records[0].truncated, true);
+  assert.equal(records[1].exitCode, 1120);
+  assert.equal(records[1].stdout, second.stdout);
+  assert.ok(diagnostics.some(({ value }) => value.exception === second));
+  assert.equal(hasUnsettledNativeBuild(first), false);
+});
+
+test("compiler batches stop after cancellation, budget, changed inputs or uncertain completion", async () => {
+  for (const mode of [
+    "cancel",
+    "cancelled-command",
+    "deadline",
+    "input",
+    "ownership",
+    "timeout",
+    "capture",
+  ]) {
+    const first = Object.assign(new Error("original compile failure"), {
+      code: 1,
+      signal: null,
+    });
+    const controller = new AbortController(),
+      attempted = [],
+      diagnostics = [];
+    let now = 0,
+      changed = false;
+    await assert.rejects(
+      withNativeDiagnostics(
+        () =>
+          attemptNativeBuilds(
+            "build-fixture",
+            [0, 1, 2].map((index) => ({
+              name: String(index),
+              run: async () => {
+                attempted.push(index);
+                if (index === 0) throw first;
+                if (["cancel", "cancelled-command"].includes(mode))
+                  controller.abort(new Error("cancelled"));
+                if (mode === "cancelled-command")
+                  throw controller.signal.reason;
+                if (mode === "deadline") now = 100;
+                if (mode === "input") changed = true;
+                if (mode === "ownership") throw new Error("unsettled owner");
+                if (mode === "timeout")
+                  throw Object.assign(new Error("timeout"), {
+                    code: 1,
+                    signal: null,
+                    timedOut: true,
+                  });
+                if (mode === "capture")
+                  throw Object.assign(new Error("capture"), {
+                    code: 1,
+                    signal: null,
+                    truncated: true,
+                  });
+              },
+            })),
+            {
+              signal: controller.signal,
+              now: () => now,
+              deadlineMs: 100,
+              verify: async () => {
+                if (changed) throw new Error("changed input");
+              },
+            },
+          ),
+        (owner, value) => diagnostics.push({ owner, value }),
+      ),
+      (error) => error === first,
+    );
+    assert.deepEqual(attempted, [0, 1]);
+    const records = JSON.parse(diagnostics.at(-1).value.stderr).builds;
+    assert.equal(records[2].status, "UNATTEMPTED");
+    assert.ok(records[2].reason);
+    assert.equal(records[0].exitCode, 1);
+    assert.equal(
+      hasUnsettledNativeBuild(new Error("build wrapper", { cause: first })),
+      ["cancelled-command", "ownership", "timeout", "capture"].includes(mode),
+    );
+  }
+});
+
+test("diagnostic command ownership and original exceptions survive a separate cleanup failure", async (t) => {
+  const chunks = [];
+  const original = new Error("unknown first failure", {
+    cause: new Error("unknown nested failure"),
+  });
+  original.cause.stdout = Buffer.from([0xff, 0, 0x61]);
+  original.cause.stderr = "unknown nested stderr";
+  const cleanup = new Error("unknown cleanup failure");
+  const opaque = { detail: "unknown opaque exception" };
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  t.after(() => {
+    for (const stream of [child.stdin, child.stdout, child.stderr])
+      stream.destroy();
+  });
+  let fail;
+  const pending = Object.assign(
+    new Promise((_, reject) => {
+      fail = reject;
+    }),
+    { child },
+  );
+  const command = diagnosticCommand("injected-command", () => pending);
+  const diagnostics = createNativeDiagnosticWriter((bytes) =>
+    chunks.push(bytes),
+  );
+  await withNativeDiagnostics(async () => {
+    const running = command();
+    assert.equal(running.child, child);
+    running.child.stdin.end();
+    child.stdout.write("unknown process stdout");
+    child.stderr.write("unknown process stderr");
+    child.emit("close", 17, null);
+    fail(original);
+    await assert.rejects(running, (error) => error === original);
+    await assert.rejects(
+      diagnosticCommand("injected-cleanup", () => Promise.reject(cleanup))(),
+      (error) => error === cleanup,
+    );
+    await assert.rejects(
+      diagnosticCommand("injected-opaque", () => Promise.reject(opaque))(),
+      (error) => error === opaque,
+    );
+    const missing = diagnosticCommand("injected-missing-capture", () => ({
+      status: null,
+      stdout: null,
+      stderr: null,
+      error: original,
+    }))();
+    assert.equal(missing.error, original);
+  }, diagnostics);
+  const raw = Buffer.concat(chunks);
+  assert.ok(raw.includes(original.cause.stdout));
+  const output = raw.toString();
+  assert.doesNotMatch(
+    output,
+    /\[native-ci injected-missing-capture\] (?:stdout|stderr)\nnull\n/u,
+  );
+  for (const value of [
+    "unknown process stdout",
+    "unknown process stderr",
+    original.stack,
+    original.cause.stack,
+    original.cause.stderr,
+    cleanup.stack,
+    opaque.detail,
+  ])
+    assert.ok(output.includes(value));
+  const count = chunks.length;
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        diagnosticCommand("protected", () => Promise.reject(original))(),
+      ),
+    null,
+  );
+  assert.equal(chunks.length, count);
+});
+
+test("Linux controller raw carriers remain independent of failure evidence", () => {
+  const chunks = [],
+    nonce = "11111111-1111-1111-1111-111111111111";
+  const raw = Buffer.from('{"type":"admitted"}\nunknown native output\n');
+  const carrier = {
+    type: "diagnostic",
+    nonce,
+    stream: "stdout",
+    hex: raw.toString("hex"),
+  };
+  withNativeDiagnostics(
+    () => {
+      assert.equal(readLinuxDiagnostic(carrier, nonce), true);
+      assert.throws(() =>
+        normalizeLinuxControllerFailure(carrier, "a".repeat(40), nonce),
+      );
+      assert.throws(() => readLinuxDiagnostic({ ...carrier, hex: "0" }, nonce));
+    },
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  assert.ok(Buffer.concat(chunks).includes(raw));
+});
+
+test("Linux controller drains primary and secondary diagnostics before publishing its terminal failure", async (t) => {
+  const frames = [],
+    chunks = [];
+  const original = Object.assign(
+    new Error("unclassified controller launch failure"),
+    { code: "ENOENT" },
+  );
+  const secondary = new Error("unclassified controller stream failure", {
+    cause: new Error("unclassified stream cause"),
+  });
+  const diagnostics = createNativeDiagnosticWriter((bytes) =>
+    chunks.push(bytes),
+  );
+  const entered = Promise.withResolvers(),
+    drained = Promise.withResolvers();
+  const channel = Object.assign(new EventEmitter(), {
+    connected: true,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    send(message, done) {
+      frames.push(message);
+      done();
+    },
+    disconnect() {
+      this.connected = false;
+    },
+  });
+  const running = withNativeDiagnostics(
+    () =>
+      runLinuxCommandController(
+        {
+          candidateSha: "a".repeat(40),
+          nonce: "11111111-1111-1111-1111-111111111111",
+        },
+        channel,
+        {
+          spawn() {
+            throw original;
+          },
+          drainDiagnostics() {
+            entered.resolve();
+            return drained.promise;
+          },
+        },
+      ),
+    diagnostics,
+  );
+  t.after(async () => {
+    drained.resolve();
+    try {
+      await running;
+    } finally {
+      for (const stream of [channel.stdin, channel.stdout, channel.stderr])
+        stream.destroy();
+    }
+  });
+  await Promise.race([entered.promise, running]);
+  assert.deepEqual(frames, []);
+  withNativeDiagnostics(
+    () => channel.stderr.emit("error", secondary),
+    diagnostics,
+  );
+  const output = Buffer.concat(chunks).toString();
+  for (const error of [original, secondary, secondary.cause])
+    assert.ok(output.includes(error.stack));
+  drained.resolve();
+  await running;
+  assert.deepEqual(
+    frames.map(({ type }) => type),
+    ["failed"],
+  );
+  assert.equal(channel.exitCode, 1);
+  assert.equal(channel.connected, false);
+  assert.equal(frames[0].cause.code, "prerequisite-unavailable");
+  assert.equal(frames[0].cleanupCause, null);
+  assert.doesNotMatch(JSON.stringify(frames[0]), /unclassified/u);
+});
+
+const job = (platform = "linux", tier = "system") =>
+  initializeNativeJob(
+    {
+      candidateSha: "a".repeat(40),
+      platform,
+      repository: "example/native",
+      runId: "1",
+      runAttempt: 1,
+    },
+    { schemaVersion: 6, tier },
+  );
+const env = {
+  CI: "true",
+  GITHUB_ACTIONS: "true",
+  RUNNER_TEMP: path.resolve("/synthetic/temp"),
+  NATIVE_SYSTEM_INPUT_REPOSITORY: "example/reviews",
+  NATIVE_SYSTEM_INPUT_REVISION: "b".repeat(40),
+  NATIVE_SYSTEM_REVIEW_SHA256: "c".repeat(64),
+  NATIVE_SYSTEM_CI_INPUTS_SHA256: "e".repeat(64),
+  NATIVE_LINUX_REVIEW_SHA256: "d".repeat(64),
+};
+const inputIds = [
+  "NATIVE_SYSTEM_INPUT_REPOSITORY",
+  "NATIVE_SYSTEM_INPUT_REVISION",
+  "NATIVE_SYSTEM_REVIEW_SHA256",
+  "NATIVE_SYSTEM_CI_INPUTS_SHA256",
+  "NATIVE_LINUX_REVIEW_SHA256",
+];
+
+test("acquisition publishes an unknown verification exception before replacing it with a strict refusal", async () => {
+  const candidate = job("darwin"),
+    source = Buffer.from("unexecuted capability bytes"),
+    chunks = [];
+  const manifest = {
+    candidateSha: candidate.candidateSha,
+    platform: candidate.platform,
+    capabilitySha256: createHash("sha256").update(source).digest("hex"),
+  };
+  const original = new Error("unknown acquisition verification", {
+    cause: new Error("unknown verification cause"),
+  });
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        acquireSystemCIInputs(
+          candidate,
+          {},
+          path.join(env.RUNNER_TEMP, "native-darwin-reviewed"),
+          {
+            env: {
+              ...env,
+              NATIVE_SYSTEM_REVIEW_SHA256: observationDigest(manifest),
+            },
+            fetchInput: async (url) => ({
+              ok: true,
+              body: [
+                url.endsWith(".json")
+                  ? Buffer.from(JSON.stringify(manifest))
+                  : source,
+              ],
+            }),
+            fs: { mkdir: async () => {}, writeFile: async () => {} },
+            verify: async () => {
+              throw original;
+            },
+          },
+        ),
+        (error) => {
+          assert.deepEqual(nativeFailureDetails(error), {
+            diagnosis: "review",
+            inputs: [{ id: "system-inputs.json", diagnosis: "malformed" }],
+          });
+          assert.doesNotMatch(error.message, /unknown/u);
+          return true;
+        },
+      ),
+    createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+  );
+  const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes(original.stack));
+  assert.ok(output.includes(original.cause.stack));
+});
+
+function rejectedInputs(candidate, values) {
+  try {
+    assertNativePreparationInputs(candidate, values);
+  } catch (error) {
+    return nativeFailureDetails(error);
+  }
+  assert.fail("Malformed prerequisites must fail");
+}
+
+test("namespace policy refusal stays a Linux-only first preparation cause through later recovery failure", () => {
+  const candidate = job(),
+    details = nativeFailureDetails(nativePreparationError("namespace-policy"));
+  const first = captureNativeFirstFailure(candidate, "prepare-linux", details);
+  assert.equal(first.diagnosis, "namespace-policy");
+  assert.equal(first.admission, "not-started");
+  assert.deepEqual(
+    captureNativeFirstFailure(
+      { ...candidate, firstFailure: first },
+      "cleanup",
+      { diagnosis: "stage-failed", inputs: [] },
+    ),
+    first,
+  );
+  assert.throws(() =>
+    captureNativeFirstFailure(job("darwin"), "prepare", details),
+  );
+});
+
+test("each empty or malformed prerequisite is identified before any acquisition", async () => {
+  for (const platform of ["linux", "darwin", "win32"]) {
+    const candidate = job(platform);
+    const values = {
+      ...env,
+      ...Object.fromEntries(inputIds.map((id) => [id, ""])),
+    };
+    const expected = inputIds.filter(
+      (id) => platform === "linux" || id !== "NATIVE_LINUX_REVIEW_SHA256",
+    );
+    assert.deepEqual(
+      rejectedInputs(candidate, values).inputs,
+      expected.map((id) => ({ id, diagnosis: "missing" })),
+    );
+    let effects = 0;
+    await assert.rejects(
+      acquireSystemCIInputs(
+        candidate,
+        {},
+        path.join(env.RUNNER_TEMP, `native-${platform}-reviewed`),
+        {
+          env: values,
+          fetchInput: async () => {
+            effects++;
+          },
+          fs: {
+            mkdir: async () => {
+              effects++;
+            },
+            writeFile: async () => {
+              effects++;
+            },
+          },
+        },
+      ),
+    );
+    assert.equal(effects, 0);
+    for (const id of expected)
+      assert.deepEqual(
+        rejectedInputs(candidate, {
+          ...env,
+          [id]: "invalid private-data /synthetic/private",
+        }).inputs,
+        [{ id, diagnosis: "malformed" }],
+      );
+  }
+  assert.deepEqual(rejectedInputs(job("darwin", "provider"), env).inputs, [
+    { id: "NATIVE_PROVIDER_REVIEW_SHA256", diagnosis: "missing" },
+  ]);
+});
+
+test("acquired missing and malformed members retain closed input identifiers", async () => {
+  const capability = Buffer.from("synthetic capability bytes");
+  for (const [platform, name, content, diagnosis, inputDiagnosis] of [
+    ["darwin", "system-inputs.json", null, "acquisition", "missing"],
+    [
+      "darwin",
+      "system-inputs.json",
+      "private-output /synthetic/private",
+      "review",
+      "malformed",
+    ],
+    [
+      "darwin",
+      "native-effects.mjs",
+      "substituted bytes",
+      "review",
+      "malformed",
+    ],
+    [
+      "linux",
+      "linux-review.json",
+      "private-output /synthetic/private",
+      "review",
+      "malformed",
+    ],
+  ]) {
+    const candidate = job(platform);
+    const manifest = {
+      candidateSha: candidate.candidateSha,
+      platform,
+      capabilitySha256: createHash("sha256").update(capability).digest("hex"),
+    };
+    const values = {
+      ...env,
+      NATIVE_SYSTEM_REVIEW_SHA256: observationDigest(manifest),
+    };
+    await assert.rejects(
+      acquireSystemCIInputs(
+        candidate,
+        { verifyLegacy: () => {} },
+        path.join(env.RUNNER_TEMP, `native-${platform}-reviewed`),
+        {
+          env: values,
+          fetchInput: async (url) => ({
+            ok: !url.endsWith(name) || content !== null,
+            body: [
+              url.endsWith(name)
+                ? Buffer.from(content ?? "")
+                : url.endsWith("system-inputs.json")
+                  ? Buffer.from(JSON.stringify(manifest))
+                  : capability,
+            ],
+          }),
+          fs: { mkdir: async () => {}, writeFile: async () => {} },
+          verify: async () => {},
+        },
+      ),
+      (error) => {
+        const details = nativeFailureDetails(error);
+        assert.deepEqual(details, {
+          diagnosis,
+          inputs: [{ id: name, diagnosis: inputDiagnosis }],
+        });
+        assert.doesNotMatch(
+          JSON.stringify(details),
+          /private-output|synthetic\/private/u,
+        );
+        return true;
+      },
+    );
+  }
+});
+
+test("published first cause survives interrupted job replacement and later failures without raw diagnostics", async () => {
+  let receipt = null,
+    saved = job(),
+    writes = 0,
+    interrupted = true;
+  const storage = {
+    read: async () => receipt,
+    persist: async (value) => {
+      receipt = structuredClone(value);
+      writes++;
+    },
+    persistJob: async (value) => {
+      if (interrupted) throw new Error("synthetic interruption");
+      saved = normalizeNativeJob(value);
+    },
+  };
+  const details = rejectedInputs(saved, {
+    ...env,
+    NATIVE_SYSTEM_INPUT_REVISION: "",
+  });
+  await assert.rejects(
+    persistNativeFirstFailure(saved, "prepare-inputs", details, storage),
+  );
+  const original = structuredClone(receipt);
+  assert.deepEqual(
+    normalizeNativeJob(await loadNativeFirstFailure(saved, async () => receipt))
+      .firstFailure,
+    original,
+  );
+  assert.throws(() =>
+    rejoinNativeFirstFailure(saved, { ...receipt, runAttempt: 2 }),
+  );
+  await assert.rejects(loadNativeFirstFailure(saved, async () => null));
+  assert.equal(
+    await loadNativeFirstFailure(saved, async () => {
+      throw Object.assign(new Error("Absent receipt"), { code: "ENOENT" });
+    }),
+    saved,
+  );
+  interrupted = false;
+  for (const stage of ["prepare", "setup", "probe", "cleanup"])
+    saved = await persistNativeFirstFailure(
+      saved,
+      stage,
+      nativeFailureDetails({
+        diagnosis: "build",
+        inputs: [{ id: "token=private-value", diagnosis: "missing" }],
+        stdout: "private-output",
+        cause: "/synthetic/private",
+      }),
+      storage,
+    );
+  assert.equal(writes, 1);
+  assert.deepEqual(saved.firstFailure, original);
+  assert.deepEqual(receipt, original);
+  const rendered = renderNativeJob(saved);
+  assert.equal(rendered.report.ciStatus, "FAIL");
+  assert.match(rendered.summary, /prepare-inputs.*prerequisite/u);
+  assert.doesNotMatch(
+    JSON.stringify(rendered),
+    /private-value|private-output|synthetic\/private/u,
+  );
+  for (const change of [
+    { candidateSha: "b".repeat(40) },
+    { runId: "2" },
+    { runAttempt: 2 },
+    { tier: "provider" },
+    { stage: "unknown" },
+    { diagnosis: "private-output" },
+    { extra: "private-value" },
+  ])
+    assert.throws(() =>
+      normalizeNativeFirstFailure({ ...original, ...change }, saved),
+    );
+  assert.throws(() =>
+    normalizeNativeFirstFailure(
+      {
+        ...original,
+        inputs: [{ id: "token=private-value", diagnosis: "missing" }],
+      },
+      saved,
+    ),
+  );
+});
+
+test("aggregation retains a uniquely bound cause without setup job identity and never promotes it to proof", () => {
+  const candidate = job();
+  candidate.firstFailure = captureNativeFirstFailure(
+    candidate,
+    "prepare-inputs",
+    {
+      diagnosis: "prerequisite",
+      inputs: [{ id: "NATIVE_SYSTEM_INPUT_REVISION", diagnosis: "missing" }],
+    },
+  );
+  const binding = {
+    candidateSha: candidate.candidateSha,
+    platform: candidate.platform,
+    tier: candidate.tier,
+    artifactId: "1",
+    provenance: { ...candidate.provenance, jobId: "1" },
+    conclusion: "failure",
+    authority: "ordinary",
+  };
+  const report = (bindings) =>
+    aggregateNativeEvidence({
+      candidateSha: candidate.candidateSha,
+      source: renderNativeJob(candidate).report.source,
+      results: [],
+      compositions: [candidate],
+      bindings,
+    });
+  assert.deepEqual(report([binding]).firstFailures, [candidate.firstFailure]);
+  assert.notEqual(report([binding]).decision, "GO");
+  for (const change of [
+    { runId: "2" },
+    { runAttempt: 2 },
+    { workflow: "other.yml" },
+    { repository: "example/other" },
+  ])
+    assert.deepEqual(
+      report([{ ...binding, provenance: { ...binding.provenance, ...change } }])
+        .firstFailures,
+      [],
+    );
+  assert.deepEqual(
+    report([
+      binding,
+      {
+        ...binding,
+        artifactId: "2",
+        provenance: { ...binding.provenance, jobId: "2" },
+      },
+    ]).firstFailures,
+    [],
+  );
+});
+
+test("missing reviewed inputs are unsuccessful prerequisites, separate from possible native effects", () => {
+  for (const platform of ["linux", "darwin", "win32"]) {
+    const candidate = job(platform);
+    candidate.firstFailure = captureNativeFirstFailure(
+      candidate,
+      "prepare-inputs",
+      rejectedInputs(candidate, {
+        ...env,
+        ...Object.fromEntries(inputIds.map((id) => [id, ""])),
+      }),
+    );
+    const before = structuredClone(candidate);
+    const rendered = renderNativeJob(candidate);
+    assert.deepEqual(candidate, before);
+    assert.deepEqual(rendered.report.firstFailures, [candidate.firstFailure]);
+    assert.equal(rendered.report.ciStatus, "FAIL");
+    assert.equal(rendered.report.decision, "BLOCKED");
+    assert.equal(rendered.report.preparationRecovery[0].status, "NOT_ADMITTED");
+    assert.match(rendered.summary, /^## Unmet native CI prerequisites/mu);
+    assert.match(rendered.summary, /admission not-started/u);
+    assert.match(rendered.summary, /full acceptance remains blocked/u);
+    assert.doesNotMatch(rendered.summary, /^## First native CI failures/mu);
+    assert.match(
+      rendered.annotations[0],
+      /^::error title=Native CI prerequisite::/u,
+    );
+    for (const input of candidate.firstFailure.inputs)
+      assert.ok(rendered.summary.includes(`${input.id} missing`));
+
+    const possible = job(platform);
+    possible.preparationEffects.admission = "possible";
+    // A prerequisite label alone must never claim that no effects occurred.
+    possible.firstFailure = captureNativeFirstFailure(
+      possible,
+      "prepare-inputs",
+      {
+        diagnosis: "prerequisite",
+        inputs: [{ id: "NATIVE_SYSTEM_REVIEW_SHA256", diagnosis: "missing" }],
+      },
+    );
+    const mixed = renderNativeFailures(
+      {
+        report: {},
+        summary: "Full acceptance remains BLOCKED.",
+        annotations: [],
+      },
+      [candidate, possible],
+    );
+    assert.match(mixed.summary, /^## Unmet native CI prerequisites/mu);
+    assert.match(
+      mixed.summary,
+      /^## First native CI failures and preparation recovery/mu,
+    );
+    assert.match(mixed.summary, /admission possible/u);
+    assert.match(mixed.summary, /preparation retirement is uncertain/u);
+    assert.deepEqual(mixed.report.firstFailures, [
+      candidate.firstFailure,
+      possible.firstFailure,
+    ]);
+    assert.deepEqual(
+      mixed.report.preparationRecovery.map(({ status }) => status),
+      ["NOT_ADMITTED", "UNCERTAIN"],
+    );
+    assert.match(mixed.annotations[1], /^::error title=Native preparation::/u);
+  }
+});
+
+test("non-admission never invents retirement and possible preparation remains independently recoverable", () => {
+  const unstarted = job();
+  assert.equal(nativeJobHasPossibleEffects(unstarted), false);
+  assert.equal(
+    renderNativeJob(unstarted).report.preparationRecovery[0].status,
+    "NOT_ADMITTED",
+  );
+  const historical = { ...unstarted };
+  delete historical.preparationEffects;
+  assert.equal(
+    nativeJobHasPossibleEffects(normalizeNativeJob(historical)),
+    true,
+  );
+  const historicalCause = captureNativeFirstFailure(historical, "prepare", {
+    diagnosis: "build",
+    inputs: [],
+  });
+  assert.equal(
+    renderNativeJob({ ...historical, firstFailure: historicalCause }).report
+      .preparationRecovery[0].status,
+    "UNCERTAIN",
+  );
+  assert.throws(() =>
+    normalizeNativeJob({
+      ...historical,
+      firstFailure: { ...historicalCause, admission: "not-started" },
+    }),
+  );
+  const possible = normalizeNativeJob({
+    ...unstarted,
+    preparationEffects: {
+      ...unstarted.preparationEffects,
+      admission: "possible",
+    },
+  });
+  possible.firstFailure = captureNativeFirstFailure(possible, "prepare", {
+    diagnosis: "build",
+    inputs: [],
+  });
+  assert.equal(possible.firstFailure.admission, "possible");
+  assert.equal(nativeCleanupFailure(possible), "unretired");
+  const rendered = renderNativeJob(possible);
+  assert.equal(rendered.report.preparationRecovery[0].status, "UNCERTAIN");
+  assert.match(rendered.summary, /independently recover possible effects/u);
+  assert.throws(() =>
+    normalizeNativeJob({
+      ...possible,
+      stages: {
+        ...possible.stages,
+        cleanup: {
+          status: "PASS",
+          elapsedMs: 1,
+          deadlineMs: 120000,
+          reason: null,
+        },
+      },
+    }),
+  );
+  const retired = normalizeNativeJob({
+    ...possible,
+    preparationEffects: {
+      ...possible.preparationEffects,
+      settlement: {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+      },
+      receiptSha256: "e".repeat(64),
+    },
+  });
+  assert.equal(
+    renderNativeJob(retired).report.preparationRecovery[0].status,
+    "RETIRED",
+  );
+  assert.deepEqual(retired.firstFailure, possible.firstFailure);
+  assert.equal(
+    renderNativeJob({
+      ...historical,
+      firstFailure: historicalCause,
+      preparationEffects: retired.preparationEffects,
+    }).report.preparationRecovery[0].status,
+    "RETIRED",
+  );
+});
