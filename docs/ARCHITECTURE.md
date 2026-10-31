@@ -464,6 +464,18 @@ promise a distinct provider dashboard category.
 
 ## Pipeline Ownership
 
+The unregistered `pipelines/init/` workspace owns the read-only infrastructure
+proposal foundation. It consumes injected public configuration and workspace
+capabilities, binding actual instructions/checks, selected roots, resource
+identities and live configuration exclusions. Its explicit reservation/result
+transitions stop at `PROPOSAL_ACCEPTED`; they expose no runner dispatch or
+publication. Placement resolves independently of review mode during bounded
+clarification and freezes with the transcript hash. Lazy requires primary
+check/fix plus distinct confirmation, independent requires separate review, and
+combined requires both over the same proposal. Revisions invalidate approvals.
+The [init specification](../pipelines/init/docs/SPEC.md) owns this contract.
+Registration awaits runner-owned publication and complete setup verification.
+
 Each pipeline owns its input interpretation, roles, configuration settings and
 defaults, accepted `run` options, prompts, structured-output schemas, explicit
 JavaScript state machine, retry policy, and completion criteria. Roles, settings,

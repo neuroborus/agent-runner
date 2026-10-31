@@ -99,6 +99,15 @@ classification, cycle/session rules and recoverable publication.
 
 ## Review modes
 
+Init's unregistered proposal foundation reviews infrastructure for either
+integrated or external placement, independently of these review modes. It reuses
+an unambiguous target-bound setup, defaults new setup to integrated, and resolves
+competing placements before freezing clarification. All proposal turns are
+read-only. Lazy requires primary convergence and a distinct clean confirmation;
+independent requires separate review; combined requires both. Accepted proposals
+are internal evidence and do not claim published or usable infrastructure. See
+the [init specification](../../pipelines/init/docs/SPEC.md).
+
 `independent` is the default and recommended mode. A primary role produces the
 work and a separately configured Reviewer supplies genuine semantic review;
 in coding pipelines an Arbiter is available only for the pipeline's bounded disagreements. This

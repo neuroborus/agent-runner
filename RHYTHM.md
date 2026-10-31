@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-30
 
+- **Init proposals have a separate read-only owner.** The unregistered init
+  workspace binds actual setup evidence, exact target/configuration paths and
+  placement before proposal work. Destination configuration never reconfigures
+  the live run. Lazy convergence, independent review and combined gates approve
+  the same structured proposal; revisions invalidate their dependent evidence.
+  Proposal acceptance grants no publication or Git effect, keeping incomplete
+  setup unavailable until runner-owned publication and verification exist.
+
 - **Operator guidance follows selected infrastructure.** Complete local additions
   resolve from the bound infrastructure base, including external setups and
   ordinary-directory targets. Integrated Git resources retain ignore safeguards;

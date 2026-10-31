@@ -370,6 +370,24 @@ validation remains in the fast tier.
 
 ## Finalization
 
+The fast `pipelines/init/test/proposals.test.js` suite owns the unregistered
+proposal foundation: both placements across all modes, unchanged read-only
+bindings, selection conflicts, frozen live-configuration protection, preserved
+skills and discovered controls, directory/file distinctions, frozen clarification
+selection, one-shot clarification edits, approval invalidation and bounded revisions.
+One focused shared-service case covers append receipts, structured answers and
+unchanged answer windows without consuming additional question rounds.
+Regressions keep unusable unselected siblings out of placement inspection and
+protect exact task artifacts when their directory also contains setup destinations.
+Injected read-only capabilities cover actual document hashing and configuration
+substitution, including placement edits with unchanged destinations and additive
+reinspection that preserves prior input, destination and ancestor identities,
+without filesystem publication or provider activity. A focused workspace case
+injects directory creation and ancestor replacement between the absence probe,
+bound inspection and first snapshot to reject newly occupied external roots.
+It also accepts an absent sibling covered by an enclosing task-tree snapshot.
+It establishes no CLI/MCP setup, durable publication or native-provider acceptance.
+
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes
 both coding pipelines with exact sibling/external file reads, frozen resume and
