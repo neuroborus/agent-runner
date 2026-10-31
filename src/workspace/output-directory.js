@@ -110,7 +110,7 @@ export async function prepareOutputDirectory(
   fs,
   inspection,
   intent,
-  { signal, beforeCreate, publishDirectory } = {},
+  { signal, beforeCreate, publishDirectory, recordIdentity } = {},
 ) {
   const fresh = await inspectOutputDirectory(
     fs,
@@ -149,6 +149,7 @@ export async function prepareOutputDirectory(
       signal?.throwIfAborted();
       created = await createDirectory(fs, storage, intent.staging);
       expected = created.identity;
+      await recordIdentity?.(expected);
       await storage.handle.sync();
       await assertBindings(fs, [storage.binding, parent.binding]);
       assertSafe(

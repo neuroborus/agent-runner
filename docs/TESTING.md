@@ -386,7 +386,21 @@ without filesystem publication or provider activity. A focused workspace case
 injects directory creation and ancestor replacement between the absence probe,
 bound inspection and first snapshot to reject newly occupied external roots.
 It also accepts an absent sibling covered by an enclosing task-tree snapshot.
-It establishes no CLI/MCP setup, durable publication or native-provider acceptance.
+That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
+
+`pipelines/init/test/integrated-publication.slow.test.js` owns real-Git ignore
+semantics and durable multi-resource publication through the public workspace
+capability: absent resources, preserved skills/settings and negations, custom
+artifact roots, verification-only reruns, file and artifact-directory substitution
+rejection, input and frozen-clarification drift, missing closed transcripts,
+lost file-receipt recovery, ignore protection on resumed
+effects and lease loss after directory allocation. A bare repository occupying
+the conventional provider root rejects setup before any prerequisite write. Its
+controlled directory publisher and isolated fixtures use no providers. These
+full snapshots, fsyncs and Git effects belong to the complete slow tier; pure
+proposal policy remains fast.
+This establishes integrated prerequisite preparation only, without guidance,
+external publication, CLI/MCP registration or setup-completion acceptance.
 
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes

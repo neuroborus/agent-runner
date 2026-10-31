@@ -464,17 +464,30 @@ promise a distinct provider dashboard category.
 
 ## Pipeline Ownership
 
-The unregistered `pipelines/init/` workspace owns the read-only infrastructure
-proposal foundation. It consumes injected public configuration and workspace
-capabilities, binding actual instructions/checks, selected roots, resource
+The unregistered `pipelines/init/` workspace owns read-only infrastructure
+proposals and Runner-owned integrated prerequisite publication. It consumes
+injected public configuration and workspace capabilities, binding actual
+instructions/checks, selected roots, resource
 identities and live configuration exclusions. Its explicit reservation/result
-transitions stop at `PROPOSAL_ACCEPTED`; they expose no runner dispatch or
-publication. Placement resolves independently of review mode during bounded
+agent transitions stop at `PROPOSAL_ACCEPTED`; they expose no runner dispatch.
+The separate `publishIntegratedInit` effect requires those approvals, unchanged
+setup bindings and the existing exclusive leases. The clarification capability
+verifies the frozen transcript before baseline recording and throughout publication.
+Workspace-owned infrastructure
+methods reuse confined artifact replacement and private-state directory allocation;
+run-store transition callbacks journal exact intents, identities and readback receipts.
+Ignore protection precedes artifacts/finalization and configuration. Existing skills
+and unrelated settings survive; exact derived `RUNNER.md` selections adapt manual
+handoff rules to pipeline effect ownership. Finalization selection and proposal
+validation preserve bare Git metadata protection even when its root coincides
+with a conventional provider directory. Guidance remains deferred. Placement
+resolves independently of review mode during bounded
 clarification and freezes with the transcript hash. Lazy requires primary
 check/fix plus distinct confirmation, independent requires separate review, and
 combined requires both over the same proposal. Revisions invalidate approvals.
 The [init specification](../pipelines/init/docs/SPEC.md) owns this contract.
-Registration awaits runner-owned publication and complete setup verification.
+Registration awaits both placements, guidance publication and complete setup
+verification.
 
 Each pipeline owns its input interpretation, roles, configuration settings and
 defaults, accepted `run` options, prompts, structured-output schemas, explicit

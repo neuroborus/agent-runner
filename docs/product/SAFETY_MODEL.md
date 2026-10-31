@@ -119,6 +119,14 @@ ignored, untracked and non-overlapping with protected inputs, including custom
 authoring. Ordinary-directory authoring uses confined task-owned artifacts;
 neither placement adds ignore rules.
 
+The unregistered init foundation has a separate reviewed integrated-publication
+boundary. Runner alone may publish the exact approved `.gitignore`, artifacts,
+destination configuration and derived finalization procedure under exclusive
+ownership, with write-ahead intents and verified identities/readback. Existing
+skills and unrelated settings stay intact. Its task/clarification artifacts remain
+external; ordinary pipeline artifact creation still cannot change ignore rules.
+Guidance publication and setup completion are not yet available through init.
+
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.

@@ -18,6 +18,12 @@ import { CONTROL_NAMES, discoverControls } from "./controls.js";
 import { capture, fingerprints, readTextFile } from "./snapshot.js";
 import { reportArtifact } from "./artifact.js";
 import {
+  inspectInfrastructure,
+  inspectInfrastructureDirectory,
+  publishInfrastructureDirectory,
+  publishInfrastructureFile,
+} from "./infrastructure.js";
+import {
   inspectOutputDirectory,
   prepareOutputDirectory,
 } from "./output-directory.js";
@@ -422,6 +428,14 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     snapshot,
     snapshotInputs,
     assertUnchanged,
+    inspectInfrastructure: (request) =>
+      boundary(() => inspectInfrastructure(fs, request)),
+    inspectInfrastructureDirectory: (request) =>
+      boundary(() => inspectInfrastructureDirectory(fs, request)),
+    publishInfrastructureDirectory: (request) =>
+      boundary(() => publishInfrastructureDirectory(fs, request)),
+    publishInfrastructureFile: (request) =>
+      boundary(() => publishInfrastructureFile(fs, request)),
     reportArtifact: ({ inspection, ...request }, options) =>
       boundary(async () => {
         await snapshot({ inspection });

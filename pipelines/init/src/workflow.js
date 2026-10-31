@@ -3,6 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 
 import { selectInitPlacement } from "./inspection.js";
 import {
+  integratedFinalizationContent,
+  integratedFinalizationPath,
+} from "./integrated-policy.js";
+import {
   assertInit,
   assertInspection,
   assertInspectionExtension,
@@ -371,6 +375,16 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
           proposal: next.proposal,
           proposalHash: next.proposalHash,
           findings: next.findings,
+          integratedFinalization:
+            next.selection?.placement === "integrated"
+              ? {
+                  path: integratedFinalizationPath(next),
+                  template: integratedFinalizationContent(
+                    next,
+                    next.proposal?.checks ?? ["<actual ordered project check>"],
+                  ),
+                }
+              : null,
         },
       )}`,
     },

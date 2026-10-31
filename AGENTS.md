@@ -281,7 +281,7 @@ All pipelines additionally require:
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |
 | `pipelines/audit/`                | Read-only audit discovery, verification, publication, tests/spec     |
-| `pipelines/init/`                 | Unregistered read-only infrastructure proposal foundation            |
+| `pipelines/init/`                 | Unregistered init proposals and Runner-owned integrated preparation  |
 | `test/agents/`                    | Provider boundaries and descriptor-registry behavior                 |
 | `test/clarifications/`            | Clarification-service behavior tests                                 |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests                 |

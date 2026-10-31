@@ -14,7 +14,7 @@ export const PHASE_INSTRUCTIONS = Object.freeze({
   CLARIFY:
     "Resolve material setup scope and explicit placement separately from review mode. Return READY, QUESTIONS or BLOCKED. Competing placements require explicit selection before closure.",
   PROPOSE:
-    "Return a complete minimal proposal with exact destinations, inspected prior hashes, proposed content and actual required checks. Preserve unrelated settings and existing skills.",
+    "Return a complete minimal proposal with exact destinations, inspected prior hashes, proposed content and actual required checks. Preserve unrelated settings and existing skills. Integrated publication appends only necessary nonduplicate ignore exclusions, including exact publication temporaries. Use the supplied integrated finalization template with the actual ordered checks; select its exact path in both execution and polishing configuration. Existing skills remain byte-for-byte unchanged; their adjacent RUNNER.md preserves substantive checks while deferring staging and commit preparation to the owning pipeline boundary. Guidance is proposed now and published separately after prerequisites.",
   CHECK_AND_FIX:
     "Inspect and correct the complete durable proposal. Return its complete structured replacement even when unchanged. Do not write the proposed files.",
   CLEAN_CONFIRM:

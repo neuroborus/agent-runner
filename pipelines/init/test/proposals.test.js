@@ -16,6 +16,7 @@ import {
   closeInitClarification,
   createInitState,
   initPipeline,
+  integratedIgnoreContent,
   inspectInitSetup,
   prepareInitTurn,
   selectInitPlacement,
@@ -23,6 +24,26 @@ import {
 
 const HASH = "a".repeat(64);
 const OTHER = "b".repeat(64);
+
+test("ignore additions preserve missing newlines and literal path characters", () => {
+  assert.equal(
+    integratedIgnoreContent("# Preserve", "/work/project", []),
+    "# Preserve",
+  );
+  assert.equal(
+    integratedIgnoreContent("# Preserve", "/work/project", [
+      "/work/project/artifacts[local] cache",
+    ]),
+    "# Preserve\n/artifacts\\[local\\]\\ cache\n",
+  );
+  assert.equal(
+    integratedIgnoreContent("/artifacts\n!/artifacts\n", "/work/project", [
+      "/work/project/artifacts",
+      "/work/project/artifacts",
+    ]),
+    "/artifacts\n!/artifacts\n/artifacts\n",
+  );
+});
 const candidate = (placement = "external", rootPath = "/work/setup") => ({
   placement,
   rootPath,
@@ -661,6 +682,7 @@ test("reused bytes, symbolic-link ancestors and overlapping file resources canno
 test("proposals protect discovered controls and setup inputs while allowing a new finalization skill", () => {
   const setup = inspection();
   setup.controlPaths.push("/work/project/metadata");
+  setup.controlPaths.push("/work/project/nested/.git");
   setup.scopeBindings.push({ path: "/work/project/metadata", hash: HASH });
   setup.documents.instructions.push({
     path: "/work/project/AGENTS.md",
@@ -672,15 +694,35 @@ test("proposals protect discovered controls and setup inputs while allowing a ne
     "/work/project/.agents/instructions.md",
     "/work/project/metadata/notes.md",
     "/work/project/AGENTS.md",
+    "/work/project/nested/finalization.md",
   ]) {
     const value = proposal(state);
     value.resources[2].path = path;
-    assert.throws(() => turn(state, setup, value), /controls|setup inputs/u);
+    assert.throws(
+      () => turn(state, setup, value),
+      /controls|setup inputs|different exclusion key/u,
+    );
   }
   const value = proposal(state);
   value.resources[2].path =
     "/work/project/.agents/skills/finalization/SKILL.md";
   assert.equal(turn(state, setup, value).workflowState, "REVIEW");
+});
+
+test("conventional finalization paths cannot exempt bare Git metadata", () => {
+  for (const name of [".agents", ".claude"]) {
+    const setup = inspection();
+    const root = join(setup.projectPath, name);
+    setup.entries = [
+      { path: join(root, "HEAD"), kind: "file", hash: HASH },
+      { path: join(root, "objects"), kind: "directory", hash: null },
+      { path: join(root, "refs"), kind: "directory", hash: null },
+    ];
+    const state = start("independent", setup);
+    const value = proposal(state);
+    value.resources[2].path = join(root, "skills", "finalization", "SKILL.md");
+    assert.throws(() => turn(state, setup, value), /bare Git metadata/u);
+  }
 });
 
 test("a parent task directory protects exact task artifacts without excluding integrated setup", () => {

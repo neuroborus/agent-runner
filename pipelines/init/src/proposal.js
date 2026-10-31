@@ -1,5 +1,13 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 export class InitProposalError extends Error {
@@ -249,6 +257,27 @@ export function assertInspectionExtension(before, after) {
   );
 }
 
+// Match workspace discovery before applying any provider-directory exception.
+export function assertOutsideBareGitMetadata(inspection, path) {
+  assertInit(
+    !inspection.controlPaths.some(
+      (root) =>
+        within(root, path) &&
+        [
+          ["HEAD", ["file", "symlink"]],
+          ["objects", ["directory", "symlink"]],
+          ["refs", ["directory", "symlink"]],
+        ].every(([name, kinds]) =>
+          inspection.entries.some(
+            (entry) =>
+              entry.path === join(root, name) && kinds.includes(entry.kind),
+          ),
+        ),
+    ),
+    "Init cannot publish inside bare Git metadata.",
+  );
+}
+
 export function normalizeProposal(value, state) {
   assertResultSize(value);
   exact(value, ["summary", "checks", "resources"]);
@@ -362,6 +391,17 @@ export function normalizeProposal(value, state) {
         "Only integrated init can propose the target ignore file.",
       );
     if (resource.action !== "reuse") {
+      assertOutsideBareGitMetadata(state.inspection, resource.path);
+      assertInit(
+        !state.inspection.controlPaths.some(
+          (path) =>
+            basename(path) === ".git" &&
+            within(state.selection.rootPath, path) &&
+            dirname(path) !== state.selection.rootPath &&
+            within(dirname(path), resource.path),
+        ),
+        "Init cannot publish into a nested Git worktree with a different exclusion key.",
+      );
       const skillRoots = [".agents", ".claude"].map((name) =>
         join(state.selection.rootPath, name),
       );

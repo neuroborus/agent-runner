@@ -1469,10 +1469,13 @@ provider-neutral. Production registration is static and frozen.
 
 ## Pipeline Boundary
 
-The [init proposal foundation](pipelines/init/docs/SPEC.md) is source-owned but
+The [init setup foundation](pipelines/init/docs/SPEC.md) is source-owned but
 unregistered. It reviews explicit integrated/external infrastructure proposals
 read-only in all three modes, with frozen target/configuration bindings. It
-does not yet expose a CLI/MCP command or publish infrastructure.
+also provides internal Runner-owned publication of reviewed integrated prerequisites,
+preserving existing skills and unrelated settings. Guidance publication, external
+publication and terminal setup verification are still pending; there is no CLI/MCP
+init command or public setup-completion claim.
 
 The pipeline registry is static in V1. A pipeline descriptor exports an ID, a
 state version, roles, configuration settings and defaults, setting allowed values and
@@ -1593,7 +1596,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   └── custom-plan/
 ├── pipelines/
 │   ├── audit/                 # read-only audit and reviewed report publication
-│   ├── init/                  # unregistered read-only proposal foundation
+│   ├── init/                  # unregistered proposals and integrated preparation
 │   ├── plan-authoring/
 │   ├── plan-execution/
 │   └── polishing/

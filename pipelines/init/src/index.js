@@ -5,6 +5,13 @@ import { assertInitState, createInitState, INIT_MODES } from "./workflow.js";
 
 export { inspectInitSetup, selectInitPlacement } from "./inspection.js";
 export { InitProposalError } from "./proposal.js";
+export { publishIntegratedInit } from "./integrated-publication.js";
+export {
+  integratedFinalizationContent,
+  integratedFinalizationPath,
+  integratedIgnoreContent,
+  integratedIgnorePaths,
+} from "./integrated-policy.js";
 export {
   acceptInitEdit,
   acceptInitQuestionAppend,
@@ -17,12 +24,12 @@ export {
 } from "./workflow.js";
 
 const ROLES = Object.freeze(["planner", "reviewer"]);
-// Proposal foundation only. Deliberately absent from the built-in registry and
-// root dependencies until runner-owned publication and completion are available.
+// Internal setup foundation. Deliberately absent from the built-in registry
+// and root dependencies until both placements and completion are available.
 export const initPipeline = Object.freeze({
   id: "init",
   stateVersion: 1,
-  description: "Review infrastructure setup proposals without publishing them.",
+  description: "Review setup proposals and prepare integrated prerequisites.",
   roles: ROLES,
   resolveActiveRoles: (settings) =>
     settings?.mode === "lazy" ? Object.freeze(["planner"]) : ROLES,

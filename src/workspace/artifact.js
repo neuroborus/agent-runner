@@ -19,7 +19,7 @@ const fileIdentity = (stat) => ({
 });
 const REPORT_CHANGED = "ERR_WORKSPACE_REPORT_CHANGED";
 
-async function readArtifact(fs, path) {
+export async function readArtifact(fs, path) {
   let handle;
   try {
     handle = await fs.open(
@@ -77,7 +77,15 @@ export async function reportArtifact(
   fs,
   inspection,
   request,
-  { inspectOnly = false, temporary: owned = null, recordTemporary } = {},
+  {
+    inspectOnly = false,
+    temporary: owned = null,
+    recordTemporary,
+    assertCurrent,
+    includeIdentity = false,
+    requireOwnedTemporary = false,
+    assertAuthorized,
+  } = {},
 ) {
   const { path, temporaryPath, content, expectedHash } = request;
   assertSafe(
@@ -99,6 +107,7 @@ export async function reportArtifact(
   const target = join(parent.anchor, basename(path));
   const temporary = join(parent.anchor, basename(temporaryPath));
   const guard = async () => {
+    await assertAuthorized?.();
     await assertBindings(fs, inspection.bindings);
     assertSafe(
       (await fs.realpath(parent.anchor)) === dirname(path),
@@ -109,6 +118,7 @@ export async function reportArtifact(
   try {
     await guard();
     const current = await readArtifact(fs, target);
+    await assertCurrent?.(current);
     if (inspectOnly) {
       assertSafe(
         (await readArtifact(fs, temporary)) === null,
@@ -120,6 +130,7 @@ export async function reportArtifact(
     }
     const desired = hash(content);
     const currentHash = current?.contentHash ?? null;
+    let publishedIdentity = current?.identity;
     assertSafe(
       currentHash === expectedHash || currentHash === desired,
       "Report artifact changed outside Runner publication.",
@@ -129,7 +140,7 @@ export async function reportArtifact(
     assertSafe(
       leftover === null ||
         (owned === null
-          ? leftover.contentHash === desired
+          ? !requireOwnedTemporary && leftover.contentHash === desired
           : same(leftover.identity, owned.identity) &&
             (owned.phase === "writing" || leftover.contentHash === desired)),
       "Unowned report publication temporary exists.",
@@ -200,6 +211,7 @@ export async function reportArtifact(
         "Report publication bytes changed.",
         REPORT_CHANGED,
       );
+      publishedIdentity = leftover.identity;
       await fs.rename(temporary, target);
     } else if (leftover !== null) {
       await guard();
@@ -212,12 +224,18 @@ export async function reportArtifact(
     }
     await parent.handle.sync();
     await guard();
+    const published = await readArtifact(fs, target);
     assertSafe(
-      (await readArtifact(fs, target))?.contentHash === desired,
+      published?.contentHash === desired &&
+        same(published.identity, publishedIdentity),
       "Report publication readback failed.",
       REPORT_CHANGED,
     );
-    return { path, contentHash: desired };
+    return {
+      path,
+      contentHash: desired,
+      ...(includeIdentity ? { identity: published.identity } : {}),
+    };
   } finally {
     await parent.handle.close();
   }

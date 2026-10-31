@@ -1,12 +1,13 @@
-# Init proposal foundation
+# Init setup foundation
 
 ## Status and ownership
 
 `pipelines/init/` owns infrastructure inspection policy, proposal contracts,
 read-only role requests, bounded clarification and proposal approval. It is
-deliberately unregistered: no CLI/MCP init command, publication, setup completion
-or Git effect is available yet. `PROPOSAL_ACCEPTED` is an internal gate, never a
-claim that infrastructure exists. Runner-owned publication and terminal
+deliberately unregistered: no CLI/MCP init command, external publication, setup
+completion or Git effect is available yet. `PROPOSAL_ACCEPTED` is an internal gate, never a
+claim that infrastructure exists. Internal Runner-owned integrated prerequisite
+publication is available after this gate. Guidance publication and terminal
 confirmation must precede registration and public completion.
 
 The private workspace has no runtime dependencies. Root composition supplies
@@ -109,7 +110,12 @@ resolved for this run, existing skills, Git/provider controls or symbolic links.
 Inspection retains workspace-discovered control paths, including Git metadata
 whose directory name is not `.git`. The only control-tree write destinations
 are the conventional `.agents` or `.claude` finalization `SKILL.md`/`RUNNER.md`
-files; existing skills and nested controls remain protected. Exact task inputs
+files; existing skills and nested controls remain protected. Writes inside nested
+Git worktrees are prohibited because they require a different exclusion key.
+Bare Git metadata remains protected even when its root is a conventional provider
+directory; finalization selection and proposal validation reject that overlap before
+any prerequisite publication.
+Exact task inputs
 (`task.md`, optional `context.md`) and `clarifications.md`, plus inspected
 instructions/check definitions, cannot be overwritten. A parent task directory
 does not exclude unrelated setup destinations beneath it. Artifacts are
@@ -136,3 +142,70 @@ clarification hash. Findings clear dependent approvals and return to Planner;
 combined revisions restart primary convergence. No arbitration is introduced.
 Revision accounting is bounded, persisted and never renewed by reload. Exhaustion
 pauses. Proposal acceptance grants no publication, staging or commit authority.
+
+## Integrated prerequisite publication
+
+`publishIntegratedInit` is a separate Runner effect API, not an agent turn or
+descriptor dispatch. It requires `PROPOSAL_ACCEPTED` in integrated placement,
+the original frozen inspection, and the selected mode's exact proposal approvals.
+The caller must hold the existing canonical exclusive workspace and execution
+leases. It supplies public workspace/configuration/clarification/Git inspection
+capabilities, the existing supervised no-replace directory publisher, a lease assertion and a
+write-ahead persistence callback backed by run-store transitions. No second store
+or provider write permission is introduced. Destination configuration remains
+setup output; it never changes this run's resolved configuration.
+
+Before recording the filesystem baseline and throughout publication, the
+clarification capability verifies the actual transcript against the frozen
+clarification hash. Changed or missing closed clarifications cannot be adopted
+as setup input. Before effects, policy validates the complete proposal.
+Configuration parsing uses the existing project-only schema. Only infrastructure binding, artifact root
+and execution/polishing finalization selections may change; unrelated settings
+survive. The exact selected finalization procedure is explicit in both pipelines.
+New skills use the established `.agents/skills/finalization/SKILL.md` location,
+or an existing `.claude` skills layout. An existing inspected finalization skill
+is preserved byte-for-byte and selects adjacent `RUNNER.md` instead. An existing
+wrapper is reused only when it matches the reviewed procedure; conflicting
+contents are preserved and rejected before effects. The derived
+procedure is part of the reviewed proposal, contains its actual ordered checks,
+reads actual project instructions and preserves the original skill's substantive
+requirements. Its pipeline adaptation defers staging, index-relative inspection
+and commit preparation to COMMIT/HANDOFF, translating applicable staged checks
+to content checks during FINALIZE. It never weakens those checks or commits.
+
+Publication preserves the original `.gitignore` bytes, including comments and
+negations, adding a separator for a missing final newline and one literal anchored
+exclusion per needed path. An earlier exclusion cancelled by a later negation is
+reasserted literally without whitespace padding. This includes configured
+artifacts, configuration, deferred guidance and exact publication temporaries.
+An absent ignore file is created.
+Applicable Git inspection rejects tracked infrastructure and verifies effective
+ignoring after ignore publication and before later writes. Directory workspaces
+need no Git initialization; Git-specific inspection remains capability-owned.
+The artifact root is the frozen selected value, with the configuration-owned
+default unchanged. No ignore/info-exclude/global-ignore or unrelated setting
+outside the reviewed integrated `.gitignore` is changed.
+
+Runner first journals the publication binding and unchanged filesystem baseline,
+then each exact file/directory intent. Directory allocation reuses private state
+and the existing no-replace primitive; its identity is persisted before publication.
+Lease ownership is rechecked after that persistence and before publication.
+File replacement reuses confined directory descriptors, exclusive temporary
+creation, journaled temporary identity, synced bytes, atomic rename and verified
+readback. Unknown temporaries, same-byte inode substitutions, ancestor changes
+and intervening edits are rejected and preserved. Temporary paths remain stable
+for each exact destination, avoiding new ignore entries on ordinary reruns.
+Each resource receives a
+verified identity/hash receipt before the next effect. Reload binds the original
+proposal, selection, state storage and approved paths; a lost file receipt can
+reconcile the exact prepared temporary identity already at its destination.
+Ambiguous directory allocations remain preserved for recovery, never adopted.
+Completed prerequisite receipts are verification-only on rerun.
+
+The order is ignore protection, artifact preparation, finalization, then destination
+configuration. Guidance is excluded from publication and remains deferred.
+The `prepared` marker means only these prerequisites have verified receipts;
+it is neither a completion receipt nor a claim that setup is usable. External
+publication, full interrupted-setup recovery, guidance-last publication and
+distinct terminal confirmation remain separate integration work. This API never
+stages, commits, changes Git controls/identity or starts another pipeline.

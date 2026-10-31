@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-31
+
+- **Integrated setup publication belongs to Runner.** The unregistered init
+  foundation now prepares only reviewed integrated prerequisites under existing
+  leases and journaled per-resource intents, identities and verified readback.
+  Literal ignore additions preserve prior contents and negations; destination
+  settings retain unrelated values. Existing finalization skills remain exact,
+  with adjacent reviewed procedures adapting manual staging instructions to
+  pipeline-owned effect boundaries. Guidance and public completion stay deferred,
+  keeping partial setup distinct from verified usable infrastructure.
+
 ## 2026-10-30
 
 - **Init proposals have a separate read-only owner.** The unregistered init
