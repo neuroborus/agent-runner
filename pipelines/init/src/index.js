@@ -5,7 +5,14 @@ import { assertInitState, createInitState, INIT_MODES } from "./workflow.js";
 
 export { inspectInitSetup, selectInitPlacement } from "./inspection.js";
 export { InitProposalError } from "./proposal.js";
-export { publishIntegratedInit } from "./integrated-publication.js";
+export {
+  publishIntegratedInit,
+  publishExternalInit,
+} from "./prerequisite-publication.js";
+export {
+  externalFinalizationContent,
+  externalFinalizationPath,
+} from "./external-policy.js";
 export {
   integratedFinalizationContent,
   integratedFinalizationPath,
@@ -29,7 +36,8 @@ const ROLES = Object.freeze(["planner", "reviewer"]);
 export const initPipeline = Object.freeze({
   id: "init",
   stateVersion: 1,
-  description: "Review setup proposals and prepare integrated prerequisites.",
+  description:
+    "Review setup proposals and prepare integrated or external prerequisites.",
   roles: ROLES,
   resolveActiveRoles: (settings) =>
     settings?.mode === "lazy" ? Object.freeze(["planner"]) : ROLES,

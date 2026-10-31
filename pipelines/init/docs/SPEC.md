@@ -4,9 +4,9 @@
 
 `pipelines/init/` owns infrastructure inspection policy, proposal contracts,
 read-only role requests, bounded clarification and proposal approval. It is
-deliberately unregistered: no CLI/MCP init command, external publication, setup
-completion or Git effect is available yet. `PROPOSAL_ACCEPTED` is an internal gate, never a
-claim that infrastructure exists. Internal Runner-owned integrated prerequisite
+deliberately unregistered: no CLI/MCP init command, setup completion or Git effect
+is available yet. `PROPOSAL_ACCEPTED` is an internal gate, never a claim that
+infrastructure exists. Internal Runner-owned integrated and external prerequisite
 publication is available after this gate. Guidance publication and terminal
 confirmation must precede registration and public completion.
 
@@ -205,7 +205,51 @@ Completed prerequisite receipts are verification-only on rerun.
 The order is ignore protection, artifact preparation, finalization, then destination
 configuration. Guidance is excluded from publication and remains deferred.
 The `prepared` marker means only these prerequisites have verified receipts;
-it is neither a completion receipt nor a claim that setup is usable. External
-publication, full interrupted-setup recovery, guidance-last publication and
-distinct terminal confirmation remain separate integration work. This API never
+it is neither a completion receipt nor a claim that setup is usable. Full
+interrupted-setup recovery, guidance-last publication and distinct terminal
+confirmation remain separate integration work. This API never
 stages, commits, changes Git controls/identity or starts another pipeline.
+
+## External prerequisite publication
+
+`publishExternalInit` applies the same approved-proposal, frozen-clarification,
+write-ahead intent, lease and verified-readback contracts to the external
+selection. It returns `{ publication, configurationPath }`; the exact absolute
+selector can subsequently be supplied as CLI `--project-config` or MCP
+`projectConfigurationPath`. The publication record is persisted through the same
+callback and supplied unchanged for recovery. It prepares prerequisites only.
+
+New external roots use the inspected canonical target's parent and
+`.agent-runner-<safe-name>-<12-character-path-hash>` name. The safe name replaces
+characters outside ASCII letters, digits and hyphens with hyphens and keeps at
+most 48 characters; an empty name uses `project`. The hash is the first 12
+hexadecimal characters of SHA-256 over the full canonical target path. The hash
+is a naming aid, not binding proof: existing roots require explicitly selected
+configuration whose complete versioned target/root protection has been verified.
+Occupied unbound roots, wrong-target bindings and identity substitutions are
+rejected. Selected bound roots retain their exact configuration and artifact
+paths, including nondefault locations, without relocation or global registration.
+Before publication is journaled and at each publication guard, including recovery,
+controls-only workspace inspection rejects destinations inside Git or provider
+storage, including canonical ancestor alias targets omitted from general snapshots.
+
+Runner publishes the absent root using the existing private allocation and
+no-replace directory primitive, then configured artifacts, `finalization/SKILL.md`
+and destination configuration. A new configuration is root `agent-runner.json`.
+Only these reviewed resources and their necessary directories receive effects;
+the root's parent is a confinement anchor, never a parent-wide read/write scope.
+The caller's lease assertion covers the canonical target exclusion and selected
+infrastructure, including when the target is inside an enclosing worktree.
+The full target, discovered controls and inspected setup inputs remain in the
+unchanged snapshot throughout publication. Ordinary directories require no Git
+initialization. No target file, instruction, skill, ignore rule, info-exclude,
+global ignore, pointer or global prerequisite is created or changed.
+
+External finalization is rendered for proposal review from actual instructions,
+ordered checks and inspected project finalization skills. It references those
+skills from the target working directory without copying or editing them.
+Existing external procedures can be reused only with the exact reviewed contents; conflicts are
+preserved and rejected. Configuration selects `finalization/SKILL.md` explicitly
+for execution and polishing and resolves relative resources from the bound root.
+Unrelated settings survive. Guidance remains proposed but unpublished until its
+later guidance-last gate; neither a selector nor `prepared` is setup completion.

@@ -386,6 +386,8 @@ without filesystem publication or provider activity. A focused workspace case
 injects directory creation and ancestor replacement between the absence probe,
 bound inspection and first snapshot to reject newly occupied external roots.
 It also accepts an absent sibling covered by an enclosing task-tree snapshot.
+The proposal suite also keeps external finalization references limited to the
+target's finalization skills, without invoking unrelated inventoried skills.
 That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
 
 `pipelines/init/test/integrated-publication.slow.test.js` owns real-Git ignore
@@ -400,7 +402,19 @@ controlled directory publisher and isolated fixtures use no providers. These
 full snapshots, fsyncs and Git effects belong to the complete slow tier; pure
 proposal policy remains fast.
 This establishes integrated prerequisite preparation only, without guidance,
-external publication, CLI/MCP registration or setup-completion acceptance.
+CLI/MCP registration or setup-completion acceptance.
+
+`pipelines/init/test/external-publication.slow.test.js` owns sibling preparation
+through the same public workspace effects: canonical-path name separation for
+neighboring projects, occupied/wrong-target roots, explicit nondefault selectors,
+custom artifacts, preserved skills/settings, lost root receipts and identity
+substitution. It rejects ancestor provider storage and canonical alias targets
+before publication intents or writes and rechecks them during recovery.
+It verifies subsequent configuration/finalization selection and
+unchanged Git and ordinary-directory targets, with no ignore inspection or
+provider activity. Run it when changing external init publication or its confined
+resource policy. Both publication suites belong to the complete slow tier;
+guidance-last and terminal setup completion remain separate integration work.
 
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes

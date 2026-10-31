@@ -15,6 +15,7 @@ import {
   authorizeInitEdit,
   closeInitClarification,
   createInitState,
+  externalFinalizationContent,
   initPipeline,
   integratedIgnoreContent,
   inspectInitSetup,
@@ -24,6 +25,28 @@ import {
 
 const HASH = "a".repeat(64);
 const OTHER = "b".repeat(64);
+
+test("external finalization references only the target's finalization skills", () => {
+  const finalization = ".agents/skills/finalization/SKILL.md";
+  const unrelated = ".agents/skills/test-authoring/SKILL.md";
+  const inspection = {
+    projectPath: "/work/project",
+    documents: {
+      instructions: [{ path: "/work/project/AGENTS.md" }],
+      skills: [
+        { path: `/work/project/${finalization}` },
+        { path: `/work/project/${unrelated}` },
+        { path: "/work/other/finalization/SKILL.md" },
+      ],
+    },
+  };
+  const content = externalFinalizationContent({ inspection }, ["node --test"]);
+  assert.ok(content.includes(`- ${finalization}\n`));
+  assert.ok(!content.includes(unrelated));
+  assert.ok(!content.includes("../other/"));
+  assert.ok(content.includes("AGENTS.md"));
+  assert.ok(content.includes("- node --test\n"));
+});
 
 test("ignore additions preserve missing newlines and literal path characters", () => {
   assert.equal(

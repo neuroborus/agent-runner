@@ -41,10 +41,14 @@ export function integratedFinalizationPath(state) {
 // Render before review. Publication never silently rewrites an accepted draft.
 export function integratedFinalizationContent(state, checks) {
   const path = integratedFinalizationPath(state);
-  const relativePath = (path) => relative(state.selection.rootPath, path);
   const original = path.endsWith("/RUNNER.md")
     ? `Read and follow the adjacent SKILL.md, preserving every substantive check.\n\n`
     : "---\nname: finalization\ndescription: Validate this project's accepted changes before handoff.\n---\n\n";
+  return finalizationContent(state, checks, original);
+}
+
+export function finalizationContent(state, checks, original) {
+  const relativePath = (path) => relative(state.inspection.projectPath, path);
   return `${original}# Runner finalization\n\nWork from the project root. Read the current project instructions${
     state.inspection.documents.instructions.length
       ? `: ${state.inspection.documents.instructions.map(({ path }) => relativePath(path)).join(", ")}`
@@ -124,36 +128,7 @@ export async function assertIntegratedPolicy(state, runtime) {
         .every(({ path }) => path === finalizationPath),
     "Integrated finalization must preserve existing skills and derive its procedure from reviewed checks.",
   );
-  const configuration = resources.find(({ kind }) => kind === "configuration");
-  await runtime.validateConfiguration(configuration.content);
-  const proposed = JSON.parse(configuration.content);
-  const original = await workspace.readFile({
-    path: configuration.path,
-    projectPath,
-    optional: true,
-  });
-  assertInit(
-    isDeepStrictEqual(
-      unrelatedSettings(proposed),
-      unrelatedSettings(
-        original === null ? { schemaVersion: 1 } : JSON.parse(original),
-      ),
-    ) &&
-      proposed.artifactRoot ===
-        relative(projectPath, state.selection.artifactPath) &&
-      isDeepStrictEqual(proposed.infrastructure, {
-        schemaVersion: 1,
-        placement: "integrated",
-        projectPath,
-        rootPath: projectPath,
-      }) &&
-      ["plan-execution", "polishing"].every(
-        (id) =>
-          proposed.pipelines?.[id]?.finalization ===
-          relative(projectPath, finalizationPath),
-      ),
-    "Integrated setup must preserve unrelated settings and explicitly select its finalization procedure.",
-  );
+  await assertInitConfiguration(state, runtime, finalizationPath);
   const ignorePath = join(projectPath, ".gitignore");
   const ignoreDocument = await workspace.readFile({
     path: ignorePath,
@@ -184,5 +159,45 @@ export async function assertIntegratedPolicy(state, runtime) {
       ? ignore.content === expected
       : needed.length === 0 && ignoreDocument !== null,
     "Integrated ignore changes must append only necessary nonduplicate exclusions.",
+  );
+}
+
+export async function assertInitConfiguration(
+  state,
+  runtime,
+  finalizationPath,
+) {
+  const { rootPath } = state.selection;
+  const configuration = state.proposal.resources.find(
+    ({ kind }) => kind === "configuration",
+  );
+  await runtime.validateConfiguration(configuration.content);
+  const proposed = JSON.parse(configuration.content);
+  const original = await runtime.workspace.readFile({
+    path: configuration.path,
+    projectPath: rootPath,
+    optional: true,
+  });
+  assertInit(
+    isDeepStrictEqual(
+      unrelatedSettings(proposed),
+      unrelatedSettings(
+        original === null ? { schemaVersion: 1 } : JSON.parse(original),
+      ),
+    ) &&
+      proposed.artifactRoot ===
+        relative(rootPath, state.selection.artifactPath) &&
+      isDeepStrictEqual(proposed.infrastructure, {
+        schemaVersion: 1,
+        placement: state.selection.placement,
+        projectPath: state.inspection.projectPath,
+        rootPath,
+      }) &&
+      ["plan-execution", "polishing"].every(
+        (id) =>
+          proposed.pipelines?.[id]?.finalization ===
+          relative(rootPath, finalizationPath),
+      ),
+    "Setup must preserve unrelated settings and explicitly select its finalization procedure.",
   );
 }

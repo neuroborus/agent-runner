@@ -8,8 +8,13 @@ import {
   integratedIgnorePaths,
   temporaryPath,
 } from "./integrated-policy.js";
+import {
+  assertExternalControls,
+  assertExternalPolicy,
+} from "./external-policy.js";
 
 /** Runner-only, under the existing exclusive workspace and execution leases.
+ * External publication also requires the selected infrastructure exclusion lease.
  * persist journals the complete record before any effect or acknowledgement.
  * This prepares prerequisites only; guidance and completion remain separate.
  */
@@ -18,14 +23,35 @@ export async function publishIntegratedInit(
   runtime,
   publication = null,
 ) {
+  return publishPrerequisites(state, runtime, publication, "integrated");
+}
+
+export async function publishExternalInit(state, runtime, publication = null) {
+  const prepared = await publishPrerequisites(
+    state,
+    runtime,
+    publication,
+    "external",
+  );
+  return {
+    publication: prepared,
+    configurationPath: state.selection.configurationPath,
+  };
+}
+
+async function publishPrerequisites(state, runtime, publication, placement) {
   assertInitState(state);
   assertInit(
     state.workflowState === "PROPOSAL_ACCEPTED" &&
-      state.selection.placement === "integrated",
-    "Integrated publication requires the selected proposal approval gate.",
+      state.selection.placement === placement,
+    "Publication requires the selected placement's proposal approval gate.",
   );
   const { workspace, stateRoot } = runtime;
-  const projectPath = state.selection.rootPath;
+  const targetPath = state.inspection.projectPath;
+  const rootPath = state.selection.rootPath;
+  // The parent is a confinement anchor, never a write inventory or read tree.
+  // Only the selected root and reviewed descendants may receive intents.
+  const projectPath = placement === "external" ? dirname(rootPath) : rootPath;
   const binding = digest({ state, stateRoot });
   const resources = state.proposal.resources.filter(
     ({ kind }) => kind !== "guidance",
@@ -61,9 +87,9 @@ export async function publishIntegratedInit(
     assertInit(
       record.schemaVersion === 1 &&
         record.binding === binding &&
-        record.inspection.workspacePath === projectPath &&
+        record.inspection.workspacePath === targetPath &&
         record.inspection.stateRoot === stateRoot &&
-        record.baseline.workspacePath === projectPath &&
+        record.baseline.workspacePath === targetPath &&
         Array.isArray(record.receipts) &&
         typeof record.prepared === "boolean",
       "Publication belongs to another reviewed setup.",
@@ -80,7 +106,7 @@ export async function publishIntegratedInit(
               receipt.observed.file?.contentHash === hashText(resource.content)
             : directories.has(receipt.path) &&
               receipt.observed.binding.kind === "directory"),
-        "Integrated publication receipt is invalid.",
+        "Infrastructure publication receipt is invalid.",
       );
       seen.add(receipt.path);
     }
@@ -119,7 +145,7 @@ export async function publishIntegratedInit(
               pending.intent.temporaryPath === temporaryPath(resource.path) &&
               (pending.intent.before.file?.contentHash ?? null) ===
                 (resource.kind === "artifacts" ? null : resource.beforeHash)),
-        "Integrated publication intent no longer matches its reviewed resource.",
+        "Infrastructure publication intent no longer matches its reviewed resource.",
       );
     }
     assertInit(
@@ -146,6 +172,7 @@ export async function publishIntegratedInit(
   async function guard() {
     await runtime.assertLease();
     await verifyClarifications();
+    if (placement === "external") await assertExternalControls(state, runtime);
     const after = await workspace.snapshot({ inspection: current.inspection });
     const allowed = new Set(current.receipts.map(({ path }) => path));
     if (current.pending !== null) {
@@ -178,9 +205,11 @@ export async function publishIntegratedInit(
       same(await runtime.inspectSetup(), state.inspection),
       "Reviewed setup bindings changed before publication.",
     );
-    await assertIntegratedPolicy(state, runtime);
+    await (
+      placement === "integrated" ? assertIntegratedPolicy : assertExternalPolicy
+    )(state, runtime);
     const inspection = await workspace.inspect({
-      workspacePath: projectPath,
+      workspacePath: targetPath,
       stateRoot,
       inputPaths: [
         state.inspection.taskPath,
@@ -190,7 +219,7 @@ export async function publishIntegratedInit(
       ],
       configurationPaths: state.inspection.configurationPaths,
       infrastructurePaths: state.inspection.roots.filter(
-        (path) => path !== projectPath,
+        (path) => path !== targetPath,
       ),
     });
     const baseline = await workspace.snapshot({ inspection });
@@ -263,7 +292,7 @@ export async function publishIntegratedInit(
           ? same(observed, result)
           : observed.file?.contentHash === hashText(pending.intent.content) &&
             same(observed.file.identity, result.identity),
-      "Integrated publication readback failed.",
+      "Infrastructure publication readback failed.",
     );
     await guard();
     await save({
@@ -352,6 +381,7 @@ export async function publishIntegratedInit(
     if (resource.kind === "ignore") await verifyIgnoring();
   }
   async function verifyIgnoring() {
+    if (placement === "external") return;
     for (const path of integratedIgnorePaths(state)) {
       const evidence = await runtime.inspectIgnored(path);
       assertInit(

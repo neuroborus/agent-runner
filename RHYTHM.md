@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-31
 
+- **External setup leaves the target untouched.** Init now reuses its journaled
+  prerequisite publisher for an absent canonical-path-named sibling or an
+  explicitly selected target-bound root. Only the selected infrastructure receives
+  artifacts, finalization and configuration; target content, skills and Git controls
+  remain protected inputs. Returning the exact configuration selector makes the
+  prepared resources reusable without pointers or global registration. Guidance
+  and terminal setup completion retain their later gates.
+
 - **Integrated setup publication belongs to Runner.** The unregistered init
   foundation now prepares only reviewed integrated prerequisites under existing
   leases and journaled per-resource intents, identities and verified readback.

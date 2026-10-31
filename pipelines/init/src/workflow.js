@@ -7,6 +7,10 @@ import {
   integratedFinalizationPath,
 } from "./integrated-policy.js";
 import {
+  externalFinalizationContent,
+  externalFinalizationPath,
+} from "./external-policy.js";
+import {
   assertInit,
   assertInspection,
   assertInspectionExtension,
@@ -380,6 +384,16 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
               ? {
                   path: integratedFinalizationPath(next),
                   template: integratedFinalizationContent(
+                    next,
+                    next.proposal?.checks ?? ["<actual ordered project check>"],
+                  ),
+                }
+              : null,
+          externalFinalization:
+            next.selection?.placement === "external"
+              ? {
+                  path: externalFinalizationPath(next),
+                  template: externalFinalizationContent(
                     next,
                     next.proposal?.checks ?? ["<actual ordered project check>"],
                   ),

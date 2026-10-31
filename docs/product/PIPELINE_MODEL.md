@@ -107,9 +107,10 @@ read-only. Lazy requires primary convergence and a distinct clean confirmation;
 independent requires separate review; combined requires both. Accepted proposals
 are internal evidence and do not claim published or usable infrastructure. See
 the [init specification](../../pipelines/init/docs/SPEC.md).
-Its internal Runner publisher can prepare reviewed integrated prerequisites with
-identity-bound receipts. Agents remain read-only; guidance and public completion
-are still deferred. Setup grants no staging, commit or pipeline-start authority.
+Its internal Runner publisher can prepare reviewed integrated or external
+prerequisites with identity-bound receipts. Agents remain read-only; guidance and
+public completion are still deferred. Setup grants no staging, commit or
+pipeline-start authority.
 
 `independent` is the default and recommended mode. A primary role produces the
 work and a separately configured Reviewer supplies genuine semantic review;

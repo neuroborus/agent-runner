@@ -465,13 +465,13 @@ promise a distinct provider dashboard category.
 ## Pipeline Ownership
 
 The unregistered `pipelines/init/` workspace owns read-only infrastructure
-proposals and Runner-owned integrated prerequisite publication. It consumes
-injected public configuration and workspace capabilities, binding actual
+proposals and Runner-owned integrated/external prerequisite publication. It
+consumes injected public configuration and workspace capabilities, binding actual
 instructions/checks, selected roots, resource
 identities and live configuration exclusions. Its explicit reservation/result
 agent transitions stop at `PROPOSAL_ACCEPTED`; they expose no runner dispatch.
-The separate `publishIntegratedInit` effect requires those approvals, unchanged
-setup bindings and the existing exclusive leases. The clarification capability
+The separate `publishIntegratedInit` / `publishExternalInit` effects require those
+approvals, unchanged setup bindings and the existing exclusive leases. The clarification capability
 verifies the frozen transcript before baseline recording and throughout publication.
 Workspace-owned infrastructure
 methods reuse confined artifact replacement and private-state directory allocation;
@@ -480,13 +480,24 @@ Ignore protection precedes artifacts/finalization and configuration. Existing sk
 and unrelated settings survive; exact derived `RUNNER.md` selections adapt manual
 handoff rules to pipeline effect ownership. Finalization selection and proposal
 validation preserve bare Git metadata protection even when its root coincides
-with a conventional provider directory. Guidance remains deferred. Placement
-resolves independently of review mode during bounded
-clarification and freezes with the transcript hash. Lazy requires primary
+with a conventional provider directory. External publication reuses the same
+publisher with exact selected-root confinement, including journaled allocation
+of a missing sibling root. Canonical target-path hashing distinguishes default
+sibling names; full target-bound configuration protection is still required to
+reuse existing roots. External policy permits only configured artifacts,
+`finalization/SKILL.md` and configuration, returning the reusable exact selector.
+Controls-only workspace inspection rejects external destinations inside Git or
+provider storage before publication journaling and throughout recovery, including
+canonical ancestor alias targets omitted from general workspace snapshots.
+Existing target finalization skills are referenced without copying or editing; target content
+and Git controls remain snapshot-protected with no ignore or pointer writes.
+The caller holds both canonical target exclusion and selected-infrastructure
+leases. Guidance remains deferred. Placement resolves independently of review
+mode during bounded clarification and freezes with the transcript hash. Lazy requires primary
 check/fix plus distinct confirmation, independent requires separate review, and
 combined requires both over the same proposal. Revisions invalidate approvals.
 The [init specification](../pipelines/init/docs/SPEC.md) owns this contract.
-Registration awaits both placements, guidance publication and complete setup
+Registration awaits guidance publication and complete setup
 verification.
 
 Each pipeline owns its input interpretation, roles, configuration settings and

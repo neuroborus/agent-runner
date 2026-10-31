@@ -64,6 +64,16 @@ accept Markdown procedures such as `finalization/SKILL.md` or an adjacent
 preserves the original skill and never rewrites the procedure. Frozen bytes,
 identity and ancestry cannot be replaced or redirected on resume.
 
+The unregistered init foundation can prepare reviewed prerequisites in either
+placement through Runner-owned effects. External preparation creates a bound
+sibling with a canonical-path hash, or reuses an explicitly selected bound root
+at its existing paths. It returns an exact configuration selector, keeps all
+target content and Git metadata unchanged, and references existing project
+finalization skills from an external finalization procedure. No target pointer,
+ignore edit or global registration is needed. Guidance, terminal setup verification and
+public CLI/MCP init dispatch remain pending; prepared prerequisites are not a
+setup-completion receipt. See the [init specification](../../pipelines/init/docs/SPEC.md).
+
 Only runner-root configuration accepts `clientAttribution`, an exact
 `{ name, title }` provider-visible identity. It defaults to
 `agent_runner` / `Agent Runner`; project configuration, CLI, MCP, pipelines,
