@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **External installation acceptance consumes the inspected archive.** A
+  separate slow suite installs the exact candidate offline in a private external
+  prefix and verifies executable metadata, bundled private imports, real CLI/MCP
+  discovery and delayed pinned resources after outer replacement. Sanitized user
+  locations, bounded child lifetimes and owned fixture teardown keep smoke work
+  separate from controllers and personal settings. README installation and
+  registration server vectors are exercised without invoking native clients.
+  Local acceptance grants no publication or additional platform/provider proof;
+  explicit installation remains separate from one-time client registration.
+
 - **Runtime selection is serialized with positively owned admission.** Existing
   state actions, leases and mutation boundaries track pinned CLI/MCP users and
   gate new runs and resumes. Activation defers while another payload is in use;

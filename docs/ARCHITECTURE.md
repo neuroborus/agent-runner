@@ -789,6 +789,19 @@ so publication is fail-closed. Local assembly is distinct from external-install
 acceptance and adds no native-platform support. Ordinary development continues
 through `npm ci` and `npm link`; there is no transpilation or general build system.
 
+External-install acceptance is owned separately by
+`test/package-install.slow.test.js`. It consumes the inspected tarball through
+offline, script-free npm installation into a fresh private prefix, compares the
+installed manifest and files, and launches the real installed CLI and STDIO MCP
+server from an unrelated empty directory. Sanitized user locations and bounded,
+awaited child lifetimes keep all effects in fixture storage. Private workspace
+imports use actual bundled directories; immutable startup, delayed guide reads
+after outer replacement and EOF admission retirement are exercised together.
+README install commands and registration server vectors are inputs to this
+acceptance; native client registration remains a separate operator action.
+No source/dependency link, controller, native client configuration or registry
+publication is changed. See [test ownership](TESTING.md#slow-gate).
+
 ## Immutable application startup
 
 `src/runtime/index.js` is the public startup and immutable-payload boundary.

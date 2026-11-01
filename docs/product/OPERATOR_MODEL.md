@@ -23,6 +23,14 @@ Local archive acceptance proves neither public availability nor clean external
 installation or new native-platform support. Assembly changes no global/native
 links and activates no controller. See [local artifacts](../../README.md#local-application-artifacts).
 
+The separate package-install gate verifies the exact local archive through an
+offline install in a disposable external prefix, installed CLI/MCP discovery,
+immutable resources and complete teardown. Installation and one-time client
+registration are distinct; clients launch the selected `agent-run mcp` and
+require a restart after registration or package changes. This local gate neither
+performs personal registration nor proves publication, live-provider behavior or
+additional native platforms. See [isolated installation](../../README.md#isolated-candidate-installation).
+
 Installed executables verify and select a complete user-owned read-only payload
 before loading application code. A running CLI/MCP process and its detached
 continuations retain that payload's code, dependencies and resources after outer

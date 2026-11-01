@@ -191,6 +191,47 @@ does not establish public availability or additional execution-platform support.
 Clean external installation acceptance is a separate package-install gate;
 assembly never changes global/native links or activates another controller.
 
+### Isolated candidate installation
+
+To inspect a local installation without linking the checkout, use the exact
+tarball reported by assembly and an unused private prefix outside the checkout:
+
+```bash
+candidate="/absolute/path/to/inspected-candidate.tgz"
+prefix="/absolute/path/to/new/private-prefix"
+mkdir -m 700 "$prefix"
+npm install --global --prefix "$prefix" --offline --ignore-scripts --no-audit --no-fund "$candidate"
+"$prefix/bin/agent-run" --help
+codex mcp add agent_runner -- "$prefix/bin/agent-run" mcp
+claude mcp add --transport stdio --scope user agent_runner -- "$prefix/bin/agent-run" mcp
+```
+
+The global npm layout is confined to that prefix; this does not change the
+active Node installation or an existing `agent-run` link. The candidate bundles
+its production dependencies, so installation requires no registry download or
+lifecycle script. Use an executable private filesystem and the documented
+Node.js/native prerequisites. This example uses the current Linux layout;
+successful local validation does not establish another platform's acceptance.
+
+Installation and client registration are separate actions. Run only the
+registration command for your client, once for the chosen executable, and
+restart the client afterward. The client launches that executable with `mcp`;
+installing package bytes alone does not register or restart a client. Existing
+settings and durable runs retain their user-global locations. For disposable
+smoke work, give the process private HOME, XDG config/state/data and temporary
+directories rather than using personal settings or an active controller's state.
+
+The package-install slow suite installs these inspected bytes in a disposable
+prefix, runs CLI and MCP discovery, and exercises the server vectors from both
+registration examples. It does not invoke native clients or alter their
+configuration. It verifies immutable startup and complete resources after outer
+replacement, awaits its owned processes and removes its fixture storage.
+Failed or unrun installation coverage remains outstanding. Packing, local
+installation and protocol smoke do not authorize publication, update another
+controller, or establish live-provider/native-platform acceptance. The checkout
+and `npm link` instructions above remain the development workflow; npm registry
+installation is not a Quickstart while public identity/publication is unapproved.
+
 ### Pinned application payloads
 
 The executable enters a standard-library bootstrap before importing the
