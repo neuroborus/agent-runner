@@ -772,7 +772,7 @@ are outside the allowlists. The source workspace topology and links are untouche
 The generated release manifest records source-lock SHA-256, dependency identities,
 and every payload file's path, size, executable mode and SHA-256. Its own exact
 bytes and ordinary file mode are checked separately. `packRelease` invokes local offline npm packing with
-disabled lifecycle scripts, private HOME/cache and separate empty user/global
+disabled lifecycle scripts, private HOME/cache (including Node's compile cache) and separate empty user/global
 configuration. Size-checked stdout uses an owned temporary file; stderr is discarded. The standard-
 library `release-archive.js` verifier reads the actual gzip/tar bytes (bounded to
 64 MiB expanded), accepts only regular file records and supported portable
@@ -788,6 +788,69 @@ owner/scope, license, repository links and publisher configuration remain absent
 so publication is fail-closed. Local assembly is distinct from external-install
 acceptance and adds no native-platform support. Ordinary development continues
 through `npm ci` and `npm link`; there is no transpilation or general build system.
+
+## Immutable application startup
+
+`src/runtime/index.js` is the public startup and immutable-payload boundary.
+The thin bin entry imports only this standard-library capability. Private
+`contract.js` owns bounded manifest and location contracts, `files.js` owns
+descriptor-bound reads and ancestor bindings, `payload.js` owns complete tree
+inspection and atomic preparation, and `bootstrap.js` selects the root before
+dynamically importing its public `src/index.js`.
+
+An installed package requires the assembler's manifest, native-ESM metadata,
+Node.js `>=24 <25`, the executable entry, runtime bootstrap, complete operator
+guide and complete declared production dependency graph. All bootstrap modules
+are mandatory manifest entries. Every declared file's
+bytes, size and executable status must match; unlisted files/directories, links,
+hard links, missing dependencies and changing inputs fail closed. The manifest
+is limited to 2 MiB, 10,000 files and 64 MiB of payload bytes. Its SHA-256 is the
+payload identity. The optional outer `.agent-runner.json` is excluded from
+capture and remains a configuration-owned mutable legacy fallback.
+
+Linux runtime storage uses XDG data/home fallback, with Application Support and
+LOCALAPPDATA location mappings as documented in the README. Creation pins every
+real ancestor through directory descriptors, verifies private user ownership,
+and uses only a fresh preparation beside the destination.
+The storage root and immediate payload container must retain private user-owned
+`0700` permissions whenever a stored payload is inspected or launched.
+File and directory data are synchronized before publication. Completed files become `0400` or
+`0500`, directories become `0500`, and the complete tree is reverified before
+publication. Each fresh tree retains its unique
+`payloads/.payload-<manifest-hash>-<UUID>` location. Publication atomically creates
+an exclusive relative symbolic reference at `payloads/<manifest-hash>`; it cannot
+replace an arriving entry, including an empty directory. Bootstrap reads that
+reference without traversing it, accepts only a matching sibling name, and
+verifies its unchanged identity and the complete unaliased tree. Pinned roots
+and executables use the physical tree path, never the reference. Existing
+payloads are fully verified and never rewritten. Concurrent complete
+preparations converge on the same published tree. Interrupted or redundant
+preparation directories remain separate; bootstrap neither adopts nor deletes
+them, even when they contain a complete sealed tree. There is no cleanup daemon.
+Preparation retains its directory binding and verifies each created entry before
+sealing through its matching descriptor; substituted paths cannot redirect
+permission changes.
+
+Only a checkout with workspace metadata and a real Git control entry is
+development-managed. A present release manifest always selects installed
+verification, even beside checkout metadata. Linked checkouts resolve to that source root. A missing
+installed manifest cannot silently become development mode. The bootstrap freezes
+one non-writable process context before application imports; duplicate module
+graphs share that context through a process-local symbol. It carries the pinned
+root/executable, original installation root, payload ID and Node identity, never
+settings or run state. Configuration uses the original installation root only for
+its existing absent-user-file legacy fallback. Direct source API imports do not
+establish a bootstrapped process.
+
+Every later application import and resource URL is rooted in the selected tree.
+The MCP launcher rechecks its complete payload plus Node path, version and file
+identity before spawning the pinned executable. Linux also compares the selected
+Node file to the running `/proc/self/exe` identity. A bounded one-use internal
+environment binding carries this tuple to the child, which verifies it before
+application imports and removes it before provider/validation children can
+inherit it. The existing runtime-compatibility token, leased revision admission,
+durable ownership and same-key recovery remain separate mandatory gates.
+Preparation grants no registry, update activation, migration or resume authority.
 
 ## Runner Configuration
 
@@ -4425,6 +4488,12 @@ version-skew error; `state.json`, the journal, leases, the durable run, and the
 incomplete idempotency intent remain exactly at their pre-dispatch state for an
 exact-key retry after the MCP process is restarted. Client disconnect and wait
 cancellation still affect only the client-side operation.
+
+For a bootstrapped installation this protocol runs inside the already pinned
+payload. Payload and Node-identity admission happen before child application
+imports; compatibility and dispatch admission still happen before run effects.
+Replacing the outer npm path cannot redirect either the current server or its
+detached continuation to another application tree.
 
 ## Clarification Lifecycle
 

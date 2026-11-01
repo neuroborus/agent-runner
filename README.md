@@ -191,6 +191,37 @@ does not establish public availability or additional execution-platform support.
 Clean external installation acceptance is a separate package-install gate;
 assembly never changes global/native links or activates another controller.
 
+### Pinned application payloads
+
+The executable enters a standard-library bootstrap before importing the
+application. An assembled installation is verified against its complete release
+manifest and materialized into a user-owned read-only payload. Application code,
+bundled dependencies, delayed imports and runtime resources then resolve from
+that payload, so replacing the outer package cannot change a running process.
+
+Payload storage uses `$XDG_DATA_HOME/agent-runner/runtime` on Linux, falling back
+to `$HOME/.local/share/agent-runner/runtime`; macOS uses
+`~/Library/Application Support/agent-runner/runtime`, and Windows uses
+`%LOCALAPPDATA%\agent-runner\runtime`. These location mappings do not extend
+execution-platform acceptance. Settings, credentials and durable run state stay
+outside payloads. The legacy configuration fallback retains the original outer
+installation path; frozen run configuration is never resolved again.
+
+Preparation publishes only a complete verified tree through an exclusive
+reference, preserving any destination that appears concurrently. Processes use
+the verified physical tree path. Partial preparations remain separate and are
+never selected or reused. Existing damaged payloads fail closed instead of being
+overwritten or repaired. MCP detached
+continuations verify the same payload and exact Node executable identity before
+launch, then verify the binding again before application imports. They retain
+the existing compatibility and dispatch-admission gates.
+
+Git checkouts, including `npm link` development, remain development-managed and
+create no payload storage. Application startup through the executable owns
+pinning; direct source API imports do not bootstrap an installed process.
+Payload preparation performs no package installation, controller activation,
+update selection, run migration or implicit resume.
+
 ## Pipelines
 
 | Pipeline         | Purpose                                                                                         | Specification                                                                    |
@@ -1900,6 +1931,12 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── cli.js
+│   ├── runtime/
+│   │   ├── index.js
+│   │   ├── bootstrap.js
+│   │   ├── contract.js
+│   │   ├── files.js
+│   │   └── payload.js
 │   ├── config/
 │   │   ├── files.js
 │   │   ├── index.js

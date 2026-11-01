@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { readProcessIdentity } from "../agents/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../pipeline-registry.js";
+import { prepareRuntimeLaunch, RUNTIME_PAYLOAD_ENV } from "../runtime/index.js";
 import { normalizeRecoveryDispatch, RunStoreError } from "../state/index.js";
 
 const EXECUTABLE_PATH = fileURLToPath(
@@ -79,7 +80,7 @@ export function createDetachedLauncher({
   executablePath = EXECUTABLE_PATH,
   environment = process.env,
 } = {}) {
-  return (
+  return async (
     runIdValue,
     action = null,
     {
@@ -89,44 +90,41 @@ export function createDetachedLauncher({
       dispatch = null,
       onSpawn,
     } = {},
-  ) =>
-    new Promise((resolvePromise, rejectPromise) => {
-      if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
-        rejectPromise(
-          new RunStoreError(
-            "Detached continuation runtime does not match this launcher; " +
-              "restart the Agent Runner MCP server and retry.",
-            { code: "ERR_RUNTIME_VERSION_SKEW" },
-          ),
-        );
-        return;
-      }
-      if (
-        stopCheckpointRevision !== null &&
-        (!Number.isSafeInteger(stopCheckpointRevision) ||
-          stopCheckpointRevision < 1 ||
-          action !== null)
-      ) {
-        rejectPromise(
-          new RunStoreError("Detached stop checkpoint is invalid.", {
-            code: "ERR_INVALID_RUNNER_INPUT",
-          }),
-        );
-        return;
-      }
-      if (dispatch !== null) normalizeRecoveryDispatch(dispatch);
+  ) => {
+    if (expectedRuntimeCompatibility !== detachedCompatibilityToken) {
+      throw new RunStoreError(
+        "Detached continuation runtime does not match this launcher; " +
+          "restart the Agent Runner MCP server and retry.",
+        { code: "ERR_RUNTIME_VERSION_SKEW" },
+      );
+    }
+    if (
+      stopCheckpointRevision !== null &&
+      (!Number.isSafeInteger(stopCheckpointRevision) ||
+        stopCheckpointRevision < 1 ||
+        action !== null)
+    ) {
+      throw new RunStoreError("Detached stop checkpoint is invalid.", {
+        code: "ERR_INVALID_RUNNER_INPUT",
+      });
+    }
+    if (dispatch !== null) normalizeRecoveryDispatch(dispatch);
+    const runtime = await prepareRuntimeLaunch(executablePath);
+    return new Promise((resolvePromise, rejectPromise) => {
       const {
         [DISPATCH_ENV]: _ignoredDispatch,
         [DETACHED_STOP_CHECKPOINT_ENV]: _ignoredStopCheckpoint,
+        [RUNTIME_PAYLOAD_ENV]: _ignoredPayload,
         ...childEnvironment
       } = environment;
       const child = spawnProcess(
-        process.execPath,
-        detachedArguments(executablePath, runIdValue, action),
+        runtime.nodePath,
+        detachedArguments(runtime.executablePath, runIdValue, action),
         {
           detached: true,
           env: {
             ...childEnvironment,
+            ...runtime.environment,
             ...(dispatch === null ? {} : { [DISPATCH_ENV]: "1" }),
             [DETACHED_RUNTIME_COMPATIBILITY_ENV]: expectedRuntimeCompatibility,
             ...(stopCheckpointRevision === null
@@ -214,4 +212,5 @@ export function createDetachedLauncher({
         }
       });
     });
+  };
 }

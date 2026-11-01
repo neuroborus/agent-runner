@@ -11,13 +11,30 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `test/runtime-payload.test.js` owns complete manifest/dependency/resource
+inspection, read-only modes, isolated storage, interrupted and concurrent
+preparation, substitution and drift rejection, delayed imports and development
+checkout behavior. Exclusive publication covers an empty destination arriving
+after the last absence check, preserving its identity, permissions and contents.
+Unpublished sealed trees and references outside their sibling namespace are
+rejected. Coverage also rejects missing bootstrap modules and lost private
+storage permissions on existing payloads. It uses neutral constructed packages and never touches a live
+controller. `test/runtime-pinning.slow.test.js` owns actual pre-import startup,
+delayed resource/dependency reads and the real detached launcher after outer
+replacement, plus launch rejection after payload drift. Its synthetic application
+uses no providers, run store, native links, package installation or activation.
+Runtime fixture teardown verifies its freshly created root identity, restores
+write/search access only to owned fixture directories through descriptors, and
+never follows links or changes the enclosing temporary-storage permissions.
+Read-only fixture files need no permission change for removal.
+
 Fast `test/release-assembly.test.js` owns isolated lock-closure assembly, real
 private workspaces, nested dependencies, executable modes, allowlist exclusions,
 metadata/resource/link rejection and no-overwrite output behavior. Synthetic tar
 fixtures prove archive byte/mode identity, path confinement, extended-header
 validation and link/extra-file rejection without npm or processes. `test/release-pack.slow.test.js` owns actual
 offline npm packing and exact archive inspection of the current application,
-standalone imports and operator-guide completeness. It performs no installation,
+complete immutable preparation, pinned standalone imports and operator-guide completeness. It performs no installation,
 provider call, global link change or controller activation. Clean external
 installation coverage remains a separate suite introduced by its owning change.
 
@@ -365,19 +382,20 @@ all test files; neither silently excludes a failed test. Use
 pass multiple paths for one affected batch; selected files retain the same
 bounded runner and per-file timing output.
 
-| Suite                                                                     | Distinct observable guarantee                                                                                     | Run when changing                                                                                                                       |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `test/release-pack.slow.test.js`                                          | Actual npm tarball matches the complete assembled production application, real dependencies, modes and resources  | Release assembly, file allowlists, lock closure, package metadata or runtime resources                                                  |
-| `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff            | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                               |
-| `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced            | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                        |
-| `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts             | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention        |
-| `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order           | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring |
-| `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content           | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume |
-| `test/runner-effects.slow.test.js`                                        | Commit effects settle exactly once across interruption, verification, and deferred checkpoints                    | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, or consumed-effect recovery                |
-| `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency           |
-| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases           | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases  |
-| `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                 | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events |
-| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                           | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                      |
+| Suite                                                                     | Distinct observable guarantee                                                                                                       | Run when changing                                                                                                                       |
+| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/runtime-pinning.slow.test.js`                                       | Running and detached synthetic applications retain the complete pinned payload after outer replacement; drift blocks another launch | Startup/bootstrap, runtime manifests or storage, delayed resources, Node identity, detached launch                                      |
+| `test/release-pack.slow.test.js`                                          | Actual npm tarball matches the complete assembled production application, real dependencies, modes and resources                    | Release assembly, file allowlists, lock closure, package metadata or runtime resources                                                  |
+| `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff                              | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                               |
+| `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced                              | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                        |
+| `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts                               | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention        |
+| `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order                             | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring |
+| `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content                             | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume |
+| `test/runner-effects.slow.test.js`                                        | Commit effects settle exactly once across interruption, verification, and deferred checkpoints                                      | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, or consumed-effect recovery                |
+| `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                   | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency           |
+| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                             | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases  |
+| `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                   | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events |
+| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                                             | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                      |
 
 Run the affected slow coverage once before handing off a change to the listed
 contracts. After the ordinary `npm run check` gate, run the complete

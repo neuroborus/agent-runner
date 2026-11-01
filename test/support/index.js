@@ -28,3 +28,4 @@ export {
 } from "./structured-results.js";
 
 export { customExecutionFixture } from "./custom-execution.js";
+export { runtimeFixture, runtimeFixtureDirectory } from "./runtime.js";

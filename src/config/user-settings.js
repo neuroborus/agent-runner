@@ -24,6 +24,7 @@ import {
 import { fileURLToPath } from "node:url";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
+import { getRuntimeContext } from "../runtime/index.js";
 
 import { readConfinedConfiguration } from "./files.js";
 import {
@@ -90,7 +91,9 @@ export function resolveUserConfigurationPath({
 
 function locations(options) {
   const installationPath = absolutePath(
-    options.installationPath ?? INSTALLATION_PATH,
+    options.installationPath ??
+      getRuntimeContext()?.installationPath ??
+      INSTALLATION_PATH,
   );
   const userPath = resolveUserConfigurationPath(options);
   const local = relative(installationPath, userPath);

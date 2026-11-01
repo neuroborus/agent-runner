@@ -381,6 +381,7 @@ export async function packRelease(release) {
           PATH: process.env.PATH,
           HOME: join(release.outputPath, "home"),
           TMPDIR: process.env.TMPDIR,
+          NODE_COMPILE_CACHE: join(release.outputPath, "cache", "node"),
           npm_config_cache: join(release.outputPath, "cache"),
           npm_config_userconfig: userConfig,
           npm_config_globalconfig: globalConfig,

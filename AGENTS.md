@@ -247,6 +247,8 @@ All pipelines additionally require:
 | --------------------------------- | -------------------------------------------------------------------- |
 | `bin/agent-run.js`                | Thin executable entry point                                          |
 | `src/index.js`                    | Public root source boundary                                          |
+| `src/runtime/index.js`            | Public immutable-payload startup and detached executable boundary    |
+| `src/runtime/`                    | Private manifest, confined preparation, and pinned process context   |
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                |
 | `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes        |
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                        |

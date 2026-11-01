@@ -23,6 +23,15 @@ Local archive acceptance proves neither public availability nor clean external
 installation or new native-platform support. Assembly changes no global/native
 links and activates no controller. See [local artifacts](../../README.md#local-application-artifacts).
 
+Installed executables verify and select a complete user-owned read-only payload
+before loading application code. A running CLI/MCP process and its detached
+continuations retain that payload's code, dependencies and resources after outer
+package replacement. Changed or incomplete payloads and changed Node executable
+identity block launch; bootstrap does not repair an existing payload. Interrupted
+preparations are not active installations. This startup contract grants no update
+activation, state migration or automatic resume. Linked Git checkouts remain
+development-managed. See [pinned payloads](../../README.md#pinned-application-payloads).
+
 ## Configuration
 
 Global user settings live outside the application installation, using the

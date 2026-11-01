@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Installed processes keep one complete application payload.** The executable
+  verifies and materializes the full manifest before application imports, then
+  freezes a process context rooted in user-owned read-only storage. Delayed reads
+  and detached continuations retain the same code, dependencies and guide after
+  outer-package replacement. Complete atomic publication leaves interrupted
+  preparations inactive and refuses to repair existing drift. An exclusive
+  publication reference selects a sealed physical tree without replacing any
+  arriving destination; processes retain that physical path. Node executable
+  identity and the existing dispatch/compatibility gates bind continuations;
+  configuration keeps its original external fallback and frozen run snapshots.
+  Linked checkouts remain development-managed. This is startup pinning, with no
+  update activation, controller promotion or implicit resume authority.
+  Preparation seals only matching owned descriptors. Feature fixtures restore
+  access only to their owned directories for teardown, preserving read-only
+  files and enclosing storage permissions.
+
 - **Local release candidates contain the complete production application.** A
   narrow assembler materializes private workspaces and the locked dependency
   closure through explicit file allowlists, preserving native ESM and public
