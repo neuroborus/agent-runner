@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Candidate preparation records validated bytes without activating them.**
+  The single updater freezes exact official metadata and integrity under the
+  state-owned action lease before installation. Fresh private attempts retain
+  descriptor ownership; complete archive and immutable payload verification,
+  compatibility and isolated CLI/MCP smoke precede the receipt. Retry reconciles
+  complete owned effects, quarantines partial attempts and blocks uncertain
+  process/storage ownership. The previous usable payload and all run/settings
+  authority remain separate. Publication and transport update entry points stay
+  disabled; preparation grants no activation, migration, resume or Git effects.
+
 - **Update checks report compatibility without acquiring update authority.** A
   root-owned on-demand capability shares one bundled immutable official identity
   policy with release tooling. It distinguishes installed and pinned running

@@ -52,6 +52,18 @@ Checking grants no installation, migration or resume authority. Automatic
 behavior is disabled, model/status/activity reads never query the registry, and
 CLI/MCP exposure remains separate. Future preferences must remain user-global.
 
+The same root capability can prepare an exact release candidate under a durable
+operation UUID. Official approval remains mandatory. Exact registry integrity,
+complete archive/resources, installed immutable payload and runtime/state
+compatibility must pass before isolated CLI/MCP smoke and a validated receipt.
+Owned private storage and process identities survive interruption; retry proves
+retirement and reconciles completed installation before any fresh attempt.
+Unknown ownership or substituted storage remains blocking. Failed attempts never
+replace the previous usable payload, and smoke storage is removed only after
+its owned processes retire. Preparation changes no global/native link or active
+selector and cannot migrate settings, resume a run or acquire Git authority.
+Transport exposure and activation remain separate from this capability.
+
 Installed executables verify and select a complete user-owned read-only payload
 before loading application code. A running CLI/MCP process and its detached
 continuations retain that payload's code, dependencies and resources after outer

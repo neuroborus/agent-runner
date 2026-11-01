@@ -86,6 +86,8 @@ export async function inspectRuntimeInstallation({
     );
     return {
       developmentManaged: true,
+      rootPath,
+      installationPath: rootPath,
       runningMetadata: metadata,
       installedMetadata: metadata,
       nodeVersion: process.version,
@@ -120,6 +122,8 @@ export async function inspectRuntimeInstallation({
   }
   return {
     developmentManaged: false,
+    rootPath,
+    installationPath: context.installationPath,
     runningMetadata: JSON.parse(
       running.captured.get("package.json").bytes.toString(),
     ),

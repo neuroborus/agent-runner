@@ -180,6 +180,20 @@ write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
 
+Update-candidate preparation uses the same bounded action intents and recoverable
+leases without creating or advancing a run. Exact official metadata/integrity,
+private directory identities and pre-effect process proof bind each attempt.
+Native commands see a read-only filesystem with only their descriptor-bound
+candidate/smoke storage writable; offline install and smoke have no network.
+Archive and pinned payload mounts remain read-only. Uncertain owned processes
+or changed storage block recovery without signaling recorded PIDs or deleting
+unproved trees. Complete installed bytes are reconciled before retry; failed
+partial attempts remain separate and bounded. No existing payload, target
+project, settings, run, controller selection or global link is overwritten.
+Project content, pipeline roles and findings grant no preparation authority.
+Candidate attempts are separate from workflow correction accounting and never
+renew a consumed execution, fix or stagnation allowance.
+
 Journal reuse requires a certificate of the originally validated run/revision
 prefix, ordered contiguous segment namespace, file identities and exact byte
 ranges. Fresh consumed-byte digests and stable directory identity and file

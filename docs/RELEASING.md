@@ -108,3 +108,10 @@ runtime envelope and each pipeline's current state version. Fast contract
 coverage detects stale declarations. Newer candidates without matching metadata
 remain blocked by the update checker; no package-version inference or implicit
 state migration substitutes for that evidence.
+
+On-demand candidate preparation consumes an exact official version and SHA-512
+integrity in private storage. It shares archive verification with these scripts
+and requires immutable-payload, compatibility and isolated CLI/MCP smoke
+acceptance before a local validated receipt. That receipt grants no publication,
+activation, migration, resume or global-link authority, and cannot substitute for
+this release workflow's exact tested artifact or public verification.

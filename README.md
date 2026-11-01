@@ -214,6 +214,14 @@ an exact explicit version. Linked checkouts stay development-managed. Checking
 changes no installation or saved run, and automatic behavior stays disabled.
 CLI/MCP integration is separate; see the [operator contract](docs/product/OPERATOR_MODEL.md).
 
+The same capability can prepare an exact candidate with a caller-supplied
+operation UUID. Approved registry metadata and SHA-512 integrity bind a fresh
+private prefix; complete archive, payload, compatibility and isolated CLI/MCP
+smoke checks precede its validated receipt. Durable intents retain ownership
+and reconcile interrupted installation before retry. Failed attempts preserve
+the current payload, settings and runs. Preparation activates nothing, changes
+no global link and remains blocked by the current unapproved identity.
+
 ### Isolated candidate installation
 
 To inspect a local installation without linking the checkout, use the exact
@@ -2009,10 +2017,14 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── index.js
 │   │   ├── bootstrap.js
 │   │   ├── admission.js
+│   │   ├── archive.js
+│   │   ├── candidate.js
 │   │   ├── contract.js
 │   │   ├── files.js
 │   │   └── payload.js
 │   ├── config/
+│   │   ├── release/
+│   │   │   └── index.js
 │   │   ├── files.js
 │   │   ├── index.js
 │   │   ├── parsing.js
@@ -2059,6 +2071,15 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── execution.js
 │   │   ├── index.js
 │   │   └── service.js
+│   ├── update/
+│   │   ├── index.js
+│   │   ├── service.js
+│   │   ├── compatibility.js
+│   │   ├── registry.js
+│   │   ├── preparation.js
+│   │   ├── candidate-contract.js
+│   │   ├── process.js
+│   │   └── storage.js
 │   └── workspace/
 │       ├── controls.js
 │       ├── index.js

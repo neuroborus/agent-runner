@@ -70,6 +70,23 @@ Source package compatibility declarations are checked against their owning
 configuration, state and pipeline contracts. Existing slow/package requirements
 remain unchanged.
 
+Fast `test/update-candidate.test.js` owns exact candidate selection, archive
+integrity/resources, installed-payload verification, interrupted/partial install
+reconciliation, permission/smoke failures and substituted-storage preservation.
+Two focused durable-action cases retain actual leased receipts and ownership
+across interrupted effects; other policy cases use lightweight action effects.
+Neutral confined payloads prove previous-payload retention and owned smoke
+teardown. npm/registry/smoke effects are injected, and a native-vector case
+asserts the filesystem mounts, private PID namespace and network policy without
+launching a process. A controlled clock proves retirement after command deadline
+expiry; intent-write failures retain redacted results and clean positively owned
+smoke allocations. Recovery coverage rejects token-owned uncertainty and ignores
+unrelated reused sessions even after their new leader exits. This is not
+native-platform acceptance.
+Existing package-install acceptance retains real CLI/MCP protocol and offline
+installation ownership; its separately assigned exact invocation remains
+required alongside complete slow coverage.
+
 `test/package-install.slow.test.js` owns actual offline installation of the exact
 inspected candidate tarball into a new private prefix outside the checkout. It
 checks installed bytes/modes, Node metadata, real private workspace imports,
