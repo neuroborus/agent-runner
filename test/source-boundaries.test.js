@@ -327,7 +327,10 @@ test("project configuration protection stays behind the config index and runner"
         resolve(dirname(importer), specifier) === configFiles,
     )
     .map(({ importer }) => relative(ROOT, importer));
-  assert.deepEqual(consumers, ["src/config/index.js"]);
+  assert.deepEqual(consumers.sort(), [
+    "src/config/index.js",
+    "src/config/user-settings.js",
+  ]);
 
   const runnerSource = await readFile(
     join(ROOT, "src/runner/service.js"),

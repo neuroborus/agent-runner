@@ -13,6 +13,21 @@ validate, rewrite, discard, or commit resumable work manually.
 
 ## Configuration
 
+Global user settings live outside the application installation, using the
+platform paths listed in [README configuration](../../README.md#configuration).
+The global layer is called runner-root configuration below. New reads prefer
+the user file and use the legacy installation-local `.agent-runner.json` only
+when it is absent; invalid or unreadable user files never trigger fallback.
+No automatic migration or configuration write occurs. Explicit managing-operator
+`agent-run config migrate --from <legacy-file>` validates and atomically copies
+exact bytes to an absent destination before ordinary resolution. Equal bytes
+are a no-op; conflicts never merge, overwrite or delete. Sources are retained.
+Unsafe interruption remnants stay preserved and block loading or migration.
+Settings survive upgrades and linked checkouts, while credentials and durable
+state remain outside payloads. This changes neither project precedence nor
+global-only authority and never reloads or migrates an active run's frozen
+configuration. Location conventions do not imply new execution-platform support.
+
 Authoring owns `planKind` (`commit` by default, or explicitly `custom`), optional
 `criteriaPath` and source/output arrays. CLI exposes `--plan-kind`, `--criteria`,
 repeatable `--source`/`--output`; MCP uses `planKind`, `criteriaPath`,

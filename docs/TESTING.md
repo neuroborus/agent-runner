@@ -11,6 +11,15 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `test/config/user-settings.test.js` owns deterministic user-location mapping,
+legacy fallback, invalid/unsafe path rejection, private exact-byte migration,
+permissions, conflict/no-op behavior, competing publication, interruption remnants and settings survival
+across replaced installations and development links. It uses isolated settings
+and actual confined filesystem effects, never personal configuration or a live
+controller. Existing configuration tests retain project precedence and authority;
+runner configuration tests retain frozen-resume coverage. CLI tests own early
+migration dispatch and argument validation without creating a runner.
+
 Fast `pipelines/audit/test/report.test.js` owns the pure audit report contract:
 strict evidence/examples and classification values, shared-cause consolidation,
 stable severity/ID ordering, optional recommendations, separate uncertainty,

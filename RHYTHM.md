@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Global settings survive installation replacement.** Configuration now prefers
+  the platform user location, retaining installation-local settings only as an
+  absent-user-file fallback. Explicit `config migrate --from` validates and
+  publishes exact bytes with private, descriptor-bound no-replacement effects;
+  equal bytes are a no-op and conflicts retain both files. This preserves project
+  precedence and global-only trust without changing schemas or reloading frozen
+  runs. Location mapping adds no execution-platform acceptance; credentials and
+  durable state remain separate from payloads.
+
 - **Pipeline diagrams follow each workflow's actual completion gates.** README
   now places editable Mermaid flows beside the five pipeline explanations,
   sharing the coding candidate gate while separating their terminal products.

@@ -751,12 +751,39 @@ native generation control; missing usage and incomplete accounting stay unknown.
 
 ## Runner Configuration
 
-The root runtime reads an optional `.agent-runner.json` from the Agent Runner
-repository root, beside its tracked `.agent-runner.example.json`. That file is
-the only source of trusted profile implementations. It may also supply runner
-defaults for backends, execution preferences, pipeline limits, and the
-repository-relative artifact root. The loader never rewrites it, and the local
-runtime file remains ignored and untracked.
+The root configuration capability owns global user settings behind
+`src/config/index.js`. Private `user-settings.js` resolves Linux
+`$XDG_CONFIG_HOME/agent-runner/config.json` (falling back to
+`$HOME/.config/agent-runner/config.json` for unset, empty or relative XDG), macOS
+`$HOME/Library/Application Support/agent-runner/config.json`, and Windows
+`%APPDATA%\agent-runner\config.json` with a drive-qualified or UNC APPDATA root. This path
+mapping does not extend Linux execution acceptance. User settings cannot reside
+inside the installation. Loading creates no directories or files.
+Only an absent user file permits the legacy installation-root
+`.agent-runner.json` fallback; malformed, unreadable or unsafe user settings fail
+closed. The layers never merge. Global files reuse the configuration boundary's
+bounded UTF-8, no-link, real-ancestry reader. The selected global layer (also
+called runner-root configuration) remains the only source of trusted profile
+implementations and global-only settings. Project precedence is unchanged.
+
+CLI `config migrate --from <legacy-file>` dispatches through the public
+configuration boundary before runner creation or ordinary resolution. It
+validates the source with the existing strict global schema before any writes.
+`migrateRunnerConfiguration` creates missing mode-0700 parents through pinned
+directory descriptors, writes and syncs a private mode-0600 temporary file, then
+atomically links its complete bytes to the absent destination without replacement.
+It removes only its owned temporary name, syncs the directory, verifies real
+ancestor identities and reads back exact bytes. Descriptor-bound directory
+access is required; it never falls back to an unsafe publication path. An existing
+byte-identical destination returns unchanged; different bytes conflict without
+merging, replacing or deleting either input. The source is always retained.
+Interrupted temporary files are not configuration and are not removed by a later
+invocation. Interruption between publication and temporary unlink can leave a
+multi-link destination; both load and migration reject it without deleting
+either name or the source. Only a completed publication with its temporary name
+removed is recognized by an identical retry after lost acknowledgement.
+No migration runs implicitly during load,
+installation or resume, and no active run snapshot is re-resolved.
 
 For a new run, the root also discovers an optional ignored and untracked
 `<project>/LOCAL_ARTIFACTS/agent-runner.json`, or uses an explicitly selected

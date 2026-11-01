@@ -11,8 +11,12 @@ export {
   assertProjectConfigurationProtected,
   inspectFinalizationFile,
   loadProjectConfiguration,
-  loadRunnerConfiguration,
 } from "./files.js";
+export {
+  loadRunnerConfiguration,
+  migrateRunnerConfiguration,
+  resolveUserConfigurationPath,
+} from "./user-settings.js";
 export {
   resolvePipelineConfiguration,
   resolvePipelineSettings,

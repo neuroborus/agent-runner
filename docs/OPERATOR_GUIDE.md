@@ -118,9 +118,19 @@ indivisible larger change remains valid with a rationale in the plan. This is a
 planning preference, not an execution limit. Resume retains the saved target;
 legacy runs receive 900.
 
-Runner-root configuration defines trusted profile implementations. Root and
-safe project configuration may define exact trusted command vectors; project
-configuration may select these aliases and safe settings. The default project
+User-global configuration lives outside installations at the platform locations
+listed in [README](../README.md#configuration). Before starting a new workflow,
+an operator may run `agent-run config migrate --from <legacy-file>` to validate
+and atomically copy legacy settings. Identical destination bytes are a no-op;
+conflicts never overwrite, merge or delete. The source is retained. New reads
+prefer user settings, falling back to installation-local `.agent-runner.json`
+only for absence. Invalid or unreadable user settings fail closed. Never migrate
+the configuration used by an active workflow; resume keeps its frozen snapshot.
+
+The global layer, also called runner-root configuration, defines trusted profile
+implementations. Global and safe project configuration may define exact trusted
+command vectors; project configuration may select these aliases and safe settings.
+The default project
 configuration is `LOCAL_ARTIFACTS/agent-runner.json`. Integrated Git configuration
 must be confined to the project, ignored and untracked. Explicit CLI
 `--project-config` / MCP `projectConfigurationPath` may instead select an existing

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+import { migrateRunnerConfiguration } from "./config/index.js";
 import { createGuidanceService } from "./guidance/index.js";
 import {
   awaitDetachedDispatch,
@@ -23,6 +24,7 @@ import {
 } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
+  config: Object.freeze(["from"]),
   guidance: Object.freeze(["project", "project-config"]),
   pause: Object.freeze([
     "run",
@@ -57,6 +59,7 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
+  config: Object.freeze(["from"]),
   guidance: Object.freeze(["project"]),
   pause: Object.freeze(["run"]),
   cancel: Object.freeze(["run"]),
@@ -82,6 +85,7 @@ const PIPELINE_RUN_OPTIONS = new Set(
 const OPTIONS = Object.freeze({
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
+  from: { type: "string" },
   run: { type: "string" },
   "expected-revision": { type: "string" },
   "idempotency-key": { type: "string" },
@@ -132,6 +136,7 @@ Usage:
   agent-run status --run <run-id>
   agent-run guidance --project <directory> [--project-config <path>]
   agent-run guidance edit --project <directory> [--project-config <path>]
+  agent-run config migrate --from <legacy-file>
   agent-run pipelines
   agent-run mcp
 
@@ -139,6 +144,8 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
+      --from               Validate and copy legacy settings to the user location
+                           Only an absent destination is created; conflicts fail
       --plan-kind          Select commit (default) or custom authoring/execution
       --criteria           Read user criteria from a local Markdown file
       --source             Declare a source path or reference (repeatable; no retrieval)
@@ -560,6 +567,7 @@ export async function main(
     createCommandRunStore = createRunStore,
     guidance,
     createCommandGuidance = createGuidanceService,
+    migrateConfiguration = migrateRunnerConfiguration,
     startMcp = serveMcp,
     environment = process.env,
     idempotencyKeyFactory = randomUUID,
@@ -610,7 +618,9 @@ export async function main(
     return 1;
   }
 
-  const maximumPositionals = ["run", "guidance"].includes(command) ? 2 : 1;
+  const maximumPositionals = ["run", "guidance", "config"].includes(command)
+    ? 2
+    : 1;
   if (positionals.length > maximumPositionals) {
     stderr.write(
       `Unexpected argument: ${positionals[maximumPositionals]}\n\n${USAGE}`,
@@ -623,8 +633,17 @@ export async function main(
   let requiredOptions = REQUIRED_COMMAND_OPTIONS[command];
   let commandLabel = command;
 
-  if (command === "guidance") {
-    if (positionals[1] !== undefined && positionals[1] !== "edit") {
+  if (command === "config" && positionals[1] !== "migrate") {
+    stderr.write(`Expected config migrate.\n\n${USAGE}`);
+    return 1;
+  }
+
+  if (["guidance", "config"].includes(command)) {
+    if (
+      command === "guidance" &&
+      positionals[1] !== undefined &&
+      positionals[1] !== "edit"
+    ) {
       stderr.write(`Unknown guidance action: ${positionals[1]}\n\n${USAGE}`);
       return 1;
     }
@@ -715,6 +734,18 @@ export async function main(
   let recoveryStarted = false;
   let recoveryStage = "runtime-compatibility";
   try {
+    if (command === "config") {
+      const receipt = await migrateConfiguration({
+        from: values.from,
+        env: environment,
+      });
+      stdout.write(
+        receipt.migrated
+          ? "User configuration migrated.\n"
+          : "User configuration unchanged.\n",
+      );
+      return 0;
+    }
     if (command === "guidance") {
       const service = guidance ?? createCommandGuidance({ env: environment });
       const input = {

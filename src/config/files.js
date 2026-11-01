@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import {
   dirname,
   isAbsolute,
@@ -11,24 +11,17 @@ import {
   sep,
 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { fileURLToPath } from "node:url";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 
 import {
-  CONFIG_FILENAME,
-  CONFIG_SCHEMA_VERSION,
   ConfigurationError,
   DEFAULT_ARTIFACT_ROOT,
   normalizeConfiguration,
   parseProjectConfiguration,
-  parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
 } from "./parsing.js";
 
-const CONFIG_PATH = fileURLToPath(
-  new URL(`../../${CONFIG_FILENAME}`, import.meta.url),
-);
 const MAX_CONFIGURATION_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = constants.O_NONBLOCK ?? 0;
@@ -104,7 +97,11 @@ async function confinedAncestors(projectPath, path) {
   );
 }
 
-async function readConfinedConfiguration(path, projectPath, relativePath) {
+export async function readConfinedConfiguration(
+  path,
+  projectPath,
+  relativePath,
+) {
   let handle;
   try {
     const [pathBefore, ancestorsBefore] = await Promise.all([
@@ -206,6 +203,7 @@ async function readConfinedConfiguration(path, projectPath, relativePath) {
     }
     return Object.freeze({
       content,
+      bytes: source,
       protection: Object.freeze({
         schemaVersion: 1,
         path,
@@ -466,27 +464,6 @@ export async function assertProjectConfigurationProtected({
       { cause, code: "ERR_PROJECT_CONFIGURATION_CHANGED" },
     );
   }
-}
-
-export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {
-  let source;
-  try {
-    source = await readFile(CONFIG_PATH, "utf8");
-  } catch (cause) {
-    if (cause?.code === "ENOENT") {
-      return normalizeConfiguration(
-        { schemaVersion: CONFIG_SCHEMA_VERSION },
-        providers,
-      );
-    }
-
-    throw new ConfigurationError(
-      `Cannot read runner configuration at ${CONFIG_PATH}.`,
-      { cause, code: "ERR_CONFIGURATION_READ" },
-    );
-  }
-
-  return parseRunnerConfiguration(source, providers);
 }
 
 // Finalization is read-only input, never configuration authority. Its fingerprint

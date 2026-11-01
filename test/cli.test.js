@@ -33,6 +33,78 @@ function createSink() {
   };
 }
 
+test("config migration dispatches before creating or resolving a runner", async () => {
+  const environment = { XDG_CONFIG_HOME: "/settings" };
+  for (const migrated of [true, false]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    let calls = 0;
+    assert.equal(
+      await main(["config", "migrate", "--from", "legacy.json"], {
+        environment,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner() {
+          assert.fail(
+            "Migration must not resolve configuration or start a runner.",
+          );
+        },
+        async migrateConfiguration(input) {
+          calls += 1;
+          assert.deepEqual(input, { from: "legacy.json", env: environment });
+          return { path: "/settings/agent-runner/config.json", migrated };
+        },
+      }),
+      0,
+    );
+    assert.equal(calls, 1);
+    assert.equal(stderr.read(), "");
+    assert.equal(
+      stdout.read(),
+      migrated
+        ? "User configuration migrated.\n"
+        : "User configuration unchanged.\n",
+    );
+  }
+});
+
+test("config migration rejects malformed commands without effects and reports conflicts", async () => {
+  for (const args of [
+    ["config"],
+    ["config", "other", "--from", "legacy.json"],
+    ["config", "migrate"],
+    ["config", "migrate", "--from", "a", "--from", "b"],
+    ["config", "migrate", "--from", "a", "--project", "/project"],
+  ]) {
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        migrateConfiguration() {
+          assert.fail("Invalid command must not migrate.");
+        },
+      }),
+      1,
+    );
+    assert.notEqual(stderr.read(), "");
+  }
+  const stderr = createSink();
+  assert.equal(
+    await main(["config", "migrate", "--from", "legacy.json"], {
+      stdout: createSink().stream,
+      stderr: stderr.stream,
+      migrateConfiguration() {
+        throw new Error(
+          "User configuration conflicts with the migration source.",
+        );
+      },
+    }),
+    1,
+  );
+  assert.match(stderr.read(), /configuration conflicts/u);
+});
+
 function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
   return {
     directoryPath: `/state/runs/${RUN_ID}`,

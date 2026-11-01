@@ -455,10 +455,45 @@ its exact intent and receipts before continuing.
 ## Configuration
 
 Trusted provider-profile implementations and runner defaults belong to the
-installed runner. Copy the
-tracked [example](.agent-runner.example.json) to an ignored, untracked
-`.agent-runner.json` beside it at the Agent Runner repository root. The runner
-treats this local file as operator-managed input.
+user-global configuration, outside the installation:
+
+| Platform | Configuration file                                                                                                            |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Linux    | `$XDG_CONFIG_HOME/agent-runner/config.json`, or `$HOME/.config/agent-runner/config.json` when XDG is unset, empty or relative |
+| macOS    | `$HOME/Library/Application Support/agent-runner/config.json`                                                                  |
+| Windows  | `%APPDATA%\agent-runner\config.json` (APPDATA must include its drive or UNC share)                                            |
+
+Create the parent directory and copy the tracked
+[example](.agent-runner.example.json) there for new settings. These location
+conventions do not expand the supported execution platforms. Settings, native
+credentials and durable state remain separate from application payloads.
+The global layer is also called runner-root or runner-local configuration below;
+it retains the same schema and authority.
+
+For an existing installation or linked checkout, explicitly migrate its legacy
+file before ordinary configuration resolution:
+
+```bash
+agent-run config migrate --from /path/to/legacy/.agent-runner.json
+```
+
+Migration validates the source and atomically copies its exact bytes only to an
+absent user file, using private directories and a mode-0600 file. Identical
+bytes are a no-op; conflicts, including formatting differences, never merge,
+overwrite or delete either file. The source stays in place. Private temporary
+files left by interruption are never adopted or removed by a later invocation.
+If interruption leaves the destination linked to its temporary file, loading
+and migration fail closed while preserving both names and the source. A
+completed publication can be retried as an identical no-op.
+
+The user file takes precedence over the installation-local `.agent-runner.json`;
+the latter remains a compatibility fallback only when the user file is absent.
+An invalid, unreadable or unsafe user file fails instead of falling back. Global
+files must be bounded UTF-8 regular files without symbolic/hard links or linked
+ancestors. Ordinary reads create nothing. User settings survive installation
+replacement and linked development. Migration is an explicit managing-operator
+action for future work; never use it to alter a running workflow's configuration.
+Existing runs continue with their frozen snapshots and never reload these files.
 
 When present, the file requires `"schemaVersion": 1`; unknown versions, fields,
 pipelines, roles, profiles, and settings are errors. `profiles` defines trusted
