@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-01
+
+- **Pipeline diagrams follow each workflow's actual completion gates.** README
+  now places editable Mermaid flows beside the five pipeline explanations,
+  sharing the coding candidate gate while separating their terminal products.
+  Audit discovery and finding verification remain distinct, including combined
+  clean-first successor cycles and both run-wide budgets. The diagrams preserve
+  independent's recommendation, read-only boundaries, resumable pauses,
+  Runner-owned publication/staging and one-shot Worker commit authority without
+  introducing diagram dependencies or a second workflow specification.
+
 ## 2026-10-31
 
 - **Setup completes only after guidance and terminal confirmation.** Init is now
