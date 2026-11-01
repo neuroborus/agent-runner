@@ -1,6 +1,6 @@
 import { join, relative } from "node:path";
 
-import { assertInit, within } from "./proposal.js";
+import { assertInit, isFinalizationRepair, within } from "./proposal.js";
 import {
   assertInitConfiguration,
   finalizationContent,
@@ -71,7 +71,9 @@ export async function assertExternalPolicy(state, runtime) {
     ({ kind }) => kind === "finalization",
   );
   assertInit(
-    (procedure.beforeHash === null || procedure.action === "reuse") &&
+    (procedure.beforeHash === null ||
+      procedure.action === "reuse" ||
+      isFinalizationRepair(state, procedure)) &&
       procedure.content ===
         externalFinalizationContent(state, state.proposal.checks),
     "External finalization must preserve existing skills and derive its procedure from reviewed checks.",

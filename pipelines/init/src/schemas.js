@@ -6,6 +6,12 @@ const object = (properties) => ({
   additionalProperties: false,
 });
 const TEXTS = { type: "array", items: TEXT };
+const DECISION_FIELDS = {
+  question: TEXT,
+  options: TEXTS,
+  whyBlocked: TEXT,
+  evidence: TEXTS,
+};
 export const CLARIFICATION_SCHEMA = object({
   status: { type: "string", enum: ["READY", "QUESTIONS", "BLOCKED"] },
   questions: {
@@ -15,6 +21,8 @@ export const CLARIFICATION_SCHEMA = object({
   reason: TEXT,
 });
 export const PROPOSAL_SCHEMA = object({
+  status: { type: "string", enum: ["PROPOSAL", "PRODUCT_DECISION_REQUIRED"] },
+  ...DECISION_FIELDS,
   summary: TEXT,
   checks: TEXTS,
   resources: {
@@ -38,7 +46,11 @@ export const PROPOSAL_SCHEMA = object({
   },
 });
 export const REVIEW_SCHEMA = object({
-  status: { type: "string", enum: ["CLEAN", "FINDINGS"] },
+  status: {
+    type: "string",
+    enum: ["CLEAN", "FINDINGS", "PRODUCT_DECISION_REQUIRED"],
+  },
+  ...DECISION_FIELDS,
   proposalHash: TEXT,
   findings: TEXTS,
 });

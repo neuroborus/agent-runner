@@ -1,7 +1,10 @@
 import { join } from "node:path";
 
 import { assertInit, within } from "./proposal.js";
-import { assertInitState, createInitState, INIT_MODES } from "./workflow.js";
+import { assertInitRun, createInitState, INIT_MODES } from "./workflow.js";
+import { defaultExternalRoot } from "./inspection.js";
+import { runInit, inspectInitWorkspace } from "./lifecycle.js";
+import { initProjections, validateResumeAction } from "./projections.js";
 
 export { inspectInitSetup, selectInitPlacement } from "./inspection.js";
 export { InitProposalError } from "./proposal.js";
@@ -31,22 +34,31 @@ export {
 } from "./workflow.js";
 
 const ROLES = Object.freeze(["planner", "reviewer"]);
-// Internal setup foundation. Deliberately absent from the built-in registry
-// and root dependencies until both placements and completion are available.
+const LAZY_ROLES = Object.freeze(["planner"]);
 export const initPipeline = Object.freeze({
   id: "init",
   stateVersion: 1,
+  migrations: Object.freeze({}),
+  setup: true,
+  inspectWorkspace: inspectInitWorkspace,
+  projections: initProjections,
+  validateResumeAction,
   description:
-    "Review setup proposals and prepare integrated or external prerequisites.",
+    "Prepare reviewed integrated or external infrastructure without committing.",
   roles: ROLES,
   resolveActiveRoles: (settings) =>
-    settings?.mode === "lazy" ? Object.freeze(["planner"]) : ROLES,
+    settings?.mode === "lazy" ? LAZY_ROLES : ROLES,
   roleAccess: Object.freeze({
     planner: Object.freeze(["read-only"]),
     reviewer: Object.freeze(["read-only"]),
   }),
   workspace: Object.freeze({ kind: "directory", lease: "exclusive" }),
-  resolveWorkspace({ projectPath, taskPath }) {
+  resolveWorkspace({
+    projectPath,
+    taskPath,
+    settingOverrides = {},
+    infrastructureRoot,
+  }) {
     assertInit(
       !within(projectPath, taskPath),
       "Init needs external task artifacts before setup exists.",
@@ -55,6 +67,17 @@ export const initPipeline = Object.freeze({
       kind: "directory",
       lease: "exclusive",
       artifactPaths: [join(taskPath, "clarifications.md")],
+      infrastructurePaths: [
+        ...new Set([
+          ...(settingOverrides.placement === "external" &&
+          (!infrastructureRoot || infrastructureRoot === projectPath)
+            ? [defaultExternalRoot(projectPath)]
+            : []),
+          ...(infrastructureRoot && infrastructureRoot !== projectPath
+            ? [infrastructureRoot]
+            : []),
+        ]),
+      ],
     };
   },
   settings: Object.freeze({
@@ -88,12 +111,7 @@ export const initPipeline = Object.freeze({
   requiredRunOptions: Object.freeze(["project", "task"]),
   workflow: Object.freeze({
     createState: createInitState,
-    validateRun: (run) => {
-      assertInit(
-        run.pipelineId === "init",
-        "Init state belongs to another pipeline.",
-      );
-      assertInitState(run.pipelineState);
-    },
+    run: runInit,
+    validateRun: assertInitRun,
   }),
 });

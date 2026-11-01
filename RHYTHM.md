@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-10-31
 
+- **Setup completes only after guidance and terminal confirmation.** Init is now
+  registered through the same CLI/MCP durable runner. Runner owns all reviewed
+  publication under canonical target and exact infrastructure leases, including
+  absent destinations. Guidance publishes last through its existing action and
+  pinned selection; a separate read-only confirmation binds the complete snapshot
+  before completion. Reruns reuse selected procedures and bounded managed metadata.
+  Repairs renew proposal approvals without resetting accounting; old placements
+  and interrupted effects remain preserved. Setup grants no Git or pipeline-start
+  authority. Reconstructed turns settle against their verified per-turn snapshots;
+  owner loss during the second attempt produces a resumable pause without renewing
+  recovery allowances. Managed guidance includes the exact finalization path.
+
 - **External setup leaves the target untouched.** Init now reuses its journaled
   prerequisite publisher for an absent canonical-path-named sibling or an
   explicitly selected target-bound root. Only the selected infrastructure receives

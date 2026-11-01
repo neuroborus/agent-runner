@@ -377,7 +377,10 @@ export function createInactivityCoordinator({
       responseRole = role;
       return response;
     },
-    async completed(role, { repositoryReconciled = true, ...options } = {}) {
+    async completed(
+      role,
+      { repositoryReconciled = true, repository, ...options } = {},
+    ) {
       if (responseRole !== role) return;
       // A safety pause or failed repository check must retain recovery evidence
       // without replacing the pipeline's original failure during turn cleanup.
@@ -397,10 +400,11 @@ export function createInactivityCoordinator({
           return;
         }
         // The pipeline supplies its reconciled snapshot, including partial writes.
-        const repository =
+        const baseline =
+          repository ??
           options.patch?.pipelineState?.repositoryBaseline ??
           run.pipelineState.repositoryBaseline;
-        await git.assertUnchanged(repository);
+        await git.assertUnchanged(baseline);
         const next = await runStore.completeInactivityTurn(
           lease,
           role,

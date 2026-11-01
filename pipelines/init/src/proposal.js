@@ -91,6 +91,69 @@ export function assertResultSize(value) {
   );
 }
 
+export function assertProductDecision(value) {
+  exact(value, ["question", "options", "whyBlocked", "evidence"]);
+  const plainText = (entry) =>
+    text(entry) && entry.length <= 4_000 && !/[\p{Cc}]/u.test(entry);
+  assertInit(
+    [value.question, value.whyBlocked].every(plainText) &&
+      Array.isArray(value.options) &&
+      value.options.length <= 16 &&
+      value.options.every(plainText) &&
+      Array.isArray(value.evidence) &&
+      value.evidence.length > 0 &&
+      value.evidence.length <= 32 &&
+      value.evidence.every(plainText),
+    "Init product decision requires a bounded material question, rationale and evidence.",
+  );
+}
+
+// The role envelope is separate from the durable, content-only proposal.
+export function normalizeInitRoleResult(result, proposal = false) {
+  exact(result, [
+    "status",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+    ...(proposal
+      ? ["summary", "checks", "resources"]
+      : ["proposalHash", "findings"]),
+  ]);
+  const { status, question, options, whyBlocked, evidence, ...content } =
+    result;
+  if (status === "PRODUCT_DECISION_REQUIRED") {
+    const decision = { question, options, whyBlocked, evidence };
+    assertProductDecision(decision);
+    assertInit(
+      proposal
+        ? content.summary === "" &&
+            Array.isArray(content.checks) &&
+            content.checks.length === 0 &&
+            Array.isArray(content.resources) &&
+            content.resources.length === 0
+        : content.proposalHash === "" &&
+            Array.isArray(content.findings) &&
+            content.findings.length === 0,
+      "Init product decision cannot also carry proposal or review approval.",
+    );
+    return { status, decision };
+  }
+  assertInit(
+    question === "" &&
+      whyBlocked === "" &&
+      Array.isArray(options) &&
+      options.length === 0 &&
+      Array.isArray(evidence) &&
+      evidence.length === 0 &&
+      (proposal
+        ? status === "PROPOSAL"
+        : ["CLEAN", "FINDINGS"].includes(status)),
+    "Init role result has invalid decision fields.",
+  );
+  return proposal ? content : { status, ...content };
+}
+
 export function assertInspection(value) {
   exact(value, [
     "schemaVersion",
@@ -158,6 +221,9 @@ export function assertInspection(value) {
       "rootPath",
       "artifactPath",
       "protectionHash",
+      ...(Object.hasOwn(candidate, "finalizationPath")
+        ? ["finalizationPath"]
+        : []),
     ]);
     assertInit(
       [
@@ -167,6 +233,9 @@ export function assertInspection(value) {
       ].every(isPath) &&
         ["integrated", "external"].includes(candidate.placement) &&
         isHash(candidate.protectionHash) &&
+        (!Object.hasOwn(candidate, "finalizationPath") ||
+          (isPath(candidate.finalizationPath) &&
+            within(candidate.rootPath, candidate.finalizationPath))) &&
         !paths.has(candidate.configurationPath) &&
         value.roots.includes(candidate.rootPath) &&
         within(candidate.rootPath, candidate.configurationPath) &&
@@ -275,6 +344,22 @@ export function assertOutsideBareGitMetadata(inspection, path) {
         ),
     ),
     "Init cannot publish inside bare Git metadata.",
+  );
+}
+
+// Only a procedure created by this setup may be repaired against its verified
+// prepared baseline. A later run cannot acquire authority over an existing skill.
+export function isFinalizationRepair(state, resource) {
+  return (
+    resource.kind === "finalization" &&
+    resource.path === state.createdFinalizationPath &&
+    Array.isArray(state.setupBaseline?.snapshot?.entries) &&
+    state.setupBaseline.snapshot.entries.some(
+      (entry) =>
+        entry.path === resource.path &&
+        entry.kind === "file" &&
+        entry.hash === resource.beforeHash,
+    )
   );
 }
 
@@ -434,7 +519,8 @@ export function normalizeProposal(value, state) {
       assertInit(
         !state.inspection.documents.skills.some(
           ({ path }) =>
-            within(resource.path, path) || within(path, resource.path),
+            (within(resource.path, path) || within(path, resource.path)) &&
+            !(path === resource.path && isFinalizationRepair(state, resource)),
         ),
         "Init must preserve existing skills.",
       );
@@ -466,10 +552,12 @@ export function normalizeProposal(value, state) {
       );
   }
   assertInit(
-    ["configuration", "artifacts", "finalization", "guidance"].every((kind) =>
-      value.resources.some((resource) => resource.kind === kind),
+    ["configuration", "artifacts", "finalization", "guidance"].every(
+      (kind) =>
+        value.resources.filter((resource) => resource.kind === kind).length ===
+        1,
     ),
-    "Init proposal omits required infrastructure.",
+    "Init proposal requires exactly one configuration, artifacts, finalization and guidance resource.",
   );
   return structuredClone(value);
 }

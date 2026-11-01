@@ -526,9 +526,11 @@ export function createRunStore({
     return directoryPath;
   }
 
-  async function getWorktreeLeaseDirectory(projectPath) {
+  async function getWorktreeLeaseDirectory(projectPath, allowMissing = false) {
     const [canonicalProjectPath, potentialStateRoot] = await Promise.all([
-      canonicalDirectory(projectPath, "Project path"),
+      allowMissing
+        ? canonicalPotentialPath(projectPath)
+        : canonicalDirectory(projectPath, "Project path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
     assertDisjointStateRoot(
@@ -853,10 +855,19 @@ export function createRunStore({
     return runLeases.ownerIsLive(runDirectory, runId);
   }
 
-  async function acquireWorktreeLease(projectPath, runId) {
+  async function acquireWorktreeLease(
+    projectPath,
+    runId,
+    allowMissing = false,
+  ) {
     assertRunId(runId);
-    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    const scope = await canonicalDirectory(projectPath, "Project path");
+    const worktreeDirectory = await getWorktreeLeaseDirectory(
+      projectPath,
+      allowMissing,
+    );
+    const scope = allowMissing
+      ? await canonicalPotentialPath(projectPath)
+      : await canonicalDirectory(projectPath, "Project path");
     // Serialize admission, rather than check then acquire: parent and child
     // scopes have distinct keys but must never both gain exclusive ownership.
     return mutate(dirname(worktreeDirectory), async () => {
@@ -959,6 +970,22 @@ export function createRunStore({
     } finally {
       await lease.release();
     }
+  }
+
+  async function assertWorkspaceLease(lease, workspaceLease, projectPath) {
+    return runLeases.runExclusive(lease, ({ record }) =>
+      worktreeLeases.holdCurrent(workspaceLease, async (owner) => {
+        if (
+          owner.record.runId !== record.runId ||
+          owner.runDirectory !==
+            (await getWorktreeLeaseDirectory(projectPath, true))
+        )
+          throw new RunStoreError(
+            "Setup requires the current workspace lease.",
+            { code: "ERR_INVALID_WORKTREE_LEASE" },
+          );
+      }),
+    );
   }
 
   async function waitForRunChange(
@@ -1663,6 +1690,80 @@ export function createRunStore({
     });
   }
 
+  // A pipeline may bind additional exact read trees before its inputs close.
+  // Ordinary transitions cannot replace workspace or provider-policy bindings.
+  async function bindWorkspaceReads(
+    lease,
+    {
+      workspace,
+      providerPolicies,
+      expectedRevision,
+      worktreeLease,
+      assertAuthorized,
+    },
+  ) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) =>
+      worktreeLeases.holdCurrent(worktreeLease, async (owner) => {
+        const snapshot = await loadSnapshot(runDirectory, record.runId);
+        const state = snapshot.state;
+        assertRunCanAdvance(state, resolveStopBoundary);
+        const old = state.workspace;
+        const { infrastructurePaths: previousReads, ...previousPolicy } =
+          old.policy ?? {};
+        const { infrastructurePaths: nextReads, ...nextPolicy } =
+          workspace.policy ?? {};
+        if (
+          state.revision !== expectedRevision ||
+          old.kind !== "directory" ||
+          workspace.kind !== "directory" ||
+          state.activeTurn !== null ||
+          state.preparation != null ||
+          state.executionProcess !== null ||
+          state.executionResource !== null ||
+          owner.record.runId !== state.runId ||
+          owner.runDirectory !==
+            (await getWorktreeLeaseDirectory(old.leasePath)) ||
+          workspace.leasePath !== old.leasePath ||
+          !isDeepStrictEqual(previousPolicy, nextPolicy) ||
+          !Array.isArray(nextReads) ||
+          !previousReads.every((path) => nextReads.includes(path)) ||
+          !isDeepStrictEqual(
+            workspace.absentInputPaths,
+            old.absentInputPaths,
+          ) ||
+          !isDeepStrictEqual(
+            workspace.retrievalPermissions,
+            old.retrievalPermissions,
+          ) ||
+          typeof assertAuthorized !== "function"
+        )
+          throw new RunStoreError(
+            "Workspace read rebinding is not authorized.",
+            { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+          );
+        await assertAuthorized(deepFreeze(state));
+        const next = normalizeRunState(
+          {
+            ...state,
+            workspace,
+            providerPolicies,
+            revision: state.revision + 1,
+            updatedAt: timestamp(state.updatedAt),
+          },
+          record.runId,
+        );
+        await journal.appendTransition(runDirectory, next, snapshot, {
+          actor: "runner",
+          phase: "clarify",
+          kind: "read-scopes-bound",
+          message:
+            "Bound additional inspected setup read scopes before clarification closed.",
+        });
+        return deepFreeze(next);
+      }),
+    );
+  }
+
   async function startAgentTurn(
     lease,
     activeTurn,
@@ -2033,6 +2134,10 @@ export function createRunStore({
     rootPath: requestedStateRoot,
     acquireRunLease,
     acquireWorktreeLease,
+    acquireInfrastructureLease: (path, runId) =>
+      acquireWorktreeLease(path, runId, true),
+    assertWorkspaceLease,
+    bindWorkspaceReads,
     createRun,
     getRunDirectory,
     finishAgentTurn,

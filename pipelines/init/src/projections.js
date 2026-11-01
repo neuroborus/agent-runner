@@ -1,0 +1,106 @@
+import { join } from "node:path";
+
+const RESUMABLE = [
+  "operator_paused",
+  "provider_interrupted",
+  "invalid_result",
+  "authentication_required",
+  "output_exhausted",
+];
+const INPUT_CHECKPOINTS = [
+  "clarification_required",
+  "placement_conflict",
+  "product_decision_required",
+];
+const EXPLANATIONS = Object.freeze({
+  setup_blocked: "Setup cannot proceed with the inspected requirements.",
+  revision_limit:
+    "The setup revision budget is exhausted; unresolved findings remain.",
+  clarification_limit: "The bounded setup clarification limit was reached.",
+  clarification_required: "Material setup clarification answers are required.",
+  placement_conflict:
+    "Competing setups require an explicit placement or configuration selector.",
+  product_decision_required:
+    "An unresolved material product decision prevents setup from continuing.",
+  proactive_clarification:
+    "Optional setup context may be supplied before work begins.",
+  provider_interrupted:
+    "The provider was interrupted; resume the saved setup checkpoint.",
+  invalid_result: "The provider returned invalid structured setup content.",
+  authentication_required: "Authenticate the selected provider, then resume.",
+  output_exhausted:
+    "The provider exhausted its response output; resume the saved checkpoint.",
+  operator_paused: "The operator paused setup at its saved checkpoint.",
+  operator_canceled:
+    "The operator canceled setup; prepared resources are preserved.",
+  workspace_changed:
+    "Frozen setup inputs or workspace controls changed; preserve the setup and start a new run.",
+  project_configuration_changed:
+    "The active run configuration changed; preserve the setup and start a new run.",
+});
+export function validateResumeAction(run, action) {
+  if (
+    ["workspace_changed", "project_configuration_changed"].includes(
+      run.pause?.reason,
+    ) ||
+    action !== null ||
+    run.pipelineState.workflowState !== "WAITING_FOR_USER" ||
+    (!run.pipelineState.pendingEdit &&
+      !INPUT_CHECKPOINTS.includes(run.pipelineState.pauseReason) &&
+      !RESUMABLE.includes(run.pause?.reason))
+  )
+    throw new Error(
+      "This init checkpoint cannot resume; preserve the setup and inspect its blocker.",
+    );
+}
+const findings = (state) =>
+  state.findings.slice(0, 256).map((summary, index) => ({
+    id: `init-${index + 1}`,
+    summary: summary.slice(0, 4_000),
+  }));
+export const initProjections = Object.freeze({
+  clarification: (run) => ({
+    path: join(run.taskPath, "clarifications.md"),
+    hash: run.pipelineState.transcriptHash,
+  }),
+  pause(run) {
+    if (!run.pause) return null;
+    let resumable = false;
+    try {
+      validateResumeAction(run, null);
+      resumable = true;
+    } catch {}
+    const state = run.pipelineState;
+    return {
+      reason: run.pause.reason,
+      code: /^[A-Z0-9_]{1,64}$/u.test(run.pause.code ?? "")
+        ? run.pause.code
+        : null,
+      explanation:
+        EXPLANATIONS[run.pause.reason] ??
+        "Init is paused at its saved setup checkpoint.",
+      evidence:
+        state.productDecision?.evidence ??
+        findings(state).map(({ summary }) => summary),
+      resumeState: resumable ? (run.pause.resumeState ?? null) : null,
+      nextActions:
+        run.pause.inputResponse !== undefined || !resumable
+          ? []
+          : state.pendingEdit
+            ? [{ type: "respond", requestId: state.pendingEdit.id }]
+            : [{ type: "resume", action: null }],
+    };
+  },
+  status(run) {
+    return {
+      currentStep: null,
+      planPath: null,
+      findings: findings(run.pipelineState),
+      completedCommits: [],
+      stagnationDirection: null,
+      finalizedFingerprint: null,
+      reviewedFingerprint: null,
+      setup: run.pipelineState.completion,
+    };
+  },
+});

@@ -102,6 +102,15 @@ export async function inspectInitSetup(
       rootPath: loaded.infrastructure.rootPath,
       artifactPath: loaded.artifactPath,
       protectionHash: digest(loaded.protection),
+      ...(() => {
+        const path =
+          loaded.configuration?.pipelines?.["plan-execution"]?.finalization;
+        return typeof path === "string" &&
+          !["auto", "none"].includes(path) &&
+          path === loaded.configuration?.pipelines?.polishing?.finalization
+          ? { finalizationPath: resolve(loaded.infrastructure.rootPath, path) }
+          : {};
+      })(),
     });
   }
   const roots = [
@@ -234,7 +243,7 @@ export async function inspectInitSetup(
   return result;
 }
 
-function defaultExternalRoot(projectPath) {
+export function defaultExternalRoot(projectPath) {
   const safeName =
     basename(projectPath)
       .replace(/[^a-zA-Z0-9-]/gu, "-")

@@ -14,17 +14,21 @@ import {
   assertInit,
   assertInspection,
   assertInspectionExtension,
+  assertProductDecision,
   assertResultSize,
   digest,
   exact,
+  hashText,
   isHash,
   isPath,
   normalizeProposal,
+  normalizeInitRoleResult,
   questions,
   text,
   texts,
 } from "./proposal.js";
 import { INIT_INSTRUCTIONS, PHASE_INSTRUCTIONS } from "./prompts.js";
+import { initGuidanceContent } from "./guidance.js";
 import {
   CLARIFICATION_SCHEMA,
   PROPOSAL_SCHEMA,
@@ -39,6 +43,9 @@ const STAGES = [
   "CLEAN_CONFIRM",
   "REVIEW",
   "PROPOSAL_ACCEPTED",
+  "DONE",
+  "CANCELED",
+  "FAILED",
   "WAITING_FOR_USER",
 ];
 const primaryConvergence = (state) => state.settings.mode !== "independent";
@@ -46,6 +53,9 @@ const primaryConvergence = (state) => state.settings.mode !== "independent";
 export function createInitState({
   settings = {},
   configurationPath = null,
+  artifactRoot = "LOCAL_ARTIFACTS",
+  proactiveClarification = false,
+  providerAuthority = {},
 } = {}) {
   const resolved = {
     mode: "independent",
@@ -68,6 +78,18 @@ export function createInitState({
   );
   return {
     workflowState: "CLARIFY",
+    artifactRoot,
+    proactiveClarification,
+    proactiveClarificationComplete: !proactiveClarification,
+    publication: null,
+    guidanceIntent: null,
+    guidanceReceipt: null,
+    terminal: null,
+    completion: null,
+    setupBaseline: null,
+    createdFinalizationPath: null,
+    sourceForks: [],
+    providerAuthority,
     settings: resolved,
     requestedConfigurationPath: configurationPath,
     clarificationReady: false,
@@ -82,6 +104,10 @@ export function createInitState({
     transcriptHash: null,
     pendingEdit: null,
     questionAppendPending: false,
+    transcriptAppendHash: null,
+    productDecision: null,
+    productDecisionAppended: false,
+    productDecisions: 0,
     clarificationRounds: 0,
     revisionRounds: 0,
     proposal: null,
@@ -115,10 +141,40 @@ export function assertInitState(state) {
       state.sequence >= 0 &&
       typeof state.clarificationReady === "boolean" &&
       typeof state.questionAppendPending === "boolean" &&
+      typeof state.productDecisionAppended === "boolean" &&
+      Number.isSafeInteger(state.productDecisions) &&
+      state.productDecisions >= 0 &&
       typeof state.reinspectionRequired === "boolean",
     "Init state or accounting is invalid.",
   );
   texts(state.findings);
+  assertInit(
+    state.createdFinalizationPath === null ||
+      (isPath(state.createdFinalizationPath) &&
+        Array.isArray(state.setupBaseline?.snapshot?.entries) &&
+        state.setupBaseline.snapshot.entries.some(
+          (entry) =>
+            entry.path === state.createdFinalizationPath &&
+            entry.kind === "file" &&
+            isHash(entry.hash),
+        )),
+    "Init procedure repair requires a verified prepared baseline.",
+  );
+  assertInit(
+    state.providerAuthority !== null &&
+      typeof state.providerAuthority === "object" &&
+      !Array.isArray(state.providerAuthority) &&
+      Object.values(state.providerAuthority).every(isHash),
+    "Init provider authority proof is invalid.",
+  );
+  assertInit(
+    typeof state.artifactRoot === "string" &&
+      typeof state.proactiveClarification === "boolean" &&
+      typeof state.proactiveClarificationComplete === "boolean" &&
+      Array.isArray(state.sourceForks) &&
+      state.sourceForks.every((key) => typeof key === "string"),
+    "Init runtime bindings are invalid.",
+  );
   questions(state.questions);
   exact(state.clarificationSelection, ["placement", "configurationPath"]);
   assertInit(
@@ -137,6 +193,29 @@ export function assertInitState(state) {
   assertInit(
     state.transcriptHash === null || isHash(state.transcriptHash),
     "Init transcript hash is invalid.",
+  );
+  if (state.productDecision !== null) {
+    assertProductDecision(state.productDecision);
+    assertInit(
+      state.workflowState === "WAITING_FOR_USER" &&
+        state.pauseReason === "product_decision_required" &&
+        state.selection !== null &&
+        state.productDecisions > 0 &&
+        state.proposal === null &&
+        state.pendingTurn === null,
+      "Init product decision requires a suspended proposal and frozen selection.",
+    );
+  }
+  assertInit(
+    !state.productDecisionAppended || state.productDecision !== null,
+    "Init decision append lacks its request.",
+  );
+  assertInit(
+    state.transcriptAppendHash === null ||
+      (isHash(state.transcriptAppendHash) &&
+        state.pendingEdit === null &&
+        (state.questionAppendPending || state.productDecision !== null)),
+    "Init transcript append requires a journaled unanswered request.",
   );
   if (state.pauseReason === "clarification_required")
     assertInit(
@@ -169,7 +248,9 @@ export function assertInitState(state) {
     ]);
     assertInit(
       state.workflowState === "WAITING_FOR_USER" &&
-        state.selection === null &&
+        (edit.action === "product-decision"
+          ? state.productDecision !== null && state.productDecisionAppended
+          : state.selection === null) &&
         state.inspection !== null &&
         edit.schemaVersion === 1 &&
         typeof edit.id === "string" &&
@@ -177,11 +258,16 @@ export function assertInitState(state) {
         edit.id.length <= 256 &&
         edit.artifactRoot === state.inspection.taskPath &&
         edit.transcriptPath === join(edit.artifactRoot, "clarifications.md") &&
-        edit.suspendedState === "CLARIFY" &&
-        edit.action ===
-          (state.pauseReason === "clarification_required"
-            ? "clarification-answers"
-            : "proactive-clarification") &&
+        edit.suspendedState ===
+          (edit.action === "product-decision" ? "PROPOSE" : "CLARIFY") &&
+        ((edit.action === "clarification-answers" &&
+          ["clarification_required", "placement_conflict"].includes(
+            state.pauseReason,
+          )) ||
+          (edit.action === "proactive-clarification" &&
+            state.pauseReason !== "clarification_required") ||
+          (edit.action === "product-decision" &&
+            state.pauseReason === "product_decision_required")) &&
         edit.preEditorHash === state.transcriptHash,
       "Init pending editor authorization is invalid.",
     );
@@ -194,6 +280,7 @@ export function assertInitState(state) {
         "clarification_limit",
         "revision_limit",
         "setup_blocked",
+        "product_decision_required",
       ].includes(state.pauseReason),
     "Init pause reason is invalid.",
   );
@@ -233,7 +320,11 @@ export function assertInitState(state) {
       "Init frozen clarifications changed.",
     );
   }
-  if (!["CLARIFY", "WAITING_FOR_USER"].includes(state.workflowState))
+  if (
+    !["CLARIFY", "WAITING_FOR_USER", "CANCELED", "FAILED"].includes(
+      state.workflowState,
+    )
+  )
     assertInit(
       state.selection !== null && state.clarificationReady,
       "Init work requires closed clarification.",
@@ -279,7 +370,7 @@ export function assertInitState(state) {
     state.reviewApproval === null || state.settings.mode !== "lazy",
     "Lazy init cannot acquire independent approval.",
   );
-  if (state.workflowState === "PROPOSAL_ACCEPTED") {
+  if (["PROPOSAL_ACCEPTED", "DONE"].includes(state.workflowState)) {
     assertInit(
       state.pendingTurn === null &&
         state.selection !== null &&
@@ -291,6 +382,87 @@ export function assertInitState(state) {
       "Init proposal has not passed its selected gates.",
     );
   }
+  if (state.workflowState === "DONE")
+    assertInit(
+      state.completion !== null &&
+        state.terminal?.status === "CLEAN" &&
+        state.guidanceReceipt !== null &&
+        state.publication?.prepared,
+      "Init completion requires verified publication and distinct terminal confirmation.",
+    );
+  if (state.publication !== null)
+    assertInit(
+      state.proposal !== null &&
+        (!primaryConvergence(state) ||
+          state.primaryApproval === approvalHash(state)) &&
+        (state.settings.mode === "lazy" ||
+          state.reviewApproval === approvalHash(state)),
+      "Publication requires unchanged proposal approvals.",
+    );
+  if (state.guidanceIntent !== null) {
+    const intent = state.guidanceIntent;
+    exact(intent, [
+      "projectPath",
+      "projectConfigurationPath",
+      "path",
+      "beforeIdentity",
+      "idempotencyKey",
+      "expectedHash",
+      "localContentHash",
+      "localContent",
+    ]);
+    const guide = state.proposal?.resources.find(
+      ({ kind }) => kind === "guidance",
+    );
+    assertInit(
+      state.publication?.prepared &&
+        intent.projectPath === state.inspection.projectPath &&
+        intent.projectConfigurationPath === state.selection.configurationPath &&
+        intent.path === guide?.path &&
+        (intent.beforeIdentity === null
+          ? guide.beforeHash === null
+          : guide.beforeHash !== null &&
+            typeof intent.beforeIdentity === "object" &&
+            !Array.isArray(intent.beforeIdentity)) &&
+        intent.expectedHash === guide.beforeHash &&
+        intent.localContent === initGuidanceContent(state) &&
+        intent.localContentHash === hashText(intent.localContent) &&
+        typeof intent.idempotencyKey === "string",
+      "Init guidance intent changed its approved selection or content.",
+    );
+  }
+  if (state.guidanceReceipt !== null) {
+    exact(state.guidanceReceipt, ["receipt", "observed"]);
+    assertInit(
+      state.guidanceIntent !== null &&
+        state.guidanceReceipt.receipt.localPath === state.guidanceIntent.path &&
+        state.guidanceReceipt.receipt.localHash ===
+          state.guidanceIntent.localContentHash &&
+        state.guidanceReceipt.observed.binding.path ===
+          state.guidanceIntent.path &&
+        state.guidanceReceipt.observed.file?.contentHash ===
+          state.guidanceIntent.localContentHash,
+      "Init guidance receipt differs from its intent.",
+    );
+  }
+  if (state.terminal !== null) {
+    exact(state.terminal, ["fingerprint", "status"]);
+    assertInit(
+      state.guidanceReceipt !== null &&
+        isHash(state.terminal.fingerprint) &&
+        ["PENDING", "CLEAN"].includes(state.terminal.status),
+      "Init terminal confirmation lacks complete prepared evidence.",
+    );
+  }
+  if (state.completion !== null)
+    assertInit(
+      ["DONE", "WAITING_FOR_USER", "CANCELED"].includes(state.workflowState) &&
+        state.completion.fingerprint === state.terminal.fingerprint &&
+        state.completion.configurationPath ===
+          state.selection.configurationPath &&
+        state.completion.placement === state.selection.placement,
+      "Init completion belongs to another setup.",
+    );
   if (state.pendingTurn !== null) {
     exact(state.pendingTurn, ["id", "phase", "role", "binding"]);
     assertInit(
@@ -378,11 +550,17 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
           selection: next.selection,
           proposal: next.proposal,
           proposalHash: next.proposalHash,
+          createdFinalizationPath: next.createdFinalizationPath,
+          mergedGuidance:
+            next.proposal === null ? null : initGuidanceContent(next),
           findings: next.findings,
           integratedFinalization:
             next.selection?.placement === "integrated"
               ? {
-                  path: integratedFinalizationPath(next),
+                  path: integratedFinalizationPath(
+                    next,
+                    next.proposal?.checks ?? ["<actual ordered project check>"],
+                  ),
                   template: integratedFinalizationContent(
                     next,
                     next.proposal?.checks ?? ["<actual ordered project check>"],
@@ -462,12 +640,15 @@ export function acceptInitQuestionAppend(
       transcript.transcriptPath ===
         join(state.inspection.taskPath, "clarifications.md") &&
       isHash(transcript.hash) &&
+      (state.transcriptAppendHash === null ||
+        transcript.hash === state.transcriptAppendHash) &&
       transcript.hash !== expectedHash,
     "Init question append does not match the pending round.",
   );
   const next = {
     ...state,
     questionAppendPending: false,
+    transcriptAppendHash: null,
     transcriptHash: transcript.hash,
   };
   assertInitState(next);
@@ -477,10 +658,13 @@ export function acceptInitQuestionAppend(
 export function authorizeInitEdit(state, authorization) {
   assertInitState(state);
   assertInit(
-    state.selection === null &&
+    (authorization.action === "product-decision"
+      ? state.productDecision !== null && state.productDecisionAppended
+      : state.selection === null) &&
       state.pendingTurn === null &&
       state.pendingEdit === null &&
       !state.questionAppendPending &&
+      state.transcriptAppendHash === null &&
       ["CLARIFY", "WAITING_FOR_USER"].includes(state.workflowState) &&
       !["clarification_limit", "setup_blocked"].includes(state.pauseReason),
     "Init cannot authorize this edit.",
@@ -501,31 +685,45 @@ export function acceptInitEdit(
 ) {
   assertInitState(state);
   const edit = state.pendingEdit;
+  const decision = edit?.action === "product-decision";
   assertInit(
     edit !== null &&
       result.authorizationId === edit.id &&
       result.preEditorHash === edit.preEditorHash &&
       result.transcriptPath === edit.transcriptPath &&
       result.action === edit.action &&
-      result.suspendedState === "CLARIFY" &&
+      result.suspendedState === (decision ? "PROPOSE" : "CLARIFY") &&
       isHash(result.hash) &&
       result.changed === (result.hash !== edit.preEditorHash),
     "Init editor authorization does not match.",
   );
-  if (edit.action === "clarification-answers" && !result.changed)
+  if (
+    ["clarification-answers", "product-decision"].includes(edit.action) &&
+    !result.changed
+  )
     return { ...state, pendingEdit: null };
   const next = {
     ...state,
     pendingEdit: null,
-    workflowState: "CLARIFY",
+    workflowState: decision ? "PROPOSE" : "CLARIFY",
     pauseReason: null,
     transcriptHash: result.hash,
-    clarificationReady: false,
+    clarificationReady: decision,
+    ...(decision
+      ? {
+          clarificationHash: result.hash,
+          productDecision: null,
+          productDecisionAppended: false,
+        }
+      : {}),
     questions: [],
-    clarificationSelection: structuredClone(selection),
+    clarificationSelection: structuredClone(
+      decision ? state.clarificationSelection : selection,
+    ),
     reinspectionRequired:
       state.reinspectionRequired ||
-      !isDeepStrictEqual(selection, state.clarificationSelection),
+      (!decision &&
+        !isDeepStrictEqual(selection, state.clarificationSelection)),
   };
   assertInitState(next);
   return next;
@@ -582,8 +780,17 @@ export function acceptInitResult(
       return pause(next, "placement_conflict");
     return next;
   }
+  result = normalizeInitRoleResult(
+    result,
+    ["PROPOSE", "CHECK_AND_FIX"].includes(state.workflowState),
+  );
+  if (result.status === "PRODUCT_DECISION_REQUIRED")
+    return requestInitDecision(next, result.decision);
   if (["PROPOSE", "CHECK_AND_FIX"].includes(state.workflowState)) {
     next.proposal = normalizeProposal(result, next);
+    // Reject unrenderable guidance while the prior valid proposal remains
+    // retryable, before it becomes durable input to the next agent request.
+    initGuidanceContent(next);
     next.proposalHash = digest(next.proposal);
     next.primaryApproval = null;
     next.reviewApproval = null;
@@ -625,4 +832,77 @@ export function acceptInitResult(
   }
   assertInitState(next);
   return next;
+}
+
+export function requestInitDecision(state, decision) {
+  assertProductDecision(decision);
+  const next = {
+    ...state,
+    workflowState: "WAITING_FOR_USER",
+    pauseReason: "product_decision_required",
+    pendingTurn: null,
+    proposal: null,
+    proposalHash: null,
+    primaryApproval: null,
+    reviewApproval: null,
+    productDecision: structuredClone(decision),
+    productDecisions: state.productDecisions + 1,
+    productDecisionAppended: false,
+    transcriptAppendHash: null,
+    findings: [],
+  };
+  assertInitState(next);
+  return next;
+}
+
+export function assertInitRun(run) {
+  assertInit(
+    run.pipelineId === "init",
+    "Init state belongs to another pipeline.",
+  );
+  if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
+    const checkpoint = run.pause.operatorResume;
+    exact(checkpoint, ["workflowState", "pause", "activeTurn"]);
+    const canceled = run.pause.reason === "operator_canceled";
+    assertInit(
+      STAGES.includes(checkpoint.workflowState) &&
+        checkpoint.workflowState !== "CANCELED" &&
+        !["operator_paused", "operator_canceled"].includes(
+          checkpoint.pause?.reason,
+        ) &&
+        run.pipelineState.workflowState ===
+          (canceled ? "CANCELED" : "WAITING_FOR_USER") &&
+        run.activeTurn === null &&
+        run.pause.resumeAction === null &&
+        run.stopRequest?.reconciledRevision != null &&
+        run.stopRequest.kind ===
+          (canceled ? "cancel_requested" : "pause_requested"),
+      "Init operator stop requires a reconciled suspended checkpoint.",
+    );
+    run = {
+      ...run,
+      pipelineState: {
+        ...run.pipelineState,
+        workflowState: checkpoint.workflowState,
+      },
+      pause: checkpoint.pause,
+    };
+  } else {
+    assertInit(
+      run.pipelineState.workflowState !== "CANCELED",
+      "Init cancellation requires a reconciled operator request.",
+    );
+  }
+  // Root safety blockers may suspend a still-reserved read-only turn. Validate
+  // its original binding without granting a continuation through that blocker.
+  const state = run.pipelineState;
+  const phase =
+    state.workflowState === "WAITING_FOR_USER" &&
+    state.pendingTurn !== null &&
+    ["workspace_changed", "project_configuration_changed"].includes(
+      run.pause?.reason,
+    )
+      ? state.pendingTurn.phase
+      : state.workflowState;
+  assertInitState({ ...state, workflowState: phase });
 }

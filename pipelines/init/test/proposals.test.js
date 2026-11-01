@@ -17,6 +17,8 @@ import {
   createInitState,
   externalFinalizationContent,
   initPipeline,
+  integratedFinalizationContent,
+  integratedFinalizationPath,
   integratedIgnoreContent,
   inspectInitSetup,
   prepareInitTurn,
@@ -100,6 +102,65 @@ const inspection = (candidates = []) => ({
   snapshotHash: HASH,
 });
 const ready = { status: "READY", questions: [], reason: "" };
+
+test("bound integrated skills use an adjacent wrapper unless their procedure already matches", () => {
+  const checks = ["node --test"];
+  const skillPath = "/work/project/.agents/skills/finalization/SKILL.md";
+  const wrapperPath = "/work/project/.agents/skills/finalization/RUNNER.md";
+  const selected = {
+    ...candidate("integrated", "/work/project"),
+    finalizationPath: skillPath,
+  };
+  const setup = inspection([selected]);
+  const state = { inspection: setup, selection: selected };
+  const matching = integratedFinalizationContent(state, checks);
+  const hash = (content) => createHash("sha256").update(content).digest("hex");
+  setup.documents.skills.push({
+    path: skillPath,
+    hash: hash("Original checks.\n"),
+  });
+  setup.entries.push({
+    path: skillPath,
+    kind: "file",
+    hash: hash("Original checks.\n"),
+  });
+  assert.equal(integratedFinalizationPath(state, checks), wrapperPath);
+  assert.match(
+    integratedFinalizationContent(state, checks),
+    /adjacent SKILL.md/u,
+  );
+
+  setup.entries[0].hash = hash(matching);
+  setup.documents.skills[0].hash = hash(matching);
+  assert.equal(integratedFinalizationPath(state, checks), skillPath);
+  assert.equal(integratedFinalizationContent(state, checks), matching);
+  assert.equal(
+    integratedFinalizationPath(state, ["node --test --test-reporter=spec"]),
+    wrapperPath,
+  );
+  // Same-run repair authority remains confined to its prepared procedure.
+  assert.equal(
+    integratedFinalizationPath(
+      { ...state, createdFinalizationPath: skillPath },
+      ["node --test --test-reporter=spec"],
+    ),
+    skillPath,
+  );
+});
+
+function roleResult(result) {
+  return ["READY", "QUESTIONS", "BLOCKED"].includes(result.status) ||
+    result.status === "PRODUCT_DECISION_REQUIRED"
+    ? result
+    : {
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+        status: "PROPOSAL",
+        ...result,
+      };
+}
 function turn(state, setup, result) {
   const reserved = prepareInitTurn(state, setup, state.transcriptHash ?? HASH);
   assert.equal(reserved.request.access, "read-only");
@@ -111,7 +172,9 @@ function turn(state, setup, result) {
     turnId: reserved.request.id,
     inspection: setup,
     transcriptHash: reserved.state.transcriptHash,
-    result: typeof result === "function" ? result(reserved.state) : result,
+    result: roleResult(
+      typeof result === "function" ? result(reserved.state) : result,
+    ),
   });
 }
 function start(mode, setup = inspection(), options = {}) {
@@ -168,6 +231,67 @@ const findings = (state) => ({
   status: "FINDINGS",
   proposalHash: state.proposalHash,
   findings: ["Preserve the existing validation command."],
+});
+
+test("a proposal cannot select multiple finalization resources for guidance and repair", () => {
+  const setup = inspection();
+  const content = "Preserve the existing procedure.\n";
+  const path = "/work/project/existing-finalization.md";
+  const hash = createHash("sha256").update(content).digest("hex");
+  setup.entries.push({ path, kind: "file", hash });
+  const initial = start("combined", setup);
+  const valid = proposal(initial);
+  const ambiguous = structuredClone(valid);
+  ambiguous.resources.unshift({
+    path,
+    kind: "finalization",
+    action: "reuse",
+    beforeHash: hash,
+    content,
+  });
+  assert.throws(
+    () => turn(initial, setup, ambiguous),
+    /exactly one.*finalization/u,
+  );
+  const accepted = turn(initial, setup, valid);
+  assert.deepEqual(accepted.proposal, valid);
+});
+
+test("reviewed guidance records the selected finalization path and replaces only managed metadata on rerun", () => {
+  const setup = inspection();
+  const render = (inspected, previous, finalizationPath) => {
+    const state = turn(start("combined", inspected), inspected, (current) => {
+      const result = proposal(current);
+      const guide = result.resources.find(({ kind }) => kind === "guidance");
+      guide.content = previous;
+      guide.beforeHash =
+        inspected.entries.find(({ path }) => path === guide.path)?.hash ?? null;
+      guide.action = guide.beforeHash === null ? "create" : "replace";
+      result.resources.find(({ kind }) => kind === "finalization").path =
+        finalizationPath;
+      return result;
+    });
+    const { request } = prepareInitTurn(state, inspected, HASH);
+    return JSON.parse(request.prompt.split("\n").at(-1)).mergedGuidance;
+  };
+  const skillPath = "/work/project/finalization/SKILL.md";
+  const wrapperPath = "/work/project/finalization/RUNNER.md";
+  const first = render(setup, "Keep local instructions.\n", skillPath);
+  assert.ok(first.includes(`Finalization: ${skillPath}\n`));
+  const content = `${first}\nKeep later operator instructions.\n`;
+  const hash = createHash("sha256").update(content).digest("hex");
+  setup.entries.push({
+    path: "/work/project/artifacts/agent-runner/rules.md",
+    kind: "file",
+    hash,
+  });
+  setup.documents.guidance.push({ path: setup.entries[0].path, hash });
+  const updated = render(setup, content, wrapperPath);
+  assert.ok(updated.includes(`Finalization: ${wrapperPath}\n`));
+  assert.ok(!updated.includes(skillPath));
+  assert.equal(updated.split("## Runner setup").length, 2);
+  assert.ok(updated.includes("Keep local instructions."));
+  assert.ok(updated.includes("Keep later operator instructions."));
 });
 
 test("proposal gates keep placement independent of all three review modes", () => {
@@ -236,6 +360,61 @@ test("persisted init settings retain the resolved independent default", () => {
       () => prepareInitTurn(incomplete, setup, HASH),
       /missing or unsupported fields/u,
     );
+  }
+});
+
+test("oversized merged guidance is rejected before replacing a retryable proposal", () => {
+  const setup = inspection();
+  const initial = start("combined", setup);
+  const proposed = turn(initial, setup, proposal);
+  const nearLimit = proposal(initial);
+  const guide = nearLimit.resources.find(({ kind }) => kind === "guidance");
+  // The existing document fits; the rendered setup section puts it over.
+  guide.content = "x".repeat(65_536);
+  guide.beforeHash = createHash("sha256").update(guide.content).digest("hex");
+  guide.action = "reuse";
+  const existing = inspection();
+  existing.entries.push({
+    path: guide.path,
+    kind: "file",
+    hash: guide.beforeHash,
+  });
+  existing.documents.guidance.push({
+    path: guide.path,
+    hash: guide.beforeHash,
+  });
+  const withExisting = start("combined", existing);
+  const oversized = (state) => {
+    const result = proposal(state);
+    result.resources.find(({ kind }) => kind === "guidance").content =
+      "é".repeat(40_000);
+    return result;
+  };
+  for (const [state, inspected, invalid] of [
+    [initial, setup, oversized],
+    [proposed, setup, oversized],
+    [withExisting, existing, nearLimit],
+  ]) {
+    const before = structuredClone(state);
+    assert.throws(
+      () => turn(state, inspected, invalid),
+      /Merged init guidance/u,
+    );
+    assert.deepEqual(state, before);
+    const repaired =
+      typeof invalid === "function"
+        ? proposal(state)
+        : structuredClone(invalid);
+    if (typeof invalid !== "function") {
+      const resource = repaired.resources.find(
+        ({ kind }) => kind === "guidance",
+      );
+      resource.content = "Keep the existing validation instructions.\n";
+      resource.action = "replace";
+    }
+    const next = turn(state, inspected, repaired);
+    assertInitState(next);
+    assert.doesNotThrow(() => prepareInitTurn(next, inspected, HASH));
   }
 });
 
@@ -355,6 +534,18 @@ test("read-only turns reject drift, stale results, premature closure and forged 
     () => prepareInitTurn(state, setup, OTHER),
     /outside an authorized/u,
   );
+  for (const reason of ["workspace_changed", "project_configuration_changed"]) {
+    const blocked = {
+      pipelineId: "init",
+      pipelineState: { ...reserved.state, workflowState: "WAITING_FOR_USER" },
+      pause: { reason },
+    };
+    assert.doesNotThrow(() => initPipeline.workflow.validateRun(blocked));
+    assert.throws(
+      () => initPipeline.validateResumeAction(blocked, null),
+      /cannot resume/u,
+    );
+  }
 });
 
 test("an authorized placement change requires new inspection before clarification freezes", () => {
@@ -1193,4 +1384,51 @@ test("additive inspection retains prior destinations and rejects input or ancest
     ),
     /changed/u,
   );
+});
+
+test("every post-clarification proposal gate supports only structured exceptional product decisions", () => {
+  const setup = inspection();
+  const decision = {
+    status: "PRODUCT_DECISION_REQUIRED",
+    question: "Which conflicting acceptance requirement should apply?",
+    options: ["Keep the original check", "Use the requested replacement"],
+    whyBlocked: "The supplied acceptance requirements conflict.",
+    evidence: [
+      "The task and agreed criteria specify incompatible acceptance commands.",
+    ],
+  };
+  let state = start("combined", setup);
+  for (const phase of ["PROPOSE", "CHECK_AND_FIX", "CLEAN_CONFIRM", "REVIEW"]) {
+    assert.equal(state.workflowState, phase);
+    const proposalTurn = ["PROPOSE", "CHECK_AND_FIX"].includes(phase);
+    const output = {
+      ...decision,
+      ...(proposalTurn
+        ? { summary: "", checks: [], resources: [] }
+        : { proposalHash: "", findings: [] }),
+    };
+    const waiting = turn(state, setup, output);
+    assert.equal(waiting.workflowState, "WAITING_FOR_USER");
+    assert.equal(waiting.pauseReason, "product_decision_required");
+    assert.deepEqual(waiting.selection, state.selection);
+    assert.equal(waiting.proposal, null);
+    assert.equal(waiting.primaryApproval, null);
+    assert.equal(waiting.reviewApproval, null);
+    assert.equal(waiting.revisionRounds, 0);
+    assert.throws(
+      () => turn(state, setup, { ...output, evidence: [] }),
+      /material question/u,
+    );
+    assert.throws(
+      () =>
+        turn(state, setup, {
+          ...output,
+          ...(proposalTurn
+            ? { checks: ["node --test"] }
+            : { findings: ["A normal finding"] }),
+        }),
+      /cannot also carry/u,
+    );
+    state = turn(state, setup, proposalTurn ? proposal : clean);
+  }
 });

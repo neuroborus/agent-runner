@@ -58,6 +58,13 @@ read-only receipt; other directory roles pin their combined startup receipt.
 It reproduces the applicable receipts before use on resume,
 retains native continuation support, and supplies only the saved path policy to
 turns. Neither directory analysis nor output work requests a commit capability.
+Init is a narrow setup exception: authorized clarification may add exact inspected
+read trees before selection freezes. Root reproves active roles and journals the
+binding under the execution/workspace leases, preserving all output and retrieval
+permissions. After verifying Runner-owned publication, resume may refresh its
+read-only policy receipts for the created identities. The provider version,
+capability flags and access requirements retain their original frozen fingerprint. It reconciles pending effects
+before another agent turn; other pipelines retain their frozen receipt contracts.
 
 Adapter execution options and turn requests also accept the portable effort
 values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from

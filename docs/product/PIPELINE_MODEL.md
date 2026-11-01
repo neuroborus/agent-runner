@@ -1,6 +1,6 @@
 # Pipeline Model
 
-Agent Runner hosts four explicit local workflows. They share runtime safety and
+Agent Runner hosts five explicit local workflows. They share runtime safety and
 durability services, but each pipeline owns its roles, prompts, settings, state,
 and completion rules. The product is not a general workflow framework, and one
 pipeline never calls another.
@@ -99,7 +99,7 @@ classification, cycle/session rules and recoverable publication.
 
 ## Review modes
 
-Init's unregistered proposal foundation reviews infrastructure for either
+Init reviews and prepares infrastructure for either
 integrated or external placement, independently of these review modes. It reuses
 an unambiguous target-bound setup, defaults new setup to integrated, and resolves
 competing placements before freezing clarification. All proposal turns are
@@ -107,9 +107,11 @@ read-only. Lazy requires primary convergence and a distinct clean confirmation;
 independent requires separate review; combined requires both. Accepted proposals
 are internal evidence and do not claim published or usable infrastructure. See
 the [init specification](../../pipelines/init/docs/SPEC.md).
-Its internal Runner publisher can prepare reviewed integrated or external
-prerequisites with identity-bound receipts. Agents remain read-only; guidance and
-public completion are still deferred. Setup grants no staging, commit or
+Runner publishes prerequisites with identity-bound receipts, verifies their
+availability, then publishes merged local guidance last. A distinct read-only
+terminal confirmation accepts the complete prepared snapshot before completion:
+primary in lazy, Reviewer in independent/combined. Findings renew the proposal
+gates and publication verification without resetting bounded accounting. Setup grants no staging, commit or
 pipeline-start authority.
 
 `independent` is the default and recommended mode. A primary role produces the

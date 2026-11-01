@@ -5,10 +5,17 @@ import {
   assertInit,
   assertOutsideBareGitMetadata,
   hashText,
+  isFinalizationRepair,
   within,
 } from "./proposal.js";
 
-export function integratedFinalizationPath(state) {
+const SKILL_PREAMBLE =
+  "---\nname: finalization\ndescription: Validate this project's accepted changes before handoff.\n---\n\n";
+
+export function integratedFinalizationPath(
+  state,
+  checks = state.proposal?.checks ?? [],
+) {
   const roots = [".agents", ".claude"].map((name) =>
     join(state.selection.rootPath, name, "skills", "finalization"),
   );
@@ -19,6 +26,27 @@ export function integratedFinalizationPath(state) {
       !roots.includes(dirname(path))
     )
       roots.push(dirname(path));
+  }
+  const selected = state.selection.finalizationPath;
+  if (
+    selected &&
+    roots.some((root) =>
+      ["SKILL.md", "RUNNER.md"].some((name) => join(root, name) === selected),
+    )
+  ) {
+    const existing = state.inspection.entries.find(
+      (entry) => entry.path === selected && entry.kind === "file",
+    );
+    const path =
+      selected.endsWith("/SKILL.md") &&
+      existing &&
+      selected !== state.createdFinalizationPath &&
+      existing.hash !==
+        hashText(finalizationContent(state, checks, SKILL_PREAMBLE))
+        ? join(dirname(selected), "RUNNER.md")
+        : selected;
+    assertOutsideBareGitMetadata(state.inspection, path);
+    return path;
   }
   const existing = roots.find((root) =>
     state.inspection.entries.some(
@@ -40,10 +68,10 @@ export function integratedFinalizationPath(state) {
 
 // Render before review. Publication never silently rewrites an accepted draft.
 export function integratedFinalizationContent(state, checks) {
-  const path = integratedFinalizationPath(state);
+  const path = integratedFinalizationPath(state, checks);
   const original = path.endsWith("/RUNNER.md")
     ? `Read and follow the adjacent SKILL.md, preserving every substantive check.\n\n`
-    : "---\nname: finalization\ndescription: Validate this project's accepted changes before handoff.\n---\n\n";
+    : SKILL_PREAMBLE;
   return finalizationContent(state, checks, original);
 }
 
@@ -114,11 +142,16 @@ export async function assertIntegratedPolicy(state, runtime) {
   const { workspace } = runtime;
   const projectPath = state.selection.rootPath;
   const resources = state.proposal.resources;
-  const finalizationPath = integratedFinalizationPath(state);
+  const finalizationPath = integratedFinalizationPath(
+    state,
+    state.proposal.checks,
+  );
   const procedure = resources.find(({ path }) => path === finalizationPath);
   assertInit(
     procedure?.kind === "finalization" &&
-      (procedure.beforeHash === null || procedure.action === "reuse") &&
+      (procedure.beforeHash === null ||
+        procedure.action === "reuse" ||
+        isFinalizationRepair(state, procedure)) &&
       procedure.content ===
         integratedFinalizationContent(state, state.proposal.checks) &&
       resources

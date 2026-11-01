@@ -70,7 +70,7 @@ Preliminary boundary discovery selects only the workspace policy; execution
 parses declarations through a confined task-input capability after project
 configuration and run overrides resolve, before Git inspection.
 It is the directory inspection foundation for custom planning/execution, audit
-and init. Custom authoring, execution and audit consume it; init remains unexposed. Git snapshots remain Git-owned.
+and init. Custom authoring, execution and audit consume it; init publishes reviewed setup. Git snapshots remain Git-owned.
 `inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
 `taskPath`, and arrays of `inputPaths`, `sourcePaths`, `outputPaths`,
 `configurationPaths`, `artifactPaths` and `infrastructurePaths`. Relative paths
@@ -464,12 +464,13 @@ promise a distinct provider dashboard category.
 
 ## Pipeline Ownership
 
-The unregistered `pipelines/init/` workspace owns read-only infrastructure
+The registered `pipelines/init/` workspace owns read-only infrastructure
 proposals and Runner-owned integrated/external prerequisite publication. It
 consumes injected public configuration and workspace capabilities, binding actual
 instructions/checks, selected roots, resource
 identities and live configuration exclusions. Its explicit reservation/result
-agent transitions stop at `PROPOSAL_ACCEPTED`; they expose no runner dispatch.
+agent transitions stop at `PROPOSAL_ACCEPTED`; its lifecycle then dispatches only
+Runner-owned setup effects.
 The separate `publishIntegratedInit` / `publishExternalInit` effects require those
 approvals, unchanged setup bindings and the existing exclusive leases. The clarification capability
 verifies the frozen transcript before baseline recording and throughout publication.
@@ -492,13 +493,57 @@ canonical ancestor alias targets omitted from general workspace snapshots.
 Existing target finalization skills are referenced without copying or editing; target content
 and Git controls remain snapshot-protected with no ignore or pointer writes.
 The caller holds both canonical target exclusion and selected-infrastructure
-leases. Guidance remains deferred. Placement resolves independently of review
+leases. The state lease capability supports exact absent infrastructure scopes
+without creating the destination. An enclosing-worktree lease already covering
+the external destination is reused instead of acquiring overlapping ownership.
+Root retains infrastructure lease handles across failed release, reuses them on
+same-run recovery, and releases them alongside canonical workspace ownership
+after verified recovery or stop settlement.
+Guidance publishes last through its existing
+expected-hash, identity-bound durable action under those held leases. Init pins
+the original guide identity and verifies its action-owned published inode before
+acknowledgement, including completed-action replay. Placement resolves independently of review
 mode during bounded clarification and freezes with the transcript hash. Lazy requires primary
 check/fix plus distinct confirmation, independent requires separate review, and
 combined requires both over the same proposal. Revisions invalidate approvals.
+Placement-specific publication policies validate proposed content before it
+becomes durable review input; invalid corrections preserve the prior proposal
+and its resumable checkpoint without reserving filesystem effects.
+Init validates reconciled operator stops against their preserved checkpoints,
+including pending turns and editor windows. Shared clarification appends can
+journal their exact result hash before replacement and recognize those bytes
+on recovery. Exceptional post-closure decisions use the same durable answer
+authorization, freeze a new clarification version and restart proposal gates
+without redirecting selected paths or renewing correction budgets. Prepared
+baselines continue protecting infrastructure and all other task content while
+the clarification capability owns its exact transcript. Public pauses retain
+bounded concrete setup findings and reason-specific explanations.
+Init supplies its verified per-turn workspace snapshot through runtime turn
+settlement for inactivity recovery, including after Runner publication. Pre-turn
+reconstruction exhaustion persists a resumable provider interruption at the
+same checkpoint without renewing attempt or correction allowances. Managed
+guidance records the exact selected finalization resource alongside the effective
+configuration, artifacts, working directory and checks.
 The [init specification](../pipelines/init/docs/SPEC.md) owns this contract.
-Registration awaits guidance publication and complete setup
-verification.
+The distinct read-only terminal confirmation accepts the complete prepared
+snapshot before the durable completion receipt. Authorized clarification may add exact
+read trees before selection freezes, with fresh active-role read-only policy
+receipts and a leased, revision-bound journal event; outputs and other permissions
+cannot expand. After verified Runner publication, resume may refresh only the
+read-policy identities changed by those effects. A separate frozen capability
+authority fingerprint retains the original provider version, flags and access
+requirements; resource rebinding cannot adopt a changed backend. Other pipelines retain immutable
+workspace and provider-policy contracts. Terminal findings invalidate
+dependent approvals and renew the selected proposal gates without resetting
+revision accounting. Public CLI/MCP status exposes the effective selectors and
+created/reused/changed resources. Directory recovery uses the original publication
+baseline and exact intent/receipt paths; it never adopts unrelated drift. Existing
+configured finalization procedures are reused at their exact reviewed paths when
+they match the required procedure and checks; differing integrated skills stay
+unchanged and select an adjacent `RUNNER.md`.
+Terminal repairs may replace only a procedure originally created by the same
+setup, bound to its verified prepared baseline. Atomic guide/procedure replacements
+retain snapshot and publication-intent guards without stale immutable file bindings.
 
 Each pipeline owns its input interpretation, roles, configuration settings and
 defaults, accepted `run` options, prompts, structured-output schemas, explicit
@@ -562,6 +607,8 @@ V1 registers:
   stages the complete result while leaving it uncommitted.
 - `audit`: inspects an agreed Git or ordinary workspace read-only and publishes
   a resumable reviewed `audit.md` through Runner-owned artifact effects.
+- `init`: prepares reviewed integrated or external infrastructure, publishes
+  merged guidance last and confirms the complete setup without Git effects.
 
 Polishing's private `mode-policy.js` separates active roles, bootstrap
 independence, primary convergence, independent review, terminal confirmer,
@@ -1284,8 +1331,10 @@ existing policy: any launched editor close consumes its one-shot authorization,
 even after a nonzero exit or signal. Authorization, document safety, and
 publication remain in their owning capabilities. MCP never opens an editor.
 
-Local guidance is supervisor context only: it is absent from role prompts, run
-state, and resume configuration. Guidance never constructs a pipeline run,
+Local guidance supplies instructions only to the supervisor. Ordinary pipeline
+prompts, run state and resume configuration do not include it. Init retains and
+reviews proposed local content as setup data, including its guidance publication
+intent; that content grants no role instructions or permissions. Guidance never constructs a pipeline run,
 changes ignore rules, replaces the common guide, mutates Git control state,
 or performs finalization or commit work.
 

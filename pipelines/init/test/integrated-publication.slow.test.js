@@ -8,7 +8,11 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { createClarificationService } from "../../../src/clarifications/index.js";
-import { parseProjectConfiguration } from "../../../src/config/index.js";
+import {
+  loadProjectConfiguration,
+  parseProjectConfiguration,
+} from "../../../src/config/index.js";
+import { createGitService } from "../../../src/git/index.js";
 import { createWorkspaceService } from "../../../src/workspace/index.js";
 import {
   acceptInitResult,
@@ -25,10 +29,24 @@ import {
 
 const exec = promisify(execFile);
 
+function roleResult(result) {
+  return ["READY", "QUESTIONS", "BLOCKED"].includes(result.status) ||
+    result.status === "PRODUCT_DECISION_REQUIRED"
+    ? result
+    : {
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+        status: "PROPOSAL",
+        ...result,
+      };
+}
 async function fixture(
   t,
   {
     existing = false,
+    boundSkill = false,
     artifactRoot = "LOCAL_ARTIFACTS",
     ignore = `# Local project rules\n/${artifactRoot}/\n!/${artifactRoot}/\n`,
     changeConfiguration = () => {},
@@ -78,6 +96,20 @@ async function fixture(
     defaultEffort: "high",
     pipelines: { polishing: { mode: "combined" } },
   };
+  if (boundSkill) {
+    originalConfiguration.artifactRoot = artifactRoot;
+    originalConfiguration.infrastructure = {
+      schemaVersion: 1,
+      placement: "integrated",
+      projectPath,
+      rootPath: projectPath,
+    };
+    for (const id of ["plan-execution", "polishing"])
+      originalConfiguration.pipelines[id] = {
+        ...originalConfiguration.pipelines[id],
+        finalization: relative(projectPath, skill),
+      };
+  }
   const originalIgnore = ignore;
   if (preparedArtifacts)
     await fs.mkdir(dirname(configurationPath), { recursive: true });
@@ -97,6 +129,7 @@ async function fixture(
     await fs.writeFile(join(projectPath, ".gitignore"), originalIgnore);
   }
   const workspace = createWorkspaceService({ fileSystem });
+  const git = createGitService();
   await beforeInspection({ projectPath, stateRoot, workspace });
   const inspectSetup = () =>
     inspectInitSetup(
@@ -105,6 +138,7 @@ async function fixture(
         taskPath,
         stateRoot,
         artifactRoot,
+        candidatePaths: boundSkill ? [configurationPath] : [],
         documents: {
           instructions: [instructions],
           checks: [],
@@ -112,7 +146,15 @@ async function fixture(
           guidance: [],
         },
       },
-      { workspace },
+      {
+        workspace,
+        loadProjectConfiguration: (input) =>
+          loadProjectConfiguration({
+            ...input,
+            runnerConfiguration: { schemaVersion: 1 },
+            inspectPath: (request) => git.inspectPath(request),
+          }),
+      },
     );
   const inspection = await inspectSetup();
   function turn(state, result) {
@@ -121,7 +163,7 @@ async function fixture(
       turnId: prepared.request.id,
       inspection,
       transcriptHash: hash,
-      result,
+      result: roleResult(result),
     });
   }
   let state = turn(createInitState({ settings: { mode: "combined" } }), {
@@ -153,7 +195,7 @@ async function fixture(
     };
   };
   const checks = ["node --test"];
-  const finalizationPath = integratedFinalizationPath(state);
+  const finalizationPath = integratedFinalizationPath(state, checks);
   const configuration = {
     ...(existing ? originalConfiguration : { schemaVersion: 1 }),
     artifactRoot,
@@ -326,11 +368,15 @@ test("integrated publication creates ignored prerequisites, defers guidance and 
   );
 });
 
-test("existing skills, negations and unrelated settings survive custom-root setup", async (t) => {
+test("bound original skills, negations and unrelated settings survive custom-root setup", async (t) => {
   const f = await fixture(t, {
     existing: true,
+    boundSkill: true,
     artifactRoot: "build/artifacts",
+    ignore:
+      "# Local project rules\n/build/artifacts/\n!/build/artifacts/\n/build/artifacts/agent-runner.json\n",
   });
+  assert.equal(f.state.selection.finalizationPath, f.skill);
   const originalSkill = await fs.readFile(f.skill, "utf8");
   await publishIntegratedInit(f.state, f.runtime);
   assert.equal(await fs.readFile(f.skill, "utf8"), originalSkill);

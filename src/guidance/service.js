@@ -140,6 +140,7 @@ export function createGuidanceService({
       await directory.verify();
       return {
         resolved,
+        localIdentity: local.identity,
         guidance: Object.freeze({
           projectPath,
           localPath: resolved.localPath,
@@ -219,7 +220,12 @@ export function createGuidanceService({
 
   async function replace(
     input,
-    { selectionSnapshot, preserveAbsence = false } = {},
+    {
+      selectionSnapshot,
+      preserveAbsence = false,
+      assertLease,
+      expectedIdentity,
+    } = {},
   ) {
     return guarded(async () => {
       assertInput(input, UPDATE_FIELDS);
@@ -389,149 +395,173 @@ export function createGuidanceService({
         // receipt must not depend on mutable configuration or subsequent edits.
         if (action.record.context.phase === "published")
           return await complete();
-        return await withPublicationLease(
-          action.record.context,
-          async (assertOwnership) => {
-            let resolved = await assertSelection(
-              publicationInput,
-              action.record.context,
-            );
-            const localPath = action.record.context.localPath;
-            let directory = await openLocalDirectory(
-              resolved.basePath,
-              localPath,
-              { ancestors: resolved.binding.ancestors },
-            );
-            try {
-              let current = await directory.read();
-              let context = action.record.context;
-              if (context.phase === "prepared") {
-                const temporary = await directory.read(context.temporaryName);
-                if (temporary.hash === null) {
-                  if (
-                    current.hash !== hash ||
-                    !sameFile(current.identity, context.temporaryIdentity, {
-                      renamed: true,
-                    })
-                  ) {
-                    throw new GuidanceError(
-                      "Interrupted guidance publication cannot be attributed safely.",
-                      { code: "ERR_GUIDANCE_RECOVERY" },
-                    );
-                  }
-                  return published(true);
-                }
-                if (
-                  temporary.hash !== hash ||
-                  !sameFile(temporary.identity, context.temporaryIdentity)
-                )
-                  throw unsafePath();
-                assertSnapshot(current, context.before);
-              } else {
-                if (context.phase === "writing") {
-                  assertSnapshot(current, context.before);
-                  await directory.removeTemporary(
-                    context.temporaryName,
-                    context.temporaryIdentity,
-                  );
-                  await patch({
-                    phase: "reserved",
-                    before: null,
-                    temporaryName: null,
-                    temporaryIdentity: null,
-                  });
-                }
-                if (current.hash !== input.expectedHash) throw stale();
-                if (
-                  current.hash === hash ||
-                  (preserveAbsence && current.hash === null)
-                ) {
-                  await onPublicationBoundary("before-publish");
-                  await assertSelection(publicationInput, context);
-                  await assertOwnership();
-                  assertSnapshot(await directory.read(), snapshot(current));
-                  return published(false);
-                }
-                if (!directory.exists) {
-                  await directory.close();
-                  directory = await openLocalDirectory(
-                    resolved.basePath,
-                    localPath,
-                    { create: true, ancestors: resolved.binding.ancestors },
-                  );
-                  const reread = await directory.read();
-                  assertSnapshot(reread, snapshot(current));
-                  current = reread;
-                }
-                const temporaryName = `.rules.${randomUUID()}.tmp`;
-                await inspectDestination(
-                  resolved,
-                  join(dirname(localPath), temporaryName),
-                );
-                resolved = await assertSelection(publicationInput, context);
-                await patch({
-                  ...(context.binding === undefined
-                    ? {}
-                    : { binding: resolved.binding }),
-                  phase: "reserved",
-                  before: snapshot(current),
-                  temporaryName,
-                  temporaryIdentity: null,
-                });
-                await onPublicationBoundary("reserved");
-                await assertOwnership();
-                const temporary = await directory.writeTemporary(
-                  temporaryName,
-                  input.localContent,
-                  async (temporaryIdentity) => {
-                    await patch({ phase: "writing", temporaryIdentity });
-                    await onPublicationBoundary("writing");
-                  },
-                );
-                await patch({
-                  phase: "prepared",
-                  temporaryIdentity: temporary.identity,
-                });
-                await onPublicationBoundary("prepared");
+        return await (
+          assertLease === undefined
+            ? withPublicationLease
+            : async (_context, operation) => {
+                await assertLease();
+                return operation(assertLease);
               }
-              context = action.record.context;
-              await onPublicationBoundary("before-publish");
-              await assertSelection(publicationInput, context);
-              await assertOwnership();
-              await inspectDestination(
-                resolved,
-                join(dirname(localPath), context.temporaryName),
-              );
+        )(action.record.context, async (assertOwnership) => {
+          let resolved = await assertSelection(
+            publicationInput,
+            action.record.context,
+          );
+          const localPath = action.record.context.localPath;
+          let directory = await openLocalDirectory(
+            resolved.basePath,
+            localPath,
+            { ancestors: resolved.binding.ancestors },
+          );
+          try {
+            let current = await directory.read();
+            let context = action.record.context;
+            if (
+              context.phase === "reserved" &&
+              expectedIdentity !== undefined &&
+              !sameFile(current.identity, expectedIdentity)
+            )
+              throw stale();
+            if (context.phase === "prepared") {
               const temporary = await directory.read(context.temporaryName);
+              if (temporary.hash === null) {
+                if (
+                  current.hash !== hash ||
+                  !sameFile(current.identity, context.temporaryIdentity, {
+                    renamed: true,
+                  })
+                ) {
+                  throw new GuidanceError(
+                    "Interrupted guidance publication cannot be attributed safely.",
+                    { code: "ERR_GUIDANCE_RECOVERY" },
+                  );
+                }
+                return published(true);
+              }
               if (
                 temporary.hash !== hash ||
                 !sameFile(temporary.identity, context.temporaryIdentity)
               )
                 throw unsafePath();
-              assertSnapshot(await directory.read(), context.before);
-              await directory.publish(context.temporaryName);
-              await onPublicationBoundary("renamed");
-              const result = await directory.read();
+              assertSnapshot(current, context.before);
+            } else {
+              if (context.phase === "writing") {
+                assertSnapshot(current, context.before);
+                await directory.removeTemporary(
+                  context.temporaryName,
+                  context.temporaryIdentity,
+                );
+                await patch({
+                  phase: "reserved",
+                  before: null,
+                  temporaryName: null,
+                  temporaryIdentity: null,
+                });
+              }
+              if (current.hash !== input.expectedHash) throw stale();
               if (
-                result.hash !== hash ||
-                !sameFile(result.identity, context.temporaryIdentity, {
-                  renamed: true,
-                })
-              )
-                throw unsafePath();
-              await inspectDestination(resolved, localPath);
-              await directory.verify();
-              return published(true);
-            } finally {
-              await directory.close();
+                current.hash === hash ||
+                (preserveAbsence && current.hash === null)
+              ) {
+                await onPublicationBoundary("before-publish");
+                await assertSelection(publicationInput, context);
+                await assertOwnership();
+                assertSnapshot(await directory.read(), snapshot(current));
+                return published(false);
+              }
+              if (!directory.exists) {
+                await directory.close();
+                directory = await openLocalDirectory(
+                  resolved.basePath,
+                  localPath,
+                  { create: true, ancestors: resolved.binding.ancestors },
+                );
+                const reread = await directory.read();
+                assertSnapshot(reread, snapshot(current));
+                current = reread;
+              }
+              const temporaryName = `.rules.${randomUUID()}.tmp`;
+              await inspectDestination(
+                resolved,
+                join(dirname(localPath), temporaryName),
+              );
+              resolved = await assertSelection(publicationInput, context);
+              await patch({
+                ...(context.binding === undefined
+                  ? {}
+                  : { binding: resolved.binding }),
+                phase: "reserved",
+                before: snapshot(current),
+                temporaryName,
+                temporaryIdentity: null,
+              });
+              await onPublicationBoundary("reserved");
+              await assertOwnership();
+              const temporary = await directory.writeTemporary(
+                temporaryName,
+                input.localContent,
+                async (temporaryIdentity) => {
+                  await patch({ phase: "writing", temporaryIdentity });
+                  await onPublicationBoundary("writing");
+                },
+              );
+              await patch({
+                phase: "prepared",
+                temporaryIdentity: temporary.identity,
+              });
+              await onPublicationBoundary("prepared");
             }
-          },
-        );
+            context = action.record.context;
+            await onPublicationBoundary("before-publish");
+            await assertSelection(publicationInput, context);
+            await assertOwnership();
+            await inspectDestination(
+              resolved,
+              join(dirname(localPath), context.temporaryName),
+            );
+            const temporary = await directory.read(context.temporaryName);
+            if (
+              temporary.hash !== hash ||
+              !sameFile(temporary.identity, context.temporaryIdentity)
+            )
+              throw unsafePath();
+            assertSnapshot(await directory.read(), context.before);
+            await directory.publish(context.temporaryName);
+            await onPublicationBoundary("renamed");
+            const result = await directory.read();
+            if (
+              result.hash !== hash ||
+              !sameFile(result.identity, context.temporaryIdentity, {
+                renamed: true,
+              })
+            )
+              throw unsafePath();
+            await inspectDestination(resolved, localPath);
+            await directory.verify();
+            return published(true);
+          } finally {
+            await directory.close();
+          }
+        });
       } finally {
         await action.release();
       }
     });
   }
 
-  return Object.freeze({ read, edit, update: (input) => replace(input) });
+  return Object.freeze({
+    read,
+    edit,
+    update: (input) => replace(input),
+    readWithIdentity: (input) =>
+      guarded(async () => {
+        const { guidance, localIdentity } = await inspect(input);
+        return { ...guidance, localIdentity };
+      }),
+    updateUnderLease: (input, assertLease, expectedIdentity) => {
+      if (typeof assertLease !== "function")
+        throw new GuidanceError("A held publication lease is required.");
+      return replace(input, { assertLease, expectedIdentity });
+    },
+  });
 }

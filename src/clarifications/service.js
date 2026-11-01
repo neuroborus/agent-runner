@@ -389,34 +389,48 @@ export function createClarificationService(options = {}) {
     return Object.freeze({ ...snapshot, created });
   }
 
-  async function appendQuestionRound(options) {
-    assertOptions(options, "Question-round options");
-    const { artifactRoot, transcriptPath, expectedHash, round, questions } =
-      options;
-    assertPositiveInteger(round, "round");
-    const normalizedQuestions = normalizeQuestions(questions);
-    const snapshot = await inspectTranscript({ artifactRoot, transcriptPath });
-    assertExpectedHash(snapshot, expectedHash);
-    const content = appendSection(
-      snapshot.content,
-      formatQuestionRound(round, normalizedQuestions),
-    );
-    await replaceTranscript(snapshot, content);
-    return inspectTranscript(snapshot);
-  }
-
-  async function appendProductDecision(input) {
-    assertOptions(input, "Product-decision options");
+  async function appendTranscriptSection(options, section) {
     const {
       artifactRoot,
       transcriptPath,
       expectedHash,
-      number,
-      question,
-      options = [],
-      whyBlocked,
-      evidence,
-    } = input;
+      resultHash,
+      persistAppend,
+    } = options;
+    assertHash(expectedHash);
+    const snapshot = await inspectTranscript({ artifactRoot, transcriptPath });
+    if (resultHash !== undefined) {
+      assertHash(resultHash, "resultHash");
+      if (snapshot.hash === resultHash) return snapshot;
+    }
+    assertExpectedHash(snapshot, expectedHash);
+    const content = appendSection(snapshot.content, section);
+    const hash = contentHash(content);
+    if (resultHash !== undefined && resultHash !== hash)
+      throw new ClarificationError(
+        "Pending transcript append content changed.",
+      );
+    // A caller that needs crash recovery journals the exact resulting bytes'
+    // hash before replacement, then supplies it on replay.
+    await persistAppend?.({ expectedHash, hash });
+    await replaceTranscript(snapshot, content);
+    return inspectTranscript(snapshot);
+  }
+
+  async function appendQuestionRound(options) {
+    assertOptions(options, "Question-round options");
+    const { round, questions } = options;
+    assertPositiveInteger(round, "round");
+    const normalizedQuestions = normalizeQuestions(questions);
+    return appendTranscriptSection(
+      options,
+      formatQuestionRound(round, normalizedQuestions),
+    );
+  }
+
+  async function appendProductDecision(input) {
+    assertOptions(input, "Product-decision options");
+    const { number, question, options = [], whyBlocked, evidence } = input;
     assertPositiveInteger(number, "number");
     const decision = Object.freeze({
       question: normalizeStructuredText(question, "question"),
@@ -429,14 +443,10 @@ export function createClarificationService(options = {}) {
         maximum: MAX_EVIDENCE_ITEMS,
       }),
     });
-    const snapshot = await inspectTranscript({ artifactRoot, transcriptPath });
-    assertExpectedHash(snapshot, expectedHash);
-    const content = appendSection(
-      snapshot.content,
+    return appendTranscriptSection(
+      input,
       formatProductDecision(number, decision),
     );
-    await replaceTranscript(snapshot, content);
-    return inspectTranscript(snapshot);
   }
 
   async function freezeTranscript(options) {

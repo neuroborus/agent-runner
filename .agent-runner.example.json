@@ -43,6 +43,15 @@
     }
   },
   "pipelines": {
+    "init": {
+      "mode": "independent",
+      "placement": null,
+      "maxRevisionRounds": 20,
+      "roles": {
+        "planner": {},
+        "reviewer": {}
+      }
+    },
     "audit": {
       "mode": "independent",
       "maxDiscoveryPasses": 20,

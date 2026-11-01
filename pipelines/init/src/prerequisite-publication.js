@@ -2,7 +2,14 @@ import { dirname, join } from "node:path";
 import { isDeepStrictEqual as same } from "node:util";
 
 import { assertInitState } from "./workflow.js";
-import { assertInit, digest, exact, hashText, within } from "./proposal.js";
+import {
+  assertInit,
+  digest,
+  exact,
+  hashText,
+  isFinalizationRepair,
+  within,
+} from "./proposal.js";
 import {
   assertIntegratedPolicy,
   integratedIgnorePaths,
@@ -42,7 +49,11 @@ export async function publishExternalInit(state, runtime, publication = null) {
 async function publishPrerequisites(state, runtime, publication, placement) {
   assertInitState(state);
   assertInit(
-    state.workflowState === "PROPOSAL_ACCEPTED" &&
+    (state.workflowState === "PROPOSAL_ACCEPTED" ||
+      (runtime.verifyOnly &&
+        ["DONE", "WAITING_FOR_USER", "CANCELED", "FAILED"].includes(
+          state.workflowState,
+        ))) &&
       state.selection.placement === placement,
     "Publication requires the selected placement's proposal approval gate.",
   );
@@ -52,10 +63,30 @@ async function publishPrerequisites(state, runtime, publication, placement) {
   // The parent is a confinement anchor, never a write inventory or read tree.
   // Only the selected root and reviewed descendants may receive intents.
   const projectPath = placement === "external" ? dirname(rootPath) : rootPath;
-  const binding = digest({ state, stateRoot });
+  const binding = digest({
+    inspection: state.inspection,
+    selection: state.selection,
+    clarificationHash: state.clarificationHash,
+    proposalHash: state.proposalHash,
+    primaryApproval: state.primaryApproval,
+    reviewApproval: state.reviewApproval,
+    settings: state.settings,
+    stateRoot,
+  });
   const resources = state.proposal.resources.filter(
     ({ kind }) => kind !== "guidance",
   );
+  const guide = state.proposal.resources.find(
+    ({ kind }) => kind === "guidance",
+  );
+  // Prepare the reviewed guide's parent with journaled directory identity too.
+  // The guidance capability then publishes only its file as the final resource.
+  resources.push({
+    path: dirname(guide.path),
+    kind: "artifacts",
+    action: "reuse",
+    content: "",
+  });
   // Ignore protections precede directory/file preparation; configuration is last.
   const order = { ignore: 0, artifacts: 1, finalization: 2, configuration: 3 };
   resources.sort((a, b) => order[a.kind] - order[b.kind]);
@@ -180,6 +211,8 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       if (current.pending.intent.temporaryPath)
         allowed.add(current.pending.intent.temporaryPath);
     }
+    if (current.prepared)
+      for (const path of runtime.guidancePaths ?? []) allowed.add(path);
     const unchanged = (snapshot) =>
       snapshot.entries.filter(({ path }) => !allowed.has(path));
     assertInit(
@@ -208,6 +241,15 @@ async function publishPrerequisites(state, runtime, publication, placement) {
     await (
       placement === "integrated" ? assertIntegratedPolicy : assertExternalPolicy
     )(state, runtime);
+    // These exact files may be atomically replaced by reviewed Runner effects.
+    // Tree snapshots, intents and receipts still bind their bytes and identities;
+    // separate immutable input bindings would reject the authorized replacement.
+    const replaceableDocuments = new Set([
+      guide.path,
+      ...resources
+        .filter((resource) => isFinalizationRepair(state, resource))
+        .map(({ path }) => path),
+    ]);
     const inspection = await workspace.inspect({
       workspacePath: targetPath,
       stateRoot,
@@ -215,7 +257,8 @@ async function publishPrerequisites(state, runtime, publication, placement) {
         state.inspection.taskPath,
         ...Object.values(state.inspection.documents)
           .flat()
-          .map(({ path }) => path),
+          .map(({ path }) => path)
+          .filter((path) => !replaceableDocuments.has(path)),
       ],
       configurationPaths: state.inspection.configurationPaths,
       infrastructurePaths: state.inspection.roots.filter(
@@ -240,6 +283,18 @@ async function publishPrerequisites(state, runtime, publication, placement) {
     await save({});
   } else {
     validate(current);
+  }
+  if (runtime.verifyOnly) {
+    await guard();
+    // A pending ignore publication must reconcile before its new exclusions
+    // can be required. Its exact intent and baseline remain guarded above.
+    const ignore = resources.find(({ kind }) => kind === "ignore");
+    if (!ignore || current.receipts.some(({ path }) => path === ignore.path))
+      await verifyIgnoring();
+    return {
+      inspection: current.inspection,
+      snapshot: await workspace.snapshot({ inspection: current.inspection }),
+    };
   }
   async function settle() {
     await guard();
@@ -392,6 +447,6 @@ async function publishPrerequisites(state, runtime, publication, placement) {
   }
   await guard();
   await verifyIgnoring();
-  await save({ prepared: true });
+  if (!current.prepared) await save({ prepared: true });
   return structuredClone(current);
 }

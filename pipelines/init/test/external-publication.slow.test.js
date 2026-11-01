@@ -35,6 +35,19 @@ const externalRoot = (projectPath) =>
       .slice(0, 48)}-${hash(projectPath).slice(0, 12)}`,
   );
 
+function roleResult(result) {
+  return ["READY", "QUESTIONS", "BLOCKED"].includes(result.status) ||
+    result.status === "PRODUCT_DECISION_REQUIRED"
+    ? result
+    : {
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+        status: "PROPOSAL",
+        ...result,
+      };
+}
 async function fixture(
   t,
   {
@@ -101,7 +114,9 @@ async function fixture(
   if (selected) {
     await fs.mkdir(dirname(configurationPath), { recursive: true });
     if (prepared) {
-      await fs.mkdir(join(rootPath, artifactRoot), { recursive: true });
+      await fs.mkdir(join(rootPath, artifactRoot, "agent-runner"), {
+        recursive: true,
+      });
       await fs.writeFile(
         join(rootPath, artifactRoot, "retained.txt"),
         "Keep existing artifacts.\n",
@@ -176,7 +191,7 @@ async function fixture(
       turnId: prepared.request.id,
       inspection,
       transcriptHash,
-      result,
+      result: roleResult(result),
     });
   }
   let state = turn(
@@ -517,14 +532,9 @@ test("lost sibling-root receipts reconcile only the recorded allocation identity
   await f.assertTargetUnchanged();
 });
 
-test("external publication rejects extra files, changed settings and unreviewed finalization", async (t) => {
+test("external publication rejects changed settings and unreviewed finalization", async (t) => {
+  // The fast proposal suite owns duplicate-resource rejection before approval.
   for (const changeProposal of [
-    (proposal) => {
-      proposal.resources.push({
-        ...proposal.resources.find(({ kind }) => kind === "finalization"),
-        path: join(dirname(proposal.resources[0].path), "extra.md"),
-      });
-    },
     (proposal) => {
       const resource = proposal.resources[0];
       const value = JSON.parse(resource.content);
@@ -539,7 +549,7 @@ test("external publication rejects extra files, changed settings and unreviewed 
     const f = await fixture(t, { changeProposal });
     await assert.rejects(
       publishExternalInit(f.state, f.runtime),
-      /only selected infrastructure|preserve unrelated settings|derive its procedure/u,
+      /preserve unrelated settings|derive its procedure/u,
     );
     assert.equal(f.saved, null);
     await assert.rejects(fs.stat(f.rootPath), { code: "ENOENT" });

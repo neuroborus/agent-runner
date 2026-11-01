@@ -706,7 +706,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   });
   assert.deepEqual(
     pipelines.structuredContent.pipelines.map(({ id }) => id),
-    ["plan-authoring", "plan-execution", "polishing", "audit"],
+    ["plan-authoring", "plan-execution", "polishing", "audit", "init"],
   );
   for (const pipeline of pipelines.structuredContent.pipelines) {
     assert.deepEqual(pipeline.settings.mode, {

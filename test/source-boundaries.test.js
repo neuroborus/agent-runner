@@ -280,6 +280,7 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
     assert.ok(
       path === "src/index.js" ||
         path === "src/cli.js" ||
+        path === "src/runner/setup.js" ||
         path.startsWith("src/mcp/") ||
         path.startsWith("src/guidance/"),
       path,
@@ -291,10 +292,15 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
       isWithin(join(ROOT, "src/runner"), path),
   )) {
     const source = await readFile(path, "utf8");
+    const sourcePath = relative(ROOT, path);
+    // Init's Runner-owned publisher uses the capability as setup data. Other
+    // runner modules and every pipeline role retain the instruction boundary.
     assert.doesNotMatch(
       source,
-      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
-      relative(ROOT, path),
+      sourcePath === "src/runner/setup.js"
+        ? /OPERATOR_GUIDE\.md|guidance_read/u
+        : /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
+      sourcePath,
     );
   }
   const root = await import("../src/index.js");
@@ -302,7 +308,12 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
   assert.equal(root.createGuidanceService, guidance.createGuidanceService);
   assert.deepEqual(
     Object.keys(guidance).sort(),
-    ["GuidanceError", "MAX_GUIDANCE_BYTES", "createGuidanceService"].sort(),
+    [
+      "GuidanceError",
+      "MAX_GUIDANCE_BYTES",
+      "createGuidanceService",
+      "validateGuidanceContent",
+    ].sort(),
   );
 });
 

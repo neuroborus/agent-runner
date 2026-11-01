@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { auditPipeline } from "@agent-runner/audit";
+import { initPipeline } from "@agent-runner/init";
 import { planAuthoringPipeline } from "@agent-runner/plan-authoring";
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
 import { polishingPipeline } from "@agent-runner/polishing";
@@ -14,6 +15,7 @@ for (const pipeline of [
   planExecutionPipeline,
   polishingPipeline,
   auditPipeline,
+  initPipeline,
 ]) {
   if (PIPELINES.has(pipeline.id)) {
     throw new Error(`Duplicate pipeline id: ${pipeline.id}`);

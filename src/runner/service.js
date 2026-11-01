@@ -61,6 +61,7 @@ import {
 } from "./workspace.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
 import { createPlanProgressPublisher } from "./plan-progress.js";
+import { createSetupRuntime } from "./setup.js";
 import {
   createStopMonitor,
   reconcileOperatorStop,
@@ -70,6 +71,7 @@ import {
 } from "./stops.js";
 import {
   defaultAdapters,
+  capabilityAuthorityFingerprint,
   probeRequiredRoles,
   roleAdapters,
   validateSourceRoles,
@@ -281,6 +283,7 @@ export function createRunner(options = {}) {
   // reconciliation keeps its handle for same-owner retry and its durable
   // lease for safe reclamation after owner loss.
   const heldWorktreeLeases = new Map();
+  const heldInfrastructureLeases = new Map();
   const retainedRunLeases = new Map();
   const defaultAdapterSets = new Map();
   if (
@@ -555,7 +558,11 @@ export function createRunner(options = {}) {
     let providerResponseRole = null;
     const safety =
       run.workspace?.kind === "directory"
-        ? directorySafety(run.workspace, workspace)
+        ? pipeline.setup
+          ? directorySafety(run.workspace, workspace, async () =>
+              inspectPipelineWorkspace(await runStore.loadRun(run.runId)),
+            )
+          : directorySafety(run.workspace, workspace)
         : git;
     const authentication = createAuthenticationPolicy({ providers });
     const outputExhaustion = createDispositionPolicy({
@@ -628,6 +635,108 @@ export function createRunner(options = {}) {
     }
     return Object.freeze({
       authentication,
+      ...(pipeline.setup
+        ? {
+            setup: createSetupRuntime({
+              run,
+              workspace,
+              git,
+              runStore,
+              providers,
+              loadConfiguration,
+              executionLease: lease,
+              withInfrastructureOwnership: (path, operation) =>
+                withInfrastructureLease(run.runId, path, operation),
+              getRun: () => run,
+              extendReadScope: async (roots) => {
+                const latest = await runStore.loadRun(run.runId);
+                if (
+                  latest.pipelineState.selection !== null ||
+                  latest.activeTurn !== null ||
+                  !latest.pipelineState.reinspectionRequired
+                )
+                  throw new RunnerError(
+                    "Setup read scopes can change only during authorized clarification.",
+                    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                  );
+                await monitor.check();
+                await guardProjectConfiguration(latest);
+                await inspectBoundWorkspace(latest.workspace, workspace);
+                const selection = {
+                  ...latest.workspace.policy,
+                  kind: "directory",
+                  lease: "exclusive",
+                  infrastructurePaths: [
+                    ...new Set([
+                      ...latest.workspace.policy.infrastructurePaths,
+                      ...roots.filter((path) => path !== latest.projectPath),
+                    ]),
+                  ],
+                };
+                const rebound = await bindWorkspace({
+                  selection,
+                  projectPath: latest.projectPath,
+                  taskPath: latest.taskPath,
+                  taskInputs: pipeline.taskInputs,
+                  configurationPath:
+                    latest.projectConfigurationProtection?.path,
+                  stateRoot: runStore.rootPath,
+                  workspace,
+                });
+                const providerPolicies = await probeRequiredRoles(
+                  pipeline,
+                  latest.roles,
+                  adaptersFor(latest),
+                  latest.sessionLineage.source === null
+                    ? null
+                    : { id: latest.sessionLineage.source },
+                  providers,
+                  rebound.policy,
+                  (role, proof) =>
+                    assertSetupProviderAuthority(latest, role, proof),
+                );
+                await inspectBoundWorkspace(latest.workspace, workspace);
+                run = await runStore.bindWorkspaceReads(lease, {
+                  workspace: rebound,
+                  providerPolicies,
+                  expectedRevision: latest.revision,
+                  worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+                  assertAuthorized: (candidate) => {
+                    if (
+                      candidate.pipelineState.selection !== null ||
+                      !candidate.pipelineState.reinspectionRequired
+                    )
+                      throw new RunnerError(
+                        "Setup clarification read scope is frozen.",
+                        { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                      );
+                  },
+                });
+                selectedAdapters = selectedRoleAdapters(pipeline, run, lease);
+                return run;
+              },
+              assertLease: async () => {
+                await monitor?.check();
+                await checkConfiguration();
+                await runStore.assertWorkspaceLease(
+                  lease,
+                  heldWorktreeLeases.get(run.runId)?.lease,
+                  run.workspace.leasePath,
+                );
+              },
+              publishDirectory: (request) =>
+                monitor.invoke(
+                  ({ signal, onProcess }) =>
+                    publishOutputDirectory(request, {
+                      signal,
+                      onProcess,
+                      cwd: run.projectPath,
+                    }),
+                  {},
+                ),
+            }),
+          }
+        : {}),
       finalization: {
         inspectFile: ({ path, policy }) =>
           inspectFinalizationFile({
@@ -647,16 +756,16 @@ export function createRunner(options = {}) {
         monitor === undefined
           ? selectedAdapters
           : Object.fromEntries(
-              Object.entries(selectedAdapters).map(([role, adapter]) => [
+              Object.keys(selectedAdapters).map((role) => [
                 role,
                 {
                   probe: async (options) => {
                     await monitor.check();
-                    return adapter.probe(options);
+                    return selectedAdapters[role].probe(options);
                   },
                   canReadFiles: async (request) => {
                     await monitor.check();
-                    return adapter.canReadFiles(request);
+                    return selectedAdapters[role].canReadFiles(request);
                   },
                   async run(request) {
                     await checkConfiguration();
@@ -672,7 +781,7 @@ export function createRunner(options = {}) {
                         (value) =>
                           inactivity.invoke(
                             role,
-                            (attempt) => adapter.run(attempt),
+                            (attempt) => selectedAdapters[role].run(attempt),
                             value,
                           ),
                         {
@@ -1018,8 +1127,11 @@ export function createRunner(options = {}) {
           throw cause;
         }
       },
-      async finishAgentTurn(activeTurn, { repositoryReconciled = true } = {}) {
-        await reconcileProviderResponse({ repositoryReconciled });
+      async finishAgentTurn(
+        activeTurn,
+        { repositoryReconciled = true, repository } = {},
+      ) {
+        await reconcileProviderResponse({ repositoryReconciled, repository });
         return runStore.finishAgentTurn(lease, activeTurn);
       },
       async recordChildSession(child, { activity } = {}) {
@@ -1215,7 +1327,7 @@ export function createRunner(options = {}) {
         code: "ERR_MISSING_RUN_SETTINGS",
       });
     }
-    const selected = selectedRoleAdapters(pipeline, run, lease);
+    let selected = selectedRoleAdapters(pipeline, run, lease);
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
@@ -1283,6 +1395,55 @@ export function createRunner(options = {}) {
       }
     }
     onRecoveryStage("checkpoint-continuation");
+    if (
+      verifyProviderPolicies &&
+      pipeline.setup &&
+      (run.pipelineState.publication !== null ||
+        run.pipelineState.setupBaseline !== null)
+    ) {
+      // Runner-created directories change native read-policy identities. Accept
+      // fresh read-only receipts only after the original publication proof,
+      // without changing its selection or granting provider writes.
+      const providerPolicies = await probeRequiredRoles(
+        pipeline,
+        run.roles,
+        adaptersFor(run),
+        run.sessionLineage.source,
+        providers,
+        run.workspace.policy,
+        (role, proof) => assertSetupProviderAuthority(run, role, proof),
+      );
+      await validatePersistedBoundary(run);
+      if (!isDeepStrictEqual(providerPolicies, run.providerPolicies)) {
+        if (run.activeTurn !== null)
+          run = await runStore.finishAgentTurn(lease, run.activeTurn);
+        const expectedPublication = run.pipelineState.publication;
+        const expectedBaseline = run.pipelineState.setupBaseline;
+        run = await runStore.bindWorkspaceReads(lease, {
+          workspace: run.workspace,
+          providerPolicies,
+          expectedRevision: run.revision,
+          worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+          assertAuthorized: (candidate) => {
+            if (
+              !isDeepStrictEqual(
+                candidate.pipelineState.publication,
+                expectedPublication,
+              ) ||
+              !isDeepStrictEqual(
+                candidate.pipelineState.setupBaseline,
+                expectedBaseline,
+              )
+            )
+              throw new RunnerError(
+                "Setup publication changed before read-policy recovery.",
+                { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+              );
+          },
+        });
+        selected = selectedRoleAdapters(pipeline, run, lease);
+      }
+    }
     if (verifyProviderPolicies && run.pause?.reason !== "environment_blocked") {
       const migrationRequired = Object.entries(run.providerPolicies).some(
         ([role, receipt]) => role !== "arbiter" && receipt === null,
@@ -1497,9 +1658,37 @@ export function createRunner(options = {}) {
   }
 
   async function releaseHeldWorktreeLease(ownership) {
+    const infrastructure = heldInfrastructureLeases.get(ownership.runId);
+    if (infrastructure !== undefined)
+      await releaseInfrastructureLease(infrastructure);
     await ownership.lease.release();
     if (heldWorktreeLeases.get(ownership.runId) === ownership) {
       heldWorktreeLeases.delete(ownership.runId);
+    }
+  }
+
+  async function releaseInfrastructureLease(ownership) {
+    await ownership.lease.release();
+    if (heldInfrastructureLeases.get(ownership.runId) === ownership)
+      heldInfrastructureLeases.delete(ownership.runId);
+  }
+
+  async function withInfrastructureLease(runId, projectPath, operation) {
+    const ownership = heldInfrastructureLeases.get(runId) ?? {
+      lease: await runStore.acquireInfrastructureLease(projectPath, runId),
+      projectPath,
+      runId,
+    };
+    if (ownership.projectPath !== projectPath)
+      throw new RunnerError("Held infrastructure lease boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
+    heldInfrastructureLeases.set(runId, ownership);
+    try {
+      return await operation(ownership.lease);
+    } finally {
+      // A failed release retains this exact handle for recovery or stop settlement.
+      await releaseInfrastructureLease(ownership);
     }
   }
 
@@ -1787,8 +1976,40 @@ export function createRunner(options = {}) {
       // Retirement needs canonical paths and current control confinement, not
       // acceptance of the inspected bytes. Frozen inputs are checked after
       // verified process/resource recovery and before any new provider work.
-      if (frozenContent) await inspectBoundWorkspace(run.workspace, workspace);
+      if (frozenContent) await inspectPipelineWorkspace(run);
     }
+  }
+
+  async function inspectPipelineWorkspace(run) {
+    const pipeline = getPipeline(run.pipelineId);
+    if (
+      pipeline?.inspectWorkspace &&
+      (run.pipelineState.publication !== null ||
+        run.pipelineState.setupBaseline !== null)
+    )
+      return pipeline.inspectWorkspace(
+        run,
+        createSetupRuntime({
+          run,
+          workspace,
+          git,
+          runStore,
+          providers,
+          loadConfiguration,
+        }),
+      );
+    return inspectBoundWorkspace(run.workspace, workspace);
+  }
+
+  function assertSetupProviderAuthority(run, role, proof) {
+    if (
+      capabilityAuthorityFingerprint(proof) !==
+      run.pipelineState.providerAuthority[role]
+    )
+      throw new RunnerError(
+        "Setup provider authority changed; start a new run.",
+        { code: "ERR_PROVIDER_POLICY_CHANGED" },
+      );
   }
 
   async function result(run) {
@@ -2079,6 +2300,7 @@ export function createRunner(options = {}) {
     let providerPolicies = Object.fromEntries(
       Object.keys(resolved.roles).map((role) => [role, null]),
     );
+    const providerAuthority = {};
     if (capabilityFailure === null) {
       providerPolicies = await probeRequiredRoles(
         pipeline,
@@ -2087,12 +2309,26 @@ export function createRunner(options = {}) {
         normalized.sourceSession,
         providers,
         boundWorkspace.policy ?? undefined,
+        pipeline.setup
+          ? (role, proof) => {
+              providerAuthority[role] = capabilityAuthorityFingerprint(proof);
+            }
+          : undefined,
       );
     }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
+      ...(pipeline.setup
+        ? {
+            configurationPath:
+              normalized.projectConfigurationPath === undefined
+                ? null
+                : resolve(projectPath, normalized.projectConfigurationPath),
+          }
+        : {}),
+      ...(pipeline.setup ? { providerAuthority } : {}),
       ...(resolved.trustedValidation === undefined
         ? {}
         : { trustedValidation: resolved.trustedValidation }),

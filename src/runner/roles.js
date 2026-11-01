@@ -556,6 +556,7 @@ export async function probeRequiredRoles(
   sourceSession,
   providers = PROVIDER_REGISTRY,
   workspacePolicy,
+  onProof,
 ) {
   const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const receipts = Object.fromEntries(
@@ -565,18 +566,18 @@ export async function probeRequiredRoles(
   for (const role of requiredRoles) {
     const configuration = roles[role];
     if (workspacePolicy !== undefined) {
-      receipts[role] = (
-        await probeRole(
-          resolveAdapter(adapters, pipeline.id, role, configuration.backend),
-          pipeline,
-          role,
-          configuration,
-          sourceSession,
-          providers,
-          workspacePolicy,
-          pipeline.initialRoleAccess?.({ role, workspacePolicy }),
-        )
-      ).policyReceipt;
+      const proof = await probeRole(
+        resolveAdapter(adapters, pipeline.id, role, configuration.backend),
+        pipeline,
+        role,
+        configuration,
+        sourceSession,
+        providers,
+        workspacePolicy,
+        pipeline.initialRoleAccess?.({ role, workspacePolicy }),
+      );
+      onProof?.(role, proof.capabilities);
+      receipts[role] = proof.policyReceipt;
       continue;
     }
     const backend = configuration.backend;
@@ -593,7 +594,7 @@ export async function probeRequiredRoles(
         ),
       );
     }
-    const { policyReceipt } = validateCapabilities(
+    const { policyReceipt, capabilities } = validateCapabilities(
       capabilitiesByConfiguration.get(key),
       {
         access: roleAccess(pipeline, role),
@@ -603,7 +604,20 @@ export async function probeRequiredRoles(
         sourceSession,
       },
     );
+    onProof?.(role, capabilities);
     receipts[role] = policyReceipt;
   }
   return Object.freeze(receipts);
+}
+
+export function capabilityAuthorityFingerprint(proof) {
+  const { policyReceipt, ...authority } = proof;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        ...authority,
+        supportedAccess: policyReceipt.supportedAccess,
+      }),
+    )
+    .digest("hex");
 }

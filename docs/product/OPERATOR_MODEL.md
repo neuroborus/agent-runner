@@ -64,15 +64,25 @@ accept Markdown procedures such as `finalization/SKILL.md` or an adjacent
 preserves the original skill and never rewrites the procedure. Frozen bytes,
 identity and ancestry cannot be replaced or redirected on resume.
 
-The unregistered init foundation can prepare reviewed prerequisites in either
-placement through Runner-owned effects. External preparation creates a bound
+The registered `init` pipeline prepares reviewed infrastructure in either
+placement through Runner-owned effects. CLI `--placement` / MCP `placement` is
+independent of review mode; all three modes work with either placement. External preparation creates a bound
 sibling with a canonical-path hash, or reuses an explicitly selected bound root
 at its existing paths. It returns an exact configuration selector, keeps all
 target content and Git metadata unchanged, and references existing project
 finalization skills from an external finalization procedure. No target pointer,
-ignore edit or global registration is needed. Guidance, terminal setup verification and
-public CLI/MCP init dispatch remain pending; prepared prerequisites are not a
-setup-completion receipt. See the [init specification](../../pipelines/init/docs/SPEC.md).
+ignore edit or global registration is needed. Merged local guidance publishes last, then a distinct read-only terminal
+confirmation accepts the complete snapshot. Status reports created/reused/changed
+resources and effective paths only after completion. Partial prerequisites are
+not a setup-completion receipt. Explicit migration retains the old setup and
+prepares the newly selected placement non-destructively. See the [init specification](../../pipelines/init/docs/SPEC.md).
+Setup pauses expose concrete blockers. Operator stops preserve reserved turns
+and clarification windows; cancellation remains terminal. An exceptional
+material decision after clarification uses durable authorized input and renews
+the proposal gates while retaining the exact selected placement and paths.
+Interrupted reconstruction exposes a resumable provider pause without renewing
+its consumed allowance. The managed local guide records the exact selected
+finalization procedure and replaces its metadata without losing local instructions.
 
 Only runner-root configuration accepts `clientAttribution`, an exact
 `{ name, title }` provider-visible identity. It defaults to

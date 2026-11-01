@@ -1,14 +1,12 @@
-# Init setup foundation
+# Init infrastructure setup
 
 ## Status and ownership
 
 `pipelines/init/` owns infrastructure inspection policy, proposal contracts,
-read-only role requests, bounded clarification and proposal approval. It is
-deliberately unregistered: no CLI/MCP init command, setup completion or Git effect
-is available yet. `PROPOSAL_ACCEPTED` is an internal gate, never a claim that
+read-only role requests, bounded clarification and proposal approval. It is registered as `init` through the existing CLI and asynchronous STDIO MCP
+runner. Setup completion never grants a Git effect. `PROPOSAL_ACCEPTED` is an internal gate, never a claim that
 infrastructure exists. Internal Runner-owned integrated and external prerequisite
-publication is available after this gate. Guidance publication and terminal
-confirmation must precede registration and public completion.
+publication is available after this gate. Guidance publication and distinct terminal confirmation precede public completion.
 
 The private workspace has no runtime dependencies. Root composition supplies
 the public workspace and configuration capabilities; the pipeline does not
@@ -23,8 +21,9 @@ inventories discovered from actual project evidence. It reads them through the
 workspace capability and retains paths and hashes, not their contents. Empty
 inventories are valid when the project has no such files. Agents must inspect
 actual requirements and commands; hashes do not invent validation requirements.
-Existing guidance text remains supervisor input; its inventory metadata reaches
-proposal prompts without becoming instructions for those roles.
+Existing guidance text remains supervisor input. Init reviews existing and
+proposed guidance as setup data for merging and publication; it never becomes
+instructions for those roles.
 
 Candidate configurations are loaded through the configuration capability with
 its existing target binding, precedence, ignored/untracked protections where
@@ -43,8 +42,7 @@ the target, so initial setup requires no ignored target directory. Existing
 repository-local artifact protections remain unchanged.
 
 Placement is separate from review mode. The descriptor reserves CLI
-`--placement integrated|external` and MCP `placement`; neither transport exposes
-init yet. Missing placement reuses one unambiguous established target-bound
+`--placement integrated|external` and MCP `placement`, separately from `mode`. Missing placement reuses one unambiguous established target-bound
 candidate. With no candidate, it selects integrated. Explicit configuration and
 placement must agree. Multiple matching candidates require a material selection
 during clarification; their resources are never merged or moved. Only explicitly
@@ -86,6 +84,10 @@ Every run starts in `CLARIFY`. Planner returns `READY`, material `QUESTIONS`, or
 three agent question rounds; this is not a configurable workflow budget.
 Questions and their rationales use the shared service's 4,000-character plain-text limit.
 An accepted question round first reserves a pending Runner-owned append.
+The shared service journals the exact result hash before replacement through
+the pipeline persistence callback. Resume accepts only the prior transcript or
+those exact appended bytes, including interruption after replacement and before
+editor authorization; it never duplicates questions or adopts unexpected edits.
 After the shared clarification service appends the exact questions,
 `acceptInitQuestionAppend` records its resulting hash against the reserved round,
 previous hash and transcript path. The receipt is consumed before authorizing
@@ -99,18 +101,32 @@ Planner or appending the questions again. An unchanged optional proactive window
 returns to clarification normally. Only pre-closure
 selection can change. The caller freezes the transcript through the existing
 clarification service before `closeInitClarification`. There are no ordinary
-question or editor paths after closure. Exceptional material product decisions
-retain the root runner's persisted decision protocol when init is integrated.
+question or editor paths after closure. Every later role schema, including
+terminal confirmation, supports `PRODUCT_DECISION_REQUIRED` with a bounded
+question, options, blocking rationale and nonempty evidence. Ordinary findings
+and technical choices use revisions. Runner persists the suspended decision
+and exact append intent, then authorizes a one-shot `product-decision` answer
+window through the shared clarification service and CLI/MCP input contract.
+An unchanged close keeps the same request without appending it again. A changed
+answer freezes the new transcript hash and restarts the complete proposal gate;
+the selected placement and paths stay frozen. Decisions after publication retain
+the verified prepared baseline and original procedure-repair authority. They
+grant no counter reset, new permissions or authority over another destination.
 
 Planner returns a complete structured proposal with actual checks and exact
 configuration, artifacts, finalization and guidance resources, their inspected
-prior hashes, actions and proposed contents. Results retain the two-MiB bound.
+prior hashes, actions and proposed contents. Each of these resource kinds occurs
+exactly once so guidance, publication and repair bind the same finalization
+procedure. Results retain the two-MiB bound.
+Ordinary proposal envelopes use `PROPOSAL`; review envelopes use `CLEAN` or
+`FINDINGS`. Their question/rationale fields are empty strings and their
+decision options/evidence are empty lists.
 No role writes those resources. Proposed writes cannot overlap configuration
-resolved for this run, existing skills, Git/provider controls or symbolic links.
+resolved for this run, skills that predate setup, Git/provider controls or symbolic links.
 Inspection retains workspace-discovered control paths, including Git metadata
 whose directory name is not `.git`. The only control-tree write destinations
 are the conventional `.agents` or `.claude` finalization `SKILL.md`/`RUNNER.md`
-files; existing skills and nested controls remain protected. Writes inside nested
+files; pre-existing skills and nested controls remain protected. Writes inside nested
 Git worktrees are prohibited because they require a different exclusion key.
 Bare Git metadata remains protected even when its root is a conventional provider
 directory; finalization selection and proposal validation reject that overlap before
@@ -164,7 +180,9 @@ and execution/polishing finalization selections may change; unrelated settings
 survive. The exact selected finalization procedure is explicit in both pipelines.
 New skills use the established `.agents/skills/finalization/SKILL.md` location,
 or an existing `.claude` skills layout. An existing inspected finalization skill
-is preserved byte-for-byte and selects adjacent `RUNNER.md` instead. An existing
+is preserved byte-for-byte. A bound configuration may reuse its selected skill
+when it already matches the required procedure and ordered checks; otherwise it
+selects adjacent `RUNNER.md` instead. An existing
 wrapper is reused only when it matches the reviewed procedure; conflicting
 contents are preserved and rejected before effects. The derived
 procedure is part of the reviewed proposal, contains its actual ordered checks,
@@ -199,15 +217,17 @@ Each resource receives a
 verified identity/hash receipt before the next effect. Reload binds the original
 proposal, selection, state storage and approved paths; a lost file receipt can
 reconcile the exact prepared temporary identity already at its destination.
+Recovery requires the new ignore exclusions only after the ignore publication
+has a verified receipt; a pending ignore intent reconciles first under the same
+baseline and identity guards.
 Ambiguous directory allocations remain preserved for recovery, never adopted.
 Completed prerequisite receipts are verification-only on rerun.
 
 The order is ignore protection, artifact preparation, finalization, then destination
 configuration. Guidance is excluded from publication and remains deferred.
 The `prepared` marker means only these prerequisites have verified receipts;
-it is neither a completion receipt nor a claim that setup is usable. Full
-interrupted-setup recovery, guidance-last publication and distinct terminal
-confirmation remain separate integration work. This API never
+it is neither a completion receipt nor a claim that setup is usable. The registered lifecycle recovers these exact records before guidance publication
+and terminal confirmation. This API never
 stages, commits, changes Git controls/identity or starts another pipeline.
 
 ## External prerequisite publication
@@ -252,4 +272,96 @@ Existing external procedures can be reused only with the exact reviewed contents
 preserved and rejected. Configuration selects `finalization/SKILL.md` explicitly
 for execution and polishing and resolves relative resources from the bound root.
 Unrelated settings survive. Guidance remains proposed but unpublished until its
-later guidance-last gate; neither a selector nor `prepared` is setup completion.
+guidance-last gate; neither a selector nor `prepared` is setup completion.
+
+## Public completion and recovery
+
+Use `agent-run run init --project <target> --task <external-task-dir>` or MCP
+`run_start` with `pipelineId: "init"`. CLI `--placement` and MCP `placement`
+select `integrated` or `external`; omission reuses an unambiguous established
+setup and otherwise selects integrated. Both placements support every mode.
+An explicit `--project-config` / `projectConfigurationPath` reuses its bound
+infrastructure. Explicit migration selects a new placement without deleting the
+old resources. Destination configuration cannot overwrite configuration resolved
+for the active run. The external task directory supplies `task.md` and optional
+`context.md`; neither transport initializes during ordinary reads.
+
+Root composition supplies the existing workspace/configuration services, shared
+clarification service, state-owned leases/actions and supervised directory move.
+The canonical target exclusion stays leased throughout execution. External setup
+also leases its exact destination, including an absent root, using the same
+serialized overlapping-workspace admission, unless the already-held enclosing
+worktree exclusion covers that destination. Every publication guard verifies
+the applicable workspace ownership tokens and the execution lease. Failed release
+retains the exact infrastructure lease handle for same-run recovery. Canonical
+workspace release also settles retained infrastructure ownership after verified
+recovery or operator stop settlement. Authorized
+clarification changes may add exact inspected read scopes before selection freezes, reproving active
+roles and journaling the new binding under both leases. Document discovery then
+refreshes within those reads, preserving the first inspection's exact bindings;
+outputs and all other permissions stay unchanged. After verified Runner publication, resumed read-only
+policy proofs may bind the identities created by those effects. The original
+provider version, capability flags and access requirements remain fingerprinted
+and must match before any rebinding. No other run
+receives workspace rebinding or provider-write authority. A pending publication permits
+only its exact journaled paths to differ from the original baseline; receipts
+still verify identities and bytes. This recovery proof does not grant provider
+write access or exempt unrelated target content from inspection.
+
+After prerequisites have verified receipts, Runner loads the published selected
+configuration and verifies availability. It reads the complete local guide,
+checks its reviewed prior hash, and reserves an exact guidance action before
+publication through the guidance capability. The intent pins the original file
+identity, and acknowledgement verifies the action-owned published identity even
+after a lost receipt; an identical-byte replacement is never adopted. Guidance
+is LAST. Reviewed useful
+local instructions survive; a delimited managed section records placement,
+canonical target, configuration selector, artifact path, exact selected
+finalization resource, working directory and ordered checks. Reruns replace
+only that section and do not duplicate it.
+The complete merged document retains the existing 65,536-byte bound. All proposal
+results validate that rendered bound before acceptance, including existing text
+and setup metadata, so invalid output leaves the previous proposal retryable.
+The guidance capability also validates the complete rendered document before
+proposal persistence; unsafe content follows the resumable invalid-result path.
+Placement-specific finalization, configuration and ignore policies are also
+validated before a proposal becomes durable review input. Invalid content leaves
+the previous proposal retryable without reserving publication effects.
+All proposal reviewers see the resulting guide. Expected-hash replacement, pinned action
+selection and prepared-file identity allow lost acknowledgements to reconcile
+without overwriting an intervening edit or redirecting a prior intent.
+
+A separate read-only `CONFIRM` turn inspects the complete prepared snapshot:
+Planner in lazy, Reviewer in independent/combined. Every role request and its
+reconstruction prompt include the task, optional context and current accepted
+clarifications, including this distinct confirmation. Only structured `CLEAN` over
+the unchanged fingerprint permits a durable completion receipt. Findings charge
+one revision, clear dependent approvals and return to proposal work over the same
+selected paths and verified prepared baseline. The mode's complete proposal gate
+and publication verification run again; reload cannot renew the revision budget.
+Only a finalization procedure created by this setup can be repaired against that
+verified baseline. Skills that predate the run remain unchanged; a subsequent
+run gains no repair authority over an existing procedure.
+Completed setup is verification-only. Failure or cancellation preserves resources
+and publication records; setup never stages, commits or launches another pipeline.
+Operator pause/cancellation validates the preserved suspended checkpoint,
+including a reserved proposal turn or pending clarification editor. Resume of a
+pause restores that checkpoint; cancellation is terminal. Root safety blockers
+retain reserved read-only bindings without granting continuation through drift.
+
+CLI status and MCP status/wait expose placement, exact reusable selector,
+artifacts, checks, working directory and created/reused/changed resources. Partial
+preparation remains distinct from completion. Use a new separately authorized
+workflow after setup; do not treat its finalization procedure as executed checks.
+Paused status includes bounded concrete setup findings and reason-specific
+explanations, including initial `BLOCKED` results and revision exhaustion.
+Recoverable spawn or initialize failures restore a requested source-fork
+reservation only with validated pre-fork launch recovery evidence. Possible
+effects or later checkpoints retain consumption; retry never repeats an
+unproved fork.
+Successful inactivity or provider-requested reconstruction settles against the
+verified per-turn workspace snapshot, including during terminal confirmation
+after Runner publication. Pre-turn reconstruction exhaustion persists a resumable
+`provider_interrupted` pause at the original checkpoint. Owner loss and explicit
+resume retain attempt 2 consumption, source-fork reservations and revision
+accounting; they never renew an automatic reconstruction allowance.

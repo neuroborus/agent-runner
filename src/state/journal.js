@@ -245,8 +245,15 @@ function assertEventContinuity(
   assertPreparationContinuity(previousState, state, event.activity);
   const previousChildren = previousState.sessionLineage.children;
   const children = state.sessionLineage.children;
+  const readRebinding = isWorkspaceReadRebinding(
+    previousState,
+    state,
+    event.activity,
+  );
   const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
-    (field) => !isDeepStrictEqual(state[field], previousState[field]),
+    (field) =>
+      !(field === "workspace" && readRebinding) &&
+      !isDeepStrictEqual(state[field], previousState[field]),
   );
   const versionChanged = VERSION_STATE_FIELDS.some(
     (field) => !isDeepStrictEqual(state[field], previousState[field]),
@@ -300,6 +307,41 @@ function assertEventContinuity(
     );
   }
   return nextStopProof;
+}
+
+function isWorkspaceReadRebinding(previous, current, activity) {
+  if (
+    activity?.actor !== "runner" ||
+    activity.phase !== "clarify" ||
+    activity.kind !== "read-scopes-bound" ||
+    previous.workspace.kind !== "directory" ||
+    current.workspace.kind !== "directory" ||
+    previous.activeTurn !== null ||
+    current.activeTurn !== null ||
+    previous.preparation != null ||
+    current.preparation != null ||
+    previous.executionProcess !== null ||
+    current.executionProcess !== null ||
+    previous.executionResource !== null ||
+    current.executionResource !== null ||
+    !isDeepStrictEqual(previous.pipelineState, current.pipelineState)
+  )
+    return false;
+  const before = previous.workspace;
+  const after = current.workspace;
+  const { infrastructurePaths: oldReads, ...oldPolicy } = before.policy;
+  const { infrastructurePaths: newReads, ...newPolicy } = after.policy;
+  return (
+    before.leasePath === after.leasePath &&
+    before.lease === after.lease &&
+    isDeepStrictEqual(oldPolicy, newPolicy) &&
+    oldReads.every((path) => newReads.includes(path)) &&
+    before.ancestorBindings.every((entry) =>
+      after.ancestorBindings.some((next) => isDeepStrictEqual(entry, next)),
+    ) &&
+    isDeepStrictEqual(before.absentInputPaths, after.absentInputPaths) &&
+    isDeepStrictEqual(before.retrievalPermissions, after.retrievalPermissions)
+  );
 }
 
 function assertPreparationContinuity(previous, current, activity) {

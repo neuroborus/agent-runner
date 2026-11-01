@@ -943,3 +943,82 @@ test("validates structured input and transcript size", async (t) => {
     ClarificationError,
   );
 });
+
+test("journaled transcript appends recover exact replacement bytes and reject intervening edits", async (t) => {
+  const location = await createFixture(t);
+  const service = createClarificationService({ interactive: false });
+  await service.ensureTranscript(location);
+  for (const [operation, fields] of [
+    [
+      "appendQuestionRound",
+      {
+        round: 1,
+        questions: [
+          {
+            question: "Which acceptance check applies?",
+            whyItMatters: "Conflicting checks cannot both apply.",
+          },
+        ],
+      },
+    ],
+    [
+      "appendProductDecision",
+      {
+        number: 1,
+        question: "Which retention policy applies?",
+        options: [],
+        whyBlocked: "The requirements specify conflicting policies.",
+        evidence: ["The task and criteria conflict."],
+      },
+    ],
+  ]) {
+    await writeFile(location.transcriptPath, CLARIFICATION_TEMPLATE);
+    const expectedHash = sha256(CLARIFICATION_TEMPLATE);
+    let resultHash;
+    await assert.rejects(
+      service[operation]({
+        ...location,
+        ...fields,
+        expectedHash,
+        async persistAppend(intent) {
+          assert.equal(
+            await readFile(location.transcriptPath, "utf8"),
+            CLARIFICATION_TEMPLATE,
+          );
+          assert.equal(intent.expectedHash, expectedHash);
+          resultHash = intent.hash;
+          throw new Error("Interrupted after append intent");
+        },
+      }),
+      /Interrupted after append intent/u,
+    );
+    assert.equal(
+      await readFile(location.transcriptPath, "utf8"),
+      CLARIFICATION_TEMPLATE,
+    );
+    const appended = await service[operation]({
+      ...location,
+      ...fields,
+      expectedHash,
+      resultHash,
+    });
+    assert.equal(appended.hash, resultHash);
+    const identity = (await lstat(location.transcriptPath)).ino;
+    const replayed = await service[operation]({
+      ...location,
+      ...fields,
+      expectedHash,
+      resultHash,
+    });
+    assert.equal(replayed.content, appended.content);
+    assert.equal((await lstat(location.transcriptPath)).ino, identity);
+    await writeFile(
+      location.transcriptPath,
+      `${appended.content}Unexpected edit.\n`,
+    );
+    await assert.rejects(
+      service[operation]({ ...location, ...fields, expectedHash, resultHash }),
+      isClarificationError("ERR_CLARIFICATIONS_CHANGED"),
+    );
+  }
+});

@@ -318,7 +318,11 @@ export async function inspectBoundWorkspace(binding, workspace) {
 
 // Recovery coordinators consume the same snapshot/guard interface in either
 // workspace. A directory capability deliberately contains no Git effects.
-export function directorySafety(binding, workspace) {
+export function directorySafety(
+  binding,
+  workspace,
+  inspect = () => inspectBoundWorkspace(binding, workspace),
+) {
   function inspectedSnapshot(snapshot, allowedPaths) {
     if (
       !Array.isArray(allowedPaths) ||
@@ -339,14 +343,11 @@ export function directorySafety(binding, workspace) {
   }
   return Object.freeze({
     async snapshot({ allowedPaths = [] } = {}) {
-      const { snapshot } = await inspectBoundWorkspace(binding, workspace);
+      const { snapshot } = await inspect();
       return inspectedSnapshot(snapshot, allowedPaths);
     },
     async assertUnchanged(before) {
-      const { snapshot: after } = await inspectBoundWorkspace(
-        binding,
-        workspace,
-      );
+      const { snapshot: after } = await inspect();
       workspace.assertUnchanged({
         before,
         after: inspectedSnapshot(after, before.allowedPaths ?? []),

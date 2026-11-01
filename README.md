@@ -167,6 +167,7 @@ configuration.
 | `plan-execution` | Execute reviewed commit steps or criterion-driven custom results                                | [`pipelines/plan-execution/docs/SPEC.md`](pipelines/plan-execution/docs/SPEC.md) |
 | `audit`          | Inspect an agreed Git or ordinary workspace read-only and publish reviewed `audit.md`           | [`pipelines/audit/docs/SPEC.md`](pipelines/audit/docs/SPEC.md)                   |
 | `polishing`      | Polish, finalize, review, and stage existing dirty-worktree changes for a later commit workflow | [`pipelines/polishing/docs/SPEC.md`](pipelines/polishing/docs/SPEC.md)           |
+| `init`           | Prepare reviewed integrated or external infrastructure without committing                       | [`pipelines/init/docs/SPEC.md`](pipelines/init/docs/SPEC.md)                     |
 
 Plan authoring and execution share the deterministic
 [`@agent-runner/commit-plan`](packages/commit-plan/README.md) contract. The
@@ -329,6 +330,9 @@ Pipeline settings use these defaults:
 | `polishing`      | `maxDisputesPerFinding`          |             5 |
 | `polishing`      | `maxSameFindingRounds`           |             5 |
 | `polishing`      | `stagnationWindowRounds`         |             3 |
+| `init`           | `mode`                           | `independent` |
+| `init`           | `placement`                      |        `null` |
+| `init`           | `maxRevisionRounds`              |          `20` |
 | `audit`          | `mode`                           | `independent` |
 | `audit`          | `maxDiscoveryPasses`             |          `20` |
 | `audit`          | `maxFindingRecheckPasses`        |          `20` |
@@ -1469,15 +1473,31 @@ provider-neutral. Production registration is static and frozen.
 
 ## Pipeline Boundary
 
-The [init setup foundation](pipelines/init/docs/SPEC.md) is source-owned but
-unregistered. It reviews explicit integrated/external infrastructure proposals
-read-only in all three modes, with frozen target/configuration bindings. It
-also provides internal Runner-owned publication of reviewed integrated or external
-prerequisites, preserving existing skills and unrelated settings. External setup
-prepares a target-bound sibling or reuses an explicitly selected root, returns its
-exact configuration selector and leaves target content and Git controls unchanged.
-Guidance publication and terminal setup verification are still pending; there is
-no CLI/MCP init command or public setup-completion claim.
+The [init pipeline](pipelines/init/docs/SPEC.md) prepares reviewed integrated or
+external infrastructure. All agent turns are read-only. Runner publishes
+prerequisites, verifies availability, publishes merged local guidance LAST and
+requires a distinct terminal confirmation before reporting completion. Setup
+never stages, commits or starts another pipeline. Both placements support all
+three modes; independent remains recommended.
+
+```bash
+agent-run run init --project /path/to/project --task /path/to/external-task
+agent-run run init --project /path/to/project --task /path/to/external-task --placement external --mode combined
+```
+
+The external task supplies `task.md` and optional `context.md`. MCP uses
+`run_start` with `pipelineId: "init"`, `projectPath`, `taskPath`, optional
+`placement` and independent `mode`. Status returns created/reused/changed
+resources, working-directory assumptions and the exact reusable configuration
+selector. Use it in later runs with CLI `--project-config` or MCP
+`projectConfigurationPath`. External setup leaves target files and Git controls
+unchanged, needs no pointer/global registration, and references existing project
+skills without editing them. Explicit placement migration preserves the old
+setup. Reruns preserve useful guidance without duplicate setup metadata;
+interrupted effects reconcile their original identities before continuing.
+The managed guidance includes the exact selected finalization procedure.
+Interrupted reconstruction pauses resumably at its saved checkpoint and retains
+the consumed recovery allowance.
 
 The pipeline registry is static in V1. A pipeline descriptor exports an ID, a
 state version, roles, configuration settings and defaults, setting allowed values and
@@ -1598,7 +1618,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   └── custom-plan/
 ├── pipelines/
 │   ├── audit/                 # read-only audit and reviewed report publication
-│   ├── init/                  # unregistered proposals and prerequisite preparation
+│   ├── init/                  # reviewed recoverable infrastructure setup
 │   ├── plan-authoring/
 │   ├── plan-execution/
 │   └── polishing/

@@ -370,10 +370,11 @@ validation remains in the fast tier.
 
 ## Finalization
 
-The fast `pipelines/init/test/proposals.test.js` suite owns the unregistered
-proposal foundation: both placements across all modes, unchanged read-only
+The fast `pipelines/init/test/proposals.test.js` suite owns the pure
+proposal contract: both placements across all modes, unchanged read-only
 bindings, selection conflicts, frozen live-configuration protection, preserved
-skills and discovered controls, directory/file distinctions, frozen clarification
+skills and discovered controls, directory/file distinctions, merged guidance
+byte-limit rejection before proposal acceptance, frozen clarification
 selection, one-shot clarification edits, approval invalidation and bounded revisions.
 One focused shared-service case covers append receipts, structured answers and
 unchanged answer windows without consuming additional question rounds.
@@ -414,7 +415,36 @@ It verifies subsequent configuration/finalization selection and
 unchanged Git and ordinary-directory targets, with no ignore inspection or
 provider activity. Run it when changing external init publication or its confined
 resource policy. Both publication suites belong to the complete slow tier;
-guidance-last and terminal setup completion remain separate integration work.
+`test/runner-init.slow.test.js` owns registered lifecycle composition: both
+placements crossed with all three modes, proven unused source-fork recovery
+without repeating possible effects, guidance-last publication, distinct
+terminal confirmation, CLI/MCP setup projections, repeatable guidance,
+resumable rejection of unsafe guidance, malformed configuration and invalid
+placement-specific procedures before publication,
+renewed proposal gates and actual procedure repairs after terminal findings,
+atomic replacement of existing local guidance, pending ignore publication,
+enclosing-worktree lease reuse, failed infrastructure-lease release across
+same-run resume and stop settlement, lost prerequisite receipts,
+intervening guidance edits, authorized pre-closure read-scope extension, and
+retired terminal-turn recovery with identity-sensitive provider receipts, frozen
+backend authority, and identical-byte guide substitution after a lost acknowledgement.
+It also owns stop settlement during reserved proposal turns and clarification
+windows, interrupted question/decision publication, structured decision answers
+with frozen selections and renewed gates, and concrete CLI/MCP blocker projections.
+Successful inactivity and provider-requested reconstruction cover both proposal
+and terminal confirmation; interrupted second attempts retain consumption and
+produce a resumable CLI/MCP pause before another provider invocation. Managed
+guidance coverage verifies the exact finalization path and preserved local text;
+the fast proposal suite also verifies metadata replacement when that path changes
+on rerun.
+The fast clarification lifecycle suite owns exact append-hash replay and
+intervening-edit rejection for both shared append operations; the pure proposal
+suite covers exceptional decision contracts at every post-closure proposal gate.
+It uses neutral directories,
+fake providers and a controlled directory publisher; the workspace tests retain
+native publication safety ownership. Run it for init lifecycle, setup lease or
+guidance integration changes, in addition to the affected prerequisite suites.
+Provider/native-platform acceptance remains opt-in.
 
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes

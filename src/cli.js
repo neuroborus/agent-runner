@@ -151,6 +151,7 @@ Options:
                            combined adds primary convergence before independent review
                            and is available for all registered pipelines;
                            audit uses separate discovery and finding recheck cycles
+      --placement          Init placement: integrated or external; separate from mode
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role
@@ -347,6 +348,21 @@ function runSummary({ directoryPath, run }) {
     lines.push(
       `Audit report: ${status.auditReport.path} (${status.auditReport.status})`,
       `Audit findings: ${status.auditReport.confirmedFindings} confirmed; ${status.auditReport.pendingCandidates} pending (unverified)`,
+    );
+  }
+  if (status.setup) {
+    lines.push(
+      `Setup: ${status.setup.placement}`,
+      `Target: ${status.setup.projectPath}`,
+      `Project configuration: ${status.setup.configurationPath}`,
+      `Artifacts: ${status.setup.artifactPath}`,
+      `Working directory: ${status.setup.workingDirectory}`,
+      "Configured checks:",
+      ...status.setup.checks.map((command) => `  ${command}`),
+      "Resources:",
+      ...status.setup.resources.map(
+        ({ path, status }) => `  ${status}: ${path}`,
+      ),
     );
   }
   lines.push(...refinementProgressLines(status.refinementProgress));
