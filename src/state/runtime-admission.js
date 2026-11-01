@@ -84,11 +84,13 @@ function ownerIdentity(value) {
 function parse(source) {
   if (source === null)
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 0,
       lastOperation: null,
       active: null,
+      activeOperation: null,
       pending: null,
+      pendingOperation: null,
       users: [],
     };
   let value;
@@ -105,8 +107,11 @@ function parse(source) {
       "active",
       "pending",
       "users",
+      ...(value?.schemaVersion === 2
+        ? ["activeOperation", "pendingOperation"]
+        : []),
     ]) ||
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(value.schemaVersion) ||
     !Number.isSafeInteger(value.revision) ||
     value.revision < 1 ||
     typeof value.lastOperation !== "string" ||
@@ -115,6 +120,24 @@ function parse(source) {
     value.users.length > MAX_USERS
   )
     throw failure("Runtime admission record is invalid.");
+  if (value.schemaVersion === 1) {
+    value = {
+      ...value,
+      schemaVersion: 2,
+      activeOperation: null,
+      pendingOperation: null,
+    };
+  }
+  if (value.activeOperation !== null) {
+    assertRunId(value.activeOperation);
+    if (value.active === null)
+      throw failure("Active runtime proof is invalid.");
+  }
+  if (value.pendingOperation !== null) {
+    assertRunId(value.pendingOperation);
+    if (value.pending === null)
+      throw failure("Pending runtime proof is invalid.");
+  }
   if (value.active !== null) runtimeIdentity(value.active);
   if (value.pending !== null) runtimeIdentity(value.pending);
   const ids = new Set();
@@ -182,6 +205,8 @@ function validateCheckpoint(record, operation, id) {
 // This focused state projection uses the existing action intents, leases and
 // mutation boundary. It grants no run migration, process custody or Git effects.
 export function createRuntimeAdmissionStore({
+  rootPath,
+  openStorage,
   ensureRoot,
   ensureDirectory,
   actions,
@@ -295,6 +320,50 @@ export function createRuntimeAdmissionStore({
           );
         if (status === "live") live.push(user);
       }
+      if (
+        operation === "admit" &&
+        live.length === 0 &&
+        state.pendingOperation !== null &&
+        isDeepStrictEqual(state.pending, runtime)
+      ) {
+        const pendingId = state.pendingOperation;
+        const pendingRequest = {
+          key: `runtime-activate:${pendingId}`,
+          tool: "runtime_activate",
+          arguments: { id: pendingId, runtime: state.pending, kind: null },
+        };
+        const pending = await actions.read(pendingRequest);
+        if (!pending) throw failure("Pending activation proof is missing.");
+        validateCheckpoint(pending, "activate", pendingId);
+        if (
+          pending.context.result?.status !== "deferred" ||
+          pending.context.fromRevision >= state.revision
+        )
+          throw failure("Pending activation proof is invalid.");
+        if (pending.status === "intent") {
+          if (
+            !isDeepStrictEqual(pending.context.owner, identity) &&
+            !["dead", "replaced"].includes(
+              await inspectOwner(pending.context.owner, identity),
+            )
+          )
+            throw failure(
+              "Pending activation owner cannot be verified.",
+              "ERR_RUNTIME_OWNER_UNVERIFIABLE",
+            );
+          const recovery = await actions.begin({
+            ...pendingRequest,
+            context: pending.context,
+          });
+          try {
+            validateCheckpoint(recovery.record, "activate", pendingId);
+            if (recovery.record.status !== "completed")
+              await recovery.complete(recovery.record.context.result);
+          } finally {
+            await recovery.release();
+          }
+        }
+      }
       const action = await actions.begin({
         ...request,
         context: { owner: identity },
@@ -307,8 +376,16 @@ export function createRuntimeAdmissionStore({
           planned.fromRevision !== undefined
         ) {
           if (
-            state.revision === planned.fromRevision + 1 &&
-            state.lastOperation === `${operation}:${id}`
+            (state.revision === planned.fromRevision + 1 &&
+              state.lastOperation === `${operation}:${id}`) ||
+            (operation === "activate" &&
+              state.revision > planned.fromRevision &&
+              ((planned.result.status === "active" &&
+                state.activeOperation === id &&
+                isDeepStrictEqual(state.active, runtime)) ||
+                (planned.result.status === "deferred" &&
+                  state.pendingOperation === id &&
+                  isDeepStrictEqual(state.pending, runtime))))
           ) {
             await action.complete(planned.result);
             return action.record.result;
@@ -345,13 +422,21 @@ export function createRuntimeAdmissionStore({
           state.users = live.filter((user) => user.id !== id);
           result = { status: "released", id };
         } else {
+          const boundarySelection =
+            operation === "admit" && live.length === 0
+              ? ((state.pendingOperation !== null ? state.pending : null) ??
+                state.active)
+              : state.active;
           const conflict =
             live.some((user) => !isDeepStrictEqual(user.runtime, runtime)) ||
             (operation === "admit" &&
-              state.active !== null &&
-              !isDeepStrictEqual(state.active, runtime));
+              boundarySelection !== null &&
+              !isDeepStrictEqual(boundarySelection, runtime));
           if (conflict) {
-            if (operation === "activate") state.pending = runtime;
+            if (operation === "activate") {
+              state.pending = runtime;
+              state.pendingOperation = id;
+            }
             result = {
               status: "deferred",
               id,
@@ -360,7 +445,16 @@ export function createRuntimeAdmissionStore({
             };
           } else {
             state.active = runtime;
-            if (isDeepStrictEqual(state.pending, runtime)) state.pending = null;
+            if (operation === "activate") state.activeOperation = id;
+            else if (isDeepStrictEqual(state.pending, runtime))
+              state.activeOperation = state.pendingOperation;
+            if (
+              operation === "activate" ||
+              isDeepStrictEqual(state.pending, runtime)
+            ) {
+              state.pending = null;
+              state.pendingOperation = null;
+            }
             if (operation === "admit") {
               const prior = live.find((user) => user.id === id);
               if (
@@ -411,6 +505,29 @@ export function createRuntimeAdmissionStore({
   }
 
   return Object.freeze({
+    async read() {
+      let binding;
+      try {
+        binding = await openStorage(join(rootPath, "runtime-admission"));
+        const state = parse(
+          await readOptionalText(join(binding.anchor, "runtime.json"), {
+            maxBytes: MAX_BYTES,
+          }),
+        );
+        await binding.verify();
+        return deepFreeze({
+          revision: state.revision,
+          active: state.active,
+          pending: state.pending,
+        });
+      } catch (error) {
+        if (error.code === "ENOENT")
+          return deepFreeze({ revision: 0, active: null, pending: null });
+        throw error;
+      } finally {
+        await binding?.close();
+      }
+    },
     admit: (input) => transaction("admit", input),
     activate: (input) => transaction("activate", input),
     release: (id) => transaction("release", { id }),

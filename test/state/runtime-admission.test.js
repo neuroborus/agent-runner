@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFile, symlink, mkdir, lstat } from "node:fs/promises";
+import { readFile, symlink, mkdir, lstat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -264,4 +264,156 @@ test("missing or malformed runtime authority cannot initialize or clear selectio
     { code: "ERR_RUNTIME_ADMISSION" },
   );
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
+  const directory = join(f.stateRoot, "runtime-admission");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, "runtime.json");
+  await writeFile(path, "null", { mode: 0o600 });
+  await assert.rejects(store.readRuntime(), { code: "ERR_RUNTIME_ADMISSION" });
+  await assert.rejects(store.activateRuntime({ runtime: runtime("a") }), {
+    code: "ERR_RUNTIME_ADMISSION",
+  });
+  assert.equal(await readFile(path, "utf8"), "null");
+});
+
+test("pending selection wins the next admission boundary; racing old starts cannot extend it", async (t) => {
+  const f = await fixture(t);
+  const a = f.store(101),
+    b = f.store(202);
+  const id = randomUUID();
+  await a.admitRuntime({ id, runtime: runtime("a"), kind: "mcp" });
+  assert.equal(
+    (await b.activateRuntime({ runtime: runtime("b") })).status,
+    "deferred",
+  );
+  await a.releaseRuntime(id);
+  const outcomes = await Promise.allSettled([
+    a.admitRuntime({ runtime: runtime("a"), kind: "cli" }),
+    b.admitRuntime({ runtime: runtime("b"), kind: "mcp" }),
+  ]);
+  assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"));
+  assert.deepEqual(
+    outcomes.map((outcome) => outcome.value.status),
+    ["deferred", "admitted"],
+  );
+  assert.deepEqual((await f.read()).active, runtime("b"));
+});
+
+test("a later admission reconciles an interrupted pending activation before selecting its payload", async (t) => {
+  const f = await fixture(t);
+  const a = f.store(101);
+  await a.admitRuntime({ runtime: runtime("a"), kind: "mcp" });
+  const id = randomUUID();
+  const b = f.store(202, {
+    onRuntimeBoundary: async ({ operation }) => {
+      if (operation === "activate")
+        throw new Error("controlled pending publication interruption");
+    },
+  });
+  await assert.rejects(
+    b.activateRuntime({ id, runtime: runtime("b") }),
+    /publication interruption/u,
+  );
+  f.live.delete(101);
+  f.live.delete(202);
+  f.live.add(303);
+  const later = f.store(303);
+  assert.equal(
+    (await later.admitRuntime({ runtime: runtime("b"), kind: "mcp" })).status,
+    "admitted",
+  );
+  const receipt = await later.readAction({
+    key: `runtime-activate:${id}`,
+    tool: "runtime_activate",
+    arguments: { id, runtime: runtime("b"), kind: null },
+  });
+  assert.equal(receipt.status, "completed");
+  assert.equal(
+    receipt.result.status,
+    "deferred",
+    "The consumed original outcome is historical, never replayed",
+  );
+  assert.deepEqual((await f.read()).active, runtime("b"));
+  assert.equal((await f.read()).pending, null);
+});
+
+test("activation recovery survives later admissions without replaying selection", async (t) => {
+  for (const outcome of ["active", "deferred"]) {
+    await t.test(outcome, async (t) => {
+      const f = await fixture(t);
+      const a = f.store(101);
+      if (outcome === "deferred")
+        await a.admitRuntime({ runtime: runtime("a"), kind: "mcp" });
+      else await a.activateRuntime({ runtime: runtime("a") });
+      const id = randomUUID();
+      const b = f.store(202, {
+        onRuntimeBoundary: async ({ operation }) => {
+          if (operation === "activate")
+            throw new Error("controlled activation interruption");
+        },
+      });
+      await assert.rejects(
+        b.activateRuntime({ id, runtime: runtime("b") }),
+        /activation interruption/u,
+      );
+      f.live.delete(202);
+      f.live.add(303);
+      const later = f.store(303);
+      await later.admitRuntime({
+        runtime: runtime(outcome === "active" ? "b" : "a"),
+        kind: "cli",
+      });
+      const before = await f.read();
+      assert.equal(
+        (await later.activateRuntime({ id, runtime: runtime("b") })).status,
+        outcome,
+      );
+      assert.deepEqual(await f.read(), before);
+    });
+  }
+});
+
+test("legacy pending projections gain no automatic admission authority", async (t) => {
+  const f = await fixture(t);
+  const a = f.store(101),
+    b = f.store(202);
+  const id = randomUUID();
+  await a.admitRuntime({ id, runtime: runtime("a"), kind: "mcp" });
+  await b.activateRuntime({ runtime: runtime("b") });
+  await a.releaseRuntime(id);
+  const legacy = await f.read();
+  legacy.schemaVersion = 1;
+  delete legacy.activeOperation;
+  delete legacy.pendingOperation;
+  await writeFile(
+    join(f.stateRoot, "runtime-admission/runtime.json"),
+    JSON.stringify(legacy),
+  );
+  assert.equal(
+    (await b.admitRuntime({ runtime: runtime("b"), kind: "cli" })).status,
+    "deferred",
+  );
+  assert.deepEqual((await f.read()).active, runtime("a"));
+  assert.equal(
+    (await b.activateRuntime({ runtime: runtime("b") })).status,
+    "active",
+  );
+});
+
+test("a later explicit activation supersedes an older deferred selection", async (t) => {
+  const f = await fixture(t);
+  const a = f.store(101),
+    b = f.store(202);
+  await a.admitRuntime({ runtime: runtime("a"), kind: "mcp" });
+  assert.equal(
+    (await b.activateRuntime({ runtime: runtime("b") })).status,
+    "deferred",
+  );
+  assert.equal(
+    (await b.activateRuntime({ runtime: runtime("a") })).status,
+    "active",
+  );
+  const state = await f.read();
+  assert.deepEqual(state.active, runtime("a"));
+  assert.equal(state.pending, null);
+  assert.equal(state.pendingOperation, null);
 });

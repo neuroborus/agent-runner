@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Candidate activation follows serialized safe admission.** A separate root
+  update action binds a fully reverified preparation to one durable runtime
+  effect. Outcomes distinguish downloaded, installed, deferred and active
+  versions before returning; retry reconciles consumed selection once. A pinned
+  MCP user defers promotion until the next safe admission, while detached work
+  retains its exact payload. Pending authority is bound to its originating
+  action rather than inferred from historical state. Previous usable trees and
+  saved progress remain intact. Restart and resume stay explicit, using frozen
+  configuration, supported leased migrations and existing consumed-effect
+  recovery; retained versions promise no rollback or renewed legacy authority.
+
 - **Candidate preparation records validated bytes without activating them.**
   The single updater freezes exact official metadata and integrity under the
   state-owned action lease before installation. Fresh private attempts retain

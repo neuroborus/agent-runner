@@ -127,6 +127,15 @@ prefer user settings, falling back to installation-local `.agent-runner.json`
 only for absence. Invalid or unreadable user settings fail closed. Never migrate
 the configuration used by an active workflow; resume keeps its frozen snapshot.
 
+Installed processes and detached continuations keep their immutable payload.
+Root API update activation publishes an active or deferred outcome before
+returning; it never restarts an MCP client. After a deferred update, retire the
+previous runtime users and explicitly restart the owning client. Resume saved
+work separately through a compatible server; frozen configuration and consumed
+effects remain authoritative. Retained older payloads do not undo persisted
+migrations. Preserve progress when a forward-version rejection blocks an older
+installation; see [version and restart limits](RELEASING.md#local-version-selection-and-restart).
+
 The global layer, also called runner-root configuration, defines trusted profile
 implementations. Global and safe project configuration may define exact trusted
 command vectors; project configuration may select these aliases and safe settings.

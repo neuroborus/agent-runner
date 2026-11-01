@@ -4,6 +4,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
+import { resolveStateLocation } from "../state/location/index.js";
+import { readRuntimeSelection } from "./selection.js";
+
 import {
   absolutePath,
   isWithin,
@@ -166,13 +169,16 @@ function expectedContext(environment) {
 }
 
 // This is the only pre-application preparation path. It never resolves settings
-// or run state, installs packages, selects an update, or activates a controller.
+// or saved runs, installs packages, or activates a controller. Normal startup
+// may read an already-published active runtime; detached launches stay exact.
 export async function prepareRuntime({
   rootPath = ROOT,
   storageRoot,
   environment = process.env,
   beforeSeal,
   beforePublish,
+  selectActive = false,
+  stateRoot,
 } = {}) {
   absolutePath(rootPath);
   if ((await realpath(rootPath)) !== rootPath)
@@ -214,6 +220,31 @@ export async function prepareRuntime({
     throw new RuntimePayloadError(
       "Detached continuation payload or Node identity changed.",
     );
+  if (selectActive && !expected) {
+    const active = await readRuntimeSelection(
+      stateRoot ?? resolveStateLocation({ env: environment }),
+    );
+    if (active !== null) {
+      const selected = await prepareRuntime({
+        rootPath: active.rootPath,
+        environment: {
+          [RUNTIME_PAYLOAD_ENV]: JSON.stringify({
+            ...active,
+            mode: "pinned",
+            installationPath: rootPath,
+          }),
+        },
+      });
+      const metadata = JSON.parse(
+        (await readRegular(join(selected.rootPath, "package.json"))).bytes,
+      );
+      if (metadata.name !== source.manifest.name)
+        throw new RuntimePayloadError(
+          "Active runtime belongs to another application.",
+        );
+      return selected;
+    }
+  }
   if (stored)
     return Object.freeze({
       mode: "pinned",
@@ -292,10 +323,12 @@ export async function startApplication() {
   try {
     if (getRuntimeContext() !== null)
       throw new RuntimePayloadError("Runtime selection is already frozen.");
-    context = await prepareRuntime();
-  } catch {
+    context = await prepareRuntime({ selectActive: true });
+  } catch (error) {
     process.stderr.write(
-      "Application payload could not be verified; no command was started.\n",
+      error.code === "ERR_RUNTIME_SELECTION_VERSION"
+        ? "Runtime selection version is unsupported; saved progress was not changed.\n"
+        : "Application payload could not be verified; no command was started.\n",
     );
     return 1;
   }

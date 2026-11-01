@@ -115,3 +115,31 @@ and requires immutable-payload, compatibility and isolated CLI/MCP smoke
 acceptance before a local validated receipt. That receipt grants no publication,
 activation, migration, resume or global-link authority, and cannot substitute for
 this release workflow's exact tested artifact or public verification.
+
+## Local version selection and restart
+
+After official approval, use an exact package version for installation, for
+example `npm install --global @your-scope/agent-runner@1.2.3` with the separately
+approved package name. This is an operator-owned installation into the intended
+prefix; local tests perform no such global change. Keep settings and run state
+outside that prefix and restart the owning client explicitly. Installation alone
+does not resume work or move a running MCP process onto new code.
+Replacing the outer package also does not override a published runtime selection;
+inspect installed, running and active versions separately.
+
+The root update API separately prepares an exact version, then activates only
+that validated preparation under a new operation UUID. While another runtime
+remains in use, the outcome is durably deferred. Next normal startup reads the
+published candidate; admission promotes it only after the previous users retire.
+Detached continuations stay pinned. Retry the same operation after interruption
+and inspect lifecycle status rather than inventing a new effect.
+
+Equal or older registry selections remain successful no-ops during preparation.
+An already validated, retained compatible candidate can be explicitly selected
+again. An explicit older package installation is not a rollback of saved state:
+run migrations and admission-projection upgrades can make older software unable
+to read it. Never edit/delete state or bypass a forward-version rejection to
+force a downgrade. Retained bytes promise neither rollback of persisted
+migrations nor execution authority for legacy/intermediate runs. Resume only
+explicitly through a compatible later server and its supported leased migrations,
+using the run's frozen configuration and existing effect-recovery rules.

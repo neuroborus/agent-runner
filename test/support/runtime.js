@@ -114,6 +114,12 @@ export async function runtimeFixture(t, { application, extraFiles = {} } = {}) {
     "bin/agent-run.js",
     await readFile(new URL("../../bin/agent-run.js", import.meta.url)),
   );
+  contents.set(
+    "src/state/location/index.js",
+    await readFile(
+      new URL("../../src/state/location/index.js", import.meta.url),
+    ),
+  );
   const files = [];
   for (const [path, content] of contents) {
     const bytes = Buffer.from(content);

@@ -48,6 +48,28 @@ export const receipt = (
     restartRequired,
   });
 
+export const preparationContext = (storageRoot) => ({
+  schemaVersion: 2,
+  storageRoot,
+  rootIdentity: null,
+  selection: null,
+  attempts: [],
+  process: null,
+  candidate: null,
+  downloadedVersion: null,
+  installedVersion: null,
+});
+export const preparationRequest = (
+  operationId,
+  version,
+  storageRoot,
+  official,
+) => ({
+  key: `update:${operationId}`,
+  tool: "update_prepare",
+  arguments: { version, storageRoot, official },
+});
+
 export function assertContext(context, root) {
   if (
     !fields(context, [
@@ -58,8 +80,16 @@ export function assertContext(context, root) {
       "attempts",
       "process",
       "candidate",
+      ...(context?.schemaVersion === 2
+        ? ["downloadedVersion", "installedVersion"]
+        : []),
     ]) ||
-    context.schemaVersion !== 1 ||
+    ![1, 2].includes(context.schemaVersion) ||
+    (context.schemaVersion === 2 &&
+      [context.downloadedVersion, context.installedVersion].some(
+        (value) =>
+          value !== null && value !== context.selection?.metadata?.version,
+      )) ||
     context.storageRoot !== root ||
     (context.rootIdentity !== null && !ownership(context.rootIdentity)) ||
     !Array.isArray(context.attempts) ||

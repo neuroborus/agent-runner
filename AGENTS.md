@@ -256,14 +256,15 @@ All pipelines additionally require:
 | `src/config/index.js`             | Public runner-configuration capability boundary                       |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
 | `src/config/release/index.js`     | Shared immutable release identity and approval policy                 |
-| `src/update/index.js`             | Public on-demand release reporting and candidate preparation boundary |
-| `src/update/`                     | Private release reports, candidate preparation and owned smoke checks |
+| `src/update/index.js`             | Public release checks, candidate preparation and activation boundary  |
+| `src/update/`                     | Private release lifecycle, candidate proof and owned smoke checks     |
 | `src/clarifications/index.js`     | Public clarification-service boundary                                 |
 | `src/clarifications/`             | Private authorization coordination and confined transcript files      |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                               |
 | `src/runner/index.js`             | Public runner-orchestration capability boundary                       |
 | `src/runner/`                     | Private input, role/session, migration, and orchestration modules     |
 | `src/state/index.js`              | Public run-store capability boundary                                  |
+| `src/state/location/index.js`     | Standard-library state location mapping shared with bootstrap         |
 | `src/state/`                      | Private storage, journals, actions, leases, preservation, validation  |
 | `src/state/runtime-admission.js`  | Owned runtime users and recoverable admission/activation state        |
 | `src/git/index.js`                | Public Git-safety capability boundary                                 |

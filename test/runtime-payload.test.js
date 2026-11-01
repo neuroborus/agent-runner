@@ -327,9 +327,27 @@ test("linked checkouts remain development managed without creating runtime stora
   const selected = await prepareRuntime({
     ...f,
     rootPath: await realpath(link),
+    selectActive: true,
+    stateRoot: join(f.directory, "absent-state"),
   });
   assert.equal(selected.mode, "development");
   assert.equal(selected.rootPath, f.rootPath);
+  await assert.rejects(lstat(f.storageRoot), { code: "ENOENT" });
+});
+
+test("unknown forward runtime selections preserve progress and block pre-import startup", async (t) => {
+  const f = await runtimeFixture(t);
+  const stateRoot = join(f.directory, "state");
+  const admissionPath = join(stateRoot, "runtime-admission");
+  await mkdir(admissionPath, { recursive: true, mode: 0o700 });
+  const path = join(admissionPath, "runtime.json");
+  const bytes = JSON.stringify({ schemaVersion: 3, progress: "retained" });
+  await writeFile(path, bytes, { mode: 0o600 });
+  await assert.rejects(
+    prepareRuntime({ ...f, selectActive: true, stateRoot }),
+    { code: "ERR_RUNTIME_SELECTION_VERSION" },
+  );
+  assert.equal(await readFile(path, "utf8"), bytes);
   await assert.rejects(lstat(f.storageRoot), { code: "ENOENT" });
 });
 

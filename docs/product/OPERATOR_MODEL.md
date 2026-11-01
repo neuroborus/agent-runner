@@ -62,15 +62,24 @@ Unknown ownership or substituted storage remains blocking. Failed attempts never
 replace the previous usable payload, and smoke storage is removed only after
 its owned processes retire. Preparation changes no global/native link or active
 selector and cannot migrate settings, resume a run or acquire Git authority.
-Transport exposure and activation remain separate from this capability.
+Transport exposure remains separate from this capability.
+
+Activation is another explicit root operation bound to the exact validated
+preparation and version. Its durable receipt distinguishes downloaded, installed,
+deferred and active versions; read-only lifecycle status does not query the
+registry. Another live runtime keeps activation deferred until safe admission
+after its users retire. An interrupted consumed activation is reconciled without
+repeating selection. Earlier usable installations remain retained.
 
 Installed executables verify and select a complete user-owned read-only payload
 before loading application code. A running CLI/MCP process and its detached
 continuations retain that payload's code, dependencies and resources after outer
 package replacement. Changed or incomplete payloads and changed Node executable
 identity block launch; bootstrap does not repair an existing payload. Interrupted
-preparations are not active installations. This startup contract grants no update
-activation, state migration or automatic resume. Linked Git checkouts remain
+preparations are not active installations. Startup follows an already-published
+selection before imports and rechecks it at admission; detached launches retain
+their exact original selection. This grants no state migration or automatic
+resume. Linked Git checkouts remain
 development-managed. See [pinned payloads](../../README.md#pinned-application-payloads).
 
 Runtime admission serializes explicit activation with positively associated
@@ -78,8 +87,13 @@ CLI/MCP users, new runs, resumes and detached continuations. Another live payloa
 defers activation; uncertain ownership remains blocking. Retirement preserves
 the previous usable tree and never signals unrelated processes. An existing
 MCP server stays pinned until it ends; selecting another payload cannot restart
-its client, migrate saved progress or resume a run. Activation currently has an
-internal capability boundary, with no new public update command.
+its client, migrate saved progress or resume a run. A later compatible server
+requires explicit resume with supported leased migrations and the original
+frozen configuration. Unknown forward versions preserve progress and fail
+clearly; retained payloads cannot undo persisted migrations. Legacy/intermediate
+runs gain no execution authority. Activation currently has a root capability
+boundary, with no new public update command. See
+[explicit versions and downgrade limits](../RELEASING.md#local-version-selection-and-restart).
 
 ## Configuration
 

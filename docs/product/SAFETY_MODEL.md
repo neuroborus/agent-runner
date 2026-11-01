@@ -194,6 +194,19 @@ Project content, pipeline roles and findings grant no preparation authority.
 Candidate attempts are separate from workflow correction accounting and never
 renew a consumed execution, fix or stagnation allowance.
 
+Candidate activation requires the exact completed preparation under its lease,
+unchanged payload/storage proof and current compatibility. A separate action
+persists the candidate and runtime-operation identity before serialized selection,
+then publishes the durable active/deferred outcome without restarting anything.
+Recovery consumes that original effect once. Pending admission authority is bound
+to the originating activation action; historical pending identities gain no such
+proof. Another associated live runtime defers selection, and uncertain owned
+identity remains blocking. Unrelated host processes acquire no veto or signals.
+Previous payloads and saved runs remain unchanged. Explicit later resume retains
+frozen configuration, leased migrations and consumed-effect recovery; activation
+grants no legacy/intermediate execution or refinement authority and cannot roll
+back persisted migrations.
+
 Journal reuse requires a certificate of the originally validated run/revision
 prefix, ordered contiguous segment namespace, file identities and exact byte
 ranges. Fresh consumed-byte digests and stable directory identity and file

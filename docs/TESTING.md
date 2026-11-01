@@ -43,6 +43,13 @@ Existing runtime-pinning slow coverage retains actual detached-process proof;
 the new admission tests require no providers, host census, signals or installs.
 Recovery also covers a consumed activation after owner loss and colliding PIDs
 in separate namespaces before the first runtime projection is published.
+Controlled concurrent admissions prove that a pending activation wins the next
+safe boundary and rejects an obsolete racing start. Recovery binds that pending
+selection to its consumed action across owner loss and intervening retirement;
+active and deferred receipts also recover after intervening admissions without
+republishing their selectors. A superseded selection retains its replay barrier;
+historical projections gain no inferred authority, and a newer explicit choice
+supersedes an older pending request.
 
 Fast `test/release-assembly.test.js` owns isolated lock-closure assembly, real
 private workspaces, nested dependencies, executable modes, allowlist exclusions,
@@ -73,7 +80,7 @@ remain unchanged.
 Fast `test/update-candidate.test.js` owns exact candidate selection, archive
 integrity/resources, installed-payload verification, interrupted/partial install
 reconciliation, permission/smoke failures and substituted-storage preservation.
-Two focused durable-action cases retain actual leased receipts and ownership
+Focused durable-action cases retain actual leased receipts and ownership
 across interrupted effects; other policy cases use lightweight action effects.
 Neutral confined payloads prove previous-payload retention and owned smoke
 teardown. npm/registry/smoke effects are injected, and a native-vector case
@@ -83,6 +90,16 @@ expiry; intent-write failures retain redacted results and clean positively owned
 smoke allocations. Recovery coverage rejects token-owned uncertainty and ignores
 unrelated reused sessions even after their new leader exits. This is not
 native-platform acceptance.
+Activation coverage holds a pinned MCP admission through deferred selection,
+then verifies next-start selection, exact detached pinning, retained previous
+payloads and consumed-effect recovery without a second publication. A saved run
+remains byte-identical across activation; explicit later leased migration retains
+its frozen configuration and consumed commit, while an unsupported forward
+pipeline version preserves progress. These cases use the real state action/lease
+boundary with injected native effects, without restarting a client or executing
+the saved run. Existing Runner slow coverage retains full resume orchestration.
+Lifecycle projection rejects malformed persisted versions without returning their
+text or performing registry/native effects.
 Existing package-install acceptance retains real CLI/MCP protocol and offline
 installation ownership; its separately assigned exact invocation remains
 required alongside complete slow coverage.

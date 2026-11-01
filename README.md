@@ -222,6 +222,13 @@ and reconcile interrupted installation before retry. Failed attempts preserve
 the current payload, settings and runs. Preparation activates nothing, changes
 no global link and remains blocked by the current unapproved identity.
 
+Root API activation requires that exact validated preparation, version and a
+separate operation UUID. Durable receipts distinguish downloaded, installed,
+deferred and active versions. A live CLI/MCP user of the previous payload defers
+selection until the next admission after those users retire. Activation never
+restarts an MCP client or resumes a saved run. Previous usable payloads remain
+available; see [restart and version limits](docs/RELEASING.md#local-version-selection-and-restart).
+
 ### Isolated candidate installation
 
 To inspect a local installation without linking the checkout, use the exact
@@ -292,16 +299,20 @@ Git checkouts, including `npm link` development, remain development-managed and
 create no payload storage. Application startup through the executable owns
 pinning; direct source API imports do not bootstrap an installed process.
 Payload preparation performs no package installation, controller activation,
-update selection, run migration or implicit resume.
+run migration or implicit resume. Normal startup reads an already-published
+selection before application imports; detached continuations retain their exact
+original payload. Linked development bypasses installed-runtime selection.
 
 Pinned CLI/MCP processes register their exact payload and process identity in
 user state. New runs, resumes and detached commands pass the same serialized
 admission boundary. Activation is deferred while positively associated users
 of another payload remain alive; an unverifiable owner remains blocking.
 Unrelated host processes are neither enumerated nor signaled. Explicit runtime
-activation selects a verified payload after users retire; admission cannot
-silently switch an existing active selection or restart an MCP client. Previous
-payloads and saved progress remain intact. The internal activation capability
+activation selects a verified payload or durably queues it for the next safe
+admission. A racing obsolete start cannot bypass that selection. Previous
+payloads and saved progress remain intact. Resume remains an explicit operation
+using supported leased migrations and the run's original frozen configuration;
+unknown forward versions fail without modifying progress. The root capability
 adds no public update command, automatic update, migration or resume authority.
 
 ## Pipelines
@@ -2021,7 +2032,8 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── candidate.js
 │   │   ├── contract.js
 │   │   ├── files.js
-│   │   └── payload.js
+│   │   ├── payload.js
+│   │   └── selection.js
 │   ├── config/
 │   │   ├── release/
 │   │   │   └── index.js
@@ -2058,6 +2070,8 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── roles.js
 │   │   └── service.js
 │   ├── state/
+│   │   ├── location/
+│   │   │   └── index.js
 │   │   ├── actions.js
 │   │   ├── files.js
 │   │   ├── index.js
@@ -2065,6 +2079,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── lease.js
 │   │   ├── preservation-contract.js
 │   │   ├── preservation.js
+│   │   ├── runtime-admission.js
 │   │   ├── service.js
 │   │   └── validation.js
 │   ├── trusted-validation/
@@ -2074,6 +2089,8 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   ├── update/
 │   │   ├── index.js
 │   │   ├── service.js
+│   │   ├── activation.js
+│   │   ├── candidate.js
 │   │   ├── compatibility.js
 │   │   ├── registry.js
 │   │   ├── preparation.js

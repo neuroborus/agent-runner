@@ -9,8 +9,10 @@ import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
 } from "../agents/index.js";
+import { openRuntimeStorage } from "../runtime/index.js";
 
 import { createActionStore } from "./actions.js";
+import { resolveStateLocation } from "./location/index.js";
 import { createRuntimeAdmissionStore } from "./runtime-admission.js";
 import {
   dispatchActivity,
@@ -237,21 +239,14 @@ export function resolveStateRoot({
   env = process.env,
   homeDirectory = homedir(),
 } = {}) {
-  const xdgStateHome = env?.XDG_STATE_HOME;
-  let basePath;
-  if (typeof xdgStateHome === "string" && isAbsolute(xdgStateHome)) {
-    basePath = xdgStateHome;
-  } else if (typeof homeDirectory === "string" && isAbsolute(homeDirectory)) {
-    basePath = join(homeDirectory, ".local", "state");
-  }
-
-  if (basePath === undefined) {
+  const location = resolveStateLocation({ env, homeDirectory });
+  if (location === null) {
     throw new RunStoreError("State-directory base path must be absolute.", {
       code: "ERR_INVALID_STATE_ROOT",
     });
   }
 
-  return resolve(basePath, "agent-runner");
+  return location;
 }
 
 export function createRunStore({
@@ -488,6 +483,8 @@ export function createRunStore({
   });
 
   const runtimeAdmission = createRuntimeAdmissionStore({
+    rootPath: requestedStateRoot,
+    openStorage: openRuntimeStorage,
     ensureRoot,
     ensureDirectory: ensureManagedDirectory,
     actions,
@@ -2168,6 +2165,7 @@ export function createRunStore({
     admitRuntime: runtimeAdmission.admit,
     assertRuntimeBoundary,
     activateRuntime: runtimeAdmission.activate,
+    readRuntime: runtimeAdmission.read,
     releaseRuntime: runtimeAdmission.release,
     rootPath: requestedStateRoot,
     acquireRunLease,

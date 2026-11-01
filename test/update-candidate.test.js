@@ -11,8 +11,13 @@ import {
   readProcessNamespace,
 } from "../src/agents/index.js";
 import { createRunStore } from "../src/state/index.js";
-import { prepareRuntime } from "../src/runtime/index.js";
+import {
+  createRuntimeAdmission,
+  prepareRuntime,
+  RUNTIME_PAYLOAD_ENV,
+} from "../src/runtime/index.js";
 import { createUpdateService } from "../src/update/index.js";
+import { preparePipelineMigration } from "../src/runner/index.js";
 import { runtimeFixture } from "./support/index.js";
 
 const policy = {
@@ -55,6 +60,7 @@ function memoryActions(contextFault) {
   const records = new Map();
   return {
     assertRuntimeBoundary: async () => {},
+    readRuntime: async () => ({ revision: 0, active: null, pending: null }),
     readAction: async ({ key }) => structuredClone(records.get(key)),
     beginAction: async ({ key, arguments: args, context }) => {
       if (!records.has(key))
@@ -91,7 +97,9 @@ async function fixture(
     spawn,
     nativeRetirement = false,
     restartRequired = false,
+    installedVersion = "1.0.0",
     contextFault,
+    storeOptions = {},
   } = {},
 ) {
   const f = await runtimeFixture(t);
@@ -100,6 +108,7 @@ async function fixture(
   );
   Object.assign(metadata, {
     name: policy.packageName,
+    version: installedVersion,
     private: false,
     license: "MIT",
     repository: { type: "git", url: "https://github.com/sample/runner.git" },
@@ -118,6 +127,7 @@ async function fixture(
   const bytes = Buffer.from(JSON.stringify(metadata));
   await writeFile(join(f.rootPath, "package.json"), bytes);
   f.manifest.name = metadata.name;
+  f.manifest.version = metadata.version;
   Object.assign(
     f.manifest.files.find((entry) => entry.path === "package.json"),
     { size: bytes.length, sha256: sha256(bytes) },
@@ -153,7 +163,7 @@ async function fixture(
     tarball: `https://registry.npmjs.org/@sample/runner/-/runner-${available.version}.tgz`,
   };
   const store = durable
-    ? createRunStore({ stateRoot: join(f.directory, "state") })
+    ? createRunStore({ stateRoot: join(f.directory, "state"), ...storeOptions })
     : memoryActions(contextFault);
   const calls = [];
   const registeredPid = process.pid === 42 ? 43 : 42;
@@ -296,20 +306,21 @@ async function fixture(
         return child;
       });
   }
+  const readInstallation = async () => ({
+    rootPath: previous.rootPath,
+    installationPath: f.rootPath,
+    installedMetadata: metadata,
+    runningMetadata: metadata,
+    developmentManaged: false,
+    canWriteInstallation: true,
+    nodeVersion: process.version,
+    restartRequired,
+  });
   const updater = createUpdateService({
     policy,
     runStore: store,
     storageRoot,
-    readInstallation: async () => ({
-      rootPath: previous.rootPath,
-      installationPath: f.rootPath,
-      installedMetadata: metadata,
-      runningMetadata: metadata,
-      developmentManaged: false,
-      canWriteInstallation: true,
-      nodeVersion: process.version,
-      restartRequired,
-    }),
+    readInstallation,
     fetch: async () => {
       assert.equal(
         (await action()).status,
@@ -325,6 +336,8 @@ async function fixture(
     ...f,
     previous,
     updater,
+    store,
+    readInstallation,
     operationId,
     version: available.version,
     calls,
@@ -406,6 +419,299 @@ test("preparation binds exact selection, owned effects, complete payload and iso
       .payloadId,
     f.previous.payloadId,
   );
+});
+
+test("validated activation defers behind a pinned MCP user and completes at its next admission boundary", async (t) => {
+  const f = await fixture(t, { durable: true, retainPrevious: true });
+  const projectPath = join(f.directory, "project"),
+    taskPath = join(f.directory, "task");
+  await mkdir(projectPath);
+  await mkdir(taskPath);
+  const saved = await f.store.createRun({
+    pipelineId: "sample",
+    pipelineStateVersion: 1,
+    projectPath,
+    taskPath,
+    roles: { worker: { backend: "codex", model: "frozen-model" } },
+    counters: { fixRounds: 2 },
+    hashes: { task: "a".repeat(64) },
+    pause: null,
+    sourceSession: null,
+    pipelineState: {
+      workflowState: "COMMIT",
+      settings: { mode: "lazy" },
+      pendingCommit: { status: "consumed" },
+    },
+  });
+  await saved.lease.release();
+  const statePath = join(saved.directoryPath, "state.json");
+  const savedBytes = await readFile(statePath);
+  assert.equal((await f.prepare()).status, "validated");
+  const queries = f.queries();
+  const previous = createRuntimeAdmission({
+    runStore: f.store,
+    context: f.previous,
+  });
+  const entered = Promise.withResolvers();
+  const leave = Promise.withResolvers();
+  const running = previous.withAdmission("mcp", async () => {
+    entered.resolve();
+    await leave.promise;
+  });
+  let selected;
+  try {
+    await entered.promise;
+    const request = {
+      operationId: randomUUID(),
+      preparationId: f.operationId,
+      version: f.version,
+    };
+    const deferred = await f.updater.activate(request);
+    assert.equal(deferred.status, "deferred");
+    assert.equal(deferred.activeVersion, "1.0.0");
+    assert.equal(deferred.deferredVersion, f.version);
+    assert.equal(deferred.downloadedVersion, f.version);
+    assert.equal(deferred.installedVersion, f.version);
+    assert.deepEqual(await f.updater.activate(request), deferred);
+    selected = await prepareRuntime({
+      rootPath: f.rootPath,
+      environment: {},
+      selectActive: true,
+      stateRoot: f.store.rootPath,
+    });
+    assert.equal(
+      (
+        await prepareRuntime({
+          rootPath: f.previous.rootPath,
+          selectActive: true,
+          stateRoot: f.store.rootPath,
+          environment: { [RUNTIME_PAYLOAD_ENV]: JSON.stringify(f.previous) },
+        })
+      ).payloadId,
+      f.previous.payloadId,
+      "Detached continuations never select another payload",
+    );
+    assert.equal(
+      JSON.parse(await readFile(join(selected.rootPath, "package.json")))
+        .version,
+      f.version,
+    );
+    await assert.rejects(
+      createRuntimeAdmission({
+        runStore: f.store,
+        context: selected,
+      }).withAdmission("cli", () =>
+        assert.fail("Old MCP still holds admission"),
+      ),
+      { code: "ERR_RUNTIME_RESTART_REQUIRED" },
+    );
+    assert.equal(
+      await readFile(
+        join(f.previous.rootPath, "docs/OPERATOR_GUIDE.md"),
+        "utf8",
+      ),
+      "# Original complete guide\n",
+    );
+  } finally {
+    leave.resolve();
+    await running;
+  }
+  assert.deepEqual(
+    await readFile(statePath),
+    savedBytes,
+    "Activation cannot migrate or resume saved progress",
+  );
+  await createRuntimeAdmission({
+    runStore: f.store,
+    context: selected,
+  }).withAdmission("cli", async () => {
+    const status = await f.updater.status({
+      preparationId: f.operationId,
+      version: f.version,
+    });
+    assert.equal(status.status, "active");
+    assert.equal(status.activeVersion, f.version);
+    assert.equal(status.deferredVersion, null);
+    assert.equal(
+      status.restartRequired,
+      true,
+      "The caller's original process remains pinned",
+    );
+    const read = await f.store.loadRun(saved.state.runId);
+    const pipeline = {
+      id: "sample",
+      stateVersion: 2,
+      migrations: { 1: (run) => ({ ...run.pipelineState, migrated: true }) },
+      workflow: { validateRun: () => {} },
+    };
+    const lease = await f.store.acquireRunLease(saved.state.runId);
+    try {
+      const migrated = preparePipelineMigration(read, pipeline);
+      const persisted = await f.store.migrateRun(
+        lease,
+        {
+          pipelineStateVersion: migrated.pipelineStateVersion,
+          pipelineState: migrated.pipelineState,
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "runtime",
+            kind: "migrated",
+            message: "Explicit compatible resume migration.",
+          },
+        },
+      );
+      assert.deepEqual(persisted.roles, saved.state.roles);
+      assert.deepEqual(persisted.counters, saved.state.counters);
+      assert.deepEqual(persisted.pipelineState.pendingCommit, {
+        status: "consumed",
+      });
+      assert.deepEqual(
+        persisted.pipelineState.settings,
+        saved.state.pipelineState.settings,
+      );
+      const bytes = await readFile(statePath);
+      assert.throws(
+        () =>
+          preparePipelineMigration(
+            { ...persisted, pipelineStateVersion: 3 },
+            pipeline,
+          ),
+        { code: "ERR_PIPELINE_VERSION_SKEW" },
+      );
+      assert.deepEqual(
+        await readFile(statePath),
+        bytes,
+        "Forward-version refusal preserves progress",
+      );
+    } finally {
+      await lease.release();
+    }
+  });
+  assert.equal(f.queries(), queries);
+  assert.deepEqual(
+    f.calls.map(({ kind }) => kind),
+    ["pack", "install", "help", "mcp"],
+  );
+  assert.equal(
+    (await prepareRuntime({ rootPath: f.previous.rootPath, environment: {} }))
+      .payloadId,
+    f.previous.payloadId,
+  );
+});
+
+test("activation reconciles an already consumed selection after owner loss without another effect", async (t) => {
+  const live = new Set([101, 202]);
+  const options = {
+    hostName: "fixture-host",
+    processId: 101,
+    processIdentity: async (pid) => ({
+      bootId: "11111111-1111-4111-8111-111111111111",
+      startTicks: String(pid),
+    }),
+    processIsAlive: async (pid) => live.has(pid),
+    runtimeProcessNamespace: async () => "pid:[42]",
+  };
+  let publications = 0;
+  const f = await fixture(t, {
+    durable: true,
+    retainPrevious: true,
+    storeOptions: {
+      ...options,
+      onRuntimeBoundary: async ({ operation }) => {
+        if (operation === "activate") {
+          publications++;
+          throw new Error("controlled activation publication interruption");
+        }
+      },
+    },
+  });
+  assert.equal((await f.prepare()).status, "validated");
+  const request = {
+    operationId: randomUUID(),
+    preparationId: f.operationId,
+    version: f.version,
+  };
+  assert.equal((await f.updater.activate(request)).status, "blocked");
+  live.delete(101);
+  const laterStore = createRunStore({
+    ...options,
+    processId: 202,
+    stateRoot: f.store.rootPath,
+  });
+  const selected = await laterStore.readRuntime();
+  const admission = await laterStore.admitRuntime({
+    runtime: selected.active,
+    kind: "mcp",
+  });
+  assert.equal(admission.status, "admitted");
+  const before = await laterStore.readRuntime();
+  const replacement = createUpdateService({
+    policy,
+    storageRoot: f.storageRoot,
+    readInstallation: f.readInstallation,
+    runStore: laterStore,
+    fetch: () => assert.fail("Activation must not query the registry"),
+  });
+  assert.equal((await replacement.activate(request)).status, "active");
+  assert.equal(publications, 1);
+  assert.deepEqual(await f.store.readRuntime(), before);
+  assert.equal(
+    (
+      await replacement.status({
+        preparationId: f.operationId,
+        version: f.version,
+      })
+    ).activeVersion,
+    f.version,
+  );
+  assert.deepEqual(
+    f.calls.map(({ kind }) => kind),
+    ["pack", "install", "help", "mcp"],
+  );
+  await laterStore.releaseRuntime(admission.id);
+});
+
+test("unvalidated candidates cannot acquire activation or create runtime selection", async (t) => {
+  const f = await fixture(t, { durable: true });
+  const before = await readdir(f.directory);
+  assert.equal(
+    (
+      await f.updater.activate({
+        operationId: randomUUID(),
+        preparationId: f.operationId,
+        version: f.version,
+      })
+    ).status,
+    "blocked",
+  );
+  assert.deepEqual(await f.store.readRuntime(), {
+    revision: 0,
+    active: null,
+    pending: null,
+  });
+  assert.deepEqual(f.calls, []);
+  assert.equal((await readdir(f.directory)).includes("candidates"), false);
+  assert.ok(before.includes("installation"));
+});
+
+test("lifecycle status rejects malformed persisted versions without exposing their text", async (t) => {
+  const invalid = "invalid-version\nprivate-value";
+  const f = await fixture(t, {
+    durable: true,
+    retainPrevious: true,
+    installedVersion: invalid,
+  });
+  await createRuntimeAdmission({ runStore: f.store }).activate(f.previous);
+  const status = await f.updater.status({
+    preparationId: f.operationId,
+    version: f.version,
+  });
+  assert.deepEqual(status.blockers, ["release_identity"]);
+  assert.equal(JSON.stringify(status).includes("private-value"), false);
+  assert.equal(f.queries(), 0);
+  assert.deepEqual(f.calls, []);
 });
 
 test("interrupted installation reconciles completed bytes only after owned-process retirement", async (t) => {
@@ -517,6 +823,21 @@ test("unapproved and arbitrary preparation requests perform no effects, and curr
   );
   assert.deepEqual(
     (
+      await updater.activate({
+        operationId: randomUUID(),
+        preparationId: randomUUID(),
+        version: "1.1.0",
+      })
+    ).blockers,
+    ["identity_unapproved"],
+  );
+  assert.deepEqual(
+    (await updater.status({ preparationId: randomUUID(), version: "1.1.0" }))
+      .blockers,
+    ["identity_unapproved"],
+  );
+  assert.deepEqual(
+    (
       await updater.prepare({
         operationId: randomUUID(),
         version: "latest",
@@ -531,6 +852,15 @@ test("unapproved and arbitrary preparation requests perform no effects, and curr
   assert.equal(current.restartRequired, true);
   const queries = f.queries();
   assert.deepEqual(await f.prepare(), current);
+  assert.equal(
+    (
+      await f.updater.status({
+        preparationId: f.operationId,
+        version: f.version,
+      })
+    ).status,
+    "current",
+  );
   assert.equal(f.queries(), queries);
   assert.deepEqual(f.calls, []);
 });

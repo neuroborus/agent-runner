@@ -5,7 +5,7 @@ import {
   resolveOfficialReleaseIdentity,
 } from "../config/index.js";
 import { inspectRuntimeInstallation } from "../runtime/index.js";
-import { RUNTIME_COMPATIBILITY } from "../state/index.js";
+import { createRunStore, RUNTIME_COMPATIBILITY } from "../state/index.js";
 
 import {
   compareVersions,
@@ -15,6 +15,7 @@ import {
 } from "./compatibility.js";
 import { readRegistryRelease } from "./registry.js";
 import { createCandidatePreparer } from "./preparation.js";
+import { createCandidateActivation } from "./activation.js";
 
 // Only trusted root composition supplies effects. Requests select an exact
 // version, never an identity, URL, project configuration or update permission.
@@ -28,6 +29,8 @@ export function createUpdateService({
 } = {}) {
   const frozenPolicy = Object.freeze({ ...policy });
   const official = resolveOfficialReleaseIdentity(frozenPolicy);
+  let store = runStore;
+  const getRunStore = () => (store ??= createRunStore());
   async function select(request = {}) {
     let installation;
     let available;
@@ -159,16 +162,26 @@ export function createUpdateService({
     result.restartRequired = true;
     return finish();
   }
+  const prepare = createCandidatePreparer({
+    select,
+    official,
+    policy: frozenPolicy,
+    readInstallation,
+    getRunStore,
+    storageRoot,
+    effects,
+  });
+  const activation = createCandidateActivation({
+    official,
+    policy: frozenPolicy,
+    readInstallation,
+    getRunStore,
+    storageRoot,
+  });
   return Object.freeze({
     check: async (request) => (await select(request)).report,
-    prepare: createCandidatePreparer({
-      select,
-      official,
-      policy: frozenPolicy,
-      readInstallation,
-      runStore,
-      storageRoot,
-      effects,
-    }),
+    prepare,
+    activate: activation.activate,
+    status: activation.status,
   });
 }

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, open, readdir } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { readProcessNamespace } from "../agents/index.js";
@@ -18,8 +18,9 @@ import {
   resolveRuntimeRoot,
   RUNTIME_PAYLOAD_ENV,
 } from "../runtime/index.js";
-import { createRunStore, RUNTIME_COMPATIBILITY } from "../state/index.js";
+import { RUNTIME_COMPATIBILITY } from "../state/index.js";
 import { isVersion, releaseCompatibility } from "./compatibility.js";
+import { verifyPreparedCandidate } from "./candidate.js";
 import {
   MCP_PROBE,
   preparationProcessRetired,
@@ -44,6 +45,8 @@ import {
   fail,
   receipt,
   assertContext,
+  preparationContext,
+  preparationRequest,
 } from "./candidate-contract.js";
 
 export function createCandidatePreparer({
@@ -51,7 +54,7 @@ export function createCandidatePreparer({
   official,
   policy,
   readInstallation,
-  runStore,
+  getRunStore,
   storageRoot,
   effects = {},
 }) {
@@ -97,29 +100,25 @@ export function createCandidatePreparer({
       assertPublicationMetadata(installation.installedMetadata, policy);
       const path = storageRoot ?? join(resolveRuntimeRoot(), "updates");
       assertStoragePath(path, installation);
-      const store = runStore ?? createRunStore();
+      const store = getRunStore();
       await store.assertRuntimeBoundary(
         [path, installation.rootPath, installation.installationPath].filter(
           Boolean,
         ),
       );
       action = await store.beginAction({
-        key: `update:${operationId}`,
-        tool: "update_prepare",
-        arguments: { version, storageRoot: path, official },
-        context: {
-          schemaVersion: 1,
-          storageRoot: path,
-          rootIdentity: null,
-          selection: null,
-          attempts: [],
-          process: null,
-          candidate: null,
-        },
+        ...preparationRequest(operationId, version, path, official),
+        context: preparationContext(path),
       });
       context = action.record.context;
       assertContext(context, path);
       contextValidated = true;
+      if (context.schemaVersion === 1 && action.record.status === "intent")
+        await save({
+          schemaVersion: 2,
+          downloadedVersion: context.candidate ? version : null,
+          installedVersion: context.candidate ? version : null,
+        });
       if (
         action.record.status === "completed" &&
         action.record.result.status === "current"
@@ -216,30 +215,7 @@ export function createCandidatePreparer({
         action.record.status === "completed" ||
         context.attempts.at(-1)?.phase === "validated"
       ) {
-        const attempt = context.attempts.at(-1);
-        if (
-          !attempt?.identity ||
-          attempt.phase !== "validated" ||
-          typeof context.candidate?.rootPath !== "string" ||
-          dirname(context.candidate.rootPath) !==
-            join(path, attempt.id, "runtime", "payloads") ||
-          context.candidate.installationPath !==
-            join(
-              path,
-              attempt.id,
-              "prefix",
-              "lib/node_modules",
-              official.packageName,
-            )
-        )
-          fail("storage_unverifiable");
-        directory = await openAttempt(root, attempt);
-        await prepareRuntime({
-          rootPath: context.candidate.rootPath,
-          environment: {
-            [RUNTIME_PAYLOAD_ENV]: JSON.stringify(context.candidate),
-          },
-        });
+        await verifyPreparedCandidate(context, path, official, version);
         const result = receipt(operationId, version, "validated");
         if (action.record.status !== "completed") await action.complete(result);
         return result;
@@ -338,6 +314,7 @@ export function createCandidatePreparer({
           )
         )
           fail("release_identity");
+        await save({ downloadedVersion: version });
         const packagePath = join(
           environment.paths.prefix,
           "lib/node_modules",
@@ -392,6 +369,7 @@ export function createCandidatePreparer({
           )
         )
           fail("release_identity");
+        await save({ installedVersion: version });
         await phase("installed");
         const pinned = await prepareRuntime({
           rootPath: packagePath,

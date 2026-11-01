@@ -868,6 +868,9 @@ process proof. The existing recoverable action lease serializes each operation.
 Completed receipts are reusable only while the pinned candidate still verifies.
 A current version is a successful no-op. These actions do not create a run or
 change any pipeline's compatibility or execution authority.
+Preparation context version 2 records downloaded and installed versions separately
+after their respective verification boundaries. Version-1 intents upgrade only
+under their action lease; completed historical receipts retain their exact shape.
 
 Default storage is private `updates/` under the user runtime root, disjoint from
 the application, controls and authoritative state. Each of at most three fresh
@@ -904,6 +907,32 @@ the previous usable payload; no native effect overwrites it. Public receipts
 contain only bounded IDs, versions, outcomes and redacted blockers. Preparation
 changes no selector, restarts no client and migrates/resumes no settings or run.
 
+## Candidate activation and restart
+
+The root update capability exposes `activate({ operationId, preparationId,
+version })` and read-only `status({ preparationId, version })`. It shares the
+official identity and development-managed gates with preparation; transports
+remain separate. Activation holds both its own `update_activate` action lease
+and the exact preparation lease. A completed validated preparation, unchanged
+storage identity, complete immutable payload, frozen metadata and current
+Node/configuration/state compatibility must verify again before selection.
+
+The activation intent persists a separate runtime-operation UUID and candidate
+before invoking serialized admission. It records the resulting active/deferred
+versions and restart requirement before returning. Recovery reuses that UUID
+and reconciles consumed selection rather than publishing it twice. Repeated
+calls return the original receipt; `status` reads current admission state and
+separate downloaded/installed milestones without querying the registry.
+Neither action rewrites or removes a previous usable installation.
+
+A running MCP server stays pinned and cannot restart its client. Selection
+changes no saved run. A later compatible server may explicitly inspect/resume
+through the existing leased migration path, original frozen roles/settings,
+ownership and consumed-effect recovery. Unknown forward state remains rejected
+without changing progress. No activation grants legacy/intermediate runs new
+execution, refinement or replacement authority. Explicit version selection and
+downgrade limits are documented in [RELEASING.md](RELEASING.md#local-version-selection-and-restart).
+
 ## Immutable application startup
 
 `src/runtime/index.js` is the public startup and immutable-payload boundary.
@@ -912,6 +941,14 @@ The thin bin entry imports only this standard-library capability. Private
 descriptor-bound reads and ancestor bindings, `payload.js` owns complete tree
 inspection and atomic preparation, and `bootstrap.js` selects the root before
 dynamically importing its public `src/index.js`.
+The standard-library-only `src/state/location/index.js` shares the existing
+state-root mapping with bootstrap. `runtime/selection.js` reads the bounded,
+private state-owned selection without creating storage. Normal startup verifies
+that selected payload and Node identity before imports, retaining the original
+installation path for configuration fallback. Detached launches bypass this
+selection and verify their exact frozen context. Unknown selection versions fail
+clearly before any command; admission rechecks the selection under its mutation
+boundary before effects, so a stale startup observation grants no admission.
 
 An installed package requires the assembler's manifest, native-ESM metadata,
 Node.js `>=24 <25`, the executable entry, runtime bootstrap, complete operator
@@ -997,14 +1034,22 @@ Activation and retirement receipts can be reconciled by a new owner only after
 the original owner is proved dead or replaced. Admission never transfers an old
 process association to that new owner.
 
-The first admission initializes selection. Later admission must match the exact
-active payload and Node identity; it cannot activate an old or new payload.
-The internal activation capability verifies a candidate, retaining the current
-selection and recording a deferred outcome while any associated live user
-requires another payload. After users retire, explicit activation changes only
-the selector. It does not rewrite or remove immutable trees, restart a process,
-reload frozen configuration, migrate or resume a run. Pending selection is not
-automatic restart or update authority. Public update entry points remain separate.
+Projection version 2 binds active and pending identities to their originating
+activation operations. A consumed activation remains reconcilable after later
+admissions or retirements while that exact selection and operation binding remain;
+a superseding selection never authorizes replay. Version-1 records remain
+readable but their pending identities acquire
+no automatic selection authority. The first admission initializes selection.
+Later admissions must match the active payload while users remain. Explicit
+activation records a deferred selection while another positively associated
+runtime remains live. After the last user retires, admission selects only that
+proved pending payload, reconciling its original deferred action receipt first;
+an obsolete racing start is deferred. A later successful explicit activation
+supersedes any older pending request. Unknown ownership remains blocking.
+This changes only the selector and admission record. It does not rewrite or
+remove trees, restart a process, reload frozen configuration, migrate or resume
+a run. Older software that cannot read the new projection must fail closed;
+retaining old payload bytes is not persistence rollback authority.
 
 Only recorded users are inspected. Proved exit, PID replacement or a prior boot
 retires the corresponding association. Unknown identity, foreign host or a PID

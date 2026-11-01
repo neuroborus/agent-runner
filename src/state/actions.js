@@ -27,6 +27,7 @@ const TOOLS = new Set([
   "runtime_activate",
   "runtime_release",
   "update_prepare",
+  "update_activate",
 ]);
 const ACTION_FIELDS = new Set([
   "schemaVersion",
