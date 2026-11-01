@@ -11,6 +11,18 @@ transport. A pause is not completion: follow its current `nextActions`, resolve
 only the permitted cause, and resume the same run when resumable. Do not finish,
 validate, rewrite, discard, or commit resumable work manually.
 
+## Local application artifacts
+
+Application distribution currently provides local candidate assembly with neutral
+`@your-scope/agent-runner` metadata. The artifact bundles the locked production
+application and operator guide; settings, native credentials and durable state
+remain separate from payloads. Root and internal packages stay private, and the
+candidate license remains `UNLICENSED`. Publication requires separately approved
+owner/identity, scope, license, repository links and publisher configuration.
+Local archive acceptance proves neither public availability nor clean external
+installation or new native-platform support. Assembly changes no global/native
+links and activates no controller. See [local artifacts](../../README.md#local-application-artifacts).
+
 ## Configuration
 
 Global user settings live outside the application installation, using the

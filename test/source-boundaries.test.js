@@ -194,7 +194,7 @@ test("workspace imports follow root to pipeline to shared-package direction", as
     let target;
     let requiresDeclaration = false;
     if (
-      specifier === "agent-runner" ||
+      specifier === manifests[0].name ||
       specifier.startsWith("@agent-runner/")
     ) {
       target = internal.get(specifier);

@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Local release candidates contain the complete production application.** A
+  narrow assembler materializes private workspaces and the locked dependency
+  closure through explicit file allowlists, preserving native ESM and public
+  indexes. An exact-file manifest and actual offline tarball inspection bind
+  bytes, paths and executable modes while excluding local settings and controls.
+  Source development keeps npm workspaces and links. Neutral scoped metadata,
+  `private: true` and `UNLICENSED` keep publication blocked pending explicit
+  identity/license/publisher approval; package installation and runtime activation
+  remain separately owned work.
+
 - **Global settings survive installation replacement.** Configuration now prefers
   the platform user location, retaining installation-local settings only as an
   absent-user-file fallback. Explicit `config migrate --from` validates and

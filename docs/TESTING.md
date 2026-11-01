@@ -11,6 +11,16 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `test/release-assembly.test.js` owns isolated lock-closure assembly, real
+private workspaces, nested dependencies, executable modes, allowlist exclusions,
+metadata/resource/link rejection and no-overwrite output behavior. Synthetic tar
+fixtures prove archive byte/mode identity, path confinement, extended-header
+validation and link/extra-file rejection without npm or processes. `test/release-pack.slow.test.js` owns actual
+offline npm packing and exact archive inspection of the current application,
+standalone imports and operator-guide completeness. It performs no installation,
+provider call, global link change or controller activation. Clean external
+installation coverage remains a separate suite introduced by its owning change.
+
 Fast `test/config/user-settings.test.js` owns deterministic user-location mapping,
 legacy fallback, invalid/unsafe path rejection, private exact-byte migration,
 permissions, conflict/no-op behavior, competing publication, interruption remnants and settings survival
@@ -357,6 +367,7 @@ bounded runner and per-file timing output.
 
 | Suite                                                                     | Distinct observable guarantee                                                                                     | Run when changing                                                                                                                       |
 | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/release-pack.slow.test.js`                                          | Actual npm tarball matches the complete assembled production application, real dependencies, modes and resources  | Release assembly, file allowlists, lock closure, package metadata or runtime resources                                                  |
 | `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff            | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                               |
 | `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced            | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                        |
 | `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts             | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention        |

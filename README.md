@@ -159,6 +159,38 @@ For repository development without a linked executable, run
 `node bin/agent-run.js` directly or use the absolute executable path in the MCP
 configuration.
 
+### Local application artifacts
+
+From a checkout prepared with `npm ci`, assemble and inspect a local candidate:
+
+```bash
+npm run release:assemble -- --output dist/candidate
+```
+
+The output directory must be absent. Assembly creates `package/`, an exact-file
+`release-manifest.json`, and a locally packed tarball. It materializes private
+workspaces and the locked production dependency closure as real directories,
+retaining native ESM, public indexes, the executable CLI and the complete operator
+guide. npm packs offline with lifecycle scripts disabled and isolated empty
+configuration. The assembler reads the actual archive and compares every regular
+file, byte hash and executable mode to the manifest; extra files and links fail.
+Node.js `>=24 <25`, Git and the documented native tools remain prerequisites.
+
+Explicit package file allowlists exclude local settings, credentials, durable
+state, task artifacts, Git/provider metadata, tests and development tooling.
+Incomplete outputs remain in their fresh directory for inspection; choose a new
+output directory for another assembly. Existing directories are never overwritten
+or removed. The checkout retains its npm workspace links and normal `npm ci` /
+`npm link` development workflow.
+
+`@your-scope/agent-runner` is neutral candidate metadata for local validation.
+The source and assembled package retain `private: true` and `UNLICENSED`.
+Publication remains blocked pending separately approved owner/identity, scope,
+license, repository links and publisher configuration. Successful local packing
+does not establish public availability or additional execution-platform support.
+Clean external installation acceptance is a separate package-install gate;
+assembly never changes global/native links or activates another controller.
+
 ## Pipelines
 
 | Pipeline         | Purpose                                                                                         | Specification                                                                    |

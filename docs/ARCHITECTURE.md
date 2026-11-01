@@ -749,6 +749,46 @@ CLI/MCP projections retain their bounded summaries and diagnostics rather than
 exposing larger private results. Byte headroom is neither a token budget nor a
 native generation control; missing usage and incomplete accounting stay unknown.
 
+## Local application packaging
+
+`scripts/assemble-release.js` owns narrow release assembly from the existing npm
+checkout. Root and private workspace `files` declarations are the publication
+allowlists. The assembler validates root package/lock agreement and walks only
+the locked production graph, checking installed names, versions, dependency
+declarations and exact workspace links. Hoisted and nested dependency slots are
+preserved while workspace links become real directories. Optional/peer closure
+requires an explicit implementation before such dependencies can be packaged.
+Installed dependencies must come from the committed lock through `npm ci`;
+assembly verifies their lock identity and records the copied bytes, without
+claiming to reconstruct upstream tarball integrity from expanded files.
+
+Fresh output storage contains a standalone native-ESM package with the same bin,
+exports and Node engine, declared runtime resources, upstream dependency notices,
+and bundled production dependencies. Checkout-only workspaces, development
+dependencies and scripts are omitted from its root metadata. Configuration,
+credentials, state, task inputs, provider controls and unrelated development files
+are outside the allowlists. The source workspace topology and links are untouched.
+
+The generated release manifest records source-lock SHA-256, dependency identities,
+and every payload file's path, size, executable mode and SHA-256. Its own exact
+bytes and ordinary file mode are checked separately. `packRelease` invokes local offline npm packing with
+disabled lifecycle scripts, private HOME/cache and separate empty user/global
+configuration. Size-checked stdout uses an owned temporary file; stderr is discarded. The standard-
+library `release-archive.js` verifier reads the actual gzip/tar bytes (bounded to
+64 MiB expanded), accepts only regular file records and supported portable
+extended headers, rejects unsafe paths, links, duplicates, extra/missing files,
+invalid headers or changed bytes/modes, and verifies exact manifest readback.
+Only supported portable extended fields are accepted, with size overrides
+required to match their file headers.
+It never installs, publishes, changes native links or activates a runtime.
+
+Candidate metadata remains `@your-scope/agent-runner`, `private: true`, and
+`UNLICENSED`; internal workspaces remain private. Approved public identity,
+owner/scope, license, repository links and publisher configuration remain absent,
+so publication is fail-closed. Local assembly is distinct from external-install
+acceptance and adds no native-platform support. Ordinary development continues
+through `npm ci` and `npm link`; there is no transpilation or general build system.
+
 ## Runner Configuration
 
 The root configuration capability owns global user settings behind
