@@ -31,6 +31,16 @@ require a restart after registration or package changes. This local gate neither
 performs personal registration nor proves publication, live-provider behavior or
 additional native platforms. See [isolated installation](../../README.md#isolated-candidate-installation).
 
+The npm release workflow remains disabled until separate owner/scope, license,
+repository and trusted-publisher approval. Explicit stable GitHub Releases must
+point to the exact approved main commit/version tag and pass ordinary checks,
+separate package installation and complete slow coverage. Publication consumes
+only the tested artifact, uses protected OIDC/provenance and verifies anonymous
+public installation. A matching existing version is verified without rewriting
+it; uncertain publication remains a reported failure. This grants no automatic
+settings migration, client restart, run resume or controller update. See the
+[release procedure](../RELEASING.md).
+
 Installed executables verify and select a complete user-owned read-only payload
 before loading application code. A running CLI/MCP process and its detached
 continuations retain that payload's code, dependencies and resources after outer

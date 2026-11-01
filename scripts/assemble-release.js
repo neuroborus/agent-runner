@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 
 import { inspectReleaseArchive } from "./release-archive.js";
+import { assertPublicationMetadata } from "./release-policy.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -46,11 +47,13 @@ function safeRelative(path) {
   return path;
 }
 
-async function regular(path) {
+// Read one bounded snapshot without following file links or accepting drift.
+export async function readReleaseFile(path) {
   const before = await lstat(path, { bigint: true });
   if (
     !before.isFile() ||
     before.nlink !== 1n ||
+    before.size > 64n * 1024n * 1024n ||
     (await realpath(path)) !== path
   )
     throw new Error("Release inputs must be real, unlinked regular files.");
@@ -139,19 +142,25 @@ export async function assembleRelease({
   outputPath = join(projectPath, "dist", "release"),
 } = {}) {
   const root = await realpath(projectPath);
-  const metadata = json((await regular(join(root, "package.json"))).bytes);
-  const lockBytes = (await regular(join(root, "package-lock.json"))).bytes;
+  const metadata = json(
+    (await readReleaseFile(join(root, "package.json"))).bytes,
+  );
+  const lockBytes = (await readReleaseFile(join(root, "package-lock.json")))
+    .bytes;
   const lock = json(lockBytes);
   const lockedRoot = lock.packages?.[""];
-  if (
-    metadata.name !== "@your-scope/agent-runner" ||
-    metadata.private !== true ||
-    metadata.license !== "UNLICENSED" ||
-    metadata.repository ||
-    metadata.publishConfig
-  )
-    throw new Error(
-      "Candidate publication must remain disabled and unapproved.",
+  const isLocalCandidate =
+    metadata.name === "@your-scope/agent-runner" &&
+    metadata.private === true &&
+    metadata.license === "UNLICENSED" &&
+    !metadata.repository &&
+    !metadata.publishConfig;
+  if (!isLocalCandidate)
+    assertPublicationMetadata(
+      metadata,
+      json(
+        (await readReleaseFile(join(root, ".github/npm-release.json"))).bytes,
+      ),
     );
   if (
     lock.lockfileVersion !== 3 ||
@@ -212,8 +221,9 @@ export async function assembleRelease({
       throw new Error("Dependency source escapes the checkout.");
     if (entry.link && (await realpath(join(root, slot))) !== sourceRoot)
       throw new Error("Installed workspace link disagrees with the lock.");
-    const manifestBytes = (await regular(join(sourceRoot, "package.json")))
-      .bytes;
+    const manifestBytes = (
+      await readReleaseFile(join(sourceRoot, "package.json"))
+    ).bytes;
     const manifest = json(manifestBytes);
     if (
       manifest.version !== expected?.version ||
@@ -292,7 +302,7 @@ export async function assembleRelease({
   }
   async function copy(sourceRoot, prefix, rules, manifestBytes) {
     for (const path of await selectedFiles(sourceRoot, rules)) {
-      const source = await regular(join(sourceRoot, path));
+      const source = await readReleaseFile(join(sourceRoot, path));
       if (
         path === "package.json" &&
         manifestBytes &&

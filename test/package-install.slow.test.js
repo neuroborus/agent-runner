@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { assembleRelease, packRelease } from "../scripts/assemble-release.js";
+import { inspectCandidate } from "../scripts/publish-release.js";
 import { runtimeFixtureDirectory } from "./support/index.js";
 
 const CHECKOUT = fileURLToPath(new URL("../", import.meta.url));
@@ -338,8 +339,6 @@ assert.equal(process.env.NODE_OPTIONS, undefined);
 const metadata = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 assert.equal(metadata.type, "module");
 assert.equal(metadata.engines.node, ">=24 <25");
-assert.equal(metadata.private, true);
-assert.equal(metadata.license, "UNLICENSED");
 assert.equal(metadata.workspaces, undefined);
 assert.equal(metadata.devDependencies, undefined);
 assert.equal(metadata.scripts, undefined);
@@ -377,14 +376,46 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
     new URL("../docs/OPERATOR_GUIDE.md", import.meta.url),
     "utf8",
   );
-  const release = await assembleRelease({
-    outputPath: join(directory, "candidate"),
-  });
-  const manifestBytes = await readFile(
-    join(release.packagePath, "release-manifest.json"),
+  const sourceMetadata = JSON.parse(
+    await readFile(join(CHECKOUT, "package.json"), "utf8"),
   );
-  const packed = await packRelease(release);
-  assert.equal(packed.files, release.manifest.files.length + 1);
+  let release;
+  let manifestBytes;
+  let packed;
+  if (process.env.AGENT_RUNNER_RELEASE_CANDIDATE) {
+    const head = await runCommand("git", ["rev-parse", "--verify", "HEAD"], {
+      cwd: CHECKOUT,
+    });
+    const candidate = await inspectCandidate(
+      process.env.AGENT_RUNNER_RELEASE_CANDIDATE,
+      {
+        name: sourceMetadata.name,
+        version: sourceMetadata.version,
+        commit: head.stdout.trim(),
+      },
+    );
+    assert.equal(
+      candidate.manifest.lockSha256,
+      digest(await readFile(join(CHECKOUT, "package-lock.json"))),
+    );
+    release = { manifest: candidate.manifest };
+    manifestBytes = candidate.manifestBytes;
+    const tarballPath = join(directory, "inspected.tgz");
+    await writeFile(tarballPath, candidate.tarballBytes, {
+      flag: "wx",
+      mode: 0o400,
+    });
+    packed = { ...candidate, tarballPath };
+  } else {
+    release = await assembleRelease({
+      outputPath: join(directory, "candidate"),
+    });
+    manifestBytes = await readFile(
+      join(release.packagePath, "release-manifest.json"),
+    );
+    packed = await packRelease(release);
+    assert.equal(packed.files, release.manifest.files.length + 1);
+  }
   const archiveDigest = digest(await readFile(packed.tarballPath));
   const examples = installExamples(readme, prefix, packed.tarballPath);
   await runCommand(examples.install[0], examples.install.slice(1), {
@@ -407,6 +438,8 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
   );
   assert.equal(probe.stderr, "");
   const imported = JSON.parse(probe.stdout);
+  assert.equal(imported.metadata.private, sourceMetadata.private);
+  assert.equal(imported.metadata.license, sourceMetadata.license);
   const privateNames = release.manifest.dependencies
     .filter(({ name }) => name.startsWith("@agent-runner/"))
     .map(({ name }) => name)

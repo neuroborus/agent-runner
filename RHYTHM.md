@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Release publication consumes only an approved tested artifact.** Stable
+  published Releases bind the version tag and main commit to ordinary checks,
+  separate external-install acceptance and complete slow coverage. A manifest,
+  receipt and independent job-output integrity preserve the exact tarball across
+  jobs. Protected OIDC/provenance replaces npm tokens; anonymous public download
+  and isolated installation close the gate. Existing versions reconcile by
+  integrity without rewriting, and partial failures remain visible. Neutral
+  private metadata and disabled owner policy keep actual publication closed
+  pending separate ownership, license and publisher approval. Release tooling
+  grants no runtime activation, migration or resume authority.
+
 - **External installation acceptance consumes the inspected archive.** A
   separate slow suite installs the exact candidate offline in a private external
   prefix and verifies executable metadata, bundled private imports, real CLI/MCP

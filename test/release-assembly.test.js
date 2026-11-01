@@ -291,6 +291,50 @@ test("assembly rejects drift, missing resources, links, unsafe output and public
   }
 });
 
+test("approved public metadata assembles only with matching explicit publication policy", async (t) => {
+  const f = await fixture(t);
+  const metadata = {
+    ...f.metadata,
+    name: "@sample/runner",
+    private: false,
+    license: "MIT",
+    repository: { type: "git", url: "https://github.com/sample/runner.git" },
+    publishConfig: {
+      access: "public",
+      registry: "https://registry.npmjs.org/",
+    },
+  };
+  await put(f.root, "package.json", metadata);
+  await put(f.root, "package-lock.json", {
+    name: metadata.name,
+    version: metadata.version,
+    lockfileVersion: 3,
+    packages: { ...f.packages, "": metadata },
+  });
+  const policy = {
+    schemaVersion: 1,
+    enabled: true,
+    repository: "sample/runner",
+    packageName: metadata.name,
+    license: "MIT",
+  };
+  await put(f.root, ".github/npm-release.json", { ...policy, enabled: false });
+  await assert.rejects(
+    assembleRelease({ projectPath: f.root, outputPath: f.outputPath }),
+  );
+  await put(f.root, ".github/npm-release.json", policy);
+  const release = await assembleRelease({
+    projectPath: f.root,
+    outputPath: f.outputPath,
+  });
+  const installed = JSON.parse(
+    await readFile(join(release.packagePath, "package.json"), "utf8"),
+  );
+  assert.equal(installed.name, metadata.name);
+  assert.equal(installed.private, false);
+  assert.equal(installed.license, "MIT");
+});
+
 function archive(entries) {
   const chunks = [];
   for (const { path, bytes, type = "0", mode = 0o644 } of entries) {

@@ -51,7 +51,7 @@ function pax(bytes) {
 
 // Inspect actual tar bytes, never npm's advisory file list. Links and extra files fail.
 export async function inspectReleaseArchive(path, manifest) {
-  const tar = gunzipSync(await readFile(path), {
+  const tar = gunzipSync(Buffer.isBuffer(path) ? path : await readFile(path), {
     maxOutputLength: 64 * 1024 * 1024,
   });
   const files = new Map();

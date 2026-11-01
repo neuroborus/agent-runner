@@ -191,6 +191,20 @@ does not establish public availability or additional execution-platform support.
 Clean external installation acceptance is a separate package-install gate;
 assembly never changes global/native links or activates another controller.
 
+### Approved npm releases
+
+The [release procedure](docs/RELEASING.md) owns administrative setup and recovery.
+The checked-in workflow is disabled by explicit approval policy and private
+package metadata. After separate owner/scope/license and trusted-publisher
+approval, only an explicitly published stable GitHub Release at the matching
+version tag in `main` can publish. Protected environment approval follows
+ordinary checks, separate package-install acceptance and complete slow coverage.
+OIDC/provenance publication consumes the exact tested tarball; public download
+and isolated installation verify it afterward. Retries verify matching existing
+bytes without overwriting versions or moving tags; partial publication stays
+failed and visible. Release notes link the exact npm version and state the
+configuration/run-state compatibility and restart requirements.
+
 ### Isolated candidate installation
 
 To inspect a local installation without linking the checkout, use the exact

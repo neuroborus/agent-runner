@@ -802,6 +802,21 @@ acceptance; native client registration remains a separate operator action.
 No source/dependency link, controller, native client configuration or registry
 publication is changed. See [test ownership](TESTING.md#slow-gate).
 
+Release automation belongs to `.github/workflows/release.yml` and the focused
+standard-library scripts `release-policy.js` and `publish-release.js`. An explicit
+stable published Release selects an exact version tag/commit in main; the
+disabled `.github/npm-release.json` requires separately approved public metadata
+before that path can validate or publish. The assembler accepts public metadata
+only through that matching policy, preserving neutral private local candidates.
+Ordinary checks, exact package installation and complete slow gate one inspected
+tarball. A commit-bound receipt and independent job-output SHA-512 bind the
+downloaded Actions artifact. Only the protected publishing job requests OIDC;
+npm provenance and an anonymous download/isolated install verify publication.
+Existing-version integrity is reconciled before effects, and uncertain/partial
+failure remains failed without overwriting versions or moving tags. This tooling
+has no runtime update, configuration-migration or run-resume authority.
+See [release ownership and setup](RELEASING.md).
+
 ## Immutable application startup
 
 `src/runtime/index.js` is the public startup and immutable-payload boundary.

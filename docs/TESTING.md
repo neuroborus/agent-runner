@@ -53,6 +53,13 @@ offline npm packing and exact archive inspection of the current application,
 complete immutable preparation, pinned standalone imports and operator-guide completeness. It performs no installation,
 provider call, global link change or controller activation.
 
+Fast `test/release-publication.test.js` owns approved stable-release selection,
+commit/tag/main binding, complete validation ordering, exact artifact receipts,
+version-integrity retries and partial-failure policy with injected effects.
+It performs no npm, Git, registry, account, tag, hosting or publish effects.
+Publication stays disabled in checked-in policy. Release automation ownership
+and administrative approval requirements are in [RELEASING.md](RELEASING.md).
+
 `test/package-install.slow.test.js` owns actual offline installation of the exact
 inspected candidate tarball into a new private prefix outside the checkout. It
 checks installed bytes/modes, Node metadata, real private workspace imports,
@@ -73,6 +80,12 @@ proves local Linux installation/protocol acceptance, not live-provider or new
 native-platform support. Required coverage is never satisfied by an unrun or
 failed invocation; complete slow includes it and replaces no separately selected
 `npm run test:slow -- test/package-install.slow.test.js` requirement.
+Release CI may supply `AGENT_RUNNER_RELEASE_CANDIDATE` pointing to its exact
+candidate receipt. That path verifies the archive/manifest, source commit and
+lock identity and installs a private copy of the verified byte snapshot, without
+repacking or reducing assertions.
+Both the separate package-install command and complete slow still run. An unset
+variable retains fresh candidate assembly for ordinary local validation.
 
 Fast `test/config/user-settings.test.js` owns deterministic user-location mapping,
 legacy fallback, invalid/unsafe path rejection, private exact-byte migration,
