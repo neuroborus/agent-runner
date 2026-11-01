@@ -11,6 +11,7 @@ import {
 } from "../agents/index.js";
 
 import { createActionStore } from "./actions.js";
+import { createRuntimeAdmissionStore } from "./runtime-admission.js";
 import {
   dispatchActivity,
   isRecoveryPreparation,
@@ -262,11 +263,13 @@ export function createRunStore({
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
   processIdentity = readProcessIdentity,
+  runtimeProcessNamespace,
   onLeasePublicationBoundary = async () => {},
   onRecoveryFailurePublicationBoundary = async () => {},
   onPreservationBoundary = async () => {},
   onTransitionBoundary = async () => {},
   onPreparationBoundary = async () => {},
+  onRuntimeBoundary = async () => {},
   resolveStopBoundary = null,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
@@ -282,11 +285,14 @@ export function createRunStore({
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
     typeof processIdentity !== "function" ||
+    (runtimeProcessNamespace !== undefined &&
+      typeof runtimeProcessNamespace !== "function") ||
     typeof onLeasePublicationBoundary !== "function" ||
     typeof onRecoveryFailurePublicationBoundary !== "function" ||
     typeof onPreservationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof onPreparationBoundary !== "function" ||
+    typeof onRuntimeBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
     hostName.length > 255 ||
@@ -479,6 +485,19 @@ export function createRunStore({
           });
         }),
       ),
+  });
+
+  const runtimeAdmission = createRuntimeAdmissionStore({
+    ensureRoot,
+    ensureDirectory: ensureManagedDirectory,
+    actions,
+    hostName,
+    processId,
+    processIdentity,
+    processIsAlive,
+    processNamespace: runtimeProcessNamespace,
+    onPublicationBoundary: onLeasePublicationBoundary,
+    onBoundary: onRuntimeBoundary,
   });
 
   async function inspectRoot() {
@@ -767,6 +786,21 @@ export function createRunStore({
     ]);
     assertDisjointStateRoot(potentialStateRoot, project, task);
     return Object.freeze({ projectPath: project, taskPath: task });
+  }
+
+  async function assertRuntimeBoundary(paths) {
+    if (
+      !Array.isArray(paths) ||
+      paths.some((path) => typeof path !== "string" || !path)
+    )
+      throw new RunStoreError("Runtime boundaries are invalid.", {
+        code: "ERR_UNSAFE_STATE_ROOT",
+      });
+    const root = await canonicalPotentialPath(requestedStateRoot);
+    for (const path of paths) {
+      const boundary = await canonicalPotentialPath(resolve(path));
+      assertDisjointStateRoot(root, boundary, boundary);
+    }
   }
 
   async function acquireRunLease(runId, retainedLease) {
@@ -2131,6 +2165,10 @@ export function createRunStore({
     loadStopCheckpoint: stops.checkpoint,
     inspectRunLeaseOwner,
     beginAction: actions.begin,
+    admitRuntime: runtimeAdmission.admit,
+    assertRuntimeBoundary,
+    activateRuntime: runtimeAdmission.activate,
+    releaseRuntime: runtimeAdmission.release,
     rootPath: requestedStateRoot,
     acquireRunLease,
     acquireWorktreeLease,

@@ -222,6 +222,16 @@ pinning; direct source API imports do not bootstrap an installed process.
 Payload preparation performs no package installation, controller activation,
 update selection, run migration or implicit resume.
 
+Pinned CLI/MCP processes register their exact payload and process identity in
+user state. New runs, resumes and detached commands pass the same serialized
+admission boundary. Activation is deferred while positively associated users
+of another payload remain alive; an unverifiable owner remains blocking.
+Unrelated host processes are neither enumerated nor signaled. Explicit runtime
+activation selects a verified payload after users retire; admission cannot
+silently switch an existing active selection or restart an MCP client. Previous
+payloads and saved progress remain intact. The internal activation capability
+adds no public update command, automatic update, migration or resume authority.
+
 ## Pipelines
 
 | Pipeline         | Purpose                                                                                         | Specification                                                                    |
@@ -1934,6 +1944,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   ├── runtime/
 │   │   ├── index.js
 │   │   ├── bootstrap.js
+│   │   ├── admission.js
 │   │   ├── contract.js
 │   │   ├── files.js
 │   │   └── payload.js

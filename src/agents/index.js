@@ -101,7 +101,10 @@ export {
   spawnOwnedProcess,
   terminateOwnedProcess,
 } from "./owned-process.js";
-export { readProcessIdentity } from "./process-containment.js";
+export {
+  readProcessIdentity,
+  readProcessNamespace,
+} from "./process-containment.js";
 export {
   createProviderRegistry,
   PROVIDER_REGISTRY,

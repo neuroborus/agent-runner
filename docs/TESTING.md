@@ -28,6 +28,22 @@ write/search access only to owned fixture directories through descriptors, and
 never follows links or changes the enclosing temporary-storage permissions.
 Read-only fixture files need no permission change for removal.
 
+Fast `test/state/runtime-admission.test.js` owns serialized admission/activation,
+deferred restart, positive owner recovery, namespace/identity uncertainty and
+write-ahead interruption without replay. It injects process observations and
+uses only owned state storage. Fast `test/runtime-admission.test.js` verifies
+CLI/MCP lifetime and Runner create/run/resume gates, old pinned resources after
+outer replacement, retirement, state separation and development-managed bypass.
+Its in-process MCP fixture supplies controlled positive process observations;
+production admission still requires native owner identity and namespace proof.
+Unavailable owner metadata must deny startup before state creation.
+It also covers actual STDIO EOF retirement and caller-input mutation after
+candidate verification.
+Existing runtime-pinning slow coverage retains actual detached-process proof;
+the new admission tests require no providers, host census, signals or installs.
+Recovery also covers a consumed activation after owner loss and colliding PIDs
+in separate namespaces before the first runtime projection is published.
+
 Fast `test/release-assembly.test.js` owns isolated lock-closure assembly, real
 private workspaces, nested dependencies, executable modes, allowlist exclusions,
 metadata/resource/link rejection and no-overwrite output behavior. Synthetic tar

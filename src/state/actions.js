@@ -23,6 +23,9 @@ const TOOLS = new Set([
   "run_cancel",
   "unexpected_issue_report",
   "guidance_update",
+  "runtime_admit",
+  "runtime_activate",
+  "runtime_release",
 ]);
 const ACTION_FIELDS = new Set([
   "schemaVersion",

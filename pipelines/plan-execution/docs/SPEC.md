@@ -2020,6 +2020,12 @@ through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
 
+The root runtime applies immutable runtime admission to CLI/MCP lifetimes and
+new-run/resume effects.
+Associated live users defer activation, while unknown owned identity blocks it;
+admission cannot migrate, resume or expand authority for a legacy run. The root
+runtime contract owns this boundary and retains all existing pipeline gates.
+
 Through MCP, the root runtime never opens an editor. It projects the same
 pending authorization with identified questions and accepts an empty response
 for optional proactive clarification or one exact answer per Worker question

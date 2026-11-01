@@ -6,3 +6,4 @@ export {
   startApplication,
 } from "./bootstrap.js";
 export { resolveRuntimeRoot, RuntimePayloadError } from "./contract.js";
+export { createRuntimeAdmission } from "./admission.js";

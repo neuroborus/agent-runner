@@ -26,6 +26,7 @@ import {
   resolveStopBoundary,
 } from "../pipeline-registry.js";
 import { createWorkspaceService } from "../workspace/index.js";
+import { createRuntimeAdmission } from "../runtime/index.js";
 import {
   createRunStore,
   deepFreeze,
@@ -78,6 +79,7 @@ import {
 } from "./roles.js";
 
 const RUNNER_OPTION_FIELDS = new Set([
+  "runtimeAdmission",
   "inactivityTimers",
   "availabilityClock",
   "availabilityWait",
@@ -276,6 +278,8 @@ export function createRunner(options = {}) {
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
+  const runtimeAdmission =
+    options.runtimeAdmission ?? createRuntimeAdmission({ runStore });
   const trustedValidation =
     options.trustedValidation ??
     createTrustedValidationService({ git, workspace });
@@ -304,6 +308,8 @@ export function createRunner(options = {}) {
     (options.availabilityWait !== undefined &&
       typeof options.availabilityWait !== "function") ||
     !isRecord(runStore) ||
+    !isRecord(runtimeAdmission) ||
+    typeof runtimeAdmission.withAdmission !== "function" ||
     !isRecord(trustedValidation) ||
     typeof trustedValidation.preflight !== "function" ||
     typeof trustedValidation.execute !== "function"
@@ -2772,10 +2778,34 @@ export function createRunner(options = {}) {
 
   return Object.freeze({
     requestOperatorStop: (input) => runStore.requestOperatorStop(input),
-    create,
+    create: (input, ...args) =>
+      runtimeAdmission.withAdmission(
+        "run",
+        () => create(input, ...args),
+        async () =>
+          [input?.projectPath, input?.taskPath].filter(
+            (path) => typeof path === "string",
+          ),
+      ),
     previewInput,
-    resume,
-    run,
+    resume: (input, ...args) =>
+      runtimeAdmission.withAdmission(
+        "resume",
+        () => resume(input, ...args),
+        async () => {
+          const state = await runStore.loadRun(input?.runId);
+          return [state.projectPath, state.taskPath];
+        },
+      ),
+    run: (input) =>
+      runtimeAdmission.withAdmission(
+        "run",
+        () => run(input),
+        async () =>
+          [input?.projectPath, input?.taskPath].filter(
+            (path) => typeof path === "string",
+          ),
+      ),
     status,
     submitInput,
     validateBoundary,

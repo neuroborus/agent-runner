@@ -852,6 +852,52 @@ inherit it. The existing runtime-compatibility token, leased revision admission,
 durable ownership and same-key recovery remain separate mandatory gates.
 Preparation grants no registry, update activation, migration or resume authority.
 
+### Serialized runtime admission
+
+`runtime/admission.js` stays standard-library-only and receives the state
+capability from root composition. Installed CLI/MCP process lifetimes and Runner
+create/run/resume calls verify their pinned payload and Node identity, then
+register before effects and await retirement afterward. Development-managed
+source calls bypass global admission. State effects use the immutable verified
+descriptor rather than retaining caller-owned identity fields. Application,
+project and task boundaries are checked before state creation, including
+missing but confined paths.
+The STDIO server handle exposes a settled-on-close lifetime promise; CLI keeps
+its admission until transport closure, including startup failure or early EOF.
+The MCP boundary closes the SDK transport when STDIO input ends or closes and
+removes its input listeners when the lifetime settles.
+
+`state/runtime-admission.js` owns a bounded private `runtime-admission/runtime.json`
+projection under the existing state root. It records the active and pending
+payload identities plus explicitly registered users, their host, PID namespace,
+boot/start identity and operation UUID. Existing action intents and leases bind
+each operation; the existing mutation boundary serializes admission, retirement
+and activation. Runtime mutation claims bind their PID namespace before any
+peer PID probe; ordinary run mutation claims retain their existing contract.
+A write-ahead action records its expected projection revision and
+outcome before atomic publication. Recovery completes a proved consumed write
+without repeating it; intervening operations with uncertain consumption block.
+Completed admission receipts cannot recreate retired users.
+Activation and retirement receipts can be reconciled by a new owner only after
+the original owner is proved dead or replaced. Admission never transfers an old
+process association to that new owner.
+
+The first admission initializes selection. Later admission must match the exact
+active payload and Node identity; it cannot activate an old or new payload.
+The internal activation capability verifies a candidate, retaining the current
+selection and recording a deferred outcome while any associated live user
+requires another payload. After users retire, explicit activation changes only
+the selector. It does not rewrite or remove immutable trees, restart a process,
+reload frozen configuration, migrate or resume a run. Pending selection is not
+automatic restart or update authority. Public update entry points remain separate.
+
+Only recorded users are inspected. Proved exit, PID replacement or a prior boot
+retires the corresponding association. Unknown identity, foreign host or a PID
+namespace unavailable to this observer remains blocking; no PID-only guess,
+host census or signal is permitted. Per-run leases, private PID containment,
+compatibility, stop gates and consumed-effect recovery retain their authority.
+Runtime admission grants no execution authority to legacy or intermediate runs.
+
 ## Runner Configuration
 
 The root configuration capability owns global user settings behind

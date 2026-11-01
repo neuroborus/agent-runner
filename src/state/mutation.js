@@ -34,7 +34,7 @@ function invalid() {
   });
 }
 
-function parseClaim(source, token) {
+function parseClaim(source, token, namespaced) {
   if (Buffer.byteLength(source) > 2_048) invalid();
   let record;
   try {
@@ -46,8 +46,13 @@ function parseClaim(source, token) {
     record === null ||
     typeof record !== "object" ||
     Array.isArray(record) ||
-    Object.keys(record).length !== FIELDS.size ||
-    Object.keys(record).some((field) => !FIELDS.has(field)) ||
+    Object.keys(record).length !== FIELDS.size + (namespaced ? 1 : 0) ||
+    Object.keys(record).some(
+      (field) => !FIELDS.has(field) && !(namespaced && field === "namespace"),
+    ) ||
+    (namespaced &&
+      (typeof record.namespace !== "string" ||
+        !/^pid:\[\d+\]$/u.test(record.namespace))) ||
     record.schemaVersion !== 1 ||
     record.token !== token ||
     !Number.isSafeInteger(record.pid) ||
@@ -61,7 +66,8 @@ function parseClaim(source, token) {
   )
     invalid();
   assertRunId(token);
-  validateProcessIdentity(record.processIdentity);
+  if (validateProcessIdentity(record.processIdentity) === null && namespaced)
+    invalid();
   return record;
 }
 
@@ -74,11 +80,27 @@ export function createMutationBoundary({
   processId,
   processIsAlive,
   processIdentity,
+  processNamespace = null,
   onPublicationBoundary,
   prefix = PREFIX,
 }) {
   const ownerOptions = { hostName, processIsAlive, processIdentity };
-  async function claims(directory, ownerToken) {
+  async function inspectOwner(record, observer) {
+    if (processNamespace !== null) {
+      if (
+        record.hostname === hostName &&
+        record.processIdentity?.bootId !== observer.processIdentity.bootId
+      )
+        return "dead";
+      if (record.namespace !== observer.namespace)
+        throw new RunStoreError(
+          "Mutation owner namespace cannot be verified.",
+          { code: "ERR_RUNTIME_OWNER_UNVERIFIABLE" },
+        );
+    }
+    return inspectProcessOwner(record, ownerOptions);
+  }
+  async function claims(directory, observer) {
     const names = (await readdir(directory)).filter(
       (name) =>
         name.startsWith(prefix) &&
@@ -94,12 +116,14 @@ export function createMutationBoundary({
       const path = join(directory, name);
       const source = await readOptionalPublishedText(path);
       if (source === null) continue;
-      const record = parseClaim(source, name.slice(prefix.length));
+      const record = parseClaim(
+        source,
+        name.slice(prefix.length),
+        processNamespace !== null,
+      );
       if (
-        record.token !== ownerToken &&
-        ["dead", "replaced"].includes(
-          await inspectProcessOwner(record, ownerOptions),
-        )
+        record.token !== observer.token &&
+        ["dead", "replaced"].includes(await inspectOwner(record, observer))
       ) {
         await removeFile(path);
       } else {
@@ -122,16 +146,27 @@ export function createMutationBoundary({
       ),
       ticket: null,
     };
+    if (processNamespace !== null) {
+      record.namespace = await processNamespace(processId);
+      if (
+        record.processIdentity === null ||
+        typeof record.namespace !== "string" ||
+        !/^pid:\[\d+\]$/u.test(record.namespace)
+      )
+        throw new RunStoreError("Mutation owner cannot be verified.", {
+          code: "ERR_RUNTIME_OWNER_UNVERIFIABLE",
+        });
+    }
     await publishExclusiveFile(path, JSON.stringify(record) + "\n", {
       onPublicationBoundary,
     });
     try {
-      const peers = await claims(directory, token);
+      const peers = await claims(directory, record);
       record.ticket = Math.max(0, ...peers.map((peer) => peer.ticket ?? 0)) + 1;
       if (!Number.isSafeInteger(record.ticket)) invalid();
       await atomicWriteFile(path, JSON.stringify(record) + "\n");
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-        const peers = await claims(directory, token);
+        const peers = await claims(directory, record);
         const owned = peers.find((peer) => peer.token === token);
         if (owned?.ticket !== record.ticket) invalid();
         const blocked = peers.some(

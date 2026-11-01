@@ -2,7 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/server";
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import {
+  serveStdio,
+  StdioServerTransport,
+} from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
 import packageMetadata from "../../package.json" with { type: "json" };
@@ -1596,10 +1599,31 @@ export async function serveMcp(options = {}) {
         issueReportingEnabled: configuration.issueReporting,
         runnerConfiguration: configuration,
       }));
-  return serveStdio(createServer, {
-    ...(options.transport === undefined
-      ? {}
-      : { transport: options.transport }),
+  const stdin = options.stdin ?? process.stdin;
+  const transport =
+    options.transport ??
+    new StdioServerTransport(stdin, options.stdout ?? process.stdout);
+  const closed = Promise.withResolvers();
+  closed.promise.catch(() => {});
+  const start = transport.start.bind(transport);
+  transport.start = async () => {
+    const onclose = transport.onclose;
+    transport.onclose = () => {
+      try {
+        onclose?.();
+      } finally {
+        closed.resolve();
+      }
+    };
+    try {
+      await start();
+    } catch (error) {
+      closed.reject(error);
+      throw error;
+    }
+  };
+  const handle = serveStdio(createServer, {
+    transport,
     onerror(error) {
       const code =
         typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
@@ -1608,4 +1632,19 @@ export async function serveMcp(options = {}) {
       stderr.write(`Agent Runner MCP error: ${code}.\n`);
     },
   });
+  if (options.transport === undefined) {
+    // The SDK transport does not close itself when its input ends.
+    const close = () => {
+      handle.close().catch(closed.reject);
+    };
+    const cleanup = () => {
+      stdin.off("end", close);
+      stdin.off("close", close);
+    };
+    stdin.once("end", close);
+    stdin.once("close", close);
+    closed.promise.then(cleanup, cleanup);
+    if (stdin.readableEnded || stdin.destroyed) close();
+  }
+  return { ...handle, closed: closed.promise };
 }

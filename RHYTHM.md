@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Runtime selection is serialized with positively owned admission.** Existing
+  state actions, leases and mutation boundaries track pinned CLI/MCP users and
+  gate new runs and resumes. Activation defers while another payload is in use;
+  unknown owned identity or namespace blocks it without a host census or signals.
+  Write-ahead revision evidence reconciles interrupted selector writes once.
+  Retired receipts cannot recreate users or roll selection backward. Selection
+  retains old trees and frozen progress, with no implicit restart, migration,
+  resume or new legacy-run authority. Development-managed calls stay separate.
+
 - **Installed processes keep one complete application payload.** The executable
   verifies and materializes the full manifest before application imports, then
   freezes a process context rooted in user-owned read-only storage. Delayed reads

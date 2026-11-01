@@ -126,6 +126,7 @@ export function parseManifest(bytes) {
     "src/index.js",
     "src/runtime/index.js",
     "src/runtime/bootstrap.js",
+    "src/runtime/admission.js",
     "src/runtime/contract.js",
     "src/runtime/files.js",
     "src/runtime/payload.js",

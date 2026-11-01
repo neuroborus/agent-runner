@@ -32,6 +32,14 @@ preparations are not active installations. This startup contract grants no updat
 activation, state migration or automatic resume. Linked Git checkouts remain
 development-managed. See [pinned payloads](../../README.md#pinned-application-payloads).
 
+Runtime admission serializes explicit activation with positively associated
+CLI/MCP users, new runs, resumes and detached continuations. Another live payload
+defers activation; uncertain ownership remains blocking. Retirement preserves
+the previous usable tree and never signals unrelated processes. An existing
+MCP server stays pinned until it ends; selecting another payload cannot restart
+its client, migrate saved progress or resume a run. Activation currently has an
+internal capability boundary, with no new public update command.
+
 ## Configuration
 
 Global user settings live outside the application installation, using the

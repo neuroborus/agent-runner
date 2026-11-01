@@ -12,6 +12,7 @@ import {
 } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
+import { createRuntimeAdmission } from "./runtime/index.js";
 import {
   createRunStore,
   projectAvailabilityRetry,
@@ -557,7 +558,45 @@ function detachedStopCheckpoint(environment) {
   return Number(value);
 }
 
-export async function main(
+export async function main(args = process.argv.slice(2), options = {}) {
+  let parsed;
+  try {
+    parsed = parseCommand(args);
+  } catch {
+    return runCommand(args, options);
+  }
+  const admission =
+    options.runtimeAdmission ??
+    createRuntimeAdmission({ runStore: createRunStore() });
+  try {
+    return await admission.withAdmission(
+      parsed.positionals[0] === "mcp" ? "mcp" : "cli",
+      () => runCommand(args, options, parsed),
+      async () =>
+        [parsed.values.project, parsed.values.task].filter(
+          (path) => typeof path === "string",
+        ),
+    );
+  } catch (error) {
+    if (!error?.code?.startsWith("ERR_RUNTIME_")) throw error;
+    (options.stderr ?? process.stderr).write(
+      "Runtime admission or retirement could not be verified.\n",
+    );
+    return 1;
+  }
+}
+
+function parseCommand(args) {
+  return parseArgs({
+    args,
+    allowPositionals: true,
+    strict: true,
+    tokens: true,
+    options: OPTIONS,
+  });
+}
+
+async function runCommand(
   args = process.argv.slice(2),
   {
     stdout = process.stdout,
@@ -572,16 +611,11 @@ export async function main(
     environment = process.env,
     idempotencyKeyFactory = randomUUID,
   } = {},
+  previouslyParsed,
 ) {
   let parsed;
   try {
-    parsed = parseArgs({
-      args,
-      allowPositionals: true,
-      strict: true,
-      tokens: true,
-      options: OPTIONS,
-    });
+    parsed = previouslyParsed ?? parseCommand(args);
   } catch (error) {
     if (
       error instanceof Error &&
@@ -722,7 +756,8 @@ export async function main(
   }
   if (command === "mcp") {
     try {
-      await startMcp({ stderr });
+      const server = await startMcp({ stderr });
+      await server?.closed;
       return 0;
     } catch {
       stderr.write("Agent Runner MCP failed to start.\n");
