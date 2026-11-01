@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Operator update transports share one durable apply operation.** Explicit
+  CLI/MCP calls freeze an official exact version under a state action before
+  installation. Concurrent keys share version-specific preparation; retries keep
+  their original selection, activation identity and bounded outcome. MCP requires
+  the managing operator's acknowledgement and cancels only observation on client
+  disconnect. Existing pipeline isolation still disables MCP. Package installation,
+  client registration, restart and saved-run resume remain distinct; official
+  identity and publication stay unapproved, so public npm installation remains
+  outside the Quickstart.
+
 - **Candidate activation follows serialized safe admission.** A separate root
   update action binds a fully reverified preparation to one durable runtime
   effect. Outcomes distinguish downloaded, installed, deferred and active

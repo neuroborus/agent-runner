@@ -621,6 +621,8 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     "run_status",
     "run_wait",
     "unexpected_issue_report",
+    "update_apply",
+    "update_check",
   ]);
   assert.equal(
     tools.find((tool) => tool.name === "run_status").annotations.readOnlyHint,

@@ -207,6 +207,14 @@ frozen configuration, leased migrations and consumed-effect recovery; activation
 grants no legacy/intermediate execution or refinement authority and cannot roll
 back persisted migrations.
 
+CLI/MCP update apply remains an explicit managing-operator action, not a pipeline
+operation or a project setting. Its action intent precedes effects, freezes exact
+selection and owns the bounded recoverable receipt. Concurrent requests cannot
+duplicate the same version's preparation. MCP requires an explicit operator
+acknowledgement; existing provider isolation disables MCP in pipeline sessions.
+Wait cancellation does not revoke or replay the operation. No update transport
+accepts a source URL, changes global links, restarts clients or advances saved runs.
+
 Journal reuse requires a certificate of the originally validated run/revision
 prefix, ordered contiguous segment namespace, file identities and exact byte
 ranges. Fresh consumed-byte digests and stable directory identity and file

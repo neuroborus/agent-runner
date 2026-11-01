@@ -100,6 +100,7 @@ async function fixture(
     installedVersion = "1.0.0",
     contextFault,
     storeOptions = {},
+    onApplyComplete,
   } = {},
 ) {
   const f = await runtimeFixture(t);
@@ -162,18 +163,43 @@ async function fixture(
     integrity: integrity(archive),
     tarball: `https://registry.npmjs.org/@sample/runner/-/runner-${available.version}.tgz`,
   };
-  const store = durable
+  const baseStore = durable
     ? createRunStore({ stateRoot: join(f.directory, "state"), ...storeOptions })
     : memoryActions(contextFault);
+  const requests = new Map();
+  let preparationId;
+  let selectionRequest;
+  const store = {
+    ...baseStore,
+    async beginAction(request) {
+      requests.set(request.key, request);
+      if (request.tool === "update_prepare")
+        preparationId = request.key.slice("update:".length);
+      if (request.tool === "update_apply") selectionRequest = request;
+      const action = await baseStore.beginAction(request);
+      if (request.tool !== "update_apply" || !onApplyComplete) return action;
+      return {
+        ...action,
+        get record() {
+          return action.record;
+        },
+        async complete(value) {
+          await onApplyComplete(value);
+          return action.complete(value);
+        },
+      };
+    },
+  };
   const calls = [];
   const registeredPid = process.pid === 42 ? 43 : 42;
   let queries = 0;
   let canRetire = false;
   const operationId = randomUUID();
+  preparationId = operationId;
   const storageRoot = join(f.directory, "candidates");
-  const action = () =>
-    store.readAction({
-      key: `update:${operationId}`,
+  const action = async () =>
+    (await store.readAction({
+      key: `update:${preparationId}`,
       tool: "update_prepare",
       arguments: {
         version: available.version,
@@ -186,7 +212,7 @@ async function fixture(
           registry: "https://registry.npmjs.org/",
         },
       },
-    });
+    })) ?? (selectionRequest ? store.readAction(selectionRequest) : null);
   const effects = {
     retired: async () => canRetire,
     run: async (command, args, options) => {
@@ -323,7 +349,10 @@ async function fixture(
     readInstallation,
     fetch: async () => {
       assert.equal(
-        (await action()).status,
+        (selectionRequest
+          ? await store.readAction(selectionRequest)
+          : await action()
+        ).status,
         "intent",
         "selection intent precedes registry effects",
       );
@@ -337,12 +366,14 @@ async function fixture(
     previous,
     updater,
     store,
+    applyAction: (key) => store.readAction(requests.get(key)),
     readInstallation,
     operationId,
     version: available.version,
     calls,
     action,
     available,
+    effects,
     storageRoot,
     processInspection,
     registeredPid,
@@ -712,6 +743,214 @@ test("lifecycle status rejects malformed persisted versions without exposing the
   assert.equal(JSON.stringify(status).includes("private-value"), false);
   assert.equal(f.queries(), 0);
   assert.deepEqual(f.calls, []);
+});
+
+test("operator apply freezes selection, persists its receipt and shares exact-version installation across keys", async (t) => {
+  const f = await fixture(t, { durable: true, retainPrevious: true });
+  const first = await f.updater.apply({ idempotencyKey: "first-update" });
+  assert.equal(first.status, "active");
+  assert.equal(first.packageVersion, "1.0.0");
+  assert.equal(first.runningVersion, "1.0.0");
+  assert.equal(first.installedVersion, "1.1.0");
+  assert.equal(first.restartRequired, true);
+  assert.equal((await f.applyAction("first-update")).status, "completed");
+  const queries = f.queries();
+  assert.deepEqual(
+    await f.updater.apply({ idempotencyKey: "first-update" }),
+    first,
+  );
+  assert.equal(f.queries(), queries);
+  const second = await f.updater.apply({
+    idempotencyKey: "second-update",
+    version: "1.1.0",
+  });
+  assert.equal(second.status, "active");
+  assert.deepEqual(
+    f.calls.map((call) => call.kind),
+    ["pack", "install", "help", "mcp"],
+  );
+  assert.deepEqual(
+    (
+      await f.updater.apply({
+        idempotencyKey: "first-update",
+        version: "1.1.0",
+      })
+    ).blockers,
+    ["operation_conflict"],
+  );
+});
+
+test("operator apply freezes caller-owned retry and version selectors before awaiting inspection", async (t) => {
+  const f = await fixture(t, { durable: true });
+  const entered = Promise.withResolvers(),
+    resume = Promise.withResolvers();
+  const updater = createUpdateService({
+    policy,
+    runStore: f.store,
+    storageRoot: f.storageRoot,
+    effects: f.effects,
+    fetch: async () => Response.json(f.available),
+    readInstallation: async () => {
+      entered.resolve();
+      await resume.promise;
+      return f.readInstallation();
+    },
+  });
+  const request = { idempotencyKey: "original-update", version: "1.1.0" };
+  const operation = updater.apply(request);
+  await entered.promise;
+  request.idempotencyKey = "changed-update";
+  request.version = "2.0.0";
+  resume.resolve();
+  const result = await operation;
+  assert.equal(result.status, "active");
+  assert.equal(result.version, "1.1.0");
+  assert.equal((await f.applyAction("original-update")).status, "completed");
+});
+
+test("concurrent apply requests cannot duplicate installation and blocked intents recover", async (t) => {
+  const entered = Promise.withResolvers(),
+    leave = Promise.withResolvers();
+  const f = await fixture(t, {
+    durable: true,
+    fault: async (kind) => {
+      if (kind === "install") {
+        entered.resolve();
+        await leave.promise;
+      }
+    },
+  });
+  const first = f.updater.apply({
+    idempotencyKey: "concurrent-first",
+    version: "1.1.0",
+  });
+  let second;
+  try {
+    await entered.promise;
+    second = await f.updater.apply({
+      idempotencyKey: "concurrent-second",
+      version: "1.1.0",
+    });
+    assert.deepEqual(second.blockers, ["operation_busy"]);
+    assert.equal((await f.applyAction("concurrent-second")).status, "intent");
+    assert.deepEqual(
+      (await f.applyAction("concurrent-second")).context.outcome,
+      second,
+    );
+  } finally {
+    leave.resolve();
+  }
+  assert.equal((await first).status, "active");
+  assert.equal(
+    (
+      await f.updater.apply({
+        idempotencyKey: "concurrent-second",
+        version: "1.1.0",
+      })
+    ).status,
+    "active",
+  );
+  assert.equal(f.calls.filter((call) => call.kind === "install").length, 1);
+});
+
+test("current and unapproved operator apply requests remain successful no-ops or fail closed", async (t) => {
+  const f = await fixture(t, { durable: true, current: true });
+  const result = await f.updater.apply({ idempotencyKey: "current-version" });
+  assert.equal(result.status, "current");
+  assert.deepEqual(f.calls, []);
+  assert.equal((await f.applyAction("current-version")).status, "completed");
+  const updater = createUpdateService({
+    readInstallation: () =>
+      assert.fail("Unapproved apply must not inspect or mutate"),
+  });
+  assert.deepEqual(
+    (await updater.apply({ idempotencyKey: "unapproved" })).blockers,
+    ["identity_unapproved"],
+  );
+});
+
+test("operator apply recovers a consumed activation after server replacement without registry or installation replay", async (t) => {
+  const live = new Set([101, 202]);
+  const owners = {
+    hostName: "fixture-host",
+    processId: 101,
+    processIdentity: async (pid) => ({
+      bootId: "11111111-1111-4111-8111-111111111111",
+      startTicks: String(pid),
+    }),
+    processIsAlive: async (pid) => live.has(pid),
+    runtimeProcessNamespace: async () => "pid:[42]",
+  };
+  const f = await fixture(t, {
+    durable: true,
+    storeOptions: {
+      ...owners,
+      onRuntimeBoundary: async ({ operation }) => {
+        if (operation === "activate")
+          throw new Error("controlled activation interruption");
+      },
+    },
+  });
+  const request = { idempotencyKey: "recover-update", version: "1.1.0" };
+  assert.equal((await f.updater.apply(request)).status, "blocked");
+  const selected = await f.store.readRuntime();
+  live.delete(101);
+  const updater = createUpdateService({
+    policy,
+    storageRoot: f.storageRoot,
+    readInstallation: f.readInstallation,
+    runStore: createRunStore({
+      ...owners,
+      processId: 202,
+      stateRoot: f.store.rootPath,
+    }),
+    fetch: () =>
+      assert.fail("Frozen selection cannot query registry on recovery"),
+  });
+  assert.equal((await updater.apply(request)).status, "active");
+  assert.deepEqual(await f.store.readRuntime(), selected);
+  assert.equal(f.calls.filter((call) => call.kind === "install").length, 1);
+});
+
+test("a published apply outcome completes after interruption while its original server is still alive", async (t) => {
+  const owners = {
+    hostName: "fixture-host",
+    processId: 101,
+    processIdentity: async (pid) => ({
+      bootId: "11111111-1111-4111-8111-111111111111",
+      startTicks: String(pid),
+    }),
+    processIsAlive: async () => true,
+    runtimeProcessNamespace: async () => "pid:[42]",
+  };
+  const f = await fixture(t, {
+    durable: true,
+    storeOptions: owners,
+    onApplyComplete: () => {
+      throw new Error("controlled receipt completion interruption");
+    },
+  });
+  const request = { idempotencyKey: "published-update" };
+  assert.equal((await f.updater.apply(request)).status, "blocked");
+  const pending = await f.applyAction(request.idempotencyKey);
+  assert.equal(pending.status, "intent");
+  assert.equal(pending.context.outcome.status, "active");
+  const before = await f.store.readRuntime();
+  const later = createUpdateService({
+    policy,
+    storageRoot: f.storageRoot,
+    readInstallation: f.readInstallation,
+    runStore: createRunStore({
+      ...owners,
+      processId: 202,
+      stateRoot: f.store.rootPath,
+    }),
+    fetch: () =>
+      assert.fail("Published outcomes cannot select another release"),
+  });
+  assert.deepEqual(await later.apply(request), pending.context.outcome);
+  assert.deepEqual(await f.store.readRuntime(), before);
+  assert.equal(f.calls.filter((call) => call.kind === "install").length, 1);
 });
 
 test("interrupted installation reconciles completed bytes only after owned-process retirement", async (t) => {

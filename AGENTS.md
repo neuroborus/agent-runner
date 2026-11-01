@@ -256,7 +256,7 @@ All pipelines additionally require:
 | `src/config/index.js`             | Public runner-configuration capability boundary                       |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
 | `src/config/release/index.js`     | Shared immutable release identity and approval policy                 |
-| `src/update/index.js`             | Public release checks, candidate preparation and activation boundary  |
+| `src/update/index.js`             | Public operator release checks, apply and candidate lifecycle         |
 | `src/update/`                     | Private release lifecycle, candidate proof and owned smoke checks     |
 | `src/clarifications/index.js`     | Public clarification-service boundary                                 |
 | `src/clarifications/`             | Private authorization coordination and confined transcript files      |

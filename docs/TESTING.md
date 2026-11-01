@@ -100,6 +100,15 @@ boundary with injected native effects, without restarting a client or executing
 the saved run. Existing Runner slow coverage retains full resume orchestration.
 Lifecycle projection rejects malformed persisted versions without returning their
 text or performing registry/native effects.
+Durable apply coverage additionally proves exact-selection receipts, same-key
+conflicts, concurrent-key installation sharing, recoverable blocked intents and
+server-replacement recovery without native-effect replay. `test/mcp/update.test.js`
+owns strict tool discovery and operator acknowledgement, unchanged protocol JSON,
+wait-only cancellation, duplicate observation and CLI dispatch without pipelines.
+It uses in-memory SDK transports and injected updater effects. Installed package
+acceptance separately exercises the unapproved CLI/MCP update entry points without
+registry requests or client registration; approval changes must revise that explicit
+default-disabled expectation as part of their own reviewed acceptance.
 Existing package-install acceptance retains real CLI/MCP protocol and offline
 installation ownership; its separately assigned exact invocation remains
 required alongside complete slow coverage.

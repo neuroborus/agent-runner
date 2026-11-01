@@ -16,6 +16,7 @@ import {
 import { readRegistryRelease } from "./registry.js";
 import { createCandidatePreparer } from "./preparation.js";
 import { createCandidateActivation } from "./activation.js";
+import { createUpdateApply } from "./apply.js";
 
 // Only trusted root composition supplies effects. Requests select an exact
 // version, never an identity, URL, project configuration or update permission.
@@ -183,5 +184,15 @@ export function createUpdateService({
     prepare,
     activate: activation.activate,
     status: activation.status,
+    apply: createUpdateApply({
+      official,
+      policy: frozenPolicy,
+      select,
+      readInstallation,
+      getRunStore,
+      storageRoot,
+      prepare,
+      activation,
+    }),
   });
 }

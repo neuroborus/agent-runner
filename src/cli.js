@@ -13,6 +13,7 @@ import {
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import { createRuntimeAdmission } from "./runtime/index.js";
+import { createUpdateService, isUpdateVersion } from "./update/index.js";
 import {
   createRunStore,
   projectAvailabilityRetry,
@@ -26,6 +27,7 @@ import {
 
 const COMMAND_OPTIONS = Object.freeze({
   config: Object.freeze(["from"]),
+  update: Object.freeze(["check", "release", "idempotency-key"]),
   guidance: Object.freeze(["project", "project-config"]),
   pause: Object.freeze([
     "run",
@@ -60,6 +62,7 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
+  update: Object.freeze([]),
   config: Object.freeze(["from"]),
   guidance: Object.freeze(["project"]),
   pause: Object.freeze(["run"]),
@@ -87,6 +90,8 @@ const OPTIONS = Object.freeze({
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
   from: { type: "string" },
+  check: { type: "boolean" },
+  release: { type: "string" },
   run: { type: "string" },
   "expected-revision": { type: "string" },
   "idempotency-key": { type: "string" },
@@ -138,6 +143,7 @@ Usage:
   agent-run guidance --project <directory> [--project-config <path>]
   agent-run guidance edit --project <directory> [--project-config <path>]
   agent-run config migrate --from <legacy-file>
+  agent-run update [--check] [--release <exact-version>] [--idempotency-key <key>]
   agent-run pipelines
   agent-run mcp
 
@@ -145,6 +151,9 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
+      --check              Check the approved official release without installing
+      --release            Select an exact version, required for prereleases
+                           update apply is managing-operator-only; never restarts clients
       --from               Validate and copy legacy settings to the user location
                            Only an absent destination is created; conflicts fail
       --plan-kind          Select commit (default) or custom authoring/execution
@@ -178,7 +187,7 @@ Options:
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
       --expected-revision  Bind a resume, pause, or cancel request revision
-      --idempotency-key    Bind an explicit pause or cancel retry identity
+      --idempotency-key    Bind an explicit pause, cancel, or update retry identity
       --timing             immediate (default) or after-current-commit for pause/cancel
                            Deferred stops require a selected execution step; pauses,
                            failures, or interruptions settle without extra work
@@ -607,6 +616,8 @@ async function runCommand(
     guidance,
     createCommandGuidance = createGuidanceService,
     migrateConfiguration = migrateRunnerConfiguration,
+    updateService,
+    createCommandUpdate = createUpdateService,
     startMcp = serveMcp,
     environment = process.env,
     idempotencyKeyFactory = randomUUID,
@@ -672,7 +683,7 @@ async function runCommand(
     return 1;
   }
 
-  if (["guidance", "config"].includes(command)) {
+  if (["guidance", "config", "update"].includes(command)) {
     if (
       command === "guidance" &&
       positionals[1] !== undefined &&
@@ -769,6 +780,40 @@ async function runCommand(
   let recoveryStarted = false;
   let recoveryStage = "runtime-compatibility";
   try {
+    if (command === "update") {
+      if (values.check && values["idempotency-key"] !== undefined)
+        throw new Error("--idempotency-key requires update apply.");
+      if (values.release !== undefined && !isUpdateVersion(values.release))
+        throw new Error("--release requires an exact version.");
+      try {
+        const request =
+          values.release === undefined ? {} : { version: values.release };
+        const key = values.check
+          ? undefined
+          : (values["idempotency-key"] ?? idempotencyKeyFactory());
+        if (
+          !values.check &&
+          (typeof key !== "string" ||
+            key.length > 1024 ||
+            !key.trim() ||
+            /[\p{Cc}\p{Zl}\p{Zp}]/u.test(key))
+        )
+          throw new Error("Invalid update retry identity.");
+        const service = updateService ?? createCommandUpdate();
+        if (!values.check && values["idempotency-key"] === undefined)
+          stderr.write(`Update retry key: ${key}\n`);
+        const result = values.check
+          ? await service.check(request)
+          : await service.apply({ ...request, idempotencyKey: key });
+        stdout.write(
+          `${JSON.stringify(values.check ? result : { ...result, idempotencyKey: key })}\n`,
+        );
+        return result.status === "blocked" ? 1 : 0;
+      } catch {
+        stderr.write("Update could not be verified.\n");
+        return 1;
+      }
+    }
     if (command === "config") {
       const receipt = await migrateConfiguration({
         from: values.from,

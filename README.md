@@ -212,7 +212,7 @@ installed and running versions, stable availability, compatibility blockers and
 restart needs. A current installation is a successful no-op; prereleases require
 an exact explicit version. Linked checkouts stay development-managed. Checking
 changes no installation or saved run, and automatic behavior stays disabled.
-CLI/MCP integration is separate; see the [operator contract](docs/product/OPERATOR_MODEL.md).
+CLI/MCP use this same capability; see the [operator contract](docs/product/OPERATOR_MODEL.md).
 
 The same capability can prepare an exact candidate with a caller-supplied
 operation UUID. Approved registry metadata and SHA-512 integrity bind a fresh
@@ -228,6 +228,48 @@ deferred and active versions. A live CLI/MCP user of the previous payload defers
 selection until the next admission after those users retire. Activation never
 restarts an MCP client or resumes a saved run. Previous usable payloads remain
 available; see [restart and version limits](docs/RELEASING.md#local-version-selection-and-restart).
+
+### Operator updates
+
+Checking is explicit and never runs during model turns or status/activity reads:
+
+```bash
+agent-run update --check
+```
+
+After official identity and public installation have been separately approved,
+the managing operator can apply an update and retain its retry key:
+
+```bash
+agent-run update --release 1.2.3 --idempotency-key operator-update-1
+```
+
+Omit `--release` to select stable `latest`; prereleases require an exact version.
+Retry the identical key and arguments after interruption. When no key was supplied,
+the CLI prints a generated retry key on stderr before effects; preserve it if
+interrupted. JSON outcomes distinguish
+the outer `packageVersion`, pinned `runningVersion`, and downloaded, installed,
+deferred and active candidate versions. A current version succeeds without an
+installation. Another live runtime defers activation; close the previous server
+and explicitly restart its owning client. No tool restarts a client, registers a
+server, migrates settings or resumes a run. Saved work resumes separately through
+supported leased migrations and frozen configuration; downgrades cannot undo them.
+
+MCP exposes `update_check` (optional exact `version`) and `update_apply`
+(`idempotencyKey`, optional exact `version`, and `operatorInitiated: true`). The
+acknowledgement records a deliberate managing-operator invocation; project
+content, findings, settings and pipeline sessions provide no update authority.
+Disconnect cancels only waiting; a same-key retry recovers the durable operation.
+Concurrent requests share exact-version preparation and cannot duplicate its
+installation. Use Node 24 and the documented Linux namespace/bubblewrap
+prerequisites; linked checkouts remain development-managed and use checkout updates.
+
+Official identity remains unapproved, so these update entry points currently
+return bounded blockers before registry or installation effects. Public npm
+commands are future placeholders until identity, publication and public installation
+are verified; public npm installation is not the Quickstart. Local package/CLI/MCP acceptance does not
+claim publication, personal client registration, live-provider or new-platform
+acceptance. Keep the detailed checkout and linking procedure above.
 
 ### Isolated candidate installation
 
@@ -1714,6 +1756,8 @@ exposes:
 
 - `guidance_read`
 - `guidance_update`
+- `update_check`
+- `update_apply`
 - `pipelines_list`
 - `run_start`
 - `run_status`
@@ -2087,6 +2131,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── update/
+│   │   ├── apply.js
 │   │   ├── index.js
 │   │   ├── service.js
 │   │   ├── activation.js

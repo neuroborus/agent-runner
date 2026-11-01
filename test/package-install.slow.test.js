@@ -468,6 +468,20 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
   });
   assert.equal(version.stdout, `${release.manifest.version}\n`);
   assert.equal(version.stderr, "");
+  const updateProcess = startProcess("agent-run", ["update", "--check"], {
+    cwd: paths.work,
+    env,
+  });
+  updateProcess.child.stdin.end();
+  const update = await updateProcess.closed;
+  assert.equal(update.failure, null);
+  assert.equal(update.code, 1);
+  assert.equal(update.signal, null);
+  assert.equal(update.stderr, "");
+  const updateReport = JSON.parse(update.stdout);
+  assert.ok(updateReport.blockers.includes("identity_unapproved"));
+  assert.equal(updateReport.runningVersion, release.manifest.version);
+  assert.equal(updateReport.installedVersion, release.manifest.version);
   const statePath = join(
     paths.state,
     "agent-runner/runtime-admission/runtime.json",
@@ -502,6 +516,25 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
     assert.equal(initialized.serverInfo.version, release.manifest.version);
     assert.ok(initialized.capabilities.tools);
     mcp.notify("notifications/initialized");
+    const checkedUpdate = await mcp.request("tools/call", {
+      name: "update_check",
+      arguments: {},
+    });
+    assert.equal(checkedUpdate.structuredContent.status, "blocked");
+    assert.ok(
+      checkedUpdate.structuredContent.blockers.includes("identity_unapproved"),
+    );
+    const appliedUpdate = await mcp.request("tools/call", {
+      name: "update_apply",
+      arguments: {
+        idempotencyKey: "package-update-smoke",
+        operatorInitiated: true,
+      },
+    });
+    assert.equal(appliedUpdate.structuredContent.status, "blocked");
+    assert.deepEqual(appliedUpdate.structuredContent.blockers, [
+      "identity_unapproved",
+    ]);
     const discovery = await mcp.request("tools/list", {});
     const names = discovery.tools.map(({ name }) => name);
     assert.equal(new Set(names).size, names.length);
@@ -518,6 +551,8 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
       "run_pause",
       "run_cancel",
       "unexpected_issue_report",
+      "update_check",
+      "update_apply",
     ])
       assert.ok(names.includes(name), name);
     const listing = await mcp.request("tools/call", {

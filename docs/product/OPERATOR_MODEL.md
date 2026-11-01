@@ -50,7 +50,7 @@ prereleases need an exact explicit selection. Node, configuration or state-contr
 incompatibility blocks a newer candidate without changing saved runs.
 Checking grants no installation, migration or resume authority. Automatic
 behavior is disabled, model/status/activity reads never query the registry, and
-CLI/MCP exposure remains separate. Future preferences must remain user-global.
+CLI/MCP expose only explicit operator requests. Future preferences must remain user-global.
 
 The same root capability can prepare an exact release candidate under a durable
 operation UUID. Official approval remains mandatory. Exact registry integrity,
@@ -62,7 +62,13 @@ Unknown ownership or substituted storage remains blocking. Failed attempts never
 replace the previous usable payload, and smoke storage is removed only after
 its owned processes retire. Preparation changes no global/native link or active
 selector and cannot migrate settings, resume a run or acquire Git authority.
-Transport exposure remains separate from this capability.
+CLI `update --check` and MCP `update_check` perform on-demand checking; CLI
+`update` and MCP `update_apply` share one durable apply coordinator. Apply requires
+a managing-operator invocation; MCP additionally requires `operatorInitiated: true`.
+Task content, project settings, findings and pipeline sessions grant no authority.
+Identical retries reuse a frozen exact selection and receipt, including across
+server replacement. Concurrent requests share exact-version installation. A
+disconnect cancels only waiting. Check and activity reads never install anything.
 
 Activation is another explicit root operation bound to the exact validated
 preparation and version. Its durable receipt distinguishes downloaded, installed,
@@ -92,7 +98,7 @@ requires explicit resume with supported leased migrations and the original
 frozen configuration. Unknown forward versions preserve progress and fail
 clearly; retained payloads cannot undo persisted migrations. Legacy/intermediate
 runs gain no execution authority. Activation currently has a root capability
-boundary, with no new public update command. See
+boundary shared by the explicit CLI/MCP operator actions. See
 [explicit versions and downgrade limits](../RELEASING.md#local-version-selection-and-restart).
 
 ## Configuration

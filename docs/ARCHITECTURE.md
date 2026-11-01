@@ -821,7 +821,7 @@ See [release ownership and setup](RELEASING.md).
 
 `src/update/index.js` exposes `createUpdateService().check()` and an optional
 exact `{ version }` selection. Construction, model turns, status and activity
-reads perform no registry request. The capability is not wired to CLI/MCP and
+reads perform no registry request. CLI/MCP delegate explicit requests to it and it
 creates no automatic-update setting. Project configuration, role findings and
 request fields cannot choose a source or acquire global-update authority.
 Trusted root composition may inject effects for controlled tests.
@@ -908,6 +908,17 @@ contain only bounded IDs, versions, outcomes and redacted blockers. Preparation
 changes no selector, restarts no client and migrates/resumes no settings or run.
 
 ## Candidate activation and restart
+
+The same capability now exposes `apply({ idempotencyKey, version? })` for explicit
+managing-operator requests. A state-owned `update_apply` action persists its operation
+and activation UUIDs before mutation. Selection freezes one exact version; a stable
+channel change cannot redirect a retry. Exact-version preparation identity is derived
+from official identity, private storage and version, so concurrent requests reuse
+the preparation lease and validated candidate rather than install twice. Recoverable
+blocked outcomes remain in the intent; success completes its bounded receipt.
+Receipts distinguish the outer package and pinned running versions from candidate
+milestones. Same-key argument changes conflict; consumed activation is reconciled
+through the original action without registry or native-effect replay.
 
 The root update capability exposes `activate({ operationId, preparationId,
 version })` and read-only `status({ preparationId, version })`. It shares the
@@ -1676,12 +1687,26 @@ or performs finalization or commit work.
 
 ## MCP Control Plane
 
+`update_check` and `update_apply` delegate to the single root update service with
+the control plane's store. Both have strict schemas and no project/configuration,
+source, role or run selectors. Apply requires `operatorInitiated: true` plus an
+idempotency key; that acknowledgement is not authority inferred from task content.
+Existing provider isolation keeps MCP disabled in pipeline sessions. Check is
+read-only and on demand; apply is destructive and idempotent. Both declare their
+fixed official registry interaction as open-world. Wait cancellation detaches only
+the observer: receipt publication continues, and server loss recovers from the
+persisted intent on the identical request. Neither restarts an MCP client or resumes
+a run. CLI `update --check` and `update` use the same capability directly, without
+constructing a pipeline or resolving project configuration; stdout contains one
+bounded JSON result. Before effects, apply prints an automatically generated retry
+key on stderr so an interrupted invocation remains retryable. Diagnostics stay on stderr.
+
 `agent-run mcp` exposes the same static pipeline registry and runner through the
 official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
 owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
 `run_activity`, `run_wait`, `run_respond`, `run_resume`, `run_pause`, and
 `run_cancel`; it also owns the shared-capability tools `guidance_read` and
-`guidance_update`, and the
+`guidance_update`, `update_check`, `update_apply`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
 implementation. The private `src/mcp/reporting.js` module owns the narrow local
