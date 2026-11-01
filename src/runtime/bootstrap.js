@@ -1,4 +1,5 @@
-import { lstat, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -63,6 +64,72 @@ async function isCheckout(rootPath) {
     if (error.code === "ENOENT") return false;
     throw error;
   }
+}
+
+// Read-only update inspection never prepares storage or activates a payload.
+export async function inspectRuntimeInstallation({
+  context = getRuntimeContext(),
+  rootPath = context?.rootPath ?? ROOT,
+} = {}) {
+  absolutePath(rootPath);
+  if ((await realpath(rootPath)) !== rootPath)
+    throw new RuntimePayloadError("Application root is aliased.");
+  if (context?.mode !== "pinned") {
+    if (!(await isCheckout(rootPath)))
+      throw new RuntimePayloadError(
+        "Installed inspection requires a pinned runtime.",
+      );
+    const metadata = JSON.parse(
+      (
+        await readRegular(join(rootPath, "package.json"), 1024 * 1024)
+      ).bytes.toString(),
+    );
+    return {
+      developmentManaged: true,
+      runningMetadata: metadata,
+      installedMetadata: metadata,
+      nodeVersion: process.version,
+      canWriteInstallation: false,
+      restartRequired: false,
+    };
+  }
+  if (context.rootPath !== rootPath)
+    throw new RuntimePayloadError("Inspection is outside the running payload.");
+  const running = await inspectPayload(rootPath, {
+    immutable: true,
+    published: true,
+  });
+  const node = await nodeIdentity();
+  if (
+    running.id !== context.payloadId ||
+    node.nodePath !== context.nodePath ||
+    node.nodeVersion !== context.nodeVersion ||
+    !isDeepStrictEqual(node.nodeIdentity, context.nodeIdentity)
+  )
+    throw new RuntimePayloadError("Running payload or Node identity changed.");
+  const installed =
+    context.installationPath === rootPath
+      ? running
+      : await inspectPayload(context.installationPath);
+  let canWriteInstallation = true;
+  try {
+    await access(context.installationPath, constants.W_OK);
+  } catch (error) {
+    if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error;
+    canWriteInstallation = false;
+  }
+  return {
+    developmentManaged: false,
+    runningMetadata: JSON.parse(
+      running.captured.get("package.json").bytes.toString(),
+    ),
+    installedMetadata: JSON.parse(
+      installed.captured.get("package.json").bytes.toString(),
+    ),
+    nodeVersion: node.nodeVersion,
+    canWriteInstallation,
+    restartRequired: installed.id !== running.id,
+  };
 }
 
 function expectedContext(environment) {

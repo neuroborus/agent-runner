@@ -805,7 +805,7 @@ publication is changed. See [test ownership](TESTING.md#slow-gate).
 Release automation belongs to `.github/workflows/release.yml` and the focused
 standard-library scripts `release-policy.js` and `publish-release.js`. An explicit
 stable published Release selects an exact version tag/commit in main; the
-disabled `.github/npm-release.json` requires separately approved public metadata
+disabled immutable policy in `src/config/release/index.js` requires separately approved public metadata
 before that path can validate or publish. The assembler accepts public metadata
 only through that matching policy, preserving neutral private local candidates.
 Ordinary checks, exact package installation and complete slow gate one inspected
@@ -816,6 +816,46 @@ Existing-version integrity is reconciled before effects, and uncertain/partial
 failure remains failed without overwriting versions or moving tags. This tooling
 has no runtime update, configuration-migration or run-resume authority.
 See [release ownership and setup](RELEASING.md).
+
+## On-demand release compatibility
+
+`src/update/index.js` exposes `createUpdateService().check()` and an optional
+exact `{ version }` selection. Construction, model turns, status and activity
+reads perform no registry request. The capability is not wired to CLI/MCP and
+creates no automatic-update setting. Project configuration, role findings and
+request fields cannot choose a source or acquire global-update authority.
+Trusted root composition may inject effects for controlled tests.
+
+The configuration-owned `src/config/release/index.js` is standard-library-only,
+contains the disabled official approval policy, and shares identity validation
+with release assembly/publication. It is included by the existing JavaScript
+payload allowlist, replacing the checkout-only approval JSON. User settings
+cannot override it. Approved package name, repository, license and public
+registry metadata must agree before an anonymous request to the fixed npm
+registry. Registry reads normalize npm's `git+https` repository form before
+checking that same exact approved repository; publication inputs retain their
+strict source metadata contract. Linked checkouts remain development-managed
+and never query it.
+
+Runtime-owned read-only inspection reuses complete payload verification and
+Node identity checks. It distinguishes pinned running bytes from the current
+outer installation without preparing storage, changing links or activating code.
+Reports expose bounded versions, official identity, stable/explicit selection,
+compatibility, blockers and restart requirements; raw paths, registry documents
+and errors are excluded. Requests have a ten-second deadline and a one-MiB body
+ceiling. A default check selects only a stable `latest`; prereleases require an
+exact explicit version. Equal or older releases are successful no-ops.
+
+Root package metadata carries versioned `agentRunnerCompatibility` independently
+of package version: configuration schema, runner/run-envelope generations and
+pipeline state versions. A candidate must declare the same supported contracts;
+unknown metadata or a differing contract blocks a newer candidate. Node ranges
+use the project's `>=major <major` form. This is conservative runtime-contract
+comparison, not certification of any saved run or permission to migrate/resume
+legacy state. Permission observations are informational and confer no install
+authority. Reports require a restart when installed and running payload identities
+differ, including same-version replacements and when no newer download is needed. No payload is downloaded,
+installed, replaced, migrated or resumed by checking.
 
 ## Immutable application startup
 

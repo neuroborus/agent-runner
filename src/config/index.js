@@ -21,3 +21,8 @@ export {
   resolvePipelineConfiguration,
   resolvePipelineSettings,
 } from "./resolution.js";
+export {
+  OFFICIAL_RELEASE_POLICY,
+  assertPublicationMetadata,
+  resolveOfficialReleaseIdentity,
+} from "./release/index.js";

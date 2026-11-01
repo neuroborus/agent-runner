@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { OFFICIAL_RELEASE_POLICY } from "../src/config/release/index.js";
+
 import {
   assembleRelease,
   packRelease,
@@ -108,7 +110,7 @@ export async function inspectCandidate(receiptPath, expected = {}) {
 
 async function selection() {
   const metadata = await json("package.json");
-  const policy = await json(".github/npm-release.json");
+  const policy = OFFICIAL_RELEASE_POLICY;
   const event = await json(process.env.GITHUB_EVENT_PATH);
   const git = (args) => command("git", args, { capture: true });
   const head = git(["rev-parse", "--verify", "HEAD"]).stdout.trim();

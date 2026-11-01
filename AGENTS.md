@@ -255,6 +255,9 @@ All pipelines additionally require:
 | `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting     |
 | `src/config/index.js`             | Public runner-configuration capability boundary                       |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
+| `src/config/release/index.js`     | Shared immutable release identity and approval policy                 |
+| `src/update/index.js`             | Public on-demand release compatibility reporting boundary             |
+| `src/update/`                     | Private version comparison, registry reads and bounded update reports |
 | `src/clarifications/index.js`     | Public clarification-service boundary                                 |
 | `src/clarifications/`             | Private authorization coordination and confined transcript files      |
 | `src/pipeline-registry.js`        | Explicit registry of built-in pipelines                               |

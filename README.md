@@ -205,6 +205,15 @@ bytes without overwriting versions or moving tags; partial publication stays
 failed and visible. Release notes link the exact npm version and state the
 configuration/run-state compatibility and restart requirements.
 
+The root update capability supports on-demand compatibility reporting. It shares
+the bundled official approval policy with release tooling and currently blocks
+registry actions because official identity remains unapproved. Reports distinguish
+installed and running versions, stable availability, compatibility blockers and
+restart needs. A current installation is a successful no-op; prereleases require
+an exact explicit version. Linked checkouts stay development-managed. Checking
+changes no installation or saved run, and automatic behavior stays disabled.
+CLI/MCP integration is separate; see the [operator contract](docs/product/OPERATOR_MODEL.md).
+
 ### Isolated candidate installation
 
 To inspect a local installation without linking the checkout, use the exact

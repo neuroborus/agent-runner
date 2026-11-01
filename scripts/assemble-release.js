@@ -25,7 +25,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 
 import { inspectReleaseArchive } from "./release-archive.js";
-import { assertPublicationMetadata } from "./release-policy.js";
+import {
+  assertPublicationMetadata,
+  OFFICIAL_RELEASE_POLICY,
+} from "../src/config/release/index.js";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -140,6 +143,7 @@ function dependencySlot(packages, from, name) {
 export async function assembleRelease({
   projectPath = ROOT,
   outputPath = join(projectPath, "dist", "release"),
+  publicationPolicy = OFFICIAL_RELEASE_POLICY,
 } = {}) {
   const root = await realpath(projectPath);
   const metadata = json(
@@ -155,13 +159,7 @@ export async function assembleRelease({
     metadata.license === "UNLICENSED" &&
     !metadata.repository &&
     !metadata.publishConfig;
-  if (!isLocalCandidate)
-    assertPublicationMetadata(
-      metadata,
-      json(
-        (await readReleaseFile(join(root, ".github/npm-release.json"))).bytes,
-      ),
-    );
+  if (!isLocalCandidate) assertPublicationMetadata(metadata, publicationPolicy);
   if (
     lock.lockfileVersion !== 3 ||
     lock.name !== metadata.name ||

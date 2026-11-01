@@ -1,6 +1,6 @@
 # npm releases
 
-Publication is currently disabled. `.github/npm-release.json` has no approved
+Publication is currently disabled. The immutable policy in `src/config/release/index.js` has no approved
 repository, package owner/scope or license, and the root package remains private
 and `UNLICENSED`. Local packing and installation do not authorize publication.
 The release workflow fails closed until a separate reviewed approval supplies
@@ -12,7 +12,8 @@ packages remain private and bundled; they are never published separately.
 Before enabling publication, the owner must:
 
 1. Approve the npm account/organization, exact scoped package name, license and
-   repository. Record the exact identity and license in `.github/npm-release.json`,
+   repository. Record the exact identity and license in `OFFICIAL_RELEASE_POLICY`
+   in `src/config/release/index.js`,
    set `enabled: true`, align root package/lock metadata, include the approved
    license file in the package allowlist, and set the root `private: false`.
    Root `repository` must select type `git` and URL
@@ -99,3 +100,11 @@ remain outside immutable payloads; installing bytes does not migrate settings,
 resume runs, restart MCP clients or grant legacy execution authority. Existing
 processes stay pinned until their normal restart/admission boundary. Retain old
 usable payloads and use the owning compatibility/recovery rules when resuming.
+
+The bundled official policy is shared by publishing and on-demand compatibility
+reporting; project/user settings cannot approve another registry or package.
+Root `agentRunnerCompatibility` metadata must match the configuration schema,
+runtime envelope and each pipeline's current state version. Fast contract
+coverage detects stale declarations. Newer candidates without matching metadata
+remain blocked by the update checker; no package-version inference or implicit
+state migration substitutes for that evidence.

@@ -41,6 +41,17 @@ it; uncertain publication remains a reported failure. This grants no automatic
 settings migration, client restart, run resume or controller update. See the
 [release procedure](../RELEASING.md).
 
+An on-demand root update capability reports official identity, running/installed
+and available versions, stable availability, compatibility, blockers and restart
+requirements. The immutable approval policy is bundled with the application;
+while unapproved, registry/update actions remain blocked. Linked development is
+reported without modifying links or Git. No newer version is a successful no-op;
+prereleases need an exact explicit selection. Node, configuration or state-contract
+incompatibility blocks a newer candidate without changing saved runs.
+Checking grants no installation, migration or resume authority. Automatic
+behavior is disabled, model/status/activity reads never query the registry, and
+CLI/MCP exposure remains separate. Future preferences must remain user-global.
+
 Installed executables verify and select a complete user-owned read-only payload
 before loading application code. A running CLI/MCP process and its detached
 continuations retain that payload's code, dependencies and resources after outer

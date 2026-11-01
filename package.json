@@ -23,6 +23,19 @@
   "engines": {
     "node": ">=24 <25"
   },
+  "agentRunnerCompatibility": {
+    "schemaVersion": 1,
+    "configurationVersion": 1,
+    "runnerVersion": 1,
+    "runStateVersion": 24,
+    "pipelines": {
+      "audit": 5,
+      "init": 1,
+      "plan-authoring": 7,
+      "plan-execution": 36,
+      "polishing": 19
+    }
+  },
   "dependencies": {
     "@agent-runner/audit": "0.0.0",
     "@agent-runner/init": "0.0.0",

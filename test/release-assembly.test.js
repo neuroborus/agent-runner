@@ -318,14 +318,13 @@ test("approved public metadata assembles only with matching explicit publication
     packageName: metadata.name,
     license: "MIT",
   };
-  await put(f.root, ".github/npm-release.json", { ...policy, enabled: false });
   await assert.rejects(
     assembleRelease({ projectPath: f.root, outputPath: f.outputPath }),
   );
-  await put(f.root, ".github/npm-release.json", policy);
   const release = await assembleRelease({
     projectPath: f.root,
     outputPath: f.outputPath,
+    publicationPolicy: policy,
   });
   const installed = JSON.parse(
     await readFile(join(release.packagePath, "package.json"), "utf8"),

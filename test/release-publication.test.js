@@ -7,6 +7,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { inspectCandidate } from "../scripts/publish-release.js";
+import { OFFICIAL_RELEASE_POLICY } from "../src/config/index.js";
 import {
   npmPublicationEnvironment,
   publishRelease,
@@ -133,6 +134,9 @@ test("only the approved stable published release selects its exact commit in mai
     },
     (v) => {
       v.metadata.repository.url = "https://github.com/other/runner.git";
+    },
+    (v) => {
+      v.metadata.repository.url = "git+https://github.com/sample/runner.git";
     },
     (v) => {
       v.metadata.publishConfig.registry = "https://example.invalid/";
@@ -383,9 +387,7 @@ test("candidate inspection binds the uploaded receipt, manifest and actual tarba
 });
 
 test("checked-in publication remains disabled and the workflow exposes OIDC only after validation", async () => {
-  const policy = JSON.parse(
-    await readFile(new URL("../.github/npm-release.json", import.meta.url)),
-  );
+  const policy = OFFICIAL_RELEASE_POLICY;
   assert.equal(policy.enabled, false);
   assert.throws(() => selectRelease({ ...inputs(), policy }));
   const workflow = await readFile(

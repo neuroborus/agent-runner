@@ -60,6 +60,16 @@ It performs no npm, Git, registry, account, tag, hosting or publish effects.
 Publication stays disabled in checked-in policy. Release automation ownership
 and administrative approval requirements are in [RELEASING.md](RELEASING.md).
 
+Fast `test/update.test.js` owns on-demand official identity gating, version
+ordering and explicit prereleases, no-update success, Node/configuration/state
+compatibility, registry/permission failure redaction and body bounds. Registry
+effects are injected; no request, installation or provider is used. Small confined
+runtime fixtures separately prove read-only running/installed inspection and
+linked-checkout preservation using the existing positively owned teardown.
+Source package compatibility declarations are checked against their owning
+configuration, state and pipeline contracts. Existing slow/package requirements
+remain unchanged.
+
 `test/package-install.slow.test.js` owns actual offline installation of the exact
 inspected candidate tarball into a new private prefix outside the checkout. It
 checks installed bytes/modes, Node metadata, real private workspace imports,

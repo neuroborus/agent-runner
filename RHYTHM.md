@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-01
 
+- **Update checks report compatibility without acquiring update authority.** A
+  root-owned on-demand capability shares one bundled immutable official identity
+  policy with release tooling. It distinguishes installed and pinned running
+  versions, selects stable releases by default and requires exact prerelease
+  selection. Bounded redacted reports preserve Node, configuration and state
+  contract blockers, development-managed links and restart needs. No-update is
+  successful, while unapproved identity blocks all registry activity. Explicit
+  compatibility metadata is independent of package versions and grants no
+  migration/resume rights. Model/status/activity reads and automatic behavior
+  remain disconnected; CLI/MCP exposure and installation stay separate.
+
 - **Release publication consumes only an approved tested artifact.** Stable
   published Releases bind the version tag and main commit to ordinary checks,
   separate external-install acceptance and complete slow coverage. A manifest,

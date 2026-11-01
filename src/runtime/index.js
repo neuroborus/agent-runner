@@ -1,5 +1,6 @@
 export {
   getRuntimeContext,
+  inspectRuntimeInstallation,
   prepareRuntime,
   prepareRuntimeLaunch,
   RUNTIME_PAYLOAD_ENV,

@@ -1,6 +1,6 @@
+import { assertPublicationMetadata } from "../src/config/release/index.js";
+
 const VERSION = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
-const REPOSITORY = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/u;
-const PACKAGE = /^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u;
 
 // Keep npm's trusted-publisher and provenance metadata together, without
 // inheriting user configuration or a long-lived registry credential.
@@ -36,36 +36,6 @@ export function npmPublicationEnvironment(env) {
       "Publishing requires complete GitHub-hosted OIDC/provenance metadata without an npm token.",
     );
   return Object.freeze(Object.fromEntries(keys.map((key) => [key, env[key]])));
-}
-
-export function assertPublicationMetadata(metadata, policy) {
-  if (
-    !policy ||
-    Object.keys(policy).sort().join() !==
-      "enabled,license,packageName,repository,schemaVersion" ||
-    policy.schemaVersion !== 1 ||
-    policy.enabled !== true ||
-    typeof policy.repository !== "string" ||
-    typeof policy.packageName !== "string" ||
-    !REPOSITORY.test(policy.repository ?? "") ||
-    !PACKAGE.test(policy.packageName ?? "") ||
-    policy.packageName.startsWith("@your-scope/") ||
-    typeof policy.license !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9.()+ -]*$/u.test(policy.license) ||
-    policy.license === "UNLICENSED" ||
-    metadata.name !== policy.packageName ||
-    metadata.private !== false ||
-    metadata.license !== policy.license ||
-    metadata.repository?.type !== "git" ||
-    Object.keys(metadata.repository).sort().join() !== "type,url" ||
-    metadata.repository.url !== `https://github.com/${policy.repository}.git` ||
-    metadata.publishConfig?.access !== "public" ||
-    Object.keys(metadata.publishConfig).sort().join() !== "access,registry" ||
-    metadata.publishConfig.registry !== "https://registry.npmjs.org/"
-  )
-    throw new Error(
-      "Publication requires approved owner/scope, license, repository and publisher metadata.",
-    );
 }
 
 // Environment approval protects the selected commit; Git ancestry is observed
