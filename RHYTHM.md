@@ -7,6 +7,12 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Live owned execution may acknowledge only its own turn's child.** Codex
+  creates sessions inside an already registered App Server process, so a
+  matching active-role child registration no longer waits for process cleanup.
+  It changes lineage alone; checkpoint advancement, ownership release and every
+  other role, stop, cancellation and duplicate guard still reject live custody.
+
 - **Claude names only its original newly created children.** Installed flag
   support gates `--name` on fresh/forked launches and reconstruction, using the
   same full Runner UUID title as Codex. Continuation and compaction preserve

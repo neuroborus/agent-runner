@@ -2700,6 +2700,9 @@ lease, so abort-triggered cleanup cannot race publication of the stopping event.
 Persisted
 process ownership also prevents a different run from reclaiming the worktree
 after owner loss, and prevents checkpoint advancement before process cleanup.
+The only live-process registration is the active turn role acknowledging its new
+child session; it changes lineage alone, and other roles, an absent turn,
+preparation custody, pending stops and cancellation remain blocked.
 CLI/MCP command registration remains transport-owned.
 
 After owner loss, the replacement execution lease inspects the recorded

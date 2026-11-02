@@ -1122,6 +1122,72 @@ test("removes an incomplete run when initialization fails", async (t) => {
   assert.deepEqual(await readdir(join(stateRoot, "runs")), []);
 });
 
+test("live process custody admits only the active role's child acknowledgement", async (t) => {
+  const { created, store } = await createFixture(t, {
+    hostName: "test-host",
+    processIsAlive: () => true,
+    processIdentity,
+  });
+  const { lease } = created;
+  const child = { role: "reviewer", sessionId: "codex:reviewer-child" };
+  const turn = { role: "reviewer", phase: "review" };
+  const processActive = { code: "ERR_EXECUTION_PROCESS_ACTIVE" };
+  await store.transitionRun(lease, {
+    pipelineState: { workflowState: "REVIEW" },
+  });
+
+  await store.recordExecutionProcess(lease, 4242);
+  await assert.rejects(store.recordChildSession(lease, child), processActive);
+  await store.recordExecutionProcess(lease, null);
+  await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: "reviewer",
+      phase: "review",
+      kind: "turn-started",
+      message: "Reviewer turn started.",
+    },
+  });
+  const live = await store.recordExecutionProcess(lease, 4242);
+
+  await assert.rejects(
+    store.recordChildSession(lease, { ...child, role: "planner" }),
+    processActive,
+  );
+  await assert.rejects(
+    store.recordChildSession(lease, { ...child, contextKey: "invalid" }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  const acknowledged = await store.recordChildSession(lease, child);
+  assert.deepEqual(acknowledged.sessionLineage.children, [child]);
+  const custody = ({ revision, updatedAt, sessionLineage, ...state }) => state;
+  assert.deepEqual(custody(acknowledged), custody(live));
+  await assert.rejects(store.recordChildSession(lease, child), {
+    code: "ERR_DUPLICATE_CHILD_SESSION",
+  });
+  for (const operation of [
+    () => store.finishAgentTurn(lease, turn),
+    () => store.transitionRun(lease, { counters: { rounds: 1 } }),
+    () => lease.release(),
+  ]) {
+    await assert.rejects(operation(), processActive);
+  }
+
+  await store.requestOperatorStop({
+    runId: live.runId,
+    kind: "pause_requested",
+    expectedRevision: acknowledged.revision,
+    idempotencyKey: "pause-key",
+  });
+  await assert.rejects(
+    store.recordChildSession(lease, {
+      ...child,
+      sessionId: "codex:late-child",
+    }),
+    { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
+  );
+  await store.recordExecutionProcess(lease, null);
+});
+
 test("validates opaque state and public activity without interpreting it", async (t) => {
   const { created, projectPath, store, taskPath } = await createFixture(t);
   const initialState = await store.loadRun(created.state.runId);

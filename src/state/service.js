@@ -1856,7 +1856,9 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        childRole: normalizedChild.role,
+      });
       if (
         snapshot.state.sessionLineage.children.some(
           (child) => child.sessionId === normalizedChild.sessionId,
