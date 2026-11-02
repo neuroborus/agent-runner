@@ -3433,6 +3433,11 @@ own correlated lifetimes. File tools report separate start/completion events.
 Token accounting, tool-progress heartbeats, and irrelevant records do not emit
 progress. Malformed, duplicate, or missing results cannot become success;
 permission failures and uncertain killed-process outcomes retain precedence.
+A `system/init` after the result must match the session already established by
+the earlier init or the result: a matching init is idempotent metadata, a
+conflicting init rejects, and the stream is still consumed to EOF. Another
+result or a post-result assistant, user, or stream-event record still rejects,
+and other trailing system records keep their existing handling.
 Owned process capture delivers bounded stdout chunks without bypassing durable
 registration, containment, cancellation, retirement, or storage cleanup.
 

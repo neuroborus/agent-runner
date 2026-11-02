@@ -342,7 +342,9 @@ accounting, and raw command output. Overlapping commands retain independent
 lifetimes; activity is cleared only after matching completion or proven process
 retirement. Codex uses scoped App Server notifications; Claude uses bounded
 validated stream JSON and preserves its terminal structured-result and failure
-contracts. This internal signal adds no public activity, deadline, or retry.
+contracts, accepting a trailing initialization record only for the session its
+result completed. This internal signal adds no public activity, deadline, or
+retry.
 Owned supervisors wait for durable registration of their boot/start identity and
 PID namespace before launching work. Live supervision and owner-loss recovery
 share positive association through the owned session, matching launch token or

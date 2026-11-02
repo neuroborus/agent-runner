@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Claude may replay its completed session's initialization.** Claude Code
+  can re-emit its single session's `system/init` after the result, which the
+  parser rejected as a protocol failure. A post-result init is now accepted only
+  when it matches the session established by the earlier init or the result,
+  as idempotent metadata without new observations, progress or identity
+  inference; a conflicting init still rejects. Duplicate results, post-result
+  assistant/user/stream-event records and malformed input stay strict. The
+  lifecycle documentation allows trailing system events but does not promise
+  this init shape.
+
 - **Codex named profiles are proved on the App Server path before work.**
   `app-server --help` accepts `--profile` even when the startup path rejects it,
   so a named-profile role used to pass preflight and fail at its first App

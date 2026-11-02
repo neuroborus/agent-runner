@@ -2554,11 +2554,17 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
     subtype: "init",
     session_id: FRESH_SESSION,
   });
+  const foreignInit = JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: CHILD_SESSION,
+  });
   const final = JSON.stringify(result());
   for (const [name, stdout, failed] of [
     ["malformed", `bad-json\n${final}\n`],
     ["duplicate", `${final}\n${final}\n`],
-    ["trailing-init", `${final}\n${init}\n`],
+    ["conflicting-trailing-init", `${init}\n${final}\n${foreignInit}\n`],
+    ["conflicting-fallback-init", `${final}\n${foreignInit}\n`],
     [
       "trailing",
       `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
@@ -2597,6 +2603,87 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       );
       assert.equal(turnCalls(fixture).length, 1);
     });
+});
+
+test("Claude treats a replayed initialization of its completed session as idempotent metadata", async () => {
+  const init = (uuid) => ({
+    type: "system",
+    subtype: "init",
+    model: "test-model",
+    tools: ["Bash"],
+    uuid,
+  });
+  for (const leadingInit of [true, false]) {
+    const sessionEvents = [];
+    const progress = [];
+    const observations = [];
+    let progressBeforeReplay;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const send = (record) =>
+          call.options.onStdout(
+            `${JSON.stringify({ session_id: CHILD_SESSION, ...record })}\n`,
+          );
+        if (leadingInit) send(init("55555555-5555-4555-8555-555555555555"));
+        send({
+          type: "assistant",
+          message: {
+            id: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "command",
+                name: "Bash",
+                input: { command: "true" },
+              },
+            ],
+          },
+        });
+        send({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "command", content: "" },
+            ],
+          },
+        });
+        send(
+          result({
+            sessionId: CHILD_SESSION,
+            structured: { ok: true },
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+        );
+        progressBeforeReplay = progress.length;
+        send(init("66666666-6666-4666-8666-666666666666"));
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        schema: STRICT_SCHEMA,
+        session: { mode: "fork", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => sessionEvents.push(id),
+        onSessionNaming: async (value) => sessionEvents.push(value),
+        onProgress: (event) => progress.push(event),
+        onObservation: (value) => observations.push(value),
+      }),
+    );
+    assert.equal(response.output, "done");
+    assert.deepEqual(response.structured, { ok: true });
+    assert.equal(response.sessionId, CHILD_SESSION);
+    assert.deepEqual(sessionEvents, [CHILD_SESSION, { status: "named" }]);
+    assert.equal(progress.length, progressBeforeReplay);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].accounting, "reported");
+    assert.equal(observations[0].commandCompletions, leadingInit ? 1 : 0);
+    assert.equal(turnCalls(fixture).length, 1);
+  }
 });
 
 test("Claude streaming preserves permission precedence and retires unfinished command activity", async () => {

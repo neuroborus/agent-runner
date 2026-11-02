@@ -60,7 +60,9 @@ export function createClaudeStream(
     if (!SESSION_ID.test(record.session_id ?? "")) return;
     if (record.type === "system" && record.subtype === "init") {
       if (payload !== null) {
-        invalid = true;
+        // Claude may re-emit its completed session's init after the result.
+        if (record.session_id !== (sessionId ?? payload.session_id))
+          invalid = true;
       } else if (sessionId === undefined) {
         sessionId = record.session_id;
         if (!invalid) progress.semantic();
