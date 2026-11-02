@@ -23,7 +23,10 @@ Reviewer session; the Arbiter always starts fresh.
 Before work, an adapter proves the capabilities required by the role: structured
 output, read-only inspection, safe workspace writes when applicable, remote
 write blocking, native session behavior, and constrained local commit when the
-pipeline needs it. A capability probe does not prove authentication or provider
+pipeline needs it. A selected named Codex profile is also validated model-free
+on the actual App Server startup path before work; a profile that does not
+apply there fails preflight with a bounded diagnostic and is never ignored or
+replaced. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
 The adapter boundary supports explicitly declared ordinary-directory access in

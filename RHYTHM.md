@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Codex named profiles are proved on the App Server path before work.**
+  `app-server --help` accepts `--profile` even when the startup path rejects it,
+  so a named-profile role used to pass preflight and fail at its first App
+  Server launch. The probe now runs the model-free strict startup-config path
+  once per profile and fails closed with a bounded `capability_native_profile`
+  diagnostic. No compatible App Server profile contract is proved, so the
+  profile is never ignored, substituted or loaded under another name, and the
+  frozen provider-policy guard is unchanged.
+
 - **Live owned execution may journal its own child's naming status.** Codex
   names a child inside the already registered App Server process, so a
   dedicated state operation records only a finite naming status for the active

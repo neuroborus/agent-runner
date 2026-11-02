@@ -61,6 +61,7 @@ const CAPABILITY_DIAGNOSTICS = Object.freeze({
   autonomousWrite: "capability_autonomous_write",
   gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
+  nativeProfile: "capability_native_profile",
   nativeSessionContinuation: "capability_session_continuation",
   nativeSessionFork: "capability_session_fork",
   readOnly: "capability_read_only",
@@ -1723,6 +1724,7 @@ export function createCodexAdapter(options = {}) {
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
   let probePromise;
   let accessProbePromise;
+  const profileValidations = new Map();
 
   async function inspectCapabilities(includeCommit = true) {
     let versionResult;
@@ -1762,17 +1764,55 @@ export function createCodexAdapter(options = {}) {
         execute,
       }));
     return Object.freeze({
-      version: version.text,
-      structuredOutput: supported,
-      readOnly: supported,
-      autonomousWrite: supported,
-      gitMetadataWriteBlocked: supported,
-      workspaceWrite: supported,
-      localCommit,
-      remoteWriteBlocked: supported,
-      nativeSessionContinuation: supported,
-      nativeSessionFork: supported,
+      capabilities: Object.freeze({
+        version: version.text,
+        structuredOutput: supported,
+        readOnly: supported,
+        autonomousWrite: supported,
+        gitMetadataWriteBlocked: supported,
+        workspaceWrite: supported,
+        localCommit,
+        remoteWriteBlocked: supported,
+        nativeSessionContinuation: supported,
+        nativeSessionFork: supported,
+      }),
+      startupConfig: help.includes("--print-startup-config"),
     });
+  }
+
+  function nativeProfileError() {
+    return new CodexAdapterError(
+      "Installed Codex CLI cannot apply the selected profile to app-server.",
+      {
+        code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        diagnosticClass: CAPABILITY_DIAGNOSTICS.nativeProfile,
+      },
+    );
+  }
+
+  async function validateProfile(profile, startupConfig) {
+    // Help output short-circuits profile application, so prove the selected
+    // profile on the model-free App Server startup path. Native output is
+    // discarded and the profile is never ignored or substituted.
+    if (!startupConfig) throw nativeProfileError();
+    try {
+      await execute(
+        codexBinary,
+        nativeArguments({ profile }, [
+          "app-server",
+          "--strict-config",
+          "--print-startup-config",
+        ]),
+        {
+          encoding: "utf8",
+          env: processEnvironment,
+          maxBuffer: 1024 * 1024,
+          timeout: 10_000,
+        },
+      );
+    } catch {
+      throw nativeProfileError();
+    }
   }
 
   function probe(value) {
@@ -1782,10 +1822,19 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function probeCapabilities(options) {
-    const capabilities = await (options.access !== undefined &&
-    options.access !== "local-commit"
+    const { capabilities, startupConfig } = await (options.access !==
+      undefined && options.access !== "local-commit"
       ? (accessProbePromise ??= inspectCapabilities(false))
       : (probePromise ??= inspectCapabilities()));
+    if (options.profile !== undefined) {
+      if (!profileValidations.has(options.profile)) {
+        profileValidations.set(
+          options.profile,
+          validateProfile(options.profile, startupConfig),
+        );
+      }
+      await profileValidations.get(options.profile);
+    }
     if (options.effort !== undefined && !capabilities.structuredOutput)
       throw effortError();
     if (options.workspacePolicy === undefined) return capabilities;

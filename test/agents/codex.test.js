@@ -48,7 +48,17 @@ const SESSION_NAMING = Object.freeze({
   pipeline: "audit",
   role: "auditor",
 });
-const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
+const HELP =
+  "--disable\n--enable\n--listen\n--print-startup-config\n--strict-config\n";
+const PROFILE_VALIDATION = Object.freeze([
+  "app-server",
+  "--strict-config",
+  "--print-startup-config",
+]);
+
+function isProfileValidation(argumentsList) {
+  return argumentsList.includes("--print-startup-config");
+}
 const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
   "HOME",
   "LOGNAME",
@@ -2177,6 +2187,17 @@ test("applies native profile and context selections to Codex", async () => {
     assert.ok(!call.argumentsList.includes("--profile"));
     assert.ok(!call.argumentsList.includes("model_context_window=200000"));
   }
+  const validations = fixture.executeCalls.filter(({ argumentsList }) =>
+    isProfileValidation(argumentsList),
+  );
+  assert.equal(validations.length, 1);
+  assert.deepEqual(validations[0].argumentsList, [
+    "--profile",
+    "work_profile",
+    ...PROFILE_VALIDATION,
+  ]);
+  assert.equal(validations[0].options.timeout, 10_000);
+  assert.equal(validations[0].options.maxBuffer, 1024 * 1024);
   const discovery = fixture.executeCalls.find(({ argumentsList }) =>
     argumentsList.includes("mcp"),
   );
@@ -2208,8 +2229,10 @@ test("omits current Codex execution overrides", async () => {
   );
 
   assert.equal(
-    fixture.executeCalls.some(({ argumentsList }) =>
-      argumentsList.includes("--profile"),
+    fixture.executeCalls.some(
+      ({ argumentsList }) =>
+        argumentsList.includes("--profile") ||
+        isProfileValidation(argumentsList),
     ),
     false,
   );
@@ -2242,6 +2265,67 @@ test("omits current Codex execution overrides", async () => {
     ),
     false,
   );
+});
+
+test("rejects a Codex profile that does not apply to app-server", async () => {
+  const nativeText = "PRIVATE_NATIVE_PROFILE_DIAGNOSTIC";
+  const execution = { profile: "work_profile" };
+  const fixture = createFixture({
+    executeHandle({ argumentsList }) {
+      if (isProfileValidation(argumentsList))
+        throw Object.assign(new Error(nativeText), {
+          code: 1,
+          stderr: `${nativeText} work_profile`,
+        });
+    },
+  });
+  const isProfileFailure = (error) => {
+    const serialized = `${error.message}${JSON.stringify(error)}`;
+    return (
+      hasDiagnostic(
+        "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        "capability_native_profile",
+      )(error) &&
+      Buffer.byteLength(serialized) < 1024 &&
+      !serialized.includes("work_profile") &&
+      !serialized.includes(nativeText)
+    );
+  };
+
+  await assert.rejects(fixture.adapter.probe(execution), isProfileFailure);
+  await assert.rejects(
+    fixture.adapter.run(request(execution)),
+    isProfileFailure,
+  );
+
+  assert.equal(
+    fixture.executeCalls.filter(({ argumentsList }) =>
+      isProfileValidation(argumentsList),
+    ).length,
+    1,
+  );
+  assert.equal(
+    fixture.executeCalls.some(({ argumentsList }) =>
+      argumentsList.includes("mcp"),
+    ),
+    false,
+  );
+  assert.equal(fixture.processes.length, 0);
+
+  const unadvertised = createFixture({
+    help: HELP.replace("--print-startup-config\n", ""),
+  });
+  await assert.rejects(
+    unadvertised.adapter.run(request(execution)),
+    isProfileFailure,
+  );
+  assert.equal(
+    unadvertised.executeCalls.some(({ argumentsList }) =>
+      isProfileValidation(argumentsList),
+    ),
+    false,
+  );
+  assert.equal(unadvertised.processes.length, 0);
 });
 
 test("rejects invalid Codex profiles and context sizes", async () => {

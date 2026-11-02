@@ -3322,9 +3322,15 @@ or commit authority. This adapter capability does not expose directory workflows
 
 Backend sessions are disposable execution context, not durable workflow state.
 Adapter capability probes inspect the installed CLI and enforceable local
-isolation only. They do not apply a selected native profile and do not claim
-that its authentication or provider is usable; that is established by the
-first real turn under the effective profile.
+isolation only. Codex additionally validates a selected named profile once per
+adapter with the model-free
+`--profile <name> app-server --strict-config --print-startup-config` startup
+path, which `app-server --help` must advertise. Its output is discarded; a
+missing flag or non-zero exit fails before any App Server launch as
+`ERR_UNSUPPORTED_CODEX_CAPABILITY` / `capability_native_profile`, without the
+profile name or native text, and the profile is never ignored or substituted.
+Probes do not claim that authentication or the provider is usable; that is
+established by the first real turn under the effective profile.
 
 Turn requests accept an optional synchronous `onProgress` observer. The shared
 internal contract emits frozen `{ kind, activeCommands }` records only. Its

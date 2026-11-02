@@ -1188,8 +1188,11 @@ non-recoverable `ERR_UNSUPPORTED_EFFORT` / `effort_unsupported` without native
 diagnostics, downgrade, or availability retry. A rejected readiness turn keeps
 the commit executor unstarted. See the provider model for the shared contract.
 
-`probe()` validates installed CLI features and enforceable local isolation. It
-does not apply a selected native profile or attest that the profile's
+`probe()` validates installed CLI features and enforceable local isolation.
+Codex also validates a selected named profile model-free on the App Server
+startup path; a profile that does not apply there fails before any launch with
+`ERR_UNSUPPORTED_CODEX_CAPABILITY` / `capability_native_profile` and is never
+ignored or substituted. `probe()` does not attest that the profile's
 authentication and provider are usable. The first real `run()` request uses the
 effective profile and reports a bounded classified failure when it cannot be
 used.
