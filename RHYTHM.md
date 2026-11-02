@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Codex names only newly acknowledged Runner children.** The native
+  `thread/name/set` RPC receives the full run UUID prefix before the first model
+  turn; continuation preserves edited names and reconstruction names only its
+  own replacement. Usable metadata rejection does not replay work. Transport
+  loss retains the child and pauses with a complete resume request, without
+  changing source-fork, retry, usage or constrained-effect authority.
+
 - **Session naming context belongs to Runner; child identity precedes metadata.**
   Active role requests carry the existing full run UUID and bounded descriptions,
   independently of client attribution. An awaited creation acknowledgement retains

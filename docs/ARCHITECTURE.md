@@ -3190,14 +3190,24 @@ attribution. The shared strict adapter request carries `sessionNaming`, awaited
 `onSessionCreated` and optional `onSessionNaming` observers. Provider-native
 naming effects remain adapter-owned and are not implemented by this context.
 
+Codex's actual selection path acknowledges verified new start/fork children, then
+calls `thread/name/set` before the first model turn. The full UUID prefix and a
+128-code-point description are built from Runner context, never an inherited
+title. Ordinary resume does not name; reconstruction names its newly acknowledged
+child. The private App Server transport exposes whether it remains usable so an
+RPC metadata rejection can continue once while transport/protocol loss emits a
+bounded diagnosis and pauses without adapter reconstruction. This failure carries
+no availability retry reason or unused source-fork proof, and commit readiness
+still proves its executor has not started. Existing pipeline recovery owns resume.
+
 Every pipeline supplies the creation acknowledgement at its existing logical
 session key, including audit cycles and commit readiness. It records the child
 before optional naming can fail, then accepts the same acknowledged response
 without recording it twice. Existing source-fork, continuation and reconstruction
 selection remains authoritative. Old sessions are never enrolled by continuation.
 Acknowledged children retain consumed source-fork authority across no-turn-effect
-and ambiguous failures. The first continued request after authentication or
-output exhaustion includes the complete recovery prompt because acknowledgement
+and ambiguous failures. The first continued request after authentication,
+output exhaustion or a backend pause includes the complete recovery prompt because acknowledgement
 does not prove that the child received its original request.
 Fresh commit-readiness children remain recorded in a
 separate, non-reusable context so they cannot replace a fully reconstructed Worker.

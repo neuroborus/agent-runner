@@ -70,12 +70,20 @@ and administrative approval requirements are in [RELEASING.md](RELEASING.md).
 Fast `test/session-naming.test.js` owns strict Runner naming context, the full
 existing run UUID across providers/pipelines/modes, inactive roles and creation
 acknowledgement ordering. Provider fixtures prove native child acknowledgement
-without title RPCs, flags or live model calls. Focused durable
+without live model calls. Codex fixtures additionally cover exact UUID prefixes,
+bounded Unicode descriptions, acknowledgement/naming/turn ordering, direct fork
+lineage, inherited titles, unchanged continuation, fresh reconstruction, redacted
+metadata rejection and transport loss before model or commit effects. Runner
+coverage retains the known child and full request through a backend pause without
+retry accounting. The installed Codex 0.164.0 stable generated protocol schema
+confirmed `ThreadSetNameParams`, `ThreadSetNameResponse` and `thread/name/set`;
+this model-free schema inspection is not live naming acceptance. The opt-in Codex
+smoke verifies naming only when explicitly enabled. Focused durable
 authoring/audit cases cover bounded journaled diagnoses, unchanged retry/usage
 accounting and known-child recovery without another source fork or owner cycle.
 Coverage retains acknowledged children through authentication/output dispositions,
 excludes commit-readiness children from Worker reuse and bounds concurrent diagnoses.
-These checks add no native acceptance or automatic naming authority. Existing
+These checks add no retrospective naming or native acceptance claim. Existing
 common and custom-execution slow assignments remain unchanged.
 
 Fast `test/update.test.js` owns on-demand official identity gating, version

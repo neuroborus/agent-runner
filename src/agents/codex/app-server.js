@@ -361,6 +361,9 @@ export function createCodexAppServerClient(
   }
 
   return Object.freeze({
+    get usable() {
+      return closedError === undefined && !closing && !exited;
+    },
     get exited() {
       return exited;
     },

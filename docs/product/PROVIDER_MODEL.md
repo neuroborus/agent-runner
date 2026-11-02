@@ -170,7 +170,7 @@ acknowledges validated child results, including recoverable error results, befor
 compaction, failure propagation or returning success.
 A recorded child takes precedence over uncertainty about source-fork effects.
 A proof that no model turn ran cannot renew a fork already acknowledged as created.
-After authentication or output exhaustion, the first continued request includes
+After authentication, output exhaustion or a backend pause, the first continued request includes
 the full recovery context: creation alone does not prove prompt delivery.
 
 An adapter may then await `onSessionNaming({ status })`, where status is exactly
@@ -181,6 +181,26 @@ correction counters, availability or inactivity allowances. A metadata diagnosis
 alone authorizes no model-turn replay, another source fork, fresh replacement or
 commit/handoff effect. Adapters retain native naming RPC/flag ownership; this
 shared context alone changes no provider title or historical session.
+
+Codex uses the documented [App Server](https://developers.openai.com/codex/app-server/)
+`thread/name/set` request with exactly `{ threadId, name }` and validates its
+object response. After validated `thread/start` or direct-child `thread/fork`
+selection, it awaits durable creation acknowledgement before naming and model
+work. Naming context requires that acknowledgement callback. The name is
+`[<full Runner runId>] <project> / <pipeline> / <role>`, with the combined
+description limited to 128 Unicode code points; the UUID is never truncated.
+It constructs this name from Runner context rather than prefixing an inherited
+native title. `thread/resume` performs no naming, preserving user edits, while
+fresh reconstruction names only the verified new replacement child.
+
+A usable RPC rejection reports `rejected` or, for method-not-found, `unsupported`
+and proceeds with the one original turn. Native errors and title text are never
+included in the diagnosis. Transport loss or a malformed naming response reports
+`unavailable` and pauses the original request with its saved child; it cannot
+trigger adapter reconstruction, another source fork or a constrained Git effect.
+There is no naming retry or retrospective rename. Capability/version bounds and
+client attribution remain unchanged; older unsupported RPCs are optional metadata
+failures rather than authority to replace a session. Live naming smoke remains opt-in.
 
 Native sessions are disposable execution context, never durable workflow
 state. Every turn has a complete recovery prompt reconstructed from persisted

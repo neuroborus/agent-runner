@@ -789,7 +789,9 @@ function assertThreadResponse(value) {
     !isRecord(value) ||
     !isRecord(value.thread) ||
     typeof value.thread.id !== "string" ||
-    value.thread.id.length === 0
+    !value.thread.id.trim() ||
+    value.thread.id.length > 1024 ||
+    /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value.thread.id)
   ) {
     throw new CodexAdapterError("Codex returned an invalid thread.", {
       code: "ERR_CODEX_PROTOCOL",
@@ -882,7 +884,12 @@ async function selectThread(client, request, fresh) {
       serviceName: "agent_runner",
     });
     assertDirectorySelection(result, request, CodexAdapterError);
-    return { id: assertThreadResponse(result), model: result.model };
+    const threadId = assertThreadResponse(result);
+    if (threadId === request.session?.id)
+      throw new CodexAdapterError("Codex did not create a new thread.", {
+        code: "ERR_CODEX_PROTOCOL",
+      });
+    return { id: threadId, model: result.model };
   }
   if (request.session.mode === "fork") {
     try {
@@ -952,6 +959,51 @@ async function selectThread(client, request, fresh) {
       recoverable: true,
     });
   }
+}
+
+async function nameCreatedThread(client, request, threadId) {
+  if (request.sessionNaming === undefined) return;
+  const { runId, project, pipeline, role } = request.sessionNaming;
+  const description = [...`${project} / ${pipeline} / ${role}`]
+    .slice(0, 128)
+    .join("")
+    .trim();
+  let status = "named";
+  try {
+    const result = await client.request("thread/name/set", {
+      threadId,
+      name: `[${runId}] ${description}`,
+    });
+    if (!isRecord(result) || !client.usable)
+      throw new Error("Session naming did not complete.");
+  } catch (cause) {
+    request.signal?.throwIfAborted();
+    if (
+      client.usable &&
+      cause instanceof CodexAdapterError &&
+      [
+        "ERR_CODEX_SESSION_NAMING_REJECTED",
+        "ERR_CODEX_SESSION_NAMING_UNSUPPORTED",
+      ].includes(cause.code)
+    ) {
+      status =
+        cause.code === "ERR_CODEX_SESSION_NAMING_UNSUPPORTED"
+          ? "unsupported"
+          : "rejected";
+    } else {
+      status = "unavailable";
+    }
+  }
+  await request.onSessionNaming?.({ status });
+  if (status === "unavailable" || !client.usable)
+    throw new CodexAdapterError(
+      "Codex session naming requires request recovery.",
+      {
+        code: "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
+        method: "thread/name/set",
+        recoverable: true,
+      },
+    );
 }
 
 function isContextWindowExceeded(turn) {
@@ -1079,6 +1131,19 @@ function isEffortRejection(message) {
 }
 
 function classifyRequestError(error, method, request) {
+  if (
+    method === "thread/name/set" &&
+    isStructuredRequestError(error) &&
+    Number.isSafeInteger(error.code) &&
+    typeof error.message === "string"
+  )
+    return new CodexAdapterError("Codex session naming was rejected.", {
+      code:
+        error.code === -32601
+          ? "ERR_CODEX_SESSION_NAMING_UNSUPPORTED"
+          : "ERR_CODEX_SESSION_NAMING_REJECTED",
+      method,
+    });
   if (
     method === "turn/start" &&
     isStructuredRequestError(error) &&
@@ -2067,8 +2132,10 @@ export function createCodexAdapter(options = {}) {
             fresh,
           );
           const threadId = selectedThread.id;
-          if (fresh || request.session?.mode !== "continue")
+          if (fresh || request.session?.mode !== "continue") {
             await request.onSessionCreated?.(threadId);
+            await nameCreatedThread(client, request, threadId);
+          }
           if (request.model === undefined && request.effort !== undefined) {
             const model =
               selectedThread.model ?? configuration.config.model ?? undefined;
@@ -2155,6 +2222,16 @@ export function createCodexAdapter(options = {}) {
   async function run(value) {
     const normalized = normalizeRequest(value);
     if (
+      normalized.sessionNaming !== undefined &&
+      normalized.onSessionCreated === undefined
+    )
+      throw new CodexAdapterError(
+        "Session naming requires child acknowledgement.",
+        {
+          code: "ERR_INVALID_CODEX_OPTIONS",
+        },
+      );
+    if (
       normalized.readPaths !== undefined &&
       !(await canReadFiles(normalized.readPaths))
     ) {
@@ -2221,7 +2298,10 @@ export function createCodexAdapter(options = {}) {
       }
       if (
         cause instanceof CodexAdapterError &&
-        cause.code === "ERR_CODEX_USAGE_LIMIT"
+        [
+          "ERR_CODEX_USAGE_LIMIT",
+          "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
+        ].includes(cause.code)
       ) {
         throw cause;
       }

@@ -15,6 +15,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import { serializeCustomPlan } from "@agent-runner/custom-plan";
+import { CodexAdapterError } from "../src/agents/index.js";
 import { createClarificationService } from "../src/clarifications/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createGitService } from "../src/git/index.js";
@@ -180,6 +181,55 @@ test("Runner acknowledges a child before a bounded naming rejection without cons
     kind: "session-naming",
     message: "Session naming: rejected.",
   });
+});
+
+test("a lost naming transport pauses with its durable child and resumes the complete original request", async (t) => {
+  const f = await fixture(t, {
+    planKind: "custom",
+    mode: "lazy",
+    criteriaPath: "criteria.md",
+  });
+  f.queue.push(async (request) => {
+    await request.onSessionCreated("child-1");
+    await request.onSessionNaming({ status: "unavailable" });
+    throw new CodexAdapterError("Session naming requires request recovery.", {
+      code: "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
+      method: "thread/name/set",
+      recoverable: true,
+    });
+  });
+  const { run: paused } = await f.runner.run(f.input);
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  assert.equal(paused.pause.code, "ERR_CODEX_SESSION_NAMING_UNAVAILABLE");
+  assert.equal(paused.sessionLineage.children.length, 1);
+  assert.equal(paused.availabilityRetry, null);
+  const counters = structuredClone(paused.counters);
+  f.queue.push(async (request) => {
+    assert.deepEqual(request.session, { mode: "continue", id: "child-1" });
+    assert.equal(request.prompt, request.recoveryPrompt);
+    assert.deepEqual(
+      (await f.runStore.loadRun(paused.runId)).counters,
+      counters,
+    );
+    return {
+      status: "QUESTIONS",
+      questions: [
+        {
+          question: "Which evidence is in scope?",
+          whyItMatters: "It determines coverage.",
+        },
+      ],
+      criteria: [],
+    };
+  });
+  const { run: resumed } = await f.runner.resume({ runId: paused.runId });
+  assert.equal(resumed.pause.reason, "clarification_answers_required");
+  assert.equal(resumed.sessionLineage.children.length, 1);
+  assert.deepEqual(resumed.counters, {
+    ...counters,
+    clarificationRounds: counters.clarificationRounds + 1,
+  });
+  assert.equal(f.calls.length, 2);
 });
 
 test("external project selection freezes custom directory configuration before Git inspection", async (t) => {

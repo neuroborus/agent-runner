@@ -1168,7 +1168,11 @@ Runner supplies active adapters with the full run UUID and bounded project,
 pipeline and role descriptions, separately from client attribution. A verified
 new child can be durably acknowledged before optional naming metadata is handled;
 bounded naming diagnoses never authorize another turn or source fork. This shared
-context does not itself change provider titles or rename existing sessions.
+context lets Codex name a verified new child `[<full run UUID>] <description>`
+after acknowledgement and before its first model turn, including reconstruction.
+Ordinary continuation preserves user-edited names. A rejected metadata request
+does not replay work; an unusable naming transport retains the child and pauses
+the original request. Claude still carries the shared context without native naming.
 See the [session contract](docs/product/PROVIDER_MODEL.md#sessions-and-context).
 
 Backend sessions are disposable. When a native context is full, the adapter

@@ -365,7 +365,8 @@ for (const mode of ["independent", "lazy", "combined"]) {
 }
 
 test("an acknowledged source child remains usable after a no-turn-effect disposition", async (t) => {
-  for (const exhausted of [false, true]) {
+  for (const kind of ["authentication", "output", "backend"]) {
+    const exhausted = kind === "output";
     const f = await createFixture(t, {
       mode: "lazy",
       sourceSession: SOURCE_SESSION,
@@ -380,6 +381,10 @@ test("an acknowledged source child remains usable after a no-turn-effect disposi
           });
           assert.equal(request.prompt, request.recoveryPrompt);
         }
+        if (kind === "backend")
+          throw Object.assign(new Error("controlled pre-turn backend loss"), {
+            recoverable: true,
+          });
         throw exhausted
           ? outputExhaustion({ effect: "none" })
           : authenticationFailure({ effect: "none" });
@@ -390,7 +395,11 @@ test("an acknowledged source child remains usable after a no-turn-effect disposi
     const paused = await f.run();
     assert.equal(
       paused.pause.reason,
-      exhausted ? "output_exhausted" : "authentication_required",
+      kind === "backend"
+        ? "backend_unavailable"
+        : exhausted
+          ? "output_exhausted"
+          : "authentication_required",
     );
     assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
     assert.equal(paused.pipelineState.authenticationSourceForkRecovery, null);

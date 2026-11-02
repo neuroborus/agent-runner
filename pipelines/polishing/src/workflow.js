@@ -568,6 +568,7 @@ export async function runPolishing({
   let resumeSessionContext = [
     "authentication_required",
     "output_exhausted",
+    "backend_unavailable",
   ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;

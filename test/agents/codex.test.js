@@ -42,6 +42,12 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+const SESSION_NAMING = Object.freeze({
+  runId: "11111111-1111-4111-8111-111111111111",
+  project: "sample",
+  pipeline: "audit",
+  role: "auditor",
+});
 const HELP = "--disable\n--enable\n--listen\n--strict-config\n";
 const CODEX_CORE_SHELL_ENVIRONMENT_NAMES = Object.freeze([
   "HOME",
@@ -389,6 +395,8 @@ function createFixture({
               [{ type: "contextCompaction" }],
             ),
           };
+        case "thread/name/set":
+          return { result: {} };
         case "turn/start": {
           const turnId = `turn-${(nextTurn += 1)}`;
           return {
@@ -532,28 +540,45 @@ function request(overrides = {}) {
   };
 }
 
-test("acknowledges newly created Codex children before model work and leaves continuation alone", async () => {
+test("names only new Codex children after acknowledgement and before model work", async () => {
   for (const mode of [undefined, "fork", "continue"]) {
     const created = [];
+    const events = [];
     const fixture = createFixture({
+      version: "0.164.0",
       handle({ message }) {
-        if (message.method === "turn/start")
+        if (message.method === "thread/name/set") {
+          events.push("name");
+          assert.equal(created.length, 1);
+          assert.deepEqual(message.params, {
+            threadId: created[0],
+            name: `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+          });
+        }
+        if (message.method === "turn/start") {
+          events.push("turn");
           assert.equal(created.length, mode === "continue" ? 0 : 1);
+        }
       },
     });
     const response = await fixture.adapter.run(
       request({
         ...(mode ? { session: { mode, id: "source" } } : {}),
-        sessionNaming: {
-          runId: "11111111-1111-4111-8111-111111111111",
-          project: "sample",
-          pipeline: "audit",
-          role: "auditor",
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => {
+          events.push("acknowledged");
+          created.push(id);
         },
-        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async ({ status }) => events.push(status),
       }),
     );
     assert.deepEqual(created, mode === "continue" ? [] : [response.sessionId]);
+    assert.deepEqual(
+      events,
+      mode === "continue"
+        ? ["turn"]
+        : ["acknowledged", "name", "named", "turn"],
+    );
   }
   const fixture = createFixture({
     handle({ message }) {
@@ -571,6 +596,288 @@ test("acknowledges newly created Codex children before model work and leaves con
     ),
   );
   assert.equal(fixture.processes.length, 1);
+});
+
+test("Codex naming bounds the description, keeps the full UUID and never prefixes an inherited title", async () => {
+  let name;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/fork")
+        return {
+          result: {
+            thread: {
+              id: "opaque-child",
+              forkedFromId: "source",
+              name: `[${SESSION_NAMING.runId}] Edited source title`,
+            },
+          },
+        };
+      if (message.method === "thread/name/set") name = message.params.name;
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      session: { mode: "fork", id: "source" },
+      sessionNaming: { ...SESSION_NAMING, project: "🌱".repeat(128) },
+      onSessionCreated: async () => {},
+    }),
+  );
+  assert.equal(name, `[${SESSION_NAMING.runId}] ${"🌱".repeat(128)}`);
+  assert.equal([...name].length, 167);
+  assert.doesNotMatch(name, /Edited source title/u);
+});
+
+test("Codex naming requires a creation acknowledgement before provider effects", async () => {
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.adapter.run(request({ sessionNaming: SESSION_NAMING })),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  assert.equal(fixture.executeCalls.length, 0);
+  assert.equal(fixture.processes.length, 0);
+});
+
+test("Codex metadata rejection is bounded and does not replay the original turn", async () => {
+  for (const [code, expected] of [
+    [-32601, "unsupported"],
+    [-32602, "rejected"],
+    [-32603, "rejected"],
+  ]) {
+    const diagnoses = [],
+      observations = [];
+    let turns = 0;
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "thread/name/set")
+          return {
+            error: {
+              code,
+              message: "DO_NOT_RETAIN_NATIVE_TITLE_OR_AUTHENTICATION_DATA",
+            },
+          };
+        if (message.method === "turn/start") turns++;
+      },
+    });
+    await fixture.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async () => {},
+        onSessionNaming: async (value) => diagnoses.push(value),
+        onObservation: (value) => observations.push(value),
+        onFreshSession: () =>
+          assert.fail("Naming rejection cannot reserve reconstruction"),
+      }),
+    );
+    assert.deepEqual(diagnoses, [{ status: expected }]);
+    assert.equal(fixture.processes.length, 1);
+    assert.equal(turns, 1);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].attempt, 1);
+    assert.doesNotMatch(JSON.stringify(diagnoses), /DO_NOT_RETAIN/u);
+  }
+});
+
+test("Codex naming transport loss retains the child and stops before model or commit effects", async () => {
+  for (const access of ["read-only", "workspace-write", "local-commit"]) {
+    for (const mode of [undefined, "fork"]) {
+      const created = [],
+        diagnoses = [],
+        observations = [];
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "thread/name/set") return { close: true };
+          if (message.method === "turn/start")
+            assert.fail("Lost naming transport cannot start a turn");
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            access,
+            ...(mode ? { session: { mode, id: "source" } } : {}),
+            ...(access === "local-commit"
+              ? {
+                  authorizationId: "authorization-1",
+                  commit: {
+                    expectedHead: EXPECTED_HEAD,
+                    message: "test(scope): verify readiness",
+                  },
+                  onCommitExecution: () =>
+                    assert.fail("Naming cannot start the constrained commit"),
+                }
+              : {}),
+            sessionNaming: SESSION_NAMING,
+            onSessionCreated: async (id) => created.push(id),
+            onSessionNaming: async (value) => diagnoses.push(value),
+            onObservation: (value) => observations.push(value),
+            onFreshSession: () =>
+              assert.fail("Naming cannot reserve reconstruction"),
+          }),
+        ),
+        (cause) => {
+          assert.equal(cause.code, "ERR_CODEX_SESSION_NAMING_UNAVAILABLE");
+          assert.equal(cause.recoverable, true);
+          const failure = normalizeAdapterFailure("codex", cause);
+          assert.equal(failure.launchRecovery, undefined);
+          assert.equal(failure.failure.availabilityReason, undefined);
+          if (access === "local-commit")
+            assert.equal(cause.effectStarted, false);
+          assert.doesNotMatch(JSON.stringify(failure), /thread-0/u);
+          return true;
+        },
+      );
+      assert.deepEqual(created, [mode === "fork" ? "child-0" : "thread-0"]);
+      assert.deepEqual(diagnoses, [{ status: "unavailable" }]);
+      assert.deepEqual(observations, []);
+      assert.equal(fixture.processes.length, 1);
+    }
+  }
+});
+
+test("Codex stops if its transport closes while the naming diagnosis is recorded", async () => {
+  const diagnoses = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        assert.fail("Closed naming transport cannot start work");
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async () => {},
+        onSessionNaming: async (value) => {
+          diagnoses.push(value);
+          fixture.processes[0].close();
+          await Promise.resolve();
+        },
+        onFreshSession: () =>
+          assert.fail("Closing transport cannot replay naming"),
+      }),
+    ),
+    hasCode("ERR_CODEX_SESSION_NAMING_UNAVAILABLE"),
+  );
+  assert.deepEqual(diagnoses, [{ status: "named" }]);
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("Codex metadata rejection preserves one authorized commit readiness and effect", async () => {
+  let turns = 0,
+    commits = 0;
+  const diagnoses = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/name/set")
+        return { error: { code: -32603, message: "metadata rejected" } };
+      if (message.method === "turn/start") {
+        turns++;
+        return {
+          result: { turn: { id: "ready" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "ready",
+            '{"ready":true}',
+          ),
+        };
+      }
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      access: "local-commit",
+      authorizationId: "authorization-1",
+      commit: {
+        expectedHead: EXPECTED_HEAD,
+        message: "test(scope): verify readiness",
+      },
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async () => {},
+      onSessionNaming: async (value) => diagnoses.push(value),
+      onCommitExecution: async () => {
+        commits++;
+      },
+    }),
+  );
+  assert.deepEqual(diagnoses, [{ status: "rejected" }]);
+  assert.equal(turns, 1);
+  assert.equal(commits, 1);
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("Codex rejects unverified creation and malformed naming results without replacement", async () => {
+  for (const thread of [
+    { id: "source", forkedFromId: "source" },
+    { id: "child", forkedFromId: "unrelated" },
+    { id: "bad\nchild", forkedFromId: "source" },
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "thread/fork") return { result: { thread } };
+        if (["thread/name/set", "turn/start"].includes(message.method))
+          assert.fail("Unverified child cannot be named or used");
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { mode: "fork", id: "source" },
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: () =>
+            assert.fail("Unverified child cannot be acknowledged"),
+        }),
+      ),
+      hasCode("ERR_CODEX_PROTOCOL"),
+    );
+    assert.equal(fixture.processes.length, 1);
+  }
+  const diagnoses = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/name/set") return { result: [] };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async () => {},
+        onSessionNaming: async (value) => diagnoses.push(value),
+      }),
+    ),
+    hasCode("ERR_CODEX_SESSION_NAMING_UNAVAILABLE"),
+  );
+  assert.deepEqual(diagnoses, [{ status: "unavailable" }]);
+  assert.equal(fixture.processes.length, 1);
+});
+
+test("fresh Codex reconstruction names only the newly acknowledged replacement", async () => {
+  const created = [],
+    diagnoses = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return { error: { code: -32000, message: "missing" } };
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      session: { mode: "continue", id: "edited-existing-thread" },
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async (id) => created.push(id),
+      onSessionNaming: async (value) => diagnoses.push(value),
+    }),
+  );
+  assert.deepEqual(created, ["thread-1"]);
+  assert.deepEqual(diagnoses, [{ status: "named" }]);
+  const named = fixture.processes.flatMap(({ messages }) =>
+    messages.filter(({ method }) => method === "thread/name/set"),
+  );
+  assert.deepEqual(
+    named.map(({ params }) => params.threadId),
+    created,
+  );
+  assert.equal(fixture.processes.length, 2);
 });
 
 test("admits exact binary source reads without granting temporary writes or starting a turn", async (t) => {
@@ -6128,9 +6435,14 @@ test(
   async () => {
     const adapter = createCodexAdapter();
     const registrations = [];
+    const created = [],
+      diagnoses = [];
     const result = await adapter.run(
       request({
         onProcess: async (pid) => registrations.push(pid),
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async (value) => diagnoses.push(value),
         prompt:
           "Use a repository command to read package.json. Return JSON with " +
           "packageName set to its name field and commandWorked set to true. " +
@@ -6152,6 +6464,8 @@ test(
     });
     assert.equal(Number.isSafeInteger(registrations[0]), true);
     assert.equal(registrations.at(-1), null);
+    assert.deepEqual(created, [result.sessionId]);
+    assert.deepEqual(diagnoses, [{ status: "named" }]);
   },
 );
 
