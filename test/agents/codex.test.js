@@ -36,6 +36,7 @@ import {
   AUTHENTICATION_REQUIRED_DISPOSITION,
   OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
+  isAdapterDiagnosticClass,
   normalizeAdapterFailure,
   createCapabilityProof,
 } from "../../src/agents/index.js";
@@ -4163,45 +4164,88 @@ test("allows read-only Git identity queries during local-commit readiness", asyn
   }
 });
 
-test("rejects forbidden Git and remote-write commands reported by Codex", async () => {
-  for (const [command, code] of [
-    [
-      "git commit -m 'feat(test): bypass adapter'",
-      "ERR_CODEX_LOCAL_COMMIT_POLICY",
-    ],
-    ["git reset --hard HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
-    ["git status && git stash", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
-    [
+test("rejects forbidden local-commit turns with per-branch diagnostic classes", async () => {
+  const gitOperation = [
+    "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    "operation_local_commit_git_operation",
+  ];
+  const remoteWrite = [
+    "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+    "operation_remote_write",
+  ];
+  const confirmation = [
+    "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    "operation_local_commit_confirmation",
+  ];
+  const commandCase = (command, expected) => [
+    command,
+    "Done.",
+    [{ type: "commandExecution", command, status: "completed" }],
+    ...expected,
+  ];
+  for (const [detail, output, items, code, diagnosticClass] of [
+    commandCase("git commit -m 'feat(test): bypass adapter'", gitOperation),
+    commandCase("git reset --hard HEAD^", gitOperation),
+    commandCase("git status && git stash", gitOperation),
+    commandCase(
       "git var GIT_AUTHOR_IDENT && git commit -m bypass",
-      "ERR_CODEX_LOCAL_COMMIT_POLICY",
-    ],
-    [
-      "git config user.name provider-private-detail",
-      "ERR_CODEX_LOCAL_COMMIT_POLICY",
-    ],
-    ["git rebase HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
-    ["git update-ref refs/heads/main HEAD^", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
-    ["git -C . push origin main", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    [
+      gitOperation,
+    ),
+    commandCase("git config user.name provider-private-detail", gitOperation),
+    commandCase("git rebase HEAD^", gitOperation),
+    commandCase("git update-ref refs/heads/main HEAD^", gitOperation),
+    commandCase("git -C . push origin main", remoteWrite),
+    commandCase(
       "git config remote.origin.url https://example.invalid/get",
-      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
-    ],
-    ["git config --unset remote.origin.url", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    [
+      remoteWrite,
+    ),
+    commandCase("git config --unset remote.origin.url", remoteWrite),
+    commandCase(
       "git config set remote.origin.url https://example.invalid/repository",
-      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
-    ],
-    ["printf ok\ngit commit -m bypass", "ERR_CODEX_LOCAL_COMMIT_POLICY"],
-    ["printf ok\ngit push origin main", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    ["gh workflow run build.yml", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    ["gh workflow enable build.yml", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    ["gh run rerun 1", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    ["gh repo fork owner/repository", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
-    [
+      remoteWrite,
+    ),
+    commandCase("printf ok\ngit commit -m bypass", gitOperation),
+    commandCase("printf ok\ngit push origin main", remoteWrite),
+    commandCase("gh workflow run build.yml", remoteWrite),
+    commandCase("gh workflow enable build.yml", remoteWrite),
+    commandCase("gh run rerun 1", remoteWrite),
+    commandCase("gh repo fork owner/repository", remoteWrite),
+    commandCase(
       "gh api --method POST repos/owner/repository/issues",
-      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+      remoteWrite,
+    ),
+    commandCase("glab api --method=patch projects/1", remoteWrite),
+    [
+      "provider-private-detail.md",
+      '{"ready":true}',
+      [
+        {
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "provider-private-detail.md",
+              kind: { type: "add" },
+              diff: "",
+            },
+          ],
+        },
+      ],
+      "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      "operation_local_commit_file_change",
     ],
-    ["glab api --method=patch projects/1", "ERR_CODEX_REMOTE_WRITE_ATTEMPT"],
+    [
+      "provider-private-detail",
+      '{"ready":"provider-private-detail"}',
+      [],
+      ...confirmation,
+    ],
+    [
+      "provider-private-detail",
+      '{"ready":true,"note":"provider-private-detail"}',
+      [],
+      ...confirmation,
+    ],
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -4211,8 +4255,8 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
             notification: completedTurn(
               message.params.threadId,
               "policy-turn",
-              "Done.",
-              [{ type: "commandExecution", command, status: "completed" }],
+              output,
+              items,
             ),
           };
         }
@@ -4231,20 +4275,17 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
         }),
       ),
       (error) => {
-        assert.ok(hasCode(code)(error));
+        assert.ok(hasDiagnostic(code, diagnosticClass)(error));
         assert.equal(error.effectStarted, false);
-        assert.equal(
-          error.diagnosticClass,
-          code === "ERR_CODEX_REMOTE_WRITE_ATTEMPT"
-            ? "operation_remote_write"
-            : "operation_local_commit",
-        );
+        assert.equal(error.failure.failureClass, diagnosticClass);
+        assert.equal(error.failure.checkpoint, "commit");
+        assert.equal(error.failure.commitExecutor, "not_started");
         assert.equal(error.cause, undefined);
         assert.equal(error.command, undefined);
-        assert.ok(!error.message.includes(command));
+        assert.ok(!error.message.includes(detail));
         const diagnostic = JSON.stringify(error);
         assert.ok(Buffer.byteLength(diagnostic) < 1_024);
-        assert.ok(!diagnostic.includes(command));
+        assert.ok(!diagnostic.includes(detail));
         assert.ok(!diagnostic.includes("provider-private-detail"));
         return true;
       },
@@ -4254,6 +4295,22 @@ test("rejects forbidden Git and remote-write commands reported by Codex", async 
       0,
     );
   }
+});
+
+test("keeps the retired local-commit class valid for historical failure records", () => {
+  const failure = {
+    failureClass: "operation_local_commit",
+    checkpoint: "commit",
+    outcome: "rejected",
+    effect: "none",
+    retry: "terminal",
+    commitExecutor: "not_started",
+  };
+  const normalized = normalizeAdapterFailure("codex", { failure });
+
+  assert.equal(isAdapterDiagnosticClass("operation_local_commit"), true);
+  assert.deepEqual({ ...normalized.failure }, failure);
+  assert.equal(normalized.diagnosticClass, "operation_local_commit");
 });
 
 test("allows read-only remote configuration inspection", async () => {

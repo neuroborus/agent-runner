@@ -133,6 +133,9 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   "operation_hosted_tool",
   "operation_lifecycle_hook",
   "operation_local_commit",
+  "operation_local_commit_confirmation",
+  "operation_local_commit_file_change",
+  "operation_local_commit_git_operation",
   "operation_mcp_tool",
   "operation_memory",
   "operation_multi_agent",
@@ -1566,7 +1569,7 @@ function auditItems(items, request) {
               : "ERR_CODEX_READ_ONLY_POLICY",
           diagnosticClass:
             request.access === "local-commit"
-              ? "operation_local_commit"
+              ? "operation_local_commit_file_change"
               : "operation_read_only_write",
         },
       );
@@ -1617,7 +1620,7 @@ function auditItems(items, request) {
           "Codex attempted a forbidden local-commit operation.",
           {
             code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-            diagnosticClass: "operation_local_commit",
+            diagnosticClass: "operation_local_commit_git_operation",
           },
         );
       }
@@ -1671,7 +1674,7 @@ function normalizeResult(turn, request, sessionId) {
       "Codex did not confirm the authorized local commit.",
       {
         code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-        diagnosticClass: "operation_local_commit",
+        diagnosticClass: "operation_local_commit_confirmation",
       },
     );
   }

@@ -1478,6 +1478,13 @@ and final Git-state verification; it is never replayed. Policy, capability,
 provider, or confirmation-turn rejection before executor invocation carries
 `effectStarted: false`, including `ERR_CODEX_LOCAL_COMMIT_POLICY`. The adapter
 preserves the original bounded error code and recoverable classification.
+`ERR_CODEX_LOCAL_COMMIT_POLICY` carries one diagnostic class per refusing rule:
+`operation_local_commit_file_change` for a reported file change,
+`operation_local_commit_git_operation` for a forbidden Git command, and
+`operation_local_commit_confirmation` for a missing or invalid `{ ready: true }`
+confirmation. These classes never expose commands, paths, output, or native
+messages. The retired single class `operation_local_commit` remains valid in
+historical failure records but is no longer emitted.
 
 ### Claude Code
 
