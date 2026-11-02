@@ -1834,10 +1834,19 @@ does not appear in the latter enum; the selected installed adapter must still
 prove native fork support at its capability probe.
 
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
-`WAITING_FOR_USER`, `DONE`, `FAILED`, `CANCELED`, or its caller-selected
-timeout. Optional MCP progress notifications carry only bounded public activity
-with role labels; they do not wake a model or alter the run. Cancellation
-cancels only that wait.
+`WAITING_FOR_USER`, `DONE`, `FAILED`, `CANCELED`, an `interrupted` execution
+whose lease owner is positively `dead` or `replaced`, or its caller-selected
+timeout. An owner can exit without changing any file, and Node reports no exit
+for a non-child process, so the wait also watches lease files and runs a
+read-only lease-owner probe once per second. The probe uses the same
+classification as `run_status`, against the classification the caller already
+inspected. Only a change to `dead` or `replaced` wakes the wait. The probe
+reads no journal, takes no lease, and writes nothing, and a failed probe read
+does not end the wait. `live`, `unverifiable`, and `none` (a released or
+transferring lease) keep waiting, so recovery stays an explicit `run_resume`.
+Optional MCP progress notifications carry only bounded public activity with
+role labels; they do not wake a model or alter the run. Cancellation cancels
+only that wait.
 
 An omitted `run_wait.timeoutMs` means 30 seconds and the public maximum is 24
 hours; either deadline ends only the client wait. Internal detached-dispatch
@@ -1855,7 +1864,7 @@ or process record has no exclusionary owner, and `idle` otherwise. Nullable
 same exact same-host process-identity classification used for exclusive
 acquisition without changing ownership. A timeout therefore distinguishes live
 lease ownership, unresolved lease identity, and durable process ownership
-without polling or a heartbeat.
+without a heartbeat or journal polling.
 `pipelines_list` projects descriptor-owned setting values, defaults, and
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`

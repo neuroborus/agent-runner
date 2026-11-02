@@ -598,8 +598,13 @@ active role and phase combine with lease ownership to distinguish running,
 interrupted, and idle work without polling a provider or depending on a
 heartbeat. MCP status and wait additionally report the finite lease-owner
 classification and whether a process record is persisted, without exposing a
-PID or process identity. An interrupted owner reconstructs work from durable
-state after revalidating inputs and the repository.
+PID or process identity. A held or new MCP wait also completes promptly and
+reports `interrupted` when the lease owner is positively observed dead or
+replaced, even if no run revision follows. Unavailable identity, another host,
+and released or transferring leases keep waiting. The wait never writes state
+or replays effects; recovery is an explicit `run_resume`. An interrupted owner
+reconstructs work from durable state after revalidating inputs and the
+repository.
 
 Repeated choosing/ready and other control publications leave unchanged journal
 prefixes eligible for byte-certified reuse. Directory metadata churn alone

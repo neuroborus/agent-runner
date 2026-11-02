@@ -3216,6 +3216,7 @@ test("projects live and crashed provider activity through status and wait", asyn
       bootId: "11111111-1111-4111-8111-111111111111",
       startTicks: String(pid),
     }),
+    ownerProbeIntervalMs: 10,
   });
   await createStoredRun(store, paths);
   const lease = await store.acquireRunLease(RUN_ID);
@@ -3278,12 +3279,47 @@ test("projects live and crashed provider activity through status and wait", asyn
     phase: "clarify",
   });
 
+  // An owner death changes no file; a held wait still observes it and
+  // returns without writing state, lease, or process records.
+  const leasePath = join(await store.getRunDirectory(RUN_ID), ".lease");
+  const leaseBytes = await readFile(leasePath);
+  const heldWaitStarted = Promise.withResolvers();
+  const heldControl = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: {
+      ...store,
+      async waitForRunChange(...argumentsList) {
+        heldWaitStarted.resolve();
+        return store.waitForRunChange(...argumentsList);
+      },
+    },
+  });
+  const heldWait = heldControl.runWait({
+    runId: RUN_ID,
+    cursor: started.revision,
+    timeoutMs: 30_000,
+    progress: false,
+  });
+  await heldWaitStarted.promise;
   ownerIsAlive = false;
+  const lostOwnerWait = await heldWait;
+  assert.equal(lostOwnerWait.timedOut, false);
+  assert.equal(lostOwnerWait.revision, registered.revision);
+  assert.deepEqual(lostOwnerWait.execution, {
+    state: "interrupted",
+    leaseOwner: "dead",
+    processRecord: "persisted",
+    role: "planner",
+    phase: "clarify",
+  });
+  assert.deepEqual(await readFile(leasePath), leaseBytes);
+  const retained = await store.loadRun(RUN_ID);
+  assert.equal(retained.revision, registered.revision);
+  assert.deepEqual(retained.executionProcess, registered.executionProcess);
+
   assert.equal(await store.runIsLeased(RUN_ID), true);
   assert.equal(await store.runLeaseOwnerIsLive(RUN_ID), false);
-  const leaseRecord = JSON.parse(
-    await readFile(join(await store.getRunDirectory(RUN_ID), ".lease"), "utf8"),
-  );
+  const leaseRecord = JSON.parse(await readFile(leasePath, "utf8"));
   assert.equal(leaseRecord.pid, ownerProcessId);
   const interruptedWait = await control.runWait({
     runId: RUN_ID,
@@ -3291,7 +3327,7 @@ test("projects live and crashed provider activity through status and wait", asyn
     timeoutMs: 10,
     progress: false,
   });
-  assert.equal(interruptedWait.timedOut, true);
+  assert.equal(interruptedWait.timedOut, false);
   assert.deepEqual(interruptedWait.execution, {
     state: "interrupted",
     leaseOwner: "dead",

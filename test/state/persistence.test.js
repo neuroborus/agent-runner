@@ -320,6 +320,144 @@ test("retains large result copies across journal rotation, interruption, and rej
   });
 });
 
+test("ownership waits end on owner loss", { timeout: 10_000 }, async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "agent-runner-owner-wait-"));
+  const projectPath = join(workspace, "project");
+  const taskPath = join(workspace, "task");
+  await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+  const owner = { alive: true, identity: true, startTicks: "4242" };
+  const reset = () =>
+    Object.assign(owner, { alive: true, identity: true, startTicks: "4242" });
+  let onLivenessCheck = () => {};
+  const store = createRunStore({
+    stateRoot: join(workspace, "state"),
+    hostName: "owner-host",
+    processId: 4242,
+    processIsAlive(pid) {
+      onLivenessCheck();
+      return pid === 4242 && owner.alive;
+    },
+    processIdentity: (pid) =>
+      pid === 4242 && owner.identity
+        ? {
+            bootId: "44444444-4444-4444-8444-444444444444",
+            startTicks: owner.startTicks,
+          }
+        : null,
+    ownerProbeIntervalMs: 5,
+  });
+  const created = await store.createRun(runInput(projectPath, taskPath));
+  const { revision, runId } = created.state;
+  const abort = new AbortController();
+  t.after(async () => {
+    abort.abort();
+    reset();
+    await created.lease.release();
+    await rm(workspace, { recursive: true, force: true });
+  });
+  // The controlled clock never reaches the wait timeout, so only a probe can
+  // settle a wait; a missed probe or loss stays pending until the test fails.
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const wait = (options) =>
+    store.waitForRunChange(runId, {
+      afterRevision: revision,
+      timeoutMs: 60_000,
+      includeOwnership: true,
+      signal: abort.signal,
+      ...options,
+    });
+  const livenessCheck = () =>
+    new Promise((resolvePromise) => {
+      onLivenessCheck = resolvePromise;
+    });
+  // Owner inspection performs no I/O after its injected reads, so one
+  // immediate turn after a probe's liveness check observes its completion.
+  const probeCompleted = async (checked) => {
+    await checked;
+    await new Promise(setImmediate);
+  };
+  const nextProbe = async () => {
+    const checked = livenessCheck();
+    t.mock.timers.tick(5);
+    await probeCompleted(checked);
+  };
+
+  for (const lose of [
+    () => (owner.alive = false),
+    () => (owner.startTicks = "4343"),
+  ]) {
+    reset();
+    const checked = livenessCheck();
+    const waiting = wait();
+    await probeCompleted(checked);
+    await nextProbe();
+    lose();
+    t.mock.timers.tick(5);
+    assert.equal((await waiting).revision, revision);
+  }
+
+  // The owner can die between the caller's inspection and the first probe.
+  reset();
+  owner.alive = false;
+  assert.equal((await wait({ ownerBaseline: "live" })).revision, revision);
+
+  // Unverifiable identity and a loss already present in the baseline keep
+  // waiting through several completed probes.
+  for (const [state, ownerBaseline] of [
+    [{ identity: false }, "live"],
+    [{ alive: false }, undefined],
+    [{ alive: false }, "dead"],
+  ]) {
+    reset();
+    Object.assign(owner, state);
+    const aborting = new AbortController();
+    const checked = livenessCheck();
+    const waiting = wait({ ownerBaseline, signal: aborting.signal });
+    await probeCompleted(checked);
+    for (let probe = 0; probe < 3; probe += 1) await nextProbe();
+    aborting.abort();
+    await assert.rejects(waiting, { name: "AbortError" });
+  }
+
+  reset();
+  const setProbe = t.mock.method(globalThis, "setInterval");
+  const clearProbe = t.mock.method(globalThis, "clearInterval");
+  const aborting = new AbortController();
+  const checked = livenessCheck();
+  const aborted = wait({ signal: aborting.signal });
+  await probeCompleted(checked);
+  const [probeTimer] = setProbe.mock.calls.map(({ result }) => result);
+  assert.ok(probeTimer);
+  const probeCleared = () =>
+    clearProbe.mock.calls.some(
+      ({ arguments: [timer] }) => timer === probeTimer,
+    );
+  assert.equal(probeCleared(), false);
+  aborting.abort();
+  assert.equal(probeCleared(), true);
+  await assert.rejects(aborted, { name: "AbortError" });
+  setProbe.mock.restore();
+  clearProbe.mock.restore();
+  t.mock.timers.reset();
+
+  for (const options of [
+    { ownerBaseline: "gone" },
+    { ownerBaseline: "live", includeOwnership: false },
+  ]) {
+    await assert.rejects(wait(options), { code: "ERR_INVALID_RUN_WAIT" });
+  }
+  for (const ownerProbeIntervalMs of [0, 2_147_483_648, 1.5]) {
+    assert.throws(
+      () =>
+        createRunStore({
+          stateRoot: join(workspace, "state"),
+          ownerProbeIntervalMs,
+        }),
+      { code: "ERR_INVALID_RUN_STORE_OPTIONS" },
+    );
+  }
+});
+
 test("persists accepted large bootstrap inventories without repeating commands per step", async (t) => {
   const { created, stateRoot } = await createFixture(t);
   await created.lease.release();

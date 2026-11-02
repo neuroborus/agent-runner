@@ -1881,8 +1881,11 @@ hours; configure the MCP client's tool timeout above the requested wait.
 `tool_timeout_sec` to 60 seconds, which is too short for long runs, so size the
 setting above to the operator's longest expected wait. A client timeout or
 cancelled wait affects the wait call while the pipeline continues. Recover with
-`run_status` and another explicit wait. Use `run_activity` for deliberate
-inspection and `run_wait` for long event-driven waits.
+`run_status` and another explicit wait. A wait also returns promptly with
+`execution.state: "interrupted"` when the execution owner is positively
+observed dead or replaced; recover that run with an explicit `run_resume`. Use
+`run_activity` for deliberate inspection and `run_wait` for long event-driven
+waits.
 
 MCP represents paused clarification and product decisions as structured
 `pendingInput`. `run_respond` requires the request ID,

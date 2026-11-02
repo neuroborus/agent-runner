@@ -143,6 +143,49 @@ test("status and wait expose bounded observation evidence without private run or
   assert.deepEqual(waited.observations, status.observations);
 });
 
+test("a wait reaching its deadline reports an owner lost before it", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const run = {
+    runId: RUN_ID,
+    revision: 5,
+    pipelineId: "plan-execution",
+    taskPath: "/task",
+    activeTurn: { role: "worker", phase: "implement" },
+    executionProcess: {},
+    pause: null,
+    pipelineState: {
+      workflowState: "IMPLEMENTING",
+      settings: { mode: "combined" },
+      currentStep: null,
+      findings: [],
+      findingOverrides: [],
+      completedCommits: [],
+    },
+  };
+  const owners = ["live", "dead"];
+  const control = createMcpControlPlane({
+    runner: { status: async () => ({ run, directoryPath: "/state/run" }) },
+    runStore: {
+      inspectRunLeaseOwner: async () => ({ status: owners.shift() }),
+      async waitForRunChange(_runId, { timeoutMs, ownerBaseline }) {
+        assert.equal(ownerBaseline, "live");
+        // The owner dies, but no probe observes it before the deadline.
+        t.mock.timers.tick(timeoutMs);
+        return run;
+      },
+    },
+  });
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 5,
+    timeoutMs: 1_000,
+  });
+  assert.equal(waited.timedOut, false);
+  assert.equal(waited.execution.state, "interrupted");
+  assert.equal(waited.execution.leaseOwner, "dead");
+  assert.deepEqual(owners, []);
+});
+
 test("action acquisition returns retryable contention without polling", async () => {
   const failure = Object.assign(new Error("Action is owned"), {
     code: "ERR_MCP_ACTION_IN_PROGRESS",

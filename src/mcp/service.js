@@ -568,9 +568,13 @@ export function createMcpControlPlane(options = {}) {
       providers,
     });
 
-  async function projectStatus(current) {
-    const leaseOwner = await runStore.inspectRunLeaseOwner(current.run.runId);
-    return statusProjection(current, leaseOwner);
+  async function projectStatus(current, leaseOwner) {
+    return statusProjection(
+      current,
+      leaseOwner === undefined
+        ? await runStore.inspectRunLeaseOwner(current.run.runId)
+        : leaseOwner,
+    );
   }
 
   async function detachedFailure(
@@ -1013,21 +1017,33 @@ export function createMcpControlPlane(options = {}) {
       if (cursor < run.revision) {
         continue;
       }
+      const leaseOwner = await runStore.inspectRunLeaseOwner(input.runId);
+      const projection = await projectStatus(current, leaseOwner);
       if (waitIsTerminal(run)) {
-        return { ...(await projectStatus(current)), timedOut: false };
+        return { ...projection, timedOut: false };
+      }
+      const { execution } = projection;
+      // A positively lost owner cannot publish further progress; only an
+      // explicit run_resume recovers its retained checkpoint.
+      if (
+        execution.state === "interrupted" &&
+        ["dead", "replaced"].includes(execution.leaseOwner)
+      ) {
+        return { ...projection, timedOut: false };
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        return { ...(await projectStatus(current)), timedOut: true };
+        return { ...projection, timedOut: true };
       }
-      const changed = await runStore.waitForRunChange(input.runId, {
+      // Every wake, including the deadline, re-evaluates status and ownership
+      // so an owner lost before the deadline never reports a timeout.
+      await runStore.waitForRunChange(input.runId, {
         afterRevision: run.revision,
         timeoutMs: remaining,
         signal: context.signal,
+        includeOwnership: true,
+        ownerBaseline: execution.leaseOwner,
       });
-      if (changed.revision === run.revision && Date.now() >= deadline) {
-        return { ...(await projectStatus(current)), timedOut: true };
-      }
     }
   }
 
@@ -1569,7 +1585,7 @@ export function createMcpServer(options = {}) {
     "run_wait",
     {
       description:
-        "Wait once for user input, completion, cancellation, failure, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
+        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
       inputSchema: z
         .object({
           runId,

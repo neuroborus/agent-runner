@@ -363,7 +363,9 @@ the original receipt. Ownerless applicable-stop recovery is a separate
 `run_resume` mutation with a new key, not a recreated pause/cancel receipt.
 Use `run_wait` for event-driven waiting and cursor-based `run_activity` for
 deliberate inspection; never poll at a fixed cadence. Omitted
-`run_wait.timeoutMs` waits 30 seconds, with a 24-hour maximum.
+`run_wait.timeoutMs` waits 30 seconds, with a 24-hour maximum. A wait that
+returns `interrupted` with a `dead` or `replaced` lease owner needs an explicit
+`run_resume`; do not wait again for that owner.
 
 Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
 and checkpoint. Compare byte measurements and token snapshots separately;

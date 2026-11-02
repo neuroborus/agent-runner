@@ -114,6 +114,13 @@ const CREATE_RUN_FIELDS = new Set([
 const MAX_RUN_ARTIFACT_BYTES = 1024 * 1024;
 const DEFAULT_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_LIMIT = 100;
+const LEASE_OWNER_STATUSES = Object.freeze([
+  "none",
+  "live",
+  "unverifiable",
+  "dead",
+  "replaced",
+]);
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -267,6 +274,7 @@ export function createRunStore({
   onPreparationBoundary = async () => {},
   onRuntimeBoundary = async () => {},
   resolveStopBoundary = null,
+  ownerProbeIntervalMs = 1000,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
     throw new RunStoreError("State root must be an absolute path.", {
@@ -294,7 +302,10 @@ export function createRunStore({
     hostName.length > 255 ||
     /[\p{Cc}\p{Zl}\p{Zp}]/u.test(hostName) ||
     !Number.isSafeInteger(processId) ||
-    processId < 1
+    processId < 1 ||
+    !Number.isSafeInteger(ownerProbeIntervalMs) ||
+    ownerProbeIntervalMs < 1 ||
+    ownerProbeIntervalMs > 2_147_483_647
   ) {
     throw new RunStoreError("Run-store options are invalid.", {
       code: "ERR_INVALID_RUN_STORE_OPTIONS",
@@ -1022,7 +1033,13 @@ export function createRunStore({
 
   async function waitForRunChange(
     runId,
-    { afterRevision, timeoutMs, signal, includeOwnership = false } = {},
+    {
+      afterRevision,
+      timeoutMs,
+      signal,
+      includeOwnership = false,
+      ownerBaseline,
+    } = {},
   ) {
     if (
       !Number.isSafeInteger(afterRevision) ||
@@ -1030,6 +1047,8 @@ export function createRunStore({
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs < 0 ||
       typeof includeOwnership !== "boolean" ||
+      (ownerBaseline !== undefined &&
+        (!includeOwnership || !LEASE_OWNER_STATUSES.includes(ownerBaseline))) ||
       (signal !== undefined && !(signal instanceof AbortSignal))
     ) {
       throw new RunStoreError("Run wait options are invalid.", {
@@ -1057,6 +1076,9 @@ export function createRunStore({
     return new Promise((resolvePromise, rejectPromise) => {
       let settled = false;
       let timer;
+      let ownerProbe;
+      let probing = false;
+      let baseline = ownerBaseline;
       const watchers = [];
       let ownershipChanged = false;
       let loading = false;
@@ -1068,6 +1090,7 @@ export function createRunStore({
         }
         settled = true;
         clearTimeout(timer);
+        clearInterval(ownerProbe);
         signal?.removeEventListener("abort", onAbort);
         for (const watcher of watchers) watcher.close();
         operation(value);
@@ -1099,6 +1122,26 @@ export function createRunStore({
           rejectPromise,
           signal.reason ?? new DOMException("Aborted", "AbortError"),
         );
+      // Node cannot observe the exit of a non-child owner, and its death need
+      // not change any file. Classify the lease owner read-only; only a
+      // positive loss that differs from the baseline ends the wait.
+      const probe = async () => {
+        if (settled || probing) return;
+        probing = true;
+        try {
+          const owner = await runLeases.inspect(runDirectory, runId);
+          const status = owner?.status ?? "none";
+          baseline ??= status;
+          if (["dead", "replaced"].includes(status) && status !== baseline) {
+            ownershipChanged = true;
+            void load();
+          }
+        } catch {
+          // An unreadable owner is not evidence of loss; the timeout bounds it.
+        } finally {
+          probing = false;
+        }
+      };
 
       try {
         for (const directory of directories) {
@@ -1142,6 +1185,10 @@ export function createRunStore({
         }
       }, timeoutMs);
       void load();
+      if (includeOwnership) {
+        ownerProbe = setInterval(probe, ownerProbeIntervalMs);
+        void probe();
+      }
     });
   }
 

@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **MCP waits end when the execution owner is positively lost.** An owner can
+  die without publishing a revision or touching its lease, so a held `run_wait`
+  stayed open while a fresh `run_status` already reported `interrupted`. Waits
+  now watch lease files and run a once-per-second read-only lease-owner probe
+  against the caller's inspected baseline. This closes the gap between the
+  caller's inspection and the start of observation without busy wake-ups for an
+  owner that was already dead. Only `dead` or `replaced` ends the wait;
+  unverifiable identity and released or transferring leases keep waiting.
+  Nothing is written or replayed, and recovery remains an explicit
+  `run_resume`. Node offers no exit notification for a non-child process, so
+  this bounded probe is the smallest standard-library mechanism and needs no
+  daemon.
+
 - **Claude may replay its completed session's initialization.** Claude Code
   can re-emit its single session's `system/init` after the result, which the
   parser rejected as a protocol failure. A post-result init is now accepted only
