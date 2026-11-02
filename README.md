@@ -1164,6 +1164,13 @@ where its installed dependencies remain available, and uses the separate
 `projected-build` declaration to demonstrate source-projection authority.
 Execution can use only capabilities frozen at run creation.
 
+Runner supplies active adapters with the full run UUID and bounded project,
+pipeline and role descriptions, separately from client attribution. A verified
+new child can be durably acknowledged before optional naming metadata is handled;
+bounded naming diagnoses never authorize another turn or source fork. This shared
+context does not itself change provider titles or rename existing sessions.
+See the [session contract](docs/product/PROVIDER_MODEL.md#sessions-and-context).
+
 Backend sessions are disposable. When a native context is full, the adapter
 compacts it and retries once; persistent pressure moves ordinary turns to a
 fresh session reconstructed from durable run state, artifacts, and the current
@@ -2112,6 +2119,7 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── input.js
 │   │   ├── migration.js
 │   │   ├── roles.js
+│   │   ├── session-naming.js
 │   │   └── service.js
 │   ├── state/
 │   │   ├── location/

@@ -67,6 +67,17 @@ It performs no npm, Git, registry, account, tag, hosting or publish effects.
 Publication stays disabled in checked-in policy. Release automation ownership
 and administrative approval requirements are in [RELEASING.md](RELEASING.md).
 
+Fast `test/session-naming.test.js` owns strict Runner naming context, the full
+existing run UUID across providers/pipelines/modes, inactive roles and creation
+acknowledgement ordering. Provider fixtures prove native child acknowledgement
+without title RPCs, flags or live model calls. Focused durable
+authoring/audit cases cover bounded journaled diagnoses, unchanged retry/usage
+accounting and known-child recovery without another source fork or owner cycle.
+Coverage retains acknowledged children through authentication/output dispositions,
+excludes commit-readiness children from Worker reuse and bounds concurrent diagnoses.
+These checks add no native acceptance or automatic naming authority. Existing
+common and custom-execution slow assignments remain unchanged.
+
 Fast `test/update.test.js` owns on-demand official identity gating, version
 ordering and explicit prereleases, no-update success, Node/configuration/state
 compatibility, registry/permission failure redaction and body bounds. Registry

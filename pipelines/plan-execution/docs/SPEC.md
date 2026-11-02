@@ -1150,10 +1150,21 @@ A request should contain only runner-level concepts such as:
   effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
+  sessionNaming: { runId, project, pipeline, role }, // Runner-owned display data
+  onSessionCreated, // awaited durable acknowledgement of a verified new child
+  onSessionNaming, // awaited bounded metadata diagnosis; no execution authority
   authorizationId, // local-commit only
   commit: { expectedHead, message } // local-commit only
 }
 ```
+
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before optional metadata work; the eventual response
+does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+Fresh commit-readiness children have their own context key and remain excluded
+from ordinary Worker continuation; acknowledging them grants no full-role context.
 
 Backend-specific CLI flags belong only inside the adapter.
 

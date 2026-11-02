@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-02
+
+- **Session naming context belongs to Runner; child identity precedes metadata.**
+  Active role requests carry the existing full run UUID and bounded descriptions,
+  independently of client attribution. An awaited creation acknowledgement retains
+  the verified child and logical context before optional naming can fail. A closed
+  metadata receipt changes no workflow, lineage or retry/usage accounting, so titles
+  cannot authorize another fork, replacement or effect. Native naming remains with
+  each adapter, and continuation never enrolls historical sessions.
+
 ## 2026-11-01
 
 - **Operator update transports share one durable apply operation.** Explicit

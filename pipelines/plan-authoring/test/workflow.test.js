@@ -2533,6 +2533,49 @@ test("uses authentication effect evidence for lazy source-fork recovery", async 
   }
 });
 
+test("acknowledged children override ambiguous or no-turn-effect source-fork recovery", async (t) => {
+  for (const mode of ["independent", "lazy", "combined"])
+    for (const effect of ["none", "possible"])
+      for (const exhausted of [false, true]) {
+        const f = await createFixture(t, {
+          mode,
+          sourceSession: SOURCE_SESSION,
+          async onRoleRun(role, request, count) {
+            assert.equal(role, "planner");
+            if (count === 1)
+              await request.onSessionCreated(ROLE_SESSIONS.planner);
+            else {
+              assert.deepEqual(request.session, {
+                mode: "continue",
+                id: ROLE_SESSIONS.planner,
+              });
+              assert.equal(request.prompt, request.recoveryPrompt);
+            }
+            throw exhausted
+              ? outputExhaustion({ effect })
+              : authenticationFailure({ effect });
+          },
+        });
+        attachAuthentication(f);
+        attachOutputExhaustion(f);
+        const paused = await f.run();
+        assert.equal(
+          paused.pause.reason,
+          exhausted ? "output_exhausted" : "authentication_required",
+        );
+        assert.equal(
+          paused.pipelineState.authenticationSourceForkRecovery,
+          null,
+        );
+        assert.equal(
+          paused.pipelineState.lazySourceForkConsumed,
+          mode === "lazy",
+        );
+        assert.equal((await f.run()).sessionLineage.children.length, 1);
+        assert.equal(f.calls.planner.length, 2);
+      }
+});
+
 test("persists a forbidden-delegation diagnostic without provider data", async (t) => {
   const sensitiveMarker = "DO_NOT_PERSIST_DELEGATED_TURN_DATA";
   const fixture = await createFixture(t, {

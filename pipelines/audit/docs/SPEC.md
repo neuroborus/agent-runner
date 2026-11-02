@@ -43,6 +43,12 @@ artifacts. Long-lived snapshots exclude those paths; task/context and source
 content remain protected, while explicit transcript hashes reject edits outside
 an authorized window. Per-turn provider enforcement remains read-only.
 
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before optional metadata work; the eventual response
+does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+
 Every new run starts in `CLARIFY`. The Auditor resolves complete `scope`,
 `references`, `exclusions` and `criteria` lists from the task, context and
 clarification artifact. Scope and criteria are nonempty; references/exclusions

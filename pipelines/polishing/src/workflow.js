@@ -565,6 +565,10 @@ export async function runPolishing({
   }
 
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
@@ -1493,12 +1497,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       selectedFile === null
         ? ""
         : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
       ...(selectedFile === null ? {} : { readPaths: [selectedFile.path] }),
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(buildPrompt(""))
           : recoveryPrompt + readContext,
       recoveryPrompt: recoveryPrompt + readContext,
@@ -1506,6 +1515,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
@@ -1719,16 +1729,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           },
           {
             ...exhaustedWorkspace?.state,
-            ...(hasPossibleSourceForkEffect
-              ? {
-                  authenticationSourceForkRecovery: Object.freeze({
-                    role,
-                    contextKey,
-                  }),
-                }
-              : consumeSourceFork
-                ? { lazySourceForkConsumed: false }
-                : {}),
+            ...(acknowledgedSessions.size > 0
+              ? { authenticationSourceForkRecovery: null }
+              : hasPossibleSourceForkEffect
+                ? {
+                    authenticationSourceForkRecovery: Object.freeze({
+                      role,
+                      contextKey,
+                    }),
+                  }
+                : consumeSourceFork
+                  ? { lazySourceForkConsumed: false }
+                  : {}),
           },
           exhaustedWorkspace?.options,
         );
@@ -1797,7 +1809,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     await recordSession(
       role,
       response.sessionId,
-      freshSession ? undefined : previousSession,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : freshSession
+          ? undefined
+          : previousSession,
       contextKey,
     );
     if (state().authenticationSourceForkRecovery !== null) {

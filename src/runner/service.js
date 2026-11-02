@@ -1269,6 +1269,25 @@ export function createRunner(options = {}) {
         pendingPolicyReceipt = operation.catch(() => {});
         return operation;
       },
+      async (role, sessionId, naming) => {
+        const activity = {
+          actor: role,
+          phase: "session",
+          kind: "session-naming",
+          message: `Session naming: ${naming.status}.`,
+        };
+        const current = await runStore.loadRun(run.runId);
+        if (
+          !current.sessionLineage.children.some(
+            (child) => child.role === role && child.sessionId === sessionId,
+          )
+        )
+          throw new RunnerError("Session naming requires a recorded child.", {
+            code: "ERR_INVALID_CHILD_SESSION",
+          });
+        const next = await runStore.transitionRun(lease, {}, { activity });
+        await publish(activity, next);
+      },
     );
   }
 

@@ -3183,6 +3183,29 @@ explicit ordered runtime migration under the execution lease.
 
 ## Agent Context Recovery
 
+`runner/session-naming.js` derives bounded display context from the existing run
+UUID, workspace basename, pipeline and active role at invocation. It overrides
+any request-supplied context, preserves the full UUID and never changes client
+attribution. The shared strict adapter request carries `sessionNaming`, awaited
+`onSessionCreated` and optional `onSessionNaming` observers. Provider-native
+naming effects remain adapter-owned and are not implemented by this context.
+
+Every pipeline supplies the creation acknowledgement at its existing logical
+session key, including audit cycles and commit readiness. It records the child
+before optional naming can fail, then accepts the same acknowledged response
+without recording it twice. Existing source-fork, continuation and reconstruction
+selection remains authoritative. Old sessions are never enrolled by continuation.
+Acknowledged children retain consumed source-fork authority across no-turn-effect
+and ambiguous failures. The first continued request after authentication or
+output exhaustion includes the complete recovery prompt because acknowledgement
+does not prove that the child received its original request.
+Fresh commit-readiness children remain recorded in a
+separate, non-reusable context so they cannot replace a fully reconstructed Worker.
+Naming diagnoses use existing immutable journaled activity, with only a closed
+status and role; child records and envelope schemas remain unchanged. No metadata
+receipt rewrites lineage or settles workflow, effects, retry or usage accounting.
+See the [provider contract](product/PROVIDER_MODEL.md#sessions-and-context).
+
 The strict provider-neutral turn contract also accepts an optional
 `workspacePolicy` with `kind: "directory"`, canonical absolute `workspacePath`
 and `stateRoot`, optional `taskPath`, and the workspace service's six path arrays:

@@ -153,6 +153,35 @@ Agents never perform adapter cleanup, and Codex's lifecycle is unchanged.
 
 ## Sessions and context
 
+Runner supplies a strict frozen `sessionNaming` context on each invoked role:
+`{ runId, project, pipeline, role }`. `runId` is the full existing Runner UUID;
+the three descriptions are single-line, sanitized and limited to 128 Unicode
+code points each. Project description uses only the workspace basename. Native
+IDs stay opaque and private, and client attribution remains a separate identity.
+Inactive roles receive no request or naming context.
+
+The awaited `onSessionCreated(sessionId)` acknowledgement preserves each verified
+new child under the execution lease and its pipeline-owned context key. It must
+finish before optional naming work. Ordinary continuation has no creation
+acknowledgement and cannot retroactively name an existing session. Fresh native
+reconstruction retains the same Runner context and acknowledges its new child.
+Codex acknowledges after verified thread selection, before model work; Claude
+acknowledges validated child results, including recoverable error results, before
+compaction, failure propagation or returning success.
+A recorded child takes precedence over uncertainty about source-fork effects.
+A proof that no model turn ran cannot renew a fork already acknowledged as created.
+After authentication or output exhaustion, the first continued request includes
+the full recovery context: creation alone does not prove prompt delivery.
+
+An adapter may then await `onSessionNaming({ status })`, where status is exactly
+`named`, `rejected`, `unsupported` or `unavailable`. Runner journals at most one
+bounded activity record for each acknowledged child. It includes only the
+status and role. The diagnosis cannot change lineage, workflow state, observations,
+correction counters, availability or inactivity allowances. A metadata diagnosis
+alone authorizes no model-turn replay, another source fork, fresh replacement or
+commit/handoff effect. Adapters retain native naming RPC/flag ownership; this
+shared context alone changes no provider title or historical session.
+
 Native sessions are disposable execution context, never durable workflow
 state. Every turn has a complete recovery prompt reconstructed from persisted
 inputs, summaries, decisions, fingerprints, and repository evidence. A

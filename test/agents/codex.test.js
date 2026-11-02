@@ -532,6 +532,47 @@ function request(overrides = {}) {
   };
 }
 
+test("acknowledges newly created Codex children before model work and leaves continuation alone", async () => {
+  for (const mode of [undefined, "fork", "continue"]) {
+    const created = [];
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start")
+          assert.equal(created.length, mode === "continue" ? 0 : 1);
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        ...(mode ? { session: { mode, id: "source" } } : {}),
+        sessionNaming: {
+          runId: "11111111-1111-4111-8111-111111111111",
+          project: "sample",
+          pipeline: "audit",
+          role: "auditor",
+        },
+        onSessionCreated: async (id) => created.push(id),
+      }),
+    );
+    assert.deepEqual(created, mode === "continue" ? [] : [response.sessionId]);
+  }
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        assert.fail("Unacknowledged child cannot start a turn");
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        onSessionCreated: async () => {
+          throw new Error("controlled acknowledgement failure");
+        },
+      }),
+    ),
+  );
+  assert.equal(fixture.processes.length, 1);
+});
+
 test("admits exact binary source reads without granting temporary writes or starting a turn", async (t) => {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), "agent-runner-source-access-")),

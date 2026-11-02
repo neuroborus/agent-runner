@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
 
 import {
   auditPipeline,
@@ -95,6 +99,43 @@ test("lazy retains one logical Auditor and its consumed source fork after child 
     ["clean"],
   );
   assert.doesNotMatch(JSON.stringify(result), /private provider payload/u);
+});
+
+test("an acknowledged Audit child survives interruption without another source fork or owner cycle", async () => {
+  for (const cause of [
+    Object.assign(new Error("controlled post-creation interruption"), {
+      recoverable: true,
+      launchRecovery: { checkpoint: "spawn" },
+    }),
+    authenticationFailure({ effect: "none" }),
+  ]) {
+    const f = fixture(
+      [
+        async (request) => {
+          await request.onSessionCreated("early-child");
+          throw cause;
+        },
+      ],
+      { mode: "lazy", source: "opaque-source" },
+    );
+    attachAuthentication(f);
+    await f.execute();
+    const saved = structuredClone(f.run());
+    assert.equal(saved.sessionLineage.children[0].sessionId, "early-child");
+    assert.equal(saved.pipelineState.sourceForkConsumed, true);
+    const later = fixture([READY, complete()], { saved });
+    const result = await later.execute();
+    assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+    assert.ok(
+      later.calls.every(
+        (request) =>
+          request.session.mode === "continue" &&
+          request.session.id === "early-child",
+      ),
+    );
+    assert.equal(result.sessionLineage.children.length, 1);
+    assert.equal(result.pipelineState.history.length, 1);
+  }
 });
 
 test("new candidates are deduplicated into a durable pending batch that blocks discovery", async () => {

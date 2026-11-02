@@ -71,6 +71,12 @@ paths. A new external root must remain missing from the initial probe through
 the bound inspection and document snapshots, retaining the probe's real ancestor
 identities. Selection and the clarification hash freeze together before proposals.
 
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before optional metadata work; the eventual response
+does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+
 ## Read-only lifecycle
 
 The proposal API uses explicit durable transitions. `prepareInitTurn` returns a

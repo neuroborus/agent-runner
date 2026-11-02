@@ -2067,6 +2067,8 @@ export function createCodexAdapter(options = {}) {
             fresh,
           );
           const threadId = selectedThread.id;
+          if (fresh || request.session?.mode !== "continue")
+            await request.onSessionCreated?.(threadId);
           if (request.model === undefined && request.effort !== undefined) {
             const model =
               selectedThread.model ?? configuration.config.model ?? undefined;

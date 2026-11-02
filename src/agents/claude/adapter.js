@@ -1598,6 +1598,14 @@ export function createClaudeAdapter(options = {}) {
       observations,
       selectedSession,
     );
+    async function acknowledgeChild(sessionId) {
+      if (
+        sessionId !== undefined &&
+        selectedSession?.mode !== "continue" &&
+        sessionId !== selectedSession?.id
+      )
+        await request.onSessionCreated?.(sessionId);
+    }
     let processRetired = true;
     let primaryError;
     try {
@@ -1720,6 +1728,7 @@ export function createClaudeAdapter(options = {}) {
           });
         }
         stream.assertValid();
+        await acknowledgeChild(sessionId);
         throw outputError(payload, request, selectedSession);
       }
       if (
@@ -1742,6 +1751,8 @@ export function createClaudeAdapter(options = {}) {
         payload.permission_denials.length === 0
       )
         stream.assertValid();
+      if (isClaudeErrorResult(payload) && !payload.permission_denials?.length)
+        await acknowledgeChild(payloadSessionId(payload));
       const result = normalizeResult(payload, request, selectedSession);
       if (
         selectedSession?.mode === "fork" &&
@@ -1760,6 +1771,7 @@ export function createClaudeAdapter(options = {}) {
           { code: "ERR_CLAUDE_PROTOCOL" },
         );
       }
+      await acknowledgeChild(result.sessionId);
       return result;
     } catch (cause) {
       primaryError = cause;

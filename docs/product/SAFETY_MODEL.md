@@ -173,6 +173,13 @@ cannot alter it. Legacy envelopes receive only the generic default without
 configuration reload. Prompts, public projections, activity, and bounded
 diagnostics retain neither attribution string.
 
+Session naming context is Runner-owned display data with the full existing run
+UUID and bounded descriptions, separate from client attribution and native IDs.
+Only a newly acknowledged child may receive one bounded metadata receipt.
+Metadata failure grants no retry, replacement, source fork, workflow progress or
+Git effect; continuation preserves existing sessions. Labels and native errors
+are excluded from naming activity. See the [provider contract](PROVIDER_MODEL.md#sessions-and-context).
+
 Authoritative run state is external to both repository and task. These trees
 must be disjoint: neither the project nor task may contain or be contained by
 the state root. Atomic files,

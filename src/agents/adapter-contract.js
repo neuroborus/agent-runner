@@ -21,12 +21,15 @@ const REQUEST_FIELDS = Object.freeze([
   "recoveryPrompt",
   "schema",
   "session",
+  "sessionNaming",
   "signal",
   "onProcess",
   "onProgress",
   "onObservation",
   "onCommitExecution",
   "onFreshSession",
+  "onSessionCreated",
+  "onSessionNaming",
   "onResource",
   "storageForbiddenPaths",
   "workspacePolicy",
@@ -279,6 +282,42 @@ export function isDefaultClientAttribution(value) {
     attribution.name === DEFAULT_CLIENT_ATTRIBUTION.name &&
     attribution.title === DEFAULT_CLIENT_ATTRIBUTION.title
   );
+}
+
+// Runner display context is separate from client attribution and native IDs.
+export function normalizeSessionNamingContext(value) {
+  const labels = ["project", "pipeline", "role"];
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["runId", ...labels]) ||
+    typeof value.runId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value.runId,
+    ) ||
+    labels.some(
+      (field) =>
+        typeof value[field] !== "string" ||
+        !value[field].length ||
+        [...value[field]].length > 128 ||
+        value[field].trim() !== value[field] ||
+        /[\p{Cc}\p{Zl}\p{Zp}\u202a-\u202e\u2066-\u2069]/u.test(value[field]),
+    )
+  )
+    throw new TypeError("Runner session naming context is invalid.");
+  return Object.freeze({
+    runId: value.runId,
+    ...Object.fromEntries(labels.map((field) => [field, value[field]])),
+  });
+}
+
+export function normalizeSessionNamingDiagnostic(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["status"]) ||
+    !["named", "rejected", "unsupported", "unavailable"].includes(value.status)
+  )
+    throw new TypeError("Session naming diagnosis is invalid.");
+  return Object.freeze({ status: value.status });
 }
 
 function isFailureClassList(value) {
@@ -807,6 +846,10 @@ export function createAdapterContract({
         typeof value.onProcess !== "function") ||
       (value.onFreshSession !== undefined &&
         typeof value.onFreshSession !== "function") ||
+      (value.onSessionCreated !== undefined &&
+        typeof value.onSessionCreated !== "function") ||
+      (value.onSessionNaming !== undefined &&
+        typeof value.onSessionNaming !== "function") ||
       (value.onCommitExecution !== undefined &&
         typeof value.onCommitExecution !== "function") ||
       (value.onProgress !== undefined &&
@@ -864,6 +907,11 @@ export function createAdapterContract({
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.sessionNaming === undefined
+        ? {}
+        : {
+            sessionNaming: normalizeSessionNamingContext(value.sessionNaming),
+          }),
       ...(value.workspacePolicy === undefined
         ? {}
         : {
@@ -878,6 +926,12 @@ export function createAdapterContract({
       ...(value.onFreshSession === undefined
         ? {}
         : { onFreshSession: value.onFreshSession }),
+      ...(value.onSessionCreated === undefined
+        ? {}
+        : { onSessionCreated: value.onSessionCreated }),
+      ...(value.onSessionNaming === undefined
+        ? {}
+        : { onSessionNaming: value.onSessionNaming }),
       ...(value.onCommitExecution === undefined
         ? {}
         : { onCommitExecution: value.onCommitExecution }),

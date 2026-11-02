@@ -204,6 +204,8 @@ const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+// A fresh commit-readiness child has not received the full logical role context.
+const COMMIT_SESSION_CONTEXT_KEY = sha256("worker\0commit-readiness");
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const TRUSTED_CHECK_FAILURE_PROBLEM =
   "A runner-trusted validation command failed.";
@@ -723,6 +725,10 @@ export async function runPlanExecution({
 
   const recoveredStepImplementation = recoveredImplementationEvidence(run);
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
@@ -1889,7 +1895,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
-      .find((child) => child.role === role);
+      .find(
+        (child) =>
+          child.role === role &&
+          child.contextKey !== COMMIT_SESSION_CONTEXT_KEY,
+      );
     const selectedSession =
       contextReview &&
       (!recovering || continuingNarrativeRecovery) &&
@@ -1974,12 +1984,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
       selectedFile === null
         ? ""
         : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
       ...(selectedFile === null ? {} : { readPaths: [selectedFile.path] }),
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(promptFor(""))
           : recoveryPrompt + readContext,
       recoveryPrompt: recoveryPrompt + readContext,
@@ -1987,6 +2002,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
@@ -2172,16 +2188,19 @@ Include every listed command exactly once in requiredChecks with its actual cano
             latestSession?.contextKey !== contextKey);
         const exhausted =
           runtime.outputExhaustion?.eligible(agentError) === true;
-        const sourceForkPatch = hasPossibleSourceForkEffect
-          ? {
-              authenticationSourceForkRecovery: Object.freeze({
-                role,
-                contextKey,
-              }),
-            }
-          : consumeSourceFork
-            ? { lazySourceForkConsumed: false }
-            : {};
+        const sourceForkPatch =
+          acknowledgedSessions.size > 0
+            ? { authenticationSourceForkRecovery: null }
+            : hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {};
         const subdivisionPatch = exhausted
           ? outputExhaustionPatch?.()
           : undefined;
@@ -2280,7 +2299,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
         : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
     resumedOutputCheckpoint = null;
-    await recordSession(role, response.sessionId, previousSession, contextKey);
+    await recordSession(
+      role,
+      response.sessionId,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : previousSession,
+      contextKey,
+    );
     if (state().authenticationSourceForkRecovery !== null) {
       await transition({
         ...state(),
@@ -7517,7 +7543,11 @@ ${JSON.stringify(
     if (pendingCommit.status === "prepared") {
       const previousSession = [...currentRun.sessionLineage.children]
         .reverse()
-        .find((child) => child.role === "worker")?.sessionId;
+        .find(
+          (child) =>
+            child.role === "worker" &&
+            child.contextKey !== COMMIT_SESSION_CONTEXT_KEY,
+        )?.sessionId;
       let baseRequest;
       try {
         baseRequest = await commit.consumeCommit(pendingCommit.authorization, {
@@ -7577,6 +7607,13 @@ ${JSON.stringify(
       );
       const request = {
         ...baseRequest,
+        onSessionCreated: (sessionId) =>
+          recordSession(
+            "worker",
+            sessionId,
+            undefined,
+            COMMIT_SESSION_CONTEXT_KEY,
+          ),
         prompt: rolePrompt(`${COMMIT_INSTRUCTIONS}
 
 Authorized planned commit:

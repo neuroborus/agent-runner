@@ -70,6 +70,8 @@ const FAILURE_CONFIGURATION = Object.freeze({
 function failureAdapter(classify, run) {
   return roleAdapters(
     {
+      runId: "11111111-1111-4111-8111-111111111111",
+      projectPath: "/workspace/project",
       pipelineId: planExecutionPipeline.id,
       roles: { worker: FAILURE_CONFIGURATION },
       sessionLineage: { source: null },
@@ -187,6 +189,8 @@ test("requested access fails through one provider-neutral diagnosis", async () =
 test("adapter probing verifies the immutable receipt before provider work", async () => {
   const order = [];
   const run = {
+    runId: "11111111-1111-4111-8111-111111111111",
+    projectPath: "/workspace/project",
     pipelineId: planExecutionPipeline.id,
     roles: { worker: CONFIGURATION },
     sessionLineage: { source: null },
@@ -282,6 +286,8 @@ test("exact-file admission uses the selected adapter only after policy receipt v
   };
   const selected = roleAdapters(
     {
+      runId: "11111111-1111-4111-8111-111111111111",
+      projectPath: "/workspace/project",
       pipelineId: planExecutionPipeline.id,
       roles: { worker: CONFIGURATION },
       sessionLineage: { source: null },

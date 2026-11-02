@@ -129,6 +129,59 @@ async function fixture(t, settings = {}, { git } = {}) {
   };
 }
 
+test("Runner acknowledges a child before a bounded naming rejection without consuming a retry", async (t) => {
+  const f = await fixture(t, {
+    planKind: "custom",
+    mode: "lazy",
+    criteriaPath: "criteria.md",
+  });
+  f.queue.push(async (request) => {
+    assert.match(request.sessionNaming.runId, /^[a-f0-9-]{36}$/u);
+    assert.equal(request.sessionNaming.role, "planner");
+    assert.equal(request.sessionNaming.pipeline, "plan-authoring");
+    await request.onSessionCreated("child-1");
+    const before = await f.runStore.loadRun(request.sessionNaming.runId);
+    assert.equal(before.sessionLineage.children[0].sessionId, "child-1");
+    await request.onSessionNaming({ status: "rejected" });
+    const after = await f.runStore.loadRun(before.runId);
+    for (const field of [
+      "pipelineState",
+      "counters",
+      "activeTurn",
+      "observations",
+      "availabilityRetry",
+      "inactivityRecovery",
+    ])
+      assert.deepEqual(after[field], before[field]);
+    return {
+      status: "QUESTIONS",
+      questions: [
+        {
+          question: "Which evidence is in scope?",
+          whyItMatters: "It determines coverage.",
+        },
+      ],
+      criteria: [],
+    };
+  });
+  const { run } = await f.runner.run(f.input);
+  assert.equal(run.pause.reason, "clarification_answers_required");
+  assert.equal(f.calls.length, 1);
+  assert.equal(run.sessionLineage.children.length, 1);
+  assert.equal(Object.hasOwn(run.sessionLineage.children[0], "naming"), false);
+  const history = await f.runStore.loadRunHistory(run.runId);
+  const naming = history.events.filter(
+    (event) => event.activity?.kind === "session-naming",
+  );
+  assert.equal(naming.length, 1);
+  assert.deepEqual(naming[0].activity, {
+    actor: "planner",
+    phase: "session",
+    kind: "session-naming",
+    message: "Session naming: rejected.",
+  });
+});
+
 test("external project selection freezes custom directory configuration before Git inspection", async (t) => {
   const f = await fixture(t);
   const rootPath = join(f.root, "infrastructure");

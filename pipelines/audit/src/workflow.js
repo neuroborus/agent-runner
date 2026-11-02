@@ -269,8 +269,25 @@ export async function runAuditDiscovery({
     const configuration = current.roles[role];
     let response;
     let agentError;
+    const acknowledgedSessions = new Set();
     try {
       response = await runtime.adapters[role].run({
+        onSessionCreated: async (sessionId) => {
+          if (
+            sessionId === source ||
+            sessionId === previous?.sessionId ||
+            current.sessionLineage.children.some(
+              (child) => child.sessionId === sessionId,
+            )
+          )
+            throw new Error("Audit created child session identity is invalid.");
+          current = await runtime.recordChildSession({
+            role,
+            sessionId,
+            contextKey: key,
+          });
+          acknowledgedSessions.add(sessionId);
+        },
         access: "read-only",
         cwd: current.projectPath,
         prompt,
@@ -321,16 +338,19 @@ export async function runAuditDiscovery({
           : runtime.authentication;
         // Only proof about this original fork can restore its unused allowance.
         const noForkEffect =
-          session?.mode === "fork" && !policy.hasPossibleEffect(agentError);
+          acknowledgedSessions.size === 0 &&
+          session?.mode === "fork" &&
+          !policy.hasPossibleEffect(agentError);
         await save(
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
             sourceForkConsumed:
               noForkEffect && lazy ? false : state().sourceForkConsumed,
-            sourceForkRecovery: noForkEffect
-              ? null
-              : state().sourceForkRecovery,
+            sourceForkRecovery:
+              acknowledgedSessions.size > 0 || noForkEffect
+                ? null
+                : state().sourceForkRecovery,
             sourceForkContexts: noForkEffect
               ? state().sourceForkContexts.filter((context) => context !== key)
               : state().sourceForkContexts,
@@ -372,6 +392,7 @@ export async function runAuditDiscovery({
       }
       if (agentError.recoverable === true) {
         if (
+          acknowledgedSessions.size === 0 &&
           session?.mode === "fork" &&
           ["spawn", "initialize"].includes(
             agentError.launchRecovery?.checkpoint,
@@ -404,7 +425,8 @@ export async function runAuditDiscovery({
       response.sessionId.length > 1024 ||
       /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(response.sessionId) ||
       response.sessionId === source ||
-      (response.sessionId !== previous?.sessionId &&
+      (!acknowledgedSessions.has(response.sessionId) &&
+        response.sessionId !== previous?.sessionId &&
         current.sessionLineage.children.some(
           (child) => child.sessionId === response.sessionId,
         ))
@@ -413,7 +435,10 @@ export async function runAuditDiscovery({
       await finishReserved("invalid");
       return { failure: invalid };
     }
-    if (response.sessionId !== previous?.sessionId) {
+    if (
+      !acknowledgedSessions.has(response.sessionId) &&
+      response.sessionId !== previous?.sessionId
+    ) {
       current = await runtime.recordChildSession({
         role,
         sessionId: response.sessionId,

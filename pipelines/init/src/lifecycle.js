@@ -368,8 +368,25 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     });
     const configuration = current.roles[role];
     let response;
+    const acknowledgedSessions = new Set();
     try {
       response = await runtime.adapters[role].run({
+        onSessionCreated: async (sessionId) => {
+          assertInit(
+            sessionId !== source &&
+              sessionId !== previous?.sessionId &&
+              !current.sessionLineage.children.some(
+                (child) => child.sessionId === sessionId,
+              ),
+            "Init created child session identity is invalid.",
+          );
+          current = await runtime.recordChildSession({
+            role,
+            sessionId,
+            contextKey: key,
+          });
+          acknowledgedSessions.add(sessionId);
+        },
         access: "read-only",
         cwd: run.projectPath,
         schema: request.schema,
@@ -400,6 +417,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       // Restore only this attempted fork when normalized evidence proves that
       // it never started. Later launch checkpoints cannot prove an unused fork.
       if (
+        acknowledgedSessions.size === 0 &&
         session?.mode === "fork" &&
         ((policy && !policy.hasPossibleEffect(cause)) ||
           (cause.recoverable === true &&
@@ -442,13 +460,17 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         response.sessionId.length <= 1024 &&
         !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(response.sessionId) &&
         response.sessionId !== source &&
-        (response.sessionId === previous?.sessionId ||
+        (acknowledgedSessions.has(response.sessionId) ||
+          response.sessionId === previous?.sessionId ||
           !current.sessionLineage.children.some(
             (child) => child.sessionId === response.sessionId,
           )),
       "Init child session identity is invalid.",
     );
-    if (response.sessionId !== previous?.sessionId)
+    if (
+      !acknowledgedSessions.has(response.sessionId) &&
+      response.sessionId !== previous?.sessionId
+    )
       current = await runtime.recordChildSession({
         role,
         sessionId: response.sessionId,

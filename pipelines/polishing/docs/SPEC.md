@@ -491,6 +491,12 @@ start. It includes a known trusted profile with the fork choice, or offers only
 long, multi-topic, or uncertain session, especially when independent mode would
 fork its complete context more than once.
 
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before optional metadata work; the eventual response
+does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+
 Each direct child session is persisted with a key over its accepted inputs and
 pipeline-owned role checkpoint. Clarification, bootstrap, Worker work, and
 Reviewer work are distinct checkpoints. In independent and combined modes, reconciliation

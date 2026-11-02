@@ -189,6 +189,12 @@ profile is unknown. Prefer a fresh start for a long, multi-topic, or uncertain
 session, especially when independent mode would fork its complete context more
 than once.
 
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before optional metadata work; the eventual response
+does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+
 ## Persistent Run State
 
 Each structured role result permits exactly 2 MiB (2,097,152 bytes) of

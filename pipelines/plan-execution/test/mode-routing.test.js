@@ -3,6 +3,15 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+
 import { runPlanExecution } from "../src/index.js";
 import {
   CLEAN_CONFIRM_SCHEMA,
@@ -23,6 +32,50 @@ import {
   reconciliationResolved,
   resolution,
 } from "./support/index.js";
+
+test("a newly acknowledged commit-readiness child does not replace the logical Worker session", async (t) => {
+  let acknowledged = false;
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    sourceSession: SOURCE_SESSION,
+    plan: "## Commit 1: feat(test): add behavior\n\nFirst.\n\n## Commit 2: feat(test): extend behavior\n\nSecond.",
+    worker: [clarificationReady(), bootstrapReady("Worker", [1, 2])],
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      finalizationPassed(),
+      implementationCompleted(),
+      checkAndFix(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(_role, request) {
+      if (!acknowledged && request.access === "local-commit") {
+        acknowledged = true;
+        await request.onSessionCreated("commit-readiness-child");
+      }
+    },
+  });
+  const result = await fixture.run();
+  assert.equal(
+    result.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(result.pause),
+  );
+  assert.ok(
+    result.sessionLineage.children.some(
+      (child) => child.sessionId === "commit-readiness-child",
+    ),
+  );
+  const nextStep = fixture.calls.worker.filter(
+    (request) => request.schema === IMPLEMENTATION_SCHEMA,
+  )[1];
+  assert.notEqual(nextStep.session?.id, "commit-readiness-child");
+  assert.equal(
+    fixture.calls.worker.filter((request) => request.session?.mode === "fork")
+      .length,
+    1,
+  );
+});
 
 for (const mode of ["independent", "lazy", "combined"]) {
   test(`${mode} repair rejoins candidate convergence before its terminal confirmer`, async (t) => {
@@ -310,3 +363,38 @@ for (const mode of ["independent", "lazy", "combined"]) {
     });
   }
 }
+
+test("an acknowledged source child remains usable after a no-turn-effect disposition", async (t) => {
+  for (const exhausted of [false, true]) {
+    const f = await createFixture(t, {
+      mode: "lazy",
+      sourceSession: SOURCE_SESSION,
+      async onRoleRun(role, request, count) {
+        assert.equal(role, "worker");
+        if (count === 1)
+          await request.onSessionCreated("acknowledged-worker-child");
+        else {
+          assert.deepEqual(request.session, {
+            mode: "continue",
+            id: "acknowledged-worker-child",
+          });
+          assert.equal(request.prompt, request.recoveryPrompt);
+        }
+        throw exhausted
+          ? outputExhaustion({ effect: "none" })
+          : authenticationFailure({ effect: "none" });
+      },
+    });
+    attachAuthentication(f);
+    attachOutputExhaustion(f);
+    const paused = await f.run();
+    assert.equal(
+      paused.pause.reason,
+      exhausted ? "output_exhausted" : "authentication_required",
+    );
+    assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
+    assert.equal(paused.pipelineState.authenticationSourceForkRecovery, null);
+    assert.equal((await f.run()).sessionLineage.children.length, 1);
+    assert.equal(f.calls.worker.length, 2);
+  }
+});

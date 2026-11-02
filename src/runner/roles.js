@@ -10,6 +10,7 @@ import {
 } from "../agents/index.js";
 
 import { isRecord, RunnerError } from "./input.js";
+import { sessionNamingRequest } from "./session-naming.js";
 
 export function defaultAdapters(
   clientAttribution,
@@ -354,6 +355,7 @@ function lazyArbiterAdapter(
   adapters,
   providers,
   onPolicyReceipt,
+  onSessionNaming,
 ) {
   let adapter;
   let capabilitiesPromise;
@@ -397,7 +399,13 @@ function lazyArbiterAdapter(
       return runAdapter(
         resolve(),
         configuration.backend,
-        directoryRequest(run, pipeline, "arbiter", request),
+        sessionNamingRequest(
+          run,
+          pipeline,
+          "arbiter",
+          directoryRequest(run, pipeline, "arbiter", request),
+          onSessionNaming,
+        ),
         providers,
       );
     },
@@ -412,6 +420,7 @@ function configuredAdapter(
   adapters,
   providers,
   onPolicyReceipt,
+  onSessionNaming,
 ) {
   const adapter = resolveAdapter(
     adapters,
@@ -482,7 +491,13 @@ function configuredAdapter(
       return runAdapter(
         adapter,
         configuration.backend,
-        directoryRequest(run, pipeline, role, request),
+        sessionNamingRequest(
+          run,
+          pipeline,
+          role,
+          directoryRequest(run, pipeline, role, request),
+          onSessionNaming,
+        ),
         providers,
       );
     },
@@ -495,6 +510,7 @@ export function roleAdapters(
   adapters,
   providers = PROVIDER_REGISTRY,
   onPolicyReceipt = async () => {},
+  onSessionNaming = async () => {},
 ) {
   return Object.freeze(
     Object.fromEntries(
@@ -508,6 +524,7 @@ export function roleAdapters(
               adapters,
               providers,
               onPolicyReceipt,
+              onSessionNaming,
             )
           : configuredAdapter(
               run,
@@ -517,6 +534,7 @@ export function roleAdapters(
               adapters,
               providers,
               onPolicyReceipt,
+              onSessionNaming,
             ),
       ]),
     ),

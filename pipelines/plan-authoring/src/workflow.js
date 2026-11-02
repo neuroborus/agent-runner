@@ -282,6 +282,10 @@ export async function runPlanAuthoring({
   }
 
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
@@ -640,11 +644,16 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
           : [],
       ),
     );
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
       access: "read-only",
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(
               promptWithSettings(
                 latestSession?.contextKey === contextKey && !custom
@@ -658,6 +667,7 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
@@ -721,16 +731,18 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
             resumeState: pipelineState().workflowState,
             ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          acknowledgedSessions.size > 0
+            ? { authenticationSourceForkRecovery: null }
+            : hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {},
         );
         return null;
       }
@@ -794,7 +806,11 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
     await recordSession(
       role,
       response.sessionId,
-      freshSession ? undefined : previousSession,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : freshSession
+          ? undefined
+          : previousSession,
       contextKey,
     );
     if (pipelineState().authenticationSourceForkRecovery !== null) {

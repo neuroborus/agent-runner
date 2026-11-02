@@ -88,6 +88,8 @@ export {
   LAUNCH_OUTCOMES,
   LAUNCH_RECOVERY_CHECKPOINTS,
   normalizeClientAttribution,
+  normalizeSessionNamingContext,
+  normalizeSessionNamingDiagnostic,
   normalizeFailureRecord,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,

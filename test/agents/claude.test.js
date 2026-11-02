@@ -731,6 +731,103 @@ function request(overrides = {}) {
   };
 }
 
+test("acknowledges validated Claude child identities without renaming continued sessions", async () => {
+  for (const mode of [undefined, "fork", "continue"]) {
+    const created = [];
+    const fixture = createFixture();
+    const response = await fixture.adapter.run(
+      request({
+        ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+        sessionNaming: {
+          runId: "11111111-1111-4111-8111-111111111111",
+          project: "sample",
+          pipeline: "audit",
+          role: "auditor",
+        },
+        onSessionCreated: async (id) => created.push(id),
+      }),
+    );
+    assert.deepEqual(created, mode === "continue" ? [] : [response.sessionId]);
+  }
+});
+
+test("acknowledges a new Claude child before compaction even when recovery fails", async () => {
+  for (const mode of [undefined, "fork", "continue"])
+    for (const succeeds of [true, false]) {
+      const sessionId = mode === "continue" ? SOURCE_SESSION : CHILD_SESSION;
+      const events = [];
+      let attempts = 0;
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return undefined;
+          events.push("turn");
+          attempts++;
+          if (attempts === 1) {
+            const payload = result({
+              error: true,
+              output: "Context window exceeded.",
+              sessionId,
+            });
+            if (mode === "fork") throw processFailure(payload);
+            return { stdout: JSON.stringify(payload), stderr: "" };
+          }
+          if (!succeeds)
+            throw processFailure(
+              result({ error: true, sessionId, api_error_status: 401 }),
+            );
+          return { stdout: JSON.stringify(result({ sessionId })), stderr: "" };
+        },
+      });
+      const operation = fixture.adapter.run(
+        request({
+          ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+          onSessionCreated: async (id) => events.push(id),
+        }),
+      );
+      if (succeeds) assert.equal((await operation).sessionId, sessionId);
+      else
+        await assert.rejects(
+          operation,
+          hasCode("ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"),
+        );
+      assert.equal(attempts, 2);
+      assert.deepEqual(
+        events,
+        mode === "continue" ? ["turn", "turn"] : ["turn", sessionId, "turn"],
+      );
+    }
+});
+
+test("failed Claude child acknowledgement prevents compaction or replacement", async () => {
+  const failure = new Error("controlled acknowledgement failure");
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        throw processFailure(
+          result({
+            error: true,
+            output: "Context window exceeded.",
+            sessionId: CHILD_SESSION,
+          }),
+        );
+      return undefined;
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "fork", id: SOURCE_SESSION },
+        onSessionCreated: async () => {
+          throw failure;
+        },
+      }),
+    ),
+    (cause) => cause === failure,
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
 test("carries a selected file into Claude read-only mounts without granting its parent", async (t) => {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), "claude-finalization-")),
