@@ -229,6 +229,37 @@ function unassociatedSessionFixture() {
   return fixture;
 }
 
+const SUPERVISOR_IDENTITY = { bootId: BOOT_ID, startTicks: "8000" };
+
+// Add owned descendant 505 in supervisor session 44 beside two same-UID
+// readers that lead their own sessions under the supervisor's parent and
+// cgroup: 101 starts after the launch cutoff and 606 before it. Unlisted
+// processes read as exited.
+function independentReadersFixture() {
+  const fixture = unassociatedSessionFixture();
+  const group = "0::/shared.scope\n";
+  const uid = "Uid:\t1000\t1000\t1000\t1000\n";
+  const reads = {
+    "/proc/505/stat": processStat(505, 44, 44, "8100"),
+    "/proc/505/status": uid,
+    "/proc/505/environ": "",
+    "/proc/505/cgroup": group,
+    "/proc/606/stat": processStat(606, 202, 606, "7000"),
+    "/proc/606/status": uid,
+    "/proc/606/environ": "READER=independent\0",
+    "/proc/606/cgroup": group,
+  };
+  const read = fixture.options.read;
+  fixture.listed = new Set(["101", "505", "606"]);
+  fixture.options.list = () => [...fixture.listed];
+  fixture.options.read = (path) => {
+    if (!Object.hasOwn(reads, path)) return read(path);
+    if (!fixture.listed.has(path.split("/")[2])) throw processRaceError();
+    return reads[path];
+  };
+  return fixture;
+}
+
 // Run the actual launcher payload with an injected procfs and clock, without
 // starting a supervisor, provider, timer, or any host process.
 function embeddedSession(ownerToken, options) {
@@ -1329,6 +1360,25 @@ test("embedded cleanup never signals unassociated processes", () => {
   assert.deepEqual(signaled, []);
 });
 
+test("embedded cleanup signals only the owned descendant beside independent readers", () => {
+  const { options, ownerToken } = independentReadersFixture();
+  const signaled = [];
+  const context = embeddedSession(ownerToken, {
+    ...options,
+    onSignal: (pid, signal) => signaled.push({ pid, signal }),
+  });
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    assert.equal(
+      runInNewContext(`signalDescendants(${JSON.stringify(signal)})`, context),
+      true,
+    );
+  }
+  assert.deepEqual(signaled, [
+    { pid: 505, signal: "SIGTERM" },
+    { pid: 505, signal: "SIGKILL" },
+  ]);
+});
+
 test("unassociated inaccessible metadata is ignored while inspection failures remain bounded", async (t) => {
   for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
@@ -2019,6 +2069,33 @@ test("recovery retains a dead session owner while descendants remain", async () 
     ),
     { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
   );
+});
+
+test("recovery inspects a dead owner beside independent readers without signaling", async (t) => {
+  const kill = t.mock.method(process, "kill", () => true);
+  const fixture = independentReadersFixture();
+  const owner = {
+    ancestryBaseline: fixture.options.ancestryBaseline,
+    controlGroup: fixture.options.controlGroup,
+    launchCutoff: SUPERVISOR_IDENTITY,
+    namespaceId: readlinkSync("/proc/self/ns/pid"),
+    pid: 44,
+    previousBoot: false,
+    processIdentity: SUPERVISOR_IDENTITY,
+    status: "dead",
+  };
+  const recover = () =>
+    terminateOwnedProcess(44, async () => owner, {
+      inspectSessionProcesses: (sessionId, token, options) =>
+        inspectOwnedSessionProcesses(sessionId, token, {
+          ...fixture.options,
+          ...options,
+        }),
+    });
+  await assert.rejects(recover(), { code: "ERR_EXECUTION_PROCESS_ACTIVE" });
+  fixture.listed.delete("505");
+  await recover();
+  assert.equal(kill.mock.callCount(), 0);
 });
 
 test("recovery accepts historical records without optional exclusion proofs", async () => {
