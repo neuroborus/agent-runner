@@ -7,6 +7,25 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Activity pages survive a proven concurrent publication.** MCP
+  `run_activity` and `run_wait` readers failed with
+  `Run changed during projection streaming.` (`ERR_INVALID_EVENT_LOG`) while
+  the lease owner was healthy. A lock-free page drain requires stable handle
+  and path observations of the active segment, and an ordinary owner append or
+  rotation changes its size and timestamps. This is distinct from the
+  historical unattributed SIGTERM 143. A drain failing with that code now
+  reloads once through its original certificate, the same proof publication
+  uses. It rereads exactly once only when every original binding, the namespace
+  and the appended continuity are proven and the revision is strictly later;
+  otherwise the original error is returned, and a second failure propagates.
+  Widening the stat checks was rejected because size, mtime and ctime cannot
+  distinguish an append from an in-place edit; only the digest-bound extension
+  proof can. A blanket fallback around the extension was rejected because it
+  hid unrelated failures: only `CheckpointInvalid`, now including a bound
+  segment that is no longer safely openable, means unavailable proof, while
+  skew, invalid or unsafe state, filesystem and programming errors propagate.
+  The repair adds no sleep, polling or catch-all retry.
+
 - **Codex local-commit refusals name their rule through `commit_failed`.**
   `ERR_CODEX_LOCAL_COMMIT_POLICY` used one class for a reported file change, a
   forbidden Git command and a missing or invalid readiness confirmation, and

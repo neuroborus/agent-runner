@@ -855,6 +855,251 @@ test("lock-free activity readers see one complete prefix during interrupted stat
   }
 });
 
+const concurrentActivity = {
+  actor: "worker",
+  phase: "implement",
+  kind: "summary",
+  message: "Candidate updated.",
+};
+
+function pageEntries(page) {
+  return page.activities.map(({ revision, message }) => ({
+    revision,
+    message,
+  }));
+}
+
+// Publish through the lease owner once each selected stream has taken its
+// opening observation of the active segment, before it reads. Loading a
+// snapshot or an extension proof observes that segment twice, and each stream
+// observes it when opening and closing, so a read's stream opens at the third
+// observation and its single reread's stream at the seventh.
+async function publishDuringStreams(t, path, openings, publish) {
+  const metadata = await stat(path, { bigint: true });
+  const handle = await open(path, "r");
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const nativeStat = prototype.stat;
+  const nativeRead = prototype.read;
+  let observations = 0;
+  let publishing = false;
+  let stream = null;
+  t.mock.method(prototype, "stat", async function (...args) {
+    const observation = await nativeStat.apply(this, args);
+    if (
+      !publishing &&
+      args[0]?.bigint &&
+      observation.ino === metadata.ino &&
+      openings.includes(++observations)
+    )
+      stream = this;
+    return observation;
+  });
+  t.mock.method(prototype, "read", async function (...args) {
+    if (this === stream) {
+      stream = null;
+      publishing = true;
+      try {
+        await publish();
+      } finally {
+        publishing = false;
+      }
+    }
+    return nativeRead.apply(this, args);
+  });
+  return prototype;
+}
+
+function publishActivity(store, created, rounds) {
+  return store.transitionRun(
+    created.lease,
+    { counters: { rounds } },
+    { activity: concurrentActivity },
+  );
+}
+
+test("a retained activity page rereads once after a proven concurrent publication", async (t) => {
+  const { store, created } = await fixture(t);
+  const { runId } = created.state;
+  await store.loadRun(runId);
+  let published;
+  await publishDuringStreams(
+    t,
+    join(created.directoryPath, "events.jsonl"),
+    [3],
+    async () => {
+      published = await publishActivity(store, created, 1);
+    },
+  );
+  const page = await store.readPublicActivity(runId);
+  assert.equal(published.revision, 2);
+  assert.deepEqual(pageEntries(page), [
+    { revision: 1, message: "Run created." },
+    { revision: 2, message: concurrentActivity.message },
+  ]);
+  assert.equal(page.cursor, 2);
+});
+
+test("an overflow activity stream rereads once after a proven concurrent publication", async (t) => {
+  const { store, created, stateRoot } = await fixture(t);
+  const { runId } = created.state;
+  const { latest } = await seedActivities(
+    { created },
+    1030,
+    "Checkpoint recorded.",
+  );
+  await store.loadRun(runId);
+  const peer = createRunStore({ stateRoot });
+  let published;
+  await publishDuringStreams(
+    t,
+    join(created.directoryPath, "events-000010.jsonl"),
+    [3],
+    async () => {
+      published = await publishActivity(
+        store,
+        created,
+        latest.counters.rounds + 1,
+      );
+    },
+  );
+  const page = await peer.readPublicActivity(runId, { limit: 2 });
+  assert.equal(published.revision, latest.revision + 1);
+  assert.deepEqual(pageEntries(page), [
+    { revision: 1, message: "Run created." },
+    { revision: 2, message: "Checkpoint recorded." },
+  ]);
+  assert.equal(page.cursor, 2);
+  const next = await peer.readPublicActivity(runId, {
+    afterRevision: latest.revision,
+  });
+  assert.deepEqual(pageEntries(next), [
+    { revision: published.revision, message: concurrentActivity.message },
+  ]);
+  assert.equal(next.cursor, published.revision);
+});
+
+test("an activity page rereads at most once for concurrent publications", async (t) => {
+  const { store, created } = await fixture(t);
+  const { runId } = created.state;
+  await store.loadRun(runId);
+  let rounds = 0;
+  await publishDuringStreams(
+    t,
+    join(created.directoryPath, "events.jsonl"),
+    [3, 7],
+    async () => {
+      rounds += 1;
+      await publishActivity(store, created, rounds);
+    },
+  );
+  await assert.rejects(store.readPublicActivity(runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+    message: "Run changed during projection streaming.",
+  });
+  assert.equal(rounds, 2, "both drains observed a publication");
+  assert.equal((await store.readPublicActivity(runId)).cursor, 3);
+});
+
+test("a concurrent publication cannot certify a prefix edited in place", async (t) => {
+  const { store, created } = await fixture(t);
+  const { runId } = created.state;
+  await store.loadRun(runId);
+  const path = join(created.directoryPath, "events.jsonl");
+  await publishDuringStreams(t, path, [3], async () => {
+    await publishActivity(store, created, 1);
+    const source = await readFile(path, "utf8");
+    const metadata = await stat(path);
+    await writeFile(path, source.replace("Run created.", "Run updated."));
+    await utimes(path, metadata.atime, metadata.mtime);
+  });
+  await assert.rejects(store.readPublicActivity(runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+    message: "Run changed during projection streaming.",
+  });
+});
+
+// Only unavailable proof falls back to the original read error. Compatibility,
+// validation, filesystem and programming failures found by the extension
+// propagate unchanged.
+for (const [name, interfere, expected] of [
+  [
+    "runtime version skew",
+    ({ path, published }) =>
+      writeFile(
+        path,
+        JSON.stringify({
+          ...published,
+          runtimeCompatibility: {
+            ...published.runtimeCompatibility,
+            runnerVersion: published.runtimeCompatibility.runnerVersion + 1,
+          },
+        }),
+      ),
+    { code: "ERR_RUNTIME_VERSION_SKEW" },
+  ],
+  [
+    "malformed state",
+    ({ path }) => writeFile(path, "{"),
+    { code: "ERR_INVALID_RUN_STATE" },
+  ],
+  [
+    "a hard-linked state file",
+    ({ path, stateRoot }) => link(path, join(stateRoot, "linked-state")),
+    { code: "ERR_UNSAFE_STATE_FILE" },
+  ],
+]) {
+  test(`an extension failure from ${name} is not hidden by the original read error`, async (t) => {
+    const { store, created, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    await store.loadRun(runId);
+    await publishDuringStreams(
+      t,
+      join(created.directoryPath, "events.jsonl"),
+      [3],
+      async () =>
+        interfere({
+          path: join(created.directoryPath, "state.json"),
+          published: await publishActivity(store, created, 1),
+          stateRoot,
+        }),
+    );
+    await assert.rejects(store.readPublicActivity(runId), expected);
+  });
+}
+
+for (const failure of [
+  Object.assign(new Error("Injected read failure."), { code: "EIO" }),
+  new TypeError("Injected programming failure."),
+]) {
+  test(`an extension ${failure.code ?? failure.name} failure is not hidden by the original read error`, async (t) => {
+    const { store, created } = await fixture(t);
+    const { runId } = created.state;
+    await store.loadRun(runId);
+    let armed = false;
+    const prototype = await publishDuringStreams(
+      t,
+      join(created.directoryPath, "events.jsonl"),
+      [3],
+      async () => {
+        await publishActivity(store, created, 1);
+        armed = true;
+      },
+    );
+    const nativeReadFile = prototype.readFile;
+    t.mock.method(prototype, "readFile", async function (...args) {
+      if (!armed) return nativeReadFile.apply(this, args);
+      armed = false;
+      throw failure;
+    });
+    await assert.rejects(
+      store.readPublicActivity(runId),
+      (error) => error === failure,
+    );
+    assert.equal(armed, false, "the extension consumed the injected failure");
+  });
+}
+
 test("bounded public projections preserve overflowed history, gaps, segments, and exact progress", async (t) => {
   const decoded = eventDecodes(t);
   for (const [count, message] of [

@@ -4668,7 +4668,20 @@ They do not repeat semantic validation of unchanged historical states. A page
 drains and verifies the entire original prefix even after reaching its limit;
 no partial page escapes a failed digest, identity, or namespace observation.
 Cursors still advance across revisions without activity and stop at the last
-returned activity when a page is full.
+returned activity when a page is full. Stream observations cannot distinguish
+an owner's append or rotation from an edit, so they stay unchanged. When a
+lock-free page's drain fails with `ERR_INVALID_EVENT_LOG`, the journal's
+`extendSnapshot` reloads through the original certificate as publication proof:
+every original binding's digest, identity, link count and stable observation,
+the recognized namespace, and continuity of the appended records. Only a
+certified snapshot with a strictly later revision, passing the same custody and
+state-root checks, permits exactly one second drain under the same cursor and
+limit rules. Proof is unavailable only for `CheckpointInvalid`, which includes
+a certificate-bound segment that can no longer be opened safely; then the
+original error is rethrown. Every other extension failure, such as runtime
+version skew, invalid or unsafe state, a filesystem or programming error, and
+any authorization or second-drain failure propagates. The extension writes
+nothing, takes no lease and populates no checkpoint.
 
 Progress publication uses retained records when they cover the complete run;
 overflow uses the same certified record stream with identical text. An

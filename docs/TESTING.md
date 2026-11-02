@@ -714,9 +714,17 @@ during overflow reads. Early-limit pages prove unread ranges; atomic progress,
 callback failure, historical tampering with snapshot rollback, partial tails,
 and legacy/redaction equivalence retain their original-prefix checks. A controlled
 historical edit during lagging-snapshot matching also proves that canonical
-validation cannot replace the original publication certificate. The state
-slow suite's bounded-heap journal case also covers overflowed projections,
-complete progress, old cursors and repeated transitions across segments.
+validation cannot replace the original publication certificate. A one-shot
+file-handle hook awaits a real lease-owner transition after a drain's stream
+opens: retained and overflow pages reread once with exact cursors, a second
+publication during the reread rejects, and a same-length restored-mtime prefix
+edit beside a real publication still rejects. A negative table proves that
+runtime version skew, malformed state, a hard-linked state file and injected
+`EIO` and `TypeError` failures found by the extension propagate instead of the
+original read error, while the overflow hard-link case stays unavailable proof.
+The state slow suite's bounded-heap journal case also covers overflowed
+projections, complete progress, old cursors and repeated transitions across
+segments.
 
 The fast state `recovery-failures.test.js` suite owns the public state boundary
 for pre-lease and pre-readiness diagnostic publication, interrupted publication,

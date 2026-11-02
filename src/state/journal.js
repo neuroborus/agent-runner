@@ -585,6 +585,15 @@ async function* readEvents(
         checkpoint === null,
       );
     } catch (cause) {
+      // A bound segment no longer safely openable, such as one gaining a hard
+      // link, is a changed binding, as a later link-count change already is.
+      if (
+        proof &&
+        prefix !== null &&
+        cause instanceof RunStoreError &&
+        cause.code === "ERR_UNSAFE_STATE_FILE"
+      )
+        throw new CheckpointInvalid();
       if (cause?.code !== "ENOENT") throw cause;
       if (proof) throw new CheckpointInvalid();
       throw new RunStoreError("Run event log is missing.", {
@@ -1086,6 +1095,29 @@ export function createStateJournal({
     }
   }
 
+  // Certifies a later publication only through the original byte proof, as
+  // publication does. Changed prefix bytes, identities or namespace grant none.
+  async function extendSnapshot(directory, snapshot) {
+    if (!snapshot.certificate) return null;
+    let extended;
+    try {
+      extended = await loadSnapshot(
+        directory,
+        snapshot.state.runId,
+        resolveStopBoundary,
+        snapshot,
+      );
+    } catch (cause) {
+      // Only unavailable proof is classified; every other failure propagates.
+      if (cause instanceof CheckpointInvalid) return null;
+      throw cause;
+    }
+    return extended.certificate &&
+      extended.state.revision > snapshot.state.revision
+      ? extended
+      : null;
+  }
+
   async function writeProgress(directory, snapshot) {
     await atomicWriteFile(
       join(directory, PROGRESS_FILENAME),
@@ -1238,6 +1270,7 @@ export function createStateJournal({
       }
     },
     loadSnapshot: loadCheckpoint,
+    extendSnapshot,
     replaySnapshot: (directory, snapshot) =>
       replaySnapshot(directory, snapshot, resolveStopBoundary),
     publicActivities,

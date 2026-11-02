@@ -834,23 +834,21 @@ export function createRunStore({
     }
   }
 
-  async function loadSnapshot(runDirectory, runId) {
-    let snapshot = await journal.loadSnapshot(runDirectory, runId);
+  // Custody and state-root checks every service snapshot passes. Only a caller
+  // supplying `reload` may reread once before rejecting unmerged custody.
+  async function authorizeSnapshot(runDirectory, snapshot, reload = null) {
     if (
       snapshot.state.preparation === null &&
       (await hasPreparationCustody(runDirectory))
     ) {
-      // A lock-free read may precede reservation publication. Reload before
-      // rejecting custody whose canonical authority was lost or rolled back.
-      snapshot = await journal.loadSnapshot(runDirectory, runId);
-      if (
-        snapshot.state.preparation === null &&
-        (await hasPreparationCustody(runDirectory))
-      )
+      if (reload === null)
         throw new RunStoreError(
           "Unmerged preparation custody has no authority.",
           { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
         );
+      // A lock-free read may precede reservation publication. Reload before
+      // rejecting custody whose canonical authority was lost or rolled back.
+      return authorizeSnapshot(runDirectory, await reload());
     }
     assertDisjointStateRoot(
       runDirectory,
@@ -858,6 +856,11 @@ export function createRunStore({
       snapshot.state.taskPath,
     );
     return snapshot;
+  }
+
+  async function loadSnapshot(runDirectory, runId) {
+    const load = () => journal.loadSnapshot(runDirectory, runId);
+    return authorizeSnapshot(runDirectory, await load(), load);
   }
 
   async function loadRun(runId) {
@@ -2054,23 +2057,39 @@ export function createRunStore({
         code: "ERR_INVALID_ACTIVITY_CURSOR",
       });
     }
-    const activities = [];
-    let cursor = snapshot.state.revision;
-
-    for await (const activity of journal.publicActivities(
-      runDirectory,
-      snapshot,
-      afterRevision,
-    )) {
-      // Drain the certified prefix even after filling the bounded page.
-      if (activities.length === limit) continue;
-      activities.push(activity);
-      if (activities.length === limit) {
-        cursor = activity.revision;
+    const drain = async (source) => {
+      const activities = [];
+      let cursor = source.state.revision;
+      for await (const activity of journal.publicActivities(
+        runDirectory,
+        source,
+        afterRevision,
+      )) {
+        // Drain the certified prefix even after filling the bounded page.
+        if (activities.length === limit) continue;
+        activities.push(activity);
+        if (activities.length === limit) {
+          cursor = activity.revision;
+        }
       }
-    }
+      return deepFreeze({ activities, cursor });
+    };
 
-    return deepFreeze({ activities, cursor });
+    try {
+      return await drain(snapshot);
+    } catch (cause) {
+      if (
+        !(cause instanceof RunStoreError) ||
+        cause.code !== "ERR_INVALID_EVENT_LOG"
+      )
+        throw cause;
+      // The owner may publish during this lock-free drain. Stream observations
+      // cannot distinguish that from an edit, so reread once only after the
+      // original certified prefix is proven unchanged and validly extended.
+      const extended = await journal.extendSnapshot(runDirectory, snapshot);
+      if (extended === null) throw cause;
+      return drain(await authorizeSnapshot(runDirectory, extended));
+    }
   }
 
   const preparation = createPreparationService({
