@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Claude names only its original newly created children.** Installed flag
+  support gates `--name` on fresh/forked launches and reconstruction, using the
+  same full Runner UUID title as Codex. Continuation and compaction preserve
+  edited names. A metadata rejection retains any verified child before a bounded
+  pause, without fallback launch, another fork or replayed turn/commit/handoff.
+  Local fixtures and metadata inspection remain separate from opt-in provider
+  acceptance and intentionally disabled publication.
+
 - **Codex names only newly acknowledged Runner children.** The native
   `thread/name/set` RPC receives the full run UUID prefix before the first model
   turn; continuation preserves edited names and reconstruction names only its

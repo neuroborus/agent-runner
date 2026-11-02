@@ -58,6 +58,12 @@ const EXPECTED_HEAD = "a".repeat(40);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
+const SESSION_NAMING = Object.freeze({
+  runId: "44444444-4444-4444-8444-444444444444",
+  project: "sample",
+  pipeline: "audit",
+  role: "auditor",
+});
 const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
 const CLAUDE_LOG_PATH = join(homedir(), ".npm/_logs");
 const executeFile = promisify(executeFileCallback);
@@ -69,6 +75,7 @@ const HELP = [
   "--include-partial-messages",
   "--mcp-config",
   "--model",
+  "-n, --name <name> Set a display name for this session",
   "--no-chrome",
   "--output-format",
   "--permission-mode",
@@ -731,24 +738,526 @@ function request(overrides = {}) {
   };
 }
 
-test("acknowledges validated Claude child identities without renaming continued sessions", async () => {
+test("names only fresh and forked Claude children, acknowledging them before the receipt", async () => {
   for (const mode of [undefined, "fork", "continue"]) {
     const created = [];
-    const fixture = createFixture();
+    const events = [];
+    const fixture = createFixture({
+      version: "2.1.316",
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          events.push("launch");
+          assert.equal(
+            option(call.argumentsList, "--name"),
+            mode === "continue"
+              ? undefined
+              : `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+          );
+          assert.equal(
+            option(call.argumentsList, "--resume"),
+            mode ? SOURCE_SESSION : undefined,
+          );
+          assert.equal(
+            call.argumentsList.includes("--fork-session"),
+            mode === "fork",
+          );
+        }
+      },
+    });
     const response = await fixture.adapter.run(
       request({
         ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
-        sessionNaming: {
-          runId: "11111111-1111-4111-8111-111111111111",
-          project: "sample",
-          pipeline: "audit",
-          role: "auditor",
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => {
+          events.push("acknowledged");
+          created.push(id);
         },
-        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async ({ status }) => events.push(status),
       }),
     );
     assert.deepEqual(created, mode === "continue" ? [] : [response.sessionId]);
+    assert.deepEqual(
+      events,
+      mode === "continue" ? ["launch"] : ["launch", "acknowledged", "named"],
+    );
   }
+});
+
+test("Claude names bound Unicode descriptions without truncating the Runner UUID", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(
+    request({
+      sessionNaming: { ...SESSION_NAMING, project: "🌱".repeat(128) },
+      onSessionCreated: async () => {},
+    }),
+  );
+  const name = option(turnCalls(fixture)[0].argumentsList, "--name");
+  assert.equal(name, `[${SESSION_NAMING.runId}] ${"🌱".repeat(128)}`);
+  assert.equal([...name].length, 167);
+});
+
+test("Claude rejects naming without acknowledgement before probing", async () => {
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.adapter.run(request({ sessionNaming: SESSION_NAMING })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  assert.deepEqual(fixture.calls, []);
+});
+
+test("unsupported Claude naming pauses before launch and preserves unused source authority", async () => {
+  for (const advertised of [
+    "",
+    "--namespace <value>",
+    "Example: use --name <name>",
+  ]) {
+    for (const mode of [undefined, "fork"]) {
+      const fixture = createFixture({
+        help: HELP.replace(/-n, --name[^\n]*/u, advertised),
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            sessionNaming: SESSION_NAMING,
+            ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+            onSessionCreated: () => assert.fail("No child exists"),
+            onSessionNaming: () =>
+              assert.fail("No child can receive a receipt"),
+          }),
+        ),
+        (cause) => {
+          assert.equal(cause.code, "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING");
+          const failure = normalizeAdapterFailure("claude", cause);
+          assert.equal(failure.recoverable, true);
+          assert.deepEqual(failure.launchRecovery, {
+            failureClass: "capability_unavailable",
+            checkpoint: "initialize",
+          });
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 0);
+      assert.equal(
+        fixture.calls.some(
+          ({ file, argumentsList }) =>
+            file === "git" && argumentsList[1] === PROJECT_PATH,
+        ),
+        false,
+      );
+    }
+  }
+  const fixture = createFixture({
+    help: HELP.replace(/-n, --name[^\n]*/u, ""),
+  });
+  await fixture.adapter.run(
+    request({
+      session: { mode: "continue", id: SOURCE_SESSION },
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: () => assert.fail("Continuation creates no child"),
+    }),
+  );
+  assert.equal(
+    option(turnCalls(fixture)[0].argumentsList, "--name"),
+    undefined,
+  );
+});
+
+test("Claude fresh reconstruction names its new child while compaction preserves the existing name", async () => {
+  for (const failure of ["missing", "context"]) {
+    const events = [];
+    const fixture = createFixture({
+      handle({ call, turnIndex }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        if (turnIndex === 0)
+          return {
+            stdout: JSON.stringify(
+              result({
+                error: true,
+                sessionId: SOURCE_SESSION,
+                output:
+                  failure === "missing"
+                    ? "No conversation found."
+                    : "Context window exceeded.",
+              }),
+            ),
+            stderr: "",
+          };
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        session: { mode: "continue", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => events.push(id),
+        onSessionNaming: async ({ status }) => events.push(status),
+      }),
+    );
+    const turns = turnCalls(fixture);
+    assert.equal(turns.length, 2);
+    assert.equal(option(turns[0].argumentsList, "--name"), undefined);
+    assert.equal(
+      option(turns[1].argumentsList, "--name"),
+      failure === "missing"
+        ? `[${SESSION_NAMING.runId}] sample / audit / auditor`
+        : undefined,
+    );
+    assert.deepEqual(
+      events,
+      failure === "missing" ? [FRESH_SESSION, "named"] : [],
+    );
+    assert.equal(
+      response.sessionId,
+      failure === "missing" ? FRESH_SESSION : SOURCE_SESSION,
+    );
+  }
+});
+
+test("Claude cannot reserve fresh reconstruction when naming is unsupported", async () => {
+  for (const contextFull of [false, true]) {
+    const fixture = createFixture({
+      help: HELP.replace(/-n, --name[^\n]*/u, ""),
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p"))
+          return {
+            stdout: JSON.stringify(
+              result({
+                error: true,
+                sessionId: SOURCE_SESSION,
+                output: contextFull
+                  ? "Context window exceeded."
+                  : "No conversation found.",
+              }),
+            ),
+            stderr: "",
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { mode: "continue", id: SOURCE_SESSION },
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: async () => {},
+          onFreshSession: () =>
+            assert.fail("Unsupported metadata cannot reserve reconstruction"),
+        }),
+      ),
+      (cause) => {
+        assert.equal(cause.code, "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING");
+        const failure = normalizeAdapterFailure("claude", cause);
+        assert.equal(failure.failure.effect, "possible");
+        assert.equal(failure.launchRecovery, undefined);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, contextFull ? 2 : 1);
+  }
+});
+
+test("Claude metadata rejection retains verified children and never retries the launch or commit", async () => {
+  for (const access of ["read-only", "workspace-write", "local-commit"])
+    for (const mode of [undefined, "fork"])
+      for (const streamed of [false, true]) {
+        const events = [];
+        const observations = [];
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (streamed) {
+              call.options.onStdout(
+                `${JSON.stringify({ type: "system", subtype: "init", session_id: CHILD_SESSION })}\n`,
+              );
+              throw Object.assign(new Error("controlled metadata failure"), {
+                stdout: "",
+                stderr:
+                  "Error: Failed to set session name. DO_NOT_RETAIN_NATIVE_METADATA",
+              });
+            }
+            throw processFailure(
+              result({
+                error: true,
+                sessionId: CHILD_SESSION,
+                output:
+                  "Failed to set session name. DO_NOT_RETAIN_NATIVE_METADATA",
+              }),
+            );
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              sessionNaming: SESSION_NAMING,
+              ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "test(scope): verify readiness",
+                    },
+                    onCommitExecution: () =>
+                      assert.fail("Naming cannot commit"),
+                  }
+                : {}),
+              onSessionCreated: async (id) => events.push(id),
+              onSessionNaming: async (value) => events.push(value),
+              onObservation: (value) => observations.push(value),
+              onFreshSession: () => assert.fail("Naming cannot reconstruct"),
+            }),
+          ),
+          (cause) => {
+            assert.equal(cause.code, "ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE");
+            const failure = normalizeAdapterFailure("claude", cause);
+            assert.equal(failure.recoverable, true);
+            assert.equal(failure.launchRecovery, undefined);
+            assert.equal(failure.failure.availabilityReason, undefined);
+            if (access === "local-commit")
+              assert.equal(cause.effectStarted, false);
+            assert.doesNotMatch(
+              JSON.stringify(failure),
+              /DO_NOT_RETAIN|22222222/u,
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(events, [CHILD_SESSION, { status: "rejected" }]);
+        assert.equal(turnCalls(fixture).length, 1);
+        assert.equal(observations.length, 1);
+        assert.equal(observations[0].attempt, 1);
+        assert.equal(observations[0].commandCompletions, 0);
+        assert.equal(observations[0].compactions, 0);
+      }
+});
+
+test("a validated Claude naming failure retains its child despite unrelated initialization frames", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      for (const session_id of [CHILD_SESSION, FRESH_SESSION])
+        call.options.onStdout(
+          `${JSON.stringify({ type: "system", subtype: "init", session_id })}\n`,
+        );
+      call.options.onStdout(
+        `${JSON.stringify(
+          result({
+            error: true,
+            sessionId: CHILD_SESSION,
+            output: "Failed to set session name.",
+          }),
+        )}\n`,
+      );
+      throw processFailure();
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "fork", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => events.push(id),
+        onSessionNaming: async (value) => events.push(value),
+        onFreshSession: () =>
+          assert.fail("Metadata cannot replay the source fork"),
+      }),
+    ),
+    hasCode("ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE"),
+  );
+  assert.deepEqual(events, [CHILD_SESSION, { status: "rejected" }]);
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("Claude naming neither enrolls an unexpected identity nor trusts model output as metadata failure", async () => {
+  for (const sessionId of [SOURCE_SESSION, "not-a-session"]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p"))
+          throw processFailure(
+            result({
+              error: true,
+              sessionId,
+              output: "Failed to set session name.",
+            }),
+          );
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { mode: "fork", id: SOURCE_SESSION },
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: () =>
+            assert.fail("Unverified child cannot be acknowledged"),
+          onSessionNaming: () =>
+            assert.fail("Unverified child cannot be diagnosed"),
+        }),
+      ),
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+  }
+  const mismatched = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      for (const session_id of [CHILD_SESSION, FRESH_SESSION])
+        call.options.onStdout(
+          `${JSON.stringify({ type: "system", subtype: "init", session_id })}\n`,
+        );
+      throw Object.assign(new Error("controlled naming failure"), {
+        stdout: "",
+        stderr: "Error: Failed to set session name.",
+      });
+    },
+  });
+  await assert.rejects(
+    mismatched.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: () =>
+          assert.fail("Contradictory identity cannot be acknowledged"),
+        onSessionNaming: () =>
+          assert.fail("Contradictory identity cannot be diagnosed"),
+      }),
+    ),
+  );
+  assert.equal(turnCalls(mismatched).length, 1);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        return {
+          stdout: JSON.stringify(
+            result({ output: "Failed to set session name." }),
+          ),
+          stderr: "",
+        };
+    },
+  });
+  const diagnoses = [];
+  await fixture.adapter.run(
+    request({
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async () => {},
+      onSessionNaming: async (value) => diagnoses.push(value),
+    }),
+  );
+  assert.deepEqual(diagnoses, [{ status: "named" }]);
+});
+
+test("Claude naming preserves stronger failures and cannot reconstruct an interrupted turn", async () => {
+  for (const [kind, expected] of [
+    ["permission", "ERR_CLAUDE_PERMISSION_DENIED"],
+    ["interruption", "ERR_CLAUDE_PROCESS_INTERRUPTED"],
+    ["authentication", "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"],
+    ["usage", "ERR_CLAUDE_USAGE_LIMIT"],
+  ]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const payload = result({
+          error: true,
+          sessionId: CHILD_SESSION,
+          output: "Failed to set session name.",
+          ...(kind === "permission"
+            ? { permission_denials: [{ tool_name: "WebFetch" }] }
+            : {}),
+          ...(kind === "authentication" ? { api_error_status: 401 } : {}),
+          ...(kind === "usage" ? { api_error_status: 429 } : {}),
+        });
+        const failure = processFailure(payload);
+        if (kind === "interruption") failure.signal = "SIGTERM";
+        throw failure;
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "workspace-write",
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: async () => {},
+          onSessionNaming: async ({ status }) =>
+            assert.notEqual(status, "rejected"),
+          onFreshSession: () =>
+            assert.fail("Naming cannot reconstruct interrupted work"),
+        }),
+      ),
+      (cause) => {
+        assert.equal(cause.code, expected);
+        if (kind === "interruption") assert.equal(cause.ambiguous, true);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+  }
+});
+
+test("a failed Claude naming receipt retains the acknowledgement without fallback work", async () => {
+  const created = [];
+  const failure = new Error("controlled receipt failure");
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async () => {
+          throw failure;
+        },
+        onFreshSession: () =>
+          assert.fail("Receipt failure cannot reconstruct work"),
+      }),
+    ),
+    (cause) => cause === failure,
+  );
+  assert.deepEqual(created, [FRESH_SESSION]);
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("persistent fresh Claude context pressure names only the two created children", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ call, turnIndex }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (turnIndex < 2)
+        return {
+          stdout: JSON.stringify(
+            result({
+              error: true,
+              sessionId: CHILD_SESSION,
+              output: "Context window exceeded.",
+            }),
+          ),
+          stderr: "",
+        };
+    },
+  });
+  const response = await fixture.adapter.run(
+    request({
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async (id) => events.push(id),
+      onSessionNaming: async ({ status }) => events.push(status),
+    }),
+  );
+  const turns = turnCalls(fixture);
+  assert.deepEqual(
+    turns.map(({ argumentsList }) => option(argumentsList, "--name")),
+    [
+      `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+      undefined,
+      `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+    ],
+  );
+  assert.equal(option(turns[1].argumentsList, "--resume"), CHILD_SESSION);
+  assert.equal(option(turns[2].argumentsList, "--resume"), undefined);
+  assert.equal(response.sessionId, FRESH_SESSION);
+  assert.deepEqual(events, [
+    CHILD_SESSION,
+    "unavailable",
+    FRESH_SESSION,
+    "named",
+  ]);
 });
 
 test("acknowledges a new Claude child before compaction even when recovery fails", async () => {
@@ -763,6 +1272,12 @@ test("acknowledges a new Claude child before compaction even when recovery fails
             return undefined;
           events.push("turn");
           attempts++;
+          assert.equal(
+            option(call.argumentsList, "--name"),
+            attempts === 1 && mode !== "continue"
+              ? `[${SESSION_NAMING.runId}] sample / audit / auditor`
+              : undefined,
+          );
           if (attempts === 1) {
             const payload = result({
               error: true,
@@ -782,7 +1297,9 @@ test("acknowledges a new Claude child before compaction even when recovery fails
       const operation = fixture.adapter.run(
         request({
           ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+          sessionNaming: SESSION_NAMING,
           onSessionCreated: async (id) => events.push(id),
+          onSessionNaming: async ({ status }) => events.push(status),
         }),
       );
       if (succeeds) assert.equal((await operation).sessionId, sessionId);
@@ -794,7 +1311,9 @@ test("acknowledges a new Claude child before compaction even when recovery fails
       assert.equal(attempts, 2);
       assert.deepEqual(
         events,
-        mode === "continue" ? ["turn", "turn"] : ["turn", sessionId, "turn"],
+        mode === "continue"
+          ? ["turn", "turn"]
+          : ["turn", sessionId, "unavailable", "turn"],
       );
     }
 });
@@ -5349,8 +5868,13 @@ test(
   { skip: process.env.AGENT_RUNNER_LIVE_CLAUDE !== "1" },
   async () => {
     const adapter = createClaudeAdapter();
+    const created = [],
+      diagnoses = [];
     const response = await adapter.run(
       request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async (value) => diagnoses.push(value),
         prompt:
           "Use Bash to run `git status --short` in the current repository. " +
           "Return ok=true only when the command completes successfully.",
@@ -5359,6 +5883,8 @@ test(
     );
     assert.equal(typeof response.sessionId, "string");
     assert.equal(response.structured.ok, true);
+    assert.deepEqual(created, [response.sessionId]);
+    assert.deepEqual(diagnoses, [{ status: "named" }]);
   },
 );
 

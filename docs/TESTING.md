@@ -86,6 +86,19 @@ excludes commit-readiness children from Worker reuse and bounds concurrent diagn
 These checks add no retrospective naming or native acceptance claim. Existing
 common and custom-execution slow assignments remain unchanged.
 
+Claude's model-free fixtures cover the same full UUID and Unicode bound, exact
+`--name` support, fresh/fork/continuation arguments, fresh reconstruction,
+unchanged compaction and source lineage, acknowledgement before bounded receipts,
+and metadata rejection with either a validated result or stream initialization.
+They reject replacement launches and constrained commit effects after metadata
+failure, and preserve permission, interruption and accounting boundaries.
+Installed Claude Code 2.1.316 help advertises `-n, --name <name>`; help inspection
+is not a live naming acceptance claim. Both provider smoke tests remain opt-in.
+The shared context matrix retains every registered pipeline/mode and active role
+on both providers, excluding inactive roles. Common slow coverage, exact package
+installation and Agent custom-execution assignments remain required; no predecessor
+gate evidence satisfies the final feature's current validation.
+
 Fast `test/update.test.js` owns on-demand official identity gating, version
 ordering and explicit prereleases, no-update success, Node/configuration/state
 compatibility, registry/permission failure redaction and body bounds. Registry

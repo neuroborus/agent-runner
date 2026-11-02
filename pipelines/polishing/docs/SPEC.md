@@ -493,8 +493,9 @@ fork its complete context more than once.
 
 Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
 The creation acknowledgement records a verified new child at this pipeline's
-existing logical context key before optional metadata work; the eventual response
-does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+existing logical context key before a naming diagnosis or metadata failure is
+returned; the eventual response does not record it twice. Naming diagnoses grant
+no retry, source fork, replacement,
 owner cycle or workflow/effect authority. Continuation preserves historical sessions.
 
 Each direct child session is persisted with a key over its accepted inputs and

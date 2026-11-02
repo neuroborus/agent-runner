@@ -3200,10 +3200,22 @@ bounded diagnosis and pauses without adapter reconstruction. This failure carrie
 no availability retry reason or unused source-fork proof, and commit readiness
 still proves its executor has not started. Existing pipeline recovery owns resume.
 
+Both adapters build the same bounded title through the private adapter contract.
+Claude's native `--name` belongs to its original fresh/forked CLI launch, after
+an exact installed-help flag check, and is omitted for ordinary continuation or
+compaction. Unsupported naming before the first launch carries proof that
+initialization did not start; later recovery retains any earlier effect
+uncertainty. Native metadata rejection retains a positively correlated
+stream initialization identity or validated child result before surfacing its
+bounded diagnosis; it cannot trigger fallback launch, reconstruction or a Git
+effect. The stream exposes only the verified identity, never a transcript or
+title. This adds no persistent schema, migration, provider bound or session-store
+inspection. Codex's acknowledgement-before-RPC ordering remains unchanged.
+
 Every pipeline supplies the creation acknowledgement at its existing logical
 session key, including audit cycles and commit readiness. It records the child
-before optional naming can fail, then accepts the same acknowledged response
-without recording it twice. Existing source-fork, continuation and reconstruction
+before a naming diagnosis or metadata failure reaches the workflow, then accepts
+the same acknowledged response without recording it twice. Existing source-fork, continuation and reconstruction
 selection remains authoritative. Old sessions are never enrolled by continuation.
 Acknowledged children retain consumed source-fork authority across no-turn-effect
 and ambiguous failures. The first continued request after authentication,

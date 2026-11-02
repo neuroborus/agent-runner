@@ -162,8 +162,9 @@ Inactive roles receive no request or naming context.
 
 The awaited `onSessionCreated(sessionId)` acknowledgement preserves each verified
 new child under the execution lease and its pipeline-owned context key. It must
-finish before optional naming work. Ordinary continuation has no creation
-acknowledgement and cannot retroactively name an existing session. Fresh native
+finish before a naming diagnosis or metadata failure is returned. Ordinary
+continuation has no creation acknowledgement and cannot retroactively name an
+existing session. Fresh native
 reconstruction retains the same Runner context and acknowledges its new child.
 Codex acknowledges after verified thread selection, before model work; Claude
 acknowledges validated child results, including recoverable error results, before
@@ -201,6 +202,28 @@ trigger adapter reconstruction, another source fork or a constrained Git effect.
 There is no naming retry or retrospective rename. Capability/version bounds and
 client attribution remain unchanged; older unsupported RPCs are optional metadata
 failures rather than authority to replace a session. Live naming smoke remains opt-in.
+
+Claude uses the documented [CLI `--name` flag](https://code.claude.com/docs/en/cli-reference)
+with the same full UUID prefix and bounded description as Codex. Fresh launches,
+`--resume <source> --fork-session` children and fresh reconstruction include the
+flag; ordinary `--resume <child>` continuation and in-session compaction omit it.
+The adapter never derives a name from an existing title or edits session storage.
+It checks the installed help's exact flag before a new-child launch. Unsupported
+naming pauses before launch; proof that its first launch did not start preserves
+any unused source fork, and no fresh-reconstruction allowance is consumed for naming.
+If an earlier continuation already ran, its effect uncertainty is preserved.
+
+Claude applies the name within its original CLI process, so creation cannot be
+acknowledged before that process starts. Validated results acknowledge the child
+before the naming receipt. A recognized native naming rejection also retains a
+verified initialization identity when no result arrives, then returns only a
+bounded diagnosis and recoverable pause. It never retries without the flag,
+forks again or replays a turn or constrained effect to repair a title. Permission
+and interruption failures keep their stronger safety semantics. Ordinary context
+recovery remains separate and never renames its continued session. Existing
+histories receive no migration or retrospective naming. Installed help inspection
+and model-free fixtures establish local compatibility, not opt-in live-provider
+or additional-platform acceptance.
 
 Native sessions are disposable execution context, never durable workflow
 state. Every turn has a complete recovery prompt reconstructed from persisted

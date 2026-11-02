@@ -1166,13 +1166,15 @@ Execution can use only capabilities frozen at run creation.
 
 Runner supplies active adapters with the full run UUID and bounded project,
 pipeline and role descriptions, separately from client attribution. A verified
-new child can be durably acknowledged before optional naming metadata is handled;
-bounded naming diagnoses never authorize another turn or source fork. This shared
-context lets Codex name a verified new child `[<full run UUID>] <description>`
-after acknowledgement and before its first model turn, including reconstruction.
-Ordinary continuation preserves user-edited names. A rejected metadata request
-does not replay work; an unusable naming transport retains the child and pauses
-the original request. Claude still carries the shared context without native naming.
+new child is durably acknowledged before its naming diagnosis is returned;
+bounded naming diagnoses never authorize another turn or source fork. Both
+providers use `[<full run UUID>] <description>` for new children, including
+reconstruction. Codex names after acknowledgement and before its first model
+turn. Claude passes the documented `--name` at fresh or forked launch, checks
+installed flag support first, and retains a verified child before reporting a
+metadata failure. Ordinary continuation preserves user-edited names. A rejected
+Codex metadata RPC can continue the original turn; a rejected Claude launch or
+unusable Codex naming transport pauses without replay or fallback launch.
 See the [session contract](docs/product/PROVIDER_MODEL.md#sessions-and-context).
 
 Backend sessions are disposable. When a native context is full, the adapter

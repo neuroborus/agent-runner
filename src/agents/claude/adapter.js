@@ -16,6 +16,7 @@ import {
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  sessionName,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { allocateClaudeStorage, environmentError } from "./storage.js";
@@ -213,6 +214,8 @@ const CONFIGURATION_ERROR_PATTERN =
   /(?:configuration|config(?:uration)? directory|profile|model)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied|unsupported)/iu;
 const EFFORT_ERROR_PATTERN =
   /\beffort\b[^\n]{0,160}(?:not supported|unsupported|invalid|not available|only supported|must be|not allowed)|(?:unsupported|invalid|unknown|does not support)[^\n]{0,160}\beffort\b/iu;
+const NAMING_ERROR_PATTERN =
+  /^(?:error: )?(?:unknown option ['"]--name['"]|option ['"](?:-n, )?--name <name>['"] argument missing|(?:failed|unable) to (?:set|save) (?:the )?session name(?:[.:]|$))/imu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
   /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
   /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
@@ -761,6 +764,8 @@ function commandArguments(
       argumentsList.push("--fork-session");
     }
   }
+  if (request.sessionNaming !== undefined && session?.mode !== "continue")
+    argumentsList.push("--name", sessionName(request.sessionNaming));
   if (
     argumentsList.some(
       (argument) => Buffer.byteLength(argument) > MAX_ARGUMENT_BYTES,
@@ -1253,6 +1258,7 @@ export function createClaudeAdapter(options = {}) {
   const directoryIsolationPolicies = new Map();
   let isolationPolicies;
   let supportedEfforts = new Set();
+  let namingSupported = false;
 
   async function inspectCapabilities(directoryAccess) {
     let versionResult;
@@ -1295,6 +1301,7 @@ export function createClaudeAdapter(options = {}) {
     const version = parseVersion(processOutput(versionResult.stdout).trim());
     const help =
       processOutput(helpResult.stdout) + processOutput(helpResult.stderr);
+    namingSupported = /^[ \t]*(?:-n,[ \t]+)?--name(?:[ \t]|$)/mu.test(help);
     const cliSupported =
       versionAtLeast(version, MINIMUM_CLAUDE_VERSION) &&
       REQUIRED_HELP_FLAGS.every((flag) => help.includes(flag));
@@ -1598,13 +1605,52 @@ export function createClaudeAdapter(options = {}) {
       observations,
       selectedSession,
     );
-    async function acknowledgeChild(sessionId) {
+    let acknowledgedChild;
+    async function acknowledgeChild(sessionId, status) {
       if (
         sessionId !== undefined &&
         selectedSession?.mode !== "continue" &&
-        sessionId !== selectedSession?.id
-      )
+        sessionId !== selectedSession?.id &&
+        sessionId !== acknowledgedChild
+      ) {
         await request.onSessionCreated?.(sessionId);
+        acknowledgedChild = sessionId;
+        if (request.sessionNaming !== undefined)
+          await request.onSessionNaming?.({ status });
+      }
+    }
+    async function rejectNaming(payload, standardError) {
+      if (
+        request.sessionNaming === undefined ||
+        selectedSession?.mode === "continue" ||
+        (payload !== null &&
+          (!isClaudeErrorResult(payload) ||
+            payload.permission_denials?.length ||
+            payload.api_error_status !== undefined ||
+            !["success", "error_during_execution"].includes(
+              payload.subtype,
+            ))) ||
+        !NAMING_ERROR_PATTERN.test(
+          `${standardError}\n${diagnosticText(payload)}`.slice(
+            0,
+            MAX_DIAGNOSTIC_INPUT_LENGTH,
+          ),
+        )
+      )
+        return;
+      if (payload !== null) stream.assertValid();
+      await acknowledgeChild(
+        payload === null ? stream.sessionId : payloadSessionId(payload),
+        "rejected",
+      );
+      throw new ClaudeAdapterError(
+        "Claude session naming requires request recovery.",
+        {
+          code: "ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE",
+          diagnosticClass: "backend_unavailable",
+          recoverable: true,
+        },
+      );
     }
     let processRetired = true;
     let primaryError;
@@ -1693,6 +1739,7 @@ export function createClaudeAdapter(options = {}) {
         }
         const standardOutput = processOutput(cause?.stdout);
         const payload = stream.finish(standardOutput);
+        await rejectNaming(payload, standardError);
         if (payload === null) {
           if (stream.hasRecords) stream.assertValid();
           const reportedError = outputError(
@@ -1728,7 +1775,7 @@ export function createClaudeAdapter(options = {}) {
           });
         }
         stream.assertValid();
-        await acknowledgeChild(sessionId);
+        await acknowledgeChild(sessionId, "unavailable");
         throw outputError(payload, request, selectedSession);
       }
       if (
@@ -1746,13 +1793,14 @@ export function createClaudeAdapter(options = {}) {
         );
       }
       const payload = stream.finish(processOutput(processResult.stdout));
+      await rejectNaming(payload, processOutput(processResult.stderr));
       if (
         !Array.isArray(payload?.permission_denials) ||
         payload.permission_denials.length === 0
       )
         stream.assertValid();
       if (isClaudeErrorResult(payload) && !payload.permission_denials?.length)
-        await acknowledgeChild(payloadSessionId(payload));
+        await acknowledgeChild(payloadSessionId(payload), "unavailable");
       const result = normalizeResult(payload, request, selectedSession);
       if (
         selectedSession?.mode === "fork" &&
@@ -1771,7 +1819,7 @@ export function createClaudeAdapter(options = {}) {
           { code: "ERR_CLAUDE_PROTOCOL" },
         );
       }
-      await acknowledgeChild(result.sessionId);
+      await acknowledgeChild(result.sessionId, "named");
       return result;
     } catch (cause) {
       primaryError = cause;
@@ -1871,6 +1919,16 @@ export function createClaudeAdapter(options = {}) {
   async function run(value) {
     const normalized = normalizeRequest(value);
     if (
+      normalized.sessionNaming !== undefined &&
+      normalized.onSessionCreated === undefined
+    )
+      throw new ClaudeAdapterError(
+        "Session naming requires child acknowledgement.",
+        {
+          code: "ERR_INVALID_CLAUDE_OPTIONS",
+        },
+      );
+    if (
       normalized.readPaths !== undefined &&
       !(await canReadFiles(normalized.readPaths))
     ) {
@@ -1893,7 +1951,36 @@ export function createClaudeAdapter(options = {}) {
           });
     let attempt = 0;
     const settlement = { directoryVerified: false };
+    function assertNamingSupported(session) {
+      request.signal?.throwIfAborted();
+      if (
+        request.sessionNaming !== undefined &&
+        session?.mode !== "continue" &&
+        !namingSupported
+      ) {
+        const cause = new ClaudeAdapterError(
+          "Installed Claude CLI does not support session naming.",
+          {
+            code: "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING",
+            diagnosticClass: "capability_unavailable",
+            recoverable: true,
+          },
+        );
+        if (attempt === 0)
+          cause.failure = buildClaudeFailure({
+            failureClass: "capability_unavailable",
+            checkpoint: "initialize",
+            outcome: "not_started",
+            effect: "none",
+            retry: "transient",
+          });
+        throw cause;
+      }
+    }
     const observedAttempt = (options = {}) => {
+      assertNamingSupported(
+        options.session === undefined ? request.session : options.session,
+      );
       settlement.directoryVerified = false;
       return runAttempt(request, {
         ...options,
@@ -2022,6 +2109,7 @@ export function createClaudeAdapter(options = {}) {
             }
           }
         }
+        assertNamingSupported(null);
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
         result = await observedAttempt({
@@ -2032,6 +2120,7 @@ export function createClaudeAdapter(options = {}) {
         cause.code === "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE" &&
         request.session?.mode === "continue"
       ) {
+        assertNamingSupported(null);
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
         result = await observedAttempt({

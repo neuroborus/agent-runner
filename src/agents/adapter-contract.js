@@ -310,6 +310,16 @@ export function normalizeSessionNamingContext(value) {
   });
 }
 
+export function sessionName(context) {
+  if (context === undefined) return undefined;
+  const { runId, project, pipeline, role } = context;
+  const description = [...`${project} / ${pipeline} / ${role}`]
+    .slice(0, 128)
+    .join("")
+    .trim();
+  return `[${runId}] ${description}`;
+}
+
 export function normalizeSessionNamingDiagnostic(value) {
   if (
     !isRecord(value) ||

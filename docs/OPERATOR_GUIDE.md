@@ -621,6 +621,18 @@ original native-platform proof of concept nor those later implementations.
 
 ## 5. Recover a pause without taking over the work
 
+New native sessions use `[<full Runner run UUID>] <bounded description>` on both
+providers. Codex names only a verified, durably acknowledged new child; Claude
+uses `--name` on its original fresh or forked launch after checking flag support.
+Continuation and compaction preserve existing names, including user edits. Do
+not rename historical sessions, edit native session storage or relaunch work to
+repair a title. A metadata pause retains any verified child and the original
+request; resolve provider compatibility and explicitly resume that request.
+Naming grants no turn, source-fork, commit or handoff replay. Model-free flag/schema
+inspection and local fixtures do not establish opt-in live-provider or additional
+platform acceptance. Publication remains intentionally disabled until its separate
+identity, approval and public-verification gates pass.
+
 Some short runner bounds deliberately remain fixed. Each model-free subprocess
 used to prove CLI availability, sandbox support, commit-executor isolation, or
 process containment has a 10-second deadline. A local-commit probe has a

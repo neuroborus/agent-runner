@@ -24,6 +24,7 @@ export function createClaudeStream(
   const commands = new Set();
   const tasks = new Set();
   let sessionId;
+  let identityUncertain = false;
   let messageId;
   let buffer = "";
   let bytes = 0;
@@ -63,6 +64,9 @@ export function createClaudeStream(
       } else if (sessionId === undefined) {
         sessionId = record.session_id;
         if (!invalid) progress.semantic();
+      } else if (sessionId !== record.session_id) {
+        // Keep ordinary progress handling, but do not infer a new child's ID.
+        identityUncertain = true;
       }
       return;
     }
@@ -272,6 +276,16 @@ export function createClaudeStream(
   }
 
   return Object.freeze({
+    get sessionId() {
+      const id = sessionId ?? payload?.session_id;
+      return !invalid &&
+        !identityUncertain &&
+        SESSION_ID.test(id ?? "") &&
+        (selectedSession?.mode !== "continue" || id === selectedSession.id) &&
+        (selectedSession?.mode !== "fork" || id !== selectedSession.id)
+        ? id
+        : undefined;
+    },
     get hasRecords() {
       return hasRecords;
     },

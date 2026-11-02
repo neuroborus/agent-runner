@@ -1160,8 +1160,9 @@ A request should contain only runner-level concepts such as:
 
 Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
 The creation acknowledgement records a verified new child at this pipeline's
-existing logical context key before optional metadata work; the eventual response
-does not record it twice. Naming diagnoses grant no retry, source fork, replacement,
+existing logical context key before a naming diagnosis or metadata failure is
+returned; the eventual response does not record it twice. Naming diagnoses grant
+no retry, source fork, replacement,
 owner cycle or workflow/effect authority. Continuation preserves historical sessions.
 Fresh commit-readiness children have their own context key and remain excluded
 from ordinary Worker continuation; acknowledging them grants no full-role context.
@@ -1588,6 +1589,11 @@ credential material.
 Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
 supplied source session uses `--resume <session-id> --fork-session`; persist the
 returned child ID and reject the source ID as invalid fork lineage. An
+original fresh or forked Claude launch also receives the supported `--name`
+flag from Runner context; continuation and compaction omit it. A verified child
+is retained before a bounded metadata failure is returned, without a replacement
+launch or replayed turn/commit. The [provider contract](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context)
+owns naming support, title bounds and acknowledgement timing. An
 unavailable continuation may reconstruct a fresh turn, but an unavailable fork
 source is an error. Classify source-session and continuation-session failures
 from the attempted session mode. On a fresh turn, distinguish effective-profile,

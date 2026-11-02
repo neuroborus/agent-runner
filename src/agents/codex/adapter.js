@@ -18,6 +18,7 @@ import {
   isRecord,
   isolateGitEnvironment,
   normalizeClientAttribution,
+  sessionName,
   OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
@@ -963,16 +964,11 @@ async function selectThread(client, request, fresh) {
 
 async function nameCreatedThread(client, request, threadId) {
   if (request.sessionNaming === undefined) return;
-  const { runId, project, pipeline, role } = request.sessionNaming;
-  const description = [...`${project} / ${pipeline} / ${role}`]
-    .slice(0, 128)
-    .join("")
-    .trim();
   let status = "named";
   try {
     const result = await client.request("thread/name/set", {
       threadId,
-      name: `[${runId}] ${description}`,
+      name: sessionName(request.sessionNaming),
     });
     if (!isRecord(result) || !client.usable)
       throw new Error("Session naming did not complete.");
