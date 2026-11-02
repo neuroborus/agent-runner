@@ -293,7 +293,7 @@ function publicResumeState(run) {
 
 function publicExplanation(pause, fallback) {
   if (
-    pause.reason === "internal_failure" &&
+    ["internal_failure", "commit_failed"].includes(pause.reason) &&
     typeof pause.diagnosticClass === "string" &&
     /^[a-z][a-z0-9_]{0,63}$/u.test(pause.diagnosticClass)
   ) {
@@ -1496,7 +1496,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 36,
+  stateVersion: 37,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1556,6 +1556,8 @@ export const planExecutionPipeline = Object.freeze({
     },
     // Preserve existing path/fallback decisions and consumed-effect evidence.
     35: (run) => Object.freeze({ ...run.pipelineState }),
+    // Older rejections and pauses carry no adapter class. Never infer one.
+    36: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

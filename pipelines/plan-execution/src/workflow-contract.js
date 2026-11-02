@@ -223,6 +223,12 @@ const ADAPTER_FAILURE_FIELDS = Object.freeze([
   ...LEGACY_OUTPUT_FAILURE_FIELDS,
   "diagnosticClass",
 ]);
+const COMMIT_REJECTION_DIAGNOSTIC_FIELDS = Object.freeze([
+  "reason",
+  "code",
+  "resumeState",
+  "diagnosticClass",
+]);
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const OUTPUT_DIAGNOSTIC_VALUE_PATTERN = /^[a-zA-Z0-9_.[\]-]{1,128}$/u;
 const BOOTSTRAP_CORRECTION_FIELDS = Object.freeze(["attempt", "diagnostics"]);
@@ -4048,6 +4054,9 @@ function normalizePendingCommit(value) {
     const hasOutputExhaustion =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "outputExhaustion");
+    const hasDiagnosticClass =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "diagnosticClass");
     assertExactFields(
       value.preEffectRejection,
       [
@@ -4056,6 +4065,7 @@ function normalizePendingCommit(value) {
         ...(hasAvailability ? ["availability"] : []),
         ...(hasAuthentication ? ["authentication"] : []),
         ...(hasOutputExhaustion ? ["outputExhaustion"] : []),
+        ...(hasDiagnosticClass ? ["diagnosticClass"] : []),
       ],
       "Plan-execution pre-effect rejection",
     );
@@ -4063,8 +4073,14 @@ function normalizePendingCommit(value) {
       value.status !== "consumed" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
       typeof value.preEffectRejection.recoverable !== "boolean" ||
-      [hasAvailability, hasAuthentication, hasOutputExhaustion].filter(Boolean)
-        .length > 1
+      (hasDiagnosticClass &&
+        !isAdapterDiagnosticClass(value.preEffectRejection.diagnosticClass)) ||
+      [
+        hasAvailability,
+        hasAuthentication,
+        hasOutputExhaustion,
+        hasDiagnosticClass,
+      ].filter(Boolean).length > 1
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -5858,7 +5874,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 36 ||
+    run.pipelineStateVersion !== 37 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6050,14 +6066,24 @@ export function assertRun(run) {
     state.workflowState === "FAILED" &&
     run.pause?.reason === "internal_failure" &&
     !outputFailure;
+  const commitRejection =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "commit_failed" &&
+    run.pause.resumeState === "COMMIT" &&
+    state.pendingCommit === null;
   const hasAdapterDiagnostic = Object.hasOwn(
     run.pause ?? {},
     "diagnosticClass",
   );
   if (
     (hasAdapterDiagnostic &&
-      (!adapterFailure ||
-        !hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) ||
+      (!(adapterFailure || commitRejection) ||
+        !hasExactFields(
+          run.pause,
+          adapterFailure
+            ? ADAPTER_FAILURE_FIELDS
+            : COMMIT_REJECTION_DIAGNOSTIC_FIELDS,
+        ) ||
         !isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
     (adapterFailure &&
       !hasExactFields(

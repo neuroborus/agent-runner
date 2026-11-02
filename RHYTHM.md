@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Codex local-commit refusals name their rule through `commit_failed`.**
+  `ERR_CODEX_LOCAL_COMMIT_POLICY` used one class for a reported file change, a
+  forbidden Git command and a missing or invalid readiness confirmation, and
+  the pre-effect commit path then dropped even that class. The adapter now emits
+  `operation_local_commit_file_change`, `operation_local_commit_git_operation`
+  or `operation_local_commit_confirmation`. Plan execution persists the class
+  beside an unproven pre-effect rejection and carries it into the retired
+  `commit_failed` pause, its activity and its public explanation. The classes
+  are distinct, bounded and redacted: no command, path, output or native
+  message. A refused turn is not evidence that the policy is wrong; a reported
+  run later completed with an ordinary retry, so the policy and one-shot commit
+  authority are unchanged. Historical `operation_local_commit` records and
+  class-free version-36 state remain valid.
+
 - **MCP waits end when the execution owner is positively lost.** An owner can
   die without publishing a revision or touching its lease, so a held `run_wait`
   stayed open while a fresh `run_status` already reported `interrupted`. Waits

@@ -951,7 +951,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 36);
+  assert.equal(planExecutionPipeline.stateVersion, 37);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -959,6 +959,97 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   });
   assert.deepEqual(authenticationMigration, current);
   assert.ok(Object.isFrozen(authenticationMigration));
+});
+
+test("version 36 pre-effect commit records migrate unchanged and classes stay bounded", async (t) => {
+  let rejectCommit = true;
+  let interruptVerification = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Git verification was interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit" && rejectCommit) {
+        rejectCommit = false;
+        throw Object.assign(new Error("The adapter rejected the commit."), {
+          code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+          effectStarted: false,
+        });
+      }
+    },
+  });
+  const { validateRun } = planExecutionPipeline.workflow;
+  const invalidState = { code: "ERR_INVALID_PLAN_EXECUTION_STATE" };
+  const consumed = await fixture.run();
+  const retired = await fixture.run();
+
+  assert.deepEqual(consumed.pipelineState.pendingCommit.preEffectRejection, {
+    code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+    recoverable: false,
+  });
+  assert.equal(retired.pause.reason, "commit_failed");
+  for (const run of [consumed, retired]) {
+    const migrated = planExecutionPipeline.migrations[36](run);
+    assert.deepEqual(migrated, run.pipelineState);
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => validateRun({ ...run, pipelineState: migrated }));
+  }
+
+  const classed = structuredClone(consumed);
+  classed.pipelineState.pendingCommit.preEffectRejection.diagnosticClass =
+    "operation_local_commit_file_change";
+  assert.doesNotThrow(() => validateRun(classed));
+  for (const diagnosticClass of ["native provider value", 7]) {
+    const invalid = structuredClone(classed);
+    invalid.pipelineState.pendingCommit.preEffectRejection.diagnosticClass =
+      diagnosticClass;
+    assert.throws(() => validateRun(invalid), invalidState);
+  }
+  const withProof = structuredClone(classed);
+  Object.assign(withProof.pipelineState.pendingCommit.preEffectRejection, {
+    code: "ERR_AUTHENTICATION_REQUIRED",
+    authentication: {
+      disposition: "authentication_required",
+      commitExecutor: "not_started",
+    },
+  });
+  assert.throws(() => validateRun(withProof), invalidState);
+
+  assert.doesNotThrow(() =>
+    validateRun({
+      ...retired,
+      pause: {
+        ...retired.pause,
+        diagnosticClass: "operation_local_commit_confirmation",
+      },
+    }),
+  );
+  for (const pause of [
+    { ...retired.pause, diagnosticClass: "native provider value" },
+    {
+      ...retired.pause,
+      reason: "backend_unavailable",
+      diagnosticClass: "operation_local_commit_confirmation",
+    },
+  ]) {
+    assert.throws(() => validateRun({ ...retired, pause }), invalidState);
+  }
+  assert.throws(
+    () =>
+      validateRun({
+        ...consumed,
+        pause: {
+          ...consumed.pause,
+          diagnosticClass: "operation_local_commit_confirmation",
+        },
+      }),
+    invalidState,
+  );
 });
 
 test("version 21 migration preserves terminal proof", async (t) => {

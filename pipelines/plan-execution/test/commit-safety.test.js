@@ -395,6 +395,78 @@ test("persists authentication proof before retiring a commit authorization", asy
   );
 });
 
+test("carries a pre-effect Codex policy class into the commit pause", async (t) => {
+  let rejectCommit = true;
+  let interruptVerification = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Git verification was interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit" && rejectCommit) {
+        rejectCommit = false;
+        throw normalizeAdapterFailure(
+          "codex",
+          Object.assign(new Error("provider-native policy secret"), {
+            code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+            diagnosticClass: "operation_local_commit_git_operation",
+            effectStarted: false,
+          }),
+        );
+      }
+    },
+  });
+
+  const verificationPaused = await fixture.run();
+
+  assert.equal(verificationPaused.pause.reason, "commit_failed");
+  assert.deepEqual(
+    verificationPaused.pipelineState.pendingCommit.preEffectRejection,
+    {
+      code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+      recoverable: false,
+      diagnosticClass: "operation_local_commit_git_operation",
+    },
+  );
+
+  const paused = await fixture.run();
+
+  assert.deepEqual(paused.pause, {
+    reason: "commit_failed",
+    code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
+    resumeState: "COMMIT",
+    diagnosticClass: "operation_local_commit_git_operation",
+  });
+  assert.equal(paused.pipelineState.pendingCommit, null);
+  assert.doesNotThrow(() => planExecutionPipeline.workflow.validateRun(paused));
+  assert.match(
+    planExecutionPipeline.projections.pause(paused).explanation,
+    / Adapter diagnostic: operation_local_commit_git_operation\.$/u,
+  );
+  assert.equal(
+    fixture.transitions.findLast(
+      ({ options }) => options?.activity?.kind === "authorization-retired",
+    ).options.activity.message,
+    "Commit authorization retired before effect: commit_failed (operation_local_commit_git_operation).",
+  );
+  assert.doesNotMatch(JSON.stringify(fixture.transitions), /policy secret/u);
+
+  const completed = await fixture.run();
+
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ access }) => access === "local-commit")
+      .map(({ authorizationId }) => authorizationId),
+    ["commit-1", "commit-2"],
+  );
+});
+
 test("re-authorizes after a proven pre-effect Codex overload rejection", async (t) => {
   let backendUnavailable = true;
   const fixture = await createFixture(t, {

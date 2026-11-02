@@ -245,8 +245,10 @@ function completeRolePrompt(prompt) {
 }
 
 function adapterDiagnosticClass(cause) {
-  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
-    ? cause.diagnosticClass
+  const diagnosticClass = cause?.diagnosticClass;
+  return typeof diagnosticClass === "string" &&
+    ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(diagnosticClass)
+    ? diagnosticClass
     : undefined;
 }
 
@@ -1033,6 +1035,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         : rejection.recoverable
           ? "backend_unavailable"
           : "commit_failed";
+    const diagnosticClass =
+      reason === "commit_failed" ? rejection.diagnosticClass : undefined;
     dispositionPausePersistence = outputExhausted || authenticationRequired;
     await transition(
       {
@@ -1052,12 +1056,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
           ...(outputExhausted
             ? { role: "worker", checkpoint: `commit:${state().currentStep}` }
             : {}),
+          ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
         },
         publicActivity: activity(
           "runner",
           "commit",
           "authorization-retired",
-          `Commit authorization retired before effect: ${reason}.`,
+          diagnosticClass === undefined
+            ? `Commit authorization retired before effect: ${reason}.`
+            : `Commit authorization retired before effect: ${reason} (${diagnosticClass}).`,
         ),
       },
     );
@@ -7636,6 +7643,12 @@ ${step.subject}`),
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
       const outputExhaustion = runtime.outputExhaustion?.preEffect(agentError);
+      const diagnosticClass =
+        availability == null &&
+        authentication == null &&
+        outputExhaustion == null
+          ? adapterDiagnosticClass(agentError)
+          : undefined;
       const preEffectRejection =
         agentError?.effectStarted === false &&
         (runtime.outputExhaustion?.eligible(agentError) !== true ||
@@ -7651,6 +7664,7 @@ ${step.subject}`),
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
               ...(outputExhaustion == null ? {} : { outputExhaustion }),
+              ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
             })
           : null;
       pendingCommit = {

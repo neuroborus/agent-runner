@@ -815,7 +815,8 @@ Persist at least:
   source-fork marker;
 - escalation reason when paused;
 - an optional finite adapter diagnostic class normalized by the root boundary
-  for any terminal role turn, without native provider data.
+  for any terminal role turn or retired pre-effect `commit_failed` pause,
+  without native provider data.
 
 The common envelope also persists an optional opaque source-session reference,
 its resolved trusted profile when known, and every direct Worker, Reviewer, or
@@ -853,6 +854,13 @@ pending commit. The record contains only a bounded diagnostic code and whether
 the rejection is recoverable. Its version-2 migration sets the record to
 `null`, retaining every legacy consumed authorization on the verification-only
 path rather than inventing proof.
+
+Pipeline state version 37 lets that record carry an optional bounded adapter
+`diagnosticClass` when no availability, authentication, or output-exhaustion
+proof applies; the class and a proof are mutually exclusive. A retired
+`commit_failed` pause resuming at `COMMIT` may carry the same class. Its
+version-36 identity migration keeps records without a class valid and never
+infers one; older runtimes refuse version-37 state rather than drop the class.
 
 Pipeline state version 4 adds the bounded bootstrap-correction ledger. Its
 version-3 migration initializes an empty ledger without changing accepted
@@ -3711,7 +3719,10 @@ If no commit is created, pause with `commit_failed`. If the adapter also proved
 `effectStarted: false`, persist its bounded rejection metadata before Git
 verification and durably retire the consumed authorization only after that
 verification reports no commit. A non-recoverable policy rejection remains
-`commit_failed`; a recoverable provider rejection remains
+`commit_failed`; its bounded adapter diagnostic class, when present, is copied
+into that pause, named by the authorization-retired activity, and projected as
+`Adapter diagnostic: <class>.` without commands, paths, output, or native
+messages. A recoverable provider rejection remains
 `backend_unavailable`. Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
