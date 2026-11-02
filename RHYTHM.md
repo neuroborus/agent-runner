@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Live owned execution may journal its own child's naming status.** Codex
+  names a child inside the already registered App Server process, so a
+  dedicated state operation records only a finite naming status for the active
+  role's recorded child, without touching the checkpoint, lineage, counters or
+  effect authority. Generic transitions, ownership release, other roles,
+  unknown children, stops and cancellation still reject live custody.
+
 - **Live owned execution may acknowledge only its own turn's child.** Codex
   creates sessions inside an already registered App Server process, so a
   matching active-role child registration no longer waits for process cleanup.

@@ -1269,23 +1269,18 @@ export function createRunner(options = {}) {
         pendingPolicyReceipt = operation.catch(() => {});
         return operation;
       },
-      async (role, sessionId, naming) => {
+      async (role, sessionId, { status }) => {
         const activity = {
           actor: role,
           phase: "session",
           kind: "session-naming",
-          message: `Session naming: ${naming.status}.`,
+          message: `Session naming: ${status}.`,
         };
-        const current = await runStore.loadRun(run.runId);
-        if (
-          !current.sessionLineage.children.some(
-            (child) => child.role === role && child.sessionId === sessionId,
-          )
-        )
-          throw new RunnerError("Session naming requires a recorded child.", {
-            code: "ERR_INVALID_CHILD_SESSION",
-          });
-        const next = await runStore.transitionRun(lease, {}, { activity });
+        const next = await runStore.recordSessionNaming(lease, {
+          role,
+          sessionId,
+          status,
+        });
         await publish(activity, next);
       },
     );

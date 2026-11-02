@@ -2703,6 +2703,10 @@ after owner loss, and prevents checkpoint advancement before process cleanup.
 The only live-process registration is the active turn role acknowledging its new
 child session; it changes lineage alone, and other roles, an absent turn,
 preparation custody, pending stops and cancellation remain blocked.
+`RunStore.recordSessionNaming` applies the same role rule to journal one finite
+naming status for that recorded child under the lease, changing only the
+revision and its bounded activity; generic transitions, including activity-only
+ones, still reject live custody.
 CLI/MCP command registration remains transport-owned.
 
 After owner loss, the replacement execution lease inspects the recorded

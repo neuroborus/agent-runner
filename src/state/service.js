@@ -8,6 +8,7 @@ import { isDeepStrictEqual } from "node:util";
 import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
+  normalizeSessionNamingDiagnostic,
 } from "../agents/index.js";
 import { openRuntimeStorage } from "../runtime/index.js";
 
@@ -1894,6 +1895,70 @@ export function createRunStore({
     });
   }
 
+  async function recordSessionNaming(lease, input) {
+    if (!isRecord(input)) {
+      throw new RunStoreError("Session naming input is invalid.", {
+        code: "ERR_INVALID_RUN_STATE",
+      });
+    }
+    rejectUnknownFields(
+      input,
+      new Set(["role", "sessionId", "status"]),
+      "sessionNaming",
+    );
+    const { role, sessionId } = normalizeChildSession(
+      { role: input.role, sessionId: input.sessionId },
+      "sessionNaming",
+    );
+    let status;
+    try {
+      ({ status } = normalizeSessionNamingDiagnostic({ status: input.status }));
+    } catch {
+      throw new RunStoreError("Session naming status is invalid.", {
+        code: "ERR_INVALID_RUN_STATE",
+      });
+    }
+    const activity = normalizePublicActivity({
+      actor: role,
+      phase: "session",
+      kind: "session-naming",
+      message: `Session naming: ${status}.`,
+    });
+
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        childRole: role,
+      });
+      if (
+        snapshot.state.activeTurn?.role !== role ||
+        !snapshot.state.sessionLineage.children.some(
+          (child) => child.role === role && child.sessionId === sessionId,
+        )
+      ) {
+        throw new RunStoreError("Session naming requires a recorded child.", {
+          code: "ERR_INVALID_CHILD_SESSION",
+        });
+      }
+
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        activity,
+      );
+      return deepFreeze(nextState);
+    });
+  }
+
   async function writeRunArtifact(lease, relativePath, content) {
     if (
       !(typeof content === "string" || content instanceof Uint8Array) ||
@@ -2186,6 +2251,7 @@ export function createRunStore({
     readAction: actions.read,
     recordChildSession,
     recordProviderPolicy,
+    recordSessionNaming,
     scheduleAvailabilityRetry,
     completeAvailabilityTurn,
     completeInactivityTurn,

@@ -1188,6 +1188,78 @@ test("live process custody admits only the active role's child acknowledgement",
   await store.recordExecutionProcess(lease, null);
 });
 
+test("live process custody admits only the active role's session naming", async (t) => {
+  const { created, store } = await createFixture(t, {
+    hostName: "test-host",
+    processIsAlive: () => true,
+    processIdentity,
+  });
+  const { lease } = created;
+  const child = { role: "reviewer", sessionId: "codex:reviewer-child" };
+  const naming = { ...child, status: "named" };
+  const activity = {
+    actor: "reviewer",
+    phase: "session",
+    kind: "session-naming",
+    message: "Session naming: named.",
+  };
+  const processActive = { code: "ERR_EXECUTION_PROCESS_ACTIVE" };
+  await store.transitionRun(lease, {
+    pipelineState: { workflowState: "REVIEW" },
+  });
+  await store.startAgentTurn(
+    lease,
+    { role: "reviewer", phase: "review" },
+    {
+      activity: {
+        actor: "reviewer",
+        phase: "review",
+        kind: "turn-started",
+        message: "Reviewer turn started.",
+      },
+    },
+  );
+  await store.recordExecutionProcess(lease, 4242);
+  const live = await store.recordChildSession(lease, child);
+
+  await assert.rejects(
+    store.transitionRun(lease, {}, { activity }),
+    processActive,
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, { ...naming, status: "renamed" }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, {
+      ...naming,
+      sessionId: "codex:unknown-child",
+    }),
+    { code: "ERR_INVALID_CHILD_SESSION" },
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, { ...naming, role: "planner" }),
+    processActive,
+  );
+  const named = await store.recordSessionNaming(lease, naming);
+  const custody = ({ revision, updatedAt, ...state }) => state;
+  assert.deepEqual(custody(named), custody(live));
+  const { events } = await store.loadRunHistory(live.runId);
+  assert.deepEqual(events.at(-1).activity, activity);
+  await assert.rejects(lease.release(), processActive);
+
+  await store.requestOperatorStop({
+    runId: live.runId,
+    kind: "pause_requested",
+    expectedRevision: named.revision,
+    idempotencyKey: "pause-key",
+  });
+  await assert.rejects(store.recordSessionNaming(lease, naming), {
+    code: "ERR_STOP_RECONCILIATION_REQUIRED",
+  });
+  await store.recordExecutionProcess(lease, null);
+});
+
 test("validates opaque state and public activity without interpreting it", async (t) => {
   const { created, projectPath, store, taskPath } = await createFixture(t);
   const initialState = await store.loadRun(created.state.runId);
