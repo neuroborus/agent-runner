@@ -247,7 +247,10 @@ configuration/ancestor identities. Pointer-resolved Git metadata, including
 nested control dependencies and state-ancestor pointers, and canonical ancestor
 provider alias targets cannot become external publication destinations.
 Existing guidance content, editor and publication suites retain integrated ignore,
-byte-limit and inode-provenance coverage. Publication tests also cover legacy
+byte-limit and inode-provenance coverage. The content-and-safety suite also owns
+integrated guidance beside an internal provider-control directory alias in Git
+and ordinary directories, protected rejection after retargeting that alias to the
+destination, and the controls diagnostic for an escaping alias. Publication tests also cover legacy
 worktree-relative receipt recovery from Git subdirectories, including incomplete
 published intents. Current external actions reject changed selector identities
 rather than adopting legacy resolution. MCP guidance tests cover the same
@@ -318,7 +321,10 @@ ancestor provider aliases, protected cross-control skill links, content/identity
 unrelated sibling creation during alias resolution and routing-directory replacement,
 escaping intermediate links, mutable hops across writable boundaries, hard links,
 special files, exact UTF-8 filenames, undecodable names and deterministic
-read/ancestor races.
+read/ancestor races. It also owns bounded internal provider-control directory
+aliases: canonical target protection, full-inspection alias-binding rejection,
+control-specific escaping, dangling, cyclic, file, FIFO, parent, Git-metadata,
+Git-link and state-overlap rejections, and target replacement during resolution.
 Temporary directories and injected filesystem effects need neither Git nor live
 providers. Workflow/provider integration remains separately owned as those
 consumers land. Fast `test/agents/codex.test.js` owns the public adapter's

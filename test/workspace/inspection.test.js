@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   createWorkspaceService,
@@ -18,6 +20,7 @@ async function fixture(t) {
   return { root, workspacePath, stateRoot: join(root, "state") };
 }
 
+const executeFile = promisify(execFile);
 const unsafe = (code) => (error) =>
   error instanceof WorkspaceSafetyError &&
   (code === undefined || error.code === code);
@@ -746,6 +749,146 @@ test("ancestor provider aliases cannot traverse writable output intermediaries",
   const snapshot = await service.snapshot({ inspection });
   for (const path of [control, storage, alternate])
     assert.ok(!snapshot.entries.some((entry) => entry.path.startsWith(path)));
+});
+
+test("internal provider-control directory aliases protect canonical targets and reject unsupported aliases", async (t) => {
+  const query = (f, fileSystem) =>
+    createWorkspaceService({ fileSystem }).inspectControls({
+      workspacePath: f.workspacePath,
+      paths: ["notes.md"],
+      stateRoot: f.stateRoot,
+    });
+  for (const target of [".agents", "shared/provider"]) {
+    await t.test(`accepts ${target}`, async (t) => {
+      const f = await fixture(t);
+      const canonical = join(f.workspacePath, target);
+      const link = join(f.workspacePath, ".claude");
+      await fs.mkdir(canonical, { recursive: true });
+      await fs.symlink(target, link);
+      const controls = await query(f);
+      assert.ok(controls.includes(link));
+      assert.ok(controls.includes(canonical));
+      await assert.rejects(
+        createWorkspaceService().inspect({
+          workspacePath: f.workspacePath,
+          stateRoot: f.stateRoot,
+        }),
+        {
+          name: "WorkspaceSafetyError",
+          message: "Workspace inspection cannot bind provider control aliases.",
+        },
+      );
+    });
+  }
+  const parentTarget =
+    "Provider control aliases must target a directory inside their parent.";
+  const ordinaryContent =
+    "Provider control aliases must resolve to ordinary content.";
+  for (const [name, prepare, message] of [
+    [
+      "escaping",
+      async (f) => {
+        await fs.mkdir(join(f.root, "outside"));
+        await fs.symlink("../outside", join(f.workspacePath, ".claude"));
+      },
+      parentTarget,
+    ],
+    [
+      "dangling",
+      (f) => fs.symlink("missing", join(f.workspacePath, ".claude")),
+      ordinaryContent,
+    ],
+    [
+      "cyclic",
+      async (f) => {
+        await fs.symlink(".codex", join(f.workspacePath, ".claude"));
+        await fs.symlink(".claude", join(f.workspacePath, ".codex"));
+      },
+      "Provider control aliases are unsafe or cyclic.",
+    ],
+    [
+      "regular file",
+      async (f) => {
+        await fs.writeFile(join(f.workspacePath, "settings.json"), "{}\n");
+        await fs.symlink(
+          "settings.json",
+          join(f.workspacePath, ".claude.json"),
+        );
+      },
+      "Provider control aliases must target a real directory.",
+    ],
+    [
+      "fifo",
+      async (f) => {
+        await executeFile("mkfifo", [join(f.workspacePath, "pipe")]);
+        await fs.symlink("pipe", join(f.workspacePath, ".claude"));
+      },
+      ordinaryContent,
+    ],
+    [
+      "parent",
+      (f) => fs.symlink(".", join(f.workspacePath, ".claude")),
+      parentTarget,
+    ],
+    [
+      "Git metadata",
+      async (f) => {
+        await fs.mkdir(join(f.workspacePath, ".git", "info"), {
+          recursive: true,
+        });
+        await fs.symlink(".git/info", join(f.workspacePath, ".claude"));
+      },
+      "Provider control aliases cannot target Git metadata.",
+    ],
+    [
+      "Git link",
+      async (f) => {
+        await fs.mkdir(join(f.workspacePath, "metadata"));
+        await fs.symlink("metadata", join(f.workspacePath, ".git"));
+      },
+      "Git controls must be ordinary paths.",
+    ],
+    [
+      "state overlap",
+      async (f) => {
+        await fs.mkdir(join(f.workspacePath, "shared"));
+        await fs.symlink("shared", join(f.workspacePath, ".claude"));
+        f.stateRoot = join(f.workspacePath, "shared", "state");
+      },
+      "State storage must be disjoint from discovered controls.",
+    ],
+  ])
+    await t.test(`rejects ${name}`, async (t) => {
+      const f = await fixture(t);
+      await prepare(f);
+      await assert.rejects(query(f), {
+        name: "WorkspaceSafetyError",
+        message,
+      });
+    });
+  await t.test("rejects target replacement during resolution", async (t) => {
+    const f = await fixture(t);
+    const target = join(f.workspacePath, ".agents");
+    await fs.mkdir(target);
+    await fs.symlink(".agents", join(f.workspacePath, ".claude"));
+    let replaced = false;
+    await assert.rejects(
+      query(f, {
+        ...fs,
+        async lstat(path, options) {
+          const stat = await fs.lstat(path, options);
+          if (!replaced && path === target) {
+            replaced = true;
+            await fs.rename(target, `${target}-previous`);
+            await fs.mkdir(target);
+          }
+          return stat;
+        },
+      }),
+      unsafe("ERR_WORKSPACE_SNAPSHOT_RACE"),
+    );
+    assert.equal(replaced, true);
+  });
 });
 
 test("external reads bind enclosing and nested Git pointers, shared metadata and provider controls", async (t) => {

@@ -5,7 +5,13 @@ import {
   ConfigurationError,
   loadProjectConfiguration,
 } from "../config/index.js";
-import { contentHash, GuidanceError, unsafePath } from "./content.js";
+import { WorkspaceSafetyError } from "../workspace/index.js";
+import {
+  contentHash,
+  GuidanceError,
+  unsafeControls,
+  unsafePath,
+} from "./content.js";
 import { isWithin } from "./contract.js";
 import { openLocalDirectory } from "./files.js";
 
@@ -58,11 +64,17 @@ export function createGuidanceSelection({
       path.split(sep).some((part) => CONTROLS.includes(part))
     )
       throw unsafePath();
-    const controls = await workspace.inspectControls({
-      workspacePath: selection.projectPath,
-      paths: [path],
-      stateRoot,
-    });
+    let controls;
+    try {
+      controls = await workspace.inspectControls({
+        workspacePath: selection.projectPath,
+        paths: [path],
+        stateRoot,
+      });
+    } catch (cause) {
+      if (cause instanceof WorkspaceSafetyError) throw unsafeControls(cause);
+      throw cause;
+    }
     if (controls.some((control) => isWithin(control, path))) throw unsafePath();
     const inspection = await workspace.inspectPath({
       projectPath: selection.basePath,

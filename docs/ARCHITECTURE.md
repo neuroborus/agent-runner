@@ -98,6 +98,19 @@ Canonical provider-control targets overlapping the workspace are protected
 against output authority; unrelated external provider storage is not captured.
 Ancestor provider aliases resolve component by component and reject writable
 output or state dependencies, including hops erased by later dot segments.
+At the workspace root, its descendants and enclosing-repository ancestors, a
+symlinked `.codex`, `.claude`, `.agents` or `.claude.json` is an internal
+provider-control alias resolved by the same component-wise resolver. Its
+canonical target must be a real directory with real ancestors strictly inside
+the link's parent, outside Git metadata, not containing the workspace and
+disjoint from state storage. Discovery then protects both the link and that
+target and traverses the target for nested controls; the alias grants no reads,
+outputs or mutable roots. Escaping, parent-equal, dangling, cyclic, file,
+special-file and Git-metadata targets fail with control-specific diagnostics,
+and a symlinked `.git` remains rejected as a non-ordinary Git control. Full
+`inspect` still rejects any alias among its control bindings, because those
+bindings feed directory workflows and provider projections; only the
+controls-only `inspectControls` query accepts them.
 Routing directories remain pinned by identity and mode, while links and files
 retain full metadata checks. Unrelated sibling creation outside inspected trees
 does not invalidate alias resolution; inspected trees retain their complete
@@ -1604,7 +1617,11 @@ Git inspection or writes. All paths must be disjoint from project configuration
 and protected control paths. The workspace capability's `inspectControls` reuses
 control discovery along the exact target/destination ancestry, including Git
 pointers, shared metadata and canonical ancestor provider alias targets containing
-selected destinations. It traverses discovered protected control trees and their
+selected destinations. Resolved internal provider-control alias targets are
+protected like the links themselves. Control-discovery failures use their own
+controls diagnostic under the same `ERR_UNSAFE_GUIDANCE_PATH` code, while a
+destination inside any control or resolved target still fails as an unsafe
+guidance path. The query traverses discovered protected control trees and their
 metadata dependencies, including nested Git pointers, without traversing unrelated
 project content. Metadata reached only through state ancestors also protects
 selected destinations; this query grants no snapshot reads. Missing

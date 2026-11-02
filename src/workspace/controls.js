@@ -1,4 +1,4 @@
-import { basename, dirname, isAbsolute, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 import {
   assertBindings,
@@ -56,9 +56,9 @@ export async function discoverControls(
     )
       paths.add(path);
   }
-  // Ancestor aliases grant no reads, but every resolution hop must be immutable
-  // to the workspace writer, even when later dot segments leave the workspace.
-  async function ancestorTarget(path) {
+  // Provider control aliases grant no reads, but every resolution hop must be
+  // immutable to the workspace writer, even when later dot segments leave it.
+  async function aliasTarget(path) {
     let current = dirname(path);
     let pending = [basename(path)];
     let links = 0;
@@ -71,24 +71,24 @@ export async function discoverControls(
       assertSafe(
         !within(stateRoot, current) &&
           declarations.outputPaths.every((output) => !within(output, current)),
-        "Ancestor provider controls cannot traverse writable outputs or state storage.",
+        "Provider control aliases cannot traverse writable outputs or state storage.",
       );
       const stat = await metadata(fs, current);
       assertSafe(
         stat && (stat.isDirectory() || stat.isFile() || stat.isSymbolicLink()),
-        "Ancestor provider controls must resolve to ordinary content.",
+        "Provider control aliases must resolve to ordinary content.",
       );
       assertSafe(
         !observed.has(current) ||
           same(observed.get(current), resolutionMetadata(stat)),
-        "Ancestor provider controls changed during resolution.",
+        "Provider control aliases changed during resolution.",
         "ERR_WORKSPACE_SNAPSHOT_RACE",
       );
       observed.set(current, resolutionMetadata(stat));
       if (stat.isSymbolicLink()) {
         assertSafe(
           stat.nlink === 1n && ++links <= 40,
-          "Ancestor provider aliases are unsafe or cyclic.",
+          "Provider control aliases are unsafe or cyclic.",
         );
         const target = new TextDecoder("utf-8", {
           fatal: true,
@@ -99,23 +99,46 @@ export async function discoverControls(
       } else
         assertSafe(
           pending.length === 0 || stat.isDirectory(),
-          "Ancestor provider control ancestors must be directories.",
+          "Provider control alias ancestors must be directories.",
         );
     }
     for (const [dependency, before] of observed) {
       const after = await metadata(fs, dependency);
       assertSafe(
         after && same(before, resolutionMetadata(after)),
-        "Ancestor provider controls changed during resolution.",
+        "Provider control aliases changed during resolution.",
         "ERR_WORKSPACE_SNAPSHOT_RACE",
       );
     }
     assertSafe(
       (await fs.realpath(path)) === current,
-      "Ancestor provider controls changed during resolution.",
+      "Provider control aliases changed during resolution.",
       "ERR_WORKSPACE_SNAPSHOT_RACE",
     );
     return current;
+  }
+  // Internal aliases protect both the link and its canonical target. The target
+  // must be a real directory below the parent, outside Git metadata.
+  async function internalAlias(parent, path) {
+    const target = await aliasTarget(path);
+    assertSafe(
+      target !== parent && within(parent, target),
+      "Provider control aliases must target a directory inside their parent.",
+    );
+    assertSafe(
+      !relative(parent, target).split(sep).includes(".git"),
+      "Provider control aliases cannot target Git metadata.",
+    );
+    assertSafe(
+      !within(target, workspacePath),
+      "Control metadata cannot contain the workspace.",
+    );
+    assertSafe(
+      (await inspectPath(fs, target)).kind === "directory",
+      "Provider control aliases must target a real directory.",
+    );
+    protect(target, false);
+    roots.push({ path: target, stateOnly: false });
   }
   async function pointerDirectory(base, value) {
     let path = isAbsolute(value) ? sep : base;
@@ -178,7 +201,7 @@ export async function discoverControls(
         name !== ".git"
       ) {
         if (stat === null) continue;
-        const target = await ancestorTarget(path);
+        const target = await aliasTarget(path);
         assertSafe(
           !overlaps(path, stateRoot) && !overlaps(target, stateRoot),
           "State storage must be disjoint from ancestor provider controls.",
@@ -200,6 +223,11 @@ export async function discoverControls(
       }
       if (reserve || stat !== null) protect(path, stateOnly);
       if (stat === null) continue;
+      if (stat.isSymbolicLink()) {
+        assertSafe(name !== ".git", "Git controls must be ordinary paths.");
+        await internalAlias(parent, path);
+        continue;
+      }
       await inspectPath(fs, path);
       if (name !== ".git") {
         if (!stateOnly && stat.isDirectory()) roots.push({ path, stateOnly });

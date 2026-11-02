@@ -126,6 +126,12 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         "State storage must be disjoint from workspace, task, infrastructure and declared read trees.",
       );
       const controls = await discoverControls(fs, declarations);
+      // Inspection bindings feed provider projections, which never follow aliases.
+      for (const path of controls)
+        assertSafe(
+          !(await metadata(fs, path))?.isSymbolicLink(),
+          "Workspace inspection cannot bind provider control aliases.",
+        );
       assertSafe(
         !controls.some((path) => within(path, workspacePath)),
         "Workspace cannot be inside a control tree.",

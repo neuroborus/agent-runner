@@ -7,6 +7,28 @@ remain in the owning documentation.
 
 ## 2026-11-02
 
+- **Internal provider-control directory aliases resolve instead of blaming
+  guidance.** A safe ordinary `rules.md` failed with
+  `ERR_UNSAFE_GUIDANCE_PATH` only because a sibling root `.claude` linked to
+  `.agents`: filesystem control discovery ran generic alias inspection on the
+  link before resolving or protecting its target, and guidance reported that
+  failure as an unsafe destination. Git-backed authoring runs no filesystem
+  discovery, so it accepted the same layout. The existing component-wise
+  ancestor-alias resolver now also resolves a symlinked `.codex`, `.claude`,
+  `.agents` or `.claude.json` at non-ancestor levels, keeping its output and
+  state traversal ban, single-link and 40-hop bounds, identity pinning and race
+  rechecks. The canonical target must be a real directory strictly inside the
+  link's parent, outside Git metadata, not containing the workspace and disjoint
+  from state; both link and target are protected and traversed, with no added
+  reads, outputs or mutable roots. Broader aliases stay unsupported with
+  control-specific diagnostics, and a symlinked `.git` remains rejected. Full
+  workspace inspection still rejects alias bindings because they feed provider
+  projections, which never follow aliases; it now says so instead of reporting
+  a generic path alias. Guidance reports control-discovery failures with a
+  controls message under the same public code, while destinations inside a
+  control or resolved target still fail as unsafe paths. Historical SIGTERM 143
+  remains unattributed.
+
 - **Activity pages survive a proven concurrent publication.** MCP
   `run_activity` and `run_wait` readers failed with
   `Run changed during projection streaming.` (`ERR_INVALID_EVENT_LOG`) while

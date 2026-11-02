@@ -8,6 +8,7 @@ import {
   readdir,
   rename,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -162,6 +163,74 @@ test("linked, non-regular, escaping, and protected targets fail closed", async (
       assert.equal(await readFile(sentinel, "utf8"), "Preserve me.");
     });
   }
+});
+
+test("internal provider-control directory aliases keep safe guidance usable and protect their targets", async (t) => {
+  const content = "Keep this project lesson.\n";
+  const replacement = "Replaced project lesson.\n";
+  const prepare = {
+    absent: async () => {},
+    alias: (f) => symlink(".agents", join(f.projectPath, ".claude")),
+    directory: (f) => mkdir(join(f.projectPath, ".claude")),
+  };
+  async function aliasFixture(t, name, gitWorkspace = false) {
+    const f = await fixture(t, { gitWorkspace, initialContent: content });
+    const provider = join(f.projectPath, ".agents", "settings.md");
+    await mkdir(dirname(provider));
+    await writeFile(provider, "Provider sentinel.\n");
+    await prepare[name](f);
+    return { ...f, provider };
+  }
+  for (const [name, gitWorkspace] of [
+    ["absent", false],
+    ["alias", false],
+    ["directory", false],
+    ["alias", true],
+  ])
+    await t.test(`${name}${gitWorkspace ? " in Git" : ""}`, async (t) => {
+      const f = await aliasFixture(t, name, gitWorkspace);
+      const result = await f.service.read({ projectPath: f.projectPath });
+      assert.equal(result.localContent, content);
+      assert.equal(result.localHash, hash(content));
+      const receipt = await f.service.update(
+        f.request(replacement, { expectedHash: result.localHash }),
+      );
+      assert.equal(receipt.localHash, hash(replacement));
+      assert.equal(await readFile(f.localPath, "utf8"), replacement);
+      assert.equal(await readFile(f.provider, "utf8"), "Provider sentinel.\n");
+    });
+  await t.test("retargeted alias", async (t) => {
+    const f = await aliasFixture(t, "alias");
+    const read = () => f.service.read({ projectPath: f.projectPath });
+    assert.equal((await read()).localHash, hash(content));
+    await unlink(join(f.projectPath, ".claude"));
+    await symlink(
+      join("LOCAL_ARTIFACTS", "agent-runner"),
+      join(f.projectPath, ".claude"),
+    );
+    const protectedTarget = {
+      code: "ERR_UNSAFE_GUIDANCE_PATH",
+      message:
+        "Guidance requires a confined, isolated regular file and real parent directories.",
+    };
+    await assert.rejects(read(), protectedTarget);
+    await assert.rejects(
+      f.service.update(f.request(replacement, { expectedHash: hash(content) })),
+      protectedTarget,
+    );
+    assert.equal(hash(await readFile(f.localPath)), hash(content));
+  });
+  await t.test("escaping alias", async (t) => {
+    const f = await aliasFixture(t, "absent");
+    await mkdir(join(f.root, "outside"));
+    await symlink("../outside", join(f.projectPath, ".claude"));
+    await assert.rejects(f.service.read({ projectPath: f.projectPath }), {
+      code: "ERR_UNSAFE_GUIDANCE_PATH",
+      message:
+        "Guidance requires safely resolvable project Git and provider controls.",
+    });
+    assert.equal(await readFile(f.localPath, "utf8"), content);
+  });
 });
 
 test("guidance cannot overlap the selected configuration file", async (t) => {

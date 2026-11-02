@@ -459,7 +459,10 @@ untracked; external files stay confined to the explicitly selected target-bound
 infrastructure without target writes. Ordinary directories need no Git.
 All destinations stay separate from configuration, state and protected control paths. Linked, unsafe,
 non-regular, malformed, or oversized documents fail closed, including unsafe
-absent destinations. Reading does not create files. Both common and local
+absent destinations. An internal provider-control directory alias, such as
+`.claude` linked to `.agents`, is accepted and its resolved target protected;
+unsupported control aliases fail with a control diagnostic rather than blaming
+the destination. Reading does not create files. Both common and local
 documents are bounded; document bodies never enter action metadata or errors.
 
 Guidance replacement holds the canonical-worktree lease and, for external
