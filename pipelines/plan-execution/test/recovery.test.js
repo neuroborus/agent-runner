@@ -1724,22 +1724,26 @@ for (const mode of ["independent", "lazy"]) {
                   "safe partial repair\n",
                 );
               }
+              const blocked = {
+                status: "BLOCKED",
+                ...(schema === FINDING_RESOLUTION_SCHEMA
+                  ? { decisions: [] }
+                  : { summary: "" }),
+                reason:
+                  "An additional generation step requires an unavailable local service.",
+                evidence: [
+                  `${command} -- --generate is not delegated to the runner.`,
+                ],
+                question: "",
+                whyBlocked: "",
+                options: [],
+              };
               return {
                 sessionId: request.session?.id ?? "blocked-worker",
-                structured: {
-                  status: "BLOCKED",
-                  ...(schema === FINDING_RESOLUTION_SCHEMA
-                    ? { decisions: [] }
-                    : { summary: "" }),
-                  reason:
-                    "An additional generation step requires an unavailable local service.",
-                  evidence: [
-                    `${command} -- --generate is not delegated to the runner.`,
-                  ],
-                  question: "",
-                  whyBlocked: "",
-                  options: [],
-                },
+                structured:
+                  schema === CHECK_AND_FIX_SCHEMA
+                    ? blocked
+                    : { result: blocked },
               };
             }
           }
@@ -1754,7 +1758,7 @@ for (const mode of ["independent", "lazy"]) {
               structured:
                 request.schema === CHECK_AND_FIX_SCHEMA
                   ? checkAndFix()
-                  : resolution({ id: "F1", decision: "FIX" }),
+                  : { result: resolution({ id: "F1", decision: "FIX" }) },
             };
           }
           return runWorker(request);

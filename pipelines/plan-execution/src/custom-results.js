@@ -237,8 +237,8 @@ export function customTurnSchema(schema, resultTurn) {
   }
   allowCriterionValidation(copy);
   if (resultTurn) {
-    copy.properties.result = { anyOf: [RESULT_SCHEMA, { type: "null" }] };
-    copy.required.push("result");
+    copy.properties.customResult = { anyOf: [RESULT_SCHEMA, { type: "null" }] };
+    copy.required.push("customResult");
   }
   return copy;
 }

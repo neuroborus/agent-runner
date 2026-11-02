@@ -4571,20 +4571,20 @@ for (const mode of ["independent", "lazy"]) {
               "agent-sandbox limitations must not cause BLOCKED",
             ))
         ) {
+          const blocked = {
+            status: "BLOCKED",
+            ...(phase === "resolution" ? { decisions: [] } : { summary: "" }),
+            reason: "The selected check needs an unavailable sandbox service.",
+            question: "",
+            whyBlocked: "",
+            options: [],
+            evidence: [
+              "The agent sandbox cannot execute the selected command.",
+            ],
+          };
           return {
             sessionId: request.session?.id ?? "blocked-worker",
-            structured: {
-              status: "BLOCKED",
-              ...(phase === "resolution" ? { decisions: [] } : { summary: "" }),
-              reason:
-                "The selected check needs an unavailable sandbox service.",
-              question: "",
-              whyBlocked: "",
-              options: [],
-              evidence: [
-                "The agent sandbox cannot execute the selected command.",
-              ],
-            },
+            structured: phase === "check" ? blocked : { result: blocked },
           };
         }
         for (const prompt of [request.prompt, request.recoveryPrompt]) {

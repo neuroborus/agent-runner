@@ -57,6 +57,8 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import {
@@ -1650,9 +1652,13 @@ async function createFixture(
             : structured;
           return {
             output: "structured",
-            structured: WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema)
-              ? { result: candidateStructured }
-              : candidateStructured,
+            structured:
+              WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema) ||
+              [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
+                request.schema,
+              )
+                ? { result: candidateStructured }
+                : candidateStructured,
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id

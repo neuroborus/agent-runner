@@ -226,7 +226,7 @@ for (const decisionStep of [1, 2]) {
           return {
             status: "PRODUCT_DECISION_REQUIRED",
             ...(decisionStep === 1
-              ? { summary: "", reason: "", result: null }
+              ? { summary: "", reason: "", customResult: null }
               : {
                   findings: [],
                   finalizationFindingIds: [],
@@ -353,7 +353,7 @@ test("an authorized decision invalidating an accepted result requires revised pl
           status: "PRODUCT_DECISION_REQUIRED",
           summary: "",
           reason: "",
-          result: null,
+          customResult: null,
           question: "Which source governs the disputed conclusion?",
           whyBlocked: "The available sources support incompatible conclusions.",
           options: ["Use the accepted source", "Replace the accepted source"],
@@ -431,7 +431,7 @@ test("result-only corrections restart combined convergence and count one fix", a
               evidence: [],
             },
           ],
-          result: {
+          customResult: {
             ...state.customCandidate,
             analysis:
               "The conclusion follows source.md; the unavailable remote evidence remains explicit.",
@@ -526,7 +526,7 @@ test("semantic-only finalization failure survives reconstruction and requires a 
               evidence: [],
             },
           ],
-          result: {
+          customResult: {
             ...state.customCandidate,
             analysis: "Conclusion from source.md.",
           },
@@ -748,7 +748,7 @@ test("misreported result-only edits consume bounded output correction without ac
         whyBlocked: "",
         options: [],
         evidence: [],
-        result: {
+        customResult: {
           ...saved.pipelineState.customCandidate,
           analysis: `Different proposed analysis ${checks}.`,
         },
@@ -779,7 +779,7 @@ test("inactive custom results receive bounded output correction without acceptin
         whyBlocked: "",
         options: [],
         evidence: ["The fixture dependency could not be opened."],
-        result: {
+        customResult: {
           ...saved.pipelineState.customCandidate,
           analysis: "Result data cannot be accepted from a blocked outcome.",
         },

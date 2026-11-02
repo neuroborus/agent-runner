@@ -409,28 +409,43 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
   ]),
 );
 
-export const IMPLEMENTATION_SCHEMA = deepFreeze({
-  type: "object",
-  properties: {
-    status: {
-      type: "string",
-      enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
-    },
-    summary: SUMMARY,
-    reason: TEXT,
-    ...DECISION_PROPERTIES,
+const IMPLEMENTATION_PROPERTIES = {
+  status: {
+    type: "string",
+    enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
   },
-  required: [
-    "status",
-    "summary",
-    "reason",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
-  additionalProperties: false,
-});
+  summary: SUMMARY,
+  reason: TEXT,
+  ...DECISION_PROPERTIES,
+};
+
+export const IMPLEMENTATION_SCHEMA = deepFreeze(
+  resultUnion([
+    variant("status", ["COMPLETED"], IMPLEMENTATION_PROPERTIES, {
+      summary: NONEMPTY_SUMMARY,
+      reason: EMPTY_TEXT,
+      ...EMPTY_DECISION_PROPERTIES,
+    }),
+    variant("status", ["BLOCKED"], IMPLEMENTATION_PROPERTIES, {
+      summary: EMPTY_TEXT,
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
+    variant(
+      "status",
+      ["PRODUCT_DECISION_REQUIRED"],
+      IMPLEMENTATION_PROPERTIES,
+      {
+        summary: EMPTY_TEXT,
+        reason: EMPTY_TEXT,
+        ...PRODUCT_DECISION_PROPERTIES,
+      },
+    ),
+  ]),
+);
 
 export const FINALIZATION_SCHEMA = deepFreeze({
   type: "object",
@@ -609,41 +624,56 @@ export const CANDIDATE_CLEAN_CONFIRM_SCHEMA = deepFreeze({
   additionalProperties: false,
 });
 
-export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
-  type: "object",
-  properties: {
-    status: {
-      type: "string",
-      enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
-    },
-    decisions: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: BLOCKER_ID,
-          decision: { type: "string", enum: ["FIX", "DISPUTE"] },
-          reason: TEXT,
-          evidence: TEXT_LIST,
-        },
-        required: ["id", "decision", "reason", "evidence"],
-        additionalProperties: false,
-      },
-    },
-    reason: TEXT,
-    ...DECISION_PROPERTIES,
+const FINDING_DECISION_PROPERTIES = {
+  id: BLOCKER_ID,
+  decision: { type: "string", enum: ["FIX", "DISPUTE"] },
+  reason: NONEMPTY_TEXT,
+  evidence: { ...TEXT_LIST, items: NONEMPTY_TEXT },
+};
+const FINDING_DECISIONS = {
+  type: "array",
+  maxItems: MAX_ITEMS,
+  items: {
+    anyOf: [
+      variant("decision", ["FIX"], FINDING_DECISION_PROPERTIES, {}),
+      variant("decision", ["DISPUTE"], FINDING_DECISION_PROPERTIES, {
+        id: REVIEW_FINDING_ID,
+        evidence: NONEMPTY_TEXT_LIST,
+      }),
+    ],
   },
-  required: [
-    "status",
-    "decisions",
-    "reason",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
-  additionalProperties: false,
-});
+};
+const RESOLUTION_PROPERTIES = {
+  status: {
+    type: "string",
+    enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+  },
+  decisions: FINDING_DECISIONS,
+  reason: TEXT,
+  ...DECISION_PROPERTIES,
+};
+
+export const FINDING_RESOLUTION_SCHEMA = deepFreeze(
+  resultUnion([
+    variant("status", ["RESOLVED"], RESOLUTION_PROPERTIES, {
+      reason: EMPTY_TEXT,
+      ...EMPTY_DECISION_PROPERTIES,
+    }),
+    variant("status", ["BLOCKED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
+    variant("status", ["PRODUCT_DECISION_REQUIRED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: EMPTY_TEXT,
+      ...PRODUCT_DECISION_PROPERTIES,
+    }),
+  ]),
+);
 
 export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
   type: "object",

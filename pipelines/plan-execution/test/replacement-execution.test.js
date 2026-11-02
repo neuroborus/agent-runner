@@ -298,10 +298,12 @@ async function fixture(
             turns.push([role, f.currentRun.activeTurn.phase, request.access]);
             return {
               sessionId: `${role}-${turns.length}`,
-              structured: resolution(
-                { id: "R1", decision: "FIX" },
-                ...(mixedDispute ? [{ id: "R2", decision: "DISPUTE" }] : []),
-              ),
+              structured: {
+                result: resolution(
+                  { id: "R1", decision: "FIX" },
+                  ...(mixedDispute ? [{ id: "R2", decision: "DISPUTE" }] : []),
+                ),
+              },
             };
           }
           const result = await original(request);

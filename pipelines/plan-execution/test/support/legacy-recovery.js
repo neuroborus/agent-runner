@@ -184,7 +184,7 @@ export async function createLegacyRecoveryFixture(
           join(projectPath, `feature-${step}.js`),
           `export const value = ${step};\n`,
         );
-        structured = implementationCompleted();
+        structured = { result: implementationCompleted() };
       } else if (schema === schemas.CHECK_AND_FIX_SCHEMA) {
         if (pendingCorrection && !changed && step === steps) {
           changed = true;
@@ -216,7 +216,7 @@ export async function createLegacyRecoveryFixture(
           join(projectPath, `feature-${steps}.js`),
           `export const fixed = ${steps};\n`,
         );
-        structured = resolution({ id: "R1", decision: "FIX" });
+        structured = { result: resolution({ id: "R1", decision: "FIX" }) };
       } else if (schema === schemas.FINALIZATION_SCHEMA) {
         if (format)
           await writeFile(

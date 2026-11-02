@@ -277,9 +277,13 @@ preserves commit semantics, gates, counters and consumed effects without grantin
 custom access or a writable policy receipt.
 
 Custom execution uses the existing sequential state machine. `IMPLEMENT` produces
-bounded `result` data: analysis, observations in exact current criterion-reference
+bounded `customResult` data: analysis, observations in exact current criterion-reference
 order, and absolute inspected output paths. Writable check/fix and finding
-resolution return the complete result; inactive outcomes use `result: null`.
+resolution return the complete result; inactive outcomes use `customResult: null`.
+This field is a sibling of the status contract, separate from the strict
+`result` status envelope used by implementation and finding resolution. Root
+status evidence never carries custom criterion observations. Criterion-reference
+order, result bounds and inspected output authority remain independently validated.
 Analysis/evidence changes invalidate dependent gates just like output changes.
 Every role sees the current and earlier accepted results, the current step's
 work/expected results and agreed criteria. Coding requirements apply only when
@@ -2517,6 +2521,33 @@ The Worker then:
 1. implements only the current planned commit;
 2. performs a concise self-review;
 3. returns control to the runner.
+
+Implementation and finding resolution advertise strict object roots containing
+a `result` union of status-specific strict objects, following the bootstrap
+schema convention. `COMPLETED` requires a nonempty summary and empty reason,
+question, options, whyBlocked and root evidence. `RESOLVED` requires empty
+inapplicable root fields and one decision per current blocker. Each `FIX` or
+`DISPUTE` decision requires a bounded nonempty reason; `FIX` evidence may be
+empty, while `DISPUTE` requires evidence and an R-prefixed finding ID.
+`BLOCKED` requires nonempty reason and evidence, with other outcome fields
+empty. `PRODUCT_DECISION_REQUIRED` requires question, whyBlocked and evidence,
+permits empty options, and leaves ordinary outcome fields empty. Inactive
+finding-resolution outcomes require no decisions.
+
+These schemas encode expressible status/disposition constraints without
+relaxing deterministic validation. Normalization additionally enforces exact
+field sets, text rules, the overall byte limit, current blocker ownership,
+exactly-once decisions and dispute restrictions, including already upheld
+findings. Every implementation or resolution normalization failure supplies a
+bounded diagnostic: Worker role, implementation or finding-resolution phase
+and contract, and allowlisted field and constraint identities. Decision and
+list positions are bounded by the 32-item limits; rejected values, blocker IDs,
+commands, arbitrary messages and raw output never enter diagnostics. Existing
+valid historical diagnostics remain readable without migration.
+
+Synthetic nonempty root reason/evidence cases establish schema/normalizer
+agreement regressions. The exact rejected fields in the reported real turns
+remain unknown; these cases do not establish what those turns returned.
 
 Implementation does not invoke the project finalization procedure, stage
 changes, inspect a post-staging cached diff, or draft a commit message. Those

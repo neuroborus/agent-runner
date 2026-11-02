@@ -435,6 +435,13 @@ function lazyOutputContext(phase) {
 }
 
 function roleOutputContextFor(role, schema, checkpoint) {
+  if ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema)) {
+    const phase =
+      schema === IMPLEMENTATION_SCHEMA
+        ? "implementation"
+        : "finding-resolution";
+    return Object.freeze({ role, phase, contract: phase });
+  }
   if ([FINDING_ARBITRATION_SCHEMA, STAGNATION_SCHEMA].includes(schema)) {
     const phase =
       schema === FINDING_ARBITRATION_SCHEMA
@@ -510,7 +517,7 @@ function normalizeRoleOutput(normalize, output, context) {
       !isRecord(output.result)
     ) {
       throw invalidRoleOutput(
-        "Structured bootstrap role result must contain one result object.",
+        "Structured role result must contain one result object.",
         context,
         { field: "result", constraint: "single-object-wrapper" },
       );
@@ -522,7 +529,7 @@ function normalizeRoleOutput(normalize, output, context) {
     }
     const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
-      "Structured bootstrap role result violates its contract.",
+      "Structured role result violates its contract.",
       {
         code: cause.code,
         diagnostic: diagnostics[0],
@@ -778,7 +785,7 @@ Current custom result (data):
 ${JSON.stringify(state().customCandidate)}
 
 Earlier accepted results (data):
-${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn result with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the complete current result on UNCHANGED; CHANGED includes analysis/evidence changes. Return result: null only for BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
+${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
   }
 
   function planEvidence(evidence) {
@@ -2269,9 +2276,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
-          ["candidate-review", "confirmation", "review"].includes(
-            outputContext.contract,
-          ) || outputContext.contract.startsWith("lazy-")
+          [
+            "candidate-review",
+            "confirmation",
+            "review",
+            "implementation",
+            "finding-resolution",
+          ].includes(outputContext.contract) ||
+            outputContext.contract.startsWith("lazy-")
             ? {
                 field: "result",
                 constraint: "provider-structured-output",
@@ -2336,7 +2348,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
       narrativeRecovery = { role, checkpoint: availabilityCheckpoint };
     }
     if (resultTurn) {
-      const { result, ...output } = response.structured;
+      const { customResult: result, ...envelope } = response.structured;
+      const output = [
+        IMPLEMENTATION_SCHEMA,
+        FINDING_RESOLUTION_SCHEMA,
+      ].includes(schema)
+        ? normalizeRoleOutput((value) => value, envelope, outputContext)
+        : envelope;
       if (
         ["COMPLETED", "CHANGED", "UNCHANGED", "RESOLVED"].includes(
           output.status,
@@ -2362,7 +2380,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             "Invalid custom criterion evidence.",
             outputContext,
             {
-              field: "result",
+              field: "customResult",
               constraint:
                 "bounded-current-criterion-evidence-and-authorized-outputs",
             },
@@ -2417,9 +2435,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
         throw invalidRoleOutput(
           "Inactive custom result must be null.",
           outputContext,
-          { field: "result", constraint: "null-for-inactive-status" },
+          { field: "customResult", constraint: "null-for-inactive-status" },
         );
-      return output;
+      return envelope;
     }
     return response.structured;
   }
@@ -4837,7 +4855,11 @@ ${plannedStepContext(step)}${
     if (output === null) {
       return false;
     }
-    const result = normalizeImplementationResult(output);
+    const result = normalizeRoleOutput(
+      normalizeImplementationResult,
+      output,
+      roleOutputContextFor("worker", IMPLEMENTATION_SCHEMA),
+    );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
     }
@@ -7164,19 +7186,24 @@ ${JSON.stringify(
       return false;
     }
     const fixRoundAlreadyCounted = state().pendingCorrection;
-    const result = normalizeResolutionResult(
+    const result = normalizeRoleOutput(
+      (payload) =>
+        normalizeResolutionResult(
+          payload,
+          blockers,
+          new Set([
+            ...current.findingArbitrations
+              .filter(({ direction }) => direction === "REVIEWER_CORRECT")
+              .map(({ findingId }) => findingId),
+            ...Object.entries(current.disputeCounts)
+              .filter(
+                ([, count]) => count >= current.settings.maxDisputesPerFinding,
+              )
+              .map(([findingId]) => findingId),
+          ]),
+        ),
       output,
-      blockers,
-      new Set([
-        ...current.findingArbitrations
-          .filter(({ direction }) => direction === "REVIEWER_CORRECT")
-          .map(({ findingId }) => findingId),
-        ...Object.entries(current.disputeCounts)
-          .filter(
-            ([, count]) => count >= current.settings.maxDisputesPerFinding,
-          )
-          .map(([findingId]) => findingId),
-      ]),
+      roleOutputContextFor("worker", FINDING_RESOLUTION_SCHEMA),
     );
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");

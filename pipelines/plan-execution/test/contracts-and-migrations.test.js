@@ -28,7 +28,13 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
 } from "../src/schemas.js";
+import {
+  customTurnSchema,
+  normalizeCustomResult,
+} from "../src/custom-results.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   createPersistedFinalizationEvidence,
@@ -37,6 +43,8 @@ import {
   normalizeCheckAndFixResult,
   normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
+  normalizeImplementationResult,
+  normalizeResolutionResult,
   normalizePipelineState,
   normalizeReconciliationResult,
 } from "../src/workflow-contract.js";
@@ -47,6 +55,7 @@ import {
   arbitrationProductDecision,
   arbitrationResolved,
   assertArraySchemasDeclareItems,
+  assertStrictSchema,
   bootstrapCapacityExhausted,
   bootstrapCorrection,
   bootstrapProductDecision,
@@ -61,6 +70,7 @@ import {
   hash,
   implementationBlocked,
   implementationCompleted,
+  implementationProductDecision,
   matchesSchemaSubset,
   migrateVersionOneState,
   persistedFinalizationCorrection,
@@ -79,6 +89,354 @@ import {
   versionOneState,
   versionThirteenState,
 } from "./support/index.js";
+
+function writableResultContracts() {
+  const { summary: _blockedSummary, ...blocked } = implementationBlocked();
+  const { summary: _decisionSummary, ...decision } =
+    implementationProductDecision();
+  return [
+    {
+      schema: IMPLEMENTATION_SCHEMA,
+      normalize: normalizeImplementationResult,
+      valid: [
+        implementationCompleted(),
+        implementationBlocked(),
+        implementationProductDecision(),
+      ],
+    },
+    {
+      schema: FINDING_RESOLUTION_SCHEMA,
+      normalize: (value) =>
+        normalizeResolutionResult(value, [{ id: "R1" }], new Set()),
+      valid: [
+        resolution({ id: "R1", decision: "FIX" }),
+        resolution({ id: "R1", decision: "DISPUTE" }),
+        { ...blocked, decisions: [] },
+        { ...decision, decisions: [] },
+      ],
+    },
+  ];
+}
+
+test("writable result schemas agree with status and disposition normalization", () => {
+  for (const { schema, normalize, valid } of writableResultContracts()) {
+    assertStrictSchema(schema);
+    assertArraySchemasDeclareItems(schema);
+    for (const pattern of schemaPatterns(schema))
+      assert.doesNotMatch(pattern, /\(\?(?:[=!]|<[=!])/u);
+    const product = {
+      ...valid.find(({ status }) => status === "PRODUCT_DECISION_REQUIRED"),
+      options: [],
+    };
+    assert.equal(matchesSchemaSubset(schema, { result: product }), true);
+    assert.doesNotThrow(() => normalize(product));
+    for (const value of valid) {
+      assert.equal(matchesSchemaSubset(schema, { result: value }), true);
+      assert.equal(matchesSchemaSubset(schema, value), false);
+      assert.doesNotThrow(() => normalize(value));
+      const invalid = [
+        { ...value, unexpected: "private-value" },
+        { ...value, status: "UNKNOWN" },
+        ...Object.entries(value)
+          .filter(
+            ([field, entry]) =>
+              field !== "status" &&
+              (typeof entry === "string" ||
+                (Array.isArray(entry) &&
+                  (entry.length === 0 || field === "evidence"))),
+          )
+          .map(([field, entry]) => ({
+            ...value,
+            [field]:
+              typeof entry === "string"
+                ? entry === ""
+                  ? "private-value"
+                  : ""
+                : entry.length === 0
+                  ? ["private-value"]
+                  : [],
+          })),
+      ];
+      for (const rejected of invalid) {
+        assert.equal(matchesSchemaSubset(schema, { result: rejected }), false);
+        assert.throws(() => normalize(rejected), {
+          code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        });
+      }
+    }
+  }
+  const fix = resolution({ id: "F1", decision: "FIX" });
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: fix }),
+    true,
+  );
+  assert.doesNotThrow(() =>
+    normalizeResolutionResult(fix, [{ id: "F1" }], new Set()),
+  );
+  const base = resolution({ id: "R1", decision: "DISPUTE" });
+  for (const change of [
+    { id: "F1" },
+    { id: "invalid" },
+    { decision: "WITHDRAW" },
+    { reason: "" },
+    { evidence: [] },
+    { evidence: [""] },
+    { extra: "private-value" },
+  ]) {
+    const value = { ...base, decisions: [{ ...base.decisions[0], ...change }] };
+    assert.equal(
+      matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: value }),
+      false,
+    );
+    assert.throws(() =>
+      normalizeResolutionResult(value, [{ id: "R1" }, { id: "F1" }], new Set()),
+    );
+  }
+});
+
+test("custom writable schemas keep criterion evidence separate from the status envelope", () => {
+  const customResult = {
+    analysis: "Compared the supplied sources.",
+    evidence: [
+      {
+        criterionId: "coverage",
+        observations: ["Both sources were inspected."],
+      },
+    ],
+    outputPaths: [],
+  };
+  for (const { schema, normalize, valid } of writableResultContracts()) {
+    const custom = customTurnSchema(schema, true);
+    assertStrictSchema(custom);
+    for (const value of valid) {
+      const active = ["COMPLETED", "RESOLVED"].includes(value.status);
+      const output = {
+        result: value,
+        customResult: active ? customResult : null,
+      };
+      assert.equal(matchesSchemaSubset(custom, output), true);
+      assert.equal(matchesSchemaSubset(custom, { result: value }), false);
+      assert.equal(matchesSchemaSubset(schema, output), false);
+      assert.doesNotThrow(() => normalize(output.result));
+      if (active) {
+        assert.doesNotThrow(() =>
+          normalizeCustomResult(output.customResult, {
+            criterionRefs: ["coverage"],
+          }),
+        );
+        assert.equal(
+          matchesSchemaSubset(custom, {
+            ...output,
+            result: { ...value, evidence: customResult.evidence },
+          }),
+          false,
+        );
+      }
+    }
+  }
+});
+
+test("writable normalization diagnostics are bounded and omit rejected values", () => {
+  const privateValue = "PRIVATE_REJECTED_VALUE";
+  for (const { normalize, valid } of writableResultContracts()) {
+    const success = valid[0];
+    const blocked = valid.find(({ status }) => status === "BLOCKED");
+    const product = valid.find(
+      ({ status }) => status === "PRODUCT_DECISION_REQUIRED",
+    );
+    for (const [value, field, constraint] of [
+      [null, "result", "object"],
+      [
+        { ...success, [privateValue]: privateValue },
+        "result",
+        "exact-field-set",
+      ],
+      [{ ...success, reason: privateValue }, "reason", "empty-string"],
+      [{ ...success, evidence: [privateValue] }, "evidence", "empty-array"],
+      [
+        { ...blocked, reason: "" },
+        "reason",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...blocked, evidence: [] },
+        "evidence",
+        "nonempty-array-up-to-32-items",
+      ],
+      [
+        { ...blocked, evidence: ["\0" + privateValue] },
+        "evidence[0]",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, question: "" },
+        "question",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, options: Array(17).fill(privateValue) },
+        "options",
+        "array-up-to-16-items",
+      ],
+      [
+        { ...product, whyBlocked: "" },
+        "whyBlocked",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, evidence: [] },
+        "evidence",
+        "nonempty-array-up-to-32-items",
+      ],
+      [
+        { ...success, reason: privateValue.repeat(100_000) },
+        "result",
+        "maximum-2-mebibytes",
+      ],
+    ]) {
+      assert.throws(
+        () => normalize(value),
+        (cause) => {
+          assert.equal(cause.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+          assert.deepEqual(cause.diagnostic, { field, constraint });
+          assert.doesNotMatch(
+            String(cause) + JSON.stringify(cause),
+            /PRIVATE_REJECTED_VALUE/u,
+          );
+          return true;
+        },
+      );
+    }
+    const cyclic = { ...success };
+    cyclic.reason = cyclic;
+    assert.throws(
+      () => normalize(cyclic),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, {
+          field: "result",
+          constraint: "serializable-json",
+        });
+        return true;
+      },
+    );
+  }
+  const base = resolution({ id: "R1", decision: "FIX" });
+  for (const [decisions, field, constraint, arbitrated] of [
+    [null, "decisions", "array-up-to-32-items"],
+    [Array(33).fill(base.decisions[0]), "decisions", "array-up-to-32-items"],
+    [[null], "decisions[0]", "object"],
+    [
+      [{ ...base.decisions[0], [privateValue]: privateValue }],
+      "decisions[0]",
+      "exact-field-set",
+    ],
+    [
+      [{ ...base.decisions[0], id: privateValue }],
+      "decisions[0].id",
+      "current-blocker-id",
+    ],
+    [
+      [{ ...base.decisions[0], id: "R2" }],
+      "decisions[0].id",
+      "current-blocker-id",
+    ],
+    [
+      [{ ...base.decisions[0], decision: privateValue }],
+      "decisions[0].decision",
+      "fix-or-dispute",
+    ],
+    [
+      [{ ...base.decisions[0], reason: "\0" + privateValue }],
+      "decisions[0].reason",
+      "nonempty-plain-text-up-to-4000-characters",
+    ],
+    [
+      [{ ...base.decisions[0], evidence: ["\0" + privateValue] }],
+      "decisions[0].evidence[0]",
+      "nonempty-plain-text-up-to-4000-characters",
+    ],
+    [
+      resolution({ id: "R1", decision: "DISPUTE" }).decisions,
+      "decisions[0].decision",
+      "disputable-blocker-only",
+      ["R1"],
+    ],
+    [[], "decisions", "every-current-blocker-exactly-once"],
+    [
+      [...base.decisions, ...base.decisions],
+      "decisions",
+      "every-current-blocker-exactly-once",
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        normalizeResolutionResult(
+          { ...base, decisions },
+          [{ id: "R1" }],
+          new Set(arbitrated),
+        ),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, { field, constraint });
+        assert.doesNotMatch(
+          String(cause) + JSON.stringify(cause),
+          /PRIVATE_REJECTED_VALUE/u,
+        );
+        return true;
+      },
+    );
+  }
+  const decisions = Array.from({ length: 32 }, (_, index) => ({
+    ...base.decisions[0],
+    id: `R${index + 1}`,
+  }));
+  decisions[31].reason = "";
+  assert.throws(
+    () =>
+      normalizeResolutionResult({ ...base, decisions }, decisions, new Set()),
+    (cause) => {
+      assert.equal(cause.diagnostic.field, "decisions[31].reason");
+      return true;
+    },
+  );
+});
+
+for (const phase of ["implementation", "finding-resolution"]) {
+  test(`publishes redacted ${phase} normalization diagnostics`, async (t) => {
+    const malformed = {
+      ...(phase === "implementation"
+        ? implementationCompleted()
+        : resolution({ id: "F1", decision: "FIX" })),
+      reason: "PRIVATE_REJECTED_VALUE",
+    };
+    const fixture = await createFixture(t, {
+      workWorker:
+        phase === "implementation"
+          ? [malformed]
+          : [implementationCompleted(), finalizationFailed("F1"), malformed],
+    });
+    await assert.rejects(fixture.run(), (cause) => {
+      assert.deepEqual(cause.diagnostic, {
+        role: "worker",
+        phase,
+        contract: phase,
+        field: "reason",
+        constraint: "empty-string",
+      });
+      return true;
+    });
+    assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+      role: "worker",
+      phase,
+      contract: phase,
+      field: "reason",
+      constraint: "empty-string",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(fixture.currentRun),
+      /PRIVATE_REJECTED_VALUE/u,
+    );
+  });
+}
 
 test("classifies only journal-proven untouched immediate-stop checkpoints as pre-work", () => {
   const checkpoint = {

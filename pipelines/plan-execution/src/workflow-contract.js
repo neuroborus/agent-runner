@@ -2091,34 +2091,61 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
   return issues;
 }
 
+function assertEmptyOutputFields(payload, textFields, arrayFields = []) {
+  for (const field of textFields) {
+    if (payload[field] !== "")
+      throw outputError(
+        "Structured role result contains an inapplicable field.",
+        outputConstraint(field, "empty-string"),
+      );
+  }
+  for (const field of arrayFields) {
+    if (!emptyArray(payload[field]))
+      throw outputError(
+        "Structured role result contains an inapplicable field.",
+        outputConstraint(field, "empty-array"),
+      );
+  }
+}
+
 export function normalizeImplementationResult(payload) {
+  if (!isRecord(payload))
+    throw outputError(
+      "Worker returned an invalid implementation result.",
+      outputConstraint("result", "object"),
+    );
+  assertStructuredResultSize(payload);
+  assertExactOutputFields(payload, [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ]);
   if (
-    !isRecord(payload) ||
     !["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
-  ) {
-    throw outputError("Worker returned an invalid implementation result.");
-  }
-  assertStructuredResultSize(payload);
+  )
+    throw outputError(
+      "Worker returned an invalid implementation status.",
+      outputConstraint("status", "implementation-status"),
+    );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (payload.summary !== "" || payload.reason !== "") {
-      throw outputError("Product decision contains inapplicable fields.");
-    }
+    assertEmptyOutputFields(payload, ["summary", "reason"]);
     return Object.freeze({
       status: payload.status,
       decision: normalizeProductDecision(payload),
     });
   }
   if (payload.status === "BLOCKED") {
-    if (
-      payload.summary !== "" ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError("Blocked implementation contains inapplicable fields.");
-    }
+    assertEmptyOutputFields(
+      payload,
+      ["summary", "question", "whyBlocked"],
+      ["options"],
+    );
     return Object.freeze({
       status: payload.status,
       reason: normalizeText(
@@ -2126,21 +2153,26 @@ export function normalizeImplementationResult(payload) {
         "implementation blocker",
         MAX_TEXT_LENGTH,
         INVALID_OUTPUT_CODE,
+        outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
       ),
       evidence: normalizeTextList(payload.evidence, "implementation evidence", {
         code: INVALID_OUTPUT_CODE,
+        diagnosticField: "evidence",
       }),
     });
   }
-  if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Completed implementation contains inapplicable fields.");
-  }
+  assertEmptyOutputFields(
+    payload,
+    ["reason", "question", "whyBlocked"],
+    ["options", "evidence"],
+  );
   return Object.freeze({
     status: payload.status,
     summary: normalizeSummary(
       payload.summary,
       "implementation summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
   });
 }
@@ -2764,35 +2796,43 @@ export function normalizeCleanConfirmationResult(
 }
 
 export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
+  if (!isRecord(payload))
+    throw outputError(
+      "Worker returned an invalid finding resolution.",
+      outputConstraint("result", "object"),
+    );
+  assertStructuredResultSize(payload);
+  assertExactOutputFields(payload, [
+    "status",
+    "decisions",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ]);
   if (
-    !isRecord(payload) ||
     !["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
-  ) {
-    throw outputError("Worker returned an invalid finding resolution.");
-  }
-  assertStructuredResultSize(payload);
+  )
+    throw outputError(
+      "Worker returned an invalid finding-resolution status.",
+      outputConstraint("status", "resolution-status"),
+    );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (!emptyArray(payload.decisions) || payload.reason !== "") {
-      throw outputError("Product decision must not include finding decisions.");
-    }
+    assertEmptyOutputFields(payload, ["reason"], ["decisions"]);
     return Object.freeze({
       status: payload.status,
       decision: normalizeProductDecision(payload),
     });
   }
   if (payload.status === "BLOCKED") {
-    if (
-      !emptyArray(payload.decisions) ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError(
-        "Blocked finding resolution contains inapplicable fields.",
-      );
-    }
+    assertEmptyOutputFields(
+      payload,
+      ["question", "whyBlocked"],
+      ["decisions", "options"],
+    );
     return Object.freeze({
       status: payload.status,
       reason: normalizeText(
@@ -2800,57 +2840,83 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
         "finding-resolution blocker",
         MAX_TEXT_LENGTH,
         INVALID_OUTPUT_CODE,
+        outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
       ),
       evidence: normalizeTextList(
         payload.evidence,
         "finding-resolution blocker evidence",
-        { code: INVALID_OUTPUT_CODE },
+        { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
       ),
     });
   }
-  if (
-    payload.reason !== "" ||
-    !emptyDecision(payload) ||
-    !Array.isArray(payload.decisions)
-  ) {
-    throw outputError("Finding resolution contains inapplicable fields.");
-  }
+  assertEmptyOutputFields(
+    payload,
+    ["reason", "question", "whyBlocked"],
+    ["options", "evidence"],
+  );
+  if (!Array.isArray(payload.decisions) || payload.decisions.length > MAX_ITEMS)
+    throw outputError(
+      "Finding resolution has an invalid number of decisions.",
+      outputConstraint("decisions", "array-up-to-32-items"),
+    );
   const expectedIds = blockers.map(({ id }) => id).sort();
   const decisions = Object.freeze(
-    payload.decisions.map((decision) => {
+    payload.decisions.map((decision, index) => {
+      const field = `decisions[${index}]`;
+      if (!isRecord(decision))
+        throw outputError(
+          "Worker returned an invalid finding decision.",
+          outputConstraint(field, "object"),
+        );
+      assertExactOutputFields(
+        decision,
+        ["id", "decision", "reason", "evidence"],
+        field,
+      );
       if (
-        !isRecord(decision) ||
-        !["FIX", "DISPUTE"].includes(decision.decision) ||
+        typeof decision.id !== "string" ||
+        !/^(?:R|F)[1-9][0-9]{0,8}$/u.test(decision.id) ||
         !expectedIds.includes(decision.id)
-      ) {
-        throw outputError("Worker returned an invalid finding decision.");
-      }
+      )
+        throw outputError(
+          "Finding decision must identify a current blocker.",
+          outputConstraint(`${field}.id`, "current-blocker-id"),
+        );
+      if (!["FIX", "DISPUTE"].includes(decision.decision))
+        throw outputError(
+          "Worker returned an invalid finding disposition.",
+          outputConstraint(`${field}.decision`, "fix-or-dispute"),
+        );
       if (
         decision.decision === "DISPUTE" &&
         (decision.id.startsWith("F") || arbitratedIds.has(decision.id))
-      ) {
-        throw outputError("This blocker cannot be disputed.");
-      }
+      )
+        throw outputError(
+          "This blocker cannot be disputed.",
+          outputConstraint(`${field}.decision`, "disputable-blocker-only"),
+        );
       return Object.freeze({
         id: decision.id,
         decision: decision.decision,
         reason: normalizeText(
           decision.reason,
-          `resolution ${decision.id} reason`,
+          "finding decision reason",
           MAX_TEXT_LENGTH,
           INVALID_OUTPUT_CODE,
+          outputConstraint(
+            `${field}.reason`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
-        evidence:
-          decision.decision === "DISPUTE"
-            ? normalizeTextList(
-                decision.evidence,
-                `dispute ${decision.id} evidence`,
-                { code: INVALID_OUTPUT_CODE },
-              )
-            : normalizeOptionalEvidence(
-                decision.evidence,
-                `fix ${decision.id} evidence`,
-              ),
+        evidence: normalizeTextList(
+          decision.evidence,
+          "finding decision evidence",
+          {
+            allowEmpty: decision.decision === "FIX",
+            code: INVALID_OUTPUT_CODE,
+            diagnosticField: `${field}.evidence`,
+          },
+        ),
       });
     }),
   );
@@ -2859,11 +2925,11 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
     decisions.length !== blockers.length ||
     new Set(actualIds).size !== actualIds.length ||
     actualIds.some((id, index) => id !== expectedIds[index])
-  ) {
+  )
     throw outputError(
       "Worker must resolve every current blocker exactly once.",
+      outputConstraint("decisions", "every-current-blocker-exactly-once"),
     );
-  }
   return Object.freeze({ status: payload.status, decisions });
 }
 

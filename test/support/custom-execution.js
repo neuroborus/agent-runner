@@ -265,7 +265,7 @@ export async function customExecutionFixture(
         structured = {
           status: "COMPLETED",
           summary: "Produced the criterion-bound result.",
-          result: result(step),
+          customResult: result(step),
           reason: "",
           ...empty,
         };
@@ -273,7 +273,7 @@ export async function customExecutionFixture(
         structured = {
           status: "UNCHANGED",
           summary: "All agreed criteria hold.",
-          result: state.customCandidate,
+          customResult: state.customCandidate,
           reason: "",
           ...empty,
         };
@@ -308,8 +308,12 @@ export async function customExecutionFixture(
           ...empty,
         };
       else assert.fail(`Unexpected state ${state.workflowState}`);
-      if (properties.result && !Object.hasOwn(structured, "result"))
-        structured = { result: structured };
+      if (properties.result && !Object.hasOwn(structured, "result")) {
+        if (properties.customResult) {
+          const { customResult, ...statusResult } = structured;
+          structured = { result: statusResult, customResult };
+        } else structured = { result: structured };
+      }
       return {
         structured,
         sessionId:
