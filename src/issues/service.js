@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, realpath } from "node:fs/promises";
+import { link, realpath, rename } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,20 +8,36 @@ import { createGitService } from "../git/index.js";
 import { getRuntimeContext, resolveRuntimeRoot } from "../runtime/index.js";
 import { createRunStore } from "../state/index.js";
 import {
+  assertReadInput,
   assertReportInput,
   createIssueDocument,
+  decodeIssueCursor,
+  encodeIssueCursor,
   IssueError,
   isDocumentHash,
   isIssueId,
+  isSameIssue,
   issueFilename,
   isTimestamp,
+  normalizeListInput,
+  normalizeUpdateInput,
+  parseIssueDocument,
   safeAbsolutePath,
   sha256,
+  updateIssueDocument,
 } from "./contract.js";
 import { resolveIssueStorePath } from "./location.js";
-import { openIssueStore, publishIssue } from "./store.js";
+import {
+  openCoordination,
+  openIssueStore,
+  publishIssue,
+  readIssueFile,
+  readIssueFiles,
+  replaceIssue,
+} from "./store.js";
 
 const REPORT_TOOL = "unexpected_issue_report";
+const UPDATE_TOOL = "issues_update";
 const INSTALLATION_PATH = fileURLToPath(new URL("../../", import.meta.url));
 const LEGACY_CONTEXT_FIELDS = [
   "issuesPath",
@@ -44,6 +60,13 @@ const CONTEXT_FIELDS = [
   "temporaryDevice",
   "temporaryInode",
   "temporaryName",
+];
+const UPDATE_CONTEXT_FIELDS = [
+  "documentHash",
+  "storeDevice",
+  "storeInode",
+  "storePath",
+  "updatedAt",
 ];
 const DEVICE_NUMBER = /^\d{1,20}$/u;
 const TEMPORARY_NAME =
@@ -91,8 +114,52 @@ function storeChangedError() {
   );
 }
 
+function notFoundError() {
+  return new IssueError("The issue was not found in the issue store.", {
+    code: "ERR_ISSUE_NOT_FOUND",
+  });
+}
+
+function staleError() {
+  return new IssueError(
+    "The issue revision or document hash is stale; read it again and use a new idempotency key.",
+    { code: "ERR_ISSUE_REVISION_CONFLICT" },
+  );
+}
+
 const isDeviceNumber = (value) =>
   typeof value === "string" && DEVICE_NUMBER.test(value);
+
+const isBoundStore = (context, store) =>
+  context.storePath === store.path &&
+  context.storeDevice === store.device &&
+  context.storeInode === store.inode;
+
+function assertUpdateContext(context) {
+  if (
+    !hasExactFields(context, UPDATE_CONTEXT_FIELDS) ||
+    safeAbsolutePath(context.storePath) !== context.storePath ||
+    !isDeviceNumber(context.storeDevice) ||
+    !isDeviceNumber(context.storeInode) ||
+    !(
+      (context.documentHash === null && context.updatedAt === null) ||
+      (isDocumentHash(context.documentHash) && isTimestamp(context.updatedAt))
+    )
+  ) {
+    throw new IssueError("Reserved issue update is invalid.", {
+      code: "ERR_ISSUE_REPORT_OWNERSHIP",
+    });
+  }
+}
+
+// Ascending creation time, then ID, is immutable and therefore keyset-stable.
+function compareKeys(left, right) {
+  if (left.createdAt !== right.createdAt) {
+    return left.createdAt < right.createdAt ? -1 : 1;
+  }
+  if (left.issueId === right.issueId) return 0;
+  return left.issueId < right.issueId ? -1 : 1;
+}
 
 function temporaryIdentity({
   temporaryBirthtimeNs,
@@ -149,8 +216,10 @@ export function createIssueService({
   installationPath = getRuntimeContext()?.installationPath ?? INSTALLATION_PATH,
   linkFile = link,
   onPublished = async () => {},
+  onUpdated = async () => {},
   openStore = openIssueStore,
   platform = process.platform,
+  renameFile = rename,
   runStore = createRunStore(),
 } = {}) {
   if (
@@ -159,7 +228,9 @@ export function createIssueService({
     typeof idFactory !== "function" ||
     typeof linkFile !== "function" ||
     typeof onPublished !== "function" ||
-    typeof openStore !== "function"
+    typeof onUpdated !== "function" ||
+    typeof openStore !== "function" ||
+    typeof renameFile !== "function"
   ) {
     throw new IssueError("Issue service options are invalid.");
   }
@@ -167,11 +238,11 @@ export function createIssueService({
 
   // Reports are user data: never inside or around settings, installed payloads,
   // run state, or the origin project; ordinary shared platform parents are fine.
-  async function assertSeparateStore(storePath, projectPath) {
+  async function assertSeparateStore(storePath, projectPath = null) {
     await runStore.assertRuntimeBoundary([storePath]);
     const protectedPaths = await Promise.all(
       [
-        projectPath,
+        ...(projectPath === null ? [] : [projectPath]),
         installationPath,
         resolveRuntimeRoot(location),
         resolveUserConfigurationPath(location),
@@ -307,11 +378,7 @@ export function createIssueService({
             code: "ERR_ISSUE_REPORT_OWNERSHIP",
           });
         }
-        if (
-          context.storePath !== store.path ||
-          context.storeDevice !== store.device ||
-          context.storeInode !== store.inode
-        ) {
+        if (!isBoundStore(context, store)) {
           throw storeChangedError();
         }
         const bytes = createIssueDocument({
@@ -326,35 +393,40 @@ export function createIssueService({
           });
         }
         const name = issueFilename(context.issueId);
-        await publishIssue(store, {
-          name,
-          temporaryName: context.temporaryName,
-          temporaryIdentity: temporaryIdentity(context),
-          bytes,
-          phase: context.phase,
-          linkFile,
-          async bindTemporary({ device, inode, birthtimeNs }) {
-            ({ context } = await action.updateContext({
-              ...context,
-              temporaryBirthtimeNs: birthtimeNs,
-              temporaryDevice: device,
-              temporaryInode: inode,
-            }));
-          },
-          async markPublished() {
-            ({ context } = await action.updateContext({
-              ...context,
-              phase: "published",
-            }));
-          },
+        // The issue lease admits no update until publication is complete;
+        // a later update changes only tracking, which recovery tolerates.
+        return await withCoordination(store, context.issueId, async (store) => {
+          await publishIssue(store, {
+            name,
+            temporaryName: context.temporaryName,
+            temporaryIdentity: temporaryIdentity(context),
+            bytes,
+            phase: context.phase,
+            linkFile,
+            matches: (current) => isSameIssue(current, bytes, context.issueId),
+            async bindTemporary({ device, inode, birthtimeNs }) {
+              ({ context } = await action.updateContext({
+                ...context,
+                temporaryBirthtimeNs: birthtimeNs,
+                temporaryDevice: device,
+                temporaryInode: inode,
+              }));
+            },
+            async markPublished() {
+              ({ context } = await action.updateContext({
+                ...context,
+                phase: "published",
+              }));
+            },
+          });
+          const receipt = {
+            issueId: context.issueId,
+            issuePath: join(store.path, name),
+          };
+          await onPublished(receipt);
+          await action.complete(receipt);
+          return receipt;
         });
-        const receipt = {
-          issueId: context.issueId,
-          issuePath: join(store.path, name),
-        };
-        await onPublished(receipt);
-        await action.complete(receipt);
-        return receipt;
       } finally {
         await action.release();
       }
@@ -363,5 +435,223 @@ export function createIssueService({
     }
   }
 
-  return Object.freeze({ report });
+  // Runs under the store-shared issue lease with a store view whose
+  // verification also proves the bound coordination directories.
+  async function withCoordination(store, issueId, operation) {
+    const coordination = await openCoordination(store, issueId);
+    try {
+      return await runStore.withIssueLease(coordination.path, (ledger) =>
+        operation(coordination.store, ledger),
+      );
+    } finally {
+      await coordination.close();
+    }
+  }
+
+  // Management never creates the store, inspects an origin, or takes a
+  // worktree lease; a missing store is an empty backlog.
+  async function openManagedStore() {
+    const storePath = resolveIssueStorePath(location);
+    await assertSeparateStore(storePath);
+    return openStore(storePath, { create: false });
+  }
+
+  async function list(input) {
+    const filters = normalizeListInput(input);
+    const store = await openManagedStore();
+    if (store === null) {
+      if (filters.cursor !== null) decodeIssueCursor(filters.cursor, null);
+      return { issues: [], nextCursor: null };
+    }
+    try {
+      const binding = sha256(
+        JSON.stringify([
+          store.path,
+          store.device,
+          store.inode,
+          filters.projectPath,
+          filters.statuses,
+        ]),
+      );
+      const after =
+        filters.cursor === null
+          ? null
+          : decodeIssueCursor(filters.cursor, binding);
+      const matches = (await readIssueFiles(store))
+        .map(({ issueId, bytes }) => {
+          const { tracking } = parseIssueDocument(bytes, issueId);
+          return {
+            issueId,
+            createdAt: tracking.createdAt,
+            documentHash: sha256(bytes),
+            tracking,
+          };
+        })
+        .filter(
+          ({ tracking }) =>
+            (filters.projectPath === null ||
+              tracking.origin.path === filters.projectPath) &&
+            (filters.statuses === null ||
+              filters.statuses.includes(tracking.status)),
+        )
+        .filter((issue) => after === null || compareKeys(issue, after) > 0)
+        .sort(compareKeys);
+      const page = matches.slice(0, filters.limit);
+      return {
+        issues: page.map(({ issueId, documentHash, tracking }) => ({
+          issueId,
+          documentHash,
+          tracking,
+        })),
+        nextCursor:
+          matches.length > page.length
+            ? encodeIssueCursor(binding, {
+                createdAt: page.at(-1).createdAt,
+                id: page.at(-1).issueId,
+              })
+            : null,
+      };
+    } finally {
+      await store.close();
+    }
+  }
+
+  async function read(input) {
+    assertReadInput(input);
+    const store = await openManagedStore();
+    if (store === null) throw notFoundError();
+    try {
+      const file = await readIssueFile(store, input.issueId);
+      if (file === null) throw notFoundError();
+      const { report: issueReport, tracking } = parseIssueDocument(
+        file.bytes,
+        input.issueId,
+      );
+      return {
+        issueId: input.issueId,
+        issuePath: join(store.path, issueFilename(input.issueId)),
+        documentHash: sha256(file.bytes),
+        markdown: issueReport.markdown,
+        tracking,
+      };
+    } finally {
+      await store.close();
+    }
+  }
+
+  // Compare-and-set on revision and document hash. The intent fixes the next
+  // document before replacement; the ledger proves whether that revision was
+  // published if newer metadata superseded it before the receipt was saved.
+  async function update(input) {
+    const { idempotencyKey, ...changes } = normalizeUpdateInput(input);
+    const { issueId, expectedRevision, expectedHash } = changes;
+    const identity = {
+      key: idempotencyKey,
+      tool: UPDATE_TOOL,
+      arguments: changes,
+    };
+    const existing = await runStore.readAction(identity);
+    if (existing?.status === "completed") return existing.result;
+    const storePath = resolveIssueStorePath(location);
+    if (existing !== null) {
+      assertUpdateContext(existing.context);
+      if (existing.context.storePath !== storePath) throw storeChangedError();
+    }
+    await assertSeparateStore(storePath);
+    const store = await openStore(storePath, { create: false });
+    if (store === null) {
+      throw existing === null ? notFoundError() : storeChangedError();
+    }
+    try {
+      const action = await runStore.beginAction({
+        ...identity,
+        context: {
+          documentHash: null,
+          storeDevice: store.device,
+          storeInode: store.inode,
+          storePath: store.path,
+          updatedAt: null,
+        },
+      });
+      try {
+        if (action.record.status === "completed") {
+          return action.record.result;
+        }
+        let { context } = action.record;
+        assertUpdateContext(context);
+        if (!isBoundStore(context, store)) throw storeChangedError();
+        const revision = expectedRevision + 1;
+        return await withCoordination(store, issueId, async (store, ledger) => {
+          // A recovered replacement is made durable before its receipt.
+          const complete = async (documentHash) => {
+            await store.sync();
+            await store.verify();
+            const receipt = { issueId, revision, documentHash };
+            await onUpdated(receipt);
+            await action.complete(receipt);
+            return receipt;
+          };
+          const file = await readIssueFile(store, issueId);
+          if (file === null) throw notFoundError();
+          const currentHash = sha256(file.bytes);
+          const current = parseIssueDocument(file.bytes, issueId);
+          if (
+            context.documentHash !== null &&
+            (currentHash === context.documentHash ||
+              (current.tracking.revision > expectedRevision &&
+                (await ledger.readRevision(revision)) === context.documentHash))
+          ) {
+            return complete(context.documentHash);
+          }
+          if (
+            current.tracking.revision !== expectedRevision ||
+            currentHash !== expectedHash
+          ) {
+            throw staleError();
+          }
+          let { updatedAt } = context;
+          if (updatedAt === null) {
+            const time = new Date(clock());
+            if (Number.isNaN(time.valueOf())) {
+              throw new IssueError("Issue clock returned an invalid value.");
+            }
+            // Tracking time never moves backwards.
+            updatedAt = time.toISOString();
+            if (updatedAt < current.tracking.updatedAt) {
+              updatedAt = current.tracking.updatedAt;
+            }
+          }
+          const bytes = updateIssueDocument(current, changes, updatedAt);
+          const documentHash = sha256(bytes);
+          if (context.documentHash === null) {
+            ({ context } = await action.updateContext({
+              ...context,
+              documentHash,
+              updatedAt,
+            }));
+          } else if (context.documentHash !== documentHash) {
+            throw new IssueError("Reserved issue update changed.", {
+              code: "ERR_ISSUE_REPORT_OWNERSHIP",
+            });
+          }
+          await ledger.recordRevision(revision, documentHash);
+          await replaceIssue(store, {
+            name: issueFilename(issueId),
+            temporaryName: `.${issueId}.${randomUUID()}.tmp`,
+            backupName: `.${issueId}.${randomUUID()}.previous`,
+            bytes,
+            previous: file,
+            renameFile,
+          });
+          return complete(documentHash);
+        });
+      } finally {
+        await action.release();
+      }
+    } finally {
+      await store.close();
+    }
+  }
+
+  return Object.freeze({ list, read, report, update });
 }

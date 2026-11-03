@@ -426,7 +426,8 @@ within the capability.
 The issue capability lives under `src/issues/` behind its public `index.js`,
 which exposes `createIssueService()` and the pure `resolveIssueStorePath()`
 location mapping. Its private service owns the deliberate-report action
-lifecycle over the run store's durable action primitives. Private contract,
+lifecycle and the list, read, and revisioned update operations over the run
+store's durable action primitives and narrow per-issue lease. Private contract,
 location, and store modules own the issue document schema, the per-user store
 location, descriptor-bound filesystem guards, and interrupted-publication
 recovery. Transports project its operations without duplicating action
@@ -1732,11 +1733,13 @@ official Node MCP SDK over STDIO only. The private `src/mcp/service.js` module
 owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status`,
 `run_activity`, `run_wait`, `run_respond`, `run_resume`, `run_pause`, and
 `run_cancel`; it also owns the shared-capability tools `guidance_read` and
-`guidance_update`, `update_check`, `update_apply`, and the
+`guidance_update`, `update_check`, `update_apply`, the issue-management tools
+`issues_list`, `issues_read`, and `issues_update`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
-implementation. The report tool delegates directly to `src/issues/index.js`,
-sharing the control plane's run store.
+implementation. The issue tools delegate directly to `src/issues/index.js`,
+sharing the control plane's run store. Management tools stay registered when
+issue reporting is disabled.
 Standard output belongs exclusively to MCP; bounded
 protocol diagnostics go to standard error without prompts or model transcripts.
 
@@ -1803,6 +1806,26 @@ update times, optional run ID and error code, bounded plan and resolving commit
 references, and an optional note. Creation writes revision `1`, status `open`,
 and empty tracking metadata. Strict parsing rejects unknown or duplicate
 fields, non-canonical bytes, and invalid IDs, statuses, hashes, or bounds.
+
+Management opens the store without creating it; a missing store is an empty
+backlog. It loads no configuration, inspects no origin, constructs no pipeline,
+and takes no worktree lease. Listing reads every published `<issueId>.json`
+through the descriptor-bound directory (at most 10,000 entries), skipping
+hidden reservation files, foreign names, and a document still hard-linked to
+its bound creation file. Exact filters compare the recorded origin path and
+status; results sort by `createdAt`, then ID, with pages of 1 to 100 (default
+50). The opaque base64url cursor holds the last key and a hash of the store
+path, directory identity, and canonical filters; any other binding fails with
+`ERR_INVALID_ISSUE_CURSOR`. Read returns Markdown, tracking, `documentHash`
+(SHA-256 of the document bytes), and the path; absent and unfinished issues
+fail with `ERR_ISSUE_NOT_FOUND`.
+
+`issues_update` sets only `status`, `planReferences`, `commitReferences`, and
+`note`; omitted fields are unchanged, `[]` and `null` clear, and at least one
+field is required. It requires `expectedRevision`, `expectedHash`, and an
+idempotency key. A mismatch fails with `ERR_ISSUE_REVISION_CONFLICT` without
+mutation. Success increments the revision, advances `updatedAt` monotonically,
+and returns `{ issueId, revision, documentHash }`.
 
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action
@@ -2192,6 +2215,37 @@ inspection; an intent that
 never reserved a local destination is rebound to the global store, and any
 other incomplete local intent fails with
 `ERR_ISSUE_REPORT_LEGACY_PUBLICATION` without touching its files.
+
+Issue mutations are serialized by the state layer's same-host lease in the
+store's private `.coordination/<issueId>/` directory, created with mode `0700`
+through the descriptor-bound store and held after the action lease. Both
+levels are opened without following links and used only through their
+descriptors, and each level's parent is synced before the lease admits a
+mutation; every store verification during the mutation also proves their
+identities, so a replaced or linked directory fails with
+`ERR_UNSAFE_ISSUE_STORE` before any destructive step. Because
+it lives in the shared store, every writer to that store coordinates there,
+whatever its state root; listing ignores the directory. Creation holds it from publication through its
+receipt, so no update observes a half-published document; recovery then
+compares only immutable report, origin, and creation fields, tolerating later
+tracking updates. An `issues_update` action replays a completed receipt before
+store resolution and binds the store path and identity in its intent; a moved,
+replaced, or missing store fails with `ERR_ISSUE_STORE_CHANGED`. Under the
+issue lease it checks the expected revision and hash, persists the next
+document hash and update time in the intent, records that hash in the lease
+directory's ledger for the next revision, and writes the previous bytes to a
+private bound backup and the new bytes to a private synced temporary file. It
+rechecks the exact document it read and the temporary file's bound identity,
+isolation, and bytes immediately before atomically renaming it over the
+document; the backup is removed only after the published identity and bytes
+are verified and remains otherwise. Recovery syncs and reverifies the store before completing the
+receipt when the current hash or that ledger entry matches its prepared hash,
+reapplies identical bytes when the document is still at the expected revision,
+and otherwise fails as stale. A later writer at the same revision overwrites the
+ledger entry before replacing, so ledger entries prove which document each
+published revision held. Only bound temporary and backup files are removed
+after a failed replacement, and the backup only while the previous document is
+still in place.
 
 Canonical-worktree leases live under
 `worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash

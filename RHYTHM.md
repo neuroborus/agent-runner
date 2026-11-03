@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-03
 
+- **The global issue backlog is managed by revisioned MCP operations.**
+  `issues_list`, `issues_read`, and `issues_update` read and update the shared
+  store from any project, including after the origin is deleted and when
+  deliberate capture is disabled, because tracking repaired or irrelevant
+  issues must not depend on reporting new ones. Updates change only status,
+  references, and the note, and require the inspected revision and document
+  hash, so concurrent clients cannot silently overwrite each other. A narrow
+  per-issue lease, not a worktree lease, serializes creation and updates so
+  management never waits on unrelated runs; it lives in the shared store
+  because clients with different state roots may share one store. Its per-revision hash ledger lets
+  an interrupted update prove whether it was published even after a newer
+  update, so exact retries return their receipt without replaying or
+  overwriting newer metadata. Listing uses immutable creation-time/ID keyset
+  cursors bound to the store and filters instead of an index file that would
+  need its own consistency guarantees.
+
 - **Deliberate issue reports move to one private per-user global store.**
   Repository-local reports required an ignored artifact directory and were lost
   with their checkout, and a global link to such a file would have kept that

@@ -664,6 +664,26 @@ location or replaced store directory fails rather than replaying elsewhere.
 Unsafe permissions, symbolic or hard links, and overlap with projects,
 settings, run state, or the installation are rejected.
 
+The backlog is managed with list, read, and update operations that remain
+available when deliberate capture is disabled; disabling capture only removes
+new-report creation. They use only the issue store and issue coordination,
+never inspect an origin project, and never take or pause a worktree lease, so
+they work after the origin is deleted and while unrelated runs execute. Listing
+covers all projects and statuses unless filtered by exact recorded origin path
+or status. It is ordered by creation time, then ID, in bounded pages whose
+cursors are bound to the store and filters. Pages are live: an issue whose
+status changes between pages may enter or leave the filtered set, and no issue
+is returned twice. Unfinished creations are not listed.
+
+Updates change only status, plan and commit references, and the note; the
+report, ID, origin, and creation information are immutable. Any status may
+follow any other, so a resolved or dismissed issue can be reopened. Every update
+names the inspected revision and document hash plus an idempotency key. A stale
+update fails without change; an exact retry returns its receipt even after a
+newer update, never overwriting it. An interrupted update is completed or
+proven stale before another writer changes that issue, and it never replays
+against a moved or replaced store.
+
 Earlier repository-local reports and the optional repository-local issue index
 are not current: the runner neither discovers, imports, nor migrates them and
 never changes those files. A historical completed receipt still replays

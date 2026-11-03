@@ -2337,6 +2337,7 @@ export function createRunStore({
     worktreeIsLeased,
     worktreeLeaseOwner,
     withGuidanceLease,
+    withIssueLease: actions.withIssueLease,
     writeRunArtifact,
   });
 }

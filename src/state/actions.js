@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { STOP_TIMINGS, validStopTiming } from "./stop-contract.js";
 import { atomicWriteFile, readOptionalText } from "./files.js";
@@ -13,6 +13,7 @@ import { assertRunId, deepFreeze, RunStoreError } from "./validation.js";
 const ACTION_SCHEMA_VERSION = 3;
 const ACTIONS_DIRECTORY = "actions";
 const ACTION_FILENAME = "action.json";
+const DOCUMENT_HASH = /^[a-f0-9]{64}$/u;
 const MAX_KEY_LENGTH = 1_024;
 const MAX_ACTION_BYTES = 256 * 1_024;
 const TOOLS = new Set([
@@ -22,6 +23,7 @@ const TOOLS = new Set([
   "run_pause",
   "run_cancel",
   "unexpected_issue_report",
+  "issues_update",
   "guidance_update",
   "runtime_admit",
   "runtime_activate",
@@ -261,6 +263,80 @@ export function createActionStore({
     onPublicationBoundary,
     tokenFactory,
   });
+  const issueLeases = createLeaseManager({
+    allowIdentityFreeReclaim: true,
+    withMutation: (_record, operation, directory) =>
+      mutate(directory, operation),
+    activeLeaseDescription: "Issue lease",
+    conflictCode: "ERR_ISSUE_IN_PROGRESS",
+    invalidLeaseCode: "ERR_INVALID_ISSUE_LEASE",
+    leaseDescription: "Issue lease",
+    reclaimingLeaseDescription: "Reclaiming issue lease",
+    leaseSubject: () => "Issue",
+    includeRunId: false,
+    requireMatchingRunId: false,
+    timestamp,
+    hostName,
+    processId,
+    processIsAlive: checkProcess,
+    processIdentity,
+    onPublicationBoundary,
+    tokenFactory,
+  });
+
+  // Serializes mutations of one issue without any worktree or run lease. The
+  // caller supplies a private descriptor-bound directory owned by the shared
+  // issue store, so every writer to that store coordinates there regardless of
+  // its state root; the issue store owns its link and identity guards.
+  // Its ledger records the document hash intended for each revision before the
+  // replacement, so a later retry can tell whether its revision was published.
+  async function withIssueLease(directory, operation) {
+    if (
+      typeof directory !== "string" ||
+      !isAbsolute(directory) ||
+      typeof operation !== "function"
+    ) {
+      throw actionError("Issue coordination input is invalid.");
+    }
+    if (!(await stat(directory)).isDirectory()) {
+      throw actionError("Issue coordination path must be a directory.");
+    }
+    const revisionPath = (revision) => {
+      if (!Number.isSafeInteger(revision) || revision < 2) {
+        throw actionError("Issue revision is invalid.");
+      }
+      return join(directory, `revision-${revision}`);
+    };
+    const lease = await issueLeases.acquire(directory, null);
+    try {
+      return await operation(
+        Object.freeze({
+          async readRevision(revision) {
+            const source = await readOptionalText(revisionPath(revision), {
+              maxBytes: 65,
+            });
+            if (source === null) return null;
+            const documentHash = source.slice(0, -1);
+            if (!DOCUMENT_HASH.test(documentHash) || !source.endsWith("\n")) {
+              throw actionError("Issue revision record is invalid.");
+            }
+            return documentHash;
+          },
+          async recordRevision(revision, documentHash) {
+            if (
+              typeof documentHash !== "string" ||
+              !DOCUMENT_HASH.test(documentHash)
+            ) {
+              throw actionError("Issue revision record is invalid.");
+            }
+            await atomicWriteFile(revisionPath(revision), `${documentHash}\n`);
+          },
+        }),
+      );
+    } finally {
+      await lease.release();
+    }
+  }
 
   async function begin({ key, tool, arguments: actionArguments, context }) {
     if (!isRecord(context)) {
@@ -450,5 +526,5 @@ export function createActionStore({
     return deepFreeze(structuredClone(record));
   }
 
-  return Object.freeze({ begin, read });
+  return Object.freeze({ begin, read, withIssueLease });
 }

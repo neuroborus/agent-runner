@@ -16,7 +16,7 @@ import {
   createGuidanceService,
   MAX_GUIDANCE_BYTES,
 } from "../guidance/index.js";
-import { createIssueService } from "../issues/index.js";
+import { createIssueService, ISSUE_STATUSES } from "../issues/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
@@ -300,6 +300,59 @@ const unexpectedIssueReportSchema = z
       .max(16_384)
       .optional()
       .describe("Retained request selector; it does not choose issue storage."),
+  })
+  .strict();
+const issueId = z
+  .string()
+  .regex(
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u,
+  )
+  .describe("Opaque issue ID from the global issue store.");
+const issueStatus = z.enum(ISSUE_STATUSES);
+const issueReferences = z
+  .array(boundedSingleLine(1_024))
+  .max(32)
+  .refine((values) => new Set(values).size === values.length)
+  .describe(
+    "Caller-supplied reference text; never retrieved, inspected, or validated remotely. An empty array clears it.",
+  );
+const issuesListSchema = z
+  .object({
+    projectPath: boundedSingleLine(4_096)
+      .optional()
+      .describe(
+        "Exact recorded absolute origin path; the project is never inspected.",
+      ),
+    statuses: z.array(issueStatus).min(1).max(ISSUE_STATUSES.length).optional(),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Page size; defaults to 50."),
+    cursor: boundedSingleLine(1_024)
+      .optional()
+      .describe("Opaque nextCursor from the same store and filters."),
+  })
+  .strict();
+const issuesReadSchema = z.object({ issueId }).strict();
+const issuesUpdateSchema = z
+  .object({
+    idempotencyKey,
+    issueId,
+    expectedRevision: z.number().int().min(1).safe(),
+    expectedHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .describe("documentHash from the inspected revision."),
+    status: issueStatus.optional(),
+    planReferences: issueReferences.optional(),
+    commitReferences: issueReferences.optional(),
+    note: markdownContent(4_000)
+      .nullable()
+      .optional()
+      .describe("Concise disposition note; null clears it."),
   })
   .strict();
 
@@ -1358,6 +1411,9 @@ export function createMcpControlPlane(options = {}) {
       detachedAction("run_start", runStart, input, context),
     runStatus,
     runWait,
+    issuesList: (input) => issueService().list(input),
+    issuesRead: (input) => issueService().read(input),
+    issuesUpdate: (input) => issueService().update(input),
     unexpectedIssueReport: (input) => issueService().report(input),
   });
 }
@@ -1566,6 +1622,37 @@ export function createMcpServer(options = {}) {
       detachedResult(() =>
         control.runResume(input, { signal: context.mcpReq.signal }),
       ),
+  );
+  // Backlog management stays available when deliberate capture is disabled.
+  server.registerTool(
+    "issues_list",
+    {
+      description:
+        "List the private per-user global issue backlog across all projects and statuses by default. Filter by exact recorded origin path or statuses; ordered by creation time then ID with an opaque nextCursor. Reads only the issue store, never origin projects.",
+      inputSchema: issuesListSchema,
+      annotations: readOnly,
+    },
+    async (input) => result(await control.issuesList(input)),
+  );
+  server.registerTool(
+    "issues_read",
+    {
+      description:
+        "Read one global issue: preserved Markdown, tracking record, revision and documentHash. Works after the origin checkout is deleted.",
+      inputSchema: issuesReadSchema,
+      annotations: readOnly,
+    },
+    async (input) => result(await control.issuesRead(input)),
+  );
+  server.registerTool(
+    "issues_update",
+    {
+      description:
+        "Update only an issue's tracking status, plan and commit references, or disposition note using its expected revision and documentHash. Omitted fields stay unchanged; empty arrays or null clear them. Retry with the same idempotency key and arguments; a stale revision fails without change.",
+      inputSchema: issuesUpdateSchema,
+      annotations: mutating,
+    },
+    async (input) => result(await control.issuesUpdate(input)),
   );
   if (issueReportingEnabled) {
     server.registerTool(

@@ -610,6 +610,9 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     "guidance_read",
     "guidance_update",
+    "issues_list",
+    "issues_read",
+    "issues_update",
     "pipelines_list",
     "run_activity",
     "run_cancel",

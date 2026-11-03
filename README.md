@@ -713,8 +713,9 @@ supplies its backend; a conflicting explicit backend is invalid.
 deliberate capture through the MCP-only unexpected-issue tool described below.
 Set it to `false` and restart the MCP server to remove the tool, its schema,
 and all related server instructions from discovery. This discovery switch is
-restart-scoped and does not select issue storage. Its scope is the runner-local
-configuration.
+restart-scoped and does not select issue storage. Backlog management through
+`issues_list`, `issues_read`, and `issues_update` stays available when capture
+is disabled. Its scope is the runner-local configuration.
 
 `clientAttribution` is a runner-root-only exact `{ "name", "title" }` object
 for provider-visible client identity. It defaults to
@@ -1789,6 +1790,9 @@ exposes:
 - `run_wait`
 - `run_respond`
 - `run_resume`
+- `issues_list`
+- `issues_read`
+- `issues_update`
 - `unexpected_issue_report` when runner-local issue reporting is enabled
 
 Call `guidance_read` once before first managing a run for each project, using
@@ -1897,6 +1901,28 @@ recovers the reserved issue ID in the reserved store without duplication.
 Repository-local reports from earlier versions are neither discovered nor
 imported and remain untouched; an incomplete historical local publication
 fails explicitly and needs a new key.
+
+The global backlog is managed with `issues_list`, `issues_read`, and
+`issues_update`, which stay registered when deliberate capture is disabled.
+They read only the issue store, never the origin project, and take no
+worktree lease, so they work after the checkout is deleted and while unrelated
+runs own their worktrees. `issues_list` covers all projects and statuses by
+default; optional `projectPath` matches the recorded origin path exactly and
+`statuses` selects one or more statuses. Results are ordered by creation time,
+then ID, with `limit` from 1 to 100 (default 50) and an opaque `nextCursor`
+bound to the store and filters. Each entry holds `issueId`, `documentHash`, and
+the tracking record. `issues_read` returns the preserved `markdown`, the
+tracking record, `documentHash`, and `issuePath`.
+
+`issues_update` requires `issueId`, the inspected `expectedRevision` and
+`expectedHash` (its `documentHash`), and an `idempotencyKey`. It changes only
+`status`, `planReferences`, `commitReferences`, or `note`; omitted fields stay
+unchanged, while empty arrays and `null` clear them. Any status may follow any
+other, including reopening. References are caller-supplied text that is never
+retrieved or validated. The receipt is `{ "issueId", "revision",
+"documentHash" }`. A stale revision fails without change; read again and use a
+new key. An exact retry returns its receipt even after newer updates and never
+overwrites them.
 
 Call `run_wait` once for the desired interval. Its `timeoutMs` accepts up to 24
 hours; configure the MCP client's tool timeout above the requested wait.

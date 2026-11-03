@@ -864,7 +864,11 @@ that is shared across projects and survives deletion of the originating
 checkout. The target project needs no ignore rule. Each issue keeps its
 Markdown together with one authoritative tracking record that starts `open`.
 Earlier repository-local reports and issue indexes are no longer read or
-maintained; leave them in place.
+maintained; leave them in place. Manage the backlog with `issues_list`,
+`issues_read`, and `issues_update`, which remain available when deliberate
+capture is disabled. Mark repaired issues `resolved` and deliberately
+irrelevant ones `dismissed`, with the inspected revision and `documentHash`;
+after a stale-revision failure, read again instead of retrying.
 
 The shipped common guide and optional `<artifactRoot>/agent-runner/rules.md`
 are returned complete with explicit boundaries, using current new-run

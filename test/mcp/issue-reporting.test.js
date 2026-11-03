@@ -7,6 +7,7 @@ import {
   link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -26,6 +27,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { createRunStore, parseRunnerConfiguration } from "../../src/index.js";
 import {
   createIssueService,
+  ISSUE_STATUSES,
   resolveIssueStorePath,
 } from "../../src/issues/index.js";
 import { openIssueStore } from "../../src/issues/store.js";
@@ -38,6 +40,8 @@ import {
 const executeFile = promisify(execFile);
 const FIXED_TIME = new Date("2026-08-24T16:45:12.123Z");
 const ISSUE_ID = "11111111-1111-4111-8111-111111111111";
+const SECOND_ID = "22222222-2222-4222-8222-222222222222";
+const THIRD_ID = "33333333-3333-4333-8333-333333333333";
 
 function reportInput(projectPath, overrides = {}) {
   return {
@@ -72,6 +76,13 @@ async function repository(t, prefix = "agent-runner-issue-report-") {
   await Promise.all([mkdir(paths.projectPath), mkdir(paths.home)]);
   await executeFile("git", ["init", "-q", paths.projectPath]);
   return paths;
+}
+
+// Store entries apart from the shared per-issue coordination directory.
+async function issueEntries(paths) {
+  return (await readdir(paths.issuesPath))
+    .filter((name) => name !== ".coordination")
+    .sort();
 }
 
 function issueOptions(paths, overrides = {}) {
@@ -373,7 +384,7 @@ test("publishes one private global document without project ignore rules", async
   assert.doesNotMatch(source, /AUTOMATIC_SECRET|private prompt/u);
   assert.equal((await stat(paths.issuesPath)).mode & 0o777, 0o700);
   assert.equal((await stat(receipt.issuePath)).mode & 0o777, 0o600);
-  assert.deepEqual(await readdir(paths.issuesPath), [`${ISSUE_ID}.json`]);
+  assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
   assert.equal(await projectStatus(), statusBefore);
 
   assert.deepEqual(await control.unexpectedIssueReport(input), receipt);
@@ -448,7 +459,7 @@ test("creates concurrent reports once per idempotency key", async (t) => {
   }
   assert.notEqual(receipts[0].issueId, receipts[1].issueId);
   assert.deepEqual(
-    (await readdir(paths.issuesPath)).sort(),
+    await issueEntries(paths),
     receipts.map(({ issueId }) => `${issueId}.json`).sort(),
   );
 });
@@ -544,7 +555,7 @@ test("recovers lost acknowledgements and interrupted publication once", async (t
         (await runStore.readAction(actionIdentity(input))).status,
         "completed",
       );
-      assert.deepEqual(await readdir(paths.issuesPath), [`${ISSUE_ID}.json`]);
+      assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
     });
   }
 });
@@ -695,7 +706,7 @@ test("does not adopt a colliding issue identity", async (t) => {
     ),
     failure("ERR_ISSUE_REPORT_OWNERSHIP"),
   );
-  assert.deepEqual(await readdir(paths.issuesPath), [`${ISSUE_ID}.json`]);
+  assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
   assert.deepEqual(await readFile(first.issuePath), published);
 });
 
@@ -805,9 +816,7 @@ test("rejects linked, shared, and overlapping storage", async (t) => {
         failure("ERR_ISSUE_REPORT_OWNERSHIP"),
       );
       assert.deepEqual(await readFile(temporaryPath), substituted);
-      assert.deepEqual(await readdir(paths.issuesPath), [
-        context.temporaryName,
-      ]);
+      assert.deepEqual(await issueEntries(paths), [context.temporaryName]);
     });
   }
 
@@ -868,4 +877,702 @@ test("rejects linked, shared, and overlapping storage", async (t) => {
     );
     assert.deepEqual(await readFile(outsidePath), outside);
   });
+});
+
+function updateInput(issue, overrides = {}) {
+  return {
+    idempotencyKey: "issue-update-1",
+    issueId: issue.issueId,
+    expectedRevision: issue.tracking.revision,
+    expectedHash: issue.documentHash,
+    status: "resolved",
+    ...overrides,
+  };
+}
+
+async function reportedIssue(t, prefix, options = {}) {
+  const paths = await repository(t, prefix);
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const issues = createIssueService({ ...issueOptions(paths), runStore });
+  const { issueId } = await issues.report(reportInput(paths.projectPath));
+  const service = (overrides = {}) =>
+    createIssueService({
+      ...issueOptions(paths, { ...options, ...overrides }),
+      runStore,
+    });
+  return {
+    paths,
+    runStore,
+    issues,
+    issue: await issues.read({ issueId }),
+    service,
+  };
+}
+
+test("manages the global backlog over MCP when capture is disabled", async (t) => {
+  const paths = await repository(t, "agent-runner-issue-mcp-management-");
+  const control = reportingControl(paths);
+  const { issueId } = await control.unexpectedIssueReport(
+    reportInput(paths.projectPath),
+  );
+  await rm(paths.projectPath, { recursive: true, force: true });
+  const { client, server } = await discoveredServer(false, control);
+  t.after(() => client.close().catch(() => {}));
+  t.after(() => server.close().catch(() => {}));
+
+  const { tools } = await client.listTools();
+  const tool = (name) => tools.find((candidate) => candidate.name === name);
+  assert.equal(tool("unexpected_issue_report"), undefined);
+  for (const name of ["issues_list", "issues_read", "issues_update"]) {
+    assert.equal(tool(name).inputSchema.additionalProperties, false);
+    assert.equal(tool(name).annotations.readOnlyHint, name !== "issues_update");
+  }
+  const updateSchema = tool("issues_update").inputSchema;
+  assert.deepEqual(updateSchema.required.sort(), [
+    "expectedHash",
+    "expectedRevision",
+    "idempotencyKey",
+    "issueId",
+  ]);
+  assert.deepEqual(updateSchema.properties.status.enum, ISSUE_STATUSES);
+  const call = async (name, argumentsValue) => {
+    const response = await client.callTool({
+      name,
+      arguments: argumentsValue,
+    });
+    assert.notEqual(response.isError, true, JSON.stringify(response.content));
+    return response.structuredContent;
+  };
+
+  const read = await call("issues_read", { issueId });
+  assert.deepEqual(read, await control.issuesRead({ issueId }));
+  assert.match(read.markdown, /^# Unexpected Agent Runner Issue\n/u);
+  assert.deepEqual(await call("issues_list", {}), {
+    issues: [
+      { issueId, documentHash: read.documentHash, tracking: read.tracking },
+    ],
+    nextCursor: null,
+  });
+  const update = updateInput(read, {
+    status: "dismissed",
+    note: "Expected behavior after review.",
+  });
+  for (const invalid of [
+    { ...update, status: "closed" },
+    { ...update, markdown: "replacement" },
+  ]) {
+    const response = await client.callTool({
+      name: "issues_update",
+      arguments: invalid,
+    });
+    assert.equal(response.isError, true);
+  }
+  const receipt = await call("issues_update", update);
+  assert.deepEqual(receipt, await control.issuesUpdate(update));
+  assert.equal(
+    (await control.issuesRead({ issueId })).tracking.status,
+    "dismissed",
+  );
+});
+
+test("lists the cross-project backlog with exact filters and bound pages", async (t) => {
+  const paths = await repository(t, "agent-runner-issue-list-");
+  const otherProject = join(paths.root, "other");
+  await mkdir(otherProject);
+  await executeFile("git", ["init", "-q", otherProject]);
+  const times = [
+    "2026-08-24T16:45:12.123Z",
+    "2026-08-24T16:46:00.000Z",
+    "2026-08-24T16:46:00.000Z",
+    "2026-08-24T16:47:00.000Z",
+  ];
+  const ids = [THIRD_ID, SECOND_ID, ISSUE_ID];
+  const issues = createIssueService({
+    ...issueOptions(paths, {
+      clock: () => new Date(times.shift()),
+      idFactory: () => ids.shift(),
+    }),
+    runStore: createRunStore({ stateRoot: paths.stateRoot }),
+  });
+
+  // Listing is read-only and never creates the store.
+  assert.deepEqual(await issues.list({}), { issues: [], nextCursor: null });
+  await assert.rejects(access(paths.dataHome), failure("ENOENT"));
+  for (const [index, projectPath] of [
+    paths.projectPath,
+    otherProject,
+    paths.projectPath,
+  ].entries()) {
+    await issues.report(
+      reportInput(projectPath, { idempotencyKey: `issue-list-${index}` }),
+    );
+  }
+  await issues.update(
+    updateInput(await issues.read({ issueId: ISSUE_ID }), {
+      idempotencyKey: "issue-list-update",
+    }),
+  );
+  const listed = async (input) =>
+    (await issues.list(input)).issues.map(({ issueId }) => issueId);
+
+  // Equal creation times order by ID.
+  assert.deepEqual(await listed({}), [THIRD_ID, ISSUE_ID, SECOND_ID]);
+  const first = await issues.list({ limit: 2 });
+  assert.deepEqual(
+    first.issues.map(({ issueId }) => issueId),
+    [THIRD_ID, ISSUE_ID],
+  );
+  assert.deepEqual(await issues.list({ limit: 2, cursor: first.nextCursor }), {
+    issues: [(await issues.list({})).issues[2]],
+    nextCursor: null,
+  });
+  assert.deepEqual(await listed({ projectPath: paths.projectPath }), [
+    THIRD_ID,
+    ISSUE_ID,
+  ]);
+  assert.deepEqual(
+    await listed({ projectPath: otherProject, statuses: ["open"] }),
+    [SECOND_ID],
+  );
+  assert.deepEqual(await listed({ statuses: ["resolved", "dismissed"] }), [
+    ISSUE_ID,
+  ]);
+  assert.deepEqual(
+    await listed({ projectPath: join(otherProject, "nested") }),
+    [],
+  );
+  for (const cursor of [`${first.nextCursor}x`, "invalid"]) {
+    await assert.rejects(
+      issues.list({ limit: 2, cursor }),
+      failure("ERR_INVALID_ISSUE_CURSOR"),
+    );
+  }
+  await assert.rejects(
+    issues.list({ limit: 2, cursor: first.nextCursor, statuses: ["open"] }),
+    failure("ERR_INVALID_ISSUE_CURSOR"),
+  );
+  for (const input of [
+    { limit: 0 },
+    { limit: 101 },
+    { statuses: [] },
+    { statuses: ["open", "open"] },
+    { statuses: ["closed"] },
+    { projectPath: "relative/project" },
+    { extra: true },
+  ]) {
+    await assert.rejects(
+      issues.list(input),
+      failure("ERR_INVALID_ISSUE_REQUEST"),
+    );
+  }
+});
+
+test("updates only tracking metadata across finite statuses", async (t) => {
+  const { paths, issues, issue } = await reportedIssue(
+    t,
+    "agent-runner-issue-update-",
+  );
+  await rm(paths.projectPath, { recursive: true, force: true });
+  const immutable = ({ markdown, tracking }) => [
+    markdown,
+    tracking.origin,
+    tracking.createdAt,
+    tracking.runId,
+    tracking.errorCode,
+  ];
+  const first = updateInput(issue, {
+    status: "queued",
+    planReferences: ["plan.md#commit-1"],
+    commitReferences: ["0123456789abcdef"],
+    note: "Scheduled for repair.",
+  });
+  const firstReceipt = await issues.update(first);
+  assert.deepEqual(firstReceipt, {
+    issueId: ISSUE_ID,
+    revision: 2,
+    documentHash: (await issues.read({ issueId: ISSUE_ID })).documentHash,
+  });
+
+  // Omitted fields stay; reopening and clearing are ordinary updates.
+  let current = await issues.read({ issueId: ISSUE_ID });
+  for (const [index, status] of [
+    "in_progress",
+    "resolved",
+    "dismissed",
+  ].entries()) {
+    await issues.update(
+      updateInput(current, { idempotencyKey: `status-${index}`, status }),
+    );
+    current = await issues.read({ issueId: ISSUE_ID });
+    assert.equal(current.tracking.status, status);
+    assert.deepEqual(current.tracking.planReferences, ["plan.md#commit-1"]);
+    assert.equal(current.tracking.note, "Scheduled for repair.");
+  }
+  await issues.update(
+    updateInput(current, {
+      idempotencyKey: "reopen",
+      status: "open",
+      planReferences: [],
+      commitReferences: [],
+      note: null,
+    }),
+  );
+  const reopened = await issues.read({ issueId: ISSUE_ID });
+  assert.deepEqual(
+    { ...reopened.tracking, updatedAt: issue.tracking.updatedAt },
+    { ...issue.tracking, revision: 6 },
+  );
+  assert.deepEqual(immutable(reopened), immutable(issue));
+
+  const stored = await readFile(reopened.issuePath);
+  assert.deepEqual(await issues.update(first), firstReceipt);
+  await assert.rejects(
+    issues.update({ ...first, idempotencyKey: "stale-update" }),
+    failure("ERR_ISSUE_REVISION_CONFLICT"),
+  );
+  await assert.rejects(
+    issues.update({ ...first, status: "dismissed" }),
+    failure("ERR_MCP_IDEMPOTENCY_CONFLICT"),
+  );
+  for (const input of [
+    {
+      ...first,
+      status: undefined,
+      planReferences: undefined,
+      commitReferences: undefined,
+      note: undefined,
+    },
+    { ...first, status: "closed" },
+    { ...first, status: null },
+    { ...first, planReferences: ["same", "same"] },
+    { ...first, note: "" },
+    { ...first, markdown: "replacement" },
+    { ...first, expectedRevision: 0 },
+  ]) {
+    await assert.rejects(
+      issues.update(input),
+      failure("ERR_INVALID_ISSUE_REQUEST"),
+    );
+  }
+  await assert.rejects(
+    issues.update(
+      updateInput(
+        { ...reopened, issueId: SECOND_ID },
+        { idempotencyKey: "missing-issue" },
+      ),
+    ),
+    failure("ERR_ISSUE_NOT_FOUND"),
+  );
+  assert.deepEqual(await readFile(reopened.issuePath), stored);
+});
+
+test("serializes competing updates and recovers interrupted updates once", async (t) => {
+  const interrupted = (name) => ({
+    async [name]() {
+      throw new Error("simulated interruption");
+    },
+  });
+  await t.test("competing clients with separate state roots", async (t) => {
+    const { paths, issue, service } = await reportedIssue(
+      t,
+      "agent-runner-issue-cas-",
+    );
+    // Both clients share the store, not a state root.
+    const other = createIssueService({
+      ...issueOptions(paths),
+      runStore: createRunStore({ stateRoot: join(paths.root, "other-state") }),
+    });
+    const competing = updateInput(issue, {
+      idempotencyKey: "competing",
+      status: "dismissed",
+    });
+    const winner = await service({
+      async renameFile(source, destination) {
+        await assert.rejects(
+          other.update(competing),
+          failure("ERR_ISSUE_IN_PROGRESS"),
+        );
+        await rename(source, destination);
+      },
+    }).update(updateInput(issue));
+
+    await assert.rejects(
+      other.update(competing),
+      failure("ERR_ISSUE_REVISION_CONFLICT"),
+    );
+    const current = await other.read({ issueId: ISSUE_ID });
+    assert.equal(current.documentHash, winner.documentHash);
+    assert.equal(current.tracking.status, "resolved");
+  });
+
+  await t.test("substituted replacement source", async (t) => {
+    const { paths, issues, issue, service } = await reportedIssue(
+      t,
+      "agent-runner-issue-update-source-",
+    );
+    const stored = await readFile(issue.issuePath);
+    let substituted = null;
+    // Replaces the written temporary file before its pre-rename check.
+    const substituting = {
+      async openStore(path, options) {
+        const store = await openIssueStore(path, options);
+        return {
+          ...store,
+          async verify() {
+            const name = (await readdir(path)).find(
+              (entry) =>
+                entry.startsWith(`.${ISSUE_ID}.`) && entry.endsWith(".tmp"),
+            );
+            if (substituted === null && name !== undefined) {
+              substituted = join(path, name);
+              await writeFile(`${substituted}.new`, "{}\n", { mode: 0o600 });
+              await rename(`${substituted}.new`, substituted);
+            }
+            await store.verify();
+          },
+        };
+      },
+    };
+
+    await assert.rejects(
+      service(substituting).update(updateInput(issue)),
+      failure("ERR_ISSUE_REPORT_OWNERSHIP"),
+    );
+    assert.deepEqual(await readFile(issue.issuePath), stored);
+    assert.equal(await readFile(substituted, "utf8"), "{}\n");
+    assert.deepEqual(await issueEntries(paths), [
+      `.${ISSUE_ID}.${substituted.split(".").at(-2)}.tmp`,
+      `${ISSUE_ID}.json`,
+    ]);
+    assert.equal(
+      (await issues.update(updateInput(issue, { idempotencyKey: "retry" })))
+        .revision,
+      2,
+    );
+  });
+
+  await t.test(
+    "lost acknowledgement superseded by a newer update",
+    async (t) => {
+      const { issues, issue, service } = await reportedIssue(
+        t,
+        "agent-runner-issue-update-ack-",
+      );
+      const lost = updateInput(issue);
+      await assert.rejects(service(interrupted("onUpdated")).update(lost));
+      const applied = await issues.read({ issueId: ISSUE_ID });
+      await issues.update(
+        updateInput(applied, { idempotencyKey: "newer", status: "open" }),
+      );
+      const newer = await readFile(applied.issuePath);
+
+      assert.deepEqual(await issues.update(lost), {
+        issueId: ISSUE_ID,
+        revision: 2,
+        documentHash: applied.documentHash,
+      });
+      assert.deepEqual(await readFile(applied.issuePath), newer);
+    },
+  );
+
+  await t.test("interrupted before replacement", async (t) => {
+    const { paths, issues, issue, service } = await reportedIssue(
+      t,
+      "agent-runner-issue-update-replace-",
+    );
+    const input = updateInput(issue);
+    await assert.rejects(service(interrupted("renameFile")).update(input));
+    assert.equal(
+      (await issues.read({ issueId: ISSUE_ID })).documentHash,
+      issue.documentHash,
+    );
+    assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
+
+    assert.equal((await issues.update(input)).revision, 2);
+    assert.equal(
+      (await issues.read({ issueId: ISSUE_ID })).tracking.status,
+      "resolved",
+    );
+  });
+
+  await t.test("directory sync lost after replacement", async (t) => {
+    const { paths, runStore, issue, service } = await reportedIssue(
+      t,
+      "agent-runner-issue-update-sync-",
+    );
+    const input = updateInput(issue);
+    let renamed = false;
+    await assert.rejects(
+      service({
+        async openStore(path, options) {
+          const store = await openIssueStore(path, options);
+          return {
+            ...store,
+            async sync() {
+              if (renamed) throw new Error("simulated sync interruption");
+              await store.sync();
+            },
+          };
+        },
+        async renameFile(source, destination) {
+          await rename(source, destination);
+          renamed = true;
+        },
+      }).update(input),
+      /simulated sync interruption/u,
+    );
+
+    const events = [];
+    const recovered = await createIssueService({
+      ...issueOptions(paths),
+      async openStore(path, options) {
+        const store = await openIssueStore(path, options);
+        return {
+          ...store,
+          async sync() {
+            events.push("sync");
+            await store.sync();
+          },
+        };
+      },
+      runStore: {
+        ...runStore,
+        withIssueLease: (directory, operation) =>
+          runStore.withIssueLease(directory, (ledger) => {
+            events.push("lease");
+            return operation(ledger);
+          }),
+        async beginAction(value) {
+          const action = await runStore.beginAction(value);
+          return {
+            get record() {
+              return action.record;
+            },
+            release: () => action.release(),
+            updateContext: (context) => action.updateContext(context),
+            async complete(result) {
+              events.push("complete");
+              return action.complete(result);
+            },
+          };
+        },
+      },
+    }).update(input);
+    assert.equal(recovered.revision, 2);
+    // The recovered replacement is synced under the lease before completion.
+    assert.deepEqual(events.slice(events.indexOf("lease") + 1), [
+      "sync",
+      "complete",
+    ]);
+  });
+
+  await t.test("interrupted and superseded before replacement", async (t) => {
+    const { issues, issue, service } = await reportedIssue(
+      t,
+      "agent-runner-issue-update-superseded-",
+    );
+    const input = updateInput(issue);
+    await assert.rejects(service(interrupted("renameFile")).update(input));
+    const winner = await issues.update(
+      updateInput(issue, { idempotencyKey: "winner", status: "dismissed" }),
+    );
+
+    await assert.rejects(
+      issues.update(input),
+      failure("ERR_ISSUE_REVISION_CONFLICT"),
+    );
+    assert.equal(
+      (await issues.read({ issueId: ISSUE_ID })).documentHash,
+      winner.documentHash,
+    );
+  });
+});
+
+test("confines issue coordination to its bound directories", async (t) => {
+  const { paths, issue, service } = await reportedIssue(
+    t,
+    "agent-runner-issue-coordination-link-",
+  );
+  const stored = await readFile(issue.issuePath);
+  const coordination = join(paths.issuesPath, ".coordination", ISSUE_ID);
+  const outside = join(paths.root, "outside");
+  await mkdir(outside);
+  let substituted = false;
+  // Links the coordination name elsewhere while the update holds its lease.
+  const substituting = {
+    async openStore(path, options) {
+      const store = await openIssueStore(path, options);
+      return {
+        ...store,
+        async verify() {
+          const pending = (await readdir(path)).some((entry) =>
+            entry.endsWith(".tmp"),
+          );
+          if (!substituted && pending) {
+            substituted = true;
+            await rename(coordination, `${coordination}.moved`);
+            await symlink(outside, coordination);
+          }
+          await store.verify();
+        },
+      };
+    },
+  };
+
+  await assert.rejects(
+    service(substituting).update(updateInput(issue)),
+    failure("ERR_UNSAFE_ISSUE_STORE"),
+  );
+  assert.deepEqual(await readFile(issue.issuePath), stored);
+  // Another writer cannot follow the link into a second lease namespace.
+  await assert.rejects(
+    service().update(updateInput(issue, { idempotencyKey: "other" })),
+    failure("ERR_UNSAFE_ISSUE_STORE"),
+  );
+  assert.deepEqual(await readdir(outside), []);
+  assert.deepEqual(await readFile(issue.issuePath), stored);
+});
+
+test("syncs coordination directory entries before admitting mutations", async (t) => {
+  const { paths, runStore, issue } = await reportedIssue(
+    t,
+    "agent-runner-issue-coordination-sync-",
+  );
+  const coordination = join(paths.issuesPath, ".coordination");
+  await rm(coordination, { recursive: true });
+  const probe = await open(paths.issuesPath);
+  const prototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const sync = prototype.sync;
+  const synced = new Set();
+  t.mock.method(prototype, "sync", async function () {
+    synced.add((await this.stat()).ino);
+    return sync.call(this);
+  });
+  let admitted = null;
+  await createIssueService({
+    ...issueOptions(paths),
+    runStore: {
+      ...runStore,
+      withIssueLease: (directory, operation) =>
+        runStore.withIssueLease(directory, (ledger) => {
+          admitted = new Set(synced);
+          return operation(ledger);
+        }),
+    },
+  }).update(updateInput(issue));
+
+  // Both parents of the recreated directories were synced first.
+  for (const path of [paths.issuesPath, coordination]) {
+    assert.ok(admitted.has((await stat(path)).ino), path);
+  }
+});
+
+test("never replays an update against a changed store", async (t) => {
+  const { paths, issue, service } = await reportedIssue(
+    t,
+    "agent-runner-issue-update-store-",
+  );
+  const input = updateInput(issue);
+  await assert.rejects(
+    service({
+      async renameFile() {
+        throw new Error("simulated interruption");
+      },
+    }).update(input),
+  );
+  const relocated = {
+    env: {
+      ...issueOptions(paths).env,
+      XDG_DATA_HOME: join(paths.root, "moved"),
+    },
+  };
+
+  await assert.rejects(
+    service(relocated).update(input),
+    failure("ERR_ISSUE_STORE_CHANGED"),
+  );
+  await assert.rejects(access(join(paths.root, "moved")), failure("ENOENT"));
+  const receipt = await service().update(input);
+  // A completed receipt replays before any store resolution.
+  assert.deepEqual(
+    await service({ env: { XDG_DATA_HOME: "/unresolved\nlocation" } }).update(
+      input,
+    ),
+    receipt,
+  );
+  assert.deepEqual(await service(relocated).update(input), receipt);
+  await assert.rejects(access(join(paths.root, "moved")), failure("ENOENT"));
+});
+
+test("coordinates creation and updates without worktree leases", async (t) => {
+  const { paths, runStore, issues, issue } = await reportedIssue(
+    t,
+    "agent-runner-issue-coordination-",
+  );
+  // An unrelated execution owns the origin worktree; management is unaffected.
+  await runStore.withGuidanceLease(paths.projectPath, async () => {
+    assert.equal((await issues.list({})).issues.length, 1);
+    await issues.update(updateInput(issue, { status: "in_progress" }));
+  });
+
+  const pending = reportInput(paths.projectPath, {
+    idempotencyKey: "pending-report",
+  });
+  await assert.rejects(
+    createIssueService({
+      ...issueOptions(paths, {
+        idFactory: () => SECOND_ID,
+        async linkFile(source, destination) {
+          await link(source, destination);
+          throw new Error("simulated interruption");
+        },
+      }),
+      runStore,
+    }).report(pending),
+  );
+  // A document still linked to its reservation is not yet published.
+  assert.deepEqual(
+    (await issues.list({})).issues.map(({ issueId }) => issueId),
+    [ISSUE_ID],
+  );
+  await assert.rejects(
+    issues.read({ issueId: SECOND_ID }),
+    failure("ERR_ISSUE_NOT_FOUND"),
+  );
+
+  const unacknowledged = reportInput(paths.projectPath, {
+    idempotencyKey: "unacknowledged-report",
+  });
+  await assert.rejects(
+    createIssueService({
+      ...issueOptions(paths, {
+        idFactory: () => THIRD_ID,
+        async onPublished() {
+          throw new Error("simulated disconnect");
+        },
+      }),
+      runStore,
+    }).report(unacknowledged),
+  );
+  const published = await issues.read({ issueId: THIRD_ID });
+  await issues.update(
+    updateInput(published, { idempotencyKey: "after-publication" }),
+  );
+
+  // Creation recovery tolerates later tracking updates and never reverts them.
+  for (const [input, issueId] of [
+    [pending, SECOND_ID],
+    [unacknowledged, THIRD_ID],
+  ]) {
+    assert.equal((await issues.report(input)).issueId, issueId);
+  }
+  assert.equal(
+    (await issues.read({ issueId: THIRD_ID })).tracking.status,
+    "resolved",
+  );
+  assert.deepEqual(
+    (await issues.list({})).issues.map(({ issueId }) => issueId).sort(),
+    [ISSUE_ID, SECOND_ID, THIRD_ID],
+  );
 });

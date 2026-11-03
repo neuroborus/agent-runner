@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { basename, isAbsolute, resolve } from "node:path";
 
 const ISSUE_SCHEMA_VERSION = 1;
-const ISSUE_STATUSES = Object.freeze([
+export const ISSUE_STATUSES = Object.freeze([
   "open",
   "queued",
   "in_progress",
@@ -16,6 +16,23 @@ const MAX_MARKDOWN_LENGTH = 64 * 1_024;
 const MAX_REFERENCES = 32;
 const MAX_REFERENCE_LENGTH = 1_024;
 const MAX_NOTE_LENGTH = 4_000;
+const MAX_CURSOR_LENGTH = 1_024;
+export const DEFAULT_ISSUE_PAGE_SIZE = 50;
+const MAX_ISSUE_PAGE_SIZE = 100;
+const TRACKING_FIELDS = Object.freeze([
+  "status",
+  "planReferences",
+  "commitReferences",
+  "note",
+]);
+const UPDATE_FIELDS = new Set([
+  ...TRACKING_FIELDS,
+  "idempotencyKey",
+  "issueId",
+  "expectedRevision",
+  "expectedHash",
+]);
+const LIST_FIELDS = new Set(["projectPath", "statuses", "limit", "cursor"]);
 const REPORT_FIELDS = Object.freeze({
   summary: 1_000,
   expectedBehavior: 4_000,
@@ -201,7 +218,7 @@ function invalidDocument(cause) {
 }
 
 // One canonical document holds the immutable report and its tracking record.
-function parseIssueDocument(bytes, issueId) {
+export function parseIssueDocument(bytes, issueId) {
   if (!Buffer.isBuffer(bytes) || bytes.byteLength > MAX_ISSUE_BYTES) {
     throw invalidDocument();
   }
@@ -282,4 +299,152 @@ export function createIssueDocument({
   });
   parseIssueDocument(bytes, issueId);
   return bytes;
+}
+
+// Immutable fields survive tracking updates; creation recovery compares them.
+export function isSameIssue(current, reserved, issueId) {
+  const immutable = ({ report, tracking }) =>
+    JSON.stringify([
+      report,
+      tracking.origin,
+      tracking.createdAt,
+      tracking.runId,
+      tracking.errorCode,
+    ]);
+  return (
+    immutable(parseIssueDocument(current, issueId)) ===
+    immutable(parseIssueDocument(reserved, issueId))
+  );
+}
+
+function invalidRequest() {
+  return new IssueError("Issue request is invalid.", {
+    code: "ERR_INVALID_ISSUE_REQUEST",
+  });
+}
+
+// Omitted optional values are absent rather than undefined in identities.
+const defined = (input) =>
+  isRecord(input)
+    ? Object.fromEntries(
+        Object.entries(input).filter(([, value]) => value !== undefined),
+      )
+    : input;
+
+export function assertReadInput(input) {
+  if (!hasFields(defined(input), ["issueId"]) || !isIssueId(input.issueId)) {
+    throw invalidRequest();
+  }
+}
+
+// Filters compare recorded origin text exactly; no project path is inspected.
+export function normalizeListInput(input) {
+  const value = defined(input);
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((field) => !LIST_FIELDS.has(field))
+  ) {
+    throw invalidRequest();
+  }
+  const {
+    projectPath,
+    statuses,
+    limit = DEFAULT_ISSUE_PAGE_SIZE,
+    cursor,
+  } = value;
+  if (
+    (projectPath !== undefined &&
+      safeAbsolutePath(projectPath) !== projectPath) ||
+    (statuses !== undefined &&
+      (!Array.isArray(statuses) ||
+        statuses.length === 0 ||
+        new Set(statuses).size !== statuses.length ||
+        !statuses.every((status) => ISSUE_STATUSES.includes(status)))) ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > MAX_ISSUE_PAGE_SIZE ||
+    (cursor !== undefined && !isBoundedText(cursor, MAX_CURSOR_LENGTH))
+  ) {
+    throw invalidRequest();
+  }
+  return {
+    projectPath: projectPath ?? null,
+    statuses:
+      statuses === undefined
+        ? null
+        : ISSUE_STATUSES.filter((status) => statuses.includes(status)),
+    limit,
+    cursor: cursor ?? null,
+  };
+}
+
+// Updates change only tracking metadata; null and empty arrays clear it.
+export function normalizeUpdateInput(input) {
+  const value = defined(input);
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((field) => !UPDATE_FIELDS.has(field)) ||
+    typeof value.idempotencyKey !== "string" ||
+    !isIssueId(value.issueId) ||
+    !Number.isSafeInteger(value.expectedRevision) ||
+    value.expectedRevision < 1 ||
+    !isDocumentHash(value.expectedHash) ||
+    !TRACKING_FIELDS.some((field) => Object.hasOwn(value, field)) ||
+    (value.status !== undefined && !ISSUE_STATUSES.includes(value.status)) ||
+    ["planReferences", "commitReferences"].some(
+      (field) => value[field] !== undefined && !isReferenceList(value[field]),
+    ) ||
+    (value.note !== undefined &&
+      value.note !== null &&
+      !isBoundedText(value.note, MAX_NOTE_LENGTH, UNSAFE_MARKDOWN))
+  ) {
+    throw invalidRequest();
+  }
+  return value;
+}
+
+export function updateIssueDocument(document, changes, updatedAt) {
+  const tracking = {
+    ...document.tracking,
+    revision: document.tracking.revision + 1,
+    updatedAt,
+  };
+  for (const field of TRACKING_FIELDS) {
+    if (Object.hasOwn(changes, field)) tracking[field] = changes[field];
+  }
+  const bytes = serialize({ ...document, tracking });
+  parseIssueDocument(bytes, document.id);
+  return bytes;
+}
+
+// Keyset cursors are opaque, canonical, and bound to one store and filter set.
+export function encodeIssueCursor(binding, { createdAt, id }) {
+  return Buffer.from(
+    JSON.stringify({ binding, createdAt, issueId: id }),
+  ).toString("base64url");
+}
+
+export function decodeIssueCursor(cursor, binding) {
+  let value;
+  try {
+    const text = Buffer.from(cursor, "base64url").toString("utf8");
+    value =
+      Buffer.from(text).toString("base64url") === cursor
+        ? JSON.parse(text)
+        : null;
+  } catch {
+    value = null;
+  }
+  if (
+    !hasFields(value, ["binding", "createdAt", "issueId"]) ||
+    value.binding !== binding ||
+    !isTimestamp(value.createdAt) ||
+    !isIssueId(value.issueId)
+  ) {
+    throw new IssueError(
+      "Issue cursor is invalid for this store and filter set.",
+      { code: "ERR_INVALID_ISSUE_CURSOR" },
+    );
+  }
+  return value;
 }

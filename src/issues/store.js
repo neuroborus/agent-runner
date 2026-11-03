@@ -1,8 +1,21 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, stat, unlink } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import { join, parse, relative, sep } from "node:path";
 
-import { IssueError, MAX_ISSUE_BYTES } from "./contract.js";
+import {
+  IssueError,
+  isIssueId,
+  issueFilename,
+  MAX_ISSUE_BYTES,
+} from "./contract.js";
 
 const DIRECTORY_FLAGS =
   constants.O_RDONLY |
@@ -63,9 +76,13 @@ async function entry(directory, name) {
   }
 }
 
+const MAX_STORE_ENTRIES = 10_000;
+const COORDINATION_DIRECTORY = ".coordination";
+
 // Opens every component without following links and keeps the chain bound.
 // Missing components are created privately; existing ancestors stay unchanged.
-export async function openIssueStore(path) {
+// Read-only callers receive null instead of creating a missing store.
+export async function openIssueStore(path, { create = true } = {}) {
   const bindings = [];
   const close = () =>
     Promise.all(bindings.map(({ handle }) => handle.close().catch(() => {})));
@@ -85,6 +102,10 @@ export async function openIssueStore(path) {
         next = await open(child, DIRECTORY_FLAGS);
       } catch (cause) {
         if (cause?.code !== "ENOENT") throw cause;
+        if (!create) {
+          await close();
+          return null;
+        }
         try {
           await mkdir(child, { mode: 0o700 });
           await handle.sync();
@@ -160,7 +181,7 @@ async function readBounded(handle) {
 }
 
 // Reads a bounded private regular file and proves its identity did not change.
-async function readOwned(store, name, linkCount) {
+async function readOwned(store, name, linkCount = 1n) {
   const path = join(store.anchor, name);
   let handle;
   try {
@@ -191,7 +212,7 @@ async function readOwned(store, name, linkCount) {
     ) {
       throw unsafe("Issue document changed while it was read.");
     }
-    return bytes;
+    return { bytes, metadata: after };
   } catch (cause) {
     if (cause instanceof IssueError) throw cause;
     throw unsafe("Cannot safely read the issue document.", cause);
@@ -270,6 +291,7 @@ export async function publishIssue(
     bindTemporary,
     markPublished,
     linkFile,
+    matches = (current) => current.equals(bytes),
   },
 ) {
   let identity = temporaryIdentity;
@@ -288,7 +310,9 @@ export async function publishIssue(
     ) {
       throw ownership("Issue document ownership is uncertain.");
     }
-    if (!(await readOwned(store, name, published.nlink)).equals(bytes)) {
+    // Only a completed publication can have later tracking updates.
+    const { bytes: current } = await readOwned(store, name, published.nlink);
+    if (temporary === null ? !matches(current) : !current.equals(bytes)) {
       throw ownership("Issue document content differs from its reservation.");
     }
   } else {
@@ -335,7 +359,180 @@ export async function publishIssue(
   }
   await removeOwnedTemporary(store, temporaryName, identity);
   await store.verify();
-  if (!(await readOwned(store, name, 1n)).equals(bytes)) {
+  if (!matches((await readOwned(store, name)).bytes)) {
     throw ownership("Published issue document content is invalid.");
   }
+}
+
+// A document still linked to its bound creation file is not yet published.
+async function isPendingCreation(store, issueId, metadata, names) {
+  if (metadata.nlink !== 2n) return false;
+  for (const name of names ?? (await storeEntries(store))) {
+    if (name.startsWith(`.${issueId}.`) && name.endsWith(".tmp")) {
+      const temporary = await entry(store.anchor, name);
+      if (temporary !== null && sameFile(temporary, metadata)) return true;
+    }
+  }
+  return false;
+}
+
+async function storeEntries(store) {
+  const names = await readdir(store.anchor);
+  if (names.length > MAX_STORE_ENTRIES) {
+    throw unsafe("Issue storage exceeds its entry limit.");
+  }
+  return names;
+}
+
+async function readPublished(store, issueId, names = null) {
+  const name = issueFilename(issueId);
+  const metadata = await entry(store.anchor, name);
+  if (
+    metadata === null ||
+    (await isPendingCreation(store, issueId, metadata, names))
+  ) {
+    return null;
+  }
+  return readOwned(store, name);
+}
+
+// Returns null for an absent or unfinished document.
+export async function readIssueFile(store, issueId) {
+  await store.verify();
+  const result = await readPublished(store, issueId);
+  await store.verify();
+  return result;
+}
+
+// Reads every published document; reservations and foreign names are skipped.
+export async function readIssueFiles(store) {
+  await store.verify();
+  const names = await storeEntries(store);
+  const documents = [];
+  for (const name of names) {
+    const issueId = name.slice(0, -".json".length);
+    if (name === issueFilename(issueId) && isIssueId(issueId)) {
+      const result = await readPublished(store, issueId, names);
+      if (result !== null) documents.push({ issueId, bytes: result.bytes });
+    }
+  }
+  await store.verify();
+  return documents;
+}
+
+// Per-issue coordination lives privately inside the shared store, so every
+// writer to this store uses the same lease and revision ledger.
+// Both levels are opened without following links and stay descriptor-bound;
+// the returned store view also proves their identities whenever it verifies,
+// so a replaced directory can neither redirect writes nor split the lease.
+export async function openCoordination(store, issueId) {
+  if (!isIssueId(issueId)) {
+    throw unsafe("Issue coordination requires a valid issue ID.");
+  }
+  const bindings = [];
+  const close = () =>
+    Promise.all(bindings.map(({ handle }) => handle.close().catch(() => {})));
+  try {
+    await store.verify();
+    let parent = store.anchor;
+    let syncParent = () => store.sync();
+    for (const name of [COORDINATION_DIRECTORY, issueId]) {
+      try {
+        await mkdir(join(parent, name), { mode: 0o700 });
+      } catch (cause) {
+        if (cause?.code !== "EEXIST") throw cause;
+      }
+      const handle = await open(join(parent, name), DIRECTORY_FLAGS);
+      const identity = await handle.stat({ bigint: true });
+      bindings.push({ parent, name, handle, identity });
+      if (!ownedByUser(identity) || !isPrivate(identity)) {
+        throw unsafe("Issue coordination must be a private directory.");
+      }
+      // Persist the entry, including one left by an interrupted creator,
+      // before any ledger write depends on it.
+      await syncParent();
+      syncParent = () => handle.sync();
+      parent = await descriptorPath(handle);
+    }
+    const verify = async () => {
+      await store.verify();
+      for (const { parent, name, identity } of bindings) {
+        const metadata = await lstat(join(parent, name), { bigint: true });
+        if (!metadata.isDirectory() || !sameFile(metadata, identity)) {
+          throw unsafe("Issue coordination directory identity changed.");
+        }
+      }
+    };
+    await verify();
+    return Object.freeze({
+      path: parent,
+      store: Object.freeze({ ...store, verify }),
+      close,
+    });
+  } catch (cause) {
+    await close();
+    if (cause instanceof IssueError) throw cause;
+    throw unsafe("Cannot open issue coordination safely.", cause);
+  }
+}
+
+// Atomically replaces the exact document that was read. Its previous bytes
+// stay in a bound private backup until the replacement is verified, and the
+// temporary source is reverified immediately before the destructive rename.
+export async function replaceIssue(
+  store,
+  { name, temporaryName, backupName, bytes, previous, renameFile },
+) {
+  let backup = null;
+  let identity;
+  try {
+    backup = await writeTemporary(store, backupName, previous.bytes, () => {});
+    identity = await writeTemporary(store, temporaryName, bytes, () => {});
+  } catch (cause) {
+    if (backup !== null) await removeOwnedTemporary(store, backupName, backup);
+    throw writeError(cause);
+  }
+  try {
+    await store.verify();
+    const current = await entry(store.anchor, name);
+    if (
+      current === null ||
+      !sameFile(current, previous.metadata) ||
+      current.nlink !== 1n ||
+      current.ctimeNs !== previous.metadata.ctimeNs
+    ) {
+      throw ownership("Issue document changed before replacement.");
+    }
+    const source = await readOwned(store, temporaryName);
+    if (
+      !isBoundFile(source.metadata, identity) ||
+      !source.bytes.equals(bytes)
+    ) {
+      throw ownership("Issue replacement source changed before publication.");
+    }
+    await renameFile(
+      join(store.anchor, temporaryName),
+      join(store.anchor, name),
+    );
+  } catch (cause) {
+    // The backup is discarded only while the previous document is in place.
+    const current = await entry(store.anchor, name);
+    if (current !== null && sameFile(current, previous.metadata)) {
+      await removeOwnedTemporary(store, backupName, backup);
+    }
+    await removeOwnedTemporary(store, temporaryName, identity);
+    throw writeError(cause);
+  }
+  await store.sync();
+  await store.verify();
+  const published = await readOwned(store, name);
+  if (
+    !isBoundFile(published.metadata, identity) ||
+    !published.bytes.equals(bytes)
+  ) {
+    throw ownership(
+      "Updated issue document is invalid; its previous content was preserved.",
+    );
+  }
+  await removeOwnedTemporary(store, backupName, backup);
 }
