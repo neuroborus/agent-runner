@@ -256,8 +256,17 @@ needed, strengthens it. The launcher applies an architecture-checked
 Runner-owned seccomp filter through the pinned real bubblewrap binary, which it
 executes once with the single validated user namespace. The Claude CLI stays
 outside that command boundary so its authentication environment and provider
-transport remain usable. The direct model-free
-fallback probe invokes the same launcher grammar and access-specific topology.
+transport remain usable. Both policies reach their launcher whether Claude
+selects bubblewrap from the spawning-parent policy or from `PATH`, and both
+proofs require that selection. A readable administrator managed setting that
+could select another bubblewrap leaves every access mode unavailable, and a
+Runner command shell refuses any command that reaches it through a bubblewrap
+other than the authenticated launcher, including one chosen by server-managed
+policy. The direct model-free
+fallback probe invokes the same launcher grammar and access-specific topology
+with Claude's producer-ordered arguments for the effective settings.
+Workspace-write proofs create a source directory and create, rename, and
+unlink a file there; read-only proofs require those changes to fail.
 It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname

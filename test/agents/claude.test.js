@@ -15,6 +15,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -24,6 +25,7 @@ import {
   isAbsolute,
   join,
   parse,
+  relative,
   resolve,
 } from "node:path";
 import test from "node:test";
@@ -39,6 +41,8 @@ import {
   recoverClaudeStorage,
   CLAUDE_STORAGE_IDENTITY,
 } from "../../src/agents/claude/index.js";
+import { claudeManagedBubblewrapOverride } from "../../src/agents/claude/command-launcher.js";
+import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
 import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
@@ -254,6 +258,10 @@ function isRunnerBoundaryProbe({ file, argumentsList }) {
         argument.includes("agent-runner-claude-isolation-ok"),
     )
   );
+}
+
+function isCommandShell(file) {
+  return parse(dirname(file)).base === ".agent-runner-shell";
 }
 
 function isIsolationProbe({ file, argumentsList }) {
@@ -480,10 +488,8 @@ async function createFakeBubblewrap(t) {
   return { directory, filterLogPath, helperLogPath, logPath };
 }
 
-async function resolveTestExecutable(binary) {
-  for (const directory of (process.env.PATH ?? "")
-    .split(delimiter)
-    .filter(isAbsolute)) {
+async function resolveTestExecutable(binary, path = process.env.PATH) {
+  for (const directory of (path ?? "").split(delimiter).filter(isAbsolute)) {
     const candidate = join(directory, binary);
     try {
       await access(candidate, constants.X_OK);
@@ -621,6 +627,8 @@ function createFixture({
   const socketServers = [];
   let turnIndex = 0;
   const execute = async (file, argumentsList, options) => {
+    // The generated command shell's launcher requirement is always proved for real.
+    if (isCommandShell(file)) return executeFile(file, argumentsList, options);
     const call = { file, argumentsList, options };
     const isClaudeCall = file === (claudeBinary ?? "claude");
     calls.push(call);
@@ -1595,11 +1603,23 @@ test("executes the fallback directory probe with a file reference inside private
       let exitCode;
       let output = "";
       const writes = new Set();
+      const change = (path) => {
+        path = resolve(cwd, path);
+        writes.add(path);
+        if (path !== leak && !mountAt(path)?.writable) throw { code: "EROFS" };
+      };
       assert.throws(
         () =>
           runInNewContext(
-            script.replace(/^import .+ from "node:[^"]+";\n/gmu, ""),
+            script.replace(/^import [^;]+ from "node:[^"]+";\n/gmu, ""),
             {
+              mkdirSync: change,
+              renameSync(from, to) {
+                change(from);
+                change(to);
+              },
+              rmdirSync: change,
+              unlinkSync: change,
               join,
               process: {
                 argv: [words[0], ...words.slice(2)],
@@ -1618,12 +1638,7 @@ test("executes the fallback directory probe with a file reference inside private
                 assert.equal(path, join(environment.HOME, ".bashrc"));
                 return "";
               },
-              writeFileSync(path) {
-                path = resolve(cwd, path);
-                writes.add(path);
-                if (path !== leak && !mountAt(path)?.writable)
-                  throw { code: "EROFS" };
-              },
+              writeFileSync: change,
               statSync: () => ({
                 isDirectory: () => true,
                 isSocket: () => true,
@@ -1646,6 +1661,11 @@ test("executes the fallback directory probe with a file reference inside private
         assert.equal(output, "agent-runner-claude-isolation-ok");
         assert.ok(writes.has(reference));
         assert.ok(writes.has("/agent-runner-claude-probe"));
+        // Only the writable proof reaches the rename and unlink of a source file.
+        assert.equal(
+          writes.has(join(cwd, "out", "source-probe", "renamed.txt")),
+          invocation === invocations[1],
+        );
       }
     }
   }
@@ -1665,6 +1685,7 @@ test("projects native and fallback directory commands onto declared outputs only
   for (const nativeSandbox of [true, "nested-denied"]) {
     const fake = await createFakeBubblewrap(t);
     const native = nativeSandbox === true;
+    const privateWrites = [];
     for (const access of ["read-only", "workspace-write"]) {
       let launcherError;
       const fixture = createFixture({
@@ -1693,6 +1714,16 @@ test("projects native and fallback directory commands onto declared outputs only
               settings.sandbox.filesystem.denyWrite.includes(directory.source),
             );
             const args = directoryCommandArguments(directory, access, native);
+            // Claude's own temporary bind stays inside the private allocation.
+            const privateWrite = join(call.options.env.TMPDIR, "claude-temp");
+            privateWrites.push(privateWrite);
+            args.splice(
+              args.indexOf("--dev"),
+              0,
+              "--bind",
+              privateWrite,
+              privateWrite,
+            );
             const runLauncher = (argumentsList) =>
               executeFile(call.commandLauncherPath, argumentsList, {
                 env: call.options.env,
@@ -1761,10 +1792,11 @@ test("projects native and fallback directory commands onto declared outputs only
       const writes = args.flatMap((arg, i) =>
         arg === "--bind" ? [args.slice(i + 1, i + 3)] : [],
       );
-      assert.deepEqual(
-        writes,
-        index === 0 ? [] : [[directory.output, directory.output]],
-      );
+      // The fallback discards private mounts with its replaced runtime trees.
+      assert.deepEqual(writes, [
+        ...(index === 0 ? [] : [[directory.output, directory.output]]),
+        ...(native ? [[privateWrites[index], privateWrites[index]]] : []),
+      ]);
       assert.ok(
         includesSequence(args, ["--ro-bind", directory.cwd, directory.cwd]),
       );
@@ -3081,7 +3113,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v2",
+      "claude-isolation-v3",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -3418,7 +3450,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v8",
+      "claude-command-boundary-v9",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -3461,10 +3493,10 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     const gitDirectory = join(workspaceDirectory, ".git");
     const socketPath = join(workspaceDirectory, "s");
     assert.equal(call.file, call.commandLauncherPath);
-    assert.equal(
-      call.options.env.PATH.split(delimiter)[0],
+    assert.deepEqual(call.options.env.PATH.split(delimiter).slice(0, 2), [
+      dirname(call.file),
       fakeBubblewrap.directory,
-    );
+    ]);
     const fallbackPayload = argumentsList.at(-1);
     const nodeExecutable = shellArgument(process.execPath);
     assert.equal(
@@ -3506,6 +3538,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.ok(
       includesSequence(boundaryArguments, ["--unsetenv", "HTTPS_PROXY"]),
     );
+    // Proxy rewrites become removals; private bridge mounts are discarded.
+    assert.ok(
+      includesSequence(boundaryArguments, ["--unsetenv", "SANDBOX_RUNTIME"]),
+    );
+    assert.equal(
+      boundaryArguments.some((argument) =>
+        argument.startsWith(join(dirname(call.file), "tmp")),
+      ),
+      false,
+    );
     assert.ok(
       includesSequence(boundaryArguments, [
         "--unsetenv",
@@ -3544,19 +3586,35 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
-    assert.equal(
-      includesSequence(boundaryArguments, [
-        "--tmpfs",
-        join(workspaceDirectory, ".claude"),
-        "--remount-ro",
-        join(workspaceDirectory, ".claude"),
-      ]),
-      access === "workspace-write",
+    // The reservation omits these protections; projection restores them.
+    for (const sequence of [
+      ["--bind", join(workspaceDirectory, "nested")],
+      ["--ro-bind", join(workspaceDirectory, ".claude")],
+      ["--ro-bind", join(workspaceDirectory, "nested", ".mcp.json")],
+    ]) {
+      assert.equal(
+        includesSequence(boundaryArguments, [...sequence, sequence[1]]),
+        access === "workspace-write",
+      );
+    }
+    // Claude's effective shell is the generated one, which the launcher's
+    // proof assignment, after Claude's removal, alone lets run.
+    const shell = join(
+      dirname(call.file),
+      "home",
+      ".agent-runner-shell",
+      parse(boundaryArguments[commandIndex + 1]).base,
     );
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1, -1), [
-      "/bin/sh",
+      shell,
       "-c",
     ]);
+    const proofs = boundaryArguments.flatMap((argument, index) =>
+      boundaryArguments[index - 1] === "AGENT_RUNNER_CLAUDE_COMMAND_SHELL_PROOF"
+        ? [boundaryArguments[index - 2]]
+        : [],
+    );
+    assert.deepEqual(proofs, ["--unsetenv", "--setenv"]);
     assert.equal(boundaryArguments.at(-1), argumentsList.at(-1));
     assert.equal(
       boundaryArguments.filter(
@@ -3640,7 +3698,10 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
     assert.equal(call.options.env.ARGV0, undefined);
     assert.equal(call.options.env.HTTPS_PROXY, "http://credential.invalid");
-    assert.equal(call.options.env.PATH, providerPath);
+    assert.equal(
+      call.options.env.PATH,
+      `${dirname(call.commandLauncherPath)}${delimiter}${providerPath}`,
+    );
     assert.equal(
       typeof call.options.env.AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN,
       "string",
@@ -3814,7 +3875,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v8",
+        "claude-command-boundary-v9",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -4110,13 +4171,13 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       },
     },
     {
-      name: "unsupported-tmpfs",
+      name: "workspace-enclosing-tmpfs",
       transform({ argumentsList }) {
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
           "--tmpfs",
-          "/var",
+          parse(projectPath).dir,
         );
       },
     },
@@ -5900,6 +5961,9 @@ test(
     let realProbeCount = 0;
     const execute = async (file, argumentsList, options) => {
       const call = { file, argumentsList, options };
+      if (isCommandShell(file)) {
+        return executeFile(file, argumentsList, options);
+      }
       if (file === process.execPath && argumentsList.at(-1) === "--version") {
         return { stdout: "2.1.233 (Claude Code)\n", stderr: "" };
       }
@@ -5922,7 +5986,9 @@ test(
       }
       if (isRunnerBoundaryProbe(call)) {
         fallbackProbeCount += 1;
-        if (realProbeCount === 0) {
+        // Real syscalls confirm read-only denial and writable source changes
+        // beside a pinned nested control.
+        if (realProbeCount < 2) {
           realProbeCount += 1;
           return executeFile(file, argumentsList, options);
         }
@@ -5945,8 +6011,9 @@ test(
 
     const capabilities = await adapter.probe();
     assert.equal(capabilities.readOnly, true);
+    assert.equal(capabilities.workspaceWrite, true);
     assert.equal(fallbackProbeCount, 3);
-    assert.equal(realProbeCount, 1);
+    assert.equal(realProbeCount, 2);
   },
 );
 
@@ -6241,6 +6308,389 @@ test("rejects absent native project targets before any mount can create them", a
   });
   await fixture.adapter.run(
     request({ access: "workspace-write", cwd: project }),
+  );
+});
+
+const BUBBLEWRAP_ARITY = Object.freeze({
+  "--bind": 2,
+  "--ro-bind": 2,
+  "--setenv": 2,
+  "--cap-drop": 1,
+  "--chdir": 1,
+  "--dev": 1,
+  "--dir": 1,
+  "--perms": 1,
+  "--proc": 1,
+  "--remount-ro": 1,
+  "--seccomp": 1,
+  "--tmpfs": 1,
+  "--unsetenv": 1,
+});
+
+function isWithin(path, parent) {
+  return (
+    path === parent || path.startsWith(parent === "/" ? "/" : `${parent}/`)
+  );
+}
+
+// Replays bubblewrap mounts independently of the launcher. Bind sources come
+// from the host, and a later mount hides every earlier mount at or beneath
+// its destination, so only the final tree decides what commands can change.
+function effectiveMountTree(argumentsList) {
+  let mounts = [];
+  for (
+    let index = 0;
+    argumentsList[index] !== "--";
+    index += 1 + (BUBBLEWRAP_ARITY[argumentsList[index]] ?? 0)
+  ) {
+    const [operation, first, second] = argumentsList.slice(index, index + 3);
+    if (operation === "--remount-ro") {
+      mounts.find(({ destination }) => destination === first).writable = false;
+    } else if (
+      ["--bind", "--ro-bind", "--tmpfs", "--dev", "--proc"].includes(operation)
+    ) {
+      const bind = operation.endsWith("bind");
+      const destination = bind ? second : first;
+      mounts = mounts.filter(
+        (mount) => !isWithin(mount.destination, destination),
+      );
+      mounts.push({
+        destination,
+        source: bind ? first : operation,
+        writable: operation !== "--ro-bind",
+      });
+    }
+  }
+  const covering = (path) =>
+    mounts
+      .filter(({ destination }) => isWithin(path, destination))
+      .sort(
+        (left, right) => right.destination.length - left.destination.length,
+      )[0];
+  // Namespace-local tmpfs content never reaches the host.
+  const hostWritable = (path) => {
+    const { source, writable } = covering(path);
+    return writable && source.startsWith("/");
+  };
+  // Creating, renaming or unlinking needs a writable parent; a mount point stays busy.
+  const movable = (path) =>
+    !mounts.some(({ destination }) => destination === path) &&
+    hostWritable(dirname(path));
+  return {
+    covering,
+    hostWritable,
+    movable,
+    // Rename-and-replace needs one movable entry between the workspace and the path.
+    replaceable(path, root) {
+      for (let current = path; current !== root; current = dirname(current))
+        if (movable(current)) return true;
+      return false;
+    },
+  };
+}
+
+test("normalizes Git workspace-write mounts so every protection stays effective", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "claude-mounts-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const outside = join(root, "outside");
+  const nested = join(project, "nested");
+  const selected = join(nested, "RUNNER.md");
+  const control = join(nested, ".mcp.json");
+  const notes = join(nested, "notes.md");
+  const source = join(project, "src", "module.js");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await Promise.all(
+    [join(project, ".claude"), join(project, "src"), nested, outside].map(
+      (path) => mkdir(path),
+    ),
+  );
+  await Promise.all([
+    writeFile(join(project, ".git", "config"), ""),
+    writeFile(control, "{}\n"),
+    writeFile(selected, "Run checks.\n"),
+    writeFile(notes, "Notes.\n"),
+    writeFile(source, "export {};\n"),
+  ]);
+  // The rejected compositions show that the model catches both failures: an
+  // earlier nested restriction hidden by the grant left its ancestor movable,
+  // and a later ancestor pin made the selected file writable again.
+  const rejectedHidden = effectiveMountTree([
+    ...["--ro-bind", "/", "/", "--ro-bind", nested, nested],
+    ...["--bind", project, project, "--ro-bind", control, control, "--"],
+  ]);
+  assert.equal(rejectedHidden.replaceable(control, project), true);
+  const rejectedOrder = effectiveMountTree([
+    ...["--ro-bind", "/", "/", "--bind", project, project],
+    ...["--ro-bind", selected, selected, "--bind", nested, nested, "--"],
+  ]);
+  assert.equal(rejectedOrder.hostWritable(selected), true);
+
+  for (const policy of ["native", "runner-boundary"]) {
+    const bwrap = await createFakeBubblewrap(t);
+    const logged = async () =>
+      (await readFile(bwrap.logPath, "utf8").catch(() => ""))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    // Claude's producer order for the read-only preparation settings: its
+    // default workspace write, then the reservation that omits covered masks.
+    const producer = ({ before = [], after = [] } = {}) => [
+      "--new-session",
+      "--die-with-parent",
+      "--unsetenv",
+      "ANTHROPIC_API_KEY",
+      "--unshare-net",
+      "--ro-bind",
+      "/",
+      "/",
+      ...before,
+      "--bind",
+      project,
+      project,
+      "--ro-bind",
+      project,
+      project,
+      ...after,
+      "--dev",
+      "/dev",
+      "--unshare-pid",
+      "--unshare-user",
+      "--cap-drop",
+      "ALL",
+      ...(policy === "native"
+        ? ["--proc", "/proc"]
+        : ["--bind", "/proc", "/proc"]),
+      "--unsetenv",
+      "SRT_ALLOW_NESTED_USERNS",
+      "--",
+      "/bin/sh",
+      "-c",
+      "edit",
+    ];
+    let access;
+    const fixture = createFixture({
+      nativeSandbox: policy === "native" ? true : "nested-denied",
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: "provider-token",
+        AGENT_RUNNER_FAKE_BWRAP_LOG: bwrap.logPath,
+        AGENT_RUNNER_FAKE_BWRAP_NATIVE: policy === "native" ? "1" : "0",
+        PATH: `${bwrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      async handle({ call }) {
+        if (call.file === "git" && call.argumentsList.includes("rev-parse"))
+          return { stdout: `${project}/.git\n.git\n`, stderr: "" };
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        // Claude's PATH lookup reaches the managed, authenticated launcher.
+        assert.equal(
+          await resolveTestExecutable("bwrap", call.options.env.PATH),
+          call.commandLauncherPath,
+        );
+        const launch = async (argumentsList) => {
+          await executeFile(call.commandLauncherPath, argumentsList, {
+            env: call.options.env,
+          });
+          return effectiveMountTree((await logged()).at(-1));
+        };
+        const ordinary = await launch(producer());
+        if (access === "read-only") {
+          assert.equal(ordinary.hostWritable(source), false);
+          assert.equal(ordinary.movable(source), false);
+          return;
+        }
+        const hidden = await launch(
+          producer({ before: ["--ro-bind", nested, nested] }),
+        );
+        // A later read-only ancestor no longer hides an earlier file mask.
+        const masked = await launch(
+          producer({
+            before: ["--ro-bind", "/dev/null", notes],
+            after: ["--ro-bind", nested, nested],
+          }),
+        );
+        assert.equal(masked.covering(notes).source, "/dev/null");
+        assert.equal(masked.hostWritable(notes), false);
+        for (const tree of [ordinary, hidden, masked]) {
+          // Ordinary source files can be created, renamed and unlinked.
+          for (const path of [source, join(project, "src", "created.js")])
+            assert.equal(tree.movable(path), true);
+          for (const path of [
+            selected,
+            control,
+            join(project, ".git", "config"),
+            join(project, ".claude", "settings.json"),
+            join(outside, "external.md"),
+          ]) {
+            assert.equal(tree.hostWritable(path), false, path);
+            if (isWithin(path, project))
+              assert.equal(tree.replaceable(path, project), false, path);
+          }
+          assert.equal(tree.movable(nested), false);
+          // The final view of the selected input is its own host file.
+          const view = tree.covering(selected);
+          assert.equal(
+            join(view.source, relative(view.destination, selected)),
+            selected,
+          );
+        }
+        // The pinned ancestor stays writable beside its protected entries,
+        // while the reapplied earlier restriction keeps its own semantics.
+        assert.equal(ordinary.movable(notes), true);
+        assert.deepEqual(hidden.covering(notes), {
+          destination: nested,
+          source: nested,
+          writable: false,
+        });
+        // Unsupported compositions fail before bubblewrap starts.
+        const accepted = (await logged()).length;
+        const rejected = (argumentsList) =>
+          assert.rejects(
+            executeFile(call.commandLauncherPath, argumentsList, {
+              env: call.options.env,
+            }),
+            { code: 125 },
+          );
+        const link = join(project, "src", ".bashrc");
+        await symlink("module.js", link);
+        try {
+          await rejected(producer());
+        } finally {
+          await rm(link);
+        }
+        await rejected(producer({ after: ["--ro-bind", root, root] }));
+        await rejected(producer({ before: ["--tmpfs", join(project, "src")] }));
+        // A later tmpfs would hide the protections beneath the pinned ancestor.
+        await rejected(producer({ after: ["--tmpfs", nested] }));
+        // A later bind at the same destination would remove an earlier mask.
+        await rejected(
+          producer({
+            before: ["--ro-bind", "/dev/null", notes],
+            after: ["--ro-bind", notes, notes],
+          }),
+        );
+        await rejected(
+          producer({
+            after: [
+              ...["--ro-bind", "/dev/null", source],
+              ...["--bind", join(project, "src"), join(project, "src")],
+            ],
+          }),
+        );
+        assert.equal((await logged()).length, accepted);
+      },
+    });
+    for (access of ["read-only", "workspace-write"]) {
+      await fixture.adapter.run(
+        request({ cwd: project, access, readPaths: [selected] }),
+      );
+    }
+    assert.equal((await logged()).length, 4);
+  }
+});
+
+test("refuses commands that another selected bubblewrap starts", async (t) => {
+  const projectPath = await createFallbackProject(t);
+  const fake = await createFakeBubblewrap(t);
+  const proof = "AGENT_RUNNER_CLAUDE_COMMAND_SHELL_PROOF";
+  let checked = false;
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "provider-token",
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+      PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const shell = call.options.env.CLAUDE_CODE_SHELL;
+      const settings = JSON.parse(option(call.argumentsList, "--settings"));
+      assert.deepEqual(
+        settings.sandbox.credentials.envVars.find(({ name }) => name === proof),
+        { mode: "deny", name: proof },
+      );
+      const marker = join(fake.directory, "command-ran");
+      const payload = `printf ran > '${marker}'`;
+      // A higher policy tier, such as server-managed settings, may name
+      // another bubblewrap; Claude still removes the proof inside it.
+      const { [proof]: _proof, ...bypassed } = call.options.env;
+      await assert.rejects(
+        executeFile(shell, ["-c", payload], { env: bypassed }),
+        { code: 125 },
+      );
+      await assert.rejects(access(marker), { code: "ENOENT" });
+      // Claude's unsandboxed shell use keeps the proof.
+      await executeFile(shell, ["-c", "exit 0"], { env: call.options.env });
+      // The authenticated launcher restores it after Claude's removal.
+      const argumentsList = claudeBubblewrapArguments({
+        access: "workspace-write",
+        payload,
+        projectPath,
+      }).map((value) => (value === "/bin/sh" ? shell : value));
+      argumentsList.splice(2, 0, "--unsetenv", proof);
+      await executeFile(call.commandLauncherPath, argumentsList, {
+        env: {
+          ...call.options.env,
+          AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
+        },
+      });
+      assert.equal(await readFile(marker, "utf8"), "ran");
+      checked = true;
+    },
+  });
+  await fixture.adapter.run(
+    request({ cwd: projectPath, access: "workspace-write" }),
+  );
+  assert.equal(checked, true);
+});
+
+test("fails closed when administrator managed settings may select another bubblewrap", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-managed-settings-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const dropIns = join(directory, "managed-settings.d");
+  assert.equal(await claudeManagedBubblewrapOverride(directory), false);
+  await mkdir(dropIns);
+  await writeFile(
+    join(directory, "managed-settings.json"),
+    JSON.stringify({ sandbox: { enabled: true } }),
+  );
+  // Claude also skips hidden and non-JSON drop-ins.
+  await writeFile(join(dropIns, ".disabled.json"), "{");
+  await writeFile(join(dropIns, "notes.txt"), "{");
+  assert.equal(await claudeManagedBubblewrapOverride(directory), false);
+  for (const [name, content] of [
+    ["managed-settings.json", { sandbox: { bwrapPath: "/opt/bwrap" } }],
+    [join("managed-settings.d", "helper.json"), { policyHelper: {} }],
+    [join("managed-settings.d", "invalid.json"), "{"],
+  ]) {
+    const path = join(directory, name);
+    const original = await readFile(path, "utf8").catch(() => undefined);
+    await writeFile(
+      path,
+      typeof content === "string" ? content : JSON.stringify(content),
+    );
+    assert.equal(await claudeManagedBubblewrapOverride(directory), true, name);
+    if (original === undefined) await rm(path);
+    else await writeFile(path, original);
+  }
+  // A managed bwrapPath outranks both launcher selections, so no proof starts.
+  await writeFile(
+    join(directory, "managed-settings.json"),
+    JSON.stringify({ sandbox: { bwrapPath: "/opt/bwrap" } }),
+  );
+  assert.deepEqual(
+    await probeClaudeIsolationPolicies({
+      managedSettingsDirectory: directory,
+      execute: () => assert.fail("An isolation proof started."),
+    }),
+    {
+      "read-only": "unavailable",
+      "workspace-write": "unavailable",
+      "local-commit": "unavailable",
+    },
   );
 });
 

@@ -3524,19 +3524,44 @@ the same provider-private command launcher, validation grammar, and
 access-aware topology installed for model commands.
 Fallback turns launch the Claude CLI directly so authentication and provider
 transport retain the host environment and network path. The invocation-local
-spawning-parent policy selects the short-lived launcher only when Claude starts
-a sandboxed command without changing the provider's `PATH`. The launcher pins
-the canonical host `bwrap` executable before the turn instead of resolving it
-through a potentially workspace-writable path. The launcher file is non-writable.
+spawning-parent policy names the short-lived launcher as `bwrapPath`. Claude
+honors that value only when its policy tier admits that source and otherwise
+resolves `bwrap` through `PATH`, so the turn environment also places the
+launcher's directory first on the provider's `PATH`. Either selection reaches
+the same authenticated launcher; without it, Claude's own bubblewrap would
+apply the read-only preparation reservation to every command. Administrator
+managed settings outrank both selections because Claude takes their first
+`bwrapPath`. Before any proof, the selector therefore reads the documented
+Linux `/etc/claude-code/managed-settings.json` and its non-hidden `.json`
+drop-ins; a `sandbox.bwrapPath`, a policy helper whose tier cannot be
+inspected, or an unreadable or invalid document leaves every access mode
+unavailable. Server-managed settings live in provider-private storage and are
+not read, so selection is also enforced per command. The turn environment names
+a generated Runner shell through `CLAUDE_CODE_SHELL`; it runs the pinned bash or
+zsh only when `AGENT_RUNNER_CLAUDE_COMMAND_SHELL_PROOF` carries the launcher's
+per-turn value and otherwise exits 125. Claude's credential denial removes that
+variable inside every sandbox it starts, while its unsandboxed shell use keeps
+it. Only the authenticated launchers set it again, after Claude's removal and
+beside the read-only HOME projection that holds the shell, so a command started
+through any other selected bubblewrap never runs. Probes require that refusal
+and run their commands through the same shell. The launcher pins
+the canonical host `bwrap` executable from the unchanged environment before the
+turn instead of resolving it through a potentially workspace-writable path. The
+launcher file is non-writable.
 Its owner-only allocation is outside the project, task, and state trees, and
 command namespaces cannot write the allocation. The adapter retains directory
 authority for teardown.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
-assignments; network unsharing; a read-only root followed by supported bind,
-read-only-bind, or private-runtime tmpfs operations; the synthetic device
-mount; PID and required user unsharing; Claude's weaker host `/proc` bind; and
-exactly one absolute shell, `-c`, and opaque command payload after `--`. The
+assignments; network unsharing, optionally followed by same-path proxy-bridge
+binds strictly inside the private runtime trees and environment operations; a
+read-only root followed by supported bind, read-only-bind, or tmpfs operations;
+the synthetic device mount; PID and required user unsharing; an optional empty
+capability set; Claude's weaker host `/proc` bind; trailing environment
+operations; and exactly one absolute shell, `-c`, and opaque command payload
+after `--`. Assignments after network unsharing point at Claude's discarded
+proxy bridge, so each becomes a removal; a variable Claude already removed stays
+removed. The
 launcher translates the required user-unshare argument into exactly one
 bubblewrap user namespace. Claude's fixed
 incidental write binds for its temporary, npm-log, and debug paths are
@@ -3548,13 +3573,18 @@ or verified owner-only empty-directory masks beneath the canonical runtime
 temporary root, both limited to strict workspace descendants. Empty-directory
 masks are replaced by private read-only tmpfs mounts rather than exposing their
 host temporary sources.
-The exact expected workspace and Git mounts, including redundant Git
-descendants, are replaced by Runner-owned mounts. Other same-path read-only
-workspace descendants preserve Claude's command-protection policy; every
+Exact workspace mounts of either kind and Git mounts, including redundant Git
+descendants, are replaced by Runner-owned mounts. Claude's own mounts strictly
+inside `/tmp`, `/run`, or the hidden allocation, without overlapping the
+workspace or Git metadata, are discarded because the launcher's private mounts
+replace those trees. Other same-path read-only workspace descendants and masks
+preserve Claude's command-protection policy for every access; outside the
+workspace, Claude may also mask an existing file with `/dev/null`. Every
 remaining read-only bind must not overlap the writable workspace or any part of
-the Runner-private device, process, runtime, or launcher trees. Only `/tmp` and
-`/run` may be supplied as tmpfs destinations; the launcher replaces them with
-its own private mounts. A later writable bind may not overlap an established
+the Runner-private device, process, runtime, or launcher trees. A tmpfs
+destination is either `/tmp` or `/run`, replaced by the launcher's private
+mounts, or an existing directory mask that overlaps none of the workspace, Git
+metadata, or those private trees. A later writable bind may not overlap an established
 read-only workspace restriction, and no later mount may re-expose a path hidden
 by a private workspace mask.
 Duplicate environment operations, assignments to `ARGV0`, credentials, or the
@@ -3589,11 +3619,21 @@ The command crosses one user, PID, mount, and network namespace boundary; the
 fallback never invokes Claude's seccomp helper or creates a nested user
 namespace.
 
-The direct fallback probe supplies representative effective Claude arguments
-to that same validator and execution path. For repository access, native and
+The direct fallback probe supplies Claude's producer-ordered arguments for the
+same read-only preparation settings to that same validator and execution path:
+credential removals, a private proxy-bridge bind with proxy rewrites, the
+default workspace write, a private temporary bind, the final workspace
+reservation without the masks it covers, the capability drop, and a trailing
+removal. Native probes use the same workspace order. Both probes first prove
+that the probe environment resolves `bwrap` to the generated launcher. For
+repository access, native and
 fallback child probes use a disposable committed repository to require compound
 repository inspection and, for read-only access, reject workspace, Git, and local
-remote-ref mutations. They also check access-specific workspace writes, outside-write
+remote-ref mutations. Workspace-write proofs create a source directory and
+create, rename, and unlink a file there; read-only proofs require each change
+to be denied. Repository proofs also reject writing a nested `.mcp.json`
+control or renaming its pinned parent, and both policies reject writes beneath
+`.claude`. They also check access-specific workspace writes, outside-write
 denial, private temporary storage, IP isolation, inability to reach live host
 abstract and pathname Unix sockets, credential and `ARGV0` removal, and host
 provider-proc secrecy. The selected fallback sets
@@ -3617,7 +3657,44 @@ explicit read-only project reservation and no extra configured write paths;
 this prevents it from registering absent project targets for creation or later
 cleanup. The authenticated launcher replaces only that exact reservation with
 the runner-authorized workspace access. Writable access requires both the
-original workspace bind and the preparation reservation. All project bind,
+original workspace bind and the preparation reservation.
+
+Because the reservation covers workspace Git metadata, selected `readPaths`
+inputs, and Claude's built-in shell, tool, and settings controls (`.gitconfig`,
+`.gitmodules`, shell profiles, `.ripgreprc`, `.mcp.json`, `.claude.json`,
+editor directories, and `.claude`), Claude omits their masks. For Git
+workspace-write access both projections therefore normalize the complete
+validated mount program before bubblewrap starts. Each destination is
+classified canonically. Mounts away from the workspace keep their order, while
+a later mount that encloses or replaces the workspace grant, an earlier
+descendant tmpfs, a writable alias of workspace content, and a later writable
+descendant overlapping an established restriction are rejected. The grant
+hides earlier descendant mounts: earlier writable descendants are subsumed by
+it, and earlier read-only restrictions are reapplied after it with their own
+source and destination. The output order is the grant, ancestor pins
+shallowest first, and then Git and selected-input protections, restored
+controls, and Claude's descendant restrictions together, shallowest first, with
+a restriction after a protection at the same destination. Restrictions with
+different operations or sources at one destination are rejected, as is a mask
+or tmpfs that would enclose a protection or another restriction, or a tmpfs at
+one, because it replaces host content; a read-only mask may still cover a
+protection at its destination. Before bubblewrap starts, the
+normalized program is replayed with each later mount hiding every earlier mount
+at or beneath its destination; every protection and restriction must remain
+effective and read-only, and none may keep a movable ancestor. Like Claude's producer, discovery finds controls and nested `.git`
+entries by name in the workspace and up to three non-symlinked directory levels
+below it, outside `node_modules`. Only existing paths are mounted. A
+symlinked control, a protected path behind an inner symlink, or a link whose
+target encloses the workspace fails closed; a linked settings, commands,
+agents, skills, or plugins entry inside a protected `.claude` directory also
+protects its in-workspace target. Immutability is decided only from read-only
+mounts in the final tree. Every other ancestor of a protected path or
+restriction becomes a writable self-bind: its contents stay editable, but as a
+mount point it cannot be renamed, removed, and recreated around the
+protection. The restricted-host launcher keeps its final Runner-owned Git and
+selected-input mounts after those pins. Directory projection admits Claude's
+same-path binds strictly inside the turn's private temporary directory and
+still rejects every other undeclared write. All project bind,
 directory, tmpfs, device, and proc targets must resolve before bubblewrap starts.
 Missing `.bashrc`, `.gitconfig`, `.mcp.json`, editor directories, and `.claude`
 tooling paths must never be materialized inside a writable project bind. No project file is
@@ -3628,8 +3705,8 @@ namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
 filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v2` and
-`claude-command-boundary-v8`. Old receipts cannot authorize the new policy.
+projection launcher too; the contract revisions are `claude-isolation-v3` and
+`claude-command-boundary-v9`. Old receipts cannot authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`

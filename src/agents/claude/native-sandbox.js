@@ -1,12 +1,15 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  CLAUDE_COMMAND_SHELL_PROOF,
   claudeCommandLauncherSettings,
+  claudeManagedBubblewrapOverride,
   createClaudeCommandLauncher,
+  selectedClaudeBubblewrap,
 } from "./command-launcher.js";
 
 const APPLY_SECCOMP_ARGV0 = "apply-seccomp";
@@ -42,9 +45,44 @@ if (result.stderr) writeSync(2, result.stderr);
 if (result.error !== undefined || result.signal !== null) process.exit(21);
 process.exit(result.status ?? 22);
 `.trim();
+// Ordinary source edits create a directory and create, rename and unlink a
+// file in it only with workspace authority. A restored nested control and its
+// pinned ancestor can never be written, renamed or replaced.
+const SOURCE_OPERATIONS = String.raw`
+function sourceOperations(base, expected) {
+  const directory = join(base, "source-probe");
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, "created.txt"), "");
+    renameSync(join(directory, "created.txt"), join(directory, "renamed.txt"));
+    unlinkSync(join(directory, "renamed.txt"));
+    rmdirSync(directory);
+    if (!expected) process.exit(32);
+  } catch ({ code }) {
+    if (expected || !denied.has(code)) process.exit(33);
+  }
+}
+function controlOperations() {
+  write("nested/.mcp.json", false);
+  try {
+    renameSync("nested", "nested-moved");
+    process.exit(34);
+  } catch ({ code }) {
+    if (!denied.has(code) && code !== "EBUSY") process.exit(35);
+  }
+}
+`.trim();
 const NATIVE_PROBE_SCRIPT = String.raw`
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, writeSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
 
@@ -76,6 +114,7 @@ function run(file, argumentsList, expected) {
   if (result.error !== undefined || result.signal !== null) process.exit(27);
   if ((result.status === 0) !== expected) process.exit(26);
 }
+${SOURCE_OPERATIONS}
 if (process.env.${PROBE_CREDENTIAL} !== undefined) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
@@ -112,6 +151,9 @@ if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit
 write(join(process.env.HOME, "home-probe"), false);
 write(join(process.env.TMPDIR, "temporary-probe"), true);
 write("workspace-probe", writable && directoryMode !== "directory");
+sourceOperations(directoryMode === "directory" ? "out" : ".", writable);
+if (directoryMode !== "directory") controlOperations();
+write(".claude/mask-probe", false);
 write(join(gitDirectory, "git-probe"), false);
 write(join(outsideDirectory, "outside-probe"), false);
 
@@ -138,7 +180,16 @@ setTimeout(() => process.exit(16), 1_000);
 `.trim();
 const RUNNER_BOUNDARY_PROBE_SCRIPT = String.raw`
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync, writeFileSync, writeSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
 
@@ -177,10 +228,12 @@ function run(file, argumentsList, expected) {
   if (result.error !== undefined || result.signal !== null) process.exit(27);
   if ((result.status === 0) !== expected) process.exit(26);
 }
+${SOURCE_OPERATIONS}
 if (
   process.env.${PROBE_CREDENTIAL} !== undefined ||
   process.env.${CLAUDE_COMMAND_LAUNCHER_TOKEN} !== undefined ||
-  process.env.ARGV0 !== undefined
+  process.env.ARGV0 !== undefined ||
+  process.env.HTTPS_PROXY !== undefined
 ) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
@@ -217,7 +270,9 @@ if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit
 write(join(process.env.HOME, "home-probe"), false);
 write(join(process.env.TMPDIR, "temporary-probe"), true);
 write("workspace-probe", writable && directoryMode !== "directory");
-if (writable && !statSync(".claude").isDirectory()) process.exit(23);
+sourceOperations(directoryMode === "directory" ? "out" : ".", writable);
+if (directoryMode !== "directory") controlOperations();
+if (!statSync(".claude").isDirectory()) process.exit(23);
 write(".claude/mask-probe", false);
 write(join(gitDirectory, "git-probe"), false);
 // A file mount's parent under private /tmp can be writable namespace-local scratch.
@@ -267,22 +322,42 @@ function shellArgument(value) {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+// Probes follow Claude's producer order for the effective settings. Only the
+// /tmp, /run and fixture-root mounts are probe-owned. Claude writes the
+// workspace by default and then applies the read-only preparation reservation,
+// which covers and therefore omits Git metadata and built-in control masks.
 function nativeArguments({
   access,
   basePath,
   claudeBinary,
   gitDirectory,
   outsideDirectory,
+  shell,
   workspaceDirectory,
   directoryMode = "git",
 }) {
-  const argumentsList = [
+  return [
     "--new-session",
     "--die-with-parent",
+    "--unsetenv",
+    CLAUDE_COMMAND_SHELL_PROOF,
     "--unshare-net",
     "--ro-bind",
     "/",
     "/",
+    "--tmpfs",
+    "/tmp",
+    "--tmpfs",
+    "/run",
+    "--ro-bind",
+    basePath,
+    basePath,
+    "--bind",
+    workspaceDirectory,
+    workspaceDirectory,
+    "--ro-bind",
+    workspaceDirectory,
+    workspaceDirectory,
     "--dev",
     "/dev",
     "--unshare-pid",
@@ -291,26 +366,6 @@ function nativeArguments({
     "ALL",
     "--proc",
     "/proc",
-    "--tmpfs",
-    "/tmp",
-    "--tmpfs",
-    "/run",
-    "--ro-bind",
-    basePath,
-    basePath,
-  ];
-  if (access === "workspace-write") {
-    argumentsList.push("--bind", workspaceDirectory, workspaceDirectory);
-  }
-  argumentsList.push(
-    "--ro-bind",
-    workspaceDirectory,
-    workspaceDirectory,
-    "--ro-bind",
-    gitDirectory,
-    gitDirectory,
-  );
-  argumentsList.push(
     "--chdir",
     workspaceDirectory,
     "--unsetenv",
@@ -319,6 +374,10 @@ function nativeArguments({
     "ARGV0",
     APPLY_SECCOMP_ARGV0,
     "--",
+    shell,
+    "-c",
+    'exec "$@"',
+    "sh",
     claudeBinary,
     process.execPath,
     "--input-type=module",
@@ -329,58 +388,70 @@ function nativeArguments({
     outsideDirectory,
     "/run/agent-runner-claude-probe.sock",
     directoryMode,
-  );
-  return argumentsList;
+  ];
 }
 
+// The fallback order adds Claude's credential removals, its proxy bridge bind
+// and rewrites, its private temporary bind, the capability drop and trailing
+// removals. The launcher discards the private mounts with their trees.
 function fallbackProbeArguments({
   access,
   abstractSocketName,
   credentialEnvironmentNames,
-  emptyMaskDirectory,
   gitDirectory,
   outsideDirectory,
+  privateDirectory,
+  shell,
   socketPath,
   workspaceDirectory,
   directoryMode = "git",
 }) {
-  const argumentsList = ["--new-session", "--die-with-parent"];
-  for (const name of new Set([
-    ...credentialEnvironmentNames,
-    PROBE_CREDENTIAL,
-  ])) {
-    argumentsList.push("--unsetenv", name);
-  }
-  argumentsList.push("--unshare-net", "--ro-bind", "/", "/");
-  if (access === "workspace-write") {
-    argumentsList.push(
-      "--bind",
-      workspaceDirectory,
-      workspaceDirectory,
-      "--ro-bind",
-      workspaceDirectory,
-      workspaceDirectory,
-      "--ro-bind",
-      emptyMaskDirectory,
-      join(workspaceDirectory, ".claude"),
-    );
-  }
-  argumentsList.push(
+  const proxySocket = join(privateDirectory, "claude-http-probe.sock");
+  const temporaryDirectory = join(privateDirectory, "claude-probe");
+  return [
+    "--new-session",
+    "--die-with-parent",
+    ...[
+      ...new Set([...credentialEnvironmentNames, CLAUDE_COMMAND_SHELL_PROOF]),
+    ].flatMap((name) => ["--unsetenv", name]),
+    "--unshare-net",
+    "--bind",
+    proxySocket,
+    proxySocket,
+    "--setenv",
+    "SANDBOX_RUNTIME",
+    "1",
+    "--setenv",
+    "HTTPS_PROXY",
+    "http://localhost:3128",
+    "--ro-bind",
+    "/",
+    "/",
     "--bind",
     "/tmp/claude",
     "/tmp/claude",
+    "--bind",
+    workspaceDirectory,
+    workspaceDirectory,
+    "--bind",
+    temporaryDirectory,
+    temporaryDirectory,
     "--ro-bind",
-    gitDirectory,
-    gitDirectory,
+    workspaceDirectory,
+    workspaceDirectory,
     "--dev",
     "/dev",
     "--unshare-pid",
     "--unshare-user",
+    "--cap-drop",
+    "ALL",
     "--bind",
     "/proc",
     "/proc",
+    "--unsetenv",
+    PROBE_CREDENTIAL,
     "--",
-    "/bin/sh",
+    shell,
     "-c",
     `${shellArgument(process.execPath)} --input-type=module -e ${shellArgument(RUNNER_BOUNDARY_PROBE_SCRIPT)} ${[
       access,
@@ -393,8 +464,33 @@ function fallbackProbeArguments({
     ]
       .map(shellArgument)
       .join(" ")}`,
+  ];
+}
+
+// Prove that the turn environment selects this launcher when Claude resolves
+// bwrap itself, rather than invoking a separately supplied executable.
+async function selectedLauncher(commandLauncher, environment, execute) {
+  const path = await selectedClaudeBubblewrap(
+    commandLauncher.environment(environment),
   );
-  return argumentsList;
+  if (path !== commandLauncher.path)
+    throw new Error("Claude command launcher is not selected.");
+  // A higher policy tier can still select another bubblewrap. Claude removes
+  // the shell proof inside any sandbox it starts, so the selected shell must
+  // refuse a command that only the launcher could have restored it for.
+  const { [CLAUDE_COMMAND_SHELL_PROOF]: _proof, ...bypassed } =
+    commandLauncher.environment(environment);
+  try {
+    await execute(commandLauncher.shell, ["-c", "exit 0"], {
+      encoding: "utf8",
+      env: bypassed,
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+    });
+  } catch (cause) {
+    if (cause?.code === 125) return path;
+  }
+  throw new Error("Claude command shell does not require the launcher.");
 }
 
 async function listen(server, socketPath) {
@@ -530,15 +626,11 @@ async function probePolicy({
       directoryAccess === undefined ? ".git" : "control",
     );
     const outsideDirectory = join(basePath, "outside");
-    const emptyMaskDirectory = join(basePath, "claude-empty-probe");
     await mkdir(workspaceDirectory);
     await Promise.all(
-      [
-        gitDirectory,
-        outsideDirectory,
-        emptyMaskDirectory,
-        join(workspaceDirectory, ".claude"),
-      ].map((path) => mkdir(path, { mode: 0o700 })),
+      [gitDirectory, outsideDirectory, join(workspaceDirectory, ".claude")].map(
+        (path) => mkdir(path, { mode: 0o700 }),
+      ),
     );
     let directoryPolicy;
     if (directoryAccess === undefined) {
@@ -548,6 +640,8 @@ async function probePolicy({
         outsideDirectory,
         workspaceDirectory,
       });
+      await mkdir(join(workspaceDirectory, "nested"));
+      await writeFile(join(workspaceDirectory, "nested", ".mcp.json"), "{}\n");
     } else {
       const outputPath = join(workspaceDirectory, "out");
       await mkdir(outputPath);
@@ -592,14 +686,15 @@ async function probePolicy({
           PROBE_CREDENTIAL,
         ],
       });
-      file = commandLauncher.path;
+      file = await selectedLauncher(commandLauncher, env, execute);
       argumentsList = fallbackProbeArguments({
         access,
         abstractSocketName,
         credentialEnvironmentNames,
-        emptyMaskDirectory,
         gitDirectory,
         outsideDirectory,
+        privateDirectory: join(dirname(commandLauncher.path), "tmp"),
+        shell: commandLauncher.shell,
         socketPath,
         workspaceDirectory,
         directoryMode,
@@ -622,6 +717,7 @@ async function probePolicy({
         claudeBinary,
         gitDirectory,
         outsideDirectory,
+        shell: commandLauncher.shell,
         workspaceDirectory,
         directoryMode,
       });
@@ -630,7 +726,7 @@ async function probePolicy({
         "--input-type=module",
         "-e",
         PROVIDER_PROBE_SCRIPT,
-        commandLauncher.path,
+        await selectedLauncher(commandLauncher, env, execute),
         ...inner,
       ];
       file = providerCommand[0];
@@ -697,6 +793,9 @@ export async function probeClaudeIsolationPolicies(options) {
   const selected = Object.fromEntries(
     ACCESS_MODES.map((access) => [access, "unavailable"]),
   );
+  // An administrator bwrapPath would bypass the launcher both proofs select.
+  if (await claudeManagedBubblewrapOverride(options.managedSettingsDirectory))
+    return Object.freeze(selected);
   let managedSettingsAvailable;
   for (const access of options.directoryAccess === undefined
     ? ACCESS_MODES

@@ -23,6 +23,7 @@ import { allocateClaudeStorage, environmentError } from "./storage.js";
 import { claudeAvailabilityReason } from "./availability.js";
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  CLAUDE_COMMAND_SHELL_PROOF,
   canReadClaudeFiles,
   claudeCommandLauncherSettings,
   createClaudeCommandLauncher,
@@ -660,8 +661,9 @@ function cliSettings(
   isolationPolicy,
 ) {
   // Keep Claude's mount preparation read-only so it neither creates nor
-  // registers absent project paths for cleanup. The authenticated launcher
-  // supplies the exact runner-authorized workspace access.
+  // registers absent project paths for cleanup. The authenticated launcher,
+  // selected through managed bwrapPath or PATH, replaces that reservation with
+  // the exact runner-authorized workspace access and omitted protections.
   const deniedWritePaths = [request.cwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
@@ -687,7 +689,11 @@ function cliSettings(
       allowUnsandboxedCommands: false,
       enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
       credentials: {
-        envVars: credentialEnvironmentNames.map((name) => ({
+        // Claude removes the shell proof inside every sandbox it starts.
+        envVars: [
+          ...credentialEnvironmentNames,
+          CLAUDE_COMMAND_SHELL_PROOF,
+        ].map((name) => ({
           mode: "deny",
           name,
         })),
@@ -1362,8 +1368,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v8"
-              : "claude-isolation-v2",
+              ? "claude-command-boundary-v9"
+              : "claude-isolation-v3",
             policies: resolvedPolicies,
             version: version.text,
           }),

@@ -623,7 +623,23 @@ inspection; collaboration, editing, and web restrictions remain explicit, and
 the sandbox continues to deny repository content writes, Git and remote
 mutation, credentials, process escape, network access, and host Unix sockets.
 Workspace-write turns retain their existing command denials and
-autonomous-write restrictions. The access-specific effective policy is part of
+autonomous-write restrictions. Claude prepares every command against a
+read-only workspace reservation; each turn makes both the spawning-parent
+policy and `PATH` select the authenticated launcher, which alone replaces that
+reservation with the authorized workspace access. Sandboxed commands can then
+create, rename, and delete ordinary source files. The launcher restores the Git
+metadata, selected inputs, and existing built-in shell, tool, and settings
+controls that the reservation had covered, without materializing absent ones,
+and keeps Claude's descendant masks. It decides the effective mount tree from
+the complete program: no later mount may hide the workspace grant or a
+protection, and every movable ancestor of a protected path is pinned as a mount
+point so it cannot be renamed and recreated around that path. Unsupported or
+replaceable compositions, including symlinked controls, fail before the command
+starts. Claude's own fallback without the launcher therefore never grants
+workspace writes. If a higher administrator policy tier makes Claude select
+another bubblewrap, Claude's command shell refuses the command, so the fallback's
+weaker settings never run a command without the launcher's socket filter and
+private process view. The access-specific effective policy is part of
 the immutable provider receipt, so resume fails closed after policy drift.
 
 Action-free process-proof failure preserves the active checkpoint instead of

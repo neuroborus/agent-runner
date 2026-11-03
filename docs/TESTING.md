@@ -773,9 +773,33 @@ Access-policy coverage also proves that one compound `git log`, `git cat-file`,
 `git branch -a`, and `ls` inspection succeeds in the read-only sandbox while
 representative workspace, Git, and remote mutations fail, local-commit
 readiness uses the same policy, and workspace-write settings stay unchanged.
+Git workspace-write coverage resolves each generated native and fallback
+launcher through the turn's `PATH`, feeds it Claude's producer-ordered
+arguments for the read-only preparation settings, and replays the resulting
+bubblewrap vector through an independent test model in which a later mount
+hides earlier mounts at or beneath its destination and a mount point cannot be
+renamed or unlinked. Ordinary source files must stay creatable, renamable, and
+removable only for workspace-write, while Git metadata, a selected input beside
+a nested control, restored controls, and external paths stay unwritable and
+irreplaceable. The model first rejects both earlier failure compositions: an
+earlier nested restriction hidden by the grant and an ancestor pin after a
+selected-file protection. An earlier file mask survives a later read-only
+ancestor. Enclosing or hidden unsupported mounts, a tmpfs hiding protections, a
+same-destination bind removing a mask,
+weakened restrictions, and symlinked controls must exit before bubblewrap
+starts. A temporary managed-settings directory proves that an administrator
+`bwrapPath`, policy helper, or invalid drop-in leaves every access unavailable
+before any isolation proof starts. A non-file override is modeled by Claude's
+credential denial removing the shell proof: the generated shell must refuse that
+command, run Claude's unsandboxed use, and run the same command through the
+authenticated launcher. Probes require the same refusal with real execution.
+Directory-probe simulations execute the generated probe script against the
+same mount view.
 One bounded capability-gated Linux process regression exercises the installed
 bubblewrap direct-filter boundary without a model request, sleep, retry loop,
-or slow-tier promotion. It does not replace post-install acceptance: after the
+or slow-tier promotion. Its read-only and workspace-write fallback probes run
+for real, confirming source changes and pinned-control denial with actual
+syscalls. It does not replace post-install acceptance: after the
 finalized commit is installed, the supervising agent starts a fresh real Claude
 lazy plan-authoring run and requires preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before

@@ -7,6 +7,32 @@ remain in the owning documentation.
 
 ## 2026-11-03
 
+- **Claude workspace-write commands reach the authorized launcher with an
+  effective mount tree.** A workspace-write Worker could edit through native
+  tools, but every sandboxed Bash workspace write returned `EROFS`: Claude
+  ignored the spawning-parent `bwrapPath` because that tier did not take part
+  in its policy, resolved `bwrap` through `PATH`, and applied the deliberate
+  read-only preparation reservation itself. Turns now also put the launcher
+  first on `PATH`, after pinning the real executable, and the fallback grammar
+  accepts Claude's actual order: proxy-bridge binds and rewrites (made
+  removals), private-tree mounts (discarded), outside masks, an empty
+  capability set and trailing removals. Because the reservation makes Claude
+  omit Git, selected-input and built-in control masks, a pure normalization
+  step now composes the whole Git workspace-write program: the grant hides
+  earlier descendant mounts, so their restrictions are reapplied after it;
+  ancestor pins come before every protection; immutability comes only from the
+  final tree; unsupported or replaceable compositions fail before spawning. An
+  earlier incremental design was rejected because it trusted mounts the grant
+  had hidden and pinned an ancestor after a selected-file protection. Probes
+  use Claude's producer order and require source create, rename and unlink, so
+  readiness is no longer proven against a more permissive setup. A higher
+  administrator tier, including server-managed policy the Runner cannot read,
+  could still name another bubblewrap, so Claude's command shell is now a Runner
+  shell that runs only with a proof variable that Claude's credential denial
+  removes in every sandbox and only the launcher restores. Readable managed
+  files that select another bubblewrap make every access unavailable. Receipts
+  moved to `claude-isolation-v3` and `claude-command-boundary-v9`.
+
 - **Writable result correction preserves work without replaying it.** Execution
   journals original implementation/resolution facts, blockers and accounting,
   reconciles the candidate and invalidates approvals before retiring the turn,

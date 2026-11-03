@@ -6,26 +6,41 @@ import {
   mkdtemp,
   mkdir,
   lstat,
+  readdir,
+  readFile,
   realpath,
   rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 import { canReadFiles } from "../file-access.js";
 import {
+  CLAUDE_COMMAND_SHELL_PROOF,
+  createCommandShell,
   createToolHome,
   nativeLauncherSource,
   projectionSource,
   toolHomeArguments,
 } from "./projection.js";
 
+export { CLAUDE_COMMAND_SHELL_PROOF };
+
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 
 const PRIVATE_TEMPORARY_ROOT = "/tmp";
 const PRIVATE_RUNTIME_ROOT = "/run";
+const CLAUDE_MANAGED_SETTINGS_DIRECTORY = "/etc/claude-code";
 
 export const CLAUDE_COMMAND_LAUNCHER_TOKEN =
   "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
@@ -37,6 +52,70 @@ export function claudeCommandLauncherSettings(path) {
 function containsPath(parent, child) {
   const path = relative(resolve(parent), resolve(child));
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
+}
+
+// Pin the bash or zsh shell Claude would otherwise select before the turn
+// environment names the Runner shell instead.
+async function commandShell(environment) {
+  for (const candidate of [environment.CLAUDE_CODE_SHELL, environment.SHELL]) {
+    if (
+      typeof candidate !== "string" ||
+      !isAbsolute(candidate) ||
+      !/bash|zsh/u.test(basename(candidate))
+    )
+      continue;
+    try {
+      return await resolveExecutable(candidate, environment);
+    } catch {
+      // Claude also falls back to shell detection.
+    }
+  }
+  return resolveExecutable("bash", environment);
+}
+
+// Resolve bwrap as Claude does when its policy tier leaves bwrapPath unset.
+export function selectedClaudeBubblewrap(environment) {
+  return resolveExecutable("bwrap", environment);
+}
+
+// Administrator managed settings outrank the spawning-parent policy, and Claude
+// takes the first bwrapPath across that tier before consulting PATH. Report
+// whether the documented Linux managed-settings file or a drop-in may select
+// another executable: an explicit bwrapPath, a policy helper whose tier cannot
+// be inspected, or a document that cannot be read or parsed.
+export async function claudeManagedBubblewrapOverride(
+  directory = CLAUDE_MANAGED_SETTINGS_DIRECTORY,
+) {
+  const dropIns = join(directory, "managed-settings.d");
+  const paths = [join(directory, "managed-settings.json")];
+  try {
+    for (const entry of await readdir(dropIns, { withFileTypes: true })) {
+      if (
+        (entry.isFile() || entry.isSymbolicLink()) &&
+        entry.name.endsWith(".json") &&
+        !entry.name.startsWith(".")
+      )
+        paths.push(join(dropIns, entry.name));
+    }
+  } catch (cause) {
+    if (!["ENOENT", "ENOTDIR"].includes(cause?.code)) return true;
+  }
+  for (const path of paths) {
+    let settings;
+    try {
+      settings = JSON.parse(await readFile(path, "utf8"));
+    } catch (cause) {
+      if (["ENOENT", "ENOTDIR"].includes(cause?.code)) continue;
+      return true;
+    }
+    if (
+      settings?.sandbox?.bwrapPath !== undefined ||
+      settings?.policyHelper !== undefined ||
+      settings?.policyHelpers !== undefined
+    )
+      return true;
+  }
+  return false;
 }
 
 export async function canReadClaudeFiles(
@@ -176,6 +255,7 @@ function launcherSource({
   hiddenDirectory,
   token,
   home,
+  proof,
   unsetEnvironmentNames,
   directoryPolicy,
 }) {
@@ -230,7 +310,7 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-${projectionSource({ access, cwd, home, injectHome: false, directoryPolicy, claudeWritablePaths })}
+${projectionSource({ access, cwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp") })}
 let sourceArguments;
 try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
 const validatedArguments = [];
@@ -420,25 +500,67 @@ function createSeccompDescriptor() {
   }
 }
 
-take("--new-session");
-take("--die-with-parent");
-while (["--unsetenv", "--setenv"].includes(sourceArguments[index])) {
-  const operation = sourceArguments[index];
-  validatedArguments.push(operation);
-  index += 1;
-  const name = takeValue();
-  if (!validEnvironmentName(name) || environmentOperations.has(name)) fail();
-  environmentOperations.add(name);
-  validatedArguments.push(name);
-  if (operation === "--unsetenv") {
-    presentUnsetEnvironmentNames.push(name);
-  } else {
-    const value = takeValue();
-    if (protectedEnvironmentNames.has(name)) fail();
-    validatedArguments.push(value);
+function takeEnvironmentOperations(networkUnshared = false) {
+  while (["--unsetenv", "--setenv"].includes(sourceArguments[index])) {
+    const assignment = sourceArguments[index] === "--setenv";
+    index += 1;
+    const name = takeValue();
+    const value = assignment ? takeValue() : undefined;
+    if (!validEnvironmentName(name)) fail();
+    // Claude points assignments after network unsharing at its proxy bridge,
+    // which the private runtime trees discard. Each becomes a removal, so
+    // neither the rewrite nor an inherited value reaches commands.
+    const removal = !assignment || networkUnshared;
+    if (assignment && removal && presentUnsetEnvironmentNames.includes(name)) continue;
+    if (
+      environmentOperations.has(name) ||
+      (!removal && protectedEnvironmentNames.has(name))
+    ) fail();
+    environmentOperations.add(name);
+    if (removal) {
+      presentUnsetEnvironmentNames.push(name);
+      validatedArguments.push("--unsetenv", name);
+    } else {
+      validatedArguments.push("--setenv", name, value);
+    }
   }
 }
+// The launcher replaces /tmp, /run and its hidden allocation with private
+// mounts, so Claude's own mounts strictly inside them are discarded.
+function privateDestination(path) {
+  const canonical = canonicalPath(path);
+  const strictlyPrivate = (value) =>
+    ["/tmp", "/run", hiddenDirectory].some(
+      (root) => root !== value && containsPath(root, value),
+    );
+  return (
+    strictlyPrivate(path) &&
+    strictlyPrivate(canonical) &&
+    ![canonicalCwd, ...canonicalGitDirectories].some(
+      (root) => containsPath(root, canonical) || containsPath(canonical, root),
+    )
+  );
+}
+
+take("--new-session");
+take("--die-with-parent");
+takeEnvironmentOperations();
 take("--unshare-net");
+// Claude binds its proxy bridge sockets inside its private temporary tree.
+for (
+  takeEnvironmentOperations(true);
+  sourceArguments[index] === "--bind";
+  takeEnvironmentOperations(true)
+) {
+  index += 1;
+  const source = takeValue();
+  const destination = takeValue();
+  if (
+    !validPath(source) ||
+    source !== destination ||
+    !privateDestination(destination)
+  ) fail();
+}
 take("--ro-bind");
 take("/");
 take("/");
@@ -448,17 +570,36 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
   index += 1;
   if (operation === "--tmpfs") {
     const path = takeValue();
-    if (!["/tmp", "/run"].includes(path)) fail();
+    if (!validPath(path)) fail();
+    if (["/tmp", "/run"].includes(path) || privateDestination(path)) continue;
+    // Claude hides denied outside directories behind empty tmpfs mounts.
+    const canonical = canonicalPath(path);
+    if (
+      pathKind(path) !== "directory" ||
+      [
+        canonicalCwd,
+        ...canonicalGitDirectories,
+        "/dev",
+        "/proc",
+        "/run",
+        "/tmp",
+        hiddenDirectory,
+      ].some(
+        (root) =>
+          containsPath(root, path) ||
+          containsPath(root, canonical) ||
+          containsPath(path, root) ||
+          containsPath(canonical, root),
+      )
+    ) fail();
+    validatedArguments.push(operation, path);
     continue;
   }
   const source = takeValue();
   const destination = takeValue();
   if (!validPath(source) || !validPath(destination)) fail();
-  const runnerWorkspaceMount =
-    operation ===
-      (access === "workspace-write" && directoryPolicy === null ? "--bind" : "--ro-bind") &&
-    source === cwd &&
-    destination === cwd;
+  // Runner-owned workspace authority replaces Claude's exact workspace mounts.
+  const runnerWorkspaceMount = source === cwd && destination === cwd;
   const runnerGitMount =
     operation === "--ro-bind" &&
     source === destination &&
@@ -470,7 +611,8 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
   if (
     !runnerWorkspaceMount &&
     !runnerGitMount &&
-    !discardedClaudeWriteMount
+    !discardedClaudeWriteMount &&
+    !privateDestination(destination)
   ) {
     if (source === destination && pathKind(source) === "missing") fail();
     const canonicalDestination = canonicalPath(destination);
@@ -524,7 +666,6 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
           canonicalDestination,
         );
         if (
-          (access !== "workspace-write" && directoryPolicy === null) ||
           canonicalDestination === canonicalCwd ||
           (source !== destination && !safeMask) ||
           (emptyMask && pathKind(destination) === "file") ||
@@ -550,7 +691,10 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
           if (existingMaskIdentity !== undefined) continue;
           privateWorkspaceMasks.set(canonicalDestination, maskIdentity);
         }
-      } else if (source !== destination) {
+      } else if (
+        source !== destination &&
+        !(source === "/dev/null" && pathKind(destination) === "file")
+      ) {
         fail();
       }
       if (
@@ -575,12 +719,18 @@ take("--dev");
 take("/dev");
 take("--unshare-pid");
 take("--unshare-user");
+// The launcher supplies its own empty capability set.
+if (
+  sourceArguments[index] === "--cap-drop" &&
+  sourceArguments[index + 1] === "ALL"
+) index += 2;
 if (
   sourceArguments[index] !== "--bind" ||
   sourceArguments[index + 1] !== "/proc" ||
   sourceArguments[index + 2] !== "/proc"
 ) fail();
 index += 3;
+takeEnvironmentOperations();
 if (sourceArguments[index] !== "--") fail();
 index += 1;
 const shell = takeValue();
@@ -608,7 +758,7 @@ try {
     [
       ...validatedArguments,
       ...${JSON.stringify(finalArguments)},
-      ...${JSON.stringify(toolHomeArguments(home))},
+      ...${JSON.stringify(toolHomeArguments(home, proof))},
       "--seccomp",
       "3",
       ...missingUnsetArguments,
@@ -719,9 +869,12 @@ export async function createClaudeCommandLauncher({
       bubblewrapBinary,
       environment,
     );
+    const resolvedShell = await commandShell(environment);
     if (
-      protectedRoots.some((path) =>
-        containsPath(path, resolvedBubblewrapBinary),
+      protectedRoots.some(
+        (path) =>
+          containsPath(path, resolvedBubblewrapBinary) ||
+          containsPath(path, resolvedShell),
       )
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
@@ -734,6 +887,8 @@ export async function createClaudeCommandLauncher({
       await mkdir(launcherDirectory, { mode: 0o700 });
     launcherIdentity = await lstat(launcherDirectory);
     const home = await createToolHome(launcherDirectory);
+    const proof = randomUUID();
+    const shell = await createCommandShell(home, resolvedShell, proof);
     const path = join(launcherDirectory, "bwrap");
     const packagePath = join(launcherDirectory, "package.json");
     const token = randomUUID();
@@ -752,12 +907,15 @@ export async function createClaudeCommandLauncher({
               bubblewrapBinary: resolvedBubblewrapBinary,
               cwd,
               home,
+              proof,
               tokenName: CLAUDE_COMMAND_LAUNCHER_TOKEN,
               token,
               unsetEnvironmentNames,
               access,
               directoryPolicy,
               claudeWritablePaths,
+              gitDirectories,
+              privateDirectory: join(directory ?? launcherDirectory, "tmp"),
             })
           : launcherSource({
               access,
@@ -775,6 +933,7 @@ export async function createClaudeCommandLauncher({
               hiddenDirectory: directory ?? launcherDirectory,
               token,
               home,
+              proof,
               unsetEnvironmentNames,
               directoryPolicy,
             }),
@@ -785,14 +944,25 @@ export async function createClaudeCommandLauncher({
     await Promise.all([chmod(path, 0o500), chmod(packagePath, 0o400)]);
     if (directory === undefined) await chmod(launcherDirectory, 0o500);
     return Object.freeze({
+      // Claude honors the managed bwrapPath only when that tier takes part in
+      // its policy and otherwise resolves bwrap through PATH. Both selections
+      // reach this non-writable launcher; the real executable is already pinned.
+      // A higher policy tier may still select another bubblewrap, so Claude's
+      // command shell also refuses every command the launcher did not start.
       environment(environment) {
         return Object.freeze({
           ...environment,
+          PATH: [launcherDirectory, environment.PATH]
+            .filter((value) => typeof value === "string" && value !== "")
+            .join(delimiter),
+          CLAUDE_CODE_SHELL: shell,
+          [CLAUDE_COMMAND_SHELL_PROOF]: proof,
           [CLAUDE_COMMAND_LAUNCHER_TOKEN]: token,
         });
       },
       path,
       remove,
+      shell,
     });
   } catch (cause) {
     if (directory === undefined && launcherDirectory !== undefined) {
