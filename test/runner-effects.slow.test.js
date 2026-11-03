@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
@@ -15,7 +23,9 @@ import {
   createExecutionAdapter,
   createFixture,
   executeFile,
+  operatorFixture,
   PLAN,
+  requestedStepAssessment,
   runnerFor,
   RUNNER_CONFIGURATION,
 } from "./support/index.js";
@@ -26,6 +36,99 @@ const SECOND_PLAN = `${PLAN}
 
 Refine the behavior.
 `;
+
+test("durable writable-result recovery preserves an accepted commit and candidate without replay", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(join(fixture.taskPath, "plan.md"), SECOND_PLAN);
+  const adapter = createExecutionAdapter();
+  const run = adapter.run.bind(adapter);
+  let writes = 0;
+  let restatements = 0;
+  adapter.run = async (request) => {
+    const writableSchema = request.schema?.properties?.result?.anyOf?.some(
+      (branch) => branch.properties.status?.enum?.includes("COMPLETED"),
+    );
+    if (!writableSchema || requestedStepAssessment(request)?.step !== 2)
+      return run(request);
+    const result = {
+      status: "COMPLETED",
+      summary: "Implemented the second step.",
+      reason: "",
+      question: "",
+      options: [],
+      whyBlocked: "",
+      evidence: [],
+    };
+    if (request.access === "workspace-write") {
+      writes++;
+      await writeFile(
+        join(fixture.projectPath, "candidate.txt"),
+        "preserved candidate bytes\n",
+      );
+      result.reason = "PRIVATE_REJECTED_VALUE";
+    } else {
+      restatements++;
+      if (restatements === 1) result.reason = "PRIVATE_REJECTED_VALUE";
+    }
+    return {
+      structured: { result },
+      sessionId: `result-${writes}-${restatements}`,
+    };
+  };
+  const adapters = { codex: adapter };
+  const runner = runnerFor(fixture, adapters);
+  const runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    })
+  ).run.runId;
+  const paused = (await runner.resume({ runId })).run;
+  assert.equal(paused.pause.reason, "writable_output_invalid");
+  assert.equal(paused.pipelineState.completedCommits.length, 1);
+  const [accepted] = paused.pipelineState.completedCommits;
+  assert.equal(
+    (
+      await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
+    ).stdout.trim(),
+    accepted,
+  );
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const saved = await store.loadRun(runId);
+  assert.equal(saved.pipelineState.writableResult.attempts, 1);
+  assert.equal(saved.pipelineState.writableResult.additionalAttempts, 0);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(saved.pipelineState.pendingCommit, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "preserved candidate bytes\n",
+  );
+  assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_REJECTED_VALUE/u);
+  const reconstructed = runnerFor(fixture, adapters, { runStore: store });
+  const done = (
+    await reconstructed.resume({ runId, expectedRevision: saved.revision })
+  ).run;
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.equal(done.pipelineState.completedCommits.length, 2);
+  assert.equal(done.pipelineState.completedCommits[0], accepted);
+  assert.equal(done.counters.fixRounds, 0);
+  assert.equal(done.pipelineState.writableResult, null);
+  assert.equal(writes, 1);
+  assert.equal(restatements, 2);
+  assert.equal(
+    (
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "rev-list",
+        "--count",
+        "HEAD",
+      ])
+    ).stdout.trim(),
+    "3",
+  );
+});
 const checkpointWorkspaces = [];
 let oneStepCheckpoint;
 let twoStepCheckpoint;
@@ -460,6 +563,82 @@ test("interrupted verified checkpoint publication preserves progress without rep
     "DONE",
   );
   assert.equal(commits, 1);
+});
+
+test("version-18 consumed-commit recovery retires interrupted observations without another provider turn", async () => {
+  const fixture = await oneStepCheckpoint.restore();
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const directoryPath = await store.getRunDirectory(fixture.runId);
+  const eventsPath = join(directoryPath, "events.jsonl");
+  const delegate = createExecutionAdapter();
+  let interruptedEvents;
+  const completed = await runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          const response = await delegate.run(request);
+          // Capture a crash after the effect but before observation settlement.
+          interruptedEvents = (await readFile(eventsPath, "utf8"))
+            .trimEnd()
+            .split("\n")
+            .map(JSON.parse);
+          return response;
+        },
+      },
+    },
+    { runStore: store },
+  ).resume({ runId: fixture.runId, action: null });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  for (const event of interruptedEvents) {
+    event.schemaVersion = event.state.schemaVersion = 18;
+    event.state.runtimeCompatibility.runStateVersion = 18;
+    delete event.state.workspace;
+    for (const attempt of event.state.observations?.attempts ?? [])
+      delete attempt.measurements;
+  }
+  const interrupted = interruptedEvents.at(-1).state;
+  const attempt = interrupted.observations.attempts.at(-1);
+  assert.equal(interrupted.pipelineState.pendingCommit.status, "consumed");
+  assert.deepEqual(interrupted.activeTurn, { role: "worker", phase: "commit" });
+  assert.equal(attempt.status, "active");
+  const source = interruptedEvents.map(JSON.stringify).join("\n") + "\n";
+  await writeFile(eventsPath, source);
+  await writeFile(
+    join(directoryPath, "state.json"),
+    JSON.stringify(interrupted),
+  );
+
+  const recovered = await runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run() {
+          assert.fail("Consumed-commit recovery must only verify the effect.");
+        },
+      },
+    },
+    { runStore: store },
+  ).resume({ runId: fixture.runId, action: null });
+  assert.equal(recovered.run.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    recovered.run.pipelineState.completedCommits,
+    completed.run.pipelineState.completedCommits,
+  );
+  assert.equal(recovered.run.pipelineState.pendingCommit, null);
+  assert.equal(recovered.run.activeTurn, null);
+  assert.deepEqual(recovered.run.observations, {
+    ...interrupted.observations,
+    attempts: [
+      ...interrupted.observations.attempts.slice(0, -1),
+      { ...attempt, status: "interrupted", accounting: "incomplete" },
+    ],
+  });
+  assert.equal(recovered.observations.attempts.at(-1).status, "interrupted");
+  assert.equal(recovered.observations.attempts.at(-1).measurements, null);
+  assert.ok((await readFile(eventsPath, "utf8")).startsWith(source));
 });
 
 test("commit-boundary capability requires a selected plan-execution step", async () => {

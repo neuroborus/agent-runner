@@ -2,13 +2,16 @@
 
 ## Goal
 
-Create a deterministic, reviewable `plan.md` that the `plan-execution` pipeline
-can consume without reinterpretation.
+Create a deterministic, reviewable `plan.md` of the explicitly selected kind.
+Commit execution consumes validated commit plans unchanged. Custom authoring
+produces criterion-driven plans consumed by explicitly selected custom execution,
+which settles reviewed results without staging or committing.
 
 ## Inputs And Artifacts
 
-The pipeline receives a local Git repository, `task.md`, and optional
-`context.md`. It manages two declared artifacts in the task directory:
+The pipeline receives a workspace, `task.md`, and optional `context.md`.
+The explicit `planKind` selects `commit` (default, requiring Git) or `custom`
+(criterion-driven, valid in an ordinary directory). It manages two declared artifacts in the task directory:
 
 ```text
 task/
@@ -18,7 +21,7 @@ task/
 
 `clarifications.md` is the durable user/agent question-and-answer transcript in
 the common Markdown format defined by the root runtime. `plan.md` is the final
-validated commit plan. Drafts and review state live under the runner's external
+validated plan of the selected kind. Drafts and review state live under the runner's external
 state directory.
 
 Project content remains read-only except for these two resolved artifact paths,
@@ -28,6 +31,48 @@ rounds, the user answers through a text editor, and the runner writes the final
 plan atomically. No other tracked or untracked file, index entry, commit, or ref
 may change.
 
+The descriptor selects a Git workspace without an exclusive lease for commit
+plans, or a directory workspace with an exclusive canonical exclusion lease
+for custom plans. The root resolves configuration and explicit overrides before
+Git inspection. A missing repository, task wording, criteria alone or a draft's
+format never selects custom. Commit plans retain ignored-artifact and all Git
+guards. Repository-contained custom authoring shares the enclosing worktree's
+canonical lease and grants no Git effects.
+
+CLI `--plan-kind commit|custom`, `--criteria <file>`, repeated `--source
+<reference>` and `--output <path>` map to MCP `planKind`, `criteriaPath`,
+`sourceReferences` and `outputPaths` and the identically named descriptor settings.
+Root configuration, project overlay and explicit run overrides retain their
+normal precedence. Relative paths resolve from the frozen canonical workspace.
+Filesystem discovery first checks the requested directory for project
+configuration, allowing that file to select custom without expanding the
+workspace. When no local selection exists and preliminary settings select
+commit, discovery retains the repository-root configuration fallback. Only
+commit selection canonicalizes the workspace to the repository root; a selected
+local configuration stays bound to its exact file. Custom configurations remain
+confined to their selected directory workspace.
+A criteria file accepts ordinary Markdown, including an empty file requiring
+clarification; a supplied file must exist. Criteria may instead be supplied in
+`task.md` or authorized clarification answers. Commit criteria supplement fixed
+coding and safety requirements without changing kind.
+
+Local sources and criteria are confined read declarations, disjoint from the
+authoring artifact paths and pinned by content,
+identity and real ancestors. URLs remain references with empty retrieval
+permissions; unavailable evidence stays explicit. Intended outputs are frozen
+plan data and never writable authoring roots. Only the two task-owned artifacts
+may change through the runner. Artifact destinations must be disjoint from
+declared criteria, sources and resolved configuration. Overlap checks use the
+final merged configuration at workspace binding, after preliminary lifecycle
+selection. Directory bindings also reject overlaps with protected inputs,
+infrastructure and control paths before publication. Resume neither reloads
+selections nor adopts changed inputs. Directory workflows use the existing
+workspace drift guards; commit authoring additionally fingerprints declared
+read trees around turns without traversing unrelated Git content or ignored
+dependencies.
+Execution separately confines and freezes output authority; authoring declarations
+alone grant no execution permissions.
+
 ## Configuration
 
 The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
@@ -35,6 +80,10 @@ The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
 
 ```text
 mode = independent
+planKind = commit
+criteriaPath = null
+sourceReferences = []
+outputPaths = []
 maxRevisionRounds = 20
 preferredCommitLineLimit = 900
 stagnationWindowRounds = 3
@@ -51,7 +100,7 @@ complete independent Reviewer gate. It resolves Planner, Reviewer, and on-demand
 Arbiter with independent checkpoint isolation. All three pipeline descriptors support combined review; each owns its
 workflow and gate requirements.
 
-`preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
+`preferredCommitLineLimit` applies only to commit planning and must be a positive safe integer. Planner and Plan
 Reviewer prefer each proposed commit to stay within that anticipated additions
 plus deletions target, including tests and documentation; smaller cohesive
 commits are welcome. A larger commit remains valid when the plan states a
@@ -71,7 +120,8 @@ trusted `profile`, backend-specific `model`, decimal `contextSize`, and portable
 documented in [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); this
 pipeline owns only its roles, setting validation, and defaults. The root loads
 an optional ignored `LOCAL_ARTIFACTS/agent-runner.json`, or an explicitly
-selected confined project file, and permits it to select only runner-trusted
+selected integrated or target-bound external project file under the root
+configuration contract, and permits it to select only runner-trusted
 profiles and safe execution and pipeline values. CLI/MCP values win over the
 project overlay, which wins over runner-root values. Explicit `--mode` or MCP
 `run_start.mode` wins over both configuration sources. All configured role
@@ -139,7 +189,22 @@ profile is unknown. Prefer a fresh start for a long, multi-topic, or uncertain
 session, especially when independent mode would fork its complete context more
 than once.
 
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before a naming diagnosis or metadata failure is
+returned; the eventual response does not record it twice. Naming diagnoses grant
+no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+
 ## Persistent Run State
+
+Each structured role result permits exactly 2 MiB (2,097,152 bytes) of
+serialized UTF-8 JSON; one-byte overflow is rejected. This is byte headroom,
+not a token budget. Semantic text, item, path, inventory, dispute, and correction
+bounds remain unchanged. New size diagnostics use `maximum-2-mebibytes` while
+historical `maximum-256-kibibytes` records remain valid. Rejected output is never
+retained. The root owns larger state/recovery containers and complete segmented
+journal recovery; see [the enclosing budgets](../../../docs/ARCHITECTURE.md#structured-result-headroom).
 
 The root run store persists this pipeline outside the project and task
 directories using the common contract in
@@ -256,6 +321,15 @@ session lineage, and correction accounting. It neither reloads configuration
 nor infers a native child, and it prevents older readers from accepting the
 expanded durable vocabulary as version 5.
 
+Pipeline state version 7 adds the frozen plan-kind/input settings and agreed
+result criterion catalog. The ordered version-6 migration selects `commit`,
+null criteria path and empty source/output declarations and criteria, preserving
+progress, drafts, counters, sessions, artifacts and approvals without reloading
+configuration or granting directory authority. Null preflight settings stay null.
+Default commit inputs retain their existing session-context keys, including
+pending source-fork recovery bindings; adding selection metadata cannot refork
+the source or invalidate an unfinished checkpoint.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -272,16 +346,18 @@ inputs and the original access contract, preserves existing artifacts and safe
 partial content, and retains unsafe input or repository changes as blockers.
 It never rolls back content or changes Git controls.
 
-Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
-baseline captured before supervisor launch. Owner-loss recovery excludes a new
-unrelated process only after every stabilized hop reaches an unchanged baseline
-identity without bypassing observed session or token ownership. Version 14
-also persists the owner's control-group identity; inaccessible current
-environment metadata is unrelated only when its stable identity differs. PID
-reuse, stale or missing anchors, boot or namespace mismatch, cycles, missing or
-matching control-group evidence, and surviving descendants fail closed before
-the process record can be retired. Legacy envelopes migrate with null evidence
-and gain no recovery authority.
+Shared-host supervision and owner-loss recovery associate processes through
+owned-session membership, a matching launch token or observed owned ancestry.
+Available parent links continue through inaccessible environments, and observed
+association survives later evidence loss. Unassociated processes neither block
+progress nor receive signals because metadata is unreadable, their session is
+newer or their cgroup is shared. Historical ancestry and control-group fields
+remain strictly validated but optional; new launches store null values. Required
+supervisor identity and namespace, live-owner exclusion, bounded inspection and
+journaled retirement remain mandatory. Recovery never signals persisted host
+PIDs. Shared-host discovery cannot prove absence against arbitrary same-user
+processes hiding all ancestry and token evidence; see the
+[safety contract](../../../docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
 A completed operator pause uses `WAITING_FOR_USER`, `operator_paused`, and a
 null resume action. Its private checkpoint preserves the reconciled workflow
@@ -296,6 +372,24 @@ an unchanged baseline and preserves the durable draft and declared artifacts.
 A read-only mutation remains a blocker after an operator pause is lifted.
 
 ## Clarification
+
+Custom clarification uses the same bounded read-only loop and returns an
+additional `criteria` array: READY requires nonempty stable `id`/observable
+`condition` pairs derived from user requirements; QUESTIONS carries `criteria: []`.
+An empty READY catalog routes to a material criteria question before drafting.
+Missing criteria cannot advance. Normalize criterion conditions through the shared
+contract before freezing the catalog with the clarification hash. Before closing
+clarification, the serialized declarations and required step scaffold/references
+must fit the unchanged 100,000-character draft limit with 4,000 characters left
+for step content. Oversized declarations are rejected before freezing; per-item
+limits alone do not establish a usable draft budget.
+Canonical publication must also fit that draft limit; serialization expansion
+is a deterministic correction finding rather than an invalid state transition.
+Distinguish plan-quality criteria from result acceptance criteria, reusing
+shared supplied conditions. Later drafting and every review/correction prompt
+carry the frozen selection. Custom prompts apply coding conventions only when
+the user selected them and review completeness, feasible order, criterion
+satisfaction and absence of contradictions.
 
 Before the first Planner turn in `CLARIFY`, the runner ensures the clarification
 artifact exists without overwriting an existing transcript. The Planner studies
@@ -491,6 +585,11 @@ reconstruction outside source forks before the next failure propagates. Explicit
 overload uses the runner's durable availability policy. Turn-item policy, protocol, and isolation
 auditing and the model-reroute guard take precedence, and native error details
 are discarded; the adapter owns recognition and recovery.
+Recognized native output exhaustion remains a terminal failure with the shared
+`output_exhausted` disposition and bypasses automatic replay, compaction, availability,
+quota, and output-correction recovery. The
+[provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
+owns its recognition and evidence limits.
 Claude classifies structured permission, HTTP status, result subtype, and
 terminal-reason fields before bounded native-text matching. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
@@ -591,7 +690,7 @@ stagnation directions. Fields that do not apply to the selected status remain
 present and empty so every object schema is strict and deterministic. The
 pipeline validates status-specific invariants after adapter validation.
 
-Only the Planner proposes the exact subject in each commit heading. The shared
+For commit plans, only the Planner proposes the exact subject in each commit heading. The shared
 `@agent-runner/commit-plan` package parses and validates every proposed subject
 and plan deterministically; neither the Reviewer, Arbiter, runner, nor execution
 pipeline generates or rewrites a subject.
@@ -631,9 +730,18 @@ pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
 does not reset or bypass this limit, and lazy mode never treats budget
 exhaustion as a clean result.
 
-The final artifact must pass
-[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md) validation
-before it is written atomically. This pipeline never changes Git history,
+Custom drafts use the exact format owned by
+[`@agent-runner/custom-plan`](../../../packages/custom-plan/README.md): fenced
+JSON declaration, contiguous ordinary `Step` titles, scoped work, expected
+results and criterion references. All modes retain structured drafts, bounded
+correction, and their selected independent/convergence gates. The runner verifies
+criteria, inputs and outputs match the frozen catalog/source/output selection
+exactly. Unknown kinds, mismatched formats or changed declarations cannot
+publish: deterministic issues return to correction. Analysis-only plans may have
+no output files or diff. Agents never write the plan.
+
+The final artifact must pass its selected shared plan contract's validation
+before Runner canonically serializes and writes it atomically. This pipeline never changes Git history,
 creates a commit, pushes, or changes remote configuration or Git identity.
 Immediately before every agent turn and the final write, re-read and compare the
 persisted hashes of `task.md`, optional `context.md`, and accepted
@@ -641,9 +749,10 @@ persisted hashes of `task.md`, optional `context.md`, and accepted
 and reviews. Preserve the preflight repository snapshot as the run baseline,
 compare it before and after every agent turn and around the final write, and
 also wrap each turn in its own full snapshot check. Any other repository
-mutation pauses instead of advancing. Before creating a repository-local
+mutation pauses instead of advancing. Before creating any repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
-path is ignored and untracked.
+path is ignored and untracked, including custom authoring. Ordinary-directory
+artifacts outside Git repositories require no Git inspection.
 
 ### Action-free ownership recovery
 
@@ -737,6 +846,30 @@ scaffolding. Read-only mutation, containment failure, and ambiguous consumed
 effects keep their existing precedence. Only bounded environment class/stage
 and trusted command identity/outcome evidence may be retained, not diagnostics.
 
+## Output-exhausted checkpoints
+
+The pipeline consumes only the normalized `output_exhausted` disposition after
+process/resource retirement and repository reconciliation. It enters
+`WAITING_FOR_USER` with the exact closed pause `{ reason: "output_exhausted",
+code: "ERR_OUTPUT_EXHAUSTED", resumeState, role, checkpoint }`. The checkpoint
+is the complete logical phase/access/checkpoint key, not a native identifier.
+CLI/MCP expose a bounded explanation, suspended-role/checkpoint evidence, and
+one explicit null resume action. Repeated exhaustion pauses again; it never
+starts writable replay, backoff, compaction, or malformed-output correction.
+An operator may explicitly retry the saved checkpoint or start a new run with
+smaller work units; retry does not replenish automatic recovery allowances.
+
+Accepted progress, findings, pending correction attempts, and session lineage
+survive. Possible source-fork effects retain the existing compatibility-named
+`authenticationSourceForkRecovery` role/context marker; only no-effect evidence
+may restore an unused lazy fork. Safety, ownership, authentication, review,
+and ordinary availability policies retain their separate precedence.
+
+Every turn remains repository-read-only. The inspected repository must be
+unchanged before pausing; a mutation takes the existing safety-failure path.
+Accepted drafts and correction attempts survive without accepting partial output
+as a replacement draft or consuming an output-correction attempt.
+
 ## Provider inactivity recovery
 
 The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
@@ -754,6 +887,12 @@ boundary before requesting a fresh reconstruction. It retains the same logical
 checkpoint and complete durable prompt, never reforks the source, and preserves
 partial-content correction accounting while invalidating stale approvals.
 Native fresh fallback and inactivity share one durably consumed allowance.
+Common-envelope version 20 distinguishes `reconstructionRevision` from proven
+`expiryRevision`. Generic and legacy reconstruction markers consume the same
+allowance but establish no timeout proof and cannot relax correction budgets.
+Public recovery adds `expiryProven`; unproven reconstruction is labeled as such.
+An interrupted consumed reconstruction without expiry proof pauses with
+`ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED`, rather than claiming inactivity.
 Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
 Restart preserves the allowance; an offered explicit resume attempts the same
 checkpoint once without replenishing automatic recovery. A returned provider

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import {
   basename,
@@ -11,6 +11,8 @@ import {
   resolve,
   sep,
 } from "node:path";
+
+import { createWorkspaceService } from "../../workspace/index.js";
 
 // The execution-resource journal uses a frozen command identity for each owner.
 // This identity belongs to adapter preparation, never to a trusted check.
@@ -75,17 +77,27 @@ async function storageRoot(forbiddenPaths, recordedPath) {
     throw environmentError("preparation");
   for (const path of forbiddenPaths) {
     // Task artifacts may not exist yet; check the normalized spelling as well.
-    let canonical = resolve(path);
-    try {
-      canonical = await realpath(path);
-    } catch (cause) {
-      if (cause.code !== "ENOENT") throw cause;
-      canonical = join(
-        await realpath(dirname(path)),
-        path.slice(dirname(path).length + 1),
-      );
+    let ancestor = resolve(path);
+    const missing = [];
+    let canonical;
+    while (canonical === undefined) {
+      try {
+        const info = await stat(ancestor);
+        if (missing.length > 0 && !info.isDirectory())
+          throw environmentError("preparation");
+        canonical = join(await realpath(ancestor), ...missing);
+      } catch (cause) {
+        if (cause.code !== "ENOENT" || dirname(ancestor) === ancestor)
+          throw cause;
+        missing.unshift(basename(ancestor));
+        ancestor = dirname(ancestor);
+      }
     }
-    if (contains(canonical, root) || contains(root, canonical))
+    if (
+      [resolve(path), canonical].some(
+        (candidate) => contains(candidate, root) || contains(root, candidate),
+      )
+    )
       throw environmentError("preparation");
   }
   return root;
@@ -112,9 +124,34 @@ async function pinnedRoot(root) {
 export async function recoverClaudeStorage({
   resource,
   storageForbiddenPaths = [],
+  workspacePolicy,
   onResource,
 }) {
   try {
+    if (workspacePolicy !== undefined) {
+      const { kind, ...declarations } = workspacePolicy;
+      if (kind !== "directory") throw environmentError("cleanup");
+      // Retired turns may have changed a control pointer to reference storage.
+      // Discover current exclusions before deletion without accepting frozen
+      // input drift or requiring deleted inputs to exist for owned cleanup.
+      const inspection = await createWorkspaceService().inspect({
+        ...declarations,
+        inputPaths: [],
+        sourcePaths: [],
+        configurationPaths: [],
+        artifactPaths: [
+          ...(declarations.artifactPaths ?? []),
+          ...(declarations.inputPaths ?? []),
+          ...(declarations.sourcePaths ?? []),
+          ...(declarations.configurationPaths ?? []),
+        ],
+      });
+      storageForbiddenPaths = [
+        ...storageForbiddenPaths,
+        inspection.stateRoot,
+        ...inspection.protectedPaths,
+      ];
+    }
     if (
       resource.commandIdentity !== CLAUDE_STORAGE_IDENTITY ||
       resource.hostname !== hostname() ||
@@ -159,6 +196,7 @@ export async function recoverClaudeStorage({
 export async function allocateClaudeStorage({
   cwd,
   storageForbiddenPaths = [],
+  workspacePolicy,
   onResource,
   signal,
 }) {
@@ -213,6 +251,7 @@ export async function allocateClaudeStorage({
           await recoverClaudeStorage({
             resource,
             storageForbiddenPaths: forbiddenPaths,
+            workspacePolicy,
             onResource: publish,
           });
         },
@@ -225,6 +264,7 @@ export async function allocateClaudeStorage({
       await recoverClaudeStorage({
         resource,
         storageForbiddenPaths: forbiddenPaths,
+        workspacePolicy,
         onResource: publish,
       });
     }

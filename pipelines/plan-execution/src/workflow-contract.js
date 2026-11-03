@@ -2,13 +2,36 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { PlanExecutionWorkflowError } from "./errors.js";
 import {
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+  MAX_PLAN_LENGTH,
+  planKindPolicy,
+  requiredRoleCapabilities,
+  completedStepCount,
+} from "./step-policy.js";
 
+import {
+  normalizeCustomResults,
+  normalizeCustomResult,
+  executionContentFingerprint,
+} from "./custom-results.js";
+import { assertWritableResult } from "./writable-result.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
-import { validStepAssessment } from "./plan-position.js";
+import {
+  assertCommitSizeAssessment,
+  COMMIT_SIZE_DEFAULTS,
+  commitSizeThreshold,
+  createCommitSizeAssessment,
+} from "./commit-size-assessment.js";
+import {
+  effectivePlanAuthority,
+  validStepAssessment,
+} from "./plan-position.js";
+import {
+  assertEffectivePlanRevisions,
+  createEffectivePlanRevisions,
+  effectivePlanRevisionCheckpoint,
+} from "./effective-plan.js";
 import {
   validCapabilityReports,
   freezeReport,
@@ -19,12 +42,15 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import { executionPolicy, combinedReview } from "./mode-policy.js";
+import { replacementInputReview } from "./replacement-inputs.js";
 import {
   deriveValidationSchedule,
   scheduledChecks,
   validationCatalog,
   validationEvidenceFingerprint,
 } from "./validation-schedule.js";
+
+export { PlanExecutionWorkflowError, MAX_PLAN_LENGTH };
 
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
@@ -45,6 +71,7 @@ export const WORKFLOW_STATES = Object.freeze([
   "CONFIRM",
   "RESOLVE_FINDINGS",
   "COMMIT",
+  "ACCEPT",
   "WAITING_FOR_USER",
   "DONE",
   "FAILED",
@@ -52,12 +79,21 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "planKind",
+  "customResults",
+  "customCandidate",
+  "customWritePolicy",
   "planContextVersion",
   "stepImplementation",
+  "writableResult",
   "implementationEvidenceLegacy",
   "artifactRoot",
   "preflightComplete",
   "settings",
+  "commitSizeAssessment",
+  "effectivePlanRevisions",
+  "effectiveValidation",
+  "replacementExecution",
   "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
@@ -72,6 +108,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "workerValidation",
   "reviewerValidation",
   "resolvedSummary",
+  "bootstrapProgress",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
@@ -159,7 +196,6 @@ const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const REQUIRED_CHECK_ID_PATTERN = /^C[1-9][0-9]{0,8}$/u;
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
-export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
 export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
@@ -170,7 +206,7 @@ export function resolveActiveRoles(settings) {
   return executionPolicy(settings).activeRoles;
 }
 
-const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
+const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
 export const INVALID_EXECUTION_INPUT_CODE = "ERR_INVALID_EXECUTION_INPUT";
 const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
@@ -187,6 +223,12 @@ const OUTPUT_FAILURE_FIELDS = Object.freeze([
 ]);
 const ADAPTER_FAILURE_FIELDS = Object.freeze([
   ...LEGACY_OUTPUT_FAILURE_FIELDS,
+  "diagnosticClass",
+]);
+const COMMIT_REJECTION_DIAGNOSTIC_FIELDS = Object.freeze([
+  "reason",
+  "code",
+  "resumeState",
   "diagnosticClass",
 ]);
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -332,6 +374,10 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
 const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
+  "planKind",
+  "automaticCommitSplitting",
+  "preferredCommitLineLimit",
+  "commitSizeAssessmentMultiplier",
   "finalization",
   "maxFixRoundsPerStep",
   "maxDisputesPerFinding",
@@ -341,7 +387,14 @@ const SETTINGS_FIELDS = Object.freeze([
   "trustedChecks",
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
-  (field) => !["finalization", "mode", "trustedChecks"].includes(field),
+  (field) =>
+    ![
+      "automaticCommitSplitting",
+      "finalization",
+      "mode",
+      "trustedChecks",
+      "planKind",
+    ].includes(field),
 );
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
@@ -349,6 +402,18 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  output_exhausted: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "CONFIRM",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+    "COMMIT",
+  ]),
   authentication_required: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -396,6 +461,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "COMMIT",
   ]),
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
+  writable_output_invalid: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
@@ -413,6 +479,13 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "CLEAN_CONFIRM",
   ]),
   review_output_invalid: Object.freeze(["REVIEW"]),
+  effective_plan_output_invalid: Object.freeze([
+    "IMPLEMENT",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "REVIEW",
+    "CONFIRM",
+  ]),
 });
 const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
   "schemaVersion",
@@ -430,30 +503,6 @@ const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
   "expectedCommitterIdentityFingerprint",
   "subject",
 ]);
-
-export class PlanExecutionWorkflowError extends Error {
-  constructor(
-    message,
-    {
-      cause,
-      code = "ERR_PLAN_EXECUTION_WORKFLOW",
-      diagnostic,
-      diagnostics,
-    } = {},
-  ) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "PlanExecutionWorkflowError";
-    this.code = code;
-    if (diagnostic !== undefined) {
-      this.diagnostic = Object.freeze({ ...diagnostic });
-    }
-    if (diagnostics !== undefined) {
-      this.diagnostics = Object.freeze(
-        diagnostics.map((entry) => Object.freeze({ ...entry })),
-      );
-    }
-  }
-}
 
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -495,8 +544,8 @@ export function createFinalizationGuidanceDecision({
   configuredPolicy,
   skillPath = null,
   selectedFileFingerprint = null,
+  selection = skillPath === null ? "fallback" : "skill",
 }) {
-  const selection = skillPath === null ? "fallback" : "skill";
   return normalizeFinalizationGuidanceDecision({
     configuredPolicy,
     selection,
@@ -519,16 +568,25 @@ export function normalizeFinalizationGuidanceDecision(value) {
     "Plan-execution finalization guidance",
   );
   const fallback = value.selection === "fallback";
-  const selected = value.selection === "skill";
+  const selected = ["skill", "file"].includes(value.selection);
   const configuredPolicy = value.configuredPolicy;
+  const selectedPath =
+    value.selection === "file" &&
+    typeof value.skillPath === "string" &&
+    value.skillPath.startsWith("finalization://")
+      ? value.skillPath.slice("finalization://".length)
+      : value.skillPath;
   const validSelectedPath =
     selected &&
-    isFinalizationPolicy(value.skillPath) &&
-    !["auto", "none"].includes(value.skillPath) &&
+    isFinalizationPolicy(selectedPath) &&
+    !["auto", "none"].includes(selectedPath) &&
+    (value.selection !== "skill" ||
+      value.skillPath === "SKILL.md" ||
+      value.skillPath.endsWith("/SKILL.md")) &&
     HASH_PATTERN.test(value.selectedFileFingerprint ?? "") &&
     (configuredPolicy === "auto"
       ? CONVENTIONAL_FINALIZATION_SKILL_PATHS.includes(value.skillPath)
-      : configuredPolicy === value.skillPath);
+      : configuredPolicy === selectedPath);
   if (
     !isFinalizationPolicy(configuredPolicy) ||
     (!fallback && !selected) ||
@@ -857,7 +915,10 @@ function assertExactOutputFields(value, fields, field = "result") {
   }
 }
 
-function assertStructuredResultSize(payload, diagnostic) {
+export function assertStructuredResultSize(
+  payload,
+  diagnostic = outputConstraint("result", "maximum-2-mebibytes"),
+) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
@@ -901,7 +962,7 @@ function normalizeText(
   return value.trim().replace(/\s+/gu, " ");
 }
 
-function normalizeSummary(
+export function normalizeSummary(
   value,
   name,
   code = "ERR_INVALID_PLAN_EXECUTION_STATE",
@@ -1185,7 +1246,7 @@ export function normalizeBootstrapResultCandidate(
   payload,
   role,
   stepCount,
-  { trustedCommands = [] } = {},
+  { trustedCommands = [], allowEmpty = false } = {},
 ) {
   assertStepAssessment(payload?.stepAssessment);
   const statuses = [
@@ -1202,7 +1263,7 @@ export function normalizeBootstrapResultCandidate(
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
   if (
@@ -1292,7 +1353,7 @@ export function normalizeBootstrapResultCandidate(
   const requiredChecks = normalizeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount },
+    { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount, allowEmpty },
   );
   if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
     throw outputError(
@@ -1366,7 +1427,7 @@ export function normalizeReconciliationResult(payload) {
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, RECONCILIATION_RESULT_FIELDS);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
@@ -1466,7 +1527,7 @@ export function normalizeBootstrapArbitration(payload) {
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, ARBITRATION_RESULT_FIELDS);
   const rationale = normalizeText(
@@ -1693,7 +1754,7 @@ function isStagingIndependentCommand(command) {
   return true;
 }
 
-function stagingDependentCheckDiagnostics(checks) {
+export function stagingDependentCheckDiagnostics(checks) {
   return Object.freeze(
     checks.flatMap((check, index) =>
       isStagingIndependentCommand(check.command)
@@ -1708,7 +1769,7 @@ function stagingDependentCheckDiagnostics(checks) {
   );
 }
 
-function normalizePhaseSafeRequiredChecks(value, code, options) {
+export function normalizePhaseSafeRequiredChecks(value, code, options) {
   const { collectDiagnostics = false, ...normalizationOptions } = options ?? {};
   const checks = normalizeRequiredChecks(value, code, normalizationOptions);
   const diagnostics = stagingDependentCheckDiagnostics(checks);
@@ -1726,6 +1787,17 @@ function normalizePhaseSafeRequiredChecks(value, code, options) {
 }
 
 function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
+  // This non-path namespace cannot shadow a canonical repository-relative file.
+  if (typeof value === "string" && value.startsWith("finalization://")) {
+    const path = value.slice("finalization://".length);
+    if (
+      isFinalizationPolicy(path) &&
+      path.endsWith(".md") &&
+      path.trim() === path
+    ) {
+      return value;
+    }
+  }
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -1751,7 +1823,7 @@ function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
   return value;
 }
 
-function normalizeRequiredChecks(
+export function normalizeRequiredChecks(
   value,
   code,
   {
@@ -1844,6 +1916,7 @@ function normalizeRequiredChecks(
   }
   if (
     scoped &&
+    !allowEmpty &&
     stepCount !== undefined &&
     new Set(checks.flatMap(({ steps }) => steps)).size !== stepCount
   ) {
@@ -1856,7 +1929,7 @@ function normalizeRequiredChecks(
   return checks;
 }
 
-function normalizeValidationInfrastructure(
+export function normalizeValidationInfrastructure(
   value,
   code,
   { maxItems = MAX_VALIDATION_ITEMS } = {},
@@ -2028,34 +2101,61 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
   return issues;
 }
 
+function assertEmptyOutputFields(payload, textFields, arrayFields = []) {
+  for (const field of textFields) {
+    if (payload[field] !== "")
+      throw outputError(
+        "Structured role result contains an inapplicable field.",
+        outputConstraint(field, "empty-string"),
+      );
+  }
+  for (const field of arrayFields) {
+    if (!emptyArray(payload[field]))
+      throw outputError(
+        "Structured role result contains an inapplicable field.",
+        outputConstraint(field, "empty-array"),
+      );
+  }
+}
+
 export function normalizeImplementationResult(payload) {
+  if (!isRecord(payload))
+    throw outputError(
+      "Worker returned an invalid implementation result.",
+      outputConstraint("result", "object"),
+    );
+  assertStructuredResultSize(payload);
+  assertExactOutputFields(payload, [
+    "status",
+    "summary",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ]);
   if (
-    !isRecord(payload) ||
     !["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
-  ) {
-    throw outputError("Worker returned an invalid implementation result.");
-  }
-  assertStructuredResultSize(payload);
+  )
+    throw outputError(
+      "Worker returned an invalid implementation status.",
+      outputConstraint("status", "implementation-status"),
+    );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (payload.summary !== "" || payload.reason !== "") {
-      throw outputError("Product decision contains inapplicable fields.");
-    }
+    assertEmptyOutputFields(payload, ["summary", "reason"]);
     return Object.freeze({
       status: payload.status,
       decision: normalizeProductDecision(payload),
     });
   }
   if (payload.status === "BLOCKED") {
-    if (
-      payload.summary !== "" ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError("Blocked implementation contains inapplicable fields.");
-    }
+    assertEmptyOutputFields(
+      payload,
+      ["summary", "question", "whyBlocked"],
+      ["options"],
+    );
     return Object.freeze({
       status: payload.status,
       reason: normalizeText(
@@ -2063,21 +2163,26 @@ export function normalizeImplementationResult(payload) {
         "implementation blocker",
         MAX_TEXT_LENGTH,
         INVALID_OUTPUT_CODE,
+        outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
       ),
       evidence: normalizeTextList(payload.evidence, "implementation evidence", {
         code: INVALID_OUTPUT_CODE,
+        diagnosticField: "evidence",
       }),
     });
   }
-  if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Completed implementation contains inapplicable fields.");
-  }
+  assertEmptyOutputFields(
+    payload,
+    ["reason", "question", "whyBlocked"],
+    ["options", "evidence"],
+  );
   return Object.freeze({
     status: payload.status,
     summary: normalizeSummary(
       payload.summary,
       "implementation summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
   });
 }
@@ -2200,7 +2305,7 @@ export function normalizeCandidateReviewResult(
 
 export function normalizeFinalizationResult(
   payload,
-  { trustedCommands = [] } = {},
+  { trustedCommands = [], allowEmpty = false } = {},
 ) {
   const statuses = [
     "PASS",
@@ -2257,7 +2362,7 @@ export function normalizeFinalizationResult(
       payload.requiredChecks,
       INVALID_OUTPUT_CODE,
       {
-        allowEmpty: payload.status !== "BLOCKED",
+        allowEmpty: allowEmpty || payload.status !== "BLOCKED",
         collectDiagnostics: true,
       },
     );
@@ -2333,7 +2438,7 @@ export function normalizeFinalizationResult(
   const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
     INVALID_OUTPUT_CODE,
-    { collectDiagnostics: true },
+    { collectDiagnostics: true, allowEmpty },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     payload.validationInfrastructure,
@@ -2355,7 +2460,8 @@ export function normalizeFinalizationResult(
           !(trustedCommandSet.has(command) && status === "NOT_RUN"),
       )) ||
     (payload.status === "FAIL" &&
-      !checks.some(({ status }) => status === "FAIL"))
+      (checks.some(({ status }) => status === "BLOCKED") ||
+        (!allowEmpty && !checks.some(({ status }) => status === "FAIL"))))
   ) {
     throw outputError("Finalization status does not match its issues.");
   }
@@ -2543,10 +2649,7 @@ export function normalizeReviewResult(payload, previousFindings = []) {
       outputConstraint("status", "review-status"),
     );
   }
-  assertStructuredResultSize(
-    payload,
-    outputConstraint("result", "bounded-structured-result"),
-  );
+  assertStructuredResultSize(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     const diagnostics = [
       ...(!emptyArray(payload.findings)
@@ -2703,35 +2806,43 @@ export function normalizeCleanConfirmationResult(
 }
 
 export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
+  if (!isRecord(payload))
+    throw outputError(
+      "Worker returned an invalid finding resolution.",
+      outputConstraint("result", "object"),
+    );
+  assertStructuredResultSize(payload);
+  assertExactOutputFields(payload, [
+    "status",
+    "decisions",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ]);
   if (
-    !isRecord(payload) ||
     !["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
-  ) {
-    throw outputError("Worker returned an invalid finding resolution.");
-  }
-  assertStructuredResultSize(payload);
+  )
+    throw outputError(
+      "Worker returned an invalid finding-resolution status.",
+      outputConstraint("status", "resolution-status"),
+    );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (!emptyArray(payload.decisions) || payload.reason !== "") {
-      throw outputError("Product decision must not include finding decisions.");
-    }
+    assertEmptyOutputFields(payload, ["reason"], ["decisions"]);
     return Object.freeze({
       status: payload.status,
       decision: normalizeProductDecision(payload),
     });
   }
   if (payload.status === "BLOCKED") {
-    if (
-      !emptyArray(payload.decisions) ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError(
-        "Blocked finding resolution contains inapplicable fields.",
-      );
-    }
+    assertEmptyOutputFields(
+      payload,
+      ["question", "whyBlocked"],
+      ["decisions", "options"],
+    );
     return Object.freeze({
       status: payload.status,
       reason: normalizeText(
@@ -2739,57 +2850,83 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
         "finding-resolution blocker",
         MAX_TEXT_LENGTH,
         INVALID_OUTPUT_CODE,
+        outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
       ),
       evidence: normalizeTextList(
         payload.evidence,
         "finding-resolution blocker evidence",
-        { code: INVALID_OUTPUT_CODE },
+        { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
       ),
     });
   }
-  if (
-    payload.reason !== "" ||
-    !emptyDecision(payload) ||
-    !Array.isArray(payload.decisions)
-  ) {
-    throw outputError("Finding resolution contains inapplicable fields.");
-  }
+  assertEmptyOutputFields(
+    payload,
+    ["reason", "question", "whyBlocked"],
+    ["options", "evidence"],
+  );
+  if (!Array.isArray(payload.decisions) || payload.decisions.length > MAX_ITEMS)
+    throw outputError(
+      "Finding resolution has an invalid number of decisions.",
+      outputConstraint("decisions", "array-up-to-32-items"),
+    );
   const expectedIds = blockers.map(({ id }) => id).sort();
   const decisions = Object.freeze(
-    payload.decisions.map((decision) => {
+    payload.decisions.map((decision, index) => {
+      const field = `decisions[${index}]`;
+      if (!isRecord(decision))
+        throw outputError(
+          "Worker returned an invalid finding decision.",
+          outputConstraint(field, "object"),
+        );
+      assertExactOutputFields(
+        decision,
+        ["id", "decision", "reason", "evidence"],
+        field,
+      );
       if (
-        !isRecord(decision) ||
-        !["FIX", "DISPUTE"].includes(decision.decision) ||
+        typeof decision.id !== "string" ||
+        !/^(?:R|F)[1-9][0-9]{0,8}$/u.test(decision.id) ||
         !expectedIds.includes(decision.id)
-      ) {
-        throw outputError("Worker returned an invalid finding decision.");
-      }
+      )
+        throw outputError(
+          "Finding decision must identify a current blocker.",
+          outputConstraint(`${field}.id`, "current-blocker-id"),
+        );
+      if (!["FIX", "DISPUTE"].includes(decision.decision))
+        throw outputError(
+          "Worker returned an invalid finding disposition.",
+          outputConstraint(`${field}.decision`, "fix-or-dispute"),
+        );
       if (
         decision.decision === "DISPUTE" &&
         (decision.id.startsWith("F") || arbitratedIds.has(decision.id))
-      ) {
-        throw outputError("This blocker cannot be disputed.");
-      }
+      )
+        throw outputError(
+          "This blocker cannot be disputed.",
+          outputConstraint(`${field}.decision`, "disputable-blocker-only"),
+        );
       return Object.freeze({
         id: decision.id,
         decision: decision.decision,
         reason: normalizeText(
           decision.reason,
-          `resolution ${decision.id} reason`,
+          "finding decision reason",
           MAX_TEXT_LENGTH,
           INVALID_OUTPUT_CODE,
+          outputConstraint(
+            `${field}.reason`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
-        evidence:
-          decision.decision === "DISPUTE"
-            ? normalizeTextList(
-                decision.evidence,
-                `dispute ${decision.id} evidence`,
-                { code: INVALID_OUTPUT_CODE },
-              )
-            : normalizeOptionalEvidence(
-                decision.evidence,
-                `fix ${decision.id} evidence`,
-              ),
+        evidence: normalizeTextList(
+          decision.evidence,
+          "finding decision evidence",
+          {
+            allowEmpty: decision.decision === "FIX",
+            code: INVALID_OUTPUT_CODE,
+            diagnosticField: `${field}.evidence`,
+          },
+        ),
       });
     }),
   );
@@ -2798,11 +2935,11 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
     decisions.length !== blockers.length ||
     new Set(actualIds).size !== actualIds.length ||
     actualIds.some((id, index) => id !== expectedIds[index])
-  ) {
+  )
     throw outputError(
       "Worker must resolve every current blocker exactly once.",
+      outputConstraint("decisions", "every-current-blocker-exactly-once"),
     );
-  }
   return Object.freeze({ status: payload.status, decisions });
 }
 
@@ -3369,7 +3506,7 @@ function normalizePersistedFindings(value, name = "Plan-execution findings") {
   }
 }
 
-function normalizePersistedFinalization(value) {
+function normalizePersistedFinalization(value, allowEmpty = false) {
   if (value === null) {
     return null;
   }
@@ -3425,6 +3562,7 @@ function normalizePersistedFinalization(value) {
   const requiredChecks = normalizeRequiredChecks(
     value.requiredChecks,
     "ERR_INVALID_PLAN_EXECUTION_STATE",
+    { allowEmpty },
   );
   const validationInfrastructure = normalizeValidationInfrastructure(
     value.validationInfrastructure,
@@ -3494,7 +3632,9 @@ function normalizePersistedFinalization(value) {
   if (
     (value.status === "PASS" &&
       checks.some(({ status }) => status !== "PASS")) ||
-    (value.status === "FAIL" && !checks.some(({ status }) => status === "FAIL"))
+    (value.status === "FAIL" &&
+      !allowEmpty &&
+      !checks.some(({ status }) => status === "FAIL"))
   ) {
     throw workflowError("Plan-execution check evidence is inconsistent.");
   }
@@ -3519,6 +3659,7 @@ function normalizePersistedFinalization(value) {
 /** Constructs the canonical persisted Worker and runner finalization tuple. */
 export function createPersistedFinalizationEvidence({
   step = null,
+  allowEmpty = false,
   workerResult,
   issues,
   checks,
@@ -3529,24 +3670,27 @@ export function createPersistedFinalizationEvidence({
   fingerprint,
 }) {
   const status = issues.length === 0 ? "PASS" : "FAIL";
-  return normalizePersistedFinalization({
-    status,
-    step,
-    skillPath: workerResult.skillPath,
-    summary:
-      status === workerResult.status
-        ? workerResult.summary
-        : "The project finalization procedure found blocking failures.",
-    issues,
-    requiredChecks: workerResult.requiredChecks,
-    validationInfrastructure: workerResult.validationInfrastructure,
-    validationInfrastructureFingerprint,
-    checks,
-    trustedCommandFingerprint,
-    trustedConfigurationFingerprint,
-    validationChanged,
-    fingerprint,
-  });
+  return normalizePersistedFinalization(
+    {
+      status,
+      step,
+      skillPath: workerResult.skillPath,
+      summary:
+        status === workerResult.status
+          ? workerResult.summary
+          : "The project finalization procedure found blocking failures.",
+      issues,
+      requiredChecks: workerResult.requiredChecks,
+      validationInfrastructure: workerResult.validationInfrastructure,
+      validationInfrastructureFingerprint,
+      checks,
+      trustedCommandFingerprint,
+      trustedConfigurationFingerprint,
+      validationChanged,
+      fingerprint,
+    },
+    allowEmpty,
+  );
 }
 
 function normalizePersistedValidation(
@@ -3555,6 +3699,7 @@ function normalizePersistedValidation(
   stepCount,
   allowLegacy,
   trustedCommands,
+  allowEmpty = false,
 ) {
   if (value === null) {
     return null;
@@ -3574,6 +3719,7 @@ function normalizePersistedValidation(
     "ERR_INVALID_PLAN_EXECUTION_STATE",
     {
       maxItems: MAX_BOOTSTRAP_ITEMS,
+      allowEmpty,
       scoped:
         !allowLegacy ||
         (Array.isArray(value.requiredChecks) &&
@@ -3621,13 +3767,28 @@ function validateValidationSchedule(state, planSteps, validations) {
       "Scoped validation requires every active role's assignments.",
     );
   }
-  const expected = deriveValidationSchedule(validations, planSteps.length);
+  const receipt = [
+    ...(state.effectiveValidation ?? []),
+    ...(state.replacementExecution?.inputChanges ?? [])
+      .flatMap(({ validation }) => (validation === null ? [] : [validation]))
+      .reverse(),
+  ].find(
+    (entry) =>
+      entry.schedule !== null &&
+      entry.revision === state.validationSchedule?.effectivePlan?.revision,
+  );
+  const expected =
+    receipt?.schedule ??
+    deriveValidationSchedule(
+      validations,
+      planKindPolicy(state.planKind).parse(state.canonicalPlan).steps.length,
+    );
   if (
     !isDeepStrictEqual(state.validationSchedule, expected) ||
-    expected.some(
-      ({ requiredChecks }) =>
-        requiredChecks.length === 0 ||
-        requiredChecks.length > MAX_VALIDATION_ITEMS,
+    expected.steps.some(
+      ({ commandIndexes }) =>
+        (state.planKind !== "custom" && commandIndexes.length === 0) ||
+        commandIndexes.length > MAX_VALIDATION_ITEMS,
     ) ||
     validationCatalog(state).length > MAX_VALIDATION_ITEMS
   ) {
@@ -3635,8 +3796,22 @@ function validateValidationSchedule(state, planSteps, validations) {
       "Validation schedule does not preserve the accepted role assignments.",
     );
   }
-  const step = state.currentStep ?? state.completedCommits.length;
-  let checks = scheduledChecks(state, step);
+  const step = state.currentStep ?? completedStepCount(state);
+  // Frozen-plan declarations remain historical evidence after revision
+  // acceptance. They cannot select replacement work; its receipts are separate.
+  let checks = scheduledChecks(
+    {
+      ...state,
+      effectivePlanRevisions: {
+        revisions: state.effectivePlanRevisions.revisions.filter(
+          (entry) =>
+            entry.number <=
+            (state.validationSchedule?.effectivePlan?.revision ?? 0),
+        ),
+      },
+    },
+    step,
+  );
   if (state.validationAmendment !== null) {
     const amendment = state.validationAmendment;
     assertExactFields(
@@ -3655,6 +3830,7 @@ function validateValidationSchedule(state, planSteps, validations) {
     checks = normalizePhaseSafeRequiredChecks(
       amendment.requiredChecks,
       "ERR_INVALID_PLAN_EXECUTION_STATE",
+      { allowEmpty: state.planKind === "custom" },
     );
   }
   if (!isDeepStrictEqual(state.requiredChecks, checks)) {
@@ -3951,6 +4127,12 @@ function normalizePendingCommit(value) {
     const hasAuthentication =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "authentication");
+    const hasOutputExhaustion =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "outputExhaustion");
+    const hasDiagnosticClass =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "diagnosticClass");
     assertExactFields(
       value.preEffectRejection,
       [
@@ -3958,6 +4140,8 @@ function normalizePendingCommit(value) {
         "recoverable",
         ...(hasAvailability ? ["availability"] : []),
         ...(hasAuthentication ? ["authentication"] : []),
+        ...(hasOutputExhaustion ? ["outputExhaustion"] : []),
+        ...(hasDiagnosticClass ? ["diagnosticClass"] : []),
       ],
       "Plan-execution pre-effect rejection",
     );
@@ -3965,7 +4149,14 @@ function normalizePendingCommit(value) {
       value.status !== "consumed" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
       typeof value.preEffectRejection.recoverable !== "boolean" ||
-      (hasAvailability && hasAuthentication)
+      (hasDiagnosticClass &&
+        !isAdapterDiagnosticClass(value.preEffectRejection.diagnosticClass)) ||
+      [
+        hasAvailability,
+        hasAuthentication,
+        hasOutputExhaustion,
+        hasDiagnosticClass,
+      ].filter(Boolean).length > 1
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -3987,6 +4178,22 @@ function normalizePendingCommit(value) {
         ].includes(proof.reason)
       ) {
         throw workflowError("Commit availability proof is invalid.");
+      }
+    }
+    if (hasOutputExhaustion) {
+      const proof = value.preEffectRejection.outputExhaustion;
+      assertExactFields(
+        proof,
+        ["disposition", "commitExecutor"],
+        "Commit output exhaustion proof",
+      );
+      if (
+        value.preEffectRejection.recoverable ||
+        value.preEffectRejection.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        proof.disposition !== "output_exhausted" ||
+        proof.commitExecutor !== "not_started"
+      ) {
+        throw workflowError("Commit output exhaustion proof is invalid.");
       }
     }
     const authentication = value.preEffectRejection.authentication;
@@ -4030,10 +4237,21 @@ export function normalizePipelineState(value) {
   if (
     Object.keys(value).length !== PIPELINE_STATE_FIELDS.size ||
     Object.keys(value).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
-    !WORKFLOW_STATES.includes(value.workflowState)
+    !WORKFLOW_STATES.includes(value.workflowState) ||
+    !["commit", "custom"].includes(value.planKind)
   ) {
     throw workflowError("Plan-execution state is invalid.");
   }
+  const stepPolicy = planKindPolicy(value.planKind);
+  if (
+    value.planKind === "commit" &&
+    (value.customResults !== null ||
+      value.customCandidate !== null ||
+      value.customWritePolicy !== null)
+  )
+    throw workflowError(
+      "Commit execution cannot carry custom result authority.",
+    );
   if (
     typeof value.artifactRoot !== "string" ||
     value.artifactRoot.includes("\\") ||
@@ -4050,6 +4268,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
   if (
+    !Array.isArray(value.effectiveValidation) ||
     typeof value.implementationEvidenceLegacy !== "boolean" ||
     (value.stepImplementation !== null &&
       (!validImplementationEvidence(value.stepImplementation, value) ||
@@ -4079,10 +4298,31 @@ export function normalizePipelineState(value) {
   if (value.settings !== null) {
     const settings = normalizeSettings(value.settings);
     assertSettings(settings);
+    if (value.planKind !== settings.planKind)
+      throw workflowError("Execution kind differs from frozen settings.");
     if (settings !== value.settings) {
       value = { ...value, settings };
     }
   }
+  try {
+    assertCommitSizeAssessment(
+      value.commitSizeAssessment,
+      value.settings,
+      value.replacementExecution?.inputChanges,
+    );
+  } catch {
+    throw workflowError("Invalid persisted commit-size assessment.");
+  }
+  // Eligibility is frozen at creation from the resolved switch.
+  if (
+    value.settings !== null &&
+    value.commitSizeAssessment.eligible !==
+      (value.settings.planKind === "commit" &&
+        value.settings.automaticCommitSplitting)
+  )
+    throw workflowError(
+      "Commit-size eligibility differs from frozen automatic commit splitting.",
+    );
   const finalizationGuidance = normalizeFinalizationGuidanceDecision(
     value.finalizationGuidance,
   );
@@ -4265,8 +4505,8 @@ export function normalizePipelineState(value) {
   if (value.canonicalPlan !== null) {
     let canonical;
     try {
-      const plan = parseCommitPlan(value.canonicalPlan);
-      canonical = serializeCommitPlan(plan);
+      const plan = stepPolicy.parse(value.canonicalPlan);
+      canonical = stepPolicy.serialize(plan);
       planSteps = plan.steps;
     } catch {
       throw workflowError("Plan-execution canonical plan is invalid.");
@@ -4275,6 +4515,71 @@ export function normalizePipelineState(value) {
       throw workflowError("Plan-execution canonical plan is not normalized.");
     }
   }
+  try {
+    assertEffectivePlanRevisions(value);
+    for (const revision of value.effectivePlanRevisions.revisions) {
+      for (const finding of revision.findings) {
+        if (
+          !isDeepStrictEqual(finding, normalizePersistedFindings([finding])[0])
+        )
+          throw workflowError("Invalid effective-plan finding payload.");
+      }
+    }
+  } catch {
+    throw workflowError("Invalid persisted effective-plan revisions.");
+  }
+  if (value.planKind === "custom") {
+    if (
+      value.customWritePolicy !== null &&
+      (!hasExactFields(value.customWritePolicy, [
+        "schemaVersion",
+        "fingerprint",
+        "supportedAccess",
+      ]) ||
+        value.customWritePolicy.schemaVersion !== 1 ||
+        typeof value.customWritePolicy.fingerprint !== "string" ||
+        !HASH_PATTERN.test(value.customWritePolicy.fingerprint) ||
+        !isDeepStrictEqual(value.customWritePolicy.supportedAccess, [
+          "workspace-write",
+        ]))
+    )
+      throw workflowError("Invalid custom writable provider policy.");
+    if (
+      value.customWritePolicy === null &&
+      (value.customCandidate !== null ||
+        (value.customResults?.accepted?.length ?? 0) > 0)
+    )
+      throw workflowError(
+        "Custom results require their writable provider policy.",
+      );
+    if (
+      value.pendingCommit !== null ||
+      value.workflowState === "COMMIT" ||
+      value.completedCommits.length !== 0 ||
+      value.stepImplementation !== null ||
+      value.commitSizeAssessment.eligible ||
+      value.effectivePlanRevisions.revisions.length !== 0 ||
+      value.effectiveValidation.length !== 0
+    )
+      throw workflowError(
+        "Custom execution cannot carry Git or refinement authority.",
+      );
+    if (value.customResults !== null)
+      normalizeCustomResults(value.customResults, value.canonicalPlan);
+    if (value.customCandidate !== null)
+      normalizeCustomResult(
+        value.customCandidate,
+        planSteps?.[(value.currentStep ?? completedStepCount(value)) - 1],
+      );
+    if (
+      value.workflowState === "ACCEPT" &&
+      (value.customCandidate === null || !commitGatePassed(value))
+    )
+      throw workflowError("Custom acceptance requires complete current gates.");
+  } else if (value.workflowState === "ACCEPT")
+    throw workflowError("Commit execution cannot accept custom results.");
+  const frozenStepCount = planSteps?.length;
+  if (planSteps !== null) planSteps = effectivePlanAuthority(value).steps;
   const workerSummary = normalizedSummary(
     value.workerSummary,
     "Worker summary",
@@ -4286,16 +4591,18 @@ export function normalizePipelineState(value) {
   const workerValidation = normalizePersistedValidation(
     value.workerValidation,
     "Worker validation evidence",
-    planSteps?.length,
+    frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
+    value.planKind === "custom",
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
-    planSteps?.length,
+    frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
+    value.planKind === "custom",
   );
   const resolvedSummary = normalizedSummary(
     value.resolvedSummary,
@@ -4319,6 +4626,19 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
+  if (
+    !isRecord(value.bootstrapProgress) ||
+    !hasExactFields(value.bootstrapProgress, ["worker", "reviewer"]) ||
+    Object.values(value.bootstrapProgress).some(
+      (progress) =>
+        !isRecord(progress) ||
+        !hasExactFields(progress, ["work", "subdivisions"]) ||
+        (progress.work !== null && !isRecord(progress.work)) ||
+        !Number.isSafeInteger(progress.subdivisions) ||
+        progress.subdivisions < 0,
+    )
+  )
+    throw workflowError("Invalid bootstrap progress.");
   const finalizationRecovery = normalizeFinalizationRecovery(
     value.finalizationRecovery,
     value,
@@ -4531,6 +4851,7 @@ export function normalizePipelineState(value) {
   );
   const finalizationResult = normalizePersistedFinalization(
     value.finalizationResult,
+    value.planKind === "custom",
   );
   const requiredChecks =
     value.requiredChecks === null
@@ -4538,6 +4859,7 @@ export function normalizePipelineState(value) {
       : normalizeRequiredChecks(
           value.requiredChecks,
           "ERR_INVALID_PLAN_EXECUTION_STATE",
+          { allowEmpty: value.planKind === "custom" },
         );
   const validationInfrastructure =
     value.validationInfrastructure === null
@@ -4578,7 +4900,7 @@ export function normalizePipelineState(value) {
     resolvedSummary !== null &&
     !value.validationMigrationPending &&
     value.planContextVersion !== 0 &&
-    finalizationGuidance?.selection === "skill" &&
+    ["skill", "file"].includes(finalizationGuidance?.selection) &&
     !validationInfrastructure.includes(finalizationGuidance.skillPath)
   ) {
     throw workflowError(
@@ -4586,7 +4908,7 @@ export function normalizePipelineState(value) {
     );
   }
   if (finalizationResult !== null) {
-    const evidenceStep = value.currentStep ?? value.completedCommits.length;
+    const evidenceStep = value.currentStep ?? completedStepCount(value);
     if (
       !(value.validationScopeLegacy && finalizationResult.step === null) &&
       finalizationResult.step !== evidenceStep
@@ -4663,7 +4985,7 @@ export function normalizePipelineState(value) {
     reviewCorrection !== null &&
     (value.currentStep !== reviewCorrection.step ||
       (value.candidateReviewedFingerprint ??
-        value.repositoryBaseline?.contentFingerprint) !==
+        executionContentFingerprint(value)) !==
         reviewCorrection.contentFingerprint ||
       value.validationInfrastructureFingerprint !==
         reviewCorrection.validationInfrastructureFingerprint ||
@@ -4790,8 +5112,75 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
   const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
+  const accounting = value.replacementExecution?.findingAccounting;
+  if (!Array.isArray(accounting))
+    throw workflowError("Invalid replacement finding accounting.");
+  for (const entry of accounting) {
+    assertExactFields(
+      entry,
+      [
+        "revision",
+        "id",
+        "fingerprint",
+        "pendingDisputes",
+        "disputeCounts",
+        "disputeHistory",
+        "findingArbitrations",
+        "sameFindingRounds",
+        "findingOverrides",
+        "reviewReconsideration",
+      ],
+      "Replacement finding accounting",
+    );
+    normalizeStringCountRecord(
+      entry.disputeCounts,
+      "Replacement dispute counts",
+    );
+    normalizeStringCountRecord(
+      entry.sameFindingRounds,
+      "Replacement finding rounds",
+    );
+    normalizePendingDisputes(entry.pendingDisputes);
+    normalizeDisputeHistory(entry.disputeHistory);
+    normalizeFindingArbitrations(entry.findingArbitrations);
+    normalizeFindingOverrides(entry.findingOverrides);
+    if (
+      [entry.disputeCounts, entry.sameFindingRounds].some((record) =>
+        Object.keys(record).some((id) => id !== entry.id),
+      ) ||
+      [
+        entry.pendingDisputes,
+        entry.disputeHistory,
+        entry.findingArbitrations,
+        entry.findingOverrides,
+      ].some((records) =>
+        records.some(({ findingId }) => findingId !== entry.id),
+      ) ||
+      !Array.isArray(entry.reviewReconsideration) ||
+      entry.reviewReconsideration.length > 1 ||
+      entry.reviewReconsideration.some((id) => id !== entry.id) ||
+      (entry.disputeCounts[entry.id] ?? 0) >
+        value.settings.maxDisputesPerFinding ||
+      (!policy.independentReview &&
+        [
+          entry.pendingDisputes,
+          entry.disputeCounts,
+          entry.disputeHistory,
+          entry.findingArbitrations,
+          entry.findingOverrides,
+          entry.reviewReconsideration,
+        ].some((records) => Object.keys(records).length > 0)) ||
+      entry.disputeHistory.some(
+        (record, index, records) =>
+          record.attempt > (entry.disputeCounts[entry.id] ?? 0) ||
+          (index > 0 && record.attempt <= records[index - 1].attempt),
+      )
+    )
+      throw workflowError("Invalid versioned replacement finding decisions.");
+  }
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
+  const completed = completedStepCount(value);
   const gateState = {
     ...value,
     candidateReviewResult,
@@ -4855,11 +5244,17 @@ export function normalizePipelineState(value) {
     );
   }
   if (
-    completedCommits.length > (planSteps?.length ?? 0) ||
+    completed > (planSteps?.length ?? 0) ||
     (value.currentStep !== null &&
-      completedCommits.length !== value.currentStep - 1) ||
-    (value.workflowState === "DONE" &&
-      completedCommits.length !== planSteps?.length) ||
+      completed !== value.currentStep - 1 &&
+      !(
+        value.planKind === "custom" &&
+        ["ACCEPT", "WAITING_FOR_USER", "FAILED"].includes(
+          value.workflowState,
+        ) &&
+        completed === value.currentStep
+      )) ||
+    (value.workflowState === "DONE" && completed !== planSteps?.length) ||
     (!value.preflightComplete && completedCommits.length !== 0) ||
     (completedCommits.length > 0 &&
       value.repositoryBaseline?.head !== completedCommits.at(-1))
@@ -4892,7 +5287,17 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution pending commit is inconsistent.");
   }
   const currentFindingIds = new Set(findings.map(({ id }) => id));
-  const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
+  const effectiveRevision = value.effectivePlanRevisions.revisions.findLast(
+    (revision) => revision.accepted,
+  );
+  // Acceptance retires content proof but retains versioned blockers outside
+  // the bounded legacy batch until replacement-specific rebinding.
+  const previousFindingIds = new Set([
+    ...previousFindings.map(({ id }) => id),
+    ...(effectiveRevision?.step === value.currentStep
+      ? effectiveRevision.findings.map(({ id }) => id)
+      : []),
+  ]);
   const reconsiderableFindingIds = new Set([
     ...currentFindingIds,
     ...previousFindingIds,
@@ -5046,6 +5451,7 @@ export function normalizePipelineState(value) {
       "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
+      "ACCEPT",
       "DONE",
       "WAITING_FOR_USER",
       "FAILED",
@@ -5195,6 +5601,7 @@ export function normalizePipelineState(value) {
       "CONFIRM",
       "RESOLVE_FINDINGS",
       "COMMIT",
+      "ACCEPT",
     ].includes(value.workflowState) &&
     (!value.clarificationFrozen ||
       resolvedSummary === null ||
@@ -5218,7 +5625,7 @@ export function normalizePipelineState(value) {
     (!policy.independentReview ||
       (policy.primaryConvergence &&
         value.candidateConfirmationFingerprint !==
-          value.repositoryBaseline?.contentFingerprint) ||
+          executionContentFingerprint(value)) ||
       (finalizationResult !== null && finalizationResult.status !== "PASS") ||
       reviewResult !== null ||
       value.reviewedFingerprint !== null)
@@ -5288,11 +5695,42 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution state has not completed preflight.");
   }
+  assertWritableResult(value, {
+    validateProductDecision(decision) {
+      try {
+        if (isDeepStrictEqual(decision, normalizeProductDecision(decision)))
+          return;
+      } catch {}
+      throw workflowError("Invalid writable product-decision settlement.");
+    },
+    validateBlockers(blockers) {
+      for (const blocker of blockers) {
+        const { source, ...content } = blocker;
+        const normalized =
+          source === "review"
+            ? normalizeReviewFindings(
+                [content],
+                "ERR_INVALID_PLAN_EXECUTION_STATE",
+              )[0]
+            : source === "finalization"
+              ? normalizeFinalizationIssues(
+                  [content],
+                  "ERR_INVALID_PLAN_EXECUTION_STATE",
+                )[0]
+              : null;
+        if (!isDeepStrictEqual(content, normalized))
+          throw workflowError("Invalid writable result blocker ownership.");
+      }
+      if (new Set(blockers.map(({ id }) => id)).size !== blockers.length)
+        throw workflowError("Invalid writable result blocker identities.");
+    },
+  });
   return value;
 }
 
 export function createPlanExecutionState({
   artifactRoot = "LOCAL_ARTIFACTS",
+  planKind,
   proactiveClarification = false,
   settings = null,
   trustedValidation = EMPTY_TRUSTED_VALIDATION,
@@ -5305,14 +5743,35 @@ export function createPlanExecutionState({
   }
   const normalizedTrustedValidation =
     normalizeTrustedValidation(trustedValidation);
+  planKind =
+    planKind === undefined ? (settings?.planKind ?? "commit") : planKind;
   return Object.freeze(
     normalizePipelineState({
       workflowState: "CLARIFY",
+      planKind,
+      customResults: null,
+      customCandidate: null,
+      customWritePolicy: null,
       artifactRoot,
       preflightComplete: false,
       planContextVersion: 1,
       stepImplementation: null,
+      writableResult: null,
       implementationEvidenceLegacy: false,
+      commitSizeAssessment: createCommitSizeAssessment({
+        // Null settings are adopted later, limited to this eligibility.
+        eligible:
+          planKind === "commit" &&
+          (settings === null || settings.automaticCommitSplitting),
+      }),
+      effectivePlanRevisions: createEffectivePlanRevisions(),
+      effectiveValidation: [],
+      replacementExecution: {
+        separations: [],
+        corrections: [],
+        findingAccounting: [],
+        inputChanges: [],
+      },
       settings:
         settings === null
           ? null
@@ -5334,6 +5793,10 @@ export function createPlanExecutionState({
       workerValidation: null,
       reviewerValidation: null,
       resolvedSummary: null,
+      bootstrapProgress: Object.freeze({
+        worker: Object.freeze({ work: null, subdivisions: 0 }),
+        reviewer: Object.freeze({ work: null, subdivisions: 0 }),
+      }),
       bootstrapDisagreement: null,
       bootstrapArbitrationUsed: false,
       bootstrapCorrections: Object.freeze([]),
@@ -5432,6 +5895,75 @@ function repositoryRelativePath(projectPath, path) {
   return pathFromProject.split(sep).join("/");
 }
 
+function matchesWritableResultOutputCheckpoint(state, pause) {
+  const recovery = state.writableResult;
+  return (
+    recovery?.stage === "correcting" &&
+    recovery.productDecision === null &&
+    recovery.phase === pause.resumeState &&
+    pause.role === "worker" &&
+    recovery.attempts > 0 &&
+    recovery.attempts === recovery.additionalAttempts + 1 &&
+    pause.checkpoint === `writable-result:read-only:commit:${recovery.step}`
+  );
+}
+
+function matchesRefinementOutputCheckpoint(state, pause) {
+  if (
+    !state.commitSizeAssessment.eligible ||
+    state.pendingCommit !== null ||
+    ![
+      "IMPLEMENT",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "CONFIRM",
+    ].includes(pause.resumeState)
+  )
+    return false;
+  const role = executionPolicy(state.settings).independentReview
+    ? "reviewer"
+    : "worker";
+  if (
+    pause.role === role &&
+    state.commitSizeAssessment.lineages.some(
+      (lineage) =>
+        lineage.attempts.at(-1)?.result === null &&
+        pause.checkpoint ===
+          `commit-size:read-only:commit-size:${lineage.originalStep}:${lineage.attempts.length}`,
+    )
+  )
+    return true;
+  const revision = state.effectivePlanRevisions.revisions.at(-1);
+  if (!revision) return false;
+  const inputReview = replacementInputReview(state);
+  if (
+    inputReview &&
+    pause.role === inputReview.role &&
+    pause.checkpoint === `effective-plan:read-only:${inputReview.checkpoint}`
+  )
+    return true;
+  if (!revision.accepted) {
+    const repair = revision.reports.some(({ status }) => status !== "CLEAN");
+    const request = effectivePlanRevisionCheckpoint(state);
+    const checkpoint = repair
+      ? `effective-plan:${revision.number}:repair`
+      : request?.checkpoint;
+    return (
+      pause.role === (repair ? "worker" : request?.role) &&
+      pause.checkpoint === `effective-plan:read-only:${checkpoint}`
+    );
+  }
+  return (
+    (pause.role === "worker" ||
+      (role === "reviewer" && pause.role === "reviewer")) &&
+    (pause.checkpoint === "revision-validation:read-only:bootstrap" ||
+      (state.validationMigrationPending &&
+        pause.checkpoint ===
+          "revision-validation:read-only:validation-migration"))
+  );
+}
+
 export function assertRun(run) {
   if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
     const checkpoint = run.pause.operatorResume;
@@ -5475,7 +6007,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 26 ||
+    run.pipelineStateVersion !== 39 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5490,6 +6022,20 @@ export function assertRun(run) {
     throw workflowError("Plan-execution run envelope is invalid.");
   }
   const state = normalizePipelineState(run.pipelineState);
+  if (state.planKind === "custom" && run.workspace?.kind !== "directory")
+    throw workflowError(
+      "Custom execution requires its frozen directory workspace.",
+    );
+  if (
+    state.planKind === "custom" &&
+    state.clarificationFrozen &&
+    state.customResults !== null &&
+    state.customResults.clarificationFingerprint !==
+      validationEvidenceFingerprint(run.hashes.executionClarifications ?? null)
+  )
+    throw workflowError(
+      "Custom evidence uses a different clarification version.",
+    );
   const activeRoles = resolveActiveRoles(state.settings);
   if (
     Object.keys(run.roles).length !== activeRoles.length ||
@@ -5601,7 +6147,10 @@ export function assertRun(run) {
       state.clarificationPath !== expectedClarificationPath ||
       !Array.isArray(state.repositoryBaseline.allowedPaths) ||
       state.repositoryBaseline.allowedPaths.length !== 1 ||
-      state.repositoryBaseline.allowedPaths[0] !== expectedAllowedPath
+      state.repositoryBaseline.allowedPaths[0] !==
+        (state.planKind === "custom"
+          ? expectedClarificationPath
+          : expectedAllowedPath)
     ) {
       throw workflowError("Plan-execution repository baseline is invalid.");
     }
@@ -5626,6 +6175,42 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-execution pause state is invalid.");
   }
+  if (
+    state.writableResult !== null &&
+    normalizedCounters(run.counters).fixRounds !==
+      state.writableResult.fixRoundsBefore +
+        (state.writableResult.fixCharged ? 1 : 0)
+  )
+    throw workflowError("Writable result correction accounting changed.");
+  const pendingProductDecision = state.writableResult?.productDecision;
+  if (
+    pendingProductDecision != null &&
+    (pendingProductDecision.number !==
+      normalizedCounters(run.counters).productDecisions + 1 ||
+      pendingProductDecision.expectedHash !==
+        run.hashes.executionClarifications ||
+      run.activeTurn !== null)
+  )
+    throw workflowError(
+      "Writable product-decision settlement changed authority.",
+    );
+  const writableOutputPause =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "writable_output_invalid";
+  if (
+    writableOutputPause &&
+    (!hasExactFields(run.pause, [
+      "reason",
+      "code",
+      "resumeState",
+      "diagnostic",
+    ]) ||
+      run.pause.code !== INVALID_OUTPUT_CODE ||
+      state.writableResult?.stage !== "exhausted" ||
+      run.pause.resumeState !== state.writableResult.phase ||
+      !isDeepStrictEqual(run.pause.diagnostic, state.writableResult.diagnostic))
+  )
+    throw workflowError("Invalid writable result recovery pause.");
   const outputFailure =
     state.workflowState === "FAILED" &&
     run.pause?.reason === "internal_failure" &&
@@ -5633,8 +6218,9 @@ export function assertRun(run) {
   const hasOutputDiagnostic = Object.hasOwn(run.pause ?? {}, "diagnostic");
   if (
     (hasOutputDiagnostic &&
-      (!outputFailure ||
-        !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS) ||
+      (!(outputFailure || writableOutputPause) ||
+        (!writableOutputPause &&
+          !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS)) ||
         !isOutputDiagnostic(run.pause.diagnostic))) ||
     (outputFailure &&
       !hasExactFields(
@@ -5650,14 +6236,24 @@ export function assertRun(run) {
     state.workflowState === "FAILED" &&
     run.pause?.reason === "internal_failure" &&
     !outputFailure;
+  const commitRejection =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "commit_failed" &&
+    run.pause.resumeState === "COMMIT" &&
+    state.pendingCommit === null;
   const hasAdapterDiagnostic = Object.hasOwn(
     run.pause ?? {},
     "diagnosticClass",
   );
   if (
     (hasAdapterDiagnostic &&
-      (!adapterFailure ||
-        !hasExactFields(run.pause, ADAPTER_FAILURE_FIELDS) ||
+      (!(adapterFailure || commitRejection) ||
+        !hasExactFields(
+          run.pause,
+          adapterFailure
+            ? ADAPTER_FAILURE_FIELDS
+            : COMMIT_REJECTION_DIAGNOSTIC_FIELDS,
+        ) ||
         !isAdapterDiagnosticClass(run.pause.diagnosticClass))) ||
     (adapterFailure &&
       !hasExactFields(
@@ -5721,6 +6317,7 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -5728,6 +6325,7 @@ export function assertRun(run) {
           "finalization_evidence_rejected",
           "lazy_output_invalid",
           "review_output_invalid",
+          "effective_plan_output_invalid",
         ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&
         run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
@@ -5738,6 +6336,42 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "output_exhausted" &&
+      (!hasExactFields(run.pause, [
+        "reason",
+        "code",
+        "resumeState",
+        "role",
+        "checkpoint",
+      ]) ||
+        run.pause.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        !Object.hasOwn(run.roles, run.pause.role) ||
+        typeof run.pause.checkpoint !== "string" ||
+        typeof run.pause.resumeState !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(run.pause.checkpoint) ||
+        (!run.pause.checkpoint.startsWith(
+          `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
+        ) &&
+          !run.pause.checkpoint.startsWith("plan-context:read-only:") &&
+          !matchesRefinementOutputCheckpoint(state, run.pause) &&
+          !matchesWritableResultOutputCheckpoint(state, run.pause) &&
+          !(
+            state.validationMigrationPending &&
+            !state.compatibilityCheckRequired &&
+            state.pendingCommit?.status !== "consumed" &&
+            run.pause.checkpoint ===
+              "validation-migration:read-only:validation-migration"
+          )) ||
+        (state.writableResult?.stage === "correcting" &&
+          !matchesWritableResultOutputCheckpoint(state, run.pause)) ||
+        (run.pause.resumeState === "COMMIT" &&
+          (run.pause.role !== "worker" ||
+            run.pause.checkpoint !== `commit:${state.currentStep}`)) ||
+        (state.settings.mode === "lazy" && run.pause.role !== "worker"))
+    ) {
+      throw workflowError("Invalid output-exhaustion pause.");
     }
     if (
       run.pause.reason === "authentication_required" &&
@@ -5760,7 +6394,11 @@ export function assertRun(run) {
     }
     const consumedCommitPause =
       state.pendingCommit?.status === "consumed" &&
-      ["commit_failed", "commit_contract_violated"].includes(run.pause.reason);
+      [
+        "commit_failed",
+        "commit_contract_violated",
+        "output_exhausted",
+      ].includes(run.pause.reason);
     const retiredCommitPause =
       state.pendingCommit === null &&
       run.pause.reason === "commit_failed" &&
@@ -5851,7 +6489,7 @@ export function assertRun(run) {
     }
   }
   if (state.canonicalPlan !== null) {
-    const stepCount = parseCommitPlan(state.canonicalPlan).steps.length;
+    const stepCount = effectivePlanAuthority(state).steps.length;
     if (state.currentStep !== null && state.currentStep > stepCount) {
       throw workflowError("Plan-execution current step is outside the plan.");
     }
@@ -5867,6 +6505,8 @@ export function assertSettings(settings) {
   ) {
     throw workflowError("Plan-execution settings are invalid.");
   }
+  if (!settings || !["commit", "custom"].includes(settings.planKind))
+    throw workflowError("Invalid execution plan kind setting.");
   if (!isFinalizationPolicy(settings.finalization)) {
     throw workflowError("Plan-execution setting finalization is invalid.");
   }
@@ -5876,10 +6516,20 @@ export function assertSettings(settings) {
   if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-execution setting mode is invalid.");
   }
+  if (typeof settings.automaticCommitSplitting !== "boolean") {
+    throw workflowError(
+      "Plan-execution setting automaticCommitSplitting is invalid.",
+    );
+  }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Plan-execution setting ${field} is invalid.`);
     }
+  }
+  try {
+    commitSizeThreshold(settings);
+  } catch {
+    throw workflowError("Plan-execution commit-size threshold is invalid.");
   }
 }
 
@@ -5911,17 +6561,28 @@ export function isFinalizationPolicy(value) {
     !value.startsWith("../") &&
     value !== ".git" &&
     !value.startsWith(".git/") &&
-    (value === "SKILL.md" || value.endsWith("/SKILL.md")) &&
+    value.endsWith(".md") &&
+    !value.split("/").includes(".git") &&
     !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   );
 }
 
 function normalizeSettings(settings) {
   let normalized = settings;
+  if (isRecord(normalized) && !Object.hasOwn(normalized, "planKind"))
+    normalized = { ...normalized, planKind: "commit" };
+  if (
+    isRecord(normalized) &&
+    Object.keys(COMMIT_SIZE_DEFAULTS).every(
+      (field) => !Object.hasOwn(normalized, field),
+    )
+  ) {
+    normalized = Object.freeze({ ...COMMIT_SIZE_DEFAULTS, ...normalized });
+  }
   if (
     isRecord(normalized) &&
     !Object.hasOwn(normalized, "finalization") &&
-    ((Object.keys(normalized).length === NUMERIC_SETTINGS_FIELDS.length &&
+    ((Object.keys(normalized).length === NUMERIC_SETTINGS_FIELDS.length + 1 &&
       NUMERIC_SETTINGS_FIELDS.every((field) =>
         Object.hasOwn(normalized, field),
       )) ||
@@ -5951,12 +6612,18 @@ function normalizeSettings(settings) {
   return normalized;
 }
 
-export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
+export function assertRuntime(
+  runtime,
+  activeRoles = resolveActiveRoles(),
+  planKind = "commit",
+) {
+  const stepPolicy = planKindPolicy(planKind);
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
-    !isRecord(runtime.git) ||
+    !isRecord(stepPolicy.kind === "custom" ? runtime.workspace : runtime.git) ||
+    typeof runtime.finalization?.inspectFile !== "function" ||
     !isRecord(runtime.trustedValidation) ||
     typeof runtime.trustedValidation.execute !== "function" ||
     typeof runtime.trustedValidation.preflight !== "function"
@@ -5973,7 +6640,7 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   }
   for (const name of [
     "finishAgentTurn",
-    "settleVerifiedCommit",
+    ...stepPolicy.runtimeMethods,
     "readInputs",
     "recordChildSession",
     "startAgentTurn",
@@ -5984,19 +6651,12 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
       throw workflowError(`Plan-execution runtime.${name} is invalid.`);
     }
   }
-  for (const name of [
-    "assertUnchanged",
-    "consumeCommit",
-    "contentFingerprint",
-    "inspectHead",
-    "inspectPath",
-    "preflight",
-    "prepareCommit",
-    "snapshot",
-    "validationInfrastructureFingerprint",
-    "verifyCommit",
-  ]) {
-    if (typeof runtime.git[name] !== "function") {
+  for (const name of stepPolicy.workspaceMethods) {
+    if (
+      typeof (stepPolicy.kind === "custom" ? runtime.workspace : runtime.git)[
+        name
+      ] !== "function"
+    ) {
       throw workflowError(`Plan-execution Git service.${name} is invalid.`);
     }
   }
@@ -6018,7 +6678,12 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   }
 }
 
-export function normalizeAdapterCapabilities(value, role, sourceSession) {
+export function normalizeAdapterCapabilities(
+  value,
+  role,
+  sourceSession,
+  planKind = "commit",
+) {
   if (
     !isRecord(value) ||
     typeof value.version !== "string" ||
@@ -6029,17 +6694,7 @@ export function normalizeAdapterCapabilities(value, role, sourceSession) {
       "ERR_UNSUPPORTED_PLAN_EXECUTION_BACKEND",
     );
   }
-  const required =
-    role === "worker"
-      ? [
-          "structuredOutput",
-          "readOnly",
-          "autonomousWrite",
-          "workspaceWrite",
-          "localCommit",
-          "remoteWriteBlocked",
-        ]
-      : ["structuredOutput", "readOnly", "remoteWriteBlocked"];
+  const required = [...requiredRoleCapabilities(planKind, role)];
   if (sourceSession !== null && role !== "arbiter") {
     required.push("nativeSessionFork");
   }

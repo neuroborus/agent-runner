@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  createDetachedRuntimeCompatibilityToken,
+  createRunner,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   main,
@@ -29,6 +32,78 @@ function createSink() {
     },
   };
 }
+
+test("config migration dispatches before creating or resolving a runner", async () => {
+  const environment = { XDG_CONFIG_HOME: "/settings" };
+  for (const migrated of [true, false]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    let calls = 0;
+    assert.equal(
+      await main(["config", "migrate", "--from", "legacy.json"], {
+        environment,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner() {
+          assert.fail(
+            "Migration must not resolve configuration or start a runner.",
+          );
+        },
+        async migrateConfiguration(input) {
+          calls += 1;
+          assert.deepEqual(input, { from: "legacy.json", env: environment });
+          return { path: "/settings/agent-runner/config.json", migrated };
+        },
+      }),
+      0,
+    );
+    assert.equal(calls, 1);
+    assert.equal(stderr.read(), "");
+    assert.equal(
+      stdout.read(),
+      migrated
+        ? "User configuration migrated.\n"
+        : "User configuration unchanged.\n",
+    );
+  }
+});
+
+test("config migration rejects malformed commands without effects and reports conflicts", async () => {
+  for (const args of [
+    ["config"],
+    ["config", "other", "--from", "legacy.json"],
+    ["config", "migrate"],
+    ["config", "migrate", "--from", "a", "--from", "b"],
+    ["config", "migrate", "--from", "a", "--project", "/project"],
+  ]) {
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        migrateConfiguration() {
+          assert.fail("Invalid command must not migrate.");
+        },
+      }),
+      1,
+    );
+    assert.notEqual(stderr.read(), "");
+  }
+  const stderr = createSink();
+  assert.equal(
+    await main(["config", "migrate", "--from", "legacy.json"], {
+      stdout: createSink().stream,
+      stderr: stderr.stream,
+      migrateConfiguration() {
+        throw new Error(
+          "User configuration conflicts with the migration source.",
+        );
+      },
+    }),
+    1,
+  );
+  assert.match(stderr.read(), /configuration conflicts/u);
+});
 
 function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
   return {
@@ -61,6 +136,9 @@ function commandResult({ pipelineId = "plan-execution", state = "DONE" } = {}) {
         finalizedFingerprint: "a".repeat(64),
         reviewedFingerprint: "a".repeat(64),
         completedCommits: ["b".repeat(40)],
+        ...(pipelineId === "audit"
+          ? { ...createAuditState(), workflowState: state }
+          : {}),
       },
     },
   };
@@ -89,6 +167,49 @@ function fakeRunner(overrides = {}) {
     ...overrides,
   };
 }
+
+test("status renders the derived refinement artifact, thresholds and verified original/replacement progress", async () => {
+  const result = commandResult();
+  Object.assign(result.run.pipelineState, {
+    canonicalPlan:
+      "## Commit 1: feat(core): add behavior\n\nImplement behavior.",
+    settings: {
+      mode: "combined",
+      preferredCommitLineLimit: 900,
+      commitSizeAssessmentMultiplier: 3,
+    },
+  });
+  const stdout = createSink();
+  const stderr = createSink();
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async status() {
+          return result;
+        },
+      }),
+    }),
+    0,
+  );
+  assert.match(stdout.read(), /Plan progress: \/task\/plan\.progress\.md/u);
+  assert.match(
+    stdout.read(),
+    /Effective revision: 0; advisory planning target: 900; execution assessment threshold: >2700/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Original step 1: feat\(core\): add behavior; completed/u,
+  );
+  assert.match(
+    stdout.read(),
+    new RegExp(
+      `Original step 1: feat\\(core\\): add behavior; completed; verified SHA: ${"b".repeat(40)}`,
+    ),
+  );
+  assert.equal(stderr.read(), "");
+});
 
 test("guidance prints the complete shared rendering without constructing a pipeline runner", async () => {
   const stdout = createSink();
@@ -189,6 +310,53 @@ test("guidance rejects unsupported actions, extra arguments, duplicate selectors
   }
 });
 
+test("issues rejects malformed management commands before dispatch", async () => {
+  const ISSUE = "11111111-1111-4111-8111-111111111111";
+  const update = [
+    "issues",
+    "update",
+    "--issue",
+    ISSUE,
+    "--expected-revision",
+    "1",
+    "--expected-hash",
+    "a".repeat(64),
+  ];
+  for (const args of [
+    ["issues"],
+    ["issues", "create"],
+    ["issues", "list", "extra"],
+    ["issues", "list", "--project", "/project"],
+    ["issues", "list", "--limit", "0"],
+    ["issues", "list", "--cursor", "a", "--cursor", "b"],
+    ["issues", "read"],
+    ["issues", "read", "--issue", ISSUE, "--status", "open"],
+    ["issues", "update", "--issue", ISSUE, "--expected-hash", "a".repeat(64)],
+    [...update.slice(0, -2)],
+    [...update, "--expected-revision", "2"],
+    [...update, "--status", "open", "--status", "resolved"],
+    [...update, "--note", "Repaired.", "--clear-note"],
+    [...update, "--plan-reference", "plan.md", "--clear-plan-references"],
+    [...update, "--commit-reference", "abc", "--clear-commit-references"],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner: () => assert.fail("must not construct a runner"),
+        createCommandIssues: () =>
+          assert.fail("must not dispatch invalid input"),
+      }),
+      1,
+      args.join(" "),
+    );
+    assert.equal(stdout.read(), "");
+    assert.notEqual(stderr.read(), "");
+  }
+});
+
 test("help describes the required commands", async () => {
   const stdout = createSink();
   const stderr = createSink();
@@ -210,6 +378,9 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /agent-run guidance --project/);
   assert.match(stdout.read(), /agent-run guidance edit --project/);
+  assert.match(stdout.read(), /agent-run issues list/);
+  assert.match(stdout.read(), /agent-run issues read --issue/);
+  assert.match(stdout.read(), /agent-run issues update --issue/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);
@@ -623,6 +794,96 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.match(stdout.read(), /Finalized fingerprint: a{12}/u);
   assert.match(stdout.read(), /Commits: b{12}/u);
   assert.match(stdout.read(), /State directory:/u);
+  assert.equal(stderr.read(), "");
+});
+
+test("status separates byte measurements from token evidence and excludes private state", async () => {
+  const result = commandResult();
+  result.run.observations = {
+    schemaVersion: 1,
+    omittedAttempts: 5,
+    attempts: [
+      {
+        id: 6,
+        role: "worker",
+        checkpoint: "implement:workspace-write:1",
+        status: "failed",
+        accounting: "incomplete",
+        incomplete: false,
+        observations: [
+          {
+            attempt: 1,
+            turn: 2,
+            kind: "compaction",
+            outcome: "failed",
+            accounting: "incomplete",
+            last: null,
+            cumulative: {
+              inputTokens: 100,
+              cachedInputTokens: 40,
+              cacheWriteInputTokens: null,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+              totalTokens: null,
+            },
+            cumulativeScope: "thread",
+            inputIncludesCached: true,
+            outputIncludesReasoning: true,
+            contextCapacity: 1000,
+            commandCompletions: 2,
+            compactions: 0,
+            factsIncomplete: true,
+          },
+        ],
+        measurements: {
+          promptBytes: 120,
+          recoveryPromptBytes: 300,
+          schemaBytes: 50,
+          resultBytes: null,
+          structuredResultBytes: null,
+          referencedFileCount: null,
+          referencedFileBytes: null,
+        },
+        nativeSessionId: "private-native-id",
+        prompt: "private prompt",
+        error: "private arbitrary error",
+      },
+    ],
+  };
+  const stdout = createSink();
+  const stderr = createSink();
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({ status: async () => result }),
+    }),
+    0,
+  );
+  assert.match(
+    stdout.read(),
+    /attempt 6; worker implement:workspace-write:1; failed; accounting incomplete; omitted attempts 5/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Supplied context bytes: prompt 120; reconstruction prompt 300; schema 50/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Result bytes: output unknown; structured JSON unknown; referenced file bytes\/count unknown/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Native attempt 1 turn 2 \(compaction\): failed; accounting incomplete; commands 2; compactions 0; facts incomplete true/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Tokens \(last request \/ cumulative thread\): input unknown\/100; output unknown\/30; context capacity 1000/u,
+  );
+  assert.doesNotMatch(
+    stdout.read(),
+    /private|nativeSessionId|arbitrary error/u,
+  );
   assert.equal(stderr.read(), "");
 });
 
@@ -1182,7 +1443,69 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
     request.expectedRuntimeCompatibility,
     `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
   );
-  assert.match(stderr.read(), /Runtime mismatch/u);
+  assert.match(stderr.read(), /The recovery runtime is incompatible/u);
+  assert.doesNotMatch(stderr.read(), /Runtime mismatch/u);
+});
+
+test("resume reports the failed recovery boundary without native error content", async () => {
+  for (const stage of ["execution-lease", "state-recovery"]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const failure = Object.assign(new Error("private stderr and transcript"), {
+      code:
+        stage === "execution-lease"
+          ? "ERR_RUN_LEASED"
+          : "ERR_INVALID_EVENT_LOG",
+    });
+    const runner = createRunner({
+      runStore: {
+        async acquireRunLease() {
+          if (stage === "execution-lease") throw failure;
+          return { async release() {} };
+        },
+        async loadRun() {
+          throw failure;
+        },
+      },
+    });
+    assert.equal(
+      await main(["resume", "--run", RUN_ID], {
+        runner,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunStore() {
+          assert.fail("Foreground failure has no dispatch to publish.");
+        },
+      }),
+      1,
+    );
+    assert.match(stderr.read(), new RegExp(`Recovery failed at ${stage}`));
+    assert.match(stderr.read(), new RegExp(failure.code));
+    assert.doesNotMatch(stderr.read(), /private|stderr|transcript/u);
+    assert.equal(stdout.read(), "");
+  }
+});
+
+test("detached version-18 dispatch rejects before accessing run state", async () => {
+  const parentToken = createDetachedRuntimeCompatibilityToken({
+    runtimeCompatibility: { runnerVersion: 1, runStateVersion: 18 },
+  });
+  let accessed = false;
+  const exitCode = await main(["resume", "--run", RUN_ID], {
+    environment: { [DETACHED_RUNTIME_COMPATIBILITY_ENV]: parentToken },
+    stdout: createSink().stream,
+    stderr: createSink().stream,
+    runner: createRunner({
+      runStore: {
+        async acquireRunLease() {
+          accessed = true;
+          throw new Error("Incompatible dispatch accessed run state.");
+        },
+      },
+    }),
+  });
+  assert.equal(exitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
+  assert.equal(accessed, false);
 });
 
 test("resume rejects conflicting or invalid fix actions", async () => {
@@ -1390,4 +1713,76 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
       );
     }
   }
+});
+
+test("authoring maps explicit kind and repeated declarations to descriptor settings", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  let input;
+  const exit = await main(
+    [
+      "run",
+      "plan-authoring",
+      "--project",
+      "/workspace",
+      "--task",
+      "/task",
+      "--plan-kind",
+      "custom",
+      "--criteria",
+      "criteria.md",
+      "--source",
+      "sources/a.md",
+      "--source",
+      "https://example.invalid/b",
+      "--output",
+      "reports/a.md",
+      "--output",
+      "reports/b.md",
+    ],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run(value) {
+          input = value;
+          return commandResult({ pipelineId: "plan-authoring" });
+        },
+      }),
+    },
+  );
+  assert.equal(exit, 0, stderr.read());
+  assert.deepEqual(input.settingOverrides, {
+    planKind: "custom",
+    criteriaPath: "criteria.md",
+    sourceReferences: ["sources/a.md", "https://example.invalid/b"],
+    outputPaths: ["reports/a.md", "reports/b.md"],
+  });
+  assert.equal(
+    await main(
+      [
+        "run",
+        "plan-execution",
+        "--project",
+        "/workspace",
+        "--task",
+        "/task",
+        "--plan-kind",
+        "custom",
+      ],
+      {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run(value) {
+            input = value;
+            return commandResult({ pipelineId: "plan-execution" });
+          },
+        }),
+      },
+    ),
+    0,
+    stderr.read(),
+  );
+  assert.deepEqual(input.settingOverrides, { planKind: "custom" });
 });

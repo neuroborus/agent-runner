@@ -3,6 +3,15 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+
 import { polishingPipeline } from "../src/index.js";
 import { runPolishing } from "../src/workflow.js";
 import {
@@ -326,4 +335,48 @@ test("polishing exposes all supported modes", () => {
     "combined",
   ]);
   assert.equal(polishingPipeline.settings.mode.validate("combined"), true);
+});
+
+test("an acknowledged source child remains usable after a no-turn-effect disposition", async (t) => {
+  for (const kind of ["authentication", "output", "backend"]) {
+    const exhausted = kind === "output";
+    const f = await createFixture(t, {
+      mode: "lazy",
+      sourceSession: SOURCE_SESSION,
+      async onRoleRun(role, request, count) {
+        assert.equal(role, "worker");
+        if (count === 1)
+          await request.onSessionCreated("acknowledged-worker-child");
+        else {
+          assert.deepEqual(request.session, {
+            mode: "continue",
+            id: "acknowledged-worker-child",
+          });
+          assert.equal(request.prompt, request.recoveryPrompt);
+        }
+        if (kind === "backend")
+          throw Object.assign(new Error("controlled pre-turn backend loss"), {
+            recoverable: true,
+          });
+        throw exhausted
+          ? outputExhaustion({ effect: "none" })
+          : authenticationFailure({ effect: "none" });
+      },
+    });
+    attachAuthentication(f);
+    attachOutputExhaustion(f);
+    const paused = await f.run();
+    assert.equal(
+      paused.pause.reason,
+      kind === "backend"
+        ? "backend_unavailable"
+        : exhausted
+          ? "output_exhausted"
+          : "authentication_required",
+    );
+    assert.equal(paused.pipelineState.lazySourceForkConsumed, true);
+    assert.equal(paused.pipelineState.authenticationSourceForkRecovery, null);
+    assert.equal((await f.run()).sessionLineage.children.length, 1);
+    assert.equal(f.calls.worker.length, 2);
+  }
 });

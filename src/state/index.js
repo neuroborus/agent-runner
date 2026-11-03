@@ -12,6 +12,7 @@ export {
   projectLaunchRecovery,
 } from "./launch-recovery.js";
 export { projectOperatorStop } from "./stop-projection.js";
+export { projectObservations, observationActivity } from "./observations.js";
 export {
   deepFreeze,
   RUNTIME_COMPATIBILITY,
@@ -22,6 +23,7 @@ export {
 } from "./validation.js";
 
 export { normalizeRecoveryDispatch } from "./dispatch.js";
+export { recoveryFailureDetails } from "./recovery-failures.js";
 
 export {
   DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,

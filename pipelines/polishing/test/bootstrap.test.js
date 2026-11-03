@@ -15,6 +15,7 @@ import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
   normalizePipelineState,
+  sha256,
 } from "../src/workflow-contract.js";
 import {
   SOURCE_SESSION,
@@ -183,11 +184,22 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
 
   const completed = await fixture.run();
   const state = completed.pipelineState;
-  const expectedFingerprint =
+  const guidance = state.finalizationGuidance;
+  const infrastructure =
     await fixture.runtime.git.validationInfrastructureFingerprint({
-      paths: derivedPaths,
+      paths: derivedPaths.filter((path) => path !== guidance.skillPath),
       projectPath: fixture.projectPath,
     });
+  const expectedFingerprint = sha256(
+    JSON.stringify({
+      infrastructure,
+      finalizationFile: (
+        await fixture.runtime.finalization.inspectFile({
+          path: guidance.skillPath,
+        })
+      ).fingerprint,
+    }),
+  );
 
   assert.equal(
     state.workerValidation.requiredChecks.length,

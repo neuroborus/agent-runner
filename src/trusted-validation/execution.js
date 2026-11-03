@@ -223,16 +223,23 @@ export async function runExactCommand(
     cwd,
     environment,
     ownershipMode = "ordinary",
+    preparationOnly = false,
     readinessRequired = false,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
     signal,
     onProcess,
+    onNoLaunch,
+    monotonicNow = process.hrtime.bigint,
     spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
-  signal?.throwIfAborted();
+  if (signal?.aborted) {
+    await onNoLaunch?.();
+    signal.throwIfAborted();
+  }
   if (process.platform === "win32") {
+    await onNoLaunch?.();
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -241,6 +248,13 @@ export async function runExactCommand(
       reason: "process-tree-supervision",
     };
   }
+  // hrtime uses the same monotonic origin in the runner and its supervisor.
+  // Start before launch, including synchronous launch work and registration.
+  const deadlineNs = preparationOnly
+    ? monotonicNow() + BigInt(timeoutMs) * 1_000_000n
+    : undefined;
+  const deadlineExpired = () =>
+    deadlineNs !== undefined && monotonicNow() >= deadlineNs;
   let child;
   try {
     child = spawnProcess(command.executable, command.arguments, {
@@ -258,9 +272,13 @@ export async function runExactCommand(
             onProcess,
             ownershipMode,
             descendantGraceMs: terminationGraceMs,
+            ...(preparationOnly
+              ? { deadlineNs: String(deadlineNs), monotonicNow }
+              : {}),
           }),
     });
   } catch {
+    await onNoLaunch?.();
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -269,11 +287,16 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
+  let closedAfterDeadline = false;
+  const processClosed = new Promise((resolvePromise) => {
+    child.once("close", resolvePromise);
+  });
   const closed = new Promise((resolvePromise) => {
     child.once("error", () => resolvePromise({ type: "error" }));
-    child.once("close", (exitCode, signal) =>
-      resolvePromise({ type: "close", exitCode, signal }),
-    );
+    child.once("close", (exitCode, signal) => {
+      closedAfterDeadline = deadlineExpired();
+      resolvePromise({ type: "close", exitCode, signal });
+    });
   });
   let ready = !readinessRequired;
   child.stdout?.resume();
@@ -284,7 +307,17 @@ export async function runExactCommand(
   });
   let timeout;
   const expired = new Promise((resolvePromise) => {
-    timeout = setTimeout(() => resolvePromise({ type: "timeout" }), timeoutMs);
+    const remainingMs =
+      deadlineNs === undefined
+        ? timeoutMs
+        : Math.max(
+            0,
+            Math.ceil(Number(deadlineNs - monotonicNow()) / 1_000_000),
+          );
+    timeout = setTimeout(
+      () => resolvePromise({ type: "timeout" }),
+      remainingMs,
+    );
     timeout.unref();
   });
   let abort;
@@ -293,11 +326,24 @@ export async function runExactCommand(
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   });
-  const outcome = await Promise.race([closed, expired, aborted]);
+  let outcome = await Promise.race([closed, expired, aborted]);
+  if (outcome.type === "close" && closedAfterDeadline)
+    outcome = { type: "timeout" };
   signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
-    await child.ownedCompletion;
+    if (preparationOnly && child.pid === undefined) {
+      // Node reports failed launches asynchronously without assigning a PID.
+      // Drain close and supervision before durably settling that no-launch fact.
+      const [, supervision] = await Promise.allSettled([
+        processClosed,
+        child.ownedCompletion,
+      ]);
+      if (child.pid === undefined && (await closed).type === "error") {
+        await onNoLaunch?.();
+        signal?.throwIfAborted();
+      } else if (supervision.status === "rejected") throw supervision.reason;
+    } else await child.ownedCompletion;
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -313,32 +359,54 @@ export async function runExactCommand(
     if (child.ownedCompletion === undefined) {
       terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
     } else child.kill("SIGKILL");
+    let closeTimer;
     const finalOutcome = await Promise.race([
       closed,
-      delay(terminationGraceMs).then(() => null),
+      new Promise((resolve) => {
+        closeTimer = setTimeout(() => resolve(null), terminationGraceMs);
+      }),
     ]);
+    clearTimeout(closeTimer);
     if (!terminated) {
       throw new TrustedExecutionError(
         "Trusted validation process tree could not be terminated.",
         { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
       );
     }
-    await child.ownedCompletion;
+    const supervision = await child.ownedCompletion;
     signal?.throwIfAborted();
+    const observed =
+      child.ownedCompletion === undefined ? finalOutcome : supervision?.outcome;
     return {
       status: "BLOCKED",
-      exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
-        ? finalOutcome.exitCode
+      exitCode: Number.isSafeInteger(observed?.exitCode)
+        ? observed.exitCode
         : null,
-      signal:
-        typeof finalOutcome?.signal === "string" ? finalOutcome.signal : null,
+      signal: typeof observed?.signal === "string" ? observed.signal : null,
       timedOut: true,
-      reason: ready ? "timeout" : "isolation",
+      reason:
+        child.ownedPreparationExpired ||
+        (preparationOnly && child.ownedPayloadRequested === false)
+          ? "registration-timeout"
+          : preparationOnly || ready
+            ? "timeout"
+            : "isolation",
     };
   }
   const supervision = await child.ownedCompletion;
   signal?.throwIfAborted();
   const executed = supervision?.outcome ?? outcome;
+  if (child.ownedPreparationExpired) {
+    return {
+      status: "BLOCKED",
+      exitCode: Number.isSafeInteger(executed.exitCode)
+        ? executed.exitCode
+        : null,
+      signal: typeof executed.signal === "string" ? executed.signal : null,
+      timedOut: true,
+      reason: "registration-timeout",
+    };
+  }
   if (executed.type === "error") {
     return {
       status: "BLOCKED",
@@ -552,16 +620,17 @@ export function gitMetadataExposures(cwd) {
 
 function dynamicExposures(
   command,
-  { cwd, environment, homePath, sourceProjection = false },
+  { cwd, environment, homePath, sourceProjection = false, workspacePaths },
 ) {
   const exposures = sourceProjection
     ? []
     : [
-        { source: cwd, target: cwd },
-        ...gitMetadataExposures(cwd).map((path) => ({
-          source: path,
-          target: path,
-        })),
+        ...(workspacePaths ?? [cwd, ...gitMetadataExposures(cwd)]).map(
+          (path) => ({
+            source: path,
+            target: path,
+          }),
+        ),
       ];
   for (const path of String(environment.PATH ?? "").split(delimiter)) {
     if (isAbsolute(path) && existsSync(path)) {
@@ -609,7 +678,10 @@ function dynamicExposures(
   return confined;
 }
 
-export function runtimeStorageExposures(command, { cwd, environment }) {
+export function runtimeStorageExposures(
+  command,
+  { cwd, environment, workspacePaths },
+) {
   try {
     return [
       ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
@@ -620,6 +692,7 @@ export function runtimeStorageExposures(command, { cwd, environment }) {
         environment,
         homePath: environment.HOME,
         sourceProjection: command.capabilities?.sourceProjection === true,
+        workspacePaths,
       }).flatMap(({ source, target }) => [source, target]),
     ];
   } catch {
@@ -641,6 +714,7 @@ function sandboxArguments(
     resources,
     privateStorageRoot,
     protectedPaths,
+    workspacePaths,
     preparationOnly,
   },
 ) {
@@ -672,10 +746,12 @@ function sandboxArguments(
     environment,
     homePath,
     sourceProjection,
+    workspacePaths,
   });
   const runtimeExposures = runtimeStorageExposures(command, {
     cwd,
     environment,
+    workspacePaths,
   });
   // Private storage must not leak through a runtime, PATH or system exposure.
   // Only the explicit per-command mounts below may expose owned subdirectories.
@@ -748,7 +824,7 @@ function sandboxArguments(
       !isAbsolute(source) ||
       realpathSync(source) !== source ||
       !lstatSync(source).isDirectory() ||
-      [cwd, ...gitMetadataExposures(cwd)].some(
+      (workspacePaths ?? [cwd, ...gitMetadataExposures(cwd)]).some(
         (path) => coversPath(path, target) || coversPath(target, path),
       )
     ) {
@@ -786,6 +862,7 @@ export function sandboxTrustedCommand(
     resources = {},
     privateStorageRoot,
     protectedPaths = [],
+    workspacePaths,
     preparationOnly = false,
     platform = process.platform,
   },
@@ -816,6 +893,7 @@ export function sandboxTrustedCommand(
           resources,
           privateStorageRoot,
           protectedPaths,
+          workspacePaths,
           preparationOnly,
         }),
       }),

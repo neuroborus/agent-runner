@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -18,6 +18,7 @@ import {
   normalizeAdapterFailure,
   normalizeClientAttribution,
   normalizeFailureRecord,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
 } from "../../src/agents/index.js";
 import {
@@ -41,6 +42,7 @@ function fakeProvider() {
         version: "fake-1.0.0",
         structuredOutput: true,
         readOnly: true,
+        declaredWorkspace: true,
         autonomousWrite: true,
         gitMetadataWriteBlocked: true,
         workspaceWrite: true,
@@ -361,53 +363,58 @@ test("availability evidence is finite, redacted, and excludes uncertain commit e
   }
 });
 
-test("authentication-required disposition is finite, terminal, and redacted", () => {
-  assert.deepEqual(FAILURE_DISPOSITIONS, [AUTHENTICATION_REQUIRED_DISPOSITION]);
-  assert.ok(Object.isFrozen(FAILURE_DISPOSITIONS));
-  const base = {
-    failureClass: "adapter_failure",
-    checkpoint: "turn",
-    outcome: "rejected",
-    effect: "possible",
-    retry: "terminal",
-    disposition: AUTHENTICATION_REQUIRED_DISPOSITION,
-  };
-  assert.deepEqual(normalizeFailureRecord(base), base);
-
-  const sensitiveMarker = "DO_NOT_RETAIN_AUTHENTICATION_PAYLOAD";
-  const providers = createProviderRegistry([
-    {
-      ...PROVIDER_REGISTRY.list()[0],
-      id: "authentication-test",
-      failures: { classes: new Set(), classify: () => base },
-    },
+test("failure dispositions are finite, terminal, and redacted", () => {
+  assert.deepEqual(FAILURE_DISPOSITIONS, [
+    AUTHENTICATION_REQUIRED_DISPOSITION,
+    OUTPUT_EXHAUSTED_DISPOSITION,
   ]);
-  const normalized = normalizeAdapterFailure(
-    "authentication-test",
-    {
-      credential: sensitiveMarker,
-      message: sensitiveMarker,
-      requestId: sensitiveMarker,
-      url: sensitiveMarker,
-    },
-    providers,
-  );
-  assert.deepEqual(normalized.failure, base);
-  assert.ok(Object.isFrozen(normalized.failure));
-  assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+  assert.ok(Object.isFrozen(FAILURE_DISPOSITIONS));
+  for (const disposition of FAILURE_DISPOSITIONS) {
+    const base = {
+      failureClass: "adapter_failure",
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+      disposition,
+    };
+    assert.deepEqual(normalizeFailureRecord(base), base);
 
-  for (const invalid of [
-    ...[null, undefined, "native_authentication_error", {}, true].map(
-      (disposition) => ({ ...base, disposition }),
-    ),
-    { ...base, outcome: "ambiguous" },
-    { ...base, outcome: "not_started", effect: "none" },
-    { ...base, effect: "started" },
-    { ...base, retry: "transient" },
-    { ...base, availabilityReason: "transport_unavailable" },
-    { ...base, processOutcome: { exitCode: 1 } },
-  ]) {
-    assert.throws(() => normalizeFailureRecord(invalid), TypeError);
+    const sensitiveMarker = "DO_NOT_RETAIN_PROVIDER_PAYLOAD";
+    const providers = createProviderRegistry([
+      {
+        ...PROVIDER_REGISTRY.list()[0],
+        id: "disposition-test",
+        failures: { classes: new Set(), classify: () => base },
+      },
+    ]);
+    const normalized = normalizeAdapterFailure(
+      "disposition-test",
+      {
+        credential: sensitiveMarker,
+        message: sensitiveMarker,
+        requestId: sensitiveMarker,
+        url: sensitiveMarker,
+      },
+      providers,
+    );
+    assert.deepEqual(normalized.failure, base);
+    assert.ok(Object.isFrozen(normalized.failure));
+    assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+
+    for (const invalid of [
+      ...[null, undefined, "native_authentication_error", {}, true].map(
+        (disposition) => ({ ...base, disposition }),
+      ),
+      { ...base, outcome: "ambiguous" },
+      { ...base, outcome: "not_started", effect: "none" },
+      { ...base, effect: "started" },
+      { ...base, retry: "transient" },
+      { ...base, availabilityReason: "transport_unavailable" },
+      { ...base, processOutcome: { exitCode: 1 } },
+    ]) {
+      assert.throws(() => normalizeFailureRecord(invalid), TypeError);
+    }
   }
 });
 
@@ -460,6 +467,7 @@ test("runner construction, attribution, probing, and source sessions use the reg
   const taskPath = join(root, "task");
   const stateRoot = join(root, "state");
   await Promise.all([mkdir(projectPath), mkdir(taskPath)]);
+  await writeFile(join(taskPath, "task.md"), "Inspect the workspace.\n");
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const { adapter, adapterOptions, registry } = fakeProvider();

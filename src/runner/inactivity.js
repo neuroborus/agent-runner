@@ -1,5 +1,6 @@
 import { inactivityActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
+import { runObservedAttempt } from "./observations.js";
 
 const KINDS = new Set([
   "semantic",
@@ -28,13 +29,19 @@ export function createInactivityWatchdog({
   let pending;
   let stopped = false;
   let commands = 0;
+  let suspensions = 0;
   function disarm() {
     if (timer !== undefined) timers.clearTimeout(timer);
     timer = undefined;
   }
   function arm() {
     disarm();
-    if (!stopped && pending === undefined && commands === 0) {
+    if (
+      !stopped &&
+      pending === undefined &&
+      commands === 0 &&
+      suspensions === 0
+    ) {
       timer = timers.setTimeout(() => {
         timer = undefined;
         pending = Promise.resolve().then(expire);
@@ -45,6 +52,18 @@ export function createInactivityWatchdog({
   }
   arm();
   return Object.freeze({
+    async suspend(operation) {
+      suspensions++;
+      disarm();
+      try {
+        // An already observed deadline still owns its durable expiry.
+        await pending;
+        return await operation();
+      } finally {
+        suspensions--;
+        arm();
+      }
+    },
     progress(event) {
       if (
         stopped ||
@@ -112,7 +131,9 @@ export function createInactivityCoordinator({
   async function record(recovery, kind) {
     return guarded(async () => {
       const activity = inactivityActivity(recovery, kind);
-      const next = await runStore.recordInactivity(lease, recovery, kind);
+      const next = await monitor.persist(() =>
+        runStore.recordInactivity(lease, recovery, kind),
+      );
       pending = true;
       await publish(activity, next);
       return next;
@@ -121,8 +142,9 @@ export function createInactivityCoordinator({
   return Object.freeze({
     async pending() {
       // A journal append may have succeeded before publication threw.
-      pending = (await runStore.loadRun(runId)).inactivityRecovery !== null;
-      return pending;
+      const recovery = (await runStore.loadRun(runId)).inactivityRecovery;
+      pending = recovery !== null;
+      return recovery?.expiryRevision != null;
     },
     eligible: (cause) =>
       cause?.code === "ERR_PROVIDER_INACTIVE" && cause.recoverable === true,
@@ -141,6 +163,7 @@ export function createInactivityCoordinator({
       if (run.activeTurn !== null) {
         if (
           run.activeTurn.role !== role ||
+          run.preparation != null ||
           run.executionProcess !== null ||
           run.executionResource !== null
         )
@@ -152,7 +175,7 @@ export function createInactivityCoordinator({
       // Backoff can continue after a new availability failure, but a stale
       // episode cannot replenish a reconstruction lost with its owner.
       if (
-        recovery.attempt === 2 &&
+        (recovery.attempt === 2 || recovery.expiryRevision == null) &&
         !manualRetry &&
         !(
           recovery.status === "reconstructing" &&
@@ -162,7 +185,15 @@ export function createInactivityCoordinator({
             recovery.reconstructionRevision
         )
       )
-        throw inactive();
+        throw recovery.expiryRevision != null
+          ? inactive()
+          : Object.assign(
+              new RunnerError(
+                "Provider reconstruction allowance was consumed.",
+                { code: "ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED" },
+              ),
+              { recoverable: true },
+            );
       manualRetry = false;
       return record(
         { ...recovery, attempt: 2, status: "reconstructing" },
@@ -174,6 +205,7 @@ export function createInactivityCoordinator({
       await git.assertUnchanged(repository);
       const run = await runStore.loadRun(runId);
       if (
+        run.preparation != null ||
         run.executionProcess !== null ||
         run.executionResource !== null ||
         run.activeTurn !== null
@@ -182,7 +214,10 @@ export function createInactivityCoordinator({
           "Inactivity recovery requires retired ownership.",
           { code: "ERR_INACTIVITY_RECOVERY" },
         );
-      return run.inactivityRecovery?.attempt === 1;
+      return (
+        run.inactivityRecovery?.attempt === 1 &&
+        run.inactivityRecovery.expiryRevision != null
+      );
     },
     async invoke(role, operation, request) {
       const run = await runStore.loadRun(runId);
@@ -238,8 +273,31 @@ export function createInactivityCoordinator({
       request.signal?.addEventListener("abort", stop, { once: true });
       let response;
       let failure;
+      const observedOperation = (value) =>
+        runObservedAttempt({
+          runStore,
+          lease,
+          role,
+          checkpoint,
+          // Exclude startup storage latency. Mid-attempt diagnostics neither
+          // suspend nor rearm the existing provider deadline.
+          persist: (write, phase) =>
+            phase === "start"
+              ? watchdog.suspend(() => monitor.persist(write))
+              : monitor.persist(write),
+          publish,
+          operation: async (attemptRequest) => {
+            try {
+              return await operation(attemptRequest);
+            } finally {
+              // Persistence latency after provider settlement is not inactivity.
+              await watchdog.close();
+            }
+          },
+          request: value,
+        });
       try {
-        response = await operation({
+        response = await observedOperation({
           ...request,
           signal,
           onProgress: watchdog.progress,
@@ -319,7 +377,10 @@ export function createInactivityCoordinator({
       responseRole = role;
       return response;
     },
-    async completed(role, { repositoryReconciled = true, ...options } = {}) {
+    async completed(
+      role,
+      { repositoryReconciled = true, repository, ...options } = {},
+    ) {
       if (responseRole !== role) return;
       // A safety pause or failed repository check must retain recovery evidence
       // without replacing the pipeline's original failure during turn cleanup.
@@ -339,10 +400,11 @@ export function createInactivityCoordinator({
           return;
         }
         // The pipeline supplies its reconciled snapshot, including partial writes.
-        const repository =
+        const baseline =
+          repository ??
           options.patch?.pipelineState?.repositoryBaseline ??
           run.pipelineState.repositoryBaseline;
-        await git.assertUnchanged(repository);
+        await git.assertUnchanged(baseline);
         const next = await runStore.completeInactivityTurn(
           lease,
           role,

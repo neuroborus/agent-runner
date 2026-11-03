@@ -135,11 +135,13 @@ const SAFE_PREFLIGHT_PAUSE_CODES = new Set([
   "ERR_GIT_SNAPSHOT_RACE",
 ]);
 const INVALID_BOOTSTRAP_PATH_CODES = new Set([
+  "ERR_FINALIZATION_FILE_INVALID",
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const RETRYABLE_CHECKPOINT_PAUSES = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "environment_blocked",
@@ -563,11 +565,16 @@ export async function runPolishing({
   }
 
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+    "backend_unavailable",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -778,8 +785,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return currentRun;
   }
 
-  async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+  async function pause(
+    reason,
+    details = {},
+    pipelineStatePatch = {},
+    options = {},
+  ) {
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...state(),
@@ -787,7 +802,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        ...options,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -797,7 +813,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1167,12 +1183,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     return (
       turn.phase === "resolve-findings" &&
-      (
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
-      ((
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
+      retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1245,7 +1261,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ["check-and-fix", "resolve-findings"].includes(interruptedTurn.phase);
       const charged =
         interruptedTurn.phase === "check-and-fix"
-          ? current.pendingLazyCorrection?.fixRoundCharged
+          ? current.availabilityCorrectionCharged ||
+            current.pendingLazyCorrection?.fixRoundCharged
           : current.pendingCorrection;
       await transition(
         {
@@ -1296,7 +1313,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
-            currentRun.inactivityRecovery == null &&
+            currentRun.inactivityRecovery?.expiryRevision == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
@@ -1304,7 +1321,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
             currentRun.availabilityRetry != null ||
-            currentRun.inactivityRecovery != null,
+            currentRun.inactivityRecovery?.expiryRevision != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1331,6 +1348,19 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       interruptedRepositoryReconciled = false;
     }
     return true;
+  }
+
+  let resumedOutputCheckpoint =
+    currentRun.pause?.reason === "output_exhausted"
+      ? currentRun.pause.checkpoint
+      : null;
+  function retryCheckpointEvidence() {
+    return resumedOutputCheckpoint === null
+      ? (currentRun.availabilityRetry ??
+          (currentRun.inactivityRecovery?.expiryRevision != null
+            ? currentRun.inactivityRecovery
+            : null))
+      : { checkpoint: resumedOutputCheckpoint };
   }
 
   const availabilityRetry = Symbol("availability-retry");
@@ -1456,24 +1486,52 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           : [],
       ),
     );
+    const guidance = state().finalizationGuidance;
+    const selectedFile =
+      guidance?.selection === "file"
+        ? await inspectValidationPath(
+            guidance.skillPath,
+            currentRun.projectPath,
+          )
+        : null;
+    const readContext =
+      selectedFile === null
+        ? ""
+        : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
+      ...(selectedFile === null ? {} : { readPaths: [selectedFile.path] }),
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(buildPrompt(""))
-          : recoveryPrompt,
-      recoveryPrompt,
+          : recoveryPrompt + readContext,
+      recoveryPrompt: recoveryPrompt + readContext,
       schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
     let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
+    let outputExhausted = false;
+    let exhaustedWorkspace;
+    async function persistReconciledWorkspace(nextState, options = {}) {
+      if (outputExhausted) {
+        exhaustedWorkspace = { state: nextState, options };
+      } else {
+        await transition(nextState, options);
+      }
+    }
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1501,6 +1559,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
+        outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
       nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1543,7 +1602,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             contentChanged && current.workflowState === "RESOLVE_FINDINGS";
           const contentChangingLazyCheck =
             contentChanged && current.workflowState === "CHECK_AND_FIX";
-          await transition(
+          await persistReconciledWorkspace(
             contentChangingCorrection || contentChangingLazyCheck
               ? {
                   ...current,
@@ -1562,12 +1621,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                     current.availabilityCorrectionCharged ||
                     ((availabilityFailure ||
                       authenticationFailure ||
+                      outputExhausted ||
                       inactivityFailure) &&
                       contentChangingLazyCheck) ||
-                    (authenticationFailure && contentChangingCorrection),
+                    ((authenticationFailure || outputExhausted) &&
+                      contentChangingCorrection),
                   reviewReconsideration: [],
                   ...(availabilityFailure ||
                   authenticationFailure ||
+                  outputExhausted ||
                   inactivityFailure
                     ? {
                         workflowState: current.workflowState,
@@ -1638,41 +1700,56 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       }
       repositoryReconciled = true;
       if (
-        authenticationFailure &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        outputExhausted ||
+        (authenticationFailure &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             polishingPolicy(state().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: state().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          {
+            ...exhaustedWorkspace?.state,
+            ...(acknowledgedSessions.size > 0
+              ? { authenticationSourceForkRecovery: null }
+              : hasPossibleSourceForkEffect
+                ? {
+                    authenticationSourceForkRecovery: Object.freeze({
+                      role,
+                      contextKey,
+                    }),
+                  }
+                : consumeSourceFork
+                  ? { lazySourceForkConsumed: false }
+                  : {}),
+          },
+          exhaustedWorkspace?.options,
         );
         return null;
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
@@ -1729,10 +1806,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             outputContext,
           );
     }
+    resumedOutputCheckpoint = null;
     await recordSession(
       role,
       response.sessionId,
-      freshSession ? undefined : previousSession,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : freshSession
+          ? undefined
+          : previousSession,
       contextKey,
     );
     if (state().authenticationSourceForkRecovery !== null) {
@@ -1967,10 +2049,49 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     });
   }
 
+  async function inspectValidationPath(path, projectPath) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && path === guidance.skillPath) {
+      const inspection = await runtime.finalization.inspectFile({
+        path:
+          guidance.configuredPolicy === "auto"
+            ? path
+            : guidance.configuredPolicy,
+        policy: guidance.configuredPolicy,
+      });
+      return {
+        ...inspection,
+        relativePath: inspection.inventoryPath ?? inspection.relativePath,
+      };
+    }
+    if (path.startsWith("finalization://")) {
+      throw workflowError(
+        "Validation infrastructure may name only the selected finalization file.",
+        "ERR_FINALIZATION_FILE_INVALID",
+      );
+    }
+    return runtime.git.inspectPath({ path, projectPath });
+  }
+
   async function validationInfrastructureFingerprint(
     paths,
     projectPath = state().repositoryBaseline.projectPath,
   ) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && paths.includes(guidance.skillPath)) {
+      const file = await inspectValidationPath(guidance.skillPath, projectPath);
+      if (!file.exists) {
+        throw workflowError("Frozen finalization guidance is missing.");
+      }
+      const infrastructure =
+        await runtime.git.validationInfrastructureFingerprint({
+          paths: paths.filter((path) => path !== guidance.skillPath),
+          projectPath,
+        });
+      return sha256(
+        JSON.stringify({ infrastructure, finalizationFile: file.fingerprint }),
+      );
+    }
     return runtime.git.validationInfrastructureFingerprint({
       paths,
       projectPath,
@@ -2075,11 +2196,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   function markPendingLazyCorrectionCharged(current) {
     const pending = current.pendingLazyCorrection;
-    if (
-      pending === null ||
-      pending.phase !== "CHECK_AND_FIX" ||
-      pending.fixRoundCharged
-    ) {
+    if (pending === null || pending.phase !== "CHECK_AND_FIX") {
       return {};
     }
     return {
@@ -2099,10 +2216,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await inspectValidationPath(
           path,
-          projectPath: state().repositoryBaseline.projectPath,
-        });
+          state().repositoryBaseline.projectPath,
+        );
       } catch (cause) {
         if (!INVALID_BOOTSTRAP_PATH_CODES.has(cause?.code)) {
           throw cause;
@@ -2620,7 +2737,7 @@ ${JSON.stringify(
     return reconcileValidationMigration();
   }
 
-  async function resolveFinalizationGuidance(projectPath, policy) {
+  async function resolveFinalizationGuidance(policy) {
     if (policy === "none") {
       return createFinalizationGuidanceDecision({ configuredPolicy: policy });
     }
@@ -2629,9 +2746,9 @@ ${JSON.stringify(
     for (const skillPath of candidates) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await runtime.finalization.inspectFile({
           path: skillPath,
-          projectPath,
+          policy,
         });
       } catch (cause) {
         if (policy === "auto") {
@@ -2640,7 +2757,7 @@ ${JSON.stringify(
         await pause("finalization_skill_invalid", {
           code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
           explanation:
-            "The explicitly configured finalization skill path is not a safe canonical repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill path is not a safe confined Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -2651,35 +2768,18 @@ ${JSON.stringify(
         inspection.kind === "file" &&
         inspection.relativePath === skillPath
       ) {
-        let selectedFileFingerprint;
-        try {
-          selectedFileFingerprint =
-            await runtime.git.validationInfrastructureFingerprint({
-              paths: [skillPath],
-              projectPath,
-            });
-        } catch (cause) {
-          if (policy === "auto") continue;
-          await pause("finalization_skill_invalid", {
-            code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
-            explanation:
-              "The explicitly configured finalization skill could not be fingerprinted safely. Repair it and start a new run.",
-            evidence: [skillPath],
-            skillPath,
-          });
-          return null;
-        }
         return createFinalizationGuidanceDecision({
           configuredPolicy: policy,
-          skillPath,
-          selectedFileFingerprint,
+          skillPath: inspection.inventoryPath ?? skillPath,
+          selectedFileFingerprint: inspection.fingerprint,
+          selection: "file",
         });
       }
       if (policy !== "auto" && inspection.exists === true) {
         await pause("finalization_skill_invalid", {
           code: "ERR_FINALIZATION_SKILL_INVALID",
           explanation:
-            "The explicitly configured finalization skill is not a canonical regular repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill is not a confined regular Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -2704,7 +2804,7 @@ ${JSON.stringify(
     repositoryBaseline,
   } = {}) {
     const guidance = state().finalizationGuidance;
-    if (guidance?.selection !== "skill") return true;
+    if (!["skill", "file"].includes(guidance?.selection)) return true;
     const pauseForGuidance = async (reason, details) => {
       const current = state();
       const contentChanged =
@@ -2745,10 +2845,7 @@ ${JSON.stringify(
     };
     let inspection;
     try {
-      inspection = await runtime.git.inspectPath({
-        path: guidance.skillPath,
-        projectPath,
-      });
+      inspection = await inspectValidationPath(guidance.skillPath, projectPath);
     } catch (cause) {
       return pauseForGuidance("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -2780,10 +2877,13 @@ ${JSON.stringify(
     }
     let fingerprint;
     try {
-      fingerprint = await validationInfrastructureFingerprint(
-        [guidance.skillPath],
-        projectPath,
-      );
+      fingerprint =
+        guidance.selection === "file"
+          ? inspection.fingerprint
+          : await validationInfrastructureFingerprint(
+              [guidance.skillPath],
+              projectPath,
+            );
     } catch (cause) {
       return pauseForGuidance("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -2819,7 +2919,6 @@ ${JSON.stringify(
       interruptedTurnIsWritable(interruptedTurn);
     if (current.finalizationGuidance === null) {
       const guidance = await resolveFinalizationGuidance(
-        current.repositoryBaseline.projectPath,
         current.settings.finalization,
       );
       if (guidance === null) return false;
@@ -3606,7 +3705,6 @@ ${JSON.stringify(
     let finalizationGuidance = state().finalizationGuidance;
     if (finalizationGuidance === null) {
       finalizationGuidance = await resolveFinalizationGuidance(
-        repositoryPath,
         effectiveSettings.finalization,
       );
       if (finalizationGuidance === null) return false;
@@ -4538,7 +4636,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -4554,7 +4652,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -4568,7 +4666,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -5975,9 +6073,7 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = (
-      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-    )?.checkpoint;
+    const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -6234,7 +6330,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
-              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              ? current.availabilityCorrectionCharged ||
+                current.pendingLazyCorrection?.fixRoundCharged === true
               : current.pendingCorrection;
           await transition(
             {
@@ -6606,7 +6703,7 @@ ${evidence}`,
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
+      dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
         cause?.code,
       )

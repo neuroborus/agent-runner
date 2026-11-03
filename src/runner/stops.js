@@ -66,6 +66,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
     if (!(stopImmediately(current) || (waiting && stopPending(current))))
       return current;
     if (stopping === null) {
+      if (!controller.signal.aborted) controller.abort(stopError());
       stopping = (async () => {
         const activity = {
           actor: "runner",
@@ -79,7 +80,6 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
         await publish(activity, next);
         return next;
       })();
-      if (!controller.signal.aborted) controller.abort(stopError());
     }
     await stopping;
     return current;
@@ -109,6 +109,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   });
 
   return Object.freeze({
+    persist: write,
     async wait(operation) {
       waiting = true;
       try {
@@ -172,6 +173,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
       watcher.abort();
       await watching;
       await stopping?.catch(() => {});
+      await pendingWrite;
       if (monitoringFailure !== null) throw monitoringFailure;
     },
   });
@@ -183,6 +185,7 @@ export function stopSettlement(
   patch,
   activity,
   configurationFailure = null,
+  continuesDeferredBoundary = false,
 ) {
   if (configurationFailure !== null) {
     patch = {
@@ -198,7 +201,11 @@ export function stopSettlement(
       activeTurn: null,
     };
   }
-  if (!stopPending(current)) return { patch, activity };
+  if (
+    !stopPending(current) ||
+    (continuesDeferredBoundary && configurationFailure === null)
+  )
+    return { patch, activity };
   const canceled = current.stopRequest.kind === "cancel_requested";
   return {
     patch: {
@@ -271,6 +278,10 @@ function reconciliationRuntime(runtime, initialRun) {
         prepareCommit: rejectEffect,
         stagePolishingHandoff: rejectEffect,
       }),
+      workspace: Object.freeze({
+        ...runtime.workspace,
+        reportArtifact: rejectEffect,
+      }),
       trustedValidation: Object.freeze({
         ...runtime.trustedValidation,
         execute: rejectEffect,
@@ -308,10 +319,18 @@ export async function reconcileOperatorStop({
   configurationFailure = null,
   cleanupResources = async (run) => run,
   inspectSessionProcesses,
+  onRecoveryStage = () => {},
 }) {
+  onRecoveryStage("state-recovery");
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
+  if (current.preparation != null) {
+    current = await runStore.recoverPreparation(lease, (owner, inspect) =>
+      terminateOwnedProcess(owner.pid, inspect, { inspectSessionProcesses }),
+    );
+  }
   if (current.executionProcess !== null) {
+    onRecoveryStage("process-recovery");
     const owner = await runStore.inspectExecutionProcess(current.runId);
     await terminateOwnedProcess(
       owner.pid,
@@ -320,7 +339,11 @@ export async function reconcileOperatorStop({
     );
     current = await runStore.recordExecutionProcess(lease, null);
   }
+  onRecoveryStage("resource-recovery");
   current = await cleanupResources(current);
+  onRecoveryStage("state-recovery");
+  if (current.observations?.attempts.at(-1).status === "active")
+    current = await runStore.recoverRun(lease);
   const activity = {
     actor: "runner",
     phase: "stop",
@@ -330,15 +353,38 @@ export async function reconcileOperatorStop({
   current = await runStore.recordStopActivity(lease, activity);
   await publish(activity, current);
 
+  onRecoveryStage("checkpoint-continuation");
   const simulated = reconciliationRuntime(runtime, current);
-  let reconciled = await pipeline.workflow.run({
-    action: null,
-    operatorStop: true,
-    operatorStopPreEffectRejection: preEffectRejection,
-    run: current,
-    settings: current.pipelineState.settings,
-    runtime: simulated.runtime,
-  });
+  let workspaceFailure = null;
+  if (runtime.workspace?.kind === "directory") {
+    try {
+      await runtime.workspace.snapshot();
+    } catch (cause) {
+      if (!cause?.code?.startsWith("ERR_WORKSPACE_")) throw cause;
+      workspaceFailure = cause;
+    }
+  }
+  // Directory turns have no Git effects to reconcile. Retain their checkpoint
+  // and the drift blocker after retirement, without accepting changed inputs.
+  let reconciled =
+    workspaceFailure === null
+      ? await pipeline.workflow.run({
+          action: null,
+          operatorStop: true,
+          operatorStopPreEffectRejection: preEffectRejection,
+          run: current,
+          settings: current.pipelineState.settings,
+          runtime: simulated.runtime,
+        })
+      : {
+          ...current,
+          pipelineState: {
+            ...current.pipelineState,
+            workflowState: "WAITING_FOR_USER",
+          },
+          pause: { reason: "workspace_changed", code: "ERR_WORKSPACE_DRIFT" },
+          activeTurn: null,
+        };
   reconciled ??= simulated.current();
   let outcomeActivity;
   const completed = await runStore.settleCheckpoint(

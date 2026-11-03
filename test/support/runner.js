@@ -184,6 +184,9 @@ export function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
     calls,
     contextCalls,
     probes,
+    async canReadFiles() {
+      return true;
+    },
     async probe(options) {
       probes.push(options);
       return {
@@ -204,6 +207,32 @@ export function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         contextCalls.push(request);
         return {
           structured: { stepAssessment: requestedStepAssessment(request) },
+          sessionId: request.session?.id ?? freshSession(),
+        };
+      }
+      if (
+        request.prompt.startsWith(
+          "Assess only the supplied contiguous canonical plan range",
+        )
+      ) {
+        const unit = JSON.parse(
+          /Applicability request \(data\):\n([^\n]+)/u.exec(request.prompt)[1],
+        );
+        return {
+          structured: {
+            result: {
+              status: "READY",
+              unitId: unit.unitId,
+              assignments: unit.discovery.requiredChecks.map(({ id }) => ({
+                checkId: id,
+                steps: unit.steps.map(({ number }) => number),
+              })),
+              missingCommands: [],
+              missingInfrastructure: [],
+              capabilityRequirements: [],
+              environmentBlockers: [],
+            },
+          },
           sessionId: request.session?.id ?? freshSession(),
         };
       }
@@ -387,6 +416,24 @@ export function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
         )?.stepAssessment
       )
         structured.stepAssessment = requestedStepAssessment(request);
+      if (
+        request.prompt.startsWith(
+          "Study the repository, task, complete validated plan",
+        ) &&
+        structured.status === "READY"
+      ) {
+        for (const field of [
+          "status",
+          "capacityField",
+          "capacityLimit",
+          "reason",
+          "question",
+          "options",
+          "whyBlocked",
+          "evidence",
+        ])
+          delete structured[field];
+      }
       return {
         output: "structured",
         structured:

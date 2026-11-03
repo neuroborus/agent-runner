@@ -8,3 +8,7 @@ export {
   validateTrustedValidationSnapshot,
 } from "./service.js";
 export { runExactCommand } from "./execution.js";
+export {
+  claimTestAttribution,
+  reportTestFailures,
+} from "./test-attribution.js";

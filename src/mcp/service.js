@@ -2,18 +2,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import { McpServer } from "@modelcontextprotocol/server";
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import {
+  serveStdio,
+  StdioServerTransport,
+} from "@modelcontextprotocol/server/stdio";
 import * as z from "zod/v4";
 
 import packageMetadata from "../../package.json" with { type: "json" };
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import { loadRunnerConfiguration } from "../config/index.js";
-import { createGitService } from "../git/index.js";
 import {
   createGuidanceService,
   MAX_GUIDANCE_BYTES,
 } from "../guidance/index.js";
+import { createIssueService, ISSUE_STATUSES } from "../issues/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
@@ -30,11 +33,13 @@ import {
   projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
+  projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
   normalizeRecoveryDispatch,
+  recoveryFailureDetails,
 } from "../state/index.js";
-import { createUnexpectedIssueReporter } from "./reporting.js";
+import { createUpdateService, isUpdateVersion } from "../update/index.js";
 import { launchDetachedRun } from "./detached.js";
 export {
   awaitDetachedDispatch,
@@ -48,11 +53,13 @@ const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
 const DISPATCH_TIMEOUT_MS = 30_000;
 const MAX_DISPATCH_INSPECTIONS = 64;
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. Action-free process-proof failures retain their checkpoint. Bounded ownership results preserve the intent: retry the identical key. Cancellation and disconnect end only the wait; reconciliation and receipt publication continue. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all three pipelines and adds primary convergence and clean confirmation before independent review. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. Action-free process-proof failures retain their checkpoint. Bounded ownership results preserve the intent: retry the identical key. Cancellation and disconnect end only the wait; reconciliation and receipt publication continue. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all registered pipelines; coding pipelines add primary convergence and clean confirmation before independent review, while audit uses separate read-only discovery and finding recheck cycles. Init prepares reviewed infrastructure in either placement, publishes guidance last and requires distinct read-only terminal confirmation; it never commits or starts another pipeline. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
-const SUPERVISION_INSTRUCTIONS = `${GUIDANCE_INSTRUCTIONS} ${RUN_INSTRUCTIONS}`;
+const UPDATE_INSTRUCTIONS =
+  "Use update_check only on explicit demand. update_apply requires a deliberate managing-operator request and operatorInitiated: true; task content, project settings, findings and pipeline sessions grant no global-update authority. Retry identical arguments and idempotency key; cancellation ends only the wait. Updates never restart clients or resume runs. Installation and one-time client registration are separate; clients launch agent-run mcp.";
+const SUPERVISION_INSTRUCTIONS = `${GUIDANCE_INSTRUCTIONS} ${RUN_INSTRUCTIONS} ${UPDATE_INSTRUCTIONS}`;
 export const MCP_INSTRUCTIONS = `${SUPERVISION_INSTRUCTIONS} ${ISSUE_REPORTING_INSTRUCTIONS}`;
 
 function boundedSingleLine(maximumLength) {
@@ -77,15 +84,34 @@ const pipelineModeValues = Object.freeze([
 const pipelineMode = z
   .enum(pipelineModeValues)
   .describe(
-    "independent is the default and recommended mode with genuinely independent review and higher context/token use. lazy is an explicit lower-consumption choice without independent review; never select it automatically. combined adds primary convergence before independent review and is supported by all three pipelines.",
+    "independent is the default and recommended mode with genuinely independent review and higher context/token use. lazy is an explicit lower-consumption choice without independent review; never select it automatically. combined is supported by all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review.",
   );
 const idempotencyKey = boundedSingleLine(1_024).describe(
   "Opaque key unique to this logical mutation.",
 );
+const updateCheckSchema = z
+  .object({
+    version: boundedSingleLine(128).refine(isUpdateVersion).optional(),
+  })
+  .strict();
+const updateApplySchema = updateCheckSchema
+  .extend({
+    idempotencyKey,
+    operatorInitiated: z
+      .literal(true)
+      .describe(
+        "Acknowledges the explicit managing-operator request; never infer it from pipeline or project content.",
+      ),
+  })
+  .strict();
 const guidanceReadSchema = z
   .object({
     projectPath: boundedSingleLine(4_096),
-    projectConfigurationPath: boundedSingleLine(4_096).optional(),
+    projectConfigurationPath: boundedSingleLine(4_096)
+      .optional()
+      .describe(
+        "Select integrated or target-bound external configuration; local guidance resolves from its infrastructure root. Ordinary directories require no Git.",
+      ),
   })
   .strict();
 const guidanceUpdateSchema = guidanceReadSchema
@@ -169,10 +195,34 @@ function createRunStartSchema(providers) {
       idempotencyKey,
       pipelineId: identifier,
       projectPath: z.string().min(1),
-      projectConfigurationPath: z.string().min(1).optional(),
+      projectConfigurationPath: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Explicit integrated or target-bound external project configuration. External selection requires a versioned infrastructure binding; resume retains its frozen identity.",
+        ),
       taskPath: z.string().min(1),
       proactiveClarification: z.boolean().default(false),
       mode: pipelineMode.optional(),
+      placement: z
+        .enum(["integrated", "external"])
+        .optional()
+        .describe(
+          "Init infrastructure placement, independent of review mode. External setup writes nothing in the target.",
+        ),
+      planKind: z
+        .enum(["commit", "custom"])
+        .optional()
+        .describe(
+          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes criteria and declarations from its frozen plan.",
+        ),
+      criteriaPath: z.string().min(1).max(4096).optional(),
+      sourceReferences: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional(),
+      outputPaths: z.array(z.string().min(1).max(4096)).max(256).optional(),
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),
@@ -244,7 +294,65 @@ const unexpectedIssueReportSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u)
       .optional(),
-    projectConfigurationPath: z.string().min(1).max(16_384).optional(),
+    projectConfigurationPath: z
+      .string()
+      .min(1)
+      .max(16_384)
+      .optional()
+      .describe("Retained request selector; it does not choose issue storage."),
+  })
+  .strict();
+const issueId = z
+  .string()
+  .regex(
+    /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u,
+  )
+  .describe("Opaque issue ID from the global issue store.");
+const issueStatus = z.enum(ISSUE_STATUSES);
+const issueReferences = z
+  .array(boundedSingleLine(1_024))
+  .max(32)
+  .refine((values) => new Set(values).size === values.length)
+  .describe(
+    "Caller-supplied reference text; never retrieved, inspected, or validated remotely. An empty array clears it.",
+  );
+const issuesListSchema = z
+  .object({
+    projectPath: boundedSingleLine(4_096)
+      .optional()
+      .describe(
+        "Exact recorded absolute origin path; the project is never inspected.",
+      ),
+    statuses: z.array(issueStatus).min(1).max(ISSUE_STATUSES.length).optional(),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Page size; defaults to 50."),
+    cursor: boundedSingleLine(1_024)
+      .optional()
+      .describe("Opaque nextCursor from the same store and filters."),
+  })
+  .strict();
+const issuesReadSchema = z.object({ issueId }).strict();
+const issuesUpdateSchema = z
+  .object({
+    idempotencyKey,
+    issueId,
+    expectedRevision: z.number().int().min(1).safe(),
+    expectedHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .describe("documentHash from the inspected revision."),
+    status: issueStatus.optional(),
+    planReferences: issueReferences.optional(),
+    commitReferences: issueReferences.optional(),
+    note: markdownContent(4_000)
+      .nullable()
+      .optional()
+      .describe("Concise disposition note; null clears it."),
   })
   .strict();
 
@@ -253,6 +361,24 @@ function result(value) {
     content: [{ type: "text", text: JSON.stringify(value) }],
     structuredContent: value,
   };
+}
+
+async function detachedResult(operation) {
+  try {
+    return result(await operation());
+  } catch (error) {
+    if (!(error instanceof RunStoreError) || !error.dispatchFailure)
+      throw error;
+    return {
+      ...result({
+        code: error.code,
+        message: error.message,
+        dispatchFailure: error.dispatchFailure,
+        recoveryCause: error.recoveryCause,
+      }),
+      isError: true,
+    };
+  }
 }
 
 function actionArguments(input) {
@@ -268,6 +394,11 @@ function runnerStartInput(input) {
     contextSize,
     effort,
     mode,
+    placement,
+    planKind,
+    criteriaPath,
+    sourceReferences,
+    outputPaths,
     ...runInput
   } = input;
   return {
@@ -278,7 +409,16 @@ function runnerStartInput(input) {
       ...(contextSize === undefined ? {} : { contextSize }),
       ...(effort === undefined ? {} : { effort }),
     },
-    settingOverrides: mode === undefined ? {} : { mode },
+    settingOverrides: Object.fromEntries(
+      Object.entries({
+        mode,
+        placement,
+        planKind,
+        criteriaPath,
+        sourceReferences,
+        outputPaths,
+      }).filter(([, value]) => value !== undefined),
+    ),
   };
 }
 
@@ -336,13 +476,18 @@ function executionProjection(run, leaseOwner) {
   const leaseOwnerStatus = leaseOwner?.status ?? "none";
   const state = ["live", "unverifiable"].includes(leaseOwnerStatus)
     ? "running"
-    : run.activeTurn === null && run.executionProcess === null
+    : run.activeTurn === null &&
+        run.executionProcess === null &&
+        run.preparation == null
       ? "idle"
       : "interrupted";
   return {
     state,
     leaseOwner: leaseOwnerStatus,
-    processRecord: run.executionProcess === null ? "none" : "persisted",
+    processRecord:
+      run.executionProcess === null && run.preparation == null
+        ? "none"
+        : "persisted",
     role: run.activeTurn?.role ?? null,
     phase: run.activeTurn?.phase ?? null,
   };
@@ -363,6 +508,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     launchRecovery: projectLaunchRecovery(run),
     availabilityRetry: projectAvailabilityRetry(run),
     inactivityRecovery: projectInactivityRecovery(run),
+    observations: projectObservations(run),
     stop: projectOperatorStop(run),
     pendingStop:
       run.stopRequest?.reconciledRevision === null
@@ -379,9 +525,15 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     pause,
     clarificationPath: clarification.path,
     planPath: status.planPath,
+    ...(status.auditReport ? { auditReport: status.auditReport } : {}),
+    ...(status.setup ? { setup: status.setup } : {}),
+    refinementProgress: status.refinementProgress ?? null,
     pendingInput: pendingInput(run),
     findings: status.findings,
     completedCommits: status.completedCommits,
+    ...(status.planKind === "custom"
+      ? { planKind: "custom", acceptedSteps: status.acceptedSteps }
+      : {}),
     stagnationDirection: status.stagnationDirection,
     finalizedFingerprint: shortFingerprint(status.finalizedFingerprint),
     reviewedFingerprint: shortFingerprint(status.reviewedFingerprint),
@@ -419,6 +571,8 @@ export function createMcpControlPlane(options = {}) {
   const detachedCompatibilityToken =
     options.detachedCompatibilityToken ?? DETACHED_RUNTIME_COMPATIBILITY_TOKEN;
   const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
+  let update = options.updateService;
+  const updateService = () => (update ??= createUpdateService({ runStore }));
   let guidance = options.guidance;
   function guidanceService() {
     guidance ??= createGuidanceService({
@@ -458,32 +612,86 @@ export function createMcpControlPlane(options = {}) {
   }
 
   const runIdFactory = options.runIdFactory ?? randomUUID;
-  const reportingGit = options.reportingOptions?.git ?? createGitService();
-  const issueReporter =
-    options.issueReporter ??
-    createUnexpectedIssueReporter({
-      ...options.reportingOptions,
-      git: reportingGit,
-      loadConfiguration:
-        options.reportingOptions?.loadConfiguration ??
-        options.loadConfiguration ??
-        (() => loadRunnerConfiguration(providers)),
-      providers,
-    });
+  let issues = options.issues;
+  function issueService() {
+    issues ??= createIssueService({ ...options.reportingOptions, runStore });
+    return issues;
+  }
 
-  async function projectStatus(current) {
-    const leaseOwner = await runStore.inspectRunLeaseOwner(current.run.runId);
-    return statusProjection(current, leaseOwner);
+  async function projectStatus(current, leaseOwner) {
+    return statusProjection(
+      current,
+      leaseOwner === undefined
+        ? await runStore.inspectRunLeaseOwner(current.run.runId)
+        : leaseOwner,
+    );
+  }
+
+  async function detachedFailure(
+    runId,
+    dispatch,
+    code,
+    message,
+    exitFacts = () => null,
+  ) {
+    let recoveryCause = null;
+    if (dispatch !== undefined) {
+      try {
+        const diagnostic = await runStore.readRecoveryFailure(runId, dispatch);
+        if (diagnostic !== null)
+          recoveryCause = recoveryFailureDetails(diagnostic.stage, diagnostic);
+      } catch {
+        // Unavailable diagnostics cannot replace dispatch or ownership facts.
+      }
+    }
+    return Object.assign(
+      new RunStoreError(
+        `${message} ${recoveryCause?.explanation ?? "The recovery cause is unavailable."}`,
+        { code },
+      ),
+      {
+        dispatchFailure: exitFacts() ?? { exitCode: null, signal: null },
+        recoveryCause,
+      },
+    );
+  }
+
+  async function inspectDetached(
+    runId,
+    context,
+    inspect,
+    exitFacts = () => null,
+  ) {
+    try {
+      return await inspect();
+    } catch (cause) {
+      if (context?.dispatch === undefined) throw cause;
+      const childExit = exitFacts();
+      const skew =
+        childExit?.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE ||
+        cause?.code === "ERR_RUNTIME_VERSION_SKEW";
+      throw await detachedFailure(
+        runId,
+        context.dispatch,
+        skew ? "ERR_RUNTIME_VERSION_SKEW" : "ERR_DETACHED_START_FAILED",
+        skew
+          ? "Detached runtime is incompatible; restart the Agent Runner MCP server and retry the same idempotency key."
+          : "Detached recovery inspection failed; retry the same idempotency key.",
+        exitFacts,
+      );
+    }
   }
 
   async function dispatchIsReady(context, runId) {
     const { dispatch, stopCheckpointRevision } = context;
     if (dispatch === undefined || stopCheckpointRevision !== undefined)
       return false;
-    const proof = await runStore.inspectRecoveryDispatch(runId, {
-      id: dispatch.id,
-      expectedRevision: dispatch.expectedRevision,
-    });
+    const proof = await inspectDetached(runId, context, () =>
+      runStore.inspectRecoveryDispatch(runId, {
+        id: dispatch.id,
+        expectedRevision: dispatch.expectedRevision,
+      }),
+    );
     return proof.ready;
   }
 
@@ -509,9 +717,13 @@ export function createMcpControlPlane(options = {}) {
   ) {
     const deadline = dispatchClock() + DISPATCH_TIMEOUT_MS;
     const exited = Promise.withResolvers();
-    let exitCode;
+    let childExit;
     let launched = false;
     let dispatch = intent.record.context.dispatch;
+    const failure = (code, message) =>
+      detachedFailure(runIdValue, dispatch, code, message, () => childExit);
+    const inspect = (operation) =>
+      inspectDetached(runIdValue, { dispatch }, operation, () => childExit);
     if (dispatch !== undefined) {
       normalizeRecoveryDispatch({
         id: dispatch.id,
@@ -528,8 +740,8 @@ export function createMcpControlPlane(options = {}) {
     for (let inspected = 0; inspected < MAX_DISPATCH_INSPECTIONS; inspected++) {
       const remaining = Math.ceil(deadline - dispatchClock());
       if (!Number.isFinite(remaining) || remaining <= 0) break;
-      const exitedBeforeInspection = exitCode !== undefined;
-      const run = (await runner.status(runIdValue)).run;
+      const exitedBeforeInspection = childExit !== undefined;
+      const run = (await inspect(() => runner.status(runIdValue))).run;
       if (
         stopCheckpointRevision !== null &&
         (run.stopRequest === null ||
@@ -539,19 +751,27 @@ export function createMcpControlPlane(options = {}) {
         return;
       let proof = { started: false, ready: false };
       if (dispatch !== undefined)
-        proof = await runStore.inspectRecoveryDispatch(runIdValue, {
-          id: dispatch.id,
-          expectedRevision: dispatch.expectedRevision,
-        });
+        proof = await inspect(() =>
+          runStore.inspectRecoveryDispatch(runIdValue, {
+            id: dispatch.id,
+            expectedRevision: dispatch.expectedRevision,
+          }),
+        );
       if (proof.ready && stopCheckpointRevision === null) return;
-      if (exitCode !== undefined) {
+      if (childExit !== undefined) {
         if (!exitedBeforeInspection) continue;
-        const skew = exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
+        const skew = childExit.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
         const owner =
-          !skew && pipelineRequiresWorktreeLease(run.pipelineId)
-            ? await runStore.worktreeLeaseOwner(run.projectPath, runIdValue)
+          !skew && pipelineRequiresWorktreeLease(run.pipelineId, run.workspace)
+            ? await inspect(() =>
+                runStore.worktreeLeaseOwner(
+                  run.workspace?.leasePath ?? run.projectPath,
+                  runIdValue,
+                ),
+              )
             : null;
-        throw new RunStoreError(
+        throw await failure(
+          skew ? "ERR_RUNTIME_VERSION_SKEW" : "ERR_DETACHED_START_FAILED",
           `Detached ${stopCheckpointRevision === null ? "continuation" : "stop reconciliation"} for run ${runIdValue} exited before durable ${stopCheckpointRevision === null ? "acknowledgement" : "stop settlement"}; retry the same idempotency key.` +
             (skew
               ? " The runtime is incompatible; restart the Agent Runner MCP server."
@@ -559,14 +779,11 @@ export function createMcpControlPlane(options = {}) {
             (owner !== null && owner !== runIdValue
               ? ` The conflicting canonical worktree lease belongs to run ${owner}.`
               : ""),
-          {
-            code: skew
-              ? "ERR_RUNTIME_VERSION_SKEW"
-              : "ERR_DETACHED_START_FAILED",
-          },
         );
       }
-      const live = await runStore.runLeaseOwnerIsLive(runIdValue);
+      const live = await inspect(() =>
+        runStore.runLeaseOwnerIsLive(runIdValue),
+      );
       if (dispatch === undefined) {
         if (rejectLiveOwner && live)
           throw new RunStoreError(
@@ -586,23 +803,25 @@ export function createMcpControlPlane(options = {}) {
           return;
       }
       if (
-        pipelineRequiresWorktreeLease(run.pipelineId) &&
+        pipelineRequiresWorktreeLease(run.pipelineId, run.workspace) &&
         stopCheckpointRevision === null
       ) {
-        const owner = await runStore.worktreeLeaseOwner(
-          run.projectPath,
-          runIdValue,
+        const owner = await inspect(() =>
+          runStore.worktreeLeaseOwner(
+            run.workspace?.leasePath ?? run.projectPath,
+            runIdValue,
+          ),
         );
         if (owner !== null && owner !== runIdValue)
-          throw new RunStoreError(
+          throw await failure(
+            "ERR_WORKTREE_LEASED",
             `Run ${runIdValue} remains durable; retry the same idempotency key after worktree owner ${owner} releases ownership.`,
-            { code: "ERR_WORKTREE_LEASED" },
           );
       }
       const ownerStatus =
         dispatch?.owner == null
           ? null
-          : await runStore.inspectDispatchOwner(dispatch.owner);
+          : await inspect(() => runStore.inspectDispatchOwner(dispatch.owner));
       if (ownerStatus === "unverifiable") break;
       if (!launched && !live && ownerStatus !== "live") {
         // No started event means the child never passed exact-revision admission.
@@ -622,23 +841,50 @@ export function createMcpControlPlane(options = {}) {
           owner: null,
         };
         await intent.updateContext({ ...intent.record.context, dispatch });
-        await launchRun(runIdValue, action, {
-          expectedRuntimeCompatibility: detachedCompatibilityToken,
-          stopCheckpointRevision,
-          dispatch: {
-            id: dispatch.id,
-            expectedRevision: dispatch.expectedRevision,
-          },
-          async onSpawn(owner) {
-            await runStore.inspectDispatchOwner(owner);
-            dispatch = { ...dispatch, owner };
-            await intent.updateContext({ ...intent.record.context, dispatch });
-          },
-          onExit(code) {
-            exitCode = code ?? 1;
-            exited.resolve();
-          },
-        });
+        try {
+          await launchRun(runIdValue, action, {
+            expectedRuntimeCompatibility: detachedCompatibilityToken,
+            stopCheckpointRevision,
+            dispatch: {
+              id: dispatch.id,
+              expectedRevision: dispatch.expectedRevision,
+            },
+            async onSpawn(owner) {
+              await runStore.inspectDispatchOwner(owner);
+              dispatch = { ...dispatch, owner };
+              await intent.updateContext({
+                ...intent.record.context,
+                dispatch,
+              });
+            },
+            onExit(code, signal) {
+              childExit = {
+                exitCode: Number.isSafeInteger(code) ? code : null,
+                signal:
+                  typeof signal === "string" &&
+                  /^SIG[A-Z0-9]{1,29}$/u.test(signal)
+                    ? signal
+                    : null,
+              };
+              exited.resolve();
+            },
+          });
+        } catch (cause) {
+          const skew =
+            childExit?.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE ||
+            cause?.code === "ERR_RUNTIME_VERSION_SKEW";
+          const code = skew
+            ? "ERR_RUNTIME_VERSION_SKEW"
+            : cause?.code === "ERR_DETACHED_OWNERSHIP_PENDING"
+              ? cause.code
+              : "ERR_DETACHED_START_FAILED";
+          throw await failure(
+            code,
+            code === "ERR_RUNTIME_VERSION_SKEW"
+              ? "Detached runtime is incompatible; restart the Agent Runner MCP server and retry the same idempotency key."
+              : "Detached admission failed; retry the same idempotency key.",
+          );
+        }
         launched = true;
         continue;
       }
@@ -651,15 +897,15 @@ export function createMcpControlPlane(options = {}) {
         includeOwnership: true,
       });
       try {
-        await Promise.race([changed, exited.promise]);
+        await inspect(() => Promise.race([changed, exited.promise]));
       } finally {
         wait.abort();
         await changed.catch(() => {});
       }
     }
-    throw new RunStoreError(
+    throw await failure(
+      "ERR_DETACHED_OWNERSHIP_PENDING",
       "Detached ownership recovery remains pending; retry the same idempotency key.",
-      { code: "ERR_DETACHED_OWNERSHIP_PENDING" },
     );
   }
 
@@ -687,14 +933,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    let boundary =
-      existing &&
-      (await dispatchIsReady(existing.context, existing.context.runId))
-        ? null
-        : await runner.validateBoundary({
-            projectPath: input.projectPath,
-            taskPath: input.taskPath,
-          });
+    let boundary = existing
+      ? null
+      : await runner.validateBoundary(runnerStartInput(input));
     const context = { runId: runIdFactory() };
     const action = await runStore.beginAction({
       ...identity,
@@ -708,17 +949,22 @@ export function createMcpControlPlane(options = {}) {
       const completedReceipt = { runId: reservedRunId };
       if (await completeReadyDispatch(action, completedReceipt))
         return completedReceipt;
-      boundary ??= await runner.validateBoundary({
-        projectPath: input.projectPath,
-        taskPath: input.taskPath,
-      });
       let run;
       try {
-        ({ run } = await runner.status(reservedRunId));
+        ({ run } = await inspectDetached(
+          reservedRunId,
+          action.record.context,
+          () => runner.status(reservedRunId),
+        ));
+        boundary = await runner.validateBoundary(
+          runnerStartInput(input),
+          run.workspace ?? { kind: "git" },
+        );
       } catch (cause) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
           throw cause;
         }
+        boundary ??= await runner.validateBoundary(runnerStartInput(input));
         ({ run } = await runner.create(runnerStartInput(input), {
           runId: reservedRunId,
         }));
@@ -735,7 +981,22 @@ export function createMcpControlPlane(options = {}) {
             : input.sourceSession.profile) ||
         run.pipelineState.proactiveClarification !==
           input.proactiveClarification ||
-        (input.mode !== undefined && resolvedMode(run) !== input.mode)
+        (input.mode !== undefined && resolvedMode(run) !== input.mode) ||
+        [
+          "placement",
+          "planKind",
+          "criteriaPath",
+          "sourceReferences",
+          "outputPaths",
+        ].some(
+          (field) =>
+            input[field] !== undefined &&
+            !isDeepStrictEqual(
+              input[field],
+              run.pipelineState.settings?.[field] ??
+                (field === "planKind" ? "commit" : undefined),
+            ),
+        )
       ) {
         throw new Error("Reserved run does not match its MCP action intent.");
       }
@@ -758,7 +1019,15 @@ export function createMcpControlPlane(options = {}) {
       afterRevision: input.cursor,
       limit: input.limit,
     });
-    return { runId: input.runId, mode: resolvedMode(run), ...page };
+    return {
+      runId: input.runId,
+      mode: resolvedMode(run),
+      refinementProgress:
+        getPipeline(run.pipelineId).projections.status(run)
+          .refinementProgress ?? null,
+      refinementProgressRevision: run.revision,
+      ...page,
+    };
   }
 
   async function runWait(input, context = {}) {
@@ -798,21 +1067,33 @@ export function createMcpControlPlane(options = {}) {
       if (cursor < run.revision) {
         continue;
       }
+      const leaseOwner = await runStore.inspectRunLeaseOwner(input.runId);
+      const projection = await projectStatus(current, leaseOwner);
       if (waitIsTerminal(run)) {
-        return { ...(await projectStatus(current)), timedOut: false };
+        return { ...projection, timedOut: false };
+      }
+      const { execution } = projection;
+      // A positively lost owner cannot publish further progress; only an
+      // explicit run_resume recovers its retained checkpoint.
+      if (
+        execution.state === "interrupted" &&
+        ["dead", "replaced"].includes(execution.leaseOwner)
+      ) {
+        return { ...projection, timedOut: false };
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        return { ...(await projectStatus(current)), timedOut: true };
+        return { ...projection, timedOut: true };
       }
-      const changed = await runStore.waitForRunChange(input.runId, {
+      // Every wake, including the deadline, re-evaluates status and ownership
+      // so an owner lost before the deadline never reports a timeout.
+      await runStore.waitForRunChange(input.runId, {
         afterRevision: run.revision,
         timeoutMs: remaining,
         signal: context.signal,
+        includeOwnership: true,
+        ownerBaseline: execution.leaseOwner,
       });
-      if (changed.revision === run.revision && Date.now() >= deadline) {
-        return { ...(await projectStatus(current)), timedOut: true };
-      }
     }
   }
 
@@ -826,7 +1107,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    await runner.status(input.runId);
+    await inspectDetached(input.runId, existing?.context, () =>
+      runner.status(input.runId),
+    );
     const action = await runStore.beginAction({
       ...identity,
       context: {
@@ -857,7 +1140,11 @@ export function createMcpControlPlane(options = {}) {
         await action.updateContext(context);
       }
 
-      let run = (await runner.status(input.runId)).run;
+      let run = (
+        await inspectDetached(input.runId, context, () =>
+          runner.status(input.runId),
+        )
+      ).run;
       let submittedRevision = context.submittedRevision;
       if (
         run.pause?.inputResponse?.requestId === input.requestId &&
@@ -908,7 +1195,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    await runner.status(input.runId);
+    await inspectDetached(input.runId, existing?.context, () =>
+      runner.status(input.runId),
+    );
     const action = await runStore.beginAction({
       ...identity,
       context: {
@@ -923,7 +1212,11 @@ export function createMcpControlPlane(options = {}) {
       const completedReceipt = { runId: input.runId };
       if (await completeReadyDispatch(action, completedReceipt))
         return completedReceipt;
-      const run = (await runner.status(input.runId)).run;
+      const run = (
+        await inspectDetached(input.runId, action.record.context, () =>
+          runner.status(input.runId),
+        )
+      ).run;
       let stopCheckpointRevision = action.record.context.stopCheckpointRevision;
       if (
         stopCheckpointRevision !== undefined &&
@@ -943,7 +1236,11 @@ export function createMcpControlPlane(options = {}) {
         if (input.action !== null) {
           throw new Error("A pending stop accepts only an action-free resume.");
         }
-        if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+        if (
+          await inspectDetached(run.runId, action.record.context, () =>
+            runStore.runLeaseOwnerIsLive(run.runId),
+          )
+        ) {
           throw new RunStoreError(
             `Run ${run.runId} already has a live execution owner.`,
             { code: "ERR_RUN_LEASED" },
@@ -966,7 +1263,11 @@ export function createMcpControlPlane(options = {}) {
               "An interrupted run accepts only an action-free resume.",
             );
           }
-          if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+          if (
+            await inspectDetached(run.runId, action.record.context, () =>
+              runStore.runLeaseOwnerIsLive(run.runId),
+            )
+          ) {
             throw new RunStoreError(
               `Run ${run.runId} already has a live execution owner.`,
               { code: "ERR_RUN_LEASED" },
@@ -998,7 +1299,22 @@ export function createMcpControlPlane(options = {}) {
   }
 
   async function reconcileDetachedStop(receipt) {
-    const run = (await runner.status(receipt.runId)).run;
+    const identity = {
+      key: `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
+      tool: "run_resume",
+    };
+    const existing = await runStore.readAction({
+      ...identity,
+      arguments: (context) => ({
+        runId: receipt.runId,
+        stopCheckpointRevision: context.stopCheckpointRevision,
+      }),
+    });
+    const run = (
+      await inspectDetached(receipt.runId, existing?.context, () =>
+        runner.status(receipt.runId),
+      )
+    ).run;
     const stop = run.stopRequest;
     if (
       stop === null ||
@@ -1006,10 +1322,14 @@ export function createMcpControlPlane(options = {}) {
       stop.requestId !== receipt.requestId
     )
       return;
-    if (await runStore.runLeaseOwnerIsLive(receipt.runId)) return;
-    const identity = {
-      key: `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
-      tool: "run_resume",
+    if (
+      await inspectDetached(receipt.runId, existing?.context, () =>
+        runStore.runLeaseOwnerIsLive(receipt.runId),
+      )
+    )
+      return;
+    const intent = await runStore.beginAction({
+      ...identity,
       arguments: {
         runId: receipt.runId,
         stopCheckpointRevision: stop.checkpoint.revision,
@@ -1019,8 +1339,7 @@ export function createMcpControlPlane(options = {}) {
         expectedRevision: run.revision,
         stopCheckpointRevision: stop.checkpoint.revision,
       },
-    };
-    const intent = await runStore.beginAction(identity);
+    });
     try {
       if (intent.record.status === "completed") return;
       await launchIfNeeded(
@@ -1051,73 +1370,21 @@ export function createMcpControlPlane(options = {}) {
     return receipt;
   }
 
-  async function unexpectedIssueReport(input) {
-    const projectPath = await reportingGit.resolveProject(input.projectPath);
-    const boundary = await runStore.validateStateBoundary({
-      projectPath,
-      taskPath: projectPath,
-    });
-    const argumentsValue = {
-      ...actionArguments(input),
-      projectPath: boundary.projectPath,
-    };
-    const identity = {
-      key: input.idempotencyKey,
-      tool: "unexpected_issue_report",
-      arguments: argumentsValue,
-    };
-    const existing = await runStore.readAction(identity);
-    if (existing?.status === "completed") {
-      return existing.result;
-    }
-    const action = await runStore.beginAction({
-      ...identity,
-      context: {
-        issuesPath: null,
-        publicationPhase: null,
-        projectPath: null,
-        reportPath: null,
-        temporaryPath: null,
-      },
-    });
-    try {
-      if (action.record.status === "completed") {
-        return action.record.result;
-      }
-      const reportPath = await issueReporter.report(argumentsValue, {
-        reservedIssuesPath: action.record.context.issuesPath,
-        reservedPath: action.record.context.reportPath,
-        reservedPublicationPhase: action.record.context.publicationPhase,
-        reservedProjectPath: action.record.context.projectPath,
-        reservedTemporaryPath: action.record.context.temporaryPath,
-        async prepare(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-        async publish(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-        async reserve(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-      });
-      const receipt = { reportPath };
-      await action.complete(receipt);
-      return receipt;
-    } finally {
-      await action.release();
-    }
-  }
-
   return Object.freeze({
+    updateCheck: (input) =>
+      updateService().check(updateCheckSchema.parse(input)),
+    updateApply: (input, context) => {
+      const value = updateApplySchema.parse(input);
+      return detachedAction(
+        "update_apply",
+        (request) => {
+          const { operatorInitiated: _operator, ...selection } = request;
+          return updateService().apply(selection);
+        },
+        value,
+        context,
+      );
+    },
     guidanceRead: (input) => guidanceService().read(input),
     guidanceUpdate: (input) => guidanceService().update(input),
     pipelinesList,
@@ -1144,7 +1411,10 @@ export function createMcpControlPlane(options = {}) {
       detachedAction("run_start", runStart, input, context),
     runStatus,
     runWait,
-    unexpectedIssueReport,
+    issuesList: (input) => issueService().list(input),
+    issuesRead: (input) => issueService().read(input),
+    issuesUpdate: (input) => issueService().update(input),
+    unexpectedIssueReport: (input) => issueService().report(input),
   });
 }
 
@@ -1182,6 +1452,30 @@ export function createMcpServer(options = {}) {
   };
 
   server.registerTool(
+    "update_check",
+    {
+      description:
+        "On-demand official release and compatibility check. Distinguishes installed package from running server. No installation, automatic checks, client restart or run resume. Unapproved identity and linked development remain blocked.",
+      inputSchema: updateCheckSchema,
+      annotations: { ...readOnly, openWorldHint: true },
+    },
+    async (input) => result(await control.updateCheck(input)),
+  );
+  server.registerTool(
+    "update_apply",
+    {
+      description:
+        "Apply an official update only on explicit managing-operator invocation. Persist exact selection and outcomes; retry the same idempotency key and arguments. Disconnect cancels only waiting. Another live runtime defers activation; restart the owning client explicitly. Never grants pipeline sessions global-update authority or rolls back persisted migrations.",
+      inputSchema: updateApplySchema,
+      annotations: { ...mutating, openWorldHint: true },
+    },
+    async (input, context) =>
+      detachedResult(() =>
+        control.updateApply(input, { signal: context.mcpReq.signal }),
+      ),
+  );
+
+  server.registerTool(
     "guidance_read",
     {
       description:
@@ -1214,12 +1508,14 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined adds primary convergence before independent review and is available for all three pipelines. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
+        "Start a durable pipeline. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined is available for all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runStart(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runStart(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_status",
@@ -1239,7 +1535,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runPause(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runPause(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_cancel",
@@ -1250,7 +1548,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runCancel(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runCancel(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_activity",
@@ -1272,7 +1572,7 @@ export function createMcpServer(options = {}) {
     "run_wait",
     {
       description:
-        "Wait once for user input, completion, cancellation, failure, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
+        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
       inputSchema: z
         .object({
           runId,
@@ -1306,8 +1606,8 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(
-        await control.runRespond(input, { signal: context.mcpReq.signal }),
+      detachedResult(() =>
+        control.runRespond(input, { signal: context.mcpReq.signal }),
       ),
   );
   server.registerTool(
@@ -1319,14 +1619,47 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runResume(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runResume(input, { signal: context.mcpReq.signal }),
+      ),
+  );
+  // Backlog management stays available when deliberate capture is disabled.
+  server.registerTool(
+    "issues_list",
+    {
+      description:
+        "List the private per-user global issue backlog across all projects and statuses by default. Filter by exact recorded origin path or statuses; ordered by creation time then ID with an opaque nextCursor. Reads only the issue store, never origin projects.",
+      inputSchema: issuesListSchema,
+      annotations: readOnly,
+    },
+    async (input) => result(await control.issuesList(input)),
+  );
+  server.registerTool(
+    "issues_read",
+    {
+      description:
+        "Read one global issue: preserved Markdown, tracking record, revision and documentHash. Works after the origin checkout is deleted.",
+      inputSchema: issuesReadSchema,
+      annotations: readOnly,
+    },
+    async (input) => result(await control.issuesRead(input)),
+  );
+  server.registerTool(
+    "issues_update",
+    {
+      description:
+        "Update only an issue's tracking status, plan and commit references, or disposition note using its expected revision and documentHash. Omitted fields stay unchanged; empty arrays or null clear them. Retry with the same idempotency key and arguments; a stale revision fails without change.",
+      inputSchema: issuesUpdateSchema,
+      annotations: mutating,
+    },
+    async (input) => result(await control.issuesUpdate(input)),
   );
   if (issueReportingEnabled) {
     server.registerTool(
       "unexpected_issue_report",
       {
         description:
-          "Create one deliberate local report only after the supervising client agent explicitly concludes Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable. Supply only concise English Markdown explicitly; no logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics are collected automatically.",
+          "Create one deliberate issue in the private per-user global issue store only after the supervising client agent explicitly concludes Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable. Supply only concise English Markdown explicitly; no logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics are collected automatically.",
         inputSchema: unexpectedIssueReportSchema,
         annotations: localCreation,
       },
@@ -1358,10 +1691,31 @@ export async function serveMcp(options = {}) {
         issueReportingEnabled: configuration.issueReporting,
         runnerConfiguration: configuration,
       }));
-  return serveStdio(createServer, {
-    ...(options.transport === undefined
-      ? {}
-      : { transport: options.transport }),
+  const stdin = options.stdin ?? process.stdin;
+  const transport =
+    options.transport ??
+    new StdioServerTransport(stdin, options.stdout ?? process.stdout);
+  const closed = Promise.withResolvers();
+  closed.promise.catch(() => {});
+  const start = transport.start.bind(transport);
+  transport.start = async () => {
+    const onclose = transport.onclose;
+    transport.onclose = () => {
+      try {
+        onclose?.();
+      } finally {
+        closed.resolve();
+      }
+    };
+    try {
+      await start();
+    } catch (error) {
+      closed.reject(error);
+      throw error;
+    }
+  };
+  const handle = serveStdio(createServer, {
+    transport,
     onerror(error) {
       const code =
         typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
@@ -1370,4 +1724,19 @@ export async function serveMcp(options = {}) {
       stderr.write(`Agent Runner MCP error: ${code}.\n`);
     },
   });
+  if (options.transport === undefined) {
+    // The SDK transport does not close itself when its input ends.
+    const close = () => {
+      handle.close().catch(closed.reject);
+    };
+    const cleanup = () => {
+      stdin.off("end", close);
+      stdin.off("close", close);
+    };
+    stdin.once("end", close);
+    stdin.once("close", close);
+    closed.promise.then(cleanup, cleanup);
+    if (stdin.readableEnded || stdin.destroyed) close();
+  }
+  return { ...handle, closed: closed.promise };
 }

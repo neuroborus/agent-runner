@@ -278,6 +278,43 @@ test("guidance action intents preserve metadata and replay bounded receipts", as
   );
 });
 
+test("action inspection resolves exact arguments from immutable saved context", async (t) => {
+  const { store, created } = await createFixture(t);
+  const runId = created.state.runId;
+  const identity = {
+    key: "stop-recovery-context",
+    tool: "run_resume",
+    arguments: { runId, stopCheckpointRevision: 1 },
+    context: { runId, stopCheckpointRevision: 1 },
+  };
+  const inspection = {
+    ...identity,
+    arguments(context) {
+      assert.equal(Object.isFrozen(context), true);
+      return { runId, stopCheckpointRevision: context.stopCheckpointRevision };
+    },
+  };
+  assert.equal(await store.readAction(inspection), null);
+  const action = await store.beginAction(identity);
+  try {
+    assert.deepEqual(await store.readAction(inspection), action.record);
+    await assert.rejects(
+      store.readAction({
+        ...inspection,
+        arguments: () => ({ runId, stopCheckpointRevision: 2 }),
+      }),
+      { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+    );
+    await assert.rejects(
+      store.readAction({ ...inspection, tool: "run_respond" }),
+      { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+    );
+    assert.equal((await store.readAction(identity)).status, "intent");
+  } finally {
+    await action.release();
+  }
+});
+
 test("writes only confined run artifacts with atomic replacement", async (t) => {
   const { created, store, workspace } = await createFixture(t);
   const artifactPath = await store.writeRunArtifact(
@@ -288,6 +325,15 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
   await store.writeRunArtifact(created.lease, "context/worker.md", "second\n");
 
   assert.equal(await readFile(artifactPath, "utf8"), "second\n");
+  await store.writeRunArtifact(
+    created.lease,
+    "events-summary.md",
+    "Summary only.\n",
+  );
+  assert.equal(
+    (await store.loadRun(created.state.runId)).revision,
+    created.state.revision,
+  );
   assert.deepEqual(await readdir(join(created.directoryPath, "context")), [
     "worker.md",
   ]);
@@ -301,6 +347,8 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
     "STATE.JSON",
     "./state.json",
     "events.jsonl",
+    "events-000001.jsonl",
+    "EVENTS-000001.JSONL",
     ".lease",
     "context/",
     "context\\",
@@ -520,7 +568,10 @@ test("reads a complete worktree lease during no-replace publication", async (t) 
   const { created, projectPath, stateRoot, store } = await createFixture(t, {
     onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
   });
-  const paused = barrier.pause((boundary) => boundary.phase === "published");
+  const paused = barrier.pause(
+    (boundary) =>
+      boundary.filePath.endsWith("/.lease") && boundary.phase === "published",
+  );
   const acquisition = store.acquireWorktreeLease(
     projectPath,
     created.state.runId,
@@ -1069,6 +1120,144 @@ test("removes an incomplete run when initialization fails", async (t) => {
     /initialization interrupted/u,
   );
   assert.deepEqual(await readdir(join(stateRoot, "runs")), []);
+});
+
+test("live process custody admits only the active role's child acknowledgement", async (t) => {
+  const { created, store } = await createFixture(t, {
+    hostName: "test-host",
+    processIsAlive: () => true,
+    processIdentity,
+  });
+  const { lease } = created;
+  const child = { role: "reviewer", sessionId: "codex:reviewer-child" };
+  const turn = { role: "reviewer", phase: "review" };
+  const processActive = { code: "ERR_EXECUTION_PROCESS_ACTIVE" };
+  await store.transitionRun(lease, {
+    pipelineState: { workflowState: "REVIEW" },
+  });
+
+  await store.recordExecutionProcess(lease, 4242);
+  await assert.rejects(store.recordChildSession(lease, child), processActive);
+  await store.recordExecutionProcess(lease, null);
+  await store.startAgentTurn(lease, turn, {
+    activity: {
+      actor: "reviewer",
+      phase: "review",
+      kind: "turn-started",
+      message: "Reviewer turn started.",
+    },
+  });
+  const live = await store.recordExecutionProcess(lease, 4242);
+
+  await assert.rejects(
+    store.recordChildSession(lease, { ...child, role: "planner" }),
+    processActive,
+  );
+  await assert.rejects(
+    store.recordChildSession(lease, { ...child, contextKey: "invalid" }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  const acknowledged = await store.recordChildSession(lease, child);
+  assert.deepEqual(acknowledged.sessionLineage.children, [child]);
+  const custody = ({ revision, updatedAt, sessionLineage, ...state }) => state;
+  assert.deepEqual(custody(acknowledged), custody(live));
+  await assert.rejects(store.recordChildSession(lease, child), {
+    code: "ERR_DUPLICATE_CHILD_SESSION",
+  });
+  for (const operation of [
+    () => store.finishAgentTurn(lease, turn),
+    () => store.transitionRun(lease, { counters: { rounds: 1 } }),
+    () => lease.release(),
+  ]) {
+    await assert.rejects(operation(), processActive);
+  }
+
+  await store.requestOperatorStop({
+    runId: live.runId,
+    kind: "pause_requested",
+    expectedRevision: acknowledged.revision,
+    idempotencyKey: "pause-key",
+  });
+  await assert.rejects(
+    store.recordChildSession(lease, {
+      ...child,
+      sessionId: "codex:late-child",
+    }),
+    { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
+  );
+  await store.recordExecutionProcess(lease, null);
+});
+
+test("live process custody admits only the active role's session naming", async (t) => {
+  const { created, store } = await createFixture(t, {
+    hostName: "test-host",
+    processIsAlive: () => true,
+    processIdentity,
+  });
+  const { lease } = created;
+  const child = { role: "reviewer", sessionId: "codex:reviewer-child" };
+  const naming = { ...child, status: "named" };
+  const activity = {
+    actor: "reviewer",
+    phase: "session",
+    kind: "session-naming",
+    message: "Session naming: named.",
+  };
+  const processActive = { code: "ERR_EXECUTION_PROCESS_ACTIVE" };
+  await store.transitionRun(lease, {
+    pipelineState: { workflowState: "REVIEW" },
+  });
+  await store.startAgentTurn(
+    lease,
+    { role: "reviewer", phase: "review" },
+    {
+      activity: {
+        actor: "reviewer",
+        phase: "review",
+        kind: "turn-started",
+        message: "Reviewer turn started.",
+      },
+    },
+  );
+  await store.recordExecutionProcess(lease, 4242);
+  const live = await store.recordChildSession(lease, child);
+
+  await assert.rejects(
+    store.transitionRun(lease, {}, { activity }),
+    processActive,
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, { ...naming, status: "renamed" }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, {
+      ...naming,
+      sessionId: "codex:unknown-child",
+    }),
+    { code: "ERR_INVALID_CHILD_SESSION" },
+  );
+  await assert.rejects(
+    store.recordSessionNaming(lease, { ...naming, role: "planner" }),
+    processActive,
+  );
+  const named = await store.recordSessionNaming(lease, naming);
+  const custody = ({ revision, updatedAt, ...state }) => state;
+  assert.deepEqual(custody(named), custody(live));
+  const { events } = await store.loadRunHistory(live.runId);
+  assert.deepEqual(events.at(-1).activity, activity);
+  await assert.rejects(lease.release(), processActive);
+
+  await store.requestOperatorStop({
+    runId: live.runId,
+    kind: "pause_requested",
+    expectedRevision: named.revision,
+    idempotencyKey: "pause-key",
+  });
+  await assert.rejects(store.recordSessionNaming(lease, naming), {
+    code: "ERR_STOP_RECONCILIATION_REQUIRED",
+  });
+  await store.recordExecutionProcess(lease, null);
 });
 
 test("validates opaque state and public activity without interpreting it", async (t) => {

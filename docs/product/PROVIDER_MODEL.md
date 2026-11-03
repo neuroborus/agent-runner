@@ -23,8 +23,51 @@ Reviewer session; the Arbiter always starts fresh.
 Before work, an adapter proves the capabilities required by the role: structured
 output, read-only inspection, safe workspace writes when applicable, remote
 write blocking, native session behavior, and constrained local commit when the
-pipeline needs it. A capability probe does not prove authentication or provider
+pipeline needs it. A selected named Codex profile is also validated model-free
+on the actual App Server startup path before work; a profile that does not
+apply there fails preflight with a bounded diagnostic and is never ignored or
+replaced. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
+
+The adapter boundary supports explicitly declared ordinary-directory access in
+Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux with proved
+command isolation. Read-only analysis and confined output access have
+separate capability receipts and require no Git repository or local-commit
+readiness. Inputs, references, configuration, artifacts, infrastructure and
+discovered controls stay read-only; only declared outputs may change. Native
+permission paths containing glob metacharacters are rejected to preserve literal
+declarations. Claude directory writes use sandboxed Bash, with native Edit/Write
+omitted. Its output roots must already exist as files or directories for exact
+bind mounts; preparation never creates them or grants their parents write access.
+New content can be created inside a declared output directory. Its native and
+restricted-host probes use ordinary directories without Git or commit preparation.
+The policy survives continuation and reconstruction with existing
+command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
+declaration before provider work. Custom authoring uses read-only directory
+turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+owns its exact fields and native mapping.
+
+Execution and polishing may supply `readPaths` containing one exact selected
+finalization Markdown file. Adapters reject directories and malformed declarations
+before launch. Codex retains its root read policy and protects the exact file in
+declared directory permissions; Claude carries it into existing read-only
+command mounts and write exclusions. Neither grants the parent or host temporary
+storage. The selected file is excluded from provider storage allocation, and
+pipeline identity/content checks surround guidance-consuming work.
+
+The runner probes every declared directory access separately. Custom execution
+pins the writable receipt after output preparation, independently of its startup
+read-only receipt; other directory roles pin their combined startup receipt.
+It reproduces the applicable receipts before use on resume,
+retains native continuation support, and supplies only the saved path policy to
+turns. Neither directory analysis nor output work requests a commit capability.
+Init is a narrow setup exception: authorized clarification may add exact inspected
+read trees before selection freezes. Root reproves active roles and journals the
+binding under the execution/workspace leases, preserving all output and retrieval
+permissions. After verifying Runner-owned publication, resume may refresh its
+read-only policy receipts for the created identities. The provider version,
+capability flags and access requirements retain their original frozen fingerprint. It reconciles pending effects
+before another agent turn; other pipelines retain their frozen receipt contracts.
 
 Adapter execution options and turn requests also accept the portable effort
 values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
@@ -113,6 +156,78 @@ Agents never perform adapter cleanup, and Codex's lifecycle is unchanged.
 
 ## Sessions and context
 
+Runner supplies a strict frozen `sessionNaming` context on each invoked role:
+`{ runId, project, pipeline, role }`. `runId` is the full existing Runner UUID;
+the three descriptions are single-line, sanitized and limited to 128 Unicode
+code points each. Project description uses only the workspace basename. Native
+IDs stay opaque and private, and client attribution remains a separate identity.
+Inactive roles receive no request or naming context.
+
+The awaited `onSessionCreated(sessionId)` acknowledgement preserves each verified
+new child under the execution lease and its pipeline-owned context key. It must
+finish before a naming diagnosis or metadata failure is returned. Ordinary
+continuation has no creation acknowledgement and cannot retroactively name an
+existing session. Fresh native
+reconstruction retains the same Runner context and acknowledges its new child.
+Codex acknowledges after verified thread selection, before model work; Claude
+acknowledges validated child results, including recoverable error results, before
+compaction, failure propagation or returning success.
+A recorded child takes precedence over uncertainty about source-fork effects.
+A proof that no model turn ran cannot renew a fork already acknowledged as created.
+After authentication, output exhaustion or a backend pause, the first continued request includes
+the full recovery context: creation alone does not prove prompt delivery.
+
+An adapter may then await `onSessionNaming({ status })`, where status is exactly
+`named`, `rejected`, `unsupported` or `unavailable`. Runner journals at most one
+bounded activity record for each acknowledged child. It includes only the
+status and role. The diagnosis cannot change lineage, workflow state, observations,
+correction counters, availability or inactivity allowances. A metadata diagnosis
+alone authorizes no model-turn replay, another source fork, fresh replacement or
+commit/handoff effect. Adapters retain native naming RPC/flag ownership; this
+shared context alone changes no provider title or historical session.
+
+Codex uses the documented [App Server](https://developers.openai.com/codex/app-server/)
+`thread/name/set` request with exactly `{ threadId, name }` and validates its
+object response. After validated `thread/start` or direct-child `thread/fork`
+selection, it awaits durable creation acknowledgement before naming and model
+work. Naming context requires that acknowledgement callback. The name is
+`[<full Runner runId>] <project> / <pipeline> / <role>`, with the combined
+description limited to 128 Unicode code points; the UUID is never truncated.
+It constructs this name from Runner context rather than prefixing an inherited
+native title. `thread/resume` performs no naming, preserving user edits, while
+fresh reconstruction names only the verified new replacement child.
+
+A usable RPC rejection reports `rejected` or, for method-not-found, `unsupported`
+and proceeds with the one original turn. Native errors and title text are never
+included in the diagnosis. Transport loss or a malformed naming response reports
+`unavailable` and pauses the original request with its saved child; it cannot
+trigger adapter reconstruction, another source fork or a constrained Git effect.
+There is no naming retry or retrospective rename. Capability/version bounds and
+client attribution remain unchanged; older unsupported RPCs are optional metadata
+failures rather than authority to replace a session. Live naming smoke remains opt-in.
+
+Claude uses the documented [CLI `--name` flag](https://code.claude.com/docs/en/cli-reference)
+with the same full UUID prefix and bounded description as Codex. Fresh launches,
+`--resume <source> --fork-session` children and fresh reconstruction include the
+flag; ordinary `--resume <child>` continuation and in-session compaction omit it.
+The adapter never derives a name from an existing title or edits session storage.
+It checks the installed help's exact flag before a new-child launch. Unsupported
+naming pauses before launch; proof that its first launch did not start preserves
+any unused source fork, and no fresh-reconstruction allowance is consumed for naming.
+If an earlier continuation already ran, its effect uncertainty is preserved.
+
+Claude applies the name within its original CLI process, so creation cannot be
+acknowledged before that process starts. Validated results acknowledge the child
+before the naming receipt. A recognized native naming rejection also retains a
+verified initialization identity when no result arrives, then returns only a
+bounded diagnosis and recoverable pause. It never retries without the flag,
+forks again or replays a turn or constrained effect to repair a title. Permission
+and interruption failures keep their stronger safety semantics. Ordinary context
+recovery remains separate and never renames its continued session. Existing
+histories receive no migration or retrospective naming. Installed help inspection
+and model-free fixtures establish local compatibility, not opt-in live-provider
+or additional-platform acceptance.
+
 Native sessions are disposable execution context, never durable workflow
 state. Every turn has a complete recovery prompt reconstructed from persisted
 inputs, summaries, decisions, fingerprints, and repository evidence. A
@@ -141,8 +256,17 @@ needed, strengthens it. The launcher applies an architecture-checked
 Runner-owned seccomp filter through the pinned real bubblewrap binary, which it
 executes once with the single validated user namespace. The Claude CLI stays
 outside that command boundary so its authentication environment and provider
-transport remain usable. The direct model-free
-fallback probe invokes the same launcher grammar and access-specific topology.
+transport remain usable. Both policies reach their launcher whether Claude
+selects bubblewrap from the spawning-parent policy or from `PATH`, and both
+proofs require that selection. A readable administrator managed setting that
+could select another bubblewrap leaves every access mode unavailable, and a
+Runner command shell refuses any command that reaches it through a bubblewrap
+other than the authenticated launcher, including one chosen by server-managed
+policy. The direct model-free
+fallback probe invokes the same launcher grammar and access-specific topology
+with Claude's producer-ordered arguments for the effective settings.
+Workspace-write proofs create a source directory and create, rename, and
+unlink a file there; read-only proofs require those changes to fail.
 It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname
@@ -191,9 +315,10 @@ mutations remain outside that turn. Polishing never requests local commit.
 Model-free capability subprocesses for CLI, sandbox, commit-executor, and
 process-containment proofs each have a fixed 10-second deadline. Within that
 bound, a local-commit probe has a one-second network-denial observation
-deadline and fails closed when a silent socket cannot prove isolation. Both
-providers' pre-effect local-commit Git metadata lookups also use the 10-second
-bound; this preparation deadline does not cap the authorized commit effect
+deadline and fails closed when a silent socket cannot prove isolation. Codex's
+pre-effect local-commit Git metadata lookup uses a 60-second bound; Claude's
+pre-effect local-commit Git metadata lookup retains the 10-second bound.
+These preparation deadlines do not cap the authorized commit effect
 after it begins. Codex MCP configuration discovery needed to construct
 isolation gets at most two attempts with a 30-second subprocess deadline apiece
 and no added retry delay; exhaustion reports provider unavailability before a
@@ -201,6 +326,19 @@ model turn. Codex model-catalog discovery makes at most 32 page requests, each
 asking for 100 entries, so a malformed or cyclic provider response cannot make
 discovery unbounded. These are protocol and safety bounds rather than user-work
 budgets, so they are intentionally not configuration settings.
+
+Structured role results have 2 MiB of serialized UTF-8 JSON headroom in every
+pipeline. This byte ceiling does not describe native output tokens, change
+model generation settings, or prove complete provider accounting. Adapter
+prompt/reconstruction and protocol envelopes accommodate accepted results and
+JSON escaping; the exact enclosing limits belong to
+[`ARCHITECTURE.md`](../ARCHITECTURE.md#structured-result-headroom). Semantic
+field limits and native failure classification remain independent.
+
+Codex reads only the complete current turn when hydrating a summarized
+completion and omits history from continuation and fork responses. Repeated
+accepted large results therefore do not accumulate into one protocol response;
+current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
 
@@ -213,16 +351,21 @@ accounting, and raw command output. Overlapping commands retain independent
 lifetimes; activity is cleared only after matching completion or proven process
 retirement. Codex uses scoped App Server notifications; Claude uses bounded
 validated stream JSON and preserves its terminal structured-result and failure
-contracts. This internal signal adds no public activity, deadline, or retry.
-Owned supervisors wait for durable registration, including their bounded
-launch-time boot/PID/start ancestry baseline and control-group identity, before
-launching work. Live
-supervision and owner-loss recovery receive the same frozen evidence and may
-exclude a new unrelated process only after its stabilized lineage reaches an
-unchanged baseline identity. A baseline anchor never bypasses observed session
-or ownership-token evidence. A same-user process with inaccessible current
-environment is unrelated only when its stable control-group identity differs
-from the owner; missing or matching evidence remains conservative. A provider
+contracts, accepting a trailing initialization record only for the session its
+result completed. This internal signal adds no public activity, deadline, or
+retry.
+Owned supervisors wait for durable registration of their boot/start identity and
+PID namespace before launching work. Live supervision and owner-loss recovery
+share positive association through the owned session, matching launch token or
+observed owned ancestry. Available ancestry continues through inaccessible
+environments; observed association survives subsequent evidence loss.
+Unassociated processes neither block progress nor receive signals because their
+metadata is unreadable, their session is newer or their cgroup is shared.
+Historical ancestry/control-group fields remain strictly validated but optional;
+new launches store null values. Shared-host discovery cannot prove absence
+against arbitrary same-user processes hiding all ancestry and token evidence.
+The [safety contract](SAFETY_MODEL.md#inputs-artifacts-and-state) owns bounded
+inspection and retirement. A provider
 adapter declares `native-sandbox-provider` only for an
 execution that requires a native sandbox. That mode uses a private PID
 namespace only after the complete nested namespace shape is proven; when
@@ -257,11 +400,11 @@ Adapters classify native failures into one finite provider-neutral control
 surface. Each record contains exactly a failure class, checkpoint, outcome,
 effect evidence, and retry eligibility, plus optional commit-executor proof,
 finite provider-neutral `availabilityReason`, and an optional process outcome
-with only an exit code or signal. The optional finite `disposition` currently
-admits only `authentication_required`. It marks a terminal rejected response
-with no started effect and cannot coexist with availability or process-outcome
-evidence; it remains separate from authorization, permission, usage-limit,
-malformed-request, and ambiguous-effect classifications.
+with only an exit code or signal. The optional finite `disposition` admits
+`authentication_required` and `output_exhausted`. Each marks a terminal rejected
+response without started-effect evidence and cannot coexist with availability
+or process-outcome evidence. Authentication remains separate from authorization,
+permission, usage-limit, malformed-request, and ambiguous-effect classifications.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
@@ -313,6 +456,12 @@ local-commit executor never started. Raw cause fields cannot override the
 validated record. Provider flags, transports, sandbox composition, protocol
 parsing, and native error recognition remain inside the provider directory.
 
+Before replacement separation, provider-owned exact-file read admission checks
+the verified external source paths against host readability and the selected
+command policy. It starts no model turn and grants no new filesystem access.
+Unavailable admission retains the candidate under the execution-owned
+environment pause; native text reads do not prove binary reconstruction access.
+
 Normalized `authentication_required` failures enter the shared durable
 reauthentication pause only after the runner proves the repository is safe;
 they never enter availability backoff and retire any active episode they
@@ -337,7 +486,24 @@ declarations do not replace deterministic pipeline validation: both
 plan-execution terminal roles still reject duplicate finalization finding IDs,
 out-of-bounds or non-member IDs, and IDs outside rejected terminal results.
 
-Codex refines native `other` failures only when bounded, validated HTTP status
+Codex recognizes the exact native response-incomplete diagnostic for
+`max_output_tokens` in failed `other` completions and supported `turn/start`
+server-error responses. It emits terminal `ERR_CODEX_OUTPUT_EXHAUSTED` /
+`turn_output_exhausted` with provider-neutral `disposition: "output_exhausted"`
+and a fixed safe message. Reported-item auditing retains precedence. This failure
+starts no automatic fresh replay, context compaction, availability or quota
+recovery, or structured-output correction. Local-commit readiness still proves
+that the executor never started. The incomplete reason alone proves neither a
+numeric output ceiling nor context utilization; missing and incomplete usage
+remain explicit. Native text, tool output, and additional details are not retained.
+
+Pipelines own the durable `output_exhausted` pause after reconciliation. It
+retains accepted progress and bounded role/checkpoint evidence, never partial
+provider output. Explicit operator retry preserves source-fork isolation and
+correction accounting. A consumed commit remains verification-only unless
+validated not-started proof and Git verification retire its unused authorization.
+
+Codex also refines native `other` failures when bounded, validated HTTP status
 and structured error-envelope evidence identify a non-transient client error.
 For example, HTTP 400 `invalid_request_error` / `invalid_json_schema` becomes
 terminal `ERR_CODEX_TURN_FAILED` with `turn_bad_request`, a fixed message, and
@@ -374,11 +540,12 @@ one-shot authorization can be retired and the `COMMIT` checkpoint resumed.
 
 The remaining Codex `turn_other` and the explicit native `serverOverloaded`
 variant, normalized as `turn_server_overloaded`, are recoverable provider
-failures unless a validated client envelope rejects the request. Native
-transport/server failures with explicit availability evidence are also
-recoverable. The adapter audits reported turn items first so policy, protocol, and
-isolation violations retain precedence. An ordinary non-commit request without availability evidence uses the
-existing single fresh reconstruction from its complete persisted recovery
+failures unless output exhaustion is recognized or a validated client envelope
+rejects the request. Native transport/server failures with explicit availability
+evidence are also recoverable. The adapter audits reported turn items first so
+policy, protocol, and isolation violations retain precedence. An ordinary
+non-commit request without availability evidence uses the existing single fresh
+reconstruction from its complete persisted recovery
 context and the observed workspace. A second failure returns to the pipeline
 without another adapter retry and pauses as `backend_unavailable` at the safe
 checkpoint when it remains recoverable. Writable workflows first reconcile safe
@@ -406,12 +573,30 @@ provider branches to pipeline policy.
 
 ## Provider inactivity
 
+Adapters optionally report bounded numeric usage and payload-free command and
+compaction facts through the public agent boundary. Native correlation stays
+private; missing values and incomplete terminal accounting remain explicit.
+The runner connects them to durable attempt evidence on success, failure,
+cancellation, compaction, and fresh reconstruction. CLI and MCP expose bounded,
+allowlisted numeric diagnostics, keeping runner-supplied UTF-8 payload sizes
+separate from native token counters. Referenced files are not assumed read;
+unknown and incomplete accounting stays explicit, including failed usage and
+results. No prompt, reasoning text, transcript, tool output, credential, native
+identifier, or arbitrary provider message enters these diagnostics.
+They change no workflow, progress, retry, or configuration. Observation
+settlement cannot replace an established ownership, isolation, or effect failure
+or extend a running inactivity deadline.
+The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
+owns snapshot scopes, inclusion rules, bounds, and provider mappings. The
+inspected Codex public protocol exposes no numeric generation-budget control;
+model output ceilings do not establish the effective Codex service limit.
+
 Adapters await the runner's `onFreshSession` reservation before native fresh
 fallback; a false result preserves the original failure. After validated
 local-commit readiness they await `onCommitExecution` before any constrained
 effect. These internal callbacks carry no provider payload or additional authority.
 
-All three pipelines apply the same frozen `providerInactivityTimeoutMs` policy
+All registered pipelines apply the same frozen `providerInactivityTimeoutMs` policy
 to Codex and Claude turns. Its default is 30 minutes; root and project settings
 accept strict positive integers up to 2147483647 milliseconds, with project
 precedence and no transport override. Resume keeps the saved setting, and
@@ -429,6 +614,10 @@ pipeline then reconciles read-only safety or safe partial writes and corrections
 One fresh reconstruction is shared with existing native fresh fallback, reserved
 durably before launch, and never replenished by restart. It uses the same logical
 role and complete durable request without reforking the supplied source.
+Common-envelope version 20 records a distinct nullable expiry revision. Generic
+fresh fallback and legacy reconstruction markers consume the shared allowance
+without proving inactivity; `expiryProven` makes this distinction public. They
+cannot grant timeout-specific recovery or relax correction budgets.
 Repeated inactivity enters resumable `backend_unavailable` with the fixed
 `ERR_PROVIDER_INACTIVE` code. An explicit offered resume makes one attempt;
 it does not grant another automatic retry. Only a returned response and matching

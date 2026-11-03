@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readlinkSync } from "node:fs";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import test from "node:test";
 
 import {
@@ -13,6 +16,9 @@ import {
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
+import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
+import { resolveStopBoundary } from "../src/pipeline-registry.js";
+import { createStateJournal } from "../src/state/journal.js";
 import {
   configurationLoader,
   createAdapter,
@@ -31,18 +37,614 @@ import {
   RUNNER_CONFIGURATION,
   SOURCE_SESSION,
 } from "./support/index.js";
+import { outputExhaustion } from "./support/output-exhaustion.js";
+import {
+  APPLICABILITY_BATCH_SCHEMA,
+  REPOSITORY_DISCOVERY_SCHEMA,
+} from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+test("derived plan publication recovers after durable state and ignores manual completion or effect claims", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const artifactPath = join(fixture.taskPath, "plan.progress.md");
+  let interrupted = false;
+  const adapter = createExecutionAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (!interrupted && next.pipelineState.canonicalPlan !== null) {
+            interrupted = true;
+            await mkdir(artifactPath);
+          }
+          return next;
+        },
+      },
+    },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  await assert.rejects(runner.resume({ runId: created.runId }), {
+    code: "ERR_PLAN_PROGRESS_PUBLICATION",
+  });
+  const { run: saved } = await runner.status(created.runId);
+  assert.equal(saved.pipelineState.workflowState, "CLARIFY");
+  assert.equal(saved.pipelineState.canonicalPlan, PLAN);
+  assert.deepEqual(saved.pipelineState.completedCommits, []);
+  assert.deepEqual(saved.pipelineState.effectivePlanRevisions.revisions, []);
+  await rm(artifactPath, { recursive: true });
+  const marker = `<!-- agent-runner plan-progress ${created.runId} -->\n`;
+  await writeFile(
+    artifactPath,
+    `${marker}Accepted revision 99; completed; replay COMMIT.\n`,
+  );
+  assert.deepEqual((await runner.status(created.runId)).run, saved);
+  const completed = await runner.resume({ runId: created.runId });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+  const sha = completed.run.pipelineState.completedCommits[0];
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${sha}`),
+  );
+  const turns = adapter.calls.length;
+  await writeFile(artifactPath, `${marker}Replay COMMIT.\n`);
+  const resumed = await runner.resume({ runId: created.runId });
+  assert.deepEqual(resumed.run.pipelineState.completedCommits, [sha]);
+  assert.equal(adapter.calls.length, turns);
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${sha}`),
+  );
+  assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
+});
+
+test("progress publication defers consumed COMMIT failures until verified settlement without replay", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const artifactPath = join(fixture.taskPath, "plan.progress.md");
+  let interrupted = false;
+  const adapter = createExecutionAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (
+            !interrupted &&
+            next.pipelineState.pendingCommit?.status === "consumed"
+          ) {
+            interrupted = true;
+            await rm(artifactPath);
+            await mkdir(artifactPath);
+          }
+          return next;
+        },
+      },
+    },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  await assert.rejects(runner.resume({ runId: created.runId }), {
+    code: "ERR_PLAN_PROGRESS_PUBLICATION",
+  });
+  const { run: saved } = await runner.status(created.runId);
+  assert.equal(interrupted, true);
+  assert.equal(saved.pipelineState.workflowState, "DONE");
+  assert.equal(saved.pipelineState.pendingCommit, null);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(saved.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+  const [head] = saved.pipelineState.completedCommits;
+  await rm(artifactPath, { recursive: true });
+  const turns = adapter.calls.length;
+  const resumed = await runner.resume({ runId: created.runId });
+  assert.deepEqual(resumed.run.pipelineState.completedCommits, [head]);
+  assert.equal(adapter.calls.length, turns);
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${head}`),
+  );
+  assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
+});
+
+for (const [kind, atRelease] of [
+  ["pause_requested", false],
+  ["cancel_requested", true],
+]) {
+  test(`progress ownership conflicts cannot prevent ${kind} settlement or lease release${atRelease ? " during run-lease release" : " during execution"}`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+    });
+    const artifactPath = join(fixture.taskPath, "plan.progress.md");
+    const notes = "Operator-owned notes.\n";
+    let runId;
+    let requested = false;
+    async function requestStop() {
+      const current = await store.loadRun(runId);
+      await writeFile(artifactPath, notes);
+      await store.requestOperatorStop({
+        runId,
+        kind,
+        expectedRevision: current.revision,
+        idempotencyKey: "progress-conflict-stop",
+      });
+      requested = true;
+    }
+    const runner = createRunner({
+      adapters: {
+        codex: {
+          ...createExecutionAdapter(),
+          run: () => assert.fail("Stop settlement must not invoke an agent."),
+        },
+      },
+      clarifications: createClarificationService({ interactive: false }),
+      git: createGitService(),
+      loadConfiguration: configurationLoader(),
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (
+            atRelease &&
+            !requested &&
+            next.pipelineState.canonicalPlan !== null
+          )
+            await writeFile(artifactPath, notes);
+          return next;
+        },
+        async acquireWorktreeLease(...args) {
+          const lease = await store.acquireWorktreeLease(...args);
+          return {
+            ...lease,
+            async release() {
+              await lease.release();
+              if (atRelease && !requested) await requestStop();
+            },
+          };
+        },
+      },
+      async onActivity(activity) {
+        if (!atRelease && activity.kind === "turn-started") await requestStop();
+      },
+    });
+    const { run: created } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    });
+    runId = created.runId;
+    await assert.rejects(runner.resume({ runId }), {
+      code: "ERR_PLAN_PROGRESS_PUBLICATION",
+    });
+    const settled = await store.loadRun(runId);
+    const canceled = kind === "cancel_requested";
+    assert.equal(requested, true);
+    assert.equal(
+      settled.pipelineState.workflowState,
+      canceled ? "CANCELED" : "WAITING_FOR_USER",
+    );
+    assert.equal(
+      settled.pause.reason,
+      canceled ? "operator_canceled" : "operator_paused",
+    );
+    assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+    assert.equal(settled.activeTurn, null);
+    assert.equal(settled.pipelineState.pendingCommit, null);
+    assert.deepEqual(settled.pipelineState.completedCommits, []);
+    assert.equal(await store.runIsLeased(runId), false);
+    assert.equal(
+      await store.worktreeIsLeased(fixture.projectPath, runId),
+      false,
+    );
+    assert.equal(await readFile(artifactPath, "utf8"), notes);
+    assert.equal(
+      await readFile(join(fixture.taskPath, "plan.md"), "utf8"),
+      PLAN,
+    );
+  });
+}
+
+async function writeVersion22Preparation(directory, runId) {
+  // Rebuild the issued certificate as well as the envelope. Merely changing
+  // historical versions would invalidate custody's exact original-prefix proof.
+  const eventPath = join(directory, "events.jsonl");
+  const statePath = join(directory, "state.json");
+  const events = (await readFile(eventPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map(JSON.parse);
+  for (const event of events) {
+    event.schemaVersion = event.state.schemaVersion = 22;
+    event.state.runtimeCompatibility.runStateVersion = 22;
+    delete event.state.preservationRecords;
+    delete event.state.workspace;
+  }
+  const first = events.findIndex(({ state }) => state.preparation !== null);
+  const prefix = events.slice(0, first);
+  await writeFile(eventPath, prefix.map(JSON.stringify).join("\n") + "\n");
+  await writeFile(statePath, JSON.stringify(prefix.at(-1).state));
+  const journal = createStateJournal({
+    onTransitionBoundary: async () => {},
+  });
+  const { certificate } = await journal.loadSnapshot(directory, runId);
+  const reservation = { ...events[first].state.preparation, certificate };
+  const { digest, settlement, ...issued } = reservation;
+  reservation.digest = createHash("sha256")
+    .update(JSON.stringify(issued))
+    .digest("hex");
+  const custodyPath = join(directory, ".preparation-custody.jsonl");
+  const records = (await readFile(custodyPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map(JSON.parse);
+  records[0].value.digest = reservation.digest;
+  let endpoint = null;
+  for (const record of records) {
+    record.previous = endpoint;
+    endpoint = createHash("sha256")
+      .update(JSON.stringify(record))
+      .digest("hex");
+  }
+  await writeFile(custodyPath, records.map(JSON.stringify).join("\n") + "\n");
+  for (const event of events.slice(first)) {
+    event.state.preparation = {
+      ...reservation,
+      settlement:
+        event.state.preparation.settlement === null
+          ? null
+          : { records, endpoint },
+    };
+  }
+  await writeFile(eventPath, events.map(JSON.stringify).join("\n") + "\n");
+  await writeFile(statePath, JSON.stringify(events.at(-1).state));
+  return { certificate, records };
+}
+
+for (const [pipelineId, custody] of [
+  ["plan-execution", "current"],
+  ["polishing", "current"],
+  ["plan-execution", "unsettled"],
+  ["polishing", "settled"],
+]) {
+  const legacy = custody !== "current";
+  test(`${pipelineId} resume recovers ${legacy ? `version-22 ${custody}` : custody} custody before its pending stop`, async (t) => {
+    const fixture = await operatorFixture(t, pipelineId);
+    const bootId = "11111111-1111-4111-8111-111111111111";
+    const options = {
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      processId: 100,
+      processIsAlive: () => true,
+      processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
+    };
+    const store = createRunStore({
+      ...options,
+      onPreparationBoundary({ phase }) {
+        if (phase === "before-removal") throw new Error("Removal interrupted");
+      },
+    });
+    const trustedValidation = {
+      preflight: async () => {},
+      execute: assert.fail,
+      inspectRequirements: assert.fail,
+    };
+    const adapter = { ...createExecutionAdapter(), run: assert.fail };
+    const configuration = {
+      ...RUNNER_CONFIGURATION,
+      trustedCommands: {
+        probe: {
+          command: "node required-check",
+          executable: process.execPath,
+          arguments: ["--eval", "throw new Error('must not execute')"],
+        },
+      },
+      pipelines: { [pipelineId]: { trustedChecks: ["probe"] } },
+    };
+    const { run } = await runnerFor(
+      fixture,
+      { codex: adapter },
+      { runStore: store, trustedValidation, configuration },
+    ).create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    const git = createGitService();
+    const repository = await git.snapshot({ projectPath: fixture.projectPath });
+    const lease = await store.acquireRunLease(run.runId);
+    const trusted = run.pipelineState.trustedValidation;
+    const authority = await store.reservePreparation(lease, {
+      commandIdentity: trusted.commands[0].identity,
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+      contentFingerprint: repository.contentFingerprint,
+    });
+    const identity = options.processIdentity(4242);
+    await store.recordPreparationProcess(
+      lease,
+      authority,
+      4242,
+      {
+        processIdentity: identity,
+        launchCutoff: identity,
+        namespaceId: readlinkSync("/proc/self/ns/pid"),
+        ancestryBaseline: [{ ...identity, pid: 4242 }],
+        controlGroup: "a".repeat(64),
+      },
+      { canRelease: () => false },
+    );
+    if (custody === "settled") {
+      await store.recordPreparationProcess(lease, authority, null);
+      await assert.rejects(
+        store.settlePreparation(lease),
+        /Removal interrupted/u,
+      );
+    }
+    const before = await store.loadRun(run.runId);
+    assert.equal(before.preparation.targetBoundary, null);
+    await store.requestOperatorStop({
+      runId: run.runId,
+      kind: "cancel_requested",
+      expectedRevision: before.revision,
+      idempotencyKey: "preparation-stop",
+    });
+    const issued = legacy
+      ? await writeVersion22Preparation(
+          await store.getRunDirectory(run.runId),
+          run.runId,
+        )
+      : null;
+    const replacement = createRunStore({
+      ...options,
+      processId: 200,
+      processIdentity: (pid) => ({
+        bootId: "22222222-2222-4222-8222-222222222222",
+        startTicks: String(pid),
+      }),
+    });
+    const result = await runnerFor(
+      fixture,
+      { codex: adapter },
+      { runStore: replacement, trustedValidation, configuration },
+    ).resume({ runId: run.runId, action: null });
+    assert.equal(result.run.pipelineState.workflowState, "CANCELED");
+    assert.equal(result.run.preparation, null);
+    assert.equal(result.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(result.run.preservationRecords, []);
+    assert.deepEqual(result.run.counters, before.counters);
+    assert.deepEqual(result.run.pipelineState.trustedValidation, trusted);
+    assert.equal(await replacement.runIsLeased(run.runId), false);
+    const { events } = await replacement.loadRunHistory(run.runId);
+    const settled = events.filter(
+      ({ activity }) =>
+        activity?.phase === "preparation" && activity.kind === "settled",
+    );
+    assert.equal(settled.length, 1);
+    if (legacy) {
+      assert.deepEqual(
+        settled[0].state.preparation.certificate,
+        issued.certificate,
+      );
+      assert.deepEqual(
+        settled[0].state.preparation.settlement.records.slice(
+          0,
+          issued.records.length,
+        ),
+        issued.records,
+      );
+      const cleared = events.find(
+        ({ activity }) =>
+          activity?.phase === "preparation" && activity.kind === "cleared",
+      );
+      const migrated = events.find(
+        ({ activity }) =>
+          activity?.phase === "runtime" && activity.kind === "migrated",
+      );
+      assert.equal(cleared.state.schemaVersion, 22);
+      assert.ok(migrated.revision > cleared.revision);
+    }
+    assert.equal(
+      settled[0].state.preparation.settlement.records.at(-1).kind,
+      "retired",
+    );
+    await git.assertUnchanged(repository);
+  });
+}
+
+test("combined bootstrap retains exhausted observations and exact coverage across runner replacement before writable entry", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    Array.from(
+      { length: 5 },
+      (_, index) =>
+        `## Commit ${index + 1}: feat(test): add part ${index + 1}\n\nImplement part ${index + 1}.`,
+    ).join("\n\n"),
+  );
+  const git = createGitService();
+  const baseline = await git.snapshot({ projectPath: fixture.projectPath });
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const discoveryRoles = [];
+  const reviewerUnits = [];
+  let exhausted = false;
+  let writableEntries = 0;
+  let writableRun;
+  let runId;
+  const stop = Object.assign(new Error("Inspected first writable entry."), {
+    code: "ERR_TEST_WRITABLE_ENTRY",
+  });
+  const observation = {
+    attempt: 1,
+    turn: 1,
+    kind: "primary",
+    outcome: "failed",
+    accounting: "incomplete",
+    last: null,
+    cumulative: {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteInputTokens: null,
+      outputTokens: 20,
+      reasoningOutputTokens: 10,
+      totalTokens: 120,
+    },
+    cumulativeScope: "thread",
+    inputIncludesCached: true,
+    outputIncludesReasoning: true,
+    contextCapacity: null,
+    commandCompletions: 2,
+    compactions: 0,
+    factsIncomplete: false,
+  };
+  function adapter(reader) {
+    const delegate = createExecutionAdapter();
+    return {
+      ...delegate,
+      async run(request) {
+        const run = await reader.loadRun(runId);
+        const role = run.activeTurn.role;
+        if (request.schema === REPOSITORY_DISCOVERY_SCHEMA)
+          discoveryRoles.push(role);
+        if (request.access !== "read-only") {
+          writableEntries++;
+          assert.equal(request.access, "workspace-write");
+          writableRun = run;
+          throw stop;
+        }
+        if (
+          role === "reviewer" &&
+          request.schema === APPLICABILITY_BATCH_SCHEMA
+        ) {
+          const unit = JSON.parse(
+            /Applicability request \(data\):\n([^\n]+)/u.exec(
+              request.prompt,
+            )[1],
+          );
+          reviewerUnits.push(unit.unitId);
+          if (!exhausted && unit.steps[0].number === 5) {
+            exhausted = true;
+            request.onObservation(observation);
+            throw outputExhaustion({ effect: "none" });
+          }
+        }
+        return delegate.run(request);
+      },
+    };
+  }
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter(store) },
+    {
+      runStore: store,
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: { "plan-execution": { mode: "combined" } },
+      },
+    },
+  );
+  ({
+    run: { runId },
+  } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  }));
+  const paused = (await runner.resume({ runId, action: null })).run;
+  assert.equal(writableEntries, 0);
+  assert.deepEqual(paused.pause, {
+    reason: "output_exhausted",
+    code: "ERR_OUTPUT_EXHAUSTED",
+    resumeState: "BOOTSTRAP",
+    role: "reviewer",
+    checkpoint: "bootstrap:read-only:bootstrap",
+  });
+  const reader = createRunStore({ stateRoot: fixture.stateRoot });
+  const reloaded = await reader.loadRun(runId);
+  const attempt = reloaded.observations.attempts.at(-1);
+  assert.equal(attempt.role, paused.pause.role);
+  assert.equal(attempt.checkpoint, paused.pause.checkpoint);
+  assert.equal(attempt.status, "failed");
+  assert.equal(attempt.accounting, "incomplete");
+  assert.deepEqual(attempt.observations, [observation]);
+  assert.equal(attempt.measurements.structuredResultBytes, null);
+  assert.deepEqual(reloaded.pipelineState, paused.pipelineState);
+  assert.ok(reloaded.pipelineState.workerValidation);
+  assert.equal(reloaded.pipelineState.reviewerValidation, null);
+  assert.equal(
+    reloaded.pipelineState.bootstrapProgress.reviewer.work.accepted.length,
+    1,
+  );
+  await git.assertUnchanged(baseline);
+  const replacement = runnerFor(
+    fixture,
+    { codex: adapter(reader) },
+    { runStore: reader },
+  );
+  await assert.rejects(replacement.resume({ runId, action: null }), {
+    code: stop.code,
+  });
+  const recovered = await reader.loadRun(runId);
+  assert.equal(writableEntries, 1);
+  assert.equal(writableRun.pipelineState.settings.mode, "combined");
+  assert.deepEqual(
+    writableRun.pipelineState.workerValidation,
+    paused.pipelineState.workerValidation,
+  );
+  for (const owner of ["worker", "reviewer"]) {
+    assert.deepEqual(
+      writableRun.pipelineState[`${owner}Validation`].requiredChecks,
+      [{ id: "C1", command: "git diff --check HEAD", steps: [1, 2, 3, 4, 5] }],
+    );
+  }
+  assert.deepEqual(
+    writableRun.pipelineState.validationSchedule.steps.map(({ step }) => step),
+    [1, 2, 3, 4, 5],
+  );
+  assert.deepEqual(discoveryRoles, ["worker", "reviewer"]);
+  assert.equal(reviewerUnits.length, 3);
+  assert.equal(reviewerUnits[1], reviewerUnits[2]);
+  assert.notEqual(reviewerUnits[0], reviewerUnits[1]);
+  assert.deepEqual(
+    recovered.observations.attempts.find(({ id }) => id === attempt.id),
+    attempt,
+  );
+  assert.deepEqual(recovered.counters, paused.counters);
+  assert.deepEqual(recovered.pipelineState.bootstrapCorrections, []);
+  await git.assertUnchanged(baseline);
+});
 
 async function rewriteRunAsLegacy(directoryPath) {
   const statePath = join(directoryPath, "state.json");
   const eventsPath = join(directoryPath, "events.jsonl");
-  const state = JSON.parse(await readFile(statePath, "utf8"));
-  state.schemaVersion = 1;
-  delete state.clientAttribution;
-  delete state.clientAttributionFingerprint;
-  delete state.providerPolicies;
-  delete state.runtimeCompatibility;
-  delete state.activeTurn;
-  for (const role of Object.values(state.roles)) delete role.effort;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -65,20 +667,37 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.workspace;
     delete event.state.clientAttribution;
     delete event.state.clientAttributionFingerprint;
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    delete event.state.observations;
     for (const role of Object.values(event.state.roles)) delete role.effort;
   }
+  const comparable = ({ revision, updatedAt, ...value }) => value;
+  const legacyEvents = events.filter(
+    (event, index) =>
+      index === 0 ||
+      event.activity !== null ||
+      !isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(event.state),
+      ),
+  );
+  legacyEvents.forEach((event, index) => {
+    event.revision = event.state.revision = index + 1;
+  });
+  const state = legacyEvents.at(-1).state;
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
     writeFile(
       eventsPath,
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      `${legacyEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     ),
   ]);
+  return state;
 }
 
 test("validates the canonical Git root before creating external state", async (t) => {
@@ -256,6 +875,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     effort: "xhigh",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 650,
@@ -309,6 +932,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
   assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
   assert.deepEqual(completed.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 650,
@@ -341,6 +968,211 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     assert.doesNotMatch(serialized, /Example Agent Runner/u);
     assert.ok(!serialized.includes(paused.run.clientAttributionFingerprint));
   }
+});
+
+test("same-run recovery ignores an unassociated session and journals retirement before continuing its pending request", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    `${PLAN}
+
+## Commit 2: feat(test): extend behavior
+
+Extend the requested behavior.
+`,
+  );
+  const bootId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const executionPid = 2_000_000_001;
+  const identity = { bootId, startTicks: "9000" };
+  const baseline = [{ bootId, pid: 303, startTicks: "6789" }];
+  const group = "0::/shared.scope\n";
+  const storeOptions = {
+    stateRoot: fixture.stateRoot,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: () => true,
+    processIdentity: (pid) =>
+      pid === executionPid ? identity : { bootId, startTicks: String(pid) },
+  };
+  const store = createRunStore(storeOptions);
+  const delegate = createExecutionAdapter();
+  let implementations = 0;
+  const original = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (
+            request.prompt.includes(
+              "Run the complete project finalization procedure",
+            ) &&
+            (await store.loadRun(run.runId)).pipelineState.completedCommits
+              .length === 1
+          )
+            throw Object.assign(new Error("Interrupted finalization"), {
+              code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            });
+          const result = await delegate.run(request);
+          if (
+            request.prompt.includes("Implement the changes described") &&
+            ++implementations === 2
+          )
+            await writeFile(
+              join(fixture.projectPath, "feature.js"),
+              "export const value = 2;\n",
+            );
+          return result;
+        },
+      },
+    },
+    { runStore: store },
+  );
+  const { run } = await original.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  await assert.rejects(original.resume({ runId: run.runId, action: null }), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const accepted = await store.loadRun(run.runId);
+  assert.equal(accepted.pipelineState.workflowState, "FINALIZE");
+  assert.equal(accepted.pipelineState.completedCommits.length, 1);
+  assert.equal(accepted.pipelineState.candidateReviewResult.status, "APPROVED");
+  assert.match(
+    accepted.pipelineState.candidateReviewedFingerprint,
+    /^[a-f0-9]{64}$/u,
+  );
+  const lease = await store.acquireRunLease(run.runId);
+  await store.acquireWorktreeLease(fixture.projectPath, run.runId);
+  const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
+    processIdentity: identity,
+    namespaceId: readlinkSync("/proc/self/ns/pid"),
+    ancestryBaseline: baseline,
+    controlGroup: createHash("sha256").update(group).digest("hex"),
+  });
+  await assert.rejects(lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  const request = {
+    key: "pending-resume",
+    tool: "run_resume",
+    arguments: {
+      runId: run.runId,
+      action: null,
+      expectedRevision: checkpoint.revision,
+    },
+    context: { runId: run.runId },
+  };
+  const pending = await store.beginAction(request);
+  const intent = pending.record;
+  await pending.release();
+  const git = createGitService();
+  const repository = await git.snapshot({ projectPath: fixture.projectPath });
+  const replacement = createRunStore({
+    ...storeOptions,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+  });
+  let inspected = false;
+  let continued = false;
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...createExecutionAdapter(),
+        async run() {
+          assert.equal(inspected, true);
+          assert.equal(
+            (await replacement.loadRun(run.runId)).executionProcess,
+            null,
+          );
+          assert.deepEqual(await replacement.readAction(request), intent);
+          continued = true;
+          throw outputExhaustion({ effect: "none" });
+        },
+      },
+    },
+    {
+      runStore: replacement,
+      inspectSessionProcesses(sessionId, token, options) {
+        assert.equal(sessionId, executionPid);
+        assert.deepEqual(options, { includeSession: true });
+        inspected = true;
+        return inspectOwnedSessionProcesses(sessionId, token, {
+          ...options,
+          getuid: () => 1000,
+          now: () => 0,
+          list: () => ["101", "202", "303"],
+          read(path) {
+            if (path === "/proc/sys/kernel/random/boot_id")
+              return `${bootId}\n`;
+            if (path.endsWith("/stat")) {
+              const pid = Number(path.split("/")[2]);
+              const fields = Array(20).fill("0");
+              fields[0] = "S";
+              fields[1] = String({ 101: 202, 202: 303, 303: 1 }[pid]);
+              fields[3] = pid === 101 ? "101" : "303";
+              fields[19] = { 101: "9999", 202: "5678", 303: "6789" }[pid];
+              return `${pid} (process) ${fields.join(" ")}`;
+            }
+            if (path.endsWith("/status"))
+              return "Uid:\t1000\t1000\t1000\t1000\n";
+            if (path.endsWith("/cgroup")) return group;
+            throw Object.assign(new Error("inaccessible environment"), {
+              code: "EACCES",
+            });
+          },
+        });
+      },
+    },
+  );
+  const dispatch = {
+    id: REVIEWER_SESSION,
+    expectedRevision: checkpoint.revision,
+  };
+  const resumed = await runner.resume({
+    ...request.arguments,
+    dispatch,
+    expectedRuntimeCompatibility: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  });
+  assert.equal(resumed.run.runId, run.runId);
+  assert.equal(resumed.run.pause.reason, "output_exhausted");
+  assert.equal(continued, true);
+  const history = await replacement.loadRunHistory(run.runId);
+  const retirement = history.events.find(
+    ({ activity }) =>
+      activity?.phase === "execution" && activity.kind === "stopped",
+  );
+  assert.ok(retirement);
+  const unchanged = ({ revision, updatedAt, executionProcess, ...state }) =>
+    state;
+  assert.deepEqual(unchanged(retirement.state), unchanged(checkpoint));
+  assert.equal(retirement.state.executionProcess, null);
+  assert.deepEqual(retirement.state.counters, accepted.counters);
+  assert.deepEqual(retirement.state.hashes, accepted.hashes);
+  assert.deepEqual(retirement.state.pipelineState, accepted.pipelineState);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "feature.js"), "utf8"),
+    "export const value = 2;\n",
+  );
+  assert.equal(
+    history.events.filter(
+      ({ activity }) =>
+        activity?.phase === "execution" && activity.kind === "stopped",
+    ).length,
+    1,
+  );
+  assert.deepEqual(await replacement.readAction(request), intent);
+  assert.equal(
+    (await replacement.inspectRecoveryDispatch(run.runId, dispatch)).ready,
+    true,
+  );
+  await git.assertUnchanged(repository);
 });
 
 test("migrates legacy authoring line targets under the lease without configuration reload", async (t) => {
@@ -636,7 +1468,11 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
       },
     },
     pipelines: {
-      "plan-execution": { trustedChecks: ["service-check"] },
+      "plan-execution": {
+        trustedChecks: ["service-check"],
+        automaticCommitSplitting: false,
+        commitSizeAssessmentMultiplier: 4,
+      },
     },
   };
   let configurationLoads = 0;
@@ -705,6 +1541,10 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     { runId: PREPARED_RUN },
   );
   const durableSnapshot = prepared.run.pipelineState.trustedValidation;
+  const frozenSettings = prepared.run.pipelineState.settings;
+  assert.equal(frozenSettings.automaticCommitSplitting, false);
+  assert.equal(frozenSettings.commitSizeAssessmentMultiplier, 4);
+  assert.equal(prepared.run.pipelineState.commitSizeAssessment.eligible, false);
   assert.equal(durableSnapshot.schemaVersion, 4);
   assert.equal(durableSnapshot.timeoutMs, 12_345);
   assert.deepEqual(durableSnapshot.commands[0].capabilities, {
@@ -728,10 +1568,13 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     resumed.run.pipelineState.trustedValidation,
     durableSnapshot,
   );
+  assert.deepEqual(resumed.run.pipelineState.settings, frozenSettings);
+  assert.equal(resumed.run.pipelineState.commitSizeAssessment.eligible, false);
   assert.equal(configurationLoads, 1);
   assert.deepEqual(trustedPreflights, [
     {
       projectPath: fixture.projectPath,
+      workspacePolicy: undefined,
       snapshot: durableSnapshot,
       storageForbiddenPaths: [
         fixture.projectPath,
@@ -741,6 +1584,7 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     },
     {
       projectPath: fixture.projectPath,
+      workspacePolicy: undefined,
       snapshot: durableSnapshot,
       storageForbiddenPaths: [
         fixture.projectPath,
@@ -930,12 +1774,12 @@ test("submits input previewed from a compatible legacy run", async (t) => {
     roleOverrides: {},
     sourceSession: null,
   });
-  await rewriteRunAsLegacy(paused.directoryPath);
+  const legacy = await rewriteRunAsLegacy(paused.directoryPath);
 
   const response = {
     runId: paused.run.runId,
     requestId: paused.run.pause.inputRequest.id,
-    expectedRevision: paused.run.revision,
+    expectedRevision: legacy.revision,
     answers: [{ questionId: "q1", answer: "Use behavior A exactly." }],
   };
   const preview = await runner.previewInput(response);
@@ -949,7 +1793,7 @@ test("submits input previewed from a compatible legacy run", async (t) => {
   );
   const unchanged = await runner.status(paused.run.runId);
   assert.equal(unchanged.run.schemaVersion, 1);
-  assert.equal(unchanged.run.revision, paused.run.revision);
+  assert.equal(unchanged.run.revision, legacy.revision);
 
   const submitted = await runner.submitInput({
     ...response,
@@ -957,7 +1801,7 @@ test("submits input previewed from a compatible legacy run", async (t) => {
   });
 
   assert.equal(submitted.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.equal(submitted.run.revision, paused.run.revision + 2);
+  assert.equal(submitted.run.revision, legacy.revision + 2);
   assert.equal(
     submitted.run.pause.inputResponse.transcriptHash,
     preview.responseHash,
@@ -1151,6 +1995,10 @@ test("persists project overrides and blocks later configuration changes", async 
 
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.deepEqual(paused.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 4,
     mode: "independent",
     preferredCommitLineLimit: 450,
@@ -1449,3 +2297,249 @@ test("releases a new run lease when activity delivery fails", async (t) => {
   const lease = await runStore.acquireRunLease(runId);
   await lease.release();
 });
+
+for (const stopKind of [null, "pause_requested", "cancel_requested"]) {
+  test(`replacement preparation recovers durable restoration before ${stopKind ?? "dispatching only the active replacement"}`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    let interrupted = false;
+    let runId;
+    let measurements = 0;
+    let commits = 0;
+    let agentTurns = 0;
+    let requestedStop = false;
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      onPreservationBoundary({ phase }) {
+        if (
+          phase === (stopKind === null ? "restored" : "path-applied") &&
+          !interrupted
+        ) {
+          interrupted = true;
+          throw new Error("Restoration receipt interrupted");
+        }
+      },
+    });
+    const realGit = createGitService();
+    const git = {
+      ...realGit,
+      async measureChanges(request) {
+        const measured = await realGit.measureChanges(request);
+        return {
+          ...measured,
+          changedLines: measurements++ === 0 ? 2701 : measured.changedLines,
+        };
+      },
+    };
+    const plan =
+      "## Commit 1: feat(reader): add the reader\n\nAdd the reader.\n\n## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n";
+    let generation = 0;
+    function adapter() {
+      const adapterGeneration = ++generation;
+      const delegate = createExecutionAdapter();
+      let session = 0;
+      return {
+        ...delegate,
+        async run(request) {
+          agentTurns++;
+          const current = await store.loadRun(runId);
+          if (
+            !requestedStop &&
+            request.access === "workspace-write" &&
+            current.pipelineState.effectivePlanRevisions.revisions.at(-1)
+              ?.accepted
+          ) {
+            requestedStop = true;
+            await store.requestOperatorStop({
+              runId,
+              kind: "pause_requested",
+              expectedRevision: current.revision,
+              idempotencyKey: "replacement-boundary-stop",
+              timing: "after-current-commit",
+            });
+          }
+          const properties = request.schema?.properties;
+          if (properties?.bindingFingerprint || properties?.preserves) {
+            const review = properties.preserves !== undefined;
+            const data = JSON.parse(
+              (review
+                ? /Proposed authority \(data\):\n([^\n]+)/u
+                : /Assessment binding \(data\):\n([^\n]+)/u
+              ).exec(request.prompt)[1],
+            );
+            return {
+              sessionId: `refinement-${adapterGeneration}-${++session}`,
+              structured: review
+                ? {
+                    fingerprint: data.fingerprint,
+                    status: "CLEAN",
+                    reason: "Requirements and checks are preserved.",
+                    preserves: {
+                      requirements: true,
+                      dependencies: true,
+                      laterSteps: true,
+                      checks: true,
+                      findings: true,
+                    },
+                  }
+                : {
+                    bindingFingerprint: data.bindingFingerprint,
+                    decision: "SPLIT",
+                    reason: "Introduce the reader before integration.",
+                    replacementPlan: plan,
+                  },
+            };
+          }
+          if (request.access === "local-commit") commits++;
+          const result = await delegate.run(request);
+          if (request.prompt.includes("Implement the changes described")) {
+            if (
+              current.pipelineState.effectivePlanRevisions.revisions.length ===
+              0
+            )
+              await writeFile(
+                join(request.cwd, "future.js"),
+                "export const integrated = true;\n",
+              );
+            else if (current.pipelineState.currentStep === 2) {
+              assert.match(request.prompt, /Preserved unfinished work/u);
+              await writeFile(
+                join(request.cwd, "future.js"),
+                "export const integrated = true;\n",
+              );
+            }
+          }
+          return {
+            ...result,
+            sessionId:
+              request.session?.mode === "continue"
+                ? request.session.id
+                : `generation-${adapterGeneration}-${result.sessionId}`,
+          };
+        },
+      };
+    }
+    const first = runnerFor(
+      fixture,
+      { codex: adapter() },
+      { runStore: store, git },
+    );
+    ({
+      run: { runId },
+    } = await first.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }));
+    await assert.rejects(
+      first.resume({ runId, action: null }),
+      /Restoration receipt interrupted/u,
+    );
+    assert.equal(commits, 0);
+    const checkpoint = await store.loadRun(runId);
+    assert.equal(
+      checkpoint.pipelineState.replacementExecution.separations[0].phase,
+      "restore",
+    );
+    if (stopKind === null)
+      assert.equal(
+        (await realGit.snapshot({ projectPath: fixture.projectPath })).clean,
+        true,
+      );
+    if (stopKind !== null) {
+      requestedStop = true;
+      await store.requestOperatorStop({
+        runId,
+        kind: stopKind,
+        expectedRevision: checkpoint.revision,
+        idempotencyKey: "restoration-stop",
+      });
+    }
+    const restarted = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+    });
+    const resumedRunner = runnerFor(
+      fixture,
+      { codex: adapter() },
+      { runStore: restarted, git },
+    );
+    const beforeStopTurns = agentTurns;
+    const paused = (await resumedRunner.resume({ runId, action: null })).run;
+    if (stopKind !== null) {
+      const canceled = stopKind === "cancel_requested";
+      assert.equal(
+        paused.pause.reason,
+        canceled ? "operator_canceled" : "operator_paused",
+      );
+      assert.equal(
+        paused.pipelineState.workflowState,
+        canceled ? "CANCELED" : "WAITING_FOR_USER",
+      );
+      assert.equal(
+        paused.pipelineState.replacementExecution.separations[0].phase,
+        "ready",
+      );
+      assert.equal(paused.pipelineState.repositoryBaseline.clean, true);
+      assert.equal(paused.stopRequest.reconciledRevision, paused.revision);
+      assert.equal(commits, 0);
+      assert.equal(agentTurns, beforeStopTurns);
+      const preserved = await restarted.readPreservation(
+        runId,
+        paused.pipelineState.replacementExecution.separations[0].preservationId,
+      );
+      assert.ok(preserved.ready);
+      if (!canceled) {
+        const completed = (await resumedRunner.resume({ runId, action: null }))
+          .run;
+        assert.equal(
+          completed.pipelineState.workflowState,
+          "DONE",
+          JSON.stringify(completed.pause),
+        );
+        assert.equal(commits, 2);
+      }
+      return;
+    }
+    assert.equal(
+      paused.pause?.reason,
+      "operator_paused",
+      JSON.stringify(paused.pause),
+    );
+    assert.equal(paused.pipelineState.completedCommits.length, 2);
+    assert.deepEqual(paused.stopRequest.settlement, {
+      kind: "commit",
+      commit: paused.pipelineState.completedCommits[1],
+    });
+    const completed = (await resumedRunner.resume({ runId, action: null })).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(commits, 2);
+    assert.equal(completed.pipelineState.completedCommits.length, 2);
+    const separation =
+      completed.pipelineState.replacementExecution.separations[0];
+    const saved = await restarted.readPreservation(
+      runId,
+      separation.preservationId,
+      { includeSources: true },
+    );
+    assert.equal(saved.record.binding.revision, separation.captureRevision);
+    assert.equal(
+      await readFile(
+        join(
+          saved.source.blobDirectory,
+          saved.changes.find(({ after }) => after.path === "future.js").after
+            .hash,
+        ),
+        "utf8",
+      ),
+      "export const integrated = true;\n",
+    );
+  });
+}

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  appendFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -16,6 +17,9 @@ import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
 } from "../../src/state/index.js";
+
+import { executeFile, largeFinalizationResult } from "../support/index.js";
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 
 const BOOT_A = "11111111-1111-4111-8111-111111111111";
 const BOOT_B = "22222222-2222-4222-8222-222222222222";
@@ -110,6 +114,7 @@ async function fixture(
     workflowState: "IMPLEMENT",
     settings: { mode: "independent" },
   },
+  pipelineStateVersion = 1,
 ) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-stops-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -127,7 +132,7 @@ async function fixture(
   const store = createRunStore(storeOptions);
   const created = await store.createRun({
     pipelineId: "plan-execution",
-    pipelineStateVersion: 1,
+    pipelineStateVersion,
     projectPath,
     taskPath,
     roles: { worker: { backend: "codex" } },
@@ -144,6 +149,150 @@ async function fixture(
   };
   return { ...created, store, storeOptions, projectPath, input };
 }
+
+test("replays many large journal segments under a bounded heap", async (t) => {
+  const f = await fixture(t);
+  await f.lease.release();
+  const pipelineState = {
+    ...f.state.pipelineState,
+    results: Array(4).fill(largeFinalizationResult()),
+  };
+  // Five 56 MiB segments hold 35 distinct 8 MiB snapshots. Eager replay
+  // cannot fit this history in the child's heap; one-segment replay can.
+  for (let index = 0; index < 35; index += 1) {
+    const state = {
+      ...f.state,
+      revision: index + 2,
+      updatedAt: new Date(
+        Date.parse(f.state.updatedAt) + index + 1,
+      ).toISOString(),
+      counters: { rounds: index + 1 },
+      pipelineState,
+    };
+    const segment = Math.floor(index / 7);
+    await appendFile(
+      join(
+        f.directoryPath,
+        segment === 0
+          ? "events.jsonl"
+          : `events-${String(segment).padStart(6, "0")}.jsonl`,
+      ),
+      `${JSON.stringify({
+        schemaVersion: state.schemaVersion,
+        revision: state.revision,
+        runId: state.runId,
+        recordedAt: state.updatedAt,
+        state,
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "recorded",
+          message: "Synthetic checkpoint.",
+        },
+      })}\n`,
+    );
+  }
+  // Keep the large-history heap proof, then exceed both projection tail caps
+  // with small current states so byte-certified checkpoints remain available.
+  for (let index = 0; index < 1030; index += 1) {
+    const state = {
+      ...f.state,
+      revision: index + 37,
+      updatedAt: new Date(
+        Date.parse(f.state.updatedAt) + index + 36,
+      ).toISOString(),
+      counters: { rounds: index + 36 },
+    };
+    await appendFile(
+      join(f.directoryPath, "events-000005.jsonl"),
+      `${JSON.stringify({
+        schemaVersion: state.schemaVersion,
+        revision: state.revision,
+        runId: state.runId,
+        recordedAt: state.updatedAt,
+        state,
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "recorded",
+          message: "\u{1f642}".repeat(500),
+        },
+      })}\n`,
+    );
+  }
+  const program = `
+    import assert from "node:assert/strict";
+    import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
+    const { createRunStore } = await import(process.argv[1]);
+    const store = createRunStore({ stateRoot: process.argv[2] });
+    const runId = process.argv[3];
+    assert.equal((await store.loadRun(runId)).revision, 1066);
+    const history = await store.loadRunHistory(runId, { stream: true });
+    assert.deepEqual(await Array.fromAsync(history.events, event => {
+      if (event.revision === 36) assert.equal(event.state.pipelineState.results.length, 4);
+      return event.revision;
+    }),
+      Array.from({ length: 1066 }, (_, index) => index + 1));
+    // Settle the lagging snapshot before measuring warm reuse. Its old event
+    // still requires canonical validation under the same bounded heap.
+    const recoveryLease = await store.acquireRunLease(runId);
+    try {
+      assert.equal((await store.recoverRun(recoveryLease)).revision, 1066);
+    } finally {
+      await recoveryLease.release();
+    }
+    const parse = JSON.parse;
+    let historicalNormalizations = 0;
+    JSON.parse = (...args) => {
+      const value = parse(...args);
+      if (value?.state?.runId && value.revision <= 1066) {
+        const projectPath = value.state.projectPath;
+        Object.defineProperty(value.state, "projectPath", { enumerable: true,
+          get() { historicalNormalizations += 1; return projectPath; } });
+      }
+      return value;
+    };
+    const page = await store.readPublicActivity(runId, { afterRevision: 20, limit: 2 });
+    assert.deepEqual(page.activities.map(activity => activity.revision), [21, 22]);
+    assert.equal(page.cursor, 22);
+    const lease = await store.acquireRunLease(runId);
+    try {
+      assert.equal((await store.recoverRun(lease)).revision, 1066);
+      assert.equal((await store.transitionRun(lease, { counters: { rounds: 1066 } })).revision, 1067);
+      const tail = await store.readPublicActivity(runId, { afterRevision: 1064 });
+      assert.deepEqual(tail.activities.map(activity => activity.revision), [1065, 1066]);
+      assert.equal(tail.cursor, 1067);
+      const progress = await readFile(join(await store.getRunDirectory(runId), "progress.md"), "utf8");
+      assert.match(progress, /Revision: 1067/u);
+      assert.equal(progress.split("\\n").filter(line => line.startsWith("- ")).length, 1066);
+      assert.doesNotMatch(progress, /pipelineState|results/u);
+      assert.equal(historicalNormalizations, 0);
+    } finally {
+      await lease.release();
+    }
+  `;
+  await executeFile(
+    process.execPath,
+    [
+      "--max-old-space-size=256",
+      "--input-type=module",
+      "-e",
+      program,
+      new URL("../../src/state/index.js", import.meta.url).href,
+      f.storeOptions.stateRoot,
+      f.state.runId,
+    ],
+    { cwd: f.directoryPath },
+  );
+  assert.equal((await f.store.loadRun(f.state.runId)).revision, 1067);
+  assert.equal(
+    (await readdir(f.directoryPath)).filter((name) =>
+      /^events.*\.jsonl$/u.test(name),
+    ).length,
+    6,
+  );
+});
 
 function advancementOperations(f, activeTurn) {
   return [
@@ -1832,6 +1981,10 @@ test("deferred stop history rejects changed targets, timing, and settlement evid
   const originalState = await readFile(statePath, "utf8");
   const changes = [
     (events) => {
+      for (const event of events.slice(2))
+        event.state.stopRequest.acceptedRevision = 3;
+    },
+    (events) => {
       events[2].state.stopRequest.targetBoundary.step = 2;
     },
     (events) => {
@@ -1848,6 +2001,10 @@ test("deferred stop history rejects changed targets, timing, and settlement evid
     },
     (events) => {
       events[1].state.stopRequest.targetBoundary.baselineHead = "not-a-sha";
+    },
+    (events) => {
+      events[1].state.stopRequest.targetBoundary.baselineHead = null;
+      events[1].state.stopRequest.targetBoundary.completedCommits = 1;
     },
     (events) => {
       events[1].state.stopRequest.settlement = {
@@ -2066,5 +2223,164 @@ test("deferred intent and lost receipt recovery retain one acceptance through ow
       const next = await peer.acquireWorktreeLease(f.projectPath, OTHER_RUN);
       await next.release();
     });
+  }
+});
+
+test("legacy execution admits deferred stops and replays their historical boundaries before migration", async (t) => {
+  for (const version of [1, 29]) {
+    const pipelineState = {
+      workflowState: "IMPLEMENT",
+      settings: { mode: "independent" },
+      canonicalPlan:
+        "## Commit 1: feat(reader): add the reader\n\nAdd the reader.\n\n## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n",
+      currentStep: 2,
+      resolvedSummary: "Execute the remaining commit.",
+      repositoryBaseline: { head: "a".repeat(40) },
+      completedCommits: ["a".repeat(40)],
+    };
+    const f = await fixture(t, { resolveStopBoundary }, pipelineState, version);
+    const input = {
+      ...f.input,
+      timing: "after-current-commit",
+    };
+    const accepted = await f.store.requestOperatorStop(input);
+    assert.deepEqual(accepted.targetBoundary, {
+      capability: "verified-commit-v1",
+      step: 2,
+      completedCommits: 1,
+      baselineHead: "a".repeat(40),
+    });
+    const recovered = createRunStore(f.storeOptions);
+    const history = await recovered.loadRunHistory(f.input.runId);
+    assert.equal(history.run.pipelineStateVersion, version);
+    assert.deepEqual(
+      history.run.stopRequest.targetBoundary,
+      accepted.targetBoundary,
+    );
+    assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+    await f.store.settleCheckpoint(f.lease, (latest) => ({
+      patch: {
+        pipelineState: {
+          ...latest.pipelineState,
+          workflowState: "WAITING_FOR_USER",
+        },
+        pause: {
+          reason: "operator_paused",
+          resumeAction: null,
+          operatorResume: {
+            workflowState: "IMPLEMENT",
+            pause: null,
+            activeTurn: null,
+          },
+        },
+      },
+    }));
+  }
+});
+
+test("verified replacement settlement retains a deferred logical boundary until its final child", async (t) => {
+  for (const baselineHead of ["a".repeat(40), null]) {
+    await t.test(
+      baselineHead === null ? "unborn baseline" : "existing baseline",
+      async (t) => {
+        const target = {
+          capability: "verified-commit-v1",
+          step: 1,
+          completedCommits: 0,
+          baselineHead,
+        };
+        const canonicalPlan =
+          "## Commit 1: feat(reader): add the reader\n\nImplement the reader.\n\n## Commit 2: feat(next): add the next feature\n\nImplement the next feature.\n";
+        const plan = canonicalPlan.replace(
+          "## Commit 2: feat(next)",
+          "## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n\n## Commit 3: feat(next)",
+        );
+        const f = await fixture(
+          t,
+          { resolveStopBoundary },
+          {
+            workflowState: "IMPLEMENT",
+            settings: { mode: "combined" },
+            resolvedSummary: "Execute the selected replacement.",
+            canonicalPlan,
+            currentStep: 1,
+            completedCommits: [],
+            repositoryBaseline: { head: baselineHead },
+            effectivePlanRevisions: {
+              revisions: [
+                {
+                  number: 1,
+                  originalStep: 1,
+                  accepted: true,
+                  plan,
+                  mapping: [
+                    { step: 1, originalStep: 1, replacement: 1 },
+                    { step: 2, originalStep: 1, replacement: 2 },
+                    { step: 3, originalStep: 2, replacement: 1 },
+                  ],
+                  binding: { assessment: { baseHead: baselineHead } },
+                },
+              ],
+            },
+          },
+          32,
+        );
+        const input = { ...f.input, timing: "after-current-commit" };
+        const accepted = await f.store.requestOperatorStop(input);
+        assert.deepEqual(accepted.targetBoundary, target);
+        const first = await f.store.settleCheckpoint(f.lease, (latest) => ({
+          patch: {
+            pipelineState: {
+              ...latest.pipelineState,
+              currentStep: 2,
+              completedCommits: ["b".repeat(40)],
+              repositoryBaseline: { head: "b".repeat(40) },
+            },
+          },
+          settlement: { kind: "commit", commit: "b".repeat(40) },
+        }));
+        assert.equal(first.stopRequest.reconciledRevision, null);
+        assert.equal(first.stopRequest.settlement, null);
+        assert.deepEqual(first.stopRequest.targetBoundary, target);
+        const recovered = createRunStore(f.storeOptions);
+        assert.deepEqual(
+          (await recovered.loadRunHistory(f.input.runId)).run,
+          first,
+        );
+        assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+        await f.store.transitionRun(f.lease, { counters: { rounds: 1 } });
+        const second = await f.store.settleCheckpoint(f.lease, (latest) => ({
+          patch: {
+            pipelineState: {
+              ...latest.pipelineState,
+              currentStep: 3,
+              completedCommits: ["b".repeat(40), "c".repeat(40)],
+              repositoryBaseline: { head: "c".repeat(40) },
+              workflowState: "WAITING_FOR_USER",
+            },
+            pause: {
+              reason: "operator_paused",
+              resumeAction: null,
+              operatorResume: {
+                workflowState: "IMPLEMENT",
+                pause: null,
+                activeTurn: null,
+              },
+            },
+          },
+          settlement: { kind: "commit", commit: "c".repeat(40) },
+        }));
+        assert.equal(second.stopRequest.reconciledRevision, second.revision);
+        assert.deepEqual(second.stopRequest.settlement, {
+          kind: "commit",
+          commit: "c".repeat(40),
+        });
+        assert.deepEqual(
+          (await recovered.loadRunHistory(f.input.runId)).run,
+          second,
+        );
+        assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+      },
+    );
   }
 });

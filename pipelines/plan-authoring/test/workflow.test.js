@@ -16,6 +16,16 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import {
+  parseCustomPlan,
+  serializeCustomPlan,
+} from "@agent-runner/custom-plan";
+
+import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+
+import {
   createPlanAuthoringState,
   migratePlanAuthoringStateV1,
   migratePlanAuthoringStateV2,
@@ -23,6 +33,7 @@ import {
   migratePlanAuthoringStateV4,
   planAuthoringPipeline,
   runPlanAuthoring,
+  migratePlanAuthoringStateV6,
 } from "../src/index.js";
 
 import {
@@ -42,12 +53,40 @@ const ROLE_SESSIONS = Object.freeze({
   reviewer: "33333333-3333-4333-8333-333333333333",
   arbiter: "44444444-4444-4444-8444-444444444444",
 });
+const PLAN_DEFAULTS = Object.fromEntries(
+  Object.entries(planAuthoringPipeline.settings).map(([key, definition]) => [
+    key,
+    definition.defaultValue,
+  ]),
+);
 const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
 const REVISED_PLAN = `## Commit 1: feat(test): add behavior
 
 Implement and verify the requested behavior.`;
+
+const CUSTOM_CRITERIA = [
+  {
+    id: "evidence",
+    condition: "Identify the supplied evidence and its limits.",
+  },
+];
+const CUSTOM_PLAN = serializeCustomPlan({
+  kind: "custom",
+  criteria: CUSTOM_CRITERIA,
+  inputs: [],
+  outputs: [],
+  steps: [
+    {
+      number: 1,
+      title: "Analyze the evidence",
+      work: "Read the supplied material.",
+      expectedResults: "An analysis with explicit evidence gaps.",
+      criterionRefs: ["evidence"],
+    },
+  ],
+});
 
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -367,6 +406,7 @@ async function createFixture(
     emptyClarification = false,
     interactive = false,
     mode = "independent",
+    planKind = "commit",
     models = {},
     onEdit,
     onInspectTranscript,
@@ -384,7 +424,8 @@ async function createFixture(
   const taskPath = join(projectPath, "task");
   const clarificationPath = join(taskPath, "clarifications.md");
   const planPath = join(taskPath, "plan.md");
-  await executeFile("git", ["init", "-q", projectPath]);
+  if (planKind === "commit")
+    await executeFile("git", ["init", "-q", projectPath]);
   await mkdir(taskPath);
   await writeFile(
     join(taskPath, "task.md"),
@@ -452,7 +493,10 @@ async function createFixture(
   let currentRun = {
     revision: 1,
     pipelineId: "plan-authoring",
-    pipelineStateVersion: 6,
+    pipelineStateVersion: planAuthoringPipeline.stateVersion,
+    ...(planKind === "custom"
+      ? { workspace: { kind: "directory", lease: "exclusive" } }
+      : {}),
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -468,6 +512,8 @@ async function createFixture(
     pipelineState: createPlanAuthoringState({
       proactiveClarification,
       settings: {
+        ...PLAN_DEFAULTS,
+        planKind,
         maxRevisionRounds: 15,
         mode,
         preferredCommitLineLimit: 900,
@@ -598,11 +644,36 @@ async function createFixture(
     },
   };
 
+  if (planKind === "custom") {
+    const gitSafety = runtime.git;
+    runtime.workspace = {
+      kind: "directory",
+      async snapshot(options) {
+        return {
+          ...(await gitSnapshot(options)),
+          workspacePath: projectPath,
+          entries: [],
+        };
+      },
+      assertUnchanged: (snapshot) => gitSafety.assertUnchanged(snapshot),
+    };
+    runtime.git = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("Custom authoring must not invoke Git.");
+        },
+      },
+    );
+  }
+
   async function run(settings = {}) {
     currentRun = await runPlanAuthoring({
       run: currentRun,
       runtime,
       settings: {
+        ...PLAN_DEFAULTS,
+        planKind,
         maxRevisionRounds: 15,
         mode,
         preferredCommitLineLimit: 900,
@@ -714,7 +785,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 6);
+  assert.equal(planAuthoringPipeline.stateVersion, 7);
   const currentState = createPlanAuthoringState();
   const legacyAuthenticationState = { ...currentState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
@@ -738,6 +809,7 @@ test("selects lazy Planner-only mode and migrates legacy runs to independent", a
 
   const initial = createPlanAuthoringState({
     settings: {
+      ...PLAN_DEFAULTS,
       maxRevisionRounds: 15,
       mode: "independent",
       preferredCommitLineLimit: 900,
@@ -2132,6 +2204,7 @@ test("keeps resolved settings stable across resume", async (t) => {
   assert.equal(resumed.pause.reason, "plan_revision_limit_reached");
   assert.equal(resumed.counters.revisionRounds, 1);
   assert.deepEqual(resumed.pipelineState.settings, {
+    ...PLAN_DEFAULTS,
     maxRevisionRounds: 1,
     mode: "independent",
     preferredCommitLineLimit: 650,
@@ -2301,7 +2374,7 @@ test("keeps Claude authentication terminal for a read-only turn", async (t) => {
   );
 });
 
-test("preserves the authentication pause across read-only turn-retirement interruption", async (t) => {
+test("preserves a legacy authentication checkpoint across read-only turn-retirement interruption", async (t) => {
   let authenticationRequired = true;
   const fixture = await createFixture(t, {
     sourceSession: SOURCE_SESSION,
@@ -2346,6 +2419,23 @@ test("preserves the authentication pause across read-only turn-retirement interr
   assert.throws(() =>
     planAuthoringPipeline.workflow.validateRun(invalidRecoveryRole),
   );
+
+  const legacyClarifications = await readFile(
+    fixture.clarificationPath,
+    "utf8",
+  );
+  const legacyContext = `Task (${join(fixture.taskPath, "task.md")}):
+${await readFile(join(fixture.taskPath, "task.md"), "utf8")}
+
+Context (${join(fixture.taskPath, "context.md")}):
+(not provided)
+
+Clarifications (${fixture.clarificationPath}):
+${legacyClarifications || "(empty)"}`;
+  paused.pipelineState.authenticationSourceForkRecovery = {
+    ...recovery,
+    contextKey: hash(`planner\0clarification\0${legacyContext}`),
+  };
 
   const completed = await fixture.run();
 
@@ -2441,6 +2531,49 @@ test("uses authentication effect evidence for lazy source-fork recovery", async 
       effect === "none" ? 2 : 1,
     );
   }
+});
+
+test("acknowledged children override ambiguous or no-turn-effect source-fork recovery", async (t) => {
+  for (const mode of ["independent", "lazy", "combined"])
+    for (const effect of ["none", "possible"])
+      for (const exhausted of [false, true]) {
+        const f = await createFixture(t, {
+          mode,
+          sourceSession: SOURCE_SESSION,
+          async onRoleRun(role, request, count) {
+            assert.equal(role, "planner");
+            if (count === 1)
+              await request.onSessionCreated(ROLE_SESSIONS.planner);
+            else {
+              assert.deepEqual(request.session, {
+                mode: "continue",
+                id: ROLE_SESSIONS.planner,
+              });
+              assert.equal(request.prompt, request.recoveryPrompt);
+            }
+            throw exhausted
+              ? outputExhaustion({ effect })
+              : authenticationFailure({ effect });
+          },
+        });
+        attachAuthentication(f);
+        attachOutputExhaustion(f);
+        const paused = await f.run();
+        assert.equal(
+          paused.pause.reason,
+          exhausted ? "output_exhausted" : "authentication_required",
+        );
+        assert.equal(
+          paused.pipelineState.authenticationSourceForkRecovery,
+          null,
+        );
+        assert.equal(
+          paused.pipelineState.lazySourceForkConsumed,
+          mode === "lazy",
+        );
+        assert.equal((await f.run()).sessionLineage.children.length, 1);
+        assert.equal(f.calls.planner.length, 2);
+      }
 });
 
 test("persists a forbidden-delegation diagnostic without provider data", async (t) => {
@@ -3121,6 +3254,7 @@ test("version four migration preserves progress and defaults only missing mode",
   const initial = structuredClone(
     createPlanAuthoringState({
       settings: {
+        ...PLAN_DEFAULTS,
         mode: "independent",
         maxRevisionRounds: 15,
         stagnationWindowRounds: 3,
@@ -3171,4 +3305,275 @@ test("authoring resumes a failed source fork with a fresh same-role request and 
     1,
   );
   assert.equal(run.counters.correctionRounds, 0);
+});
+
+test("output exhaustion preserves the authoring checkpoint across interrupted pause settlement", async (t) => {
+  let failures = 2;
+  const fixture = await createFixture(t, {
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role) {
+      if (role === "planner" && failures-- > 0) throw outputExhaustion();
+    },
+  });
+  attachOutputExhaustion(fixture);
+  interruptAuthenticationSettlement(fixture);
+  await assert.rejects(fixture.run(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const first = fixture.currentRun;
+  assert.equal(first.pause.reason, "output_exhausted");
+  assert.equal(first.pause.resumeState, "CLARIFY");
+  assert.equal(first.pause.role, "planner");
+  assert.match(first.pause.checkpoint, /^clarify:read-only:/u);
+  assert.equal(first.activeTurn, null);
+  const invalid = structuredClone(first);
+  invalid.pause.providerMessage = "Untrusted diagnostic";
+  assert.throws(() => planAuthoringPipeline.workflow.validateRun(invalid));
+  const second = await fixture.run();
+  assert.deepEqual(second.pause, first.pause);
+  assert.deepEqual(second.counters, first.counters);
+  const publicPause = planAuthoringPipeline.projections.pause(second);
+  assert.equal(publicPause.reason, "output_exhausted");
+  assert.deepEqual(publicPause.nextActions, [{ type: "resume", action: null }]);
+  assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.planner
+      .slice(0, 3)
+      .filter(({ session }) => session?.mode === "fork").length,
+    1,
+  );
+});
+
+test("custom authoring retains every mode gate without Git or coding defaults", async (t) => {
+  for (const mode of ["independent", "lazy", "combined"]) {
+    await t.test(mode, async (t) => {
+      const fixture = await createFixture(t, {
+        mode,
+        planKind: "custom",
+        planner: [
+          { ...ready(), criteria: CUSTOM_CRITERIA },
+          draft(CUSTOM_PLAN),
+          ...(mode === "independent" ? [] : [checkUnchanged(), clean()]),
+        ],
+      });
+      const result = await fixture.run();
+      assert.equal(result.pipelineState.workflowState, "DONE");
+      assert.deepEqual(result.pipelineState.agreedCriteria, CUSTOM_CRITERIA);
+      assert.equal(await readFile(fixture.planPath, "utf8"), CUSTOM_PLAN);
+      assert.equal(fixture.calls.reviewer.length, mode === "lazy" ? 0 : 1);
+      assert.equal(
+        fixture.calls.planner.length,
+        mode === "independent" ? 2 : 4,
+      );
+      for (const request of [
+        ...fixture.calls.planner,
+        ...fixture.calls.reviewer,
+      ]) {
+        assert.equal(request.access, "read-only");
+        assert.doesNotMatch(
+          request.prompt,
+          /anticipated changed lines|idiomatic implementation|## Commit N/u,
+        );
+        assert.match(request.prompt, /criteria|criterion/u);
+      }
+    });
+  }
+});
+
+test("missing custom criteria stays in bounded clarification without drafting", async (t) => {
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [{ ...ready(), criteria: [] }],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pause.reason, "clarification_answers_required");
+  assert.equal(result.pipelineState.clarificationFrozen, false);
+  assert.equal(result.pipelineState.draft, null);
+  assert.deepEqual(result.pipelineState.agreedCriteria, []);
+  assert.equal(fixture.calls.planner.length, 1);
+});
+
+test("custom clarification freezes canonical conditions that survive publication", async (t) => {
+  const criteria = [
+    {
+      id: "evidence",
+      condition:
+        "\r\n \r\nIdentify the evidence.\r\nDescribe its limits.\r\n\t\r\n",
+    },
+  ];
+  const plan = serializeCustomPlan({
+    ...parseCustomPlan(CUSTOM_PLAN),
+    criteria,
+  });
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [{ ...ready(), criteria }, draft(plan)],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.deepEqual(result.pipelineState.agreedCriteria, [
+    {
+      id: "evidence",
+      condition: "Identify the evidence.\nDescribe its limits.",
+    },
+  ]);
+  assert.equal(await readFile(fixture.planPath, "utf8"), plan);
+  assert.equal(result.counters.revisionRounds, 0);
+});
+
+test("custom clarification rejects declarations that leave no draft headroom", async (t) => {
+  const catalog = (count, condition) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `criterion-${index}`,
+      condition,
+    }));
+  const paths = (prefix) =>
+    Array.from({ length: 12 }, (_, index) =>
+      `${prefix}-${index}/`.padEnd(4096, "a"),
+    );
+  for (const [name, criteria, settings] of [
+    ["combined criteria", catalog(26, "a".repeat(4000)), {}],
+    ["JSON escaping", catalog(13, '"'.repeat(4000)), {}],
+    [
+      "criteria, sources and outputs",
+      CUSTOM_CRITERIA,
+      { sourceReferences: paths("source"), outputPaths: paths("output") },
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const fixture = await createFixture(t, {
+        planKind: "custom",
+        planner: [{ ...ready(), criteria }],
+      });
+      await assert.rejects(fixture.run(settings), {
+        code: "ERR_INVALID_CUSTOM_PLAN",
+      });
+      assert.equal(fixture.currentRun.pipelineState.clarificationFrozen, false);
+      assert.deepEqual(fixture.currentRun.pipelineState.agreedCriteria, []);
+      assert.equal(fixture.calls.planner.length, 1);
+      assert.equal(fixture.calls.reviewer.length, 0);
+      await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+    });
+  }
+});
+
+test("custom clarification rejects criteria attached to unresolved questions", async (t) => {
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [{ ...questions(), criteria: CUSTOM_CRITERIA }],
+  });
+  await assert.rejects(fixture.run(), {
+    code: "ERR_INVALID_PLAN_AUTHORING_OUTPUT",
+  });
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.equal(fixture.currentRun.pipelineState.pendingEdit, null);
+  assert.equal(fixture.currentRun.pipelineState.clarificationFrozen, false);
+  assert.deepEqual(fixture.currentRun.pipelineState.agreedCriteria, []);
+  await assert.rejects(readFile(fixture.planPath), { code: "ENOENT" });
+});
+
+test("custom declaration mismatch requires correction before publishing", async (t) => {
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [
+      { ...ready(), criteria: CUSTOM_CRITERIA },
+      draft(
+        CUSTOM_PLAN.replace('"outputs": []', '"outputs": ["undeclared.md"]'),
+      ),
+      draft(CUSTOM_PLAN),
+    ],
+    reviewer: [approved(), approved()],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.match(
+    fixture.calls.planner[2].prompt,
+    /must match the frozen criteria, sources and outputs exactly/u,
+  );
+  assert.equal(await readFile(fixture.planPath, "utf8"), CUSTOM_PLAN);
+});
+
+test("canonical custom plan expansion is correctable without invalid persisted state", async (t) => {
+  const work = parseCustomPlan(CUSTOM_PLAN).steps[0].work;
+  const oversized = CUSTOM_PLAN.replace(
+    work,
+    "a".repeat(100_001 - CUSTOM_PLAN.length + work.length),
+  );
+  const headerEnd = oversized.indexOf("\n```");
+  const header = JSON.parse(oversized.slice("```json\n".length, headerEnd));
+  const compact = `\`\`\`json\n${JSON.stringify(header)}${oversized.slice(headerEnd)}`;
+  assert.ok(compact.length < 100_000);
+  assert.equal(serializeCustomPlan(parseCustomPlan(compact)).length, 100_001);
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [
+      { ...ready(), criteria: CUSTOM_CRITERIA },
+      draft(compact),
+      draft(CUSTOM_PLAN),
+    ],
+    reviewer: [approved(), approved()],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.counters.revisionRounds, 1);
+  assert.match(
+    fixture.calls.planner[2].prompt,
+    /Canonical custom plan exceeds/u,
+  );
+  assert.equal(await readFile(fixture.planPath, "utf8"), CUSTOM_PLAN);
+});
+
+test("legacy authoring gains only explicit commit defaults and no custom authority", () => {
+  const current = createPlanAuthoringState({ settings: PLAN_DEFAULTS });
+  const legacy = structuredClone(current);
+  delete legacy.agreedCriteria;
+  for (const name of [
+    "planKind",
+    "criteriaPath",
+    "sourceReferences",
+    "outputPaths",
+  ])
+    delete legacy.settings[name];
+  const before = structuredClone(legacy);
+  assert.deepEqual(
+    migratePlanAuthoringStateV6({ pipelineState: legacy }),
+    current,
+  );
+  assert.deepEqual(legacy, before);
+  assert.equal(
+    migratePlanAuthoringStateV6({
+      pipelineState: { ...legacy, settings: null },
+    }).settings,
+    null,
+  );
+});
+
+test("the selected authoring kind rejects the other artifact format without coercion", async (t) => {
+  for (const [planKind, plan] of [
+    ["commit", CUSTOM_PLAN],
+    ["custom", PLAN],
+  ]) {
+    await t.test(planKind, async (t) => {
+      const fixture = await createFixture(t, {
+        planKind,
+        planner: [
+          planKind === "commit"
+            ? ready()
+            : { ...ready(), criteria: CUSTOM_CRITERIA },
+          draft(plan),
+          draft(planKind === "commit" ? PLAN : CUSTOM_PLAN),
+        ],
+        reviewer: [approved(), approved()],
+      });
+      const result = await fixture.run();
+      assert.equal(result.pipelineState.workflowState, "DONE");
+      assert.equal(result.counters.revisionRounds, 1);
+      assert.match(fixture.calls.planner[2].prompt, /validationIssues/u);
+      assert.equal(
+        await readFile(fixture.planPath, "utf8"),
+        planKind === "commit" ? PLAN : CUSTOM_PLAN,
+      );
+    });
+  }
 });

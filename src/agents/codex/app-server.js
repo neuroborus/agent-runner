@@ -17,6 +17,7 @@ export function createCodexAppServerClient(
   signal,
   classifyRequestError,
   progress,
+  observations,
 ) {
   if (
     child === null ||
@@ -70,6 +71,8 @@ export function createCodexAppServerClient(
 
   function dispatchNotification(message) {
     try {
+      observations?.notification(message);
+      if (closing) return;
       progress?.notification(message);
     } catch {
       rejectAll(
@@ -92,7 +95,7 @@ export function createCodexAppServerClient(
     }
   }
 
-  function handleLine(line) {
+  function dispatchLine(line) {
     if (Buffer.byteLength(line) > MAX_PROTOCOL_LINE_BYTES) {
       rejectAll(
         new AdapterError("Codex protocol message is too large.", {
@@ -105,10 +108,10 @@ export function createCodexAppServerClient(
     let message;
     try {
       message = JSON.parse(line);
-    } catch (cause) {
+    } catch {
+      // Parser diagnostics can embed the untrusted frame.
       rejectAll(
         new AdapterError("Codex emitted invalid JSONL.", {
-          cause,
           code: "ERR_CODEX_PROTOCOL",
         }),
       );
@@ -125,6 +128,15 @@ export function createCodexAppServerClient(
       return;
     }
     if (message.id !== undefined && typeof message.method === "string") {
+      if (closing) {
+        rejectAll(
+          new AdapterError("Codex emitted a request during shutdown.", {
+            code: "ERR_CODEX_PROTOCOL",
+          }),
+        );
+        child.kill();
+        return;
+      }
       write({
         id: message.id,
         error: {
@@ -150,6 +162,7 @@ export function createCodexAppServerClient(
         );
       } else if (message.result !== undefined) {
         try {
+          observations?.response(operation.method, message.result);
           progress?.response(operation.method, message.result);
           operation.resolve(message.result);
         } catch {
@@ -172,6 +185,20 @@ export function createCodexAppServerClient(
     }
     if (typeof message.method === "string") {
       dispatchNotification(message);
+    }
+  }
+
+  function handleLine(line) {
+    if (closedError !== undefined || exited) return;
+    try {
+      dispatchLine(line);
+    } catch {
+      rejectAll(
+        new AdapterError("Codex emitted an invalid protocol message.", {
+          code: "ERR_CODEX_PROTOCOL",
+        }),
+      );
+      child.kill();
     }
   }
 
@@ -212,6 +239,7 @@ export function createCodexAppServerClient(
     );
   });
   child.once("close", () => {
+    lines.close();
     signal?.removeEventListener("abort", abort);
     exited = true;
     if (!closing) {
@@ -225,6 +253,7 @@ export function createCodexAppServerClient(
   });
 
   async function request(method, params) {
+    observations?.begin(method, params);
     progress?.begin(method, params);
     const id = nextId;
     nextId += 1;
@@ -289,7 +318,7 @@ export function createCodexAppServerClient(
       return closed;
     }
     closing = true;
-    lines.close();
+    if (observations === undefined) lines.close();
     let streamError;
     try {
       child.stdin.end();
@@ -300,6 +329,7 @@ export function createCodexAppServerClient(
       });
     }
     if (retainProcess) {
+      lines.close();
       signal?.removeEventListener("abort", abort);
       child.stdin.destroy();
       child.stdout.destroy();
@@ -307,6 +337,7 @@ export function createCodexAppServerClient(
       return;
     }
     if (streamError === undefined && (await waitForExit(1_000))) {
+      if (closedError !== undefined) throw closedError;
       return;
     }
     child.kill();
@@ -314,6 +345,7 @@ export function createCodexAppServerClient(
       if (streamError !== undefined) {
         throw streamError;
       }
+      if (closedError !== undefined) throw closedError;
       return;
     }
     child.kill("SIGKILL");
@@ -325,9 +357,20 @@ export function createCodexAppServerClient(
     if (streamError !== undefined) {
       throw streamError;
     }
+    if (closedError !== undefined) throw closedError;
   }
 
   return Object.freeze({
+    get usable() {
+      return closedError === undefined && !closing && !exited;
+    },
+    get exited() {
+      return exited;
+    },
+    selectCompaction: (threadId, turnId) =>
+      observations?.selectCompaction(threadId, turnId),
+    confirmCompaction: (threadId, turnId) =>
+      observations?.confirmCompaction(threadId, turnId),
     close,
     notify,
     receivedNotification,

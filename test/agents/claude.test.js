@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import {
   access,
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -14,13 +15,24 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, parse } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+} from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
+import { largeFinalizationResult } from "../support/index.js";
 
 import {
   CLAUDE_BACKEND_ID,
@@ -29,6 +41,8 @@ import {
   recoverClaudeStorage,
   CLAUDE_STORAGE_IDENTITY,
 } from "../../src/agents/claude/index.js";
+import { claudeManagedBubblewrapOverride } from "../../src/agents/claude/command-launcher.js";
+import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
 import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
@@ -48,6 +62,12 @@ const EXPECTED_HEAD = "a".repeat(40);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
+const SESSION_NAMING = Object.freeze({
+  runId: "44444444-4444-4444-8444-444444444444",
+  project: "sample",
+  pipeline: "audit",
+  role: "auditor",
+});
 const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
 const CLAUDE_LOG_PATH = join(homedir(), ".npm/_logs");
 const executeFile = promisify(executeFileCallback);
@@ -59,6 +79,7 @@ const HELP = [
   "--include-partial-messages",
   "--mcp-config",
   "--model",
+  "-n, --name <name> Set a display name for this session",
   "--no-chrome",
   "--output-format",
   "--permission-mode",
@@ -77,6 +98,8 @@ const STRICT_SCHEMA = Object.freeze({
   required: ["ok"],
   additionalProperties: false,
 });
+
+const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
 const COMMON_DENY_POLICY = [
   "Agent",
   "Task",
@@ -235,6 +258,10 @@ function isRunnerBoundaryProbe({ file, argumentsList }) {
         argument.includes("agent-runner-claude-isolation-ok"),
     )
   );
+}
+
+function isCommandShell(file) {
+  return parse(dirname(file)).base === ".agent-runner-shell";
 }
 
 function isIsolationProbe({ file, argumentsList }) {
@@ -461,10 +488,8 @@ async function createFakeBubblewrap(t) {
   return { directory, filterLogPath, helperLogPath, logPath };
 }
 
-async function resolveTestExecutable(binary) {
-  for (const directory of (process.env.PATH ?? "")
-    .split(delimiter)
-    .filter(isAbsolute)) {
+async function resolveTestExecutable(binary, path = process.env.PATH) {
+  for (const directory of (path ?? "").split(delimiter).filter(isAbsolute)) {
     const candidate = join(directory, binary);
     try {
       await access(candidate, constants.X_OK);
@@ -602,6 +627,8 @@ function createFixture({
   const socketServers = [];
   let turnIndex = 0;
   const execute = async (file, argumentsList, options) => {
+    // The generated command shell's launcher requirement is always proved for real.
+    if (isCommandShell(file)) return executeFile(file, argumentsList, options);
     const call = { file, argumentsList, options };
     const isClaudeCall = file === (claudeBinary ?? "claude");
     calls.push(call);
@@ -719,10 +746,1625 @@ function request(overrides = {}) {
   };
 }
 
+test("names only fresh and forked Claude children, acknowledging them before the receipt", async () => {
+  for (const mode of [undefined, "fork", "continue"]) {
+    const created = [];
+    const events = [];
+    const fixture = createFixture({
+      version: "2.1.316",
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          events.push("launch");
+          assert.equal(
+            option(call.argumentsList, "--name"),
+            mode === "continue"
+              ? undefined
+              : `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+          );
+          assert.equal(
+            option(call.argumentsList, "--resume"),
+            mode ? SOURCE_SESSION : undefined,
+          );
+          assert.equal(
+            call.argumentsList.includes("--fork-session"),
+            mode === "fork",
+          );
+        }
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => {
+          events.push("acknowledged");
+          created.push(id);
+        },
+        onSessionNaming: async ({ status }) => events.push(status),
+      }),
+    );
+    assert.deepEqual(created, mode === "continue" ? [] : [response.sessionId]);
+    assert.deepEqual(
+      events,
+      mode === "continue" ? ["launch"] : ["launch", "acknowledged", "named"],
+    );
+  }
+});
+
+test("Claude names bound Unicode descriptions without truncating the Runner UUID", async () => {
+  const fixture = createFixture();
+  await fixture.adapter.run(
+    request({
+      sessionNaming: { ...SESSION_NAMING, project: "🌱".repeat(128) },
+      onSessionCreated: async () => {},
+    }),
+  );
+  const name = option(turnCalls(fixture)[0].argumentsList, "--name");
+  assert.equal(name, `[${SESSION_NAMING.runId}] ${"🌱".repeat(128)}`);
+  assert.equal([...name].length, 167);
+});
+
+test("Claude rejects naming without acknowledgement before probing", async () => {
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.adapter.run(request({ sessionNaming: SESSION_NAMING })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  assert.deepEqual(fixture.calls, []);
+});
+
+test("unsupported Claude naming pauses before launch and preserves unused source authority", async () => {
+  for (const advertised of [
+    "",
+    "--namespace <value>",
+    "Example: use --name <name>",
+  ]) {
+    for (const mode of [undefined, "fork"]) {
+      const fixture = createFixture({
+        help: HELP.replace(/-n, --name[^\n]*/u, advertised),
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            sessionNaming: SESSION_NAMING,
+            ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+            onSessionCreated: () => assert.fail("No child exists"),
+            onSessionNaming: () =>
+              assert.fail("No child can receive a receipt"),
+          }),
+        ),
+        (cause) => {
+          assert.equal(cause.code, "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING");
+          const failure = normalizeAdapterFailure("claude", cause);
+          assert.equal(failure.recoverable, true);
+          assert.deepEqual(failure.launchRecovery, {
+            failureClass: "capability_unavailable",
+            checkpoint: "initialize",
+          });
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 0);
+      assert.equal(
+        fixture.calls.some(
+          ({ file, argumentsList }) =>
+            file === "git" && argumentsList[1] === PROJECT_PATH,
+        ),
+        false,
+      );
+    }
+  }
+  const fixture = createFixture({
+    help: HELP.replace(/-n, --name[^\n]*/u, ""),
+  });
+  await fixture.adapter.run(
+    request({
+      session: { mode: "continue", id: SOURCE_SESSION },
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: () => assert.fail("Continuation creates no child"),
+    }),
+  );
+  assert.equal(
+    option(turnCalls(fixture)[0].argumentsList, "--name"),
+    undefined,
+  );
+});
+
+test("Claude fresh reconstruction names its new child while compaction preserves the existing name", async () => {
+  for (const failure of ["missing", "context"]) {
+    const events = [];
+    const fixture = createFixture({
+      handle({ call, turnIndex }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        if (turnIndex === 0)
+          return {
+            stdout: JSON.stringify(
+              result({
+                error: true,
+                sessionId: SOURCE_SESSION,
+                output:
+                  failure === "missing"
+                    ? "No conversation found."
+                    : "Context window exceeded.",
+              }),
+            ),
+            stderr: "",
+          };
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        session: { mode: "continue", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => events.push(id),
+        onSessionNaming: async ({ status }) => events.push(status),
+      }),
+    );
+    const turns = turnCalls(fixture);
+    assert.equal(turns.length, 2);
+    assert.equal(option(turns[0].argumentsList, "--name"), undefined);
+    assert.equal(
+      option(turns[1].argumentsList, "--name"),
+      failure === "missing"
+        ? `[${SESSION_NAMING.runId}] sample / audit / auditor`
+        : undefined,
+    );
+    assert.deepEqual(
+      events,
+      failure === "missing" ? [FRESH_SESSION, "named"] : [],
+    );
+    assert.equal(
+      response.sessionId,
+      failure === "missing" ? FRESH_SESSION : SOURCE_SESSION,
+    );
+  }
+});
+
+test("Claude cannot reserve fresh reconstruction when naming is unsupported", async () => {
+  for (const contextFull of [false, true]) {
+    const fixture = createFixture({
+      help: HELP.replace(/-n, --name[^\n]*/u, ""),
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p"))
+          return {
+            stdout: JSON.stringify(
+              result({
+                error: true,
+                sessionId: SOURCE_SESSION,
+                output: contextFull
+                  ? "Context window exceeded."
+                  : "No conversation found.",
+              }),
+            ),
+            stderr: "",
+          };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { mode: "continue", id: SOURCE_SESSION },
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: async () => {},
+          onFreshSession: () =>
+            assert.fail("Unsupported metadata cannot reserve reconstruction"),
+        }),
+      ),
+      (cause) => {
+        assert.equal(cause.code, "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING");
+        const failure = normalizeAdapterFailure("claude", cause);
+        assert.equal(failure.failure.effect, "possible");
+        assert.equal(failure.launchRecovery, undefined);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, contextFull ? 2 : 1);
+  }
+});
+
+test("Claude metadata rejection retains verified children and never retries the launch or commit", async () => {
+  for (const access of ["read-only", "workspace-write", "local-commit"])
+    for (const mode of [undefined, "fork"])
+      for (const streamed of [false, true]) {
+        const events = [];
+        const observations = [];
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (streamed) {
+              call.options.onStdout(
+                `${JSON.stringify({ type: "system", subtype: "init", session_id: CHILD_SESSION })}\n`,
+              );
+              throw Object.assign(new Error("controlled metadata failure"), {
+                stdout: "",
+                stderr:
+                  "Error: Failed to set session name. DO_NOT_RETAIN_NATIVE_METADATA",
+              });
+            }
+            throw processFailure(
+              result({
+                error: true,
+                sessionId: CHILD_SESSION,
+                output:
+                  "Failed to set session name. DO_NOT_RETAIN_NATIVE_METADATA",
+              }),
+            );
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access,
+              sessionNaming: SESSION_NAMING,
+              ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+              ...(access === "local-commit"
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "test(scope): verify readiness",
+                    },
+                    onCommitExecution: () =>
+                      assert.fail("Naming cannot commit"),
+                  }
+                : {}),
+              onSessionCreated: async (id) => events.push(id),
+              onSessionNaming: async (value) => events.push(value),
+              onObservation: (value) => observations.push(value),
+              onFreshSession: () => assert.fail("Naming cannot reconstruct"),
+            }),
+          ),
+          (cause) => {
+            assert.equal(cause.code, "ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE");
+            const failure = normalizeAdapterFailure("claude", cause);
+            assert.equal(failure.recoverable, true);
+            assert.equal(failure.launchRecovery, undefined);
+            assert.equal(failure.failure.availabilityReason, undefined);
+            if (access === "local-commit")
+              assert.equal(cause.effectStarted, false);
+            assert.doesNotMatch(
+              JSON.stringify(failure),
+              /DO_NOT_RETAIN|22222222/u,
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(events, [CHILD_SESSION, { status: "rejected" }]);
+        assert.equal(turnCalls(fixture).length, 1);
+        assert.equal(observations.length, 1);
+        assert.equal(observations[0].attempt, 1);
+        assert.equal(observations[0].commandCompletions, 0);
+        assert.equal(observations[0].compactions, 0);
+      }
+});
+
+test("a validated Claude naming failure retains its child despite unrelated initialization frames", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      for (const session_id of [CHILD_SESSION, FRESH_SESSION])
+        call.options.onStdout(
+          `${JSON.stringify({ type: "system", subtype: "init", session_id })}\n`,
+        );
+      call.options.onStdout(
+        `${JSON.stringify(
+          result({
+            error: true,
+            sessionId: CHILD_SESSION,
+            output: "Failed to set session name.",
+          }),
+        )}\n`,
+      );
+      throw processFailure();
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "fork", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => events.push(id),
+        onSessionNaming: async (value) => events.push(value),
+        onFreshSession: () =>
+          assert.fail("Metadata cannot replay the source fork"),
+      }),
+    ),
+    hasCode("ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE"),
+  );
+  assert.deepEqual(events, [CHILD_SESSION, { status: "rejected" }]);
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("Claude naming neither enrolls an unexpected identity nor trusts model output as metadata failure", async () => {
+  for (const sessionId of [SOURCE_SESSION, "not-a-session"]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p"))
+          throw processFailure(
+            result({
+              error: true,
+              sessionId,
+              output: "Failed to set session name.",
+            }),
+          );
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { mode: "fork", id: SOURCE_SESSION },
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: () =>
+            assert.fail("Unverified child cannot be acknowledged"),
+          onSessionNaming: () =>
+            assert.fail("Unverified child cannot be diagnosed"),
+        }),
+      ),
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+  }
+  const mismatched = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      for (const session_id of [CHILD_SESSION, FRESH_SESSION])
+        call.options.onStdout(
+          `${JSON.stringify({ type: "system", subtype: "init", session_id })}\n`,
+        );
+      throw Object.assign(new Error("controlled naming failure"), {
+        stdout: "",
+        stderr: "Error: Failed to set session name.",
+      });
+    },
+  });
+  await assert.rejects(
+    mismatched.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: () =>
+          assert.fail("Contradictory identity cannot be acknowledged"),
+        onSessionNaming: () =>
+          assert.fail("Contradictory identity cannot be diagnosed"),
+      }),
+    ),
+  );
+  assert.equal(turnCalls(mismatched).length, 1);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        return {
+          stdout: JSON.stringify(
+            result({ output: "Failed to set session name." }),
+          ),
+          stderr: "",
+        };
+    },
+  });
+  const diagnoses = [];
+  await fixture.adapter.run(
+    request({
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async () => {},
+      onSessionNaming: async (value) => diagnoses.push(value),
+    }),
+  );
+  assert.deepEqual(diagnoses, [{ status: "named" }]);
+});
+
+test("Claude naming preserves stronger failures and cannot reconstruct an interrupted turn", async () => {
+  for (const [kind, expected] of [
+    ["permission", "ERR_CLAUDE_PERMISSION_DENIED"],
+    ["interruption", "ERR_CLAUDE_PROCESS_INTERRUPTED"],
+    ["authentication", "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"],
+    ["usage", "ERR_CLAUDE_USAGE_LIMIT"],
+  ]) {
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const payload = result({
+          error: true,
+          sessionId: CHILD_SESSION,
+          output: "Failed to set session name.",
+          ...(kind === "permission"
+            ? { permission_denials: [{ tool_name: "WebFetch" }] }
+            : {}),
+          ...(kind === "authentication" ? { api_error_status: 401 } : {}),
+          ...(kind === "usage" ? { api_error_status: 429 } : {}),
+        });
+        const failure = processFailure(payload);
+        if (kind === "interruption") failure.signal = "SIGTERM";
+        throw failure;
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "workspace-write",
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: async () => {},
+          onSessionNaming: async ({ status }) =>
+            assert.notEqual(status, "rejected"),
+          onFreshSession: () =>
+            assert.fail("Naming cannot reconstruct interrupted work"),
+        }),
+      ),
+      (cause) => {
+        assert.equal(cause.code, expected);
+        if (kind === "interruption") assert.equal(cause.ambiguous, true);
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+  }
+});
+
+test("a failed Claude naming receipt retains the acknowledgement without fallback work", async () => {
+  const created = [];
+  const failure = new Error("controlled receipt failure");
+  const fixture = createFixture();
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async () => {
+          throw failure;
+        },
+        onFreshSession: () =>
+          assert.fail("Receipt failure cannot reconstruct work"),
+      }),
+    ),
+    (cause) => cause === failure,
+  );
+  assert.deepEqual(created, [FRESH_SESSION]);
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("persistent fresh Claude context pressure names only the two created children", async () => {
+  const events = [];
+  const fixture = createFixture({
+    handle({ call, turnIndex }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (turnIndex < 2)
+        return {
+          stdout: JSON.stringify(
+            result({
+              error: true,
+              sessionId: CHILD_SESSION,
+              output: "Context window exceeded.",
+            }),
+          ),
+          stderr: "",
+        };
+    },
+  });
+  const response = await fixture.adapter.run(
+    request({
+      sessionNaming: SESSION_NAMING,
+      onSessionCreated: async (id) => events.push(id),
+      onSessionNaming: async ({ status }) => events.push(status),
+    }),
+  );
+  const turns = turnCalls(fixture);
+  assert.deepEqual(
+    turns.map(({ argumentsList }) => option(argumentsList, "--name")),
+    [
+      `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+      undefined,
+      `[${SESSION_NAMING.runId}] sample / audit / auditor`,
+    ],
+  );
+  assert.equal(option(turns[1].argumentsList, "--resume"), CHILD_SESSION);
+  assert.equal(option(turns[2].argumentsList, "--resume"), undefined);
+  assert.equal(response.sessionId, FRESH_SESSION);
+  assert.deepEqual(events, [
+    CHILD_SESSION,
+    "unavailable",
+    FRESH_SESSION,
+    "named",
+  ]);
+});
+
+test("acknowledges a new Claude child before compaction even when recovery fails", async () => {
+  for (const mode of [undefined, "fork", "continue"])
+    for (const succeeds of [true, false]) {
+      const sessionId = mode === "continue" ? SOURCE_SESSION : CHILD_SESSION;
+      const events = [];
+      let attempts = 0;
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return undefined;
+          events.push("turn");
+          attempts++;
+          assert.equal(
+            option(call.argumentsList, "--name"),
+            attempts === 1 && mode !== "continue"
+              ? `[${SESSION_NAMING.runId}] sample / audit / auditor`
+              : undefined,
+          );
+          if (attempts === 1) {
+            const payload = result({
+              error: true,
+              output: "Context window exceeded.",
+              sessionId,
+            });
+            if (mode === "fork") throw processFailure(payload);
+            return { stdout: JSON.stringify(payload), stderr: "" };
+          }
+          if (!succeeds)
+            throw processFailure(
+              result({ error: true, sessionId, api_error_status: 401 }),
+            );
+          return { stdout: JSON.stringify(result({ sessionId })), stderr: "" };
+        },
+      });
+      const operation = fixture.adapter.run(
+        request({
+          ...(mode ? { session: { mode, id: SOURCE_SESSION } } : {}),
+          sessionNaming: SESSION_NAMING,
+          onSessionCreated: async (id) => events.push(id),
+          onSessionNaming: async ({ status }) => events.push(status),
+        }),
+      );
+      if (succeeds) assert.equal((await operation).sessionId, sessionId);
+      else
+        await assert.rejects(
+          operation,
+          hasCode("ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"),
+        );
+      assert.equal(attempts, 2);
+      assert.deepEqual(
+        events,
+        mode === "continue"
+          ? ["turn", "turn"]
+          : ["turn", sessionId, "unavailable", "turn"],
+      );
+    }
+});
+
+test("failed Claude child acknowledgement prevents compaction or replacement", async () => {
+  const failure = new Error("controlled acknowledgement failure");
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p"))
+        throw processFailure(
+          result({
+            error: true,
+            output: "Context window exceeded.",
+            sessionId: CHILD_SESSION,
+          }),
+        );
+      return undefined;
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        session: { mode: "fork", id: SOURCE_SESSION },
+        onSessionCreated: async () => {
+          throw failure;
+        },
+      }),
+    ),
+    (cause) => cause === failure,
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("carries a selected file into Claude read-only mounts without granting its parent", async (t) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "claude-finalization-")),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "RUNNER.md");
+  await writeFile(path, "Run checks.\n");
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    async handle({ call }) {
+      if (call.argumentsList.includes("-p")) {
+        const settings = JSON.parse(option(call.argumentsList, "--settings"));
+        assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
+        assert.equal(
+          settings.sandbox.filesystem.denyWrite.includes(directory),
+          false,
+        );
+        const launcher = await readFile(call.commandLauncherPath, "utf8");
+        assert.ok(
+          launcher.includes(JSON.stringify([`${PROJECT_PATH}/.git`, path])),
+        );
+      }
+    },
+  });
+  for (const readPaths of [[directory], ["relative.md"], [path, path], []]) {
+    await assert.rejects(fixture.adapter.run(request({ readPaths })));
+  }
+  assert.equal(turnCalls(fixture).length, 0);
+  await fixture.adapter.run(request({ readPaths: [path] }));
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+async function directoryWorkspace(t) {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "claude-directory-")),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace");
+  const output = join(cwd, "out");
+  const input = join(cwd, "input.md");
+  const source = join(root, "source.md");
+  const control = join(cwd, ".claude");
+  await mkdir(cwd);
+  await mkdir(output);
+  await mkdir(control);
+  await writeFile(input, "Input.\n");
+  await writeFile(source, "Reference.\n");
+  await writeFile(join(control, "settings.json"), "{}\n");
+  return {
+    root,
+    cwd,
+    output,
+    input,
+    source,
+    control,
+    workspacePolicy: {
+      kind: "directory",
+      workspacePath: cwd,
+      stateRoot: join(root, "state"),
+      inputPaths: [input],
+      sourcePaths: [source],
+      outputPaths: [output],
+    },
+  };
+}
+
+function directoryCommandArguments(directory, access, native) {
+  return [
+    "--new-session",
+    "--die-with-parent",
+    "--unsetenv",
+    "ANTHROPIC_API_KEY",
+    "--unshare-net",
+    "--ro-bind",
+    "/",
+    "/",
+    ...(access === "workspace-write"
+      ? ["--bind", directory.cwd, directory.cwd]
+      : []),
+    "--ro-bind",
+    directory.cwd,
+    directory.cwd,
+    "--ro-bind",
+    directory.input,
+    directory.input,
+    "--ro-bind",
+    directory.source,
+    directory.source,
+    "--ro-bind",
+    "/dev/null",
+    join(directory.control, "settings.json"),
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-user",
+    ...(native
+      ? ["--proc", "/proc", "--cap-drop", "ALL"]
+      : ["--bind", "/proc", "/proc"]),
+    "--",
+    "/bin/sh",
+    "-c",
+    "opaque model command",
+  ];
+}
+
+test("proves directory access without Git or commit preparation and binds each receipt", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const artifactPath = join(directory.root, "artifacts");
+  directory.workspacePolicy.artifactPaths = [artifactPath];
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fake = await createFakeBubblewrap(t);
+    const fixture = createFixture({
+      nativeSandbox,
+      executeFallbackLauncher: true,
+      env: {
+        ...process.env,
+        AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+        PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    const receipts = [];
+    for (const access of ["read-only", "workspace-write"]) {
+      await rm(artifactPath, { recursive: true, force: true });
+      const options = { access, workspacePolicy: directory.workspacePolicy };
+      const capabilities = await fixture.adapter.probe(options);
+      assert.equal(capabilities.declaredWorkspace, true);
+      assert.equal(capabilities.localCommit, false);
+      assert.equal(capabilities.readOnly, access === "read-only");
+      assert.equal(capabilities.workspaceWrite, access === "workspace-write");
+      assert.deepEqual(capabilities.policyReceipt.supportedAccess, [access]);
+      assert.ok(Object.isFrozen(capabilities.policyReceipt));
+      receipts.push(capabilities.policyReceipt.fingerprint);
+      await writeFile(join(directory.output, "result.md"), "Output.\n");
+      await mkdir(artifactPath);
+      await writeFile(
+        join(artifactPath, "clarifications.md"),
+        "Frozen clarifications\n",
+      );
+      assert.deepEqual(
+        (await fixture.adapter.probe(options)).policyReceipt,
+        capabilities.policyReceipt,
+      );
+      assert.equal(
+        await fixture.adapter.canReadFiles({
+          ...options,
+          paths: [directory.input, directory.source],
+        }),
+        true,
+      );
+    }
+    assert.notEqual(receipts[0], receipts[1]);
+    assert.equal(
+      fixture.calls.some(({ file }) => file === "git"),
+      false,
+    );
+    assert.equal(localCommitSandboxCalls(fixture).length, 0);
+    assert.equal(turnCalls(fixture).length, 0);
+    // A later repository probe must still perform its independent Git proof.
+    assert.equal((await fixture.adapter.probe()).localCommit, true);
+    assert.ok(fixture.calls.some(isProbeRepositorySetup));
+  }
+});
+
+test("executes the fallback directory probe with a file reference inside private temporary storage", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fake = await createFakeBubblewrap(t);
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    executeFallbackLauncher: true,
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+      PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+  for (const access of ["read-only", "workspace-write"]) {
+    assert.equal(
+      (
+        await fixture.adapter.probe({
+          access,
+          workspacePolicy: directory.workspacePolicy,
+        })
+      ).declaredWorkspace,
+      true,
+    );
+  }
+  const invocations = (await readFile(fake.logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(invocations.length, 2);
+  for (const invocation of invocations) {
+    // Replay under private /tmp even when the host test harness uses another
+    // temporary root. These paths exist only in the filesystem simulation.
+    const basePath = dirname(option(invocation, "--chdir"));
+    const args = invocation.map((value) =>
+      value.replaceAll(basePath, "/tmp/claude-probe"),
+    );
+    const payload = args.at(-1);
+    const words = [...payload.matchAll(/'((?:[^']|'\\'')*)'/gu)].map(
+      ([, value]) => value.replaceAll("'\\''", "'"),
+    );
+    assert.equal(
+      `${shellArgument(words[0])} --input-type=module -e ${words.slice(1).map(shellArgument).join(" ")}`,
+      payload,
+    );
+    const [, script, , , outside] = words;
+    const reference = join(outside, "reference.md");
+    const cwd = option(args, "--chdir");
+    const environment = {};
+    const mounts = [];
+    for (let index = 0; index < args.indexOf("--"); index += 1) {
+      const operation = args[index];
+      if (["--ro-bind", "--bind"].includes(operation)) {
+        mounts.push({
+          path: args[index + 2],
+          writable: operation === "--bind",
+        });
+        index += 2;
+      } else if (["--tmpfs", "--remount-ro"].includes(operation)) {
+        mounts.push({
+          path: args[index + 1],
+          writable: operation === "--tmpfs",
+        });
+        index += 1;
+      } else if (operation === "--setenv") {
+        environment[args[index + 1]] = args[index + 2];
+        index += 2;
+      }
+    }
+    const mountAt = (path) =>
+      mounts.findLast(
+        (mount) =>
+          path === mount.path ||
+          path.startsWith(mount.path === "/" ? "/" : `${mount.path}/`),
+      );
+    assert.deepEqual(mountAt(reference), { path: reference, writable: false });
+    assert.deepEqual(mountAt(join(outside, "outside-probe")), {
+      path: "/tmp",
+      writable: true,
+    });
+    // Execute the emitted payload with filesystem effects derived from its
+    // actual mounts. No host namespace, network or filesystem writes are used.
+    for (const leak of [undefined, reference, "/agent-runner-claude-probe"]) {
+      const exit = {};
+      let exitCode;
+      let output = "";
+      const writes = new Set();
+      const change = (path) => {
+        path = resolve(cwd, path);
+        writes.add(path);
+        if (path !== leak && !mountAt(path)?.writable) throw { code: "EROFS" };
+      };
+      assert.throws(
+        () =>
+          runInNewContext(
+            script.replace(/^import [^;]+ from "node:[^"]+";\n/gmu, ""),
+            {
+              mkdirSync: change,
+              renameSync(from, to) {
+                change(from);
+                change(to);
+              },
+              rmdirSync: change,
+              unlinkSync: change,
+              join,
+              process: {
+                argv: [words[0], ...words.slice(2)],
+                cwd: () => cwd,
+                env: environment,
+                exit(code) {
+                  exitCode ??= code;
+                  throw exit;
+                },
+              },
+              readFileSync(path) {
+                path = resolve(cwd, path);
+                if (path.startsWith("/proc/")) throw { code: "EACCES" };
+                if (path === reference) return "reference\n";
+                if (path === join(cwd, "inspection.txt")) return "inspection\n";
+                assert.equal(path, join(environment.HOME, ".bashrc"));
+                return "";
+              },
+              writeFileSync: change,
+              statSync: () => ({
+                isDirectory: () => true,
+                isSocket: () => true,
+              }),
+              writeSync: (fd, value) => {
+                assert.equal(fd, 1);
+                output += value;
+              },
+              createConnection: () => ({
+                once(event, listener) {
+                  if (event === "error") listener({ code: "EPERM" });
+                },
+              }),
+            },
+          ),
+        (error) => error === exit,
+      );
+      assert.equal(exitCode, leak === undefined ? 0 : 10);
+      if (leak === undefined) {
+        assert.equal(output, "agent-runner-claude-isolation-ok");
+        assert.ok(writes.has(reference));
+        assert.ok(writes.has("/agent-runner-claude-probe"));
+        // Only the writable proof reaches the rename and unlink of a source file.
+        assert.equal(
+          writes.has(join(cwd, "out", "source-probe", "renamed.txt")),
+          invocation === invocations[1],
+        );
+      }
+    }
+  }
+});
+
+test("projects native and fallback directory commands onto declared outputs only", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const metadata = join(directory.root, "metadata");
+  const shared = join(directory.root, "shared");
+  const pointer = join(directory.cwd, "nested", ".git");
+  await mkdir(dirname(pointer));
+  await mkdir(metadata);
+  await mkdir(shared);
+  await writeFile(pointer, `gitdir: ${metadata}\n`);
+  await writeFile(join(metadata, "commondir"), `${shared}\n`);
+  await writeFile(join(shared, "config"), "Control.\n");
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fake = await createFakeBubblewrap(t);
+    const native = nativeSandbox === true;
+    const privateWrites = [];
+    for (const access of ["read-only", "workspace-write"]) {
+      let launcherError;
+      const fixture = createFixture({
+        nativeSandbox,
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: "provider-token",
+          AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+        },
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          try {
+            assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
+            assert.equal(
+              option(call.argumentsList, "--tools"),
+              READ_ONLY_TOOLS,
+            );
+            const settings = JSON.parse(
+              option(call.argumentsList, "--settings"),
+            );
+            assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
+            assert.ok(
+              settings.sandbox.filesystem.denyWrite.includes(directory.source),
+            );
+            const args = directoryCommandArguments(directory, access, native);
+            // Claude's own temporary bind stays inside the private allocation.
+            const privateWrite = join(call.options.env.TMPDIR, "claude-temp");
+            privateWrites.push(privateWrite);
+            args.splice(
+              args.indexOf("--dev"),
+              0,
+              "--bind",
+              privateWrite,
+              privateWrite,
+            );
+            const runLauncher = (argumentsList) =>
+              executeFile(call.commandLauncherPath, argumentsList, {
+                env: call.options.env,
+                encoding: "utf8",
+                timeout: 10_000,
+              });
+            await runLauncher(args);
+            for (const forbidden of [
+              directory.input,
+              directory.source,
+              directory.control,
+              metadata,
+              directory.root,
+            ]) {
+              const forged = [...args];
+              forged.splice(
+                forged.indexOf("--dev"),
+                0,
+                "--bind",
+                forbidden,
+                forbidden,
+              );
+              await assert.rejects(runLauncher(forged), { code: 125 });
+            }
+            if (access === "workspace-write") {
+              const held = join(directory.root, "original-output");
+              await rename(directory.output, held);
+              await mkdir(directory.output);
+              await assert.rejects(runLauncher(args), { code: 125 });
+              await rm(held, { recursive: true });
+              await writeFile(
+                join(directory.output, "result.md"),
+                "Written.\n",
+              );
+            }
+          } catch (cause) {
+            launcherError = cause;
+            throw cause;
+          }
+        },
+      });
+      await fixture.adapter
+        .run(
+          request({
+            cwd: directory.cwd,
+            access,
+            workspacePolicy: directory.workspacePolicy,
+          }),
+        )
+        .catch((cause) => {
+          throw launcherError ?? cause;
+        });
+      const turn = turnCalls(fixture)[0];
+      await assert.rejects(stat(turn.commandLauncherPath), { code: "ENOENT" });
+      assert.equal(
+        fixture.calls.some(({ file }) => file === "git"),
+        false,
+      );
+    }
+    const boundaries = (await readFile(fake.logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(boundaries.length, 2);
+    for (const [index, args] of boundaries.entries()) {
+      const writes = args.flatMap((arg, i) =>
+        arg === "--bind" ? [args.slice(i + 1, i + 3)] : [],
+      );
+      // The fallback discards private mounts with its replaced runtime trees.
+      assert.deepEqual(writes, [
+        ...(index === 0 ? [] : [[directory.output, directory.output]]),
+        ...(native ? [[privateWrites[index], privateWrites[index]]] : []),
+      ]);
+      assert.ok(
+        includesSequence(args, ["--ro-bind", directory.cwd, directory.cwd]),
+      );
+      assert.ok(
+        includesSequence(args, [
+          "--ro-bind",
+          directory.control,
+          directory.control,
+        ]),
+      );
+      assert.ok(
+        includesSequence(args, [
+          "--ro-bind",
+          directory.source,
+          directory.source,
+        ]),
+      );
+      for (const control of [pointer, metadata, shared])
+        assert.ok(includesSequence(args, ["--ro-bind", control, control]));
+      const maskTarget = join(directory.control, "settings.json");
+      assert.ok(includesSequence(args, ["--ro-bind", "/dev/null", maskTarget]));
+      assert.ok(args.lastIndexOf(directory.control) < args.indexOf(maskTarget));
+      assert.ok(includesSequence(args, ["--setenv", "HOME"]));
+      if (!native) {
+        assert.ok(includesSequence(args, ["--seccomp", "3"]));
+        assert.ok(includesSequence(args, ["--unshare-net"]));
+      }
+    }
+  }
+});
+
+test("rejects unsafe directory outputs during storage allocation and launcher admission", async (t) => {
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    for (const stage of ["allocation", "admission"]) {
+      const directory = await directoryWorkspace(t);
+      const output = join(directory.output, "result.md");
+      const external = join(directory.root, "external.md");
+      await writeFile(output, "Output.\n");
+      await writeFile(external, "External.\n");
+      const fake = await createFakeBubblewrap(t);
+      let substituted = false;
+      let launcherRejected = false;
+      const fixture = createFixture({
+        nativeSandbox,
+        env: {
+          ...process.env,
+          AGENT_RUNNER_FAKE_BWRAP_NATIVE: nativeSandbox === true ? "1" : "0",
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+        },
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          if (stage === "admission") {
+            // Keep the captured inode; only its link count changes.
+            await link(output, join(directory.root, "output-alias.md"));
+            substituted = true;
+          }
+          try {
+            await executeFile(
+              call.commandLauncherPath,
+              directoryCommandArguments(
+                directory,
+                "workspace-write",
+                nativeSandbox === true,
+              ),
+              { env: call.options.env, timeout: 10_000 },
+            );
+          } catch (cause) {
+            assert.equal(cause.code, 125);
+            launcherRejected = true;
+          }
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            access: "workspace-write",
+            workspacePolicy: {
+              ...directory.workspacePolicy,
+              outputPaths: [output],
+            },
+            async onResource(resource) {
+              if (stage !== "allocation" || resource?.phase !== "allocated")
+                return;
+              await rm(output);
+              await link(external, output);
+              substituted = true;
+            },
+          }),
+        ),
+        hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+      );
+      assert.equal(substituted, true);
+      if (stage === "allocation") assert.equal(turnCalls(fixture).length, 0);
+      else assert.equal(launcherRejected, true);
+      await assert.rejects(readFile(fake.logPath), { code: "ENOENT" });
+      assert.equal(await readFile(external, "utf8"), "External.\n");
+    }
+  }
+});
+
+test("accepts missing nested directory artifact and state exclusions without creating them", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const artifact = join(directory.cwd, "generated", "artifacts");
+  const stateRoot = join(directory.root, "private", "state", "runs");
+  const fixture = createFixture();
+  for (const access of ["read-only", "workspace-write"]) {
+    const workspacePolicy = {
+      ...directory.workspacePolicy,
+      artifactPaths: [artifact],
+      stateRoot,
+    };
+    assert.equal(
+      (await fixture.adapter.probe({ access, workspacePolicy }))
+        .declaredWorkspace,
+      true,
+    );
+    await fixture.adapter.run(
+      request({ cwd: directory.cwd, access, workspacePolicy }),
+    );
+    for (const missing of [
+      join(directory.cwd, "generated"),
+      dirname(dirname(stateRoot)),
+    ])
+      await assert.rejects(stat(missing), { code: "ENOENT" });
+  }
+  const reservedState = join(
+    await realpath(tmpdir()),
+    `agent-runner-claude-${process.getuid()}`,
+    "absent-exclusion",
+    "state",
+  );
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: {
+          ...directory.workspacePolicy,
+          stateRoot: reservedState,
+        },
+      }),
+    ),
+    { code: "ERR_AGENT_ENVIRONMENT_PREPARATION" },
+  );
+  await assert.rejects(stat(dirname(reservedState)), { code: "ENOENT" });
+  assert.equal(turnCalls(fixture).length, 2);
+});
+
+test("rejects directory drift after failed attempts before reconstruction", async (t) => {
+  for (const target of ["input", "source", "control", "output"]) {
+    const directory = await directoryWorkspace(t);
+    let fresh = 0;
+    const observations = [];
+    const fixture = createFixture({
+      async handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const path =
+          target === "control"
+            ? join(directory.control, "settings.json")
+            : target === "output"
+              ? join(directory.output, "result.md")
+              : directory[target];
+        await writeFile(path, "Unexpected change.\n");
+        throw processFailure(
+          undefined,
+          `No conversation found with session ID: ${SOURCE_SESSION}`,
+        );
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          cwd: directory.cwd,
+          access: target === "output" ? "read-only" : "workspace-write",
+          workspacePolicy: directory.workspacePolicy,
+          session: { mode: "continue", id: SOURCE_SESSION },
+          recoveryPrompt: "Complete durable context.",
+          onFreshSession() {
+            fresh += 1;
+          },
+          onObservation(value) {
+            observations.push(value);
+          },
+        }),
+      ),
+      hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(fresh, 0);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].outcome, "incomplete");
+    await assert.rejects(stat(turnCalls(fixture)[0].commandLauncherPath), {
+      code: "ENOENT",
+    });
+  }
+});
+
+test("retains retiring directory turns when current controls reference storage or cannot be inspected", async (t) => {
+  for (const outcome of ["completed", "failed", "malformed-control"]) {
+    await t.test(outcome, async (t) => {
+      let directory;
+      let pointer;
+      let original;
+      let resource;
+      const onResource = (value) => {
+        resource = value;
+      };
+      t.after(async () => {
+        if (resource) {
+          await writeFile(pointer, original);
+          await recoverClaudeStorage({
+            resource,
+            workspacePolicy: directory.workspacePolicy,
+            storageForbiddenPaths: [directory.cwd],
+            onResource,
+          });
+        }
+      });
+      directory = await directoryWorkspace(t);
+      const metadata = join(directory.root, "metadata");
+      pointer = join(directory.cwd, ".git");
+      await mkdir(metadata);
+      original = `gitdir: ${metadata}\n`;
+      await writeFile(pointer, original);
+      let retained;
+      let allocation;
+      const fixture = createFixture({
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          retained = resource;
+          allocation = join(resource.root.path, resource.id);
+          await writeFile(join(allocation, "protected.txt"), "Preserve.\n");
+          await writeFile(
+            pointer,
+            outcome === "malformed-control"
+              ? "invalid\n"
+              : `gitdir: ${allocation}\n`,
+          );
+          if (outcome === "failed")
+            throw processFailure(
+              result({ error: true, output: "authentication failed" }),
+            );
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            access: "workspace-write",
+            workspacePolicy: directory.workspacePolicy,
+            onResource,
+          }),
+        ),
+        {
+          code:
+            outcome === "failed"
+              ? "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"
+              : "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+        },
+      );
+      assert.equal(resource, retained);
+      assert.equal(resource.phase, "allocated");
+      assert.equal(
+        await readFile(join(allocation, "protected.txt"), "utf8"),
+        "Preserve.\n",
+      );
+      await assert.rejects(
+        recoverClaudeStorage({
+          resource,
+          workspacePolicy: directory.workspacePolicy,
+          storageForbiddenPaths: [directory.cwd],
+          onResource,
+        }),
+        { code: "ERR_EXECUTION_RESOURCE_UNVERIFIABLE" },
+      );
+      assert.equal(resource, retained);
+
+      // The same owner can retire storage after controls are restored, even
+      // when a frozen input disappeared. Cleanup grants no turn replay.
+      await writeFile(pointer, original);
+      await rm(directory.input);
+      await recoverClaudeStorage({
+        resource,
+        workspacePolicy: directory.workspacePolicy,
+        storageForbiddenPaths: [directory.cwd],
+        onResource,
+      });
+      assert.equal(resource, null);
+      await assert.rejects(stat(allocation), { code: "ENOENT" });
+      assert.equal(turnCalls(fixture).length, 1);
+    });
+  }
+});
+
+test("retains directory storage and forbids reconstruction without process retirement", async (t) => {
+  let resource;
+  let directory;
+  // The process is entirely injected; retire its storage before the workspace.
+  t.after(async () => {
+    if (resource)
+      await recoverClaudeStorage({
+        resource,
+        storageForbiddenPaths: [directory.cwd],
+      });
+  });
+  directory = await directoryWorkspace(t);
+  let fresh = 0;
+  const fixture = createFixture({
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      await call.options.onProcess(4242, {});
+      throw processFailure(
+        undefined,
+        `No conversation found with session ID: ${SOURCE_SESSION}`,
+      );
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        access: "workspace-write",
+        workspacePolicy: directory.workspacePolicy,
+        session: { mode: "continue", id: SOURCE_SESSION },
+        recoveryPrompt: "Complete durable context.",
+        onProcess: async () => {},
+        onResource(value) {
+          resource = value;
+        },
+        onFreshSession() {
+          fresh += 1;
+        },
+      }),
+    ),
+    hasCode("ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE"),
+  );
+  assert.equal(fresh, 0);
+  assert.equal(turnCalls(fixture).length, 1);
+  assert.equal(resource.phase, "allocated");
+  assert.ok((await stat(turnCalls(fixture)[0].commandLauncherPath)).isFile());
+});
+
+test("reconstructs directory output turns under the same policy without Git", async (t) => {
+  const directory = await directoryWorkspace(t);
+  let fresh = 0;
+  let attempts = 0;
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (++attempts === 1) {
+        await writeFile(join(directory.output, "partial.md"), "Preserved.\n");
+        throw processFailure(
+          undefined,
+          `No conversation found with session ID: ${SOURCE_SESSION}`,
+        );
+      }
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+      session: { mode: "continue", id: SOURCE_SESSION },
+      recoveryPrompt: "Complete durable context.",
+      onFreshSession() {
+        fresh += 1;
+      },
+    }),
+  );
+  const turns = turnCalls(fixture);
+  assert.equal(fresh, 1);
+  assert.equal(turns.length, 2);
+  assert.equal(option(turns[1].argumentsList, "--resume"), undefined);
+  assert.equal(option(turns[1].argumentsList, "--tools"), READ_ONLY_TOOLS);
+  assert.notEqual(turns[0].commandLauncherPath, turns[1].commandLauncherPath);
+  assert.equal(
+    await readFile(join(directory.output, "partial.md"), "utf8"),
+    "Preserved.\n",
+  );
+  assert.equal(
+    fixture.calls.some(({ file }) => file === "git"),
+    false,
+  );
+});
+
+test("retains an unretired directory compaction attempt without requesting reconstruction", async (t) => {
+  let resource;
+  let retainedResource;
+  let directory;
+  t.after(async () => {
+    if (retainedResource)
+      await recoverClaudeStorage({
+        resource: retainedResource,
+        storageForbiddenPaths: [directory.cwd],
+      });
+  });
+  directory = await directoryWorkspace(t);
+  let attempts = 0;
+  let fresh = 0;
+  const fixture = createFixture({
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (++attempts === 2) {
+        await call.options.onProcess(4242, {});
+        retainedResource = resource;
+      }
+      throw processFailure(undefined, "context window full");
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        session: { mode: "continue", id: SOURCE_SESSION },
+        recoveryPrompt: "Complete durable context.",
+        onProcess: async () => {},
+        onResource(value) {
+          resource = value;
+        },
+        onFreshSession() {
+          fresh += 1;
+        },
+      }),
+    ),
+    hasCode("ERR_CLAUDE_CONTEXT_EXHAUSTED"),
+  );
+  assert.equal(fresh, 0);
+  assert.equal(turnCalls(fixture).length, 2);
+  assert.equal(resource, retainedResource);
+  assert.ok((await stat(turnCalls(fixture)[1].commandLauncherPath)).isFile());
+});
+
+test("fails closed on invalid directory declarations and unsupported isolation", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture();
+  for (const policy of [
+    { ...directory.workspacePolicy, extra: true },
+    { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ cwd: directory.cwd, workspacePolicy: policy }),
+      ),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        access: "local-commit",
+        workspacePolicy: directory.workspacePolicy,
+        authorizationId: "unused",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): reject directory commit",
+        },
+      }),
+    ),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  for (const policy of [
+    { ...directory.workspacePolicy, outputPaths: [directory.input] },
+    { ...directory.workspacePolicy, stateRoot: directory.output },
+    {
+      ...directory.workspacePolicy,
+      outputPaths: [join(directory.cwd, "absent")],
+    },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          cwd: directory.cwd,
+          access: "workspace-write",
+          workspacePolicy: policy,
+        }),
+      ),
+      hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+    );
+  assert.equal(fixture.calls.length, 0);
+  for (const options of [
+    { nativeSandbox: false },
+    { nativeSandbox: "nested-denied", architecture: "unsupported" },
+  ]) {
+    const unsupported = createFixture(options);
+    const probe = {
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    };
+    const capabilities = await unsupported.adapter.probe(probe);
+    assert.equal(capabilities.declaredWorkspace, false);
+    assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+    await assert.rejects(
+      unsupported.adapter.run(request({ ...probe, cwd: directory.cwd })),
+      hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+    );
+    assert.equal(turnCalls(unsupported).length, 0);
+  }
+});
+
+test("rejects binary preservation sources masked by the selected command sandbox", async (t) => {
+  const stateRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-preserved-source-")),
+  );
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const masked = stateRoot.startsWith("/run/") || stateRoot.startsWith("/tmp/");
+  const binary = Buffer.from([0, 255, 128, 13, 10]);
+  const blob = join(
+    stateRoot,
+    createHash("sha256").update(binary).digest("hex"),
+  );
+  const manifest = join(stateRoot, "manifest.json");
+  await writeFile(blob, binary);
+  await writeFile(manifest, JSON.stringify({ blob }));
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fixture = createFixture({ nativeSandbox });
+    const paths = [manifest, blob];
+    const readable = await fixture.adapter.canReadFiles({
+      access: "workspace-write",
+      paths,
+    });
+    // The host and native root read can access the bytes; the proved fallback
+    // command mounts replace the host temporary trees with private filesystems.
+    assert.equal(readable, nativeSandbox === true || !masked);
+    assert.deepEqual(await readFile(blob), binary);
+    assert.equal(
+      fixture.calls.some(({ argumentsList }) => argumentsList.includes("-p")),
+      false,
+    );
+  }
+});
+
+test("preserves a two-mebibyte result through duplicated escaped stream envelopes", async () => {
+  const structured = largeFinalizationResult('"');
+  const output = JSON.stringify(structured);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        assert.equal(call.options.input, output);
+        return {
+          stdout: JSON.stringify(result({ output, structured })),
+          stderr: "",
+        };
+      }
+    },
+  });
+  const response = await fixture.adapter.run(
+    request({
+      prompt: output,
+      recoveryPrompt: output,
+      schema: POLISHING_FINALIZATION_SCHEMA,
+    }),
+  );
+  assert.equal(response.output, output);
+  assert.deepEqual(response.structured, structured);
+});
+
 test("streams Claude progress before completion without exposing payloads or losing command nesting", async (t) => {
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
   const events = [];
+  const observations = [];
   const fixture = createFixture({
     async handle({ call }) {
       if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
@@ -735,11 +2377,16 @@ test("streams Claude progress before completion without exposing payloads or los
     fixture.adapter.run(request({ onProgress: true })),
     hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
   );
+  await assert.rejects(
+    fixture.adapter.run(request({ onObservation: true })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
   const running = fixture.adapter.run(
     request({
       schema: STRICT_SCHEMA,
       session: { id: FRESH_SESSION, mode: "continue" },
       onProgress: (event) => events.push(event),
+      onObservation: (value) => observations.push(value),
     }),
   );
   t.after(async () => {
@@ -757,6 +2404,13 @@ test("streams Claude progress before completion without exposing payloads or los
       ),
     );
   send({ type: "system", subtype: "init" });
+  for (let index = 0; index < 2; index++)
+    send({
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: "compaction",
+      compact_metadata: { trigger: "auto", pre_tokens: 100 },
+    });
   const partial = (event) => send({ type: "stream_event", event });
   partial({
     type: "message_start",
@@ -870,12 +2524,39 @@ test("streams Claude progress before completion without exposing payloads or los
     task_id: "background",
     status: "completed",
   });
-  send(result({ structured: { ok: true }, output: "done🙂" }));
+  send(
+    result({
+      structured: { ok: true },
+      output: "done🙂",
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 40,
+        cache_creation_input_tokens: 5,
+        output_tokens: 30,
+      },
+      modelUsage: { "test-model": { contextWindow: 1000 } },
+    }),
+  );
   release.resolve();
   const response = await running;
   assert.equal(response.output, "done🙂");
   assert.deepEqual(response.structured, { ok: true });
   assert.equal(response.sessionId, FRESH_SESSION);
+  assert.equal(observations[0].commandCompletions, 3);
+  assert.equal(observations[0].compactions, 1);
+  assert.equal(observations[0].accounting, "reported");
+  assert.deepEqual(observations[0].cumulative, {
+    inputTokens: 10,
+    cachedInputTokens: 40,
+    cacheWriteInputTokens: 5,
+    outputTokens: 30,
+    reasoningOutputTokens: null,
+    totalTokens: null,
+  });
+  assert.equal(observations[0].inputIncludesCached, false);
+  assert.equal(observations[0].cumulativeScope, "attempt");
+  assert.equal(observations[0].last, null);
+  assert.equal(observations[0].contextCapacity, 1000);
   assert.deepEqual(
     events
       .filter(({ kind }) => kind.startsWith("local-command-"))
@@ -905,11 +2586,17 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
     subtype: "init",
     session_id: FRESH_SESSION,
   });
+  const foreignInit = JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: CHILD_SESSION,
+  });
   const final = JSON.stringify(result());
   for (const [name, stdout, failed] of [
     ["malformed", `bad-json\n${final}\n`],
     ["duplicate", `${final}\n${final}\n`],
-    ["trailing-init", `${final}\n${init}\n`],
+    ["conflicting-trailing-init", `${init}\n${final}\n${foreignInit}\n`],
+    ["conflicting-fallback-init", `${final}\n${foreignInit}\n`],
     [
       "trailing",
       `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
@@ -948,6 +2635,87 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       );
       assert.equal(turnCalls(fixture).length, 1);
     });
+});
+
+test("Claude treats a replayed initialization of its completed session as idempotent metadata", async () => {
+  const init = (uuid) => ({
+    type: "system",
+    subtype: "init",
+    model: "test-model",
+    tools: ["Bash"],
+    uuid,
+  });
+  for (const leadingInit of [true, false]) {
+    const sessionEvents = [];
+    const progress = [];
+    const observations = [];
+    let progressBeforeReplay;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const send = (record) =>
+          call.options.onStdout(
+            `${JSON.stringify({ session_id: CHILD_SESSION, ...record })}\n`,
+          );
+        if (leadingInit) send(init("55555555-5555-4555-8555-555555555555"));
+        send({
+          type: "assistant",
+          message: {
+            id: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "command",
+                name: "Bash",
+                input: { command: "true" },
+              },
+            ],
+          },
+        });
+        send({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "command", content: "" },
+            ],
+          },
+        });
+        send(
+          result({
+            sessionId: CHILD_SESSION,
+            structured: { ok: true },
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }),
+        );
+        progressBeforeReplay = progress.length;
+        send(init("66666666-6666-4666-8666-666666666666"));
+        return { stdout: "", stderr: "" };
+      },
+    });
+    const response = await fixture.adapter.run(
+      request({
+        schema: STRICT_SCHEMA,
+        session: { mode: "fork", id: SOURCE_SESSION },
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => sessionEvents.push(id),
+        onSessionNaming: async (value) => sessionEvents.push(value),
+        onProgress: (event) => progress.push(event),
+        onObservation: (value) => observations.push(value),
+      }),
+    );
+    assert.equal(response.output, "done");
+    assert.deepEqual(response.structured, { ok: true });
+    assert.equal(response.sessionId, CHILD_SESSION);
+    assert.deepEqual(sessionEvents, [CHILD_SESSION, { status: "named" }]);
+    assert.equal(progress.length, progressBeforeReplay);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].accounting, "reported");
+    assert.equal(observations[0].commandCompletions, leadingInit ? 1 : 0);
+    assert.equal(turnCalls(fixture).length, 1);
+  }
 });
 
 test("Claude streaming preserves permission precedence and retires unfinished command activity", async () => {
@@ -1004,9 +2772,14 @@ test("Claude streaming preserves permission precedence and retires unfinished co
 });
 
 test("redacts Claude retirement observer errors without replacing provider failures", async (t) => {
-  for (const failed of [false, true])
+  for (const [observer, failed] of [
+    ["onProgress", false],
+    ["onProgress", true],
+    ["onObservation", false],
+    ["onObservation", true],
+  ])
     await t.test(
-      failed ? "provider failure" : "successful result",
+      `${observer}: ${failed ? "provider failure" : "successful result"}`,
       async () => {
         const fixture = createFixture({
           handle({ call }) {
@@ -1040,8 +2813,11 @@ test("redacts Claude retirement observer errors without replacing provider failu
         await assert.rejects(
           fixture.adapter.run(
             request({
-              onProgress({ kind }) {
-                if (kind === "local-command-completed")
+              [observer]({ kind }) {
+                if (
+                  observer === "onObservation" ||
+                  kind === "local-command-completed"
+                )
                   throw new Error("private-observer-error");
               },
             }),
@@ -1337,7 +3113,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v2",
+      "claude-isolation-v3",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -1674,7 +3450,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v8",
+      "claude-command-boundary-v9",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -1717,10 +3493,10 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     const gitDirectory = join(workspaceDirectory, ".git");
     const socketPath = join(workspaceDirectory, "s");
     assert.equal(call.file, call.commandLauncherPath);
-    assert.equal(
-      call.options.env.PATH.split(delimiter)[0],
+    assert.deepEqual(call.options.env.PATH.split(delimiter).slice(0, 2), [
+      dirname(call.file),
       fakeBubblewrap.directory,
-    );
+    ]);
     const fallbackPayload = argumentsList.at(-1);
     const nodeExecutable = shellArgument(process.execPath);
     assert.equal(
@@ -1762,6 +3538,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.ok(
       includesSequence(boundaryArguments, ["--unsetenv", "HTTPS_PROXY"]),
     );
+    // Proxy rewrites become removals; private bridge mounts are discarded.
+    assert.ok(
+      includesSequence(boundaryArguments, ["--unsetenv", "SANDBOX_RUNTIME"]),
+    );
+    assert.equal(
+      boundaryArguments.some((argument) =>
+        argument.startsWith(join(dirname(call.file), "tmp")),
+      ),
+      false,
+    );
     assert.ok(
       includesSequence(boundaryArguments, [
         "--unsetenv",
@@ -1800,19 +3586,35 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
-    assert.equal(
-      includesSequence(boundaryArguments, [
-        "--tmpfs",
-        join(workspaceDirectory, ".claude"),
-        "--remount-ro",
-        join(workspaceDirectory, ".claude"),
-      ]),
-      access === "workspace-write",
+    // The reservation omits these protections; projection restores them.
+    for (const sequence of [
+      ["--bind", join(workspaceDirectory, "nested")],
+      ["--ro-bind", join(workspaceDirectory, ".claude")],
+      ["--ro-bind", join(workspaceDirectory, "nested", ".mcp.json")],
+    ]) {
+      assert.equal(
+        includesSequence(boundaryArguments, [...sequence, sequence[1]]),
+        access === "workspace-write",
+      );
+    }
+    // Claude's effective shell is the generated one, which the launcher's
+    // proof assignment, after Claude's removal, alone lets run.
+    const shell = join(
+      dirname(call.file),
+      "home",
+      ".agent-runner-shell",
+      parse(boundaryArguments[commandIndex + 1]).base,
     );
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1, -1), [
-      "/bin/sh",
+      shell,
       "-c",
     ]);
+    const proofs = boundaryArguments.flatMap((argument, index) =>
+      boundaryArguments[index - 1] === "AGENT_RUNNER_CLAUDE_COMMAND_SHELL_PROOF"
+        ? [boundaryArguments[index - 2]]
+        : [],
+    );
+    assert.deepEqual(proofs, ["--unsetenv", "--setenv"]);
     assert.equal(boundaryArguments.at(-1), argumentsList.at(-1));
     assert.equal(
       boundaryArguments.filter(
@@ -1896,7 +3698,10 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
     assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
     assert.equal(call.options.env.ARGV0, undefined);
     assert.equal(call.options.env.HTTPS_PROXY, "http://credential.invalid");
-    assert.equal(call.options.env.PATH, providerPath);
+    assert.equal(
+      call.options.env.PATH,
+      `${dirname(call.commandLauncherPath)}${delimiter}${providerPath}`,
+    );
     assert.equal(
       typeof call.options.env.AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN,
       "string",
@@ -2070,7 +3875,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v8",
+        "claude-command-boundary-v9",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -2366,13 +4171,13 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       },
     },
     {
-      name: "unsupported-tmpfs",
+      name: "workspace-enclosing-tmpfs",
       transform({ argumentsList }) {
         argumentsList.splice(
           argumentsList.indexOf("--dev"),
           0,
           "--tmpfs",
-          "/var",
+          parse(projectPath).dir,
         );
       },
     },
@@ -3691,6 +5496,51 @@ test("fails instead of replacing an unavailable fork source", async () => {
   assert.equal(turnCalls(fixture).length, 1);
 });
 
+test("rejects Claude observations outside the selected session lineage", async () => {
+  for (const mode of ["continue", "fork"]) {
+    const observations = [];
+    const sessionId = mode === "continue" ? FRESH_SESSION : SOURCE_SESSION;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        return {
+          stdout: [
+            { type: "system", subtype: "init", session_id: sessionId },
+            {
+              type: "system",
+              subtype: "compact_boundary",
+              uuid: "compaction",
+              session_id: sessionId,
+              compact_metadata: { trigger: "auto", pre_tokens: 100 },
+            },
+            result({
+              sessionId,
+              usage: { input_tokens: 10, output_tokens: 5 },
+            }),
+          ]
+            .map((record) => JSON.stringify(record))
+            .join("\n"),
+          stderr: "",
+        };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { id: SOURCE_SESSION, mode },
+          onObservation: (value) => observations.push(value),
+        }),
+      ),
+      hasCode("ERR_CLAUDE_PROTOCOL"),
+    );
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].accounting, "missing");
+    assert.equal(observations[0].cumulative, null);
+    assert.equal(observations[0].compactions, 0);
+  }
+});
+
 test("retries a compacted context and then reconstructs fresh", async () => {
   let attempts = 0;
   const fixture = createFixture({
@@ -4111,6 +5961,9 @@ test(
     let realProbeCount = 0;
     const execute = async (file, argumentsList, options) => {
       const call = { file, argumentsList, options };
+      if (isCommandShell(file)) {
+        return executeFile(file, argumentsList, options);
+      }
       if (file === process.execPath && argumentsList.at(-1) === "--version") {
         return { stdout: "2.1.233 (Claude Code)\n", stderr: "" };
       }
@@ -4133,7 +5986,9 @@ test(
       }
       if (isRunnerBoundaryProbe(call)) {
         fallbackProbeCount += 1;
-        if (realProbeCount === 0) {
+        // Real syscalls confirm read-only denial and writable source changes
+        // beside a pinned nested control.
+        if (realProbeCount < 2) {
           realProbeCount += 1;
           return executeFile(file, argumentsList, options);
         }
@@ -4156,8 +6011,9 @@ test(
 
     const capabilities = await adapter.probe();
     assert.equal(capabilities.readOnly, true);
+    assert.equal(capabilities.workspaceWrite, true);
     assert.equal(fallbackProbeCount, 3);
-    assert.equal(realProbeCount, 1);
+    assert.equal(realProbeCount, 2);
   },
 );
 
@@ -4166,8 +6022,13 @@ test(
   { skip: process.env.AGENT_RUNNER_LIVE_CLAUDE !== "1" },
   async () => {
     const adapter = createClaudeAdapter();
+    const created = [],
+      diagnoses = [];
     const response = await adapter.run(
       request({
+        sessionNaming: SESSION_NAMING,
+        onSessionCreated: async (id) => created.push(id),
+        onSessionNaming: async (value) => diagnoses.push(value),
         prompt:
           "Use Bash to run `git status --short` in the current repository. " +
           "Return ok=true only when the command completes successfully.",
@@ -4176,6 +6037,8 @@ test(
     );
     assert.equal(typeof response.sessionId, "string");
     assert.equal(response.structured.ok, true);
+    assert.deepEqual(created, [response.sessionId]);
+    assert.deepEqual(diagnoses, [{ status: "named" }]);
   },
 );
 
@@ -4445,6 +6308,389 @@ test("rejects absent native project targets before any mount can create them", a
   });
   await fixture.adapter.run(
     request({ access: "workspace-write", cwd: project }),
+  );
+});
+
+const BUBBLEWRAP_ARITY = Object.freeze({
+  "--bind": 2,
+  "--ro-bind": 2,
+  "--setenv": 2,
+  "--cap-drop": 1,
+  "--chdir": 1,
+  "--dev": 1,
+  "--dir": 1,
+  "--perms": 1,
+  "--proc": 1,
+  "--remount-ro": 1,
+  "--seccomp": 1,
+  "--tmpfs": 1,
+  "--unsetenv": 1,
+});
+
+function isWithin(path, parent) {
+  return (
+    path === parent || path.startsWith(parent === "/" ? "/" : `${parent}/`)
+  );
+}
+
+// Replays bubblewrap mounts independently of the launcher. Bind sources come
+// from the host, and a later mount hides every earlier mount at or beneath
+// its destination, so only the final tree decides what commands can change.
+function effectiveMountTree(argumentsList) {
+  let mounts = [];
+  for (
+    let index = 0;
+    argumentsList[index] !== "--";
+    index += 1 + (BUBBLEWRAP_ARITY[argumentsList[index]] ?? 0)
+  ) {
+    const [operation, first, second] = argumentsList.slice(index, index + 3);
+    if (operation === "--remount-ro") {
+      mounts.find(({ destination }) => destination === first).writable = false;
+    } else if (
+      ["--bind", "--ro-bind", "--tmpfs", "--dev", "--proc"].includes(operation)
+    ) {
+      const bind = operation.endsWith("bind");
+      const destination = bind ? second : first;
+      mounts = mounts.filter(
+        (mount) => !isWithin(mount.destination, destination),
+      );
+      mounts.push({
+        destination,
+        source: bind ? first : operation,
+        writable: operation !== "--ro-bind",
+      });
+    }
+  }
+  const covering = (path) =>
+    mounts
+      .filter(({ destination }) => isWithin(path, destination))
+      .sort(
+        (left, right) => right.destination.length - left.destination.length,
+      )[0];
+  // Namespace-local tmpfs content never reaches the host.
+  const hostWritable = (path) => {
+    const { source, writable } = covering(path);
+    return writable && source.startsWith("/");
+  };
+  // Creating, renaming or unlinking needs a writable parent; a mount point stays busy.
+  const movable = (path) =>
+    !mounts.some(({ destination }) => destination === path) &&
+    hostWritable(dirname(path));
+  return {
+    covering,
+    hostWritable,
+    movable,
+    // Rename-and-replace needs one movable entry between the workspace and the path.
+    replaceable(path, root) {
+      for (let current = path; current !== root; current = dirname(current))
+        if (movable(current)) return true;
+      return false;
+    },
+  };
+}
+
+test("normalizes Git workspace-write mounts so every protection stays effective", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "claude-mounts-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const outside = join(root, "outside");
+  const nested = join(project, "nested");
+  const selected = join(nested, "RUNNER.md");
+  const control = join(nested, ".mcp.json");
+  const notes = join(nested, "notes.md");
+  const source = join(project, "src", "module.js");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await Promise.all(
+    [join(project, ".claude"), join(project, "src"), nested, outside].map(
+      (path) => mkdir(path),
+    ),
+  );
+  await Promise.all([
+    writeFile(join(project, ".git", "config"), ""),
+    writeFile(control, "{}\n"),
+    writeFile(selected, "Run checks.\n"),
+    writeFile(notes, "Notes.\n"),
+    writeFile(source, "export {};\n"),
+  ]);
+  // The rejected compositions show that the model catches both failures: an
+  // earlier nested restriction hidden by the grant left its ancestor movable,
+  // and a later ancestor pin made the selected file writable again.
+  const rejectedHidden = effectiveMountTree([
+    ...["--ro-bind", "/", "/", "--ro-bind", nested, nested],
+    ...["--bind", project, project, "--ro-bind", control, control, "--"],
+  ]);
+  assert.equal(rejectedHidden.replaceable(control, project), true);
+  const rejectedOrder = effectiveMountTree([
+    ...["--ro-bind", "/", "/", "--bind", project, project],
+    ...["--ro-bind", selected, selected, "--bind", nested, nested, "--"],
+  ]);
+  assert.equal(rejectedOrder.hostWritable(selected), true);
+
+  for (const policy of ["native", "runner-boundary"]) {
+    const bwrap = await createFakeBubblewrap(t);
+    const logged = async () =>
+      (await readFile(bwrap.logPath, "utf8").catch(() => ""))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    // Claude's producer order for the read-only preparation settings: its
+    // default workspace write, then the reservation that omits covered masks.
+    const producer = ({ before = [], after = [] } = {}) => [
+      "--new-session",
+      "--die-with-parent",
+      "--unsetenv",
+      "ANTHROPIC_API_KEY",
+      "--unshare-net",
+      "--ro-bind",
+      "/",
+      "/",
+      ...before,
+      "--bind",
+      project,
+      project,
+      "--ro-bind",
+      project,
+      project,
+      ...after,
+      "--dev",
+      "/dev",
+      "--unshare-pid",
+      "--unshare-user",
+      "--cap-drop",
+      "ALL",
+      ...(policy === "native"
+        ? ["--proc", "/proc"]
+        : ["--bind", "/proc", "/proc"]),
+      "--unsetenv",
+      "SRT_ALLOW_NESTED_USERNS",
+      "--",
+      "/bin/sh",
+      "-c",
+      "edit",
+    ];
+    let access;
+    const fixture = createFixture({
+      nativeSandbox: policy === "native" ? true : "nested-denied",
+      env: {
+        ...process.env,
+        ANTHROPIC_API_KEY: "provider-token",
+        AGENT_RUNNER_FAKE_BWRAP_LOG: bwrap.logPath,
+        AGENT_RUNNER_FAKE_BWRAP_NATIVE: policy === "native" ? "1" : "0",
+        PATH: `${bwrap.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      async handle({ call }) {
+        if (call.file === "git" && call.argumentsList.includes("rev-parse"))
+          return { stdout: `${project}/.git\n.git\n`, stderr: "" };
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        // Claude's PATH lookup reaches the managed, authenticated launcher.
+        assert.equal(
+          await resolveTestExecutable("bwrap", call.options.env.PATH),
+          call.commandLauncherPath,
+        );
+        const launch = async (argumentsList) => {
+          await executeFile(call.commandLauncherPath, argumentsList, {
+            env: call.options.env,
+          });
+          return effectiveMountTree((await logged()).at(-1));
+        };
+        const ordinary = await launch(producer());
+        if (access === "read-only") {
+          assert.equal(ordinary.hostWritable(source), false);
+          assert.equal(ordinary.movable(source), false);
+          return;
+        }
+        const hidden = await launch(
+          producer({ before: ["--ro-bind", nested, nested] }),
+        );
+        // A later read-only ancestor no longer hides an earlier file mask.
+        const masked = await launch(
+          producer({
+            before: ["--ro-bind", "/dev/null", notes],
+            after: ["--ro-bind", nested, nested],
+          }),
+        );
+        assert.equal(masked.covering(notes).source, "/dev/null");
+        assert.equal(masked.hostWritable(notes), false);
+        for (const tree of [ordinary, hidden, masked]) {
+          // Ordinary source files can be created, renamed and unlinked.
+          for (const path of [source, join(project, "src", "created.js")])
+            assert.equal(tree.movable(path), true);
+          for (const path of [
+            selected,
+            control,
+            join(project, ".git", "config"),
+            join(project, ".claude", "settings.json"),
+            join(outside, "external.md"),
+          ]) {
+            assert.equal(tree.hostWritable(path), false, path);
+            if (isWithin(path, project))
+              assert.equal(tree.replaceable(path, project), false, path);
+          }
+          assert.equal(tree.movable(nested), false);
+          // The final view of the selected input is its own host file.
+          const view = tree.covering(selected);
+          assert.equal(
+            join(view.source, relative(view.destination, selected)),
+            selected,
+          );
+        }
+        // The pinned ancestor stays writable beside its protected entries,
+        // while the reapplied earlier restriction keeps its own semantics.
+        assert.equal(ordinary.movable(notes), true);
+        assert.deepEqual(hidden.covering(notes), {
+          destination: nested,
+          source: nested,
+          writable: false,
+        });
+        // Unsupported compositions fail before bubblewrap starts.
+        const accepted = (await logged()).length;
+        const rejected = (argumentsList) =>
+          assert.rejects(
+            executeFile(call.commandLauncherPath, argumentsList, {
+              env: call.options.env,
+            }),
+            { code: 125 },
+          );
+        const link = join(project, "src", ".bashrc");
+        await symlink("module.js", link);
+        try {
+          await rejected(producer());
+        } finally {
+          await rm(link);
+        }
+        await rejected(producer({ after: ["--ro-bind", root, root] }));
+        await rejected(producer({ before: ["--tmpfs", join(project, "src")] }));
+        // A later tmpfs would hide the protections beneath the pinned ancestor.
+        await rejected(producer({ after: ["--tmpfs", nested] }));
+        // A later bind at the same destination would remove an earlier mask.
+        await rejected(
+          producer({
+            before: ["--ro-bind", "/dev/null", notes],
+            after: ["--ro-bind", notes, notes],
+          }),
+        );
+        await rejected(
+          producer({
+            after: [
+              ...["--ro-bind", "/dev/null", source],
+              ...["--bind", join(project, "src"), join(project, "src")],
+            ],
+          }),
+        );
+        assert.equal((await logged()).length, accepted);
+      },
+    });
+    for (access of ["read-only", "workspace-write"]) {
+      await fixture.adapter.run(
+        request({ cwd: project, access, readPaths: [selected] }),
+      );
+    }
+    assert.equal((await logged()).length, 4);
+  }
+});
+
+test("refuses commands that another selected bubblewrap starts", async (t) => {
+  const projectPath = await createFallbackProject(t);
+  const fake = await createFakeBubblewrap(t);
+  const proof = "AGENT_RUNNER_CLAUDE_COMMAND_SHELL_PROOF";
+  let checked = false;
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    env: {
+      ...process.env,
+      ANTHROPIC_API_KEY: "provider-token",
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+      PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const shell = call.options.env.CLAUDE_CODE_SHELL;
+      const settings = JSON.parse(option(call.argumentsList, "--settings"));
+      assert.deepEqual(
+        settings.sandbox.credentials.envVars.find(({ name }) => name === proof),
+        { mode: "deny", name: proof },
+      );
+      const marker = join(fake.directory, "command-ran");
+      const payload = `printf ran > '${marker}'`;
+      // A higher policy tier, such as server-managed settings, may name
+      // another bubblewrap; Claude still removes the proof inside it.
+      const { [proof]: _proof, ...bypassed } = call.options.env;
+      await assert.rejects(
+        executeFile(shell, ["-c", payload], { env: bypassed }),
+        { code: 125 },
+      );
+      await assert.rejects(access(marker), { code: "ENOENT" });
+      // Claude's unsandboxed shell use keeps the proof.
+      await executeFile(shell, ["-c", "exit 0"], { env: call.options.env });
+      // The authenticated launcher restores it after Claude's removal.
+      const argumentsList = claudeBubblewrapArguments({
+        access: "workspace-write",
+        payload,
+        projectPath,
+      }).map((value) => (value === "/bin/sh" ? shell : value));
+      argumentsList.splice(2, 0, "--unsetenv", proof);
+      await executeFile(call.commandLauncherPath, argumentsList, {
+        env: {
+          ...call.options.env,
+          AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
+        },
+      });
+      assert.equal(await readFile(marker, "utf8"), "ran");
+      checked = true;
+    },
+  });
+  await fixture.adapter.run(
+    request({ cwd: projectPath, access: "workspace-write" }),
+  );
+  assert.equal(checked, true);
+});
+
+test("fails closed when administrator managed settings may select another bubblewrap", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "claude-managed-settings-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const dropIns = join(directory, "managed-settings.d");
+  assert.equal(await claudeManagedBubblewrapOverride(directory), false);
+  await mkdir(dropIns);
+  await writeFile(
+    join(directory, "managed-settings.json"),
+    JSON.stringify({ sandbox: { enabled: true } }),
+  );
+  // Claude also skips hidden and non-JSON drop-ins.
+  await writeFile(join(dropIns, ".disabled.json"), "{");
+  await writeFile(join(dropIns, "notes.txt"), "{");
+  assert.equal(await claudeManagedBubblewrapOverride(directory), false);
+  for (const [name, content] of [
+    ["managed-settings.json", { sandbox: { bwrapPath: "/opt/bwrap" } }],
+    [join("managed-settings.d", "helper.json"), { policyHelper: {} }],
+    [join("managed-settings.d", "invalid.json"), "{"],
+  ]) {
+    const path = join(directory, name);
+    const original = await readFile(path, "utf8").catch(() => undefined);
+    await writeFile(
+      path,
+      typeof content === "string" ? content : JSON.stringify(content),
+    );
+    assert.equal(await claudeManagedBubblewrapOverride(directory), true, name);
+    if (original === undefined) await rm(path);
+    else await writeFile(path, original);
+  }
+  // A managed bwrapPath outranks both launcher selections, so no proof starts.
+  await writeFile(
+    join(directory, "managed-settings.json"),
+    JSON.stringify({ sandbox: { bwrapPath: "/opt/bwrap" } }),
+  );
+  assert.deepEqual(
+    await probeClaudeIsolationPolicies({
+      managedSettingsDirectory: directory,
+      execute: () => assert.fail("An isolation proof started."),
+    }),
+    {
+      "read-only": "unavailable",
+      "workspace-write": "unavailable",
+      "local-commit": "unavailable",
+    },
   );
 });
 

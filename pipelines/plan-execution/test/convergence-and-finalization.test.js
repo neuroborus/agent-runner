@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 
+import { REPOSITORY_DISCOVERY_SCHEMA } from "../src/bootstrap-unit-schemas.js";
 import { planExecutionPipeline } from "../src/index.js";
 import {
-  BOOTSTRAP_SCHEMA,
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
@@ -1309,7 +1309,7 @@ test("rejects repository mutation and fingerprint drift during terminal confirma
     const validationInfrastructureFingerprint =
       fixture.runtime.git.validationInfrastructureFingerprint;
     fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-      drifted && options.paths.length > 1
+      drifted && options.paths.includes("package.json")
         ? "c".repeat(64)
         : validationInfrastructureFingerprint(options);
 
@@ -1741,7 +1741,7 @@ test("uses an explicitly configured finalization skill", async (t) => {
   assert.equal(result.pipelineState.settings.finalization, skillPath);
   assert.deepEqual(result.pipelineState.finalizationGuidance, {
     configuredPolicy: skillPath,
-    selection: "skill",
+    selection: "file",
     skillPath,
     selectedFileFingerprint:
       result.pipelineState.finalizationGuidance.selectedFileFingerprint,
@@ -1814,13 +1814,15 @@ test("selects the first safely inspectable conventional skill", async (t) => {
     skillPath,
   );
   assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
-      .length,
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === REPOSITORY_DISCOVERY_SCHEMA,
+    ).length,
     1,
   );
   assert.equal(
-    fixture.calls.reviewer.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
-      .length,
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === REPOSITORY_DISCOVERY_SCHEMA,
+    ).length,
     1,
   );
   assert.deepEqual(
@@ -2645,7 +2647,7 @@ test("reruns finalization when validation infrastructure drifts during lazy reco
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted && options.paths.length > 1
+    drifted && options.paths.includes("package.json")
       ? "d".repeat(64)
       : validationInfrastructureFingerprint(options);
 
@@ -2724,7 +2726,7 @@ test("reruns finalization when retained candidate-review correction scope drifts
   const validationInfrastructureFingerprint =
     fixture.runtime.git.validationInfrastructureFingerprint;
   fixture.runtime.git.validationInfrastructureFingerprint = (options) =>
-    drifted && options.paths.length > 1
+    drifted && options.paths.includes("package.json")
       ? "c".repeat(64)
       : validationInfrastructureFingerprint(options);
 
@@ -4569,20 +4571,20 @@ for (const mode of ["independent", "lazy"]) {
               "agent-sandbox limitations must not cause BLOCKED",
             ))
         ) {
+          const blocked = {
+            status: "BLOCKED",
+            ...(phase === "resolution" ? { decisions: [] } : { summary: "" }),
+            reason: "The selected check needs an unavailable sandbox service.",
+            question: "",
+            whyBlocked: "",
+            options: [],
+            evidence: [
+              "The agent sandbox cannot execute the selected command.",
+            ],
+          };
           return {
             sessionId: request.session?.id ?? "blocked-worker",
-            structured: {
-              status: "BLOCKED",
-              ...(phase === "resolution" ? { decisions: [] } : { summary: "" }),
-              reason:
-                "The selected check needs an unavailable sandbox service.",
-              question: "",
-              whyBlocked: "",
-              options: [],
-              evidence: [
-                "The agent sandbox cannot execute the selected command.",
-              ],
-            },
+            structured: phase === "check" ? blocked : { result: blocked },
           };
         }
         for (const prompt of [request.prompt, request.recoveryPrompt]) {

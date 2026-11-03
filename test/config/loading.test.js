@@ -29,9 +29,6 @@ import {
 import { createGitService } from "../../src/git/index.js";
 
 const executeFile = promisify(execFile);
-const RUNNER_ROOT_URL = new URL("../../", import.meta.url);
-const CONFIG_URL = new URL(CONFIG_FILENAME, RUNNER_ROOT_URL);
-
 async function readIfPresent(path) {
   try {
     return await readFile(path, "utf8");
@@ -43,23 +40,36 @@ async function readIfPresent(path) {
   }
 }
 
-test("configuration loads from the runner root without reading the target", async (t) => {
+test("global configuration never reads the target or writes defaults", async (t) => {
   const projectPath = await mkdtemp(join(tmpdir(), "agent-runner-config-"));
   t.after(() => rm(projectPath, { recursive: true, force: true }));
   await writeFile(join(projectPath, CONFIG_FILENAME), '{"schemaVersion":2}\n');
-  const source = await readIfPresent(CONFIG_URL);
-
-  const configuration = await loadRunnerConfiguration();
+  const installationPath = join(projectPath, "installation");
+  await mkdir(installationPath);
+  const options = {
+    platform: "linux",
+    env: {},
+    homeDirectory: join(projectPath, "home"),
+    installationPath,
+  };
+  const configuration = await loadRunnerConfiguration(undefined, options);
 
   assert.deepEqual(
     configuration,
-    source === null
-      ? parseRunnerConfiguration(
-          JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION }),
-        )
-      : parseRunnerConfiguration(source),
+    parseRunnerConfiguration(
+      JSON.stringify({ schemaVersion: CONFIG_SCHEMA_VERSION }),
+    ),
   );
-  assert.equal(await readIfPresent(CONFIG_URL), source);
+  assert.equal(
+    await readIfPresent(join(installationPath, CONFIG_FILENAME)),
+    null,
+  );
+  assert.equal(
+    await readIfPresent(
+      join(options.homeDirectory, ".config", "agent-runner", "config.json"),
+    ),
+    null,
+  );
 });
 
 test("loads only ignored confined project configuration files", async (t) => {

@@ -53,6 +53,7 @@ export function createStopService({
   runLeases,
   timestamp,
   resolveStopBoundary,
+  preparation,
 }) {
   async function request(input) {
     if (
@@ -101,13 +102,13 @@ export function createStopService({
         const requestId = action.record.keyHash;
         // The journal proves acceptance even if receipt publication was interrupted,
         // a competing cancellation won, or the pipeline has since terminated.
-        const accepted = snapshot.events.find(
-          (event) =>
+        for await (const event of journal.replaySnapshot(directory, snapshot)) {
+          if (
             event.state.stopRequest?.requestId === requestId &&
-            event.state.stopRequest.acceptedRevision === event.revision,
-        );
-        if (accepted !== undefined)
-          return receipt(runId, accepted.state.stopRequest);
+            event.state.stopRequest.acceptedRevision === event.revision
+          )
+            return receipt(runId, event.state.stopRequest);
+        }
         const current = snapshot.state;
         if (
           TERMINAL_STATES.has(current.pipelineState.workflowState) ||
@@ -188,6 +189,7 @@ export function createStopService({
           runId,
         );
         const migrating = current.schemaVersion !== RUN_STATE_SCHEMA_VERSION;
+        await preparation.revoke(directory, current, stopRequest);
         await journal.appendTransition(directory, next, snapshot, {
           actor: "runner",
           phase: migrating ? "runtime" : "stop",
@@ -220,6 +222,7 @@ export function createStopService({
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const current = snapshot.state;
       if (
+        current.preparation != null ||
         current.executionProcess !== null ||
         current.executionResource !== null
       ) {
@@ -272,6 +275,7 @@ export function createStopService({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
+        snapshot.state.preparation != null ||
         snapshot.state.executionProcess !== null ||
         snapshot.state.executionResource !== null
       ) {
@@ -306,7 +310,18 @@ export function createStopService({
     settlement = { kind: "quiescent", commit: null },
   ) {
     const current = snapshot.state;
-    const pending = stopIsPending(current);
+    const continuesDeferredBoundary =
+      stopIsPending(current) &&
+      settlement.kind === "commit" &&
+      current.stopRequest.effectiveTiming === "after-current-commit" &&
+      !["WAITING_FOR_USER", "CANCELED", "FAILED", "DONE"].includes(
+        patch.pipelineState?.workflowState,
+      ) &&
+      isDeepStrictEqual(
+        resolveCommitBoundary({ ...current, ...patch }, resolveStopBoundary),
+        current.stopRequest.targetBoundary,
+      );
+    const pending = stopIsPending(current) && !continuesDeferredBoundary;
     const canceled = current.stopRequest?.kind === "cancel_requested";
     if (
       pending &&
@@ -349,11 +364,15 @@ export function createStopService({
   }
 
   async function checkpoint(runId) {
-    const snapshot = await loadSnapshot(await getRunDirectory(runId), runId);
+    const directory = await getRunDirectory(runId);
+    const snapshot = await loadSnapshot(directory, runId);
     const revision = snapshot.state.stopRequest?.checkpoint.revision;
-    return revision === undefined
-      ? null
-      : deepFreeze(snapshot.events[revision - 1].state);
+    if (revision !== undefined) {
+      for await (const event of journal.replaySnapshot(directory, snapshot)) {
+        if (event.revision === revision) return deepFreeze(event.state);
+      }
+    }
+    return null;
   }
 
   async function activity(lease, value) {

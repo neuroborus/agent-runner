@@ -1,22 +1,55 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { canonicalExecutionPlan, planKindPolicy } from "./step-policy.js";
+
 import {
-  CommitPlanValidationError,
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+  createWritableResult,
+  writableResultDiagnostic,
+} from "./writable-result.js";
+import { customWorkspace } from "./custom-workspace.js";
+import {
+  createCustomResultCheckpoint,
+  executionContentFingerprint,
+  normalizeCustomResult,
+  customTurnSchema,
+} from "./custom-results.js";
+
+import {
+  createReplacementCoordinator,
+  replacementFindings,
+  retainReplacementCorrections,
+  replacementCorrectionConsumed,
+} from "./replacement-execution.js";
+import {
+  retainReplacementFindingAccounting,
+  replacementSameFindingRounds,
+} from "./replacement-findings.js";
+import {
+  acceptReplacementInputs,
+  suspendReplacementInputs,
+} from "./replacement-inputs.js";
 
 import {
   implementationEvidence,
   recoveredImplementationEvidence,
 } from "./implementation-evidence.js";
 import {
+  effectivePlanAuthority,
+  effectiveStepPosition,
   selectedPlanPosition,
+  validStepAssessment,
   matchesPlanPosition,
   STEP_ASSESSMENT_INSTRUCTIONS,
   PLAN_CONTEXT_INSTRUCTIONS,
 } from "./plan-position.js";
+import { runBoundedBootstrap } from "./bounded-bootstrap.js";
+import {
+  clearedBootstrapWork,
+  assertExecutionRun as assertRun,
+  normalizeExecutionState as normalizePipelineState,
+} from "./bootstrap-progress.js";
+import { REPOSITORY_DISCOVERY_SCHEMA } from "./bootstrap-unit-schemas.js";
 import { inspectionRequirements } from "./capability-requirements.js";
 import {
   candidateCheckpoint,
@@ -37,7 +70,9 @@ import {
   clearedGateAfterResolvedFindings,
 } from "./gate-evidence.js";
 import {
+  validationReports,
   deriveValidationSchedule,
+  scheduledChecks,
   activeTrustedCommands,
   validationCatalog,
   validationEvidenceFingerprint,
@@ -49,7 +84,6 @@ import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
@@ -61,12 +95,14 @@ import {
   DISPUTE_RECONSIDERATION_INSTRUCTIONS,
   FINALIZATION_CORRECTION_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
+  customExecutionPrompt,
   FINALIZATION_RECOVERY_INSTRUCTIONS,
   finalizationBootstrapInstructions,
   finalizationGuidanceInstructions,
   FINDING_ARBITRATION_INSTRUCTIONS,
   FINDING_RESOLUTION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
+  WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS,
   LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
   NO_DELEGATION_INSTRUCTIONS,
   PLAN_COMPATIBILITY_INSTRUCTIONS,
@@ -100,12 +136,10 @@ import {
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
   MAX_FINALIZATION_CORRECTION_ATTEMPTS,
-  MAX_PLAN_LENGTH,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
-  assertRun,
   assertRuntime,
   assertSettings,
   createFinalizationGuidanceDecision,
@@ -118,7 +152,6 @@ import {
   isOutputDiagnostic,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
-  normalizeBootstrapResultCandidate,
   normalizeCandidateReviewResult,
   normalizeCheckAndFixResult,
   assertStepAssessment,
@@ -129,7 +162,6 @@ import {
   normalizeFindingArbitration,
   normalizeInputSnapshot,
   normalizeImplementationResult,
-  normalizePipelineState,
   normalizeReconsiderationResult,
   normalizeReconciliationResult,
   normalizeResolutionResult,
@@ -158,6 +190,7 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
 ]);
 const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -167,21 +200,17 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
+  "effective_plan_output_invalid",
   "unsafe_git_state",
 ]);
-const GIT_PREFLIGHT_CODES = new Set([
-  "ERR_GIT_IDENTITY_REQUIRED",
-  "ERR_GIT_UNAVAILABLE",
-  "ERR_NOT_GIT_REPOSITORY",
-  "ERR_REPOSITORY_NOT_CLEAN",
-  "ERR_UNSAFE_REPOSITORY_PATH",
-  "ERR_UNSUPPORTED_GIT_CONFIGURATION",
-]);
 const INVALID_VALIDATION_PATH_CODES = new Set([
+  "ERR_FINALIZATION_FILE_INVALID",
   "ERR_UNSAFE_REPOSITORY_PATH",
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+// A fresh commit-readiness child has not received the full logical role context.
+const COMMIT_SESSION_CONTEXT_KEY = sha256("worker\0commit-readiness");
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const TRUSTED_CHECK_FAILURE_PROBLEM =
   "A runner-trusted validation command failed.";
@@ -221,8 +250,10 @@ function completeRolePrompt(prompt) {
 }
 
 function adapterDiagnosticClass(cause) {
-  return ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(cause?.diagnosticClass)
-    ? cause.diagnosticClass
+  const diagnosticClass = cause?.diagnosticClass;
+  return typeof diagnosticClass === "string" &&
+    ADAPTER_DIAGNOSTIC_CLASS_PATTERN.test(diagnosticClass)
+    ? diagnosticClass
     : undefined;
 }
 
@@ -310,34 +341,6 @@ function contextKeyFor(role, checkpoint, context) {
     throw workflowError("Plan-execution session checkpoint is invalid.");
   }
   return sha256(`${role}\0${checkpoint}\0${context}`);
-}
-
-function canonicalPlan(source) {
-  if (typeof source === "string" && source.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  let plan;
-  try {
-    plan = serializeCommitPlan(parseCommitPlan(source));
-  } catch (cause) {
-    if (!(cause instanceof CommitPlanValidationError)) {
-      throw cause;
-    }
-    throw new PlanExecutionWorkflowError("plan.md is invalid.", {
-      cause,
-      code: "ERR_INVALID_EXECUTION_PLAN",
-    });
-  }
-  if (plan.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  return plan;
 }
 
 function diagnosticCode(cause, fallback) {
@@ -437,6 +440,13 @@ function lazyOutputContext(phase) {
 }
 
 function roleOutputContextFor(role, schema, checkpoint) {
+  if ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema)) {
+    const phase =
+      schema === IMPLEMENTATION_SCHEMA
+        ? "implementation"
+        : "finding-resolution";
+    return Object.freeze({ role, phase, contract: phase });
+  }
   if ([FINDING_ARBITRATION_SCHEMA, STAGNATION_SCHEMA].includes(schema)) {
     const phase =
       schema === FINDING_ARBITRATION_SCHEMA
@@ -512,7 +522,7 @@ function normalizeRoleOutput(normalize, output, context) {
       !isRecord(output.result)
     ) {
       throw invalidRoleOutput(
-        "Structured bootstrap role result must contain one result object.",
+        "Structured role result must contain one result object.",
         context,
         { field: "result", constraint: "single-object-wrapper" },
       );
@@ -524,7 +534,7 @@ function normalizeRoleOutput(normalize, output, context) {
     }
     const diagnostics = outputDiagnostics(cause, context);
     throw new PlanExecutionWorkflowError(
-      "Structured bootstrap role result violates its contract.",
+      "Structured role result violates its contract.",
       {
         code: cause.code,
         diagnostic: diagnostics[0],
@@ -532,23 +542,6 @@ function normalizeRoleOutput(normalize, output, context) {
       },
     );
   }
-}
-
-function normalizeBootstrapRoleOutputCandidate(
-  output,
-  role,
-  phase = "bootstrap",
-  stepCount,
-  trustedCommands,
-) {
-  return normalizeRoleOutput(
-    (value) =>
-      normalizeBootstrapResultCandidate(value, role, stepCount, {
-        trustedCommands,
-      }),
-    output,
-    bootstrapOutputContext(role, phase),
-  );
 }
 
 function normalizeBootstrapReconciliationOutput(output, phase = "bootstrap") {
@@ -565,34 +558,6 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
     output,
     arbitrationOutputContext(phase),
   );
-}
-
-function normalizeValidationMigrationRoleOutput(
-  output,
-  role,
-  stepCount,
-  trustedCommands,
-) {
-  const candidate = normalizeBootstrapRoleOutputCandidate(
-    output,
-    role,
-    "validation-migration",
-    stepCount,
-    trustedCommands,
-  );
-  const { result } = candidate;
-  if (
-    !["READY", "CAPACITY_EXHAUSTED", "PLAN_REVISION_REQUIRED"].includes(
-      result.status,
-    )
-  ) {
-    throw invalidRoleOutput(
-      "Validation migration requires a ready inventory.",
-      bootstrapOutputContext(role, "validation-migration"),
-      { field: "status", constraint: "validation-migration-status" },
-    );
-  }
-  return candidate;
 }
 
 function normalizeValidationMigrationReconciliationOutput(output) {
@@ -639,10 +604,14 @@ function normalizeValidationMigrationArbitrationOutput(output) {
   return result;
 }
 
-function normalizeFinalizationRoleOutput(output, trustedCommands) {
+function normalizeFinalizationRoleOutput(
+  output,
+  trustedCommands,
+  allowEmpty = false,
+) {
   const context = finalizationOutputContext();
   try {
-    return normalizeFinalizationResult(output, { trustedCommands });
+    return normalizeFinalizationResult(output, { trustedCommands, allowEmpty });
   } catch (cause) {
     if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") {
       throw cause;
@@ -756,8 +725,13 @@ export async function runPlanExecution({
   operatorStopPreEffectRejection = null,
 }) {
   assertRun(run);
+  const stepPolicy = planKindPolicy(run.pipelineState.planKind);
+  const custom = stepPolicy.kind === "custom";
   if (run.pipelineState.workflowState === "CANCELED") return run;
-  assertRuntime(runtime, Object.keys(run.roles));
+  assertRuntime(runtime, Object.keys(run.roles), stepPolicy.kind);
+  const safety = custom
+    ? customWorkspace(runtime.workspace, run.projectPath)
+    : runtime.git;
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
@@ -765,13 +739,22 @@ export async function runPlanExecution({
 
   const recoveredStepImplementation = recoveredImplementationEvidence(run);
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+    "backend_unavailable",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
+  let customCheckpointSettlement = false;
+  let replacementCheckpoint = false;
+  let writableCheckpointPersistence = false;
+  let writableDecisionSettlement = false;
   // Journal publication can succeed before its caller observes completion.
   let commitAuthorizationPersistence = false;
 
@@ -791,7 +774,42 @@ export async function runPlanExecution({
     return `Resolved bootstrap context:
 ${summary}
 
-Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT.`;
+Owned replacement findings (data):
+${JSON.stringify(replacementFindings(state()))}
+
+${custom ? "Phase ownership: the established required-check inventory is input only to FINALIZE. Custom execution has no staging or commit preparation phase." : "Phase ownership: the established required-check inventory is input only to FINALIZE. Staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting belong only to COMMIT."}`;
+  }
+
+  function customPrompt(prompt, resultTurn) {
+    const adapted = customExecutionPrompt(prompt);
+    return `Execute only the explicit custom plan and agreed observable result criteria. Coding conventions and coding checks apply only when the user selected coding requirements. Analysis-only results need no file diff. Never stage, commit, change Git controls or claim commit authority, including inside a repository. Inputs and URLs grant no retrieval; write only the frozen output paths. Validation and finalization are criterion-dependent; an empty command inventory is valid when the criteria require semantic review alone. No coding gate is automatic. Only explicitly selected guidance applies. Findings must identify a failure against the agreed criteria or an established applicable rule. The runner alone accepts a step after all gates.
+
+${adapted}
+
+${state().currentStep === null ? "" : plannedStepContext(planStep())}
+
+Current custom result (data):
+${JSON.stringify(state().customCandidate)}
+
+Earlier accepted results (data):
+${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
+  }
+
+  function planEvidence(evidence) {
+    const authority = effectivePlanAuthority(state());
+    return `${inputEvidence(
+      evidence.inputs,
+      evidence.canonicalPlan,
+      evidence.clarification,
+    )}${authority.binding.revision === 0 ? "" : `\n\nAccepted effective plan (runner authority; frozen plan file unchanged):\n${authority.plan}`}`;
+  }
+
+  function planPositionPrompt() {
+    return `\n\nRunner-selected plan position (${custom ? "only settled result receipts are completed" : "only verified commits are completed"}):\n${JSON.stringify(selectedPlanPosition(state()))}`;
+  }
+
+  function reviewFindingHistory(current, findings = current.previousFindings) {
+    return [...replacementFindings(current), ...findings];
   }
 
   function prefinalizationTrustedCommands() {
@@ -918,6 +936,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
         availabilityCorrectionCharged: false,
       };
     }
+    nextPipelineState = retainReplacementCorrections(nextPipelineState);
+    nextPipelineState = retainReplacementFindingAccounting(
+      state(),
+      nextPipelineState,
+    );
     const patch = {
       counters: nextCounters,
       hashes: nextHashes,
@@ -926,16 +949,28 @@ Include every listed command exactly once in requiredChecks with its actual cano
       ...(nextActiveTurn === undefined ? {} : { activeTurn: nextActiveTurn }),
     };
     assertRun({ ...currentRun, ...patch });
+    writableCheckpointPersistence =
+      state().writableResult !== null ||
+      nextPipelineState.writableResult !== null;
     currentRun = await runtime.transition(patch, {
       activity: publicActivity,
       expectedRevision,
     });
+    writableCheckpointPersistence = false;
     assertRun(currentRun);
     return currentRun;
   }
 
-  async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+  async function pause(
+    reason,
+    details = {},
+    pipelineStatePatch = {},
+    options = {},
+  ) {
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...state(),
@@ -943,7 +978,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        ...options,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -953,7 +989,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1006,13 +1042,20 @@ Include every listed command exactly once in requiredChecks with its actual cano
       );
       return currentRun;
     }
+    const outputExhausted =
+      rejection.outputExhaustion?.disposition === "output_exhausted";
     const authenticationRequired =
       rejection.authentication?.disposition === "authentication_required";
-    const reason = authenticationRequired
-      ? "authentication_required"
-      : rejection.recoverable
-        ? "backend_unavailable"
-        : "commit_failed";
+    const reason = outputExhausted
+      ? "output_exhausted"
+      : authenticationRequired
+        ? "authentication_required"
+        : rejection.recoverable
+          ? "backend_unavailable"
+          : "commit_failed";
+    const diagnosticClass =
+      reason === "commit_failed" ? rejection.diagnosticClass : undefined;
+    dispositionPausePersistence = outputExhausted || authenticationRequired;
     await transition(
       {
         ...state(),
@@ -1022,19 +1065,28 @@ Include every listed command exactly once in requiredChecks with its actual cano
       {
         pause: {
           reason,
-          code: authenticationRequired
-            ? "ERR_AUTHENTICATION_REQUIRED"
-            : rejection.code,
+          code: outputExhausted
+            ? "ERR_OUTPUT_EXHAUSTED"
+            : authenticationRequired
+              ? "ERR_AUTHENTICATION_REQUIRED"
+              : rejection.code,
           resumeState: "COMMIT",
+          ...(outputExhausted
+            ? { role: "worker", checkpoint: `commit:${state().currentStep}` }
+            : {}),
+          ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
         },
         publicActivity: activity(
           "runner",
           "commit",
           "authorization-retired",
-          `Commit authorization retired before effect: ${reason}.`,
+          diagnosticClass === undefined
+            ? `Commit authorization retired before effect: ${reason}.`
+            : `Commit authorization retired before effect: ${reason} (${diagnosticClass}).`,
         ),
       },
     );
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1082,6 +1134,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
     } = {},
   ) {
     const current = state();
+    // Current and archived revision receipts bind the original role inventories.
+    // Retain them as history while retiring every active execution approval.
+    const retainInventories =
+      current.effectiveValidation.length > 0 ||
+      current.replacementExecution.inputChanges.some(
+        ({ validation }) => validation !== null,
+      );
     await transition(
       {
         ...current,
@@ -1089,10 +1148,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
         workflowState: "WAITING_FOR_USER",
         clarificationFrozen: false,
         pendingEdit: null,
-        workerSummary: null,
-        reviewerSummary: null,
-        workerValidation: null,
-        reviewerValidation: null,
+        workerSummary: retainInventories ? current.workerSummary : null,
+        reviewerSummary: retainInventories ? current.reviewerSummary : null,
+        workerValidation: retainInventories ? current.workerValidation : null,
+        reviewerValidation: retainInventories
+          ? current.reviewerValidation
+          : null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         resolvedSummary: null,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
@@ -1103,6 +1165,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         currentStep: null,
         reviewerStep: null,
         implementationDirection: null,
+        stepImplementation: null,
+        writableResult: null,
         requiredChecks: null,
         validationSchedule: null,
         validationAmendment: null,
@@ -1126,6 +1190,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         additionalFixRounds: 0,
         findingOverrides: [],
         pendingCommit: null,
+        ...(custom ? { customCandidate: null } : {}),
       },
       {
         nextCounters: {
@@ -1147,11 +1212,16 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
     return Object.freeze({
       inputs,
-      canonicalPlan: canonicalPlan(inputs.plan.content),
+      canonicalPlan: canonicalExecutionPlan(
+        inputs.plan.content,
+        stepPolicy.kind,
+      ),
     });
   }
 
-  async function readCurrentInputs() {
+  async function readCurrentInputs({
+    allowProductDecisionAppend = false,
+  } = {}) {
     let input;
     try {
       input = await readInputs();
@@ -1186,8 +1256,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
       context: input.inputs.context?.hash ?? null,
       executionClarifications: clarification.hash,
     };
+    const appendedHash = allowProductDecisionAppend
+      ? state().writableResult?.productDecision?.resultHash
+      : null;
     const changedField = Object.keys(nextHashes).find(
-      (field) => currentRun.hashes[field] !== nextHashes[field],
+      (field) =>
+        currentRun.hashes[field] !== nextHashes[field] &&
+        !(
+          field === "executionClarifications" &&
+          appendedHash != null &&
+          nextHashes[field] === appendedHash
+        ),
     );
     if (
       changedField !== undefined ||
@@ -1206,14 +1285,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
   async function verifyPersistedRepository() {
     if (!(await ensurePlanPosition())) return false;
     try {
-      await runtime.git.assertUnchanged(state().repositoryBaseline);
+      await safety.assertUnchanged(state().repositoryBaseline);
     } catch (cause) {
       if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
         throw cause;
       }
       if (cause.changes?.includes("head") && !(await ensurePlanPosition()))
         return false;
-      await pause("unsafe_git_state", { code: cause.code });
+      await pause(
+        "unsafe_git_state",
+        { code: cause.code },
+        { bootstrapProgress: clearedBootstrapWork(state().bootstrapProgress) },
+      );
       return false;
     }
     return true;
@@ -1237,37 +1320,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     )
       return true;
     const stepNumber = current.completedCommits.length + 1;
-    const step = parseCommitPlan(current.canonicalPlan).steps[stepNumber - 1];
+    const step = effectivePlanAuthority(current).steps[stepNumber - 1];
     if (step === undefined) return true;
-    const observed = await runtime.git.inspectHead({
+    const evidence = await stepPolicy.inspectPlanPosition({
+      git: safety,
       projectPath: currentRun.projectPath,
+      baseline: current.repositoryBaseline,
+      step,
     });
-    if (
-      observed.head === current.repositoryBaseline.head &&
-      observed.subject !== step.subject
-    )
-      return true;
-    // Preserve the existing diagnostics for independent control violations.
-    const snapshot = await runtime.git.snapshot({
-      projectPath: currentRun.projectPath,
-      allowedPaths: current.repositoryBaseline.allowedPaths,
-    });
-    if (
-      [
-        "branch",
-        "detached",
-        "remoteConfigurationFingerprint",
-        "identityFingerprint",
-      ].some((field) => snapshot[field] !== current.repositoryBaseline[field])
-    )
-      return true;
-    if (
-      observed.head === current.repositoryBaseline.head &&
-      ["refsFingerprint", "indexFingerprint", "contentFingerprint"].some(
-        (field) => snapshot[field] !== current.repositoryBaseline[field],
-      )
-    )
-      return true;
+    if (evidence === null) return true;
     await transition(
       {
         ...current,
@@ -1280,12 +1341,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           code: "ERR_STALE_EXECUTION_PLAN",
           explanation:
             "The runner-selected plan step conflicts with the observed HEAD. Revise the plan and start a new run.",
-          evidence: [
-            `Current step ${stepNumber}: ${step.subject}`,
-            observed.subject === step.subject
-              ? "HEAD already has the exact current planned subject."
-              : "HEAD moved outside runner-authorized commit settlement.",
-          ],
+          evidence,
         },
         publicActivity: activity(
           "runner",
@@ -1329,6 +1385,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
       );
     }
+    writableCheckpointPersistence = state().writableResult !== null;
     currentRun = await runtime.recordChildSession(
       { role, sessionId, contextKey },
       {
@@ -1340,6 +1397,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
+    writableCheckpointPersistence = false;
     assertRun(currentRun);
   }
 
@@ -1385,10 +1443,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     try {
       result = await runtime.trustedValidation.inspectRequirements({
         inventory: validationCatalog(current),
-        requirements: inspectionRequirements([
-          current.workerValidation,
-          current.reviewerValidation,
-        ]),
+        requirements: inspectionRequirements(validationReports(current)),
         snapshot: current.trustedValidation,
         projectPath: currentRun.projectPath,
       });
@@ -1428,6 +1483,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         await runtime.adapters[role].probe(),
         role,
         currentRun.sessionLineage.source,
+        stepPolicy.kind,
       );
     } catch (cause) {
       throw new PlanExecutionWorkflowError(`${role} backend is unavailable.`, {
@@ -1455,6 +1511,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   function workspaceControlChange(before, after) {
+    if (custom) return null;
     if (
       before.projectPath !== after.projectPath ||
       before.head !== after.head ||
@@ -1487,6 +1544,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   function interruptedTurnIsWritable(turn) {
+    if (state().writableResult?.stage === "correcting") return false;
     if (turn.role !== "worker") {
       return false;
     }
@@ -1501,12 +1559,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     return (
       turn.phase === "resolve-findings" &&
-      (
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
-      ((
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
+      retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1536,13 +1594,51 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return false;
     }
     if (!(await ensurePlanPosition())) return false;
+    if (state().writableResult !== null) {
+      const checkpoint = state().writableResult;
+      const correcting = checkpoint.stage === "correcting";
+      let inspected;
+      try {
+        inspected = await safety.reconcileInterrupted(
+          state().repositoryBaseline,
+          {
+            allowWorkspaceChanges: !correcting && !checkpoint.budgetExhausted,
+            allowIndexChanges: false,
+          },
+        );
+      } catch (cause) {
+        if (cause?.code !== "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED")
+          throw cause;
+        await pause(interruptedControlChange(cause), { code: cause.code });
+        return false;
+      }
+      if (["prepared", "invoking"].includes(checkpoint.stage))
+        await reconcileWritableResult(inspected);
+      else if (!isDeepStrictEqual(inspected, state().repositoryBaseline)) {
+        await pause("unsafe_git_state", {
+          code: "ERR_WRITABLE_RESULT_CONTENT_CHANGED",
+        });
+        return false;
+      }
+      writableCheckpointPersistence = true;
+      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      writableCheckpointPersistence = false;
+      interruptedTurn = null;
+      interruptedRepositoryReconciled = true;
+      // A reserved attempt is consumed even when its response was lost.
+      if (correcting) {
+        await exhaustWritableResult();
+        return false;
+      }
+      return true;
+    }
     const correctionWasReconciled =
       interruptedCorrectionWasReconciled(interruptedTurn);
     const supersededByValidationMigration = state().validationMigrationPending;
     const allowWorkspaceChanges = interruptedTurnIsWritable(interruptedTurn);
     let reconciledRepository;
     try {
-      reconciledRepository = await runtime.git.reconcileInterrupted(
+      reconciledRepository = await safety.reconcileInterrupted(
         state().repositoryBaseline,
         {
           allowWorkspaceChanges,
@@ -1565,7 +1661,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return false;
     }
     interruptedRepositoryReconciled = true;
-    if (interruptedTurn.phase === "plan-context") {
+    if (
+      [
+        "plan-context",
+        "commit-size",
+        "effective-plan",
+        "revision-validation",
+      ].includes(interruptedTurn.phase)
+    ) {
       currentRun = await runtime.finishAgentTurn(interruptedTurn);
       interruptedTurn = null;
       interruptedRepositoryReconciled = false;
@@ -1576,6 +1679,47 @@ Include every listed command exactly once in requiredChecks with its actual cano
       state().workflowState === "CHECK_AND_FIX" &&
       state().repositoryBaseline.contentFingerprint !==
         reconciledRepository.contentFingerprint;
+    if (
+      !supersededByValidationMigration &&
+      allowWorkspaceChanges &&
+      ["implement", "resolve-findings"].includes(interruptedTurn.phase) &&
+      state().workflowState.toLowerCase().replaceAll("_", "-") ===
+        interruptedTurn.phase &&
+      !isDeepStrictEqual(reconciledRepository, state().repositoryBaseline)
+    ) {
+      // Legacy turns have no result checkpoint. Retain the safety boundary's
+      // reconciled baseline before registering their continuation, without
+      // replacing the original implementation evidence or blocker ownership.
+      const current = state();
+      const changed =
+        current.repositoryBaseline.contentFingerprint !==
+        reconciledRepository.contentFingerprint;
+      const fixing = changed && interruptedTurn.phase === "resolve-findings";
+      await transition(
+        {
+          ...current,
+          ...(changed ? clearedCandidateAndTerminalGate() : {}),
+          ...(changed && current.finalizationResult?.status === "FAIL"
+            ? {
+                finalizationResult: current.finalizationResult,
+                finalizedFingerprint: current.finalizedFingerprint,
+              }
+            : {}),
+          repositoryBaseline: reconciledRepository,
+          pendingCorrection: current.pendingCorrection || fixing,
+          availabilityCorrectionCharged:
+            current.availabilityCorrectionCharged || fixing,
+        },
+        {
+          nextCounters: {
+            ...counters(),
+            fixRounds:
+              counters().fixRounds +
+              (fixing && !current.pendingCorrection ? 1 : 0),
+          },
+        },
+      );
+    }
     if (supersededByValidationMigration) {
       const current = state();
       const contentChanged =
@@ -1586,6 +1730,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       const changedCorrection =
         changedLazyCheck ||
         (interruptedTurn.phase === "resolve-findings" && contentChanged);
+      const charged = changedLazyCheck
+        ? current.availabilityCorrectionCharged ||
+          current.pendingLazyCorrection?.fixRoundCharged
+        : current.pendingCorrection;
       if (
         !isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)
       ) {
@@ -1603,6 +1751,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
                   findings: [],
                   reviewReconsideration: [],
                   ...(changedCorrection ? { pendingCorrection: true } : {}),
+                  ...(changedLazyCheck
+                    ? markPendingLazyCorrectionCharged(current)
+                    : {}),
                 }
               : {}),
           },
@@ -1610,9 +1761,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ? {
                 nextCounters: {
                   ...counters(),
-                  fixRounds:
-                    counters().fixRounds +
-                    (changedLazyCheck || !current.pendingCorrection ? 1 : 0),
+                  fixRounds: counters().fixRounds + (charged ? 0 : 1),
                 },
               }
             : {},
@@ -1636,7 +1785,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
-            currentRun.inactivityRecovery == null &&
+            currentRun.inactivityRecovery?.expiryRevision == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
@@ -1644,7 +1793,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
             currentRun.availabilityRetry != null ||
-            currentRun.inactivityRecovery != null,
+            currentRun.inactivityRecovery?.expiryRevision != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1653,7 +1802,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ...counters(),
             fixRounds:
               counters().fixRounds +
-              (current.availabilityCorrectionCharged ? 0 : 1),
+              (current.availabilityCorrectionCharged ||
+              current.pendingLazyCorrection?.fixRoundCharged
+                ? 0
+                : 1),
           },
         },
       );
@@ -1670,7 +1822,21 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return true;
   }
 
+  let resumedOutputCheckpoint =
+    currentRun.pause?.reason === "output_exhausted"
+      ? currentRun.pause.checkpoint
+      : null;
+  function retryCheckpointEvidence() {
+    return resumedOutputCheckpoint === null
+      ? (currentRun.availabilityRetry ??
+          (currentRun.inactivityRecovery?.expiryRevision != null
+            ? currentRun.inactivityRecovery
+            : null))
+      : { checkpoint: resumedOutputCheckpoint };
+  }
+
   const availabilityRetry = Symbol("availability-retry");
+  let narrativeRecovery = null;
   async function runRole(role, schema, buildPrompt, options) {
     for (;;) {
       const result = await runRoleAttempt(role, schema, buildPrompt, options);
@@ -1690,18 +1856,54 @@ Include every listed command exactly once in requiredChecks with its actual cano
       recoveryContext = "",
       contextReview = false,
       contractContext,
+      focusedContext,
+      outputExhaustionPatch,
+      resultRestatement = false,
+      writableFacts,
     } = {},
   ) {
+    if (!stepPolicy.roleAccess[role]?.includes(access))
+      throw workflowError("The plan kind does not authorize this role access.");
     if (state().preflightComplete && !(await verifyFinalizationGuidance())) {
       return null;
     }
     if (!(await ensurePlanPosition())) return null;
     if (!(await ensureTrustedCapabilities())) return null;
+    if (
+      access === "workspace-write" &&
+      effectivePlanAuthority(state()).binding.revision > 0 &&
+      (state().validationSchedule?.effectivePlan?.revision !==
+        effectivePlanAuthority(state()).binding.revision ||
+        !state().replacementExecution.separations.some(
+          (entry) =>
+            entry.revision ===
+              effectivePlanAuthority(state()).binding.revision &&
+            entry.phase === "ready",
+        ))
+    )
+      throw workflowError("Replacement work is not prepared.");
     if (access === "workspace-write" && !(await ensureCheckRequirements()))
       return null;
-    const turn = contextReview
-      ? { role, phase: "plan-context" }
-      : activeTurn(role, state().workflowState);
+    const refinementPhase = checkpoint.startsWith("commit-size:")
+      ? "commit-size"
+      : checkpoint.startsWith("effective-plan:")
+        ? "effective-plan"
+        : ["bootstrap", "validation-migration"].includes(checkpoint) &&
+            effectivePlanAuthority(state()).binding.revision > 0
+          ? "revision-validation"
+          : null;
+    const turn = resultRestatement
+      ? { role: "worker", phase: "writable-result" }
+      : contextReview
+        ? { role, phase: "plan-context" }
+        : refinementPhase !== null
+          ? { role, phase: refinementPhase }
+          : activeTurn(
+              role,
+              checkpoint === "validation-migration"
+                ? "VALIDATION_MIGRATION"
+                : state().workflowState,
+            );
     const retrying = currentRun.availabilityRetry != null;
     const recovering =
       interruptedTurn !== null ||
@@ -1729,18 +1931,83 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     if (access === "workspace-write" && !(await ensureImplementationEvidence()))
       return null;
-    const turnSnapshot = await runtime.git.snapshot({
+    if (custom && access === "workspace-write") {
+      const { policyReceipt } = await runtime.adapters[role].probe({ access });
+      if (state().customWritePolicy === null) {
+        await transition({
+          ...state(),
+          customWritePolicy: structuredClone(policyReceipt),
+        });
+      } else if (!isDeepStrictEqual(state().customWritePolicy, policyReceipt)) {
+        throw new PlanExecutionWorkflowError(
+          "Custom writable provider policy changed.",
+          { code: "ERR_PROVIDER_POLICY_CHANGED" },
+        );
+      }
+    }
+    if (writableFacts !== undefined)
+      await beginWritableResult({
+        ...writableFacts,
+        beforeFingerprint: await contentFingerprint(),
+      });
+    const turnSnapshot = await safety.snapshot({
       allowedPaths: [],
       projectPath: baseline.projectPath,
     });
-    const evidenceContext = inputEvidence(
-      evidence.inputs,
-      evidence.canonicalPlan,
-      evidence.clarification,
+    const turnFixRounds = counters().fixRounds;
+    const beforeCustomFingerprint = custom
+      ? executionContentFingerprint(state())
+      : null;
+    const evidenceContext = planEvidence(evidence);
+    const sourceContext =
+      access === "workspace-write" || ["review", "confirm"].includes(turn.phase)
+        ? await replacements.preservedContext()
+        : "";
+    const context = durableContext(
+      focusedContext === undefined ? evidenceContext : focusedContext(evidence),
+      recoveryContext,
     );
-    const context = durableContext(evidenceContext, recoveryContext);
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
-    const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
+    // Narrative review has no accepted result yet. Rebuild its read-only
+    // producing turn under the same recovery allowance before reviewing again.
+    const narrativeCheckpoint = `plan-context:read-only:${checkpoint}`;
+    const recoveries = [
+      currentRun.availabilityRetry,
+      currentRun.inactivityRecovery,
+    ];
+    const reconstructingNarrative =
+      !contextReview &&
+      access === "read-only" &&
+      recoveries.some(
+        (recovery) =>
+          recovery?.role === role &&
+          recovery.checkpoint === narrativeCheckpoint,
+      );
+    // Version 27 bound migration retries to the suspended workflow phase.
+    // Keep that exact recovery checkpoint until success, without changing the
+    // new read-only turn identity or renewing either recovery allowance.
+    const legacyMigrationCheckpoint = `${activeTurn(role, state().workflowState).phase}:read-only:validation-migration`;
+    const resumingLegacyMigration =
+      checkpoint === "validation-migration" &&
+      access === "read-only" &&
+      state().validationMigrationPending &&
+      recoveries.some(
+        (recovery) =>
+          recovery?.role === role &&
+          recovery.checkpoint === legacyMigrationCheckpoint,
+      );
+    const availabilityCheckpoint = reconstructingNarrative
+      ? narrativeCheckpoint
+      : resumingLegacyMigration
+        ? legacyMigrationCheckpoint
+        : `${turn.phase}:${access}:${checkpoint}`;
+    const continuingNarrativeRecovery =
+      contextReview &&
+      narrativeRecovery?.role === role &&
+      narrativeRecovery.checkpoint === availabilityCheckpoint;
+    // Only the immediate review after a successful prerequisite shares its
+    // reservation. Failed prerequisite or review retries reserve normally.
+    narrativeRecovery = null;
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
         role,
@@ -1748,7 +2015,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         repository: turnSnapshot,
       });
     }
-    if (runtime.inactivity !== undefined) {
+    if (runtime.inactivity !== undefined && !continuingNarrativeRecovery) {
       currentRun = await runtime.inactivity.before({
         role,
         checkpoint: availabilityCheckpoint,
@@ -1757,9 +2024,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const latestSession = [...currentRun.sessionLineage.children]
       .reverse()
-      .find((child) => child.role === role);
+      .find(
+        (child) =>
+          child.role === role &&
+          child.contextKey !== COMMIT_SESSION_CONTEXT_KEY,
+      );
     const selectedSession =
-      contextReview && !recovering && latestSession?.contextKey === contextKey
+      contextReview &&
+      (!recovering || continuingNarrativeRecovery) &&
+      latestSession?.contextKey === contextKey
         ? {
             session: { id: latestSession.sessionId, mode: "continue" },
             previousSession: latestSession.sessionId,
@@ -1773,7 +2046,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             sourceSession: currentRun.sessionLineage.source,
             sourceForkConsumed: state().lazySourceForkConsumed,
             recovering,
-            freshSession,
+            freshSession: freshSession || resultRestatement,
           });
     const sourceForkRecovery = state().authenticationSourceForkRecovery;
     if (
@@ -1794,20 +2067,27 @@ Include every listed command exactly once in requiredChecks with its actual cano
           }
         : selectedSession;
     const roleConfiguration = currentRun.roles[role];
-    const positionPrompt = `\n\nRunner-selected plan position (only verified commits are completed):\n${JSON.stringify(selectedPlanPosition(state()))}`;
+    const positionPrompt = planPositionPrompt();
     const assessmentPrompt = [
       FINDING_ARBITRATION_SCHEMA,
       STAGNATION_SCHEMA,
       CLARIFICATION_SCHEMA,
       PLAN_COMPATIBILITY_SCHEMA,
       BOOTSTRAP_SCHEMA,
+      REPOSITORY_DISCOVERY_SCHEMA,
       BOOTSTRAP_RECONCILIATION_SCHEMA,
       BOOTSTRAP_ARBITRATION_SCHEMA,
     ].includes(schema)
       ? `\n\n${STEP_ASSESSMENT_INSTRUCTIONS}`
       : "";
-    const promptFor = (evidence) =>
-      `${buildPrompt(evidence)}${positionPrompt}${assessmentPrompt}`;
+    const resultTurn =
+      custom &&
+      ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema) ||
+        (access === "workspace-write" && schema === CHECK_AND_FIX_SCHEMA));
+    const promptFor = (evidence) => {
+      const prompt = `${buildPrompt(evidence)}\n${sourceContext}${positionPrompt}${assessmentPrompt}`;
+      return custom ? customPrompt(prompt, resultTurn) : prompt;
+    };
     const recoveryPrompt = completeRolePrompt(promptFor(context));
     const executionPreferences = Object.fromEntries(
       ["profile", "model", "contextSize", "effort"].flatMap((field) =>
@@ -1817,35 +2097,80 @@ Include every listed command exactly once in requiredChecks with its actual cano
           : [],
       ),
     );
+    const guidance = state().finalizationGuidance;
+    const selectedFile =
+      guidance?.selection === "file"
+        ? await inspectValidationPath(
+            guidance.skillPath,
+            currentRun.projectPath,
+          )
+        : null;
+    const readContext =
+      selectedFile === null
+        ? ""
+        : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
+      ...(selectedFile === null ? {} : { readPaths: [selectedFile.path] }),
       access,
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(promptFor(""))
-          : recoveryPrompt,
-      recoveryPrompt,
-      schema,
+          : recoveryPrompt + readContext,
+      recoveryPrompt: recoveryPrompt + readContext,
+      schema: custom ? customTurnSchema(schema, resultTurn) : schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
     let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
+    let outputExhausted = false;
+    let exhaustedWorkspace;
+    let retireFailedWritable = false;
+    async function persistReconciledWorkspace(nextState, options = {}) {
+      if (retireFailedWritable)
+        nextState = { ...nextState, writableResult: null };
+      if (outputExhausted) {
+        exhaustedWorkspace = { state: nextState, options };
+      } else {
+        await transition(nextState, options);
+      }
+    }
+    const originalWritableTurn =
+      !resultRestatement &&
+      state().writableResult !== null &&
+      [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema);
+    writableCheckpointPersistence = originalWritableTurn || resultRestatement;
     currentRun = await runtime.startAgentTurn(
       turn,
-      consumeSourceFork
+      consumeSourceFork || originalWritableTurn
         ? {
             pipelineState: {
               ...state(),
-              lazySourceForkConsumed: true,
+              ...(consumeSourceFork ? { lazySourceForkConsumed: true } : {}),
+              ...(originalWritableTurn
+                ? {
+                    writableResult: {
+                      ...state().writableResult,
+                      stage: "invoking",
+                    },
+                  }
+                : {}),
             },
           }
         : undefined,
     );
+    writableCheckpointPersistence = false;
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
@@ -1854,20 +2179,22 @@ Include every listed command exactly once in requiredChecks with its actual cano
         response = await runtime.adapters[role].run(request);
       } catch (cause) {
         agentError = cause;
-        if (isOwnershipFailure(cause)) throw cause;
+        if (writableCheckpointPersistence || isOwnershipFailure(cause))
+          throw cause;
         inactivityFailure =
           runtime.inactivity?.eligible(cause) === true ||
           (await runtime.inactivity?.pending()) === true;
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
+        outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
-        await runtime.git.assertUnchanged(turnSnapshot);
-        await runtime.git.assertUnchanged(baseline);
+        await safety.assertUnchanged(turnSnapshot);
+        await safety.assertUnchanged(baseline);
       } else {
-        nextRepositoryBaseline = await runtime.git.snapshot({
+        nextRepositoryBaseline = await safety.snapshot({
           allowedPaths: baseline.allowedPaths,
           projectPath: baseline.projectPath,
         });
@@ -1883,7 +2210,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
       if ((await readCurrentInputs()) === null) {
         return null;
       }
-      if (access !== "read-only") {
+      // Classified non-output failures retain their established recovery
+      // convention. A missing/malformed result or interrupted publication never
+      // borrows that convention to replay the writable effect.
+      retireFailedWritable =
+        originalWritableTurn &&
+        agentError !== undefined &&
+        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS &&
+        agentError?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
+      if (originalWritableTurn && !retireFailedWritable) {
+        await reconcileWritableResult(nextRepositoryBaseline);
+      } else if (access !== "read-only") {
         const current = state();
         const contentChanged =
           baseline.contentFingerprint !==
@@ -1897,7 +2234,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           changedLazyCheck ||
           !isDeepStrictEqual(nextRepositoryBaseline, baseline)
         ) {
-          await transition(
+          await persistReconciledWorkspace(
             changedCorrection || changedLazyCheck
               ? {
                   ...current,
@@ -1914,12 +2251,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
                     current.availabilityCorrectionCharged ||
                     ((availabilityFailure ||
                       authenticationFailure ||
+                      outputExhausted ||
                       inactivityFailure) &&
                       changedLazyCheck) ||
-                    (authenticationFailure && changedCorrection),
+                    ((authenticationFailure || outputExhausted) &&
+                      changedCorrection),
                   reviewReconsideration: [],
                   ...(availabilityFailure ||
                   authenticationFailure ||
+                  outputExhausted ||
                   inactivityFailure
                     ? {
                         workflowState: current.workflowState,
@@ -1970,56 +2310,108 @@ Include every listed command exactly once in requiredChecks with its actual cano
                       ...counters(),
                       fixRounds:
                         counters().fixRounds +
-                        (current.availabilityCorrectionCharged ? 0 : 1),
+                        (current.availabilityCorrectionCharged ||
+                        current.pendingLazyCorrection?.fixRoundCharged
+                          ? 0
+                          : 1),
                     },
                   }
                 : {},
           );
         }
       }
+      if (
+        retireFailedWritable &&
+        !outputExhausted &&
+        state().writableResult !== null
+      )
+        await transition({ ...state(), writableResult: null });
       repositoryReconciled = true;
       if (
-        authenticationFailure &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        outputExhausted ||
+        (authenticationFailure &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             executionPolicy(state().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
+        const sourceForkRecoveryPatch =
+          acknowledgedSessions.size > 0
+            ? { authenticationSourceForkRecovery: null }
+            : hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {};
+        const sourceForkPatch = {
+          ...sourceForkRecoveryPatch,
+          ...(retireFailedWritable ? { writableResult: null } : {}),
+        };
+        const subdivisionPatch = exhausted
+          ? outputExhaustionPatch?.()
+          : undefined;
+        if (subdivisionPatch !== undefined) {
+          await transition(
+            { ...state(), ...subdivisionPatch, ...sourceForkPatch },
+            {
+              publicActivity: activity(
+                role,
+                checkpoint,
+                "bootstrap-subdivided",
+                "Unfinished read-only applicability subdivided after output exhaustion.",
+              ),
+            },
+          );
+          return null;
+        }
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: state().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          {
+            ...exhaustedWorkspace?.state,
+            ...sourceForkPatch,
+          },
+          exhaustedWorkspace?.options,
         );
         return null;
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
+        !writableCheckpointPersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
+        writableCheckpointPersistence = state().writableResult !== null;
         currentRun = await runtime.finishAgentTurn(turn, {
-          repositoryReconciled,
+          // Rebuilding the prerequisite does not complete narrative recovery.
+          repositoryReconciled:
+            repositoryReconciled && !reconstructingNarrative,
         });
+        writableCheckpointPersistence = false;
         assertRun(currentRun);
       }
     }
@@ -2035,9 +2427,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
         throw invalidRoleOutput(
           `${role} returned invalid structured output.`,
           outputContext,
-          ["candidate-review", "confirmation", "review"].includes(
-            outputContext.contract,
-          ) || outputContext.contract.startsWith("lazy-")
+          [
+            "candidate-review",
+            "confirmation",
+            "review",
+            "implementation",
+            "finding-resolution",
+          ].includes(outputContext.contract) ||
+            outputContext.contract.startsWith("lazy-")
             ? {
                 field: "result",
                 constraint: "provider-structured-output",
@@ -2072,7 +2469,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
           )
         : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
-    await recordSession(role, response.sessionId, previousSession, contextKey);
+    resumedOutputCheckpoint = null;
+    await recordSession(
+      role,
+      response.sessionId,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : previousSession,
+      contextKey,
+    );
     if (state().authenticationSourceForkRecovery !== null) {
       await transition({
         ...state(),
@@ -2089,6 +2494,98 @@ Include every listed command exactly once in requiredChecks with its actual cano
             `${role} returned no structured result.`,
             outputContext,
           );
+    }
+    if (reconstructingNarrative) {
+      narrativeRecovery = { role, checkpoint: availabilityCheckpoint };
+    }
+    if ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema))
+      return response.structured;
+    if (resultTurn) {
+      const { customResult: result, ...envelope } = response.structured;
+      const output = envelope;
+      if (
+        ["COMPLETED", "CHANGED", "UNCHANGED", "RESOLVED"].includes(
+          output.status,
+        )
+      ) {
+        let candidate;
+        try {
+          candidate = normalizeCustomResult(result, planStep());
+          if (
+            candidate.outputPaths.some(
+              (path) =>
+                !currentRun.workspace.policy.outputPaths.some((root) =>
+                  isWithin(root, path),
+                ),
+            )
+          )
+            throw workflowError(
+              "Custom result declares an unauthorized output.",
+            );
+        } catch (cause) {
+          if (!outputContext) throw cause;
+          throw invalidRoleOutput(
+            "Invalid custom criterion evidence.",
+            outputContext,
+            {
+              field: "customResult",
+              constraint:
+                "bounded-current-criterion-evidence-and-authorized-outputs",
+            },
+          );
+        }
+        if (schema === CHECK_AND_FIX_SCHEMA) {
+          normalizeCheckAndFixResult(output);
+          const changed =
+            (await contentFingerprint()) !== beforeCustomFingerprint ||
+            !isDeepStrictEqual(candidate, state().customCandidate);
+          if ((output.status === "CHANGED") !== changed)
+            throw invalidRoleOutput(
+              "Custom check/fix status must match content and result changes.",
+              outputContext,
+              { field: "status", constraint: "matches-result-mutation" },
+            );
+        }
+        if (!isDeepStrictEqual(candidate, state().customCandidate)) {
+          const current = state();
+          await transition(
+            {
+              ...current,
+              ...clearedCandidateAndTerminalGate(),
+              customCandidate: candidate,
+              ...(current.workflowState === "RESOLVE_FINDINGS"
+                ? {
+                    workflowState: candidateCheckpoint(current.settings),
+                    previousFindings: current.findings.length
+                      ? current.findings
+                      : current.previousFindings,
+                    findings: [],
+                    pendingCorrection: true,
+                  }
+                : {}),
+            },
+            (current.workflowState === "RESOLVE_FINDINGS" &&
+              !current.pendingCorrection) ||
+              (current.workflowState === "CHECK_AND_FIX" &&
+                !current.availabilityCorrectionCharged &&
+                !current.pendingLazyCorrection?.fixRoundCharged &&
+                counters().fixRounds === turnFixRounds)
+              ? {
+                  nextCounters: {
+                    ...counters(),
+                    fixRounds: counters().fixRounds + 1,
+                  },
+                }
+              : {},
+          );
+        }
+      } else if (result !== null)
+        throw invalidRoleOutput(
+          "Inactive custom result must be null.",
+          outputContext,
+          { field: "customResult", constraint: "null-for-inactive-status" },
+        );
+      return envelope;
     }
     return response.structured;
   }
@@ -2147,7 +2644,16 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function consumeEdit(result) {
-    const current = state();
+    const current =
+      result.changed && result.action === "product-decision"
+        ? acceptReplacementInputs(
+            state(),
+            validationEvidenceFingerprint({
+              ...currentRun.hashes,
+              executionClarifications: result.hash,
+            }),
+          )
+        : state();
     if (!result.changed && result.action !== "proactive-clarification") {
       await prepareEdit(
         result.action,
@@ -2178,6 +2684,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ? true
             : current.proactiveClarificationComplete,
         clarificationFrozen: false,
+        pendingCorrection: productDecision ? false : current.pendingCorrection,
         workerSummary: bootstrapDecision ? null : current.workerSummary,
         reviewerSummary: bootstrapDecision ? null : current.reviewerSummary,
         resolvedSummary: bootstrapDecision ? null : current.resolvedSummary,
@@ -2238,17 +2745,48 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return result.changed || result.action === "proactive-clarification";
   }
 
-  async function productDecision(decision, suspendedState) {
-    const count = counters().productDecisions + 1;
+  async function productDecision(
+    decision,
+    suspendedState,
+    { preserveLineage = false } = {},
+  ) {
+    const settlement = state().writableResult?.productDecision;
+    const count = settlement?.number ?? counters().productDecisions + 1;
+    const inputFingerprint = validationEvidenceFingerprint(currentRun.hashes);
     const transcript = await runtime.clarifications.appendProductDecision({
       artifactRoot: state().repositoryBaseline.projectPath,
       transcriptPath: state().clarificationPath,
-      expectedHash: currentRun.hashes.executionClarifications,
+      expectedHash:
+        settlement?.expectedHash ?? currentRun.hashes.executionClarifications,
       number: count,
       ...decision,
+      ...(settlement == null
+        ? {}
+        : {
+            ...(settlement.resultHash === null
+              ? {}
+              : { resultHash: settlement.resultHash }),
+            async persistAppend({ hash }) {
+              if (settlement.resultHash === hash) return;
+              await transition({
+                ...state(),
+                writableResult: {
+                  ...state().writableResult,
+                  productDecision: { ...settlement, resultHash: hash },
+                },
+              });
+            },
+          }),
     });
     const current = state();
     const bootstrapDecision = suspendedState === "BOOTSTRAP";
+    preserveLineage ||=
+      current.currentStep !== null &&
+      current.commitSizeAssessment.lineages.some(
+        ({ originalStep }) =>
+          originalStep ===
+          effectiveStepPosition(current, current.currentStep).originalStep,
+      );
     return requestEdit(
       "product-decision",
       suspendedState,
@@ -2268,6 +2806,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
         },
         nextPipelineState: {
           ...current,
+          writableResult: null,
+          replacementExecution: suspendReplacementInputs(
+            current,
+            inputFingerprint,
+          ),
           ...clearedCandidateAndTerminalGate(),
           clarificationFrozen: false,
           workerSummary: bootstrapDecision ? null : current.workerSummary,
@@ -2325,6 +2868,22 @@ Include every listed command exactly once in requiredChecks with its actual cano
           stagnationArbitrationUsed: false,
           stagnationDirection: null,
           reviewReconsideration: [],
+          ...(preserveLineage
+            ? Object.fromEntries(
+                [
+                  "pendingDisputes",
+                  "disputeCounts",
+                  "disputeHistory",
+                  "findingArbitrations",
+                  "sameFindingRounds",
+                  "pendingCorrection",
+                  "blockedSinceStagnation",
+                  "stagnationArbitrationUsed",
+                  "stagnationDirection",
+                  "reviewReconsideration",
+                ].map((field) => [field, current[field]]),
+              )
+            : {}),
         },
         nextCounters: { ...counters(), productDecisions: count },
         nextHashes: {
@@ -2353,9 +2912,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   function planStep() {
-    return parseCommitPlan(state().canonicalPlan).steps[
-      state().currentStep - 1
-    ];
+    return effectivePlanAuthority(state()).steps[state().currentStep - 1];
+  }
+
+  function plannedStepContext(step) {
+    return stepPolicy.stepContext(effectivePlanAuthority(state()).plan, step);
   }
 
   function fixBudget() {
@@ -2376,14 +2937,58 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function contentFingerprint() {
-    return runtime.git.contentFingerprint({
+    const fingerprint = await safety.contentFingerprint({
       allowedPaths: [state().clarificationPath],
       projectPath: state().repositoryBaseline.projectPath,
     });
+    return executionContentFingerprint(state(), {
+      contentFingerprint: fingerprint,
+    });
+  }
+
+  async function inspectValidationPath(path, projectPath) {
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && path === guidance.skillPath) {
+      const inspection = await runtime.finalization.inspectFile({
+        path:
+          guidance.configuredPolicy === "auto"
+            ? path
+            : guidance.configuredPolicy,
+        policy: guidance.configuredPolicy,
+      });
+      return {
+        ...inspection,
+        relativePath: inspection.inventoryPath ?? inspection.relativePath,
+      };
+    }
+    if (path.startsWith("finalization://")) {
+      throw workflowError(
+        "Validation infrastructure may name only the selected finalization file.",
+        "ERR_FINALIZATION_FILE_INVALID",
+      );
+    }
+    return safety.inspectPath({ path, projectPath });
   }
 
   async function validationInfrastructureFingerprint(paths) {
-    return runtime.git.validationInfrastructureFingerprint({
+    const guidance = state().finalizationGuidance;
+    if (guidance?.selection === "file" && paths.includes(guidance.skillPath)) {
+      const file = await inspectValidationPath(
+        guidance.skillPath,
+        state().repositoryBaseline.projectPath,
+      );
+      if (!file.exists) {
+        throw workflowError("Frozen finalization guidance is missing.");
+      }
+      const infrastructure = await safety.validationInfrastructureFingerprint({
+        paths: paths.filter((path) => path !== guidance.skillPath),
+        projectPath: state().repositoryBaseline.projectPath,
+      });
+      return sha256(
+        JSON.stringify({ infrastructure, finalizationFile: file.fingerprint }),
+      );
+    }
+    return safety.validationInfrastructureFingerprint({
       paths,
       projectPath: state().repositoryBaseline.projectPath,
     });
@@ -2477,7 +3082,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       fixRoundCharged: false,
       step: current.currentStep,
       phase,
-      contentFingerprint: current.repositoryBaseline.contentFingerprint,
+      contentFingerprint: executionContentFingerprint(current),
       validationInfrastructureFingerprint:
         current.validationInfrastructureFingerprint,
     });
@@ -2503,11 +3108,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   function markPendingLazyCorrectionCharged(current) {
     const pending = current.pendingLazyCorrection;
-    if (
-      pending === null ||
-      pending.phase !== "CHECK_AND_FIX" ||
-      pending.fixRoundCharged
-    ) {
+    if (pending === null || pending.phase !== "CHECK_AND_FIX") {
       return {};
     }
     return {
@@ -2528,10 +3129,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
     for (const [index, path] of result.validationInfrastructure.entries()) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await inspectValidationPath(
           path,
-          projectPath: state().repositoryBaseline.projectPath,
-        });
+          state().repositoryBaseline.projectPath,
+        );
       } catch (cause) {
         if (!INVALID_VALIDATION_PATH_CODES.has(cause?.code)) {
           throw cause;
@@ -2596,6 +3197,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
+      (result.status === undefined && context.contract === "bootstrap") ||
       ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(result.direction);
     const omitsTrustedCommand =
       resolvedInventory &&
@@ -2752,8 +3354,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     buildPrompt,
     normalize,
     deferredDiagnostics = false,
+    context: suppliedContext,
+    semanticContext = true,
+    wrapped = false,
+    outputExhaustionPatch,
+    focusedContext,
+    correctionPatch = () => ({}),
   }) {
-    const context = roleOutputContextFor(role, schema, checkpoint);
+    const context =
+      suppliedContext ?? roleOutputContextFor(role, schema, checkpoint);
     while (true) {
       if (!(await verifyFinalizationGuidance())) return null;
       const correction = pendingBootstrapCorrection(context);
@@ -2767,15 +3376,43 @@ Include every listed command exactly once in requiredChecks with its actual cano
               ? prompt
               : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic batch:\n${JSON.stringify(correction, null, 2)}`;
           },
-          { checkpoint, recoveryContext },
+          {
+            checkpoint,
+            recoveryContext,
+            focusedContext,
+            contractContext: context,
+            outputExhaustionPatch,
+          },
         );
         if (output === null) {
           return null;
         }
         if (!(await verifyFinalizationGuidance())) return null;
+        if (
+          schema === REPOSITORY_DISCOVERY_SCHEMA &&
+          validStepAssessment(output?.result?.stepAssessment) &&
+          !matchesPlanPosition(
+            output.result.stepAssessment,
+            selectedPlanPosition(state()),
+          ) &&
+          !(await validatePlanContext(
+            output,
+            role,
+            checkpoint,
+            context,
+            recoveryContext,
+          ))
+        )
+          return null;
         let normalized;
         try {
-          normalized = normalize(output);
+          normalized = wrapped
+            ? normalizeRoleOutput(
+                (value) => normalize({ result: value }),
+                output,
+                context,
+              )
+            : normalize(output);
           if (
             Object.keys(output).length !== schema.required.length ||
             schema.required.some((field) => !Object.hasOwn(output, field))
@@ -2802,6 +3439,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           deferredDiagnostics ? normalized.diagnostics : [],
         );
         if (
+          semanticContext &&
           !(await validatePlanContext(
             output,
             role,
@@ -2840,6 +3478,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ...state(),
             bootstrapCorrections: [...state().bootstrapCorrections, correction],
             pendingBootstrapCorrection: correction,
+            ...correctionPatch(),
           },
           {
             publicActivity: activity(
@@ -2876,11 +3515,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const validationSchedule = deriveValidationSchedule(
       [state().workerValidation, state().reviewerValidation],
-      parseCommitPlan(state().canonicalPlan).steps.length,
+      stepPolicy.parse(state().canonicalPlan).steps.length,
     );
     return {
-      requiredChecks:
-        validationSchedule[(state().currentStep ?? 1) - 1].requiredChecks,
+      requiredChecks: scheduledChecks(
+        { validationSchedule },
+        state().currentStep ?? 1,
+      ),
       validationSchedule,
       validationAmendment: null,
       validationScopeLegacy: false,
@@ -2968,6 +3609,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerSummary: null,
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
       });
@@ -2977,6 +3619,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ...(paused ? current : invalidatedLegacyValidation(current)),
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         validationMigrationPending: true,
       });
     }
@@ -3009,6 +3652,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerSummary: null,
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
       });
@@ -3115,30 +3759,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function rediscoverValidationRole(role) {
-    const result = await runBootstrapContract({
-      role,
-      schema: BOOTSTRAP_SCHEMA,
-      checkpoint: "validation-migration",
-      deferredDiagnostics: true,
-      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
-
-This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
-
-${finalizationBootstrapInstructions(state().finalizationGuidance)}
-
-${trustedValidationInstructions()}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-
-${evidence}`,
-      normalize: (output) =>
-        normalizeValidationMigrationRoleOutput(
-          output,
-          role,
-          parseCommitPlan(state().canonicalPlan).steps.length,
-          state().trustedValidation.commands,
-        ),
-    });
+    const result = await boundedBootstrapRole(role, "validation-migration");
     if (result === null) {
       return false;
     }
@@ -3153,6 +3774,10 @@ ${evidence}`,
     await transition(
       {
         ...state(),
+        bootstrapProgress: {
+          ...state().bootstrapProgress,
+          [role]: { ...state().bootstrapProgress[role], work: null },
+        },
         [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
@@ -3307,9 +3932,9 @@ ${JSON.stringify(
     return reconcileValidationMigration();
   }
 
-  async function resolveFinalizationGuidance(projectPath) {
+  async function resolveFinalizationGuidance() {
     const policy = state().settings.finalization;
-    if (policy === "none") {
+    if (policy === "none" || (custom && policy === "auto")) {
       return createFinalizationGuidanceDecision({
         configuredPolicy: policy,
       });
@@ -3319,9 +3944,9 @@ ${JSON.stringify(
     for (const skillPath of candidates) {
       let inspection;
       try {
-        inspection = await runtime.git.inspectPath({
+        inspection = await runtime.finalization.inspectFile({
           path: skillPath,
-          projectPath,
+          policy,
         });
       } catch (cause) {
         if (policy === "auto") {
@@ -3330,7 +3955,7 @@ ${JSON.stringify(
         await pause("finalization_skill_invalid", {
           code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
           explanation:
-            "The explicitly configured finalization skill path is not a safe canonical repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill path is not a safe confined Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -3341,35 +3966,18 @@ ${JSON.stringify(
         inspection.kind === "file" &&
         inspection.relativePath === skillPath
       ) {
-        let selectedFileFingerprint;
-        try {
-          selectedFileFingerprint =
-            await runtime.git.validationInfrastructureFingerprint({
-              paths: [skillPath],
-              projectPath,
-            });
-        } catch (cause) {
-          if (policy === "auto") continue;
-          await pause("finalization_skill_invalid", {
-            code: diagnosticCode(cause, "ERR_FINALIZATION_SKILL_INVALID"),
-            explanation:
-              "The explicitly configured finalization skill could not be fingerprinted safely. Repair it and start a new run.",
-            evidence: [skillPath],
-            skillPath,
-          });
-          return null;
-        }
         return createFinalizationGuidanceDecision({
           configuredPolicy: policy,
-          skillPath,
-          selectedFileFingerprint,
+          skillPath: inspection.inventoryPath ?? skillPath,
+          selectedFileFingerprint: inspection.fingerprint,
+          selection: "file",
         });
       }
       if (policy !== "auto" && inspection.exists === true) {
         await pause("finalization_skill_invalid", {
           code: "ERR_FINALIZATION_SKILL_INVALID",
           explanation:
-            "The explicitly configured finalization skill is not a canonical regular repository file. Repair the path and start a new run.",
+            "The explicitly configured finalization skill is not a confined regular Markdown file. Repair the path and start a new run.",
           evidence: [skillPath],
           skillPath,
         });
@@ -3391,13 +3999,13 @@ ${JSON.stringify(
 
   async function verifyFinalizationGuidance() {
     const guidance = state().finalizationGuidance;
-    if (guidance?.selection !== "skill") return true;
+    if (!["skill", "file"].includes(guidance?.selection)) return true;
     let inspection;
     try {
-      inspection = await runtime.git.inspectPath({
-        path: guidance.skillPath,
-        projectPath: state().repositoryBaseline.projectPath,
-      });
+      inspection = await inspectValidationPath(
+        guidance.skillPath,
+        state().repositoryBaseline.projectPath,
+      );
     } catch (cause) {
       await pause("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -3431,9 +4039,10 @@ ${JSON.stringify(
     }
     let fingerprint;
     try {
-      fingerprint = await validationInfrastructureFingerprint([
-        guidance.skillPath,
-      ]);
+      fingerprint =
+        guidance.selection === "file"
+          ? inspection.fingerprint
+          : await validationInfrastructureFingerprint([guidance.skillPath]);
     } catch (cause) {
       await pause("finalization_skill_invalid", {
         code: diagnosticCode(cause, "ERR_FINALIZATION_GUIDANCE_INVALID"),
@@ -3467,9 +4076,7 @@ ${JSON.stringify(
       return true;
     }
     if (current.finalizationGuidance === null) {
-      const guidance = await resolveFinalizationGuidance(
-        current.repositoryBaseline.projectPath,
-      );
+      const guidance = await resolveFinalizationGuidance();
       if (guidance === null) return false;
       await transition(
         { ...state(), finalizationGuidance: guidance },
@@ -3513,7 +4120,18 @@ ${JSON.stringify(
         },
       ].slice(-MAX_DIAGNOSTIC_ITEMS),
       sameFindingRounds: Object.fromEntries(
-        findingIds.map((id) => [id, (current.sameFindingRounds[id] ?? 0) + 1]),
+        findingIds.map((id) => [
+          id,
+          replacementSameFindingRounds(
+            current,
+            [
+              ...current.findings,
+              ...current.primaryFindings,
+              ...current.previousFindings,
+            ].find((finding) => finding.id === id),
+            id,
+          ) + 1,
+        ]),
       ),
       blockedSinceStagnation: current.blockedSinceStagnation + 1,
     });
@@ -3521,12 +4139,12 @@ ${JSON.stringify(
 
   function exhaustedStableFindingIds(findings = state().findings) {
     return findings
-      .map(({ id }) => id)
       .filter(
-        (id) =>
-          (state().sameFindingRounds[id] ?? 0) >=
+        (finding) =>
+          replacementSameFindingRounds(state(), finding) >=
           state().settings.maxSameFindingRounds,
-      );
+      )
+      .map(({ id }) => id);
   }
 
   function latestDispute(findingId) {
@@ -3748,67 +4366,17 @@ ${JSON.stringify(
   async function initializeInputs() {
     if (!(await ensureTrustedCapabilities())) return false;
     const input = await readInputs();
-    const discoveryOptions = {
-      allowedPaths: [],
+    const preflight = await stepPolicy.inspectWorkspace({
+      git: safety,
       projectPath: currentRun.projectPath,
-      requireClean: true,
-      requireIdentity: true,
-      requiredIgnoredPaths: [],
-    };
-    let discovery;
-    try {
-      discovery = await runtime.git.preflight(discoveryOptions);
-    } catch (cause) {
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
-        await pause("unsafe_git_state", { code: cause.code });
-        return false;
-      }
-      throw cause;
-    }
-    const repositoryPath = discovery?.snapshot?.projectPath;
-    if (
-      !isRecord(discovery?.snapshot) ||
-      typeof repositoryPath !== "string" ||
-      !isAbsolute(repositoryPath) ||
-      resolve(repositoryPath) !== repositoryPath ||
-      !isWithin(repositoryPath, currentRun.projectPath)
-    ) {
-      throw workflowError("Git preflight returned an invalid repository root.");
-    }
-    const clarificationPath = join(
-      repositoryPath,
-      state().artifactRoot,
-      "agent-runner",
-      currentRun.runId,
-      "clarifications.md",
-    );
-    let preflight;
-    try {
-      preflight = await runtime.git.preflight({
-        allowedPaths: [clarificationPath],
-        projectPath: repositoryPath,
-        requireClean: true,
-        requireIdentity: true,
-        requiredIgnoredPaths: [clarificationPath],
-      });
-    } catch (cause) {
-      if (cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED") {
-        await pause("local_artifacts_not_ignored", { path: clarificationPath });
-        return false;
-      }
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
-        await pause("unsafe_git_state", { code: cause.code });
-        return false;
-      }
-      throw cause;
-    }
-    if (preflight?.snapshot?.projectPath !== repositoryPath) {
-      throw workflowError(
-        "Git preflight returned an unstable repository root.",
-      );
-    }
-    const finalizationGuidance =
-      await resolveFinalizationGuidance(repositoryPath);
+      artifactRoot: state().artifactRoot,
+      runId: currentRun.runId,
+      pause,
+    });
+    if (preflight === null) return false;
+    const { clarificationPath } = preflight;
+    const repositoryPath = preflight.snapshot.projectPath;
+    const finalizationGuidance = await resolveFinalizationGuidance();
     if (finalizationGuidance === null) return false;
     const preflightRoles = Object.keys(currentRun.roles).filter(
       (role) => role !== "arbiter",
@@ -3823,6 +4391,7 @@ ${JSON.stringify(
               await runtime.adapters[role].probe(),
               role,
               currentRun.sessionLineage.source,
+              stepPolicy.kind,
             ),
           ]),
         ),
@@ -3842,7 +4411,9 @@ ${JSON.stringify(
         ...state(),
         preflightComplete: true,
         finalizationGuidance,
-        repositoryBaseline: preflight.snapshot,
+        repositoryBaseline: custom
+          ? await safety.snapshot({ allowedPaths: [clarificationPath] })
+          : preflight.snapshot,
         backendVersions: Object.fromEntries(
           Object.keys(currentRun.roles).map((role) => [
             role,
@@ -3871,34 +4442,57 @@ ${JSON.stringify(
     return true;
   }
 
+  async function boundedBootstrapRole(role, checkpoint) {
+    try {
+      return await runBoundedBootstrap({
+        role,
+        checkpoint,
+        state,
+        run: () => currentRun,
+        transition,
+        runContract: runBootstrapContract,
+        correctionAttempt: (context) =>
+          bootstrapCorrectionAttempt(context) === undefined ? 0 : 1,
+        chargeCorrection: async (context, patch) => {
+          const correction = {
+            attempt: 1,
+            diagnostics: [
+              outputDiagnostic(
+                {
+                  diagnostic: {
+                    field: "catalogCorrection",
+                    constraint: "complete-catalog-required",
+                  },
+                },
+                context,
+              ),
+            ],
+          };
+          await transition({
+            ...state(),
+            ...patch,
+            bootstrapCorrections: [...state().bootstrapCorrections, correction],
+            pendingBootstrapCorrection: correction,
+          });
+        },
+        fingerprintInfrastructure: validationInfrastructureFingerprint,
+        guidance: () =>
+          `${finalizationBootstrapInstructions({ ...state().finalizationGuidance, planKind: stepPolicy.kind })}\n\n${trustedValidationInstructions()}`,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED") throw cause;
+      await pause("bootstrap_inventory_capacity_exhausted", {
+        code: cause.code,
+        explanation:
+          "A single canonical applicability step exceeds the bounded supplied-request capacity. Reduce its context or start a new run with a compatible Runner contract.",
+        evidence: [`Bootstrap role: ${role}.`],
+      });
+      return null;
+    }
+  }
+
   async function bootstrapRole(role) {
-    const result = await runBootstrapContract({
-      role,
-      schema: BOOTSTRAP_SCHEMA,
-      checkpoint: "bootstrap",
-      deferredDiagnostics: true,
-      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
-        role === "reviewer"
-          ? "\nAs Reviewer, also state what you intend to verify."
-          : ""
-      }
-
-${finalizationBootstrapInstructions(state().finalizationGuidance)}
-
-${trustedValidationInstructions()}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-
-${evidence}`,
-      normalize: (output) =>
-        normalizeBootstrapRoleOutputCandidate(
-          output,
-          role,
-          "bootstrap",
-          parseCommitPlan(state().canonicalPlan).steps.length,
-          state().trustedValidation.commands,
-        ),
-    });
+    const result = await boundedBootstrapRole(role, "bootstrap");
     if (result === null) {
       return false;
     }
@@ -3916,6 +4510,10 @@ ${evidence}`,
     await transition(
       {
         ...state(),
+        bootstrapProgress: {
+          ...state().bootstrapProgress,
+          [role]: { ...state().bootstrapProgress[role], work: null },
+        },
         [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
@@ -4091,6 +4689,43 @@ The runner will derive validation inventories from the independently accepted ro
   async function applyResumeAction() {
     if (resumeAction === null) {
       const current = state();
+      if (
+        current.workflowState === "WAITING_FOR_USER" &&
+        (currentRun.pause.reason === "writable_output_invalid" ||
+          (currentRun.pause.reason === "environment_blocked" &&
+            current.writableResult?.stage === "blocked"))
+      ) {
+        if (
+          (await readCurrentInputs()) === null ||
+          !(await verifyPersistedRepository())
+        )
+          return false;
+        const checkpoint = current.writableResult;
+        await transition(
+          {
+            ...current,
+            workflowState: checkpoint.phase,
+            writableResult: {
+              ...checkpoint,
+              stage: "ready",
+              additionalAttempts:
+                checkpoint.attempts >= checkpoint.additionalAttempts + 1
+                  ? checkpoint.additionalAttempts + 1
+                  : checkpoint.additionalAttempts,
+            },
+          },
+          {
+            pause: null,
+            publicActivity: activity(
+              "runner",
+              "writable-result",
+              "retry-authorized",
+              "One additional read-only result restatement explicitly authorized.",
+            ),
+          },
+        );
+        return true;
+      }
       if (
         current.workflowState === "WAITING_FOR_USER" &&
         current.pendingEdit === null &&
@@ -4353,6 +4988,7 @@ The runner will derive validation inventories from the independently accepted ro
   }
 
   async function ensureImplementationEvidence() {
+    if (custom) return true;
     const current = state();
     const initial =
       current.workflowState === "IMPLEMENT" &&
@@ -4377,6 +5013,342 @@ The runner will derive validation inventories from the independently accepted ro
     return true;
   }
 
+  function implementationPrompt(evidence, current = state()) {
+    const step = planStep();
+    return `${IMPLEMENTATION_INSTRUCTIONS}
+
+${prefinalizationTrustedCommands()}
+
+${evidence}
+
+${plannedStepContext(step)}${
+      current.implementationDirection === null
+        ? ""
+        : `\n\nRequired rework direction:\n${JSON.stringify(current.implementationDirection, null, 2)}\n\nPersisted correction context:\n${JSON.stringify(
+            {
+              previousFindings: current.previousFindings,
+              pendingDisputes: current.pendingDisputes,
+              correctionHistory: current.correctionHistory,
+              priorDecisions: priorFindingDecisions(),
+            },
+            null,
+            2,
+          )}`
+    }`;
+  }
+
+  async function beginWritableResult(facts) {
+    const pending = state().writableResult;
+    if (pending !== null) {
+      // An absent turn-start publication proves native work never began.
+      // Reuse that exact reservation; invoking/retired turns remain restatement-only.
+      if (
+        pending.stage === "prepared" &&
+        currentRun.activeTurn === null &&
+        pending.beforeFingerprint === facts.beforeFingerprint &&
+        isDeepStrictEqual(pending.blockers, facts.blockers ?? []) &&
+        isDeepStrictEqual(pending.restrictedIds, facts.restrictedIds ?? []) &&
+        pending.budgetExhausted === (facts.budgetExhausted ?? false)
+      )
+        return;
+      throw workflowError("A writable result is already pending.");
+    }
+    await transition({
+      ...state(),
+      writableResult: createWritableResult(state(), counters(), facts),
+    });
+  }
+
+  async function reconcileWritableResult(repositoryBaseline) {
+    const current = state();
+    const checkpoint = current.writableResult;
+    const changed =
+      checkpoint.originalContentFingerprint !==
+      repositoryBaseline.contentFingerprint;
+    const charge =
+      changed &&
+      (checkpoint.rework ||
+        (checkpoint.phase === "RESOLVE_FINDINGS" &&
+          !current.pendingCorrection));
+    const next = {
+      ...current,
+      ...(changed ? clearedCandidateAndTerminalGate() : {}),
+      // A failed check is still a blocker, never an approval. Retain its
+      // ownership while invalidating every successful gate after mutation.
+      ...(changed && current.finalizationResult?.status === "FAIL"
+        ? {
+            finalizationResult: current.finalizationResult,
+            finalizedFingerprint: current.finalizedFingerprint,
+          }
+        : {}),
+      repositoryBaseline,
+      pendingCorrection:
+        current.pendingCorrection ||
+        (charge && checkpoint.phase === "RESOLVE_FINDINGS"),
+    };
+    next.writableResult = {
+      ...checkpoint,
+      stage: "ready",
+      fixCharged: charge,
+      candidateFingerprint: executionContentFingerprint(next),
+    };
+    await transition(next, {
+      nextCounters: {
+        ...counters(),
+        fixRounds: counters().fixRounds + (charge ? 1 : 0),
+      },
+    });
+  }
+
+  function normalizeWritableOutput(output, schema) {
+    const checkpoint = state().writableResult;
+    const context = roleOutputContextFor("worker", schema);
+    let envelope = output;
+    let customCandidate = state().customCandidate;
+    let customResult;
+    if (custom && isRecord(output)) {
+      ({ customResult, ...envelope } = output);
+    }
+    const result = normalizeRoleOutput(
+      schema === IMPLEMENTATION_SCHEMA
+        ? normalizeImplementationResult
+        : (payload) =>
+            normalizeResolutionResult(
+              payload,
+              checkpoint.blockers,
+              new Set(checkpoint.restrictedIds),
+            ),
+      envelope,
+      context,
+    );
+    if (custom) {
+      if (["COMPLETED", "RESOLVED"].includes(result.status)) {
+        try {
+          customCandidate = normalizeCustomResult(customResult, planStep());
+          if (
+            customCandidate.outputPaths.some(
+              (path) =>
+                !currentRun.workspace.policy.outputPaths.some((root) =>
+                  isWithin(root, path),
+                ),
+            )
+          )
+            throw workflowError("Unauthorized custom output.");
+        } catch {
+          throw invalidRoleOutput(
+            "Invalid custom criterion evidence.",
+            context,
+            {
+              field: "customResult",
+              constraint:
+                "bounded-current-criterion-evidence-and-authorized-outputs",
+            },
+          );
+        }
+      } else if (customResult !== null)
+        throw invalidRoleOutput(
+          "Inactive custom result must be null.",
+          context,
+          {
+            field: "customResult",
+            constraint: "null-for-inactive-status",
+          },
+        );
+    }
+    return { result, customCandidate };
+  }
+
+  async function acceptWritableOutput(output, schema) {
+    const { result, customCandidate } = normalizeWritableOutput(output, schema);
+    const checkpoint = state().writableResult;
+    if (
+      (await readCurrentInputs()) === null ||
+      !(await verifyPersistedRepository())
+    )
+      return false;
+    if ((await contentFingerprint()) !== checkpoint.candidateFingerprint)
+      return pauseWritableResultDrift();
+    if (result.status === "BLOCKED") {
+      const retain =
+        checkpoint.attempts > 0 || (checkpoint.rework && checkpoint.fixCharged);
+      const changedResolution =
+        !retain &&
+        checkpoint.phase === "RESOLVE_FINDINGS" &&
+        checkpoint.originalContentFingerprint !==
+          state().repositoryBaseline.contentFingerprint;
+      await pause(
+        "environment_blocked",
+        {
+          explanation: result.reason,
+          evidence: result.evidence,
+          resumeState: changedResolution
+            ? candidateCheckpoint(state().settings)
+            : checkpoint.phase,
+        },
+        {
+          ...(changedResolution
+            ? {
+                ...clearedCandidateAndTerminalGate(),
+                previousFindings: state().findings.length
+                  ? state().findings
+                  : state().previousFindings,
+                findings: [],
+                pendingCorrection: true,
+              }
+            : {}),
+          writableResult: retain ? { ...checkpoint, stage: "blocked" } : null,
+        },
+      );
+      return false;
+    }
+    if (result.status === "PRODUCT_DECISION_REQUIRED") {
+      await transition({
+        ...state(),
+        writableResult: {
+          ...checkpoint,
+          productDecision: {
+            decision: result.decision,
+            number: counters().productDecisions + 1,
+            expectedHash: currentRun.hashes.executionClarifications,
+            resultHash: null,
+          },
+        },
+      });
+      return settleWritableProductDecision();
+    }
+    return schema === IMPLEMENTATION_SCHEMA
+      ? acceptImplementationResult(result, customCandidate)
+      : acceptResolutionResult(result, customCandidate);
+  }
+
+  async function invokeWritableResult(schema, prompt, options) {
+    try {
+      const output = await runRole("worker", schema, prompt, options);
+      if (output === null) return false;
+      return await acceptWritableOutput(output, schema);
+    } catch (cause) {
+      if (
+        cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT" ||
+        state().writableResult === null
+      )
+        throw cause;
+      await transition({
+        ...state(),
+        writableResult: {
+          ...state().writableResult,
+          diagnostic: writableResultDiagnostic(
+            cause,
+            state().writableResult.phase,
+          ),
+        },
+      });
+      return restateWritableResult();
+    }
+  }
+
+  async function pauseWritableResultDrift() {
+    await pause("unsafe_git_state", {
+      code: "ERR_WRITABLE_RESULT_CONTENT_CHANGED",
+    });
+    return false;
+  }
+
+  async function exhaustWritableResult(cause) {
+    const checkpoint = state().writableResult;
+    const diagnostic = writableResultDiagnostic(
+      cause ?? {
+        diagnostic: checkpoint.diagnostic,
+      },
+      checkpoint.phase,
+    );
+    await pause(
+      "writable_output_invalid",
+      {
+        code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        resumeState: checkpoint.phase,
+        diagnostic,
+      },
+      { writableResult: { ...checkpoint, stage: "exhausted", diagnostic } },
+    );
+    return false;
+  }
+
+  async function settleWritableProductDecision() {
+    if (
+      (await readCurrentInputs({ allowProductDecisionAppend: true })) ===
+        null ||
+      !(await verifyPersistedRepository())
+    )
+      return false;
+    if (custom) await checkpoint().verify();
+    writableDecisionSettlement = true;
+    const result = await productDecision(
+      state().writableResult.productDecision.decision,
+      "IMPLEMENT",
+    );
+    writableDecisionSettlement = false;
+    return result;
+  }
+
+  async function restateWritableResult() {
+    if (state().writableResult.productDecision !== null)
+      return settleWritableProductDecision();
+    let pending = state().writableResult;
+    if (
+      (await readCurrentInputs()) === null ||
+      !(await verifyPersistedRepository())
+    )
+      return false;
+    if (["prepared", "invoking"].includes(pending.stage)) {
+      // No active turn remains. Do not adopt edits made after retirement or
+      // replay work merely because publication of its result was interrupted.
+      await reconcileWritableResult(state().repositoryBaseline);
+      pending = state().writableResult;
+    }
+    if ((await contentFingerprint()) !== pending.candidateFingerprint)
+      return pauseWritableResultDrift();
+    if (custom) await checkpoint().verify();
+    if (
+      pending.stage !== "ready" ||
+      pending.attempts >= 1 + pending.additionalAttempts
+    )
+      return exhaustWritableResult();
+    // The root adapter revalidates the frozen native policy and exact read-only
+    // filesystem authority. Custom writable authority remains separately pinned.
+    await runtime.adapters.worker.probe({ access: "read-only" });
+    await transition({
+      ...state(),
+      writableResult: {
+        ...pending,
+        stage: "correcting",
+        attempts: pending.attempts + 1,
+      },
+    });
+    const schema =
+      pending.phase === "IMPLEMENT"
+        ? IMPLEMENTATION_SCHEMA
+        : FINDING_RESOLUTION_SCHEMA;
+    try {
+      const output = await runRole(
+        "worker",
+        schema,
+        (evidence) =>
+          `${WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS}\n\n${prefinalizationTrustedCommands()}\n\n${evidence}\n\nOriginal turn facts (runner data):\n${JSON.stringify(state().writableResult)}\n\nImplementation rework direction:\n${JSON.stringify(state().implementationDirection)}\n\n${plannedStepContext(planStep())}`,
+        {
+          access: "read-only",
+          checkpoint: `commit:${pending.step}`,
+          recoveryContext: resolvedContext(),
+          resultRestatement: true,
+        },
+      );
+      if (output === null) return false;
+      return await acceptWritableOutput(output, schema);
+    } catch (cause) {
+      if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") throw cause;
+      return exhaustWritableResult(cause);
+    }
+  }
+
   async function runImplementationTurn() {
     const current = state();
     const correction = current.implementationDirection !== null;
@@ -4387,72 +5359,45 @@ The runner will derive validation inventories from the independently accepted ro
       });
       return false;
     }
-    const step = planStep();
-    const output = await runRole(
-      "worker",
-      IMPLEMENTATION_SCHEMA,
-      (evidence) => `${IMPLEMENTATION_INSTRUCTIONS}
+    return invokeWritableResult(IMPLEMENTATION_SCHEMA, implementationPrompt, {
+      access: "workspace-write",
+      checkpoint: `commit:${current.currentStep}`,
+      recoveryContext: resolvedContext(),
+      writableFacts: {},
+    });
+  }
 
-${prefinalizationTrustedCommands()}
-
-${evidence}
-
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}${
-        current.implementationDirection === null
-          ? ""
-          : `\n\nRequired rework direction:\n${JSON.stringify(current.implementationDirection, null, 2)}\n\nPersisted correction context:\n${JSON.stringify(
-              {
-                previousFindings: current.previousFindings,
-                pendingDisputes: current.pendingDisputes,
-                correctionHistory: current.correctionHistory,
-                priorDecisions: priorFindingDecisions(),
-              },
-              null,
-              2,
-            )}`
-      }`,
-      {
-        access: "workspace-write",
-        checkpoint: `commit:${current.currentStep}`,
-        recoveryContext: resolvedContext(),
-      },
-    );
-    if (output === null) {
-      return false;
-    }
-    const result = normalizeImplementationResult(output);
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (result.status === "BLOCKED") {
-      await pause("environment_blocked", {
-        explanation: result.reason,
-        evidence: result.evidence,
-        resumeState: "IMPLEMENT",
-      });
-      return false;
-    }
+  async function acceptImplementationResult(result, customCandidate) {
+    const current = state();
+    const checkpoint = current.writableResult;
+    const correction = checkpoint.rework;
     const evidence = state().stepImplementation;
     if (
+      !custom &&
       !correction &&
       !evidence.accepted &&
-      (await contentFingerprint()) === evidence.contentFingerprint
+      !stepPolicy.acceptsInitialResult(
+        evidence.contentFingerprint,
+        await contentFingerprint(),
+      )
     ) {
       return pauseForImplementationEvidence(
         "Initial implementation left the step content unchanged. Revise the plan and start a new run.",
       );
     }
     const nextCounters = correction
-      ? { ...counters(), fixRounds: counters().fixRounds + 1 }
+      ? {
+          ...counters(),
+          fixRounds: counters().fixRounds + (checkpoint.fixCharged ? 0 : 1),
+        }
       : counters();
     await transition(
       {
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
-        stepImplementation: { ...evidence, accepted: true },
+        writableResult: null,
+        ...(custom ? { customCandidate } : {}),
+        stepImplementation: custom ? null : { ...evidence, accepted: true },
         implementationDirection: null,
         ...clearedCandidateAndTerminalGate(),
         lazyCorrections: [],
@@ -4512,7 +5457,7 @@ ${step.body}${
             FINALIZATION_SCHEMA,
             (evidence) => `${FINALIZATION_INSTRUCTIONS}
 
-${finalizationGuidanceInstructions(selectedGuidance)}
+${finalizationGuidanceInstructions({ ...selectedGuidance, planKind: stepPolicy.kind })}
 
 ${establishedValidationPrompt(state())}
 
@@ -4522,10 +5467,7 @@ ${trustedValidationInstructions(true)}
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 ${
   correction === undefined
     ? ""
@@ -4550,6 +5492,7 @@ ${
           const result = normalizeFinalizationRoleOutput(
             output,
             activeTrustedCommands(state()).map(({ command }) => command),
+            custom,
           );
           if (
             result.requiredChecks &&
@@ -4807,7 +5750,11 @@ ${
       ]),
     );
     const bindings = Object.freeze({
-      contentFingerprint: fingerprint,
+      // The trusted executor binds the capability's complete content snapshot;
+      // semantic gates separately bind analysis/evidence and inspected outputs.
+      contentFingerprint: custom
+        ? (await runtime.workspace.snapshot()).contentFingerprint
+        : fingerprint,
       validationInfrastructureFingerprint: candidateValidationFingerprint,
       commandFingerprint: state().trustedValidation.commandFingerprint,
       configurationFingerprint:
@@ -4928,6 +5875,7 @@ ${
     try {
       finalizationResult = createPersistedFinalizationEvidence({
         step: state().currentStep,
+        allowEmpty: custom,
         workerResult: result,
         issues,
         checks,
@@ -5031,7 +5979,7 @@ ${JSON.stringify(
   function confirmationValidationPrompt(current) {
     return `${establishedValidationPrompt(current)}
 
-Complete persisted plan-step schedule (an inventory amendment affects only the current step):
+Complete persisted plan-step schedule (commandIndexes are zero-based references into commands; an inventory amendment affects only the current step):
 ${JSON.stringify(current.validationSchedule)}
 Explicitly assess how any shared validation-infrastructure change affects future requirements. Preserve every future step's accepted assignments.
 
@@ -5066,7 +6014,13 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
         scope.fixRoundCharged || existing?.fixRoundCharged === true,
       diagnostics,
     };
-    if (existing === null) {
+    if (
+      existing === null &&
+      !replacementCorrectionConsumed(
+        current,
+        scope.phase === "CHECK_AND_FIX" ? "check" : "clean",
+      )
+    ) {
       await transition(
         {
           ...state(),
@@ -5090,6 +6044,10 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
       {
         ...state(),
         workflowState: "WAITING_FOR_USER",
+        lazyCorrections:
+          existing === null
+            ? [...state().lazyCorrections, correction]
+            : state().lazyCorrections,
         pendingLazyCorrection: correction,
       },
       {
@@ -5119,7 +6077,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -5135,7 +6093,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -5149,7 +6107,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -5183,10 +6141,7 @@ ${prefinalizationTrustedCommands()}
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Concrete findings from the preceding clean confirmation:
 ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(correction)}`,
@@ -5374,10 +6329,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Inspected candidate fingerprint: ${inspectedFingerprint}
 
@@ -5397,9 +6349,12 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
         }
         const result = normalizeCandidateReviewRoleOutput(
           output,
-          combinedReview(current.settings)
-            ? current.primaryFindings
-            : current.previousFindings,
+          reviewFindingHistory(
+            current,
+            combinedReview(current.settings)
+              ? current.primaryFindings
+              : current.previousFindings,
+          ),
           { clean: true },
         );
         const confirmedFingerprint = await contentFingerprint();
@@ -5558,10 +6513,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Finalized content fingerprint: ${inspectedFingerprint}
 Validation-infrastructure fingerprint: ${inspectedValidationFingerprint}
@@ -5588,7 +6540,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
         }
         const result = normalizeConfirmationRoleOutput(
           output,
-          current.previousFindings,
+          reviewFindingHistory(current),
           current.finalizationResult.validationChanged,
           { clean: true },
         );
@@ -5666,7 +6618,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           {
             ...state(),
             ...acceptedValidation,
-            workflowState: "COMMIT",
+            workflowState: stepPolicy.terminalState,
             pendingConfirmationCorrection: null,
             reviewResult,
             reviewedFingerprint: confirmedFingerprint,
@@ -5697,7 +6649,10 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           MAX_DIAGNOSTIC_ITEMS,
         );
         const pendingCorrection = { ...scope, diagnostics };
-        if (state().confirmationCorrection === null) {
+        if (
+          state().confirmationCorrection === null &&
+          !replacementCorrectionConsumed(state(), "confirmation")
+        ) {
           await transition(
             {
               ...state(),
@@ -5719,6 +6674,8 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
+            confirmationCorrection:
+              state().confirmationCorrection ?? pendingCorrection,
             pendingConfirmationCorrection: pendingCorrection,
           },
           {
@@ -5753,7 +6710,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
     async function verifiedCandidateScope() {
       const current = state();
       try {
-        await runtime.git.assertUnchanged(current.repositoryBaseline);
+        await safety.assertUnchanged(current.repositoryBaseline);
       } catch (cause) {
         if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
           throw cause;
@@ -5796,10 +6753,7 @@ Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionabl
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Previous candidate findings for this step:
 ${JSON.stringify(current.previousFindings, null, 2)}${
@@ -5847,7 +6801,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         }
         result = normalizeCandidateReviewRoleOutput(
           output,
-          current.previousFindings,
+          reviewFindingHistory(current),
         );
         scope = await verifiedCandidateScope();
         if (scope === null) {
@@ -5869,7 +6823,10 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           ...scope.correctionScope,
           diagnostics,
         };
-        if (state().reviewCorrection === null) {
+        if (
+          state().reviewCorrection === null &&
+          !replacementCorrectionConsumed(state(), "review")
+        ) {
           await transition(
             {
               ...state(),
@@ -5891,6 +6848,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
+            reviewCorrection: state().reviewCorrection ?? pendingCorrection,
             pendingReviewCorrection: pendingCorrection,
           },
           {
@@ -6031,7 +6989,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     async function verifiedReviewScope() {
       const current = state();
       try {
-        await runtime.git.assertUnchanged(current.repositoryBaseline);
+        await safety.assertUnchanged(current.repositoryBaseline);
       } catch (cause) {
         if (cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") {
           throw cause;
@@ -6083,10 +7041,7 @@ Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionabl
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 ${confirmationValidationPrompt(current)}
 
@@ -6141,7 +7096,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         }
         result = normalizeConfirmationRoleOutput(
           output,
-          current.previousFindings,
+          reviewFindingHistory(current),
           current.finalizationResult.validationChanged,
         );
         scope = await verifiedReviewScope();
@@ -6167,7 +7122,10 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           ...scope.correctionScope,
           diagnostics,
         };
-        if (state().confirmationCorrection === null) {
+        if (
+          state().confirmationCorrection === null &&
+          !replacementCorrectionConsumed(state(), "confirmation")
+        ) {
           const violationLabel =
             diagnostics.length === 1 ? "violation" : "violations";
           await transition(
@@ -6191,6 +7149,8 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
+            confirmationCorrection:
+              state().confirmationCorrection ?? pendingCorrection,
             pendingConfirmationCorrection: pendingCorrection,
           },
           {
@@ -6282,7 +7242,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     await transition(
       {
         ...state(),
-        workflowState: "COMMIT",
+        workflowState: stepPolicy.terminalState,
         ...(result.validationChange === "ACCEPTED"
           ? acceptedValidationAmendment(current)
           : {}),
@@ -6665,9 +7625,7 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = (
-      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-    )?.checkpoint;
+    const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -6694,9 +7652,23 @@ ${JSON.stringify(
       });
       return false;
     }
-    const beforeFingerprint = await contentFingerprint();
-    const output = await runRole(
-      "worker",
+    const writableFacts = {
+      blockers,
+      budgetExhausted,
+      restrictedIds: blockers
+        .filter(
+          ({ id }) =>
+            current.findingArbitrations.some(
+              (entry) =>
+                entry.findingId === id &&
+                entry.direction === "REVIEWER_CORRECT",
+            ) ||
+            (current.disputeCounts[id] ?? 0) >=
+              current.settings.maxDisputesPerFinding,
+        )
+        .map(({ id }) => id),
+    };
+    return invokeWritableResult(
       FINDING_RESOLUTION_SCHEMA,
       (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
 
@@ -6727,38 +7699,18 @@ ${JSON.stringify(
         access: budgetExhausted ? "read-only" : "workspace-write",
         checkpoint: `commit:${current.currentStep}`,
         recoveryContext: resolvedContext(),
+        writableFacts,
       },
     );
-    if (output === null) {
-      return false;
-    }
-    const fixRoundAlreadyCounted = state().pendingCorrection;
-    const result = normalizeResolutionResult(
-      output,
-      blockers,
-      new Set([
-        ...current.findingArbitrations
-          .filter(({ direction }) => direction === "REVIEWER_CORRECT")
-          .map(({ findingId }) => findingId),
-        ...Object.entries(current.disputeCounts)
-          .filter(
-            ([, count]) => count >= current.settings.maxDisputesPerFinding,
-          )
-          .map(([findingId]) => findingId),
-      ]),
-    );
-    if (result.status === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
-    }
-    if (result.status === "BLOCKED") {
-      const resumeState = state().workflowState;
-      await pause("environment_blocked", {
-        explanation: result.reason,
-        evidence: result.evidence,
-        resumeState,
-      });
-      return false;
-    }
+  }
+
+  async function acceptResolutionResult(result, customCandidate) {
+    const current = state();
+    const checkpoint = current.writableResult;
+    const budgetExhausted = checkpoint.budgetExhausted;
+    const fixRoundAlreadyCounted =
+      checkpoint.fixCharged || current.pendingCorrection;
+    const beforeFingerprint = checkpoint.beforeFingerprint;
     if (
       budgetExhausted &&
       result.decisions.some(({ decision }) => decision === "FIX")
@@ -6777,6 +7729,8 @@ ${JSON.stringify(
       await transition(
         {
           ...state(),
+          writableResult: null,
+          ...(custom ? { customCandidate } : {}),
           workflowState: "WAITING_FOR_USER",
           pendingDisputes: disputes,
           disputeCounts,
@@ -6797,7 +7751,9 @@ ${JSON.stringify(
       );
       return false;
     }
-    const changed = (await contentFingerprint()) !== beforeFingerprint;
+    const changed =
+      (await contentFingerprint()) !== beforeFingerprint ||
+      (custom && !isDeepStrictEqual(customCandidate, current.customCandidate));
     const declaredFix = result.decisions.some(
       ({ decision }) => decision === "FIX",
     );
@@ -6824,6 +7780,8 @@ ${JSON.stringify(
       await transition(
         {
           ...state(),
+          writableResult: null,
+          ...(custom ? { customCandidate } : {}),
           ...(changed || current.finalizationResult?.status !== "PASS"
             ? clearedCandidateAndTerminalGate()
             : clearedCandidateAndConfirmationGate(current)),
@@ -6865,6 +7823,8 @@ ${JSON.stringify(
     await transition(
       {
         ...state(),
+        writableResult: null,
+        ...(custom ? { customCandidate } : {}),
         pendingDisputes: disputes,
         disputeCounts,
       },
@@ -6880,7 +7840,131 @@ ${JSON.stringify(
     return true;
   }
 
+  function checkpoint() {
+    return createCustomResultCheckpoint({
+      run: currentRun,
+      runtime: {
+        ...runtime,
+        workspace: {
+          ...runtime.workspace,
+          snapshot: () =>
+            safety.snapshot({ allowedPaths: [state().clarificationPath] }),
+        },
+        async transition(patch, options) {
+          const preparation = patch.pipelineState.customResults.preparation;
+          if (preparation?.prepared) {
+            // The prepared identity and its only authorized baseline change
+            // must survive together, including a lost transition response.
+            patch = {
+              ...patch,
+              pipelineState: {
+                ...patch.pipelineState,
+                repositoryBaseline: await safety.preparationSnapshot(
+                  state().repositoryBaseline,
+                  preparation,
+                ),
+              },
+            };
+          }
+          currentRun = await runtime.transition(patch, options);
+          return currentRun;
+        },
+      },
+    });
+  }
+
+  async function prepareCustomOutputs() {
+    await checkpoint().verify();
+    const roots = [];
+    const declaredDirectories = stepPolicy
+      .parse(state().canonicalPlan)
+      .outputs.filter((path) => path.endsWith("/"))
+      .map((path) => resolve(currentRun.projectPath, path));
+    for (const path of currentRun.workspace.policy.outputPaths) {
+      const inspected = await runtime.workspace.inspectPath({
+        path,
+        projectPath: currentRun.projectPath,
+      });
+      if (inspected.kind === "directory" || declaredDirectories.includes(path))
+        roots.push(path);
+    }
+    const ledger = state().customResults;
+    if (
+      ledger === null ||
+      ledger.preparation !== null ||
+      roots.some(
+        (path) => !ledger.preparedRoots.some((root) => root.path === path),
+      )
+    ) {
+      await checkpoint().prepareOutputRoots(roots);
+      await safety.assertUnchanged(state().repositoryBaseline);
+    }
+  }
+
+  async function acceptCustomStep() {
+    let ledger = await checkpoint().reconcile();
+    if (ledger.accepted.length < state().currentStep) {
+      await checkpoint().accept(state().customCandidate);
+      ledger = state().customResults;
+    }
+    const current = state();
+    const done =
+      ledger.accepted.length ===
+      stepPolicy.parse(current.canonicalPlan).steps.length;
+    const next = done
+      ? {}
+      : {
+          ...clearedCandidateAndTerminalGate(),
+          customCandidate: null,
+          requiredChecks: scheduledChecks(current, current.currentStep + 1),
+          validationAmendment: null,
+          finalizationCorrections: [],
+          pendingFinalizationCorrection: null,
+          finalizationRecovery: createFinalizationRecovery(),
+          findings: [],
+          previousFindings: [],
+          pendingDisputes: [],
+          disputeCounts: {},
+          disputeHistory: [],
+          findingArbitrations: [],
+          correctionHistory: [],
+          sameFindingRounds: {},
+          pendingCorrection: false,
+          availabilityCorrectionCharged: false,
+          blockedSinceStagnation: 0,
+          stagnationArbitrationUsed: false,
+          stagnationDirection: null,
+          reviewReconsideration: [],
+          additionalFixRounds: 0,
+          findingOverrides: [],
+        };
+    await transition(
+      {
+        ...current,
+        ...next,
+        workflowState: done ? "DONE" : "IMPLEMENT",
+        currentStep: done ? null : current.currentStep + 1,
+        reviewerStep: null,
+        repositoryBaseline: await safety.snapshot({
+          allowedPaths: [current.clarificationPath],
+        }),
+      },
+      {
+        nextCounters: done
+          ? counters()
+          : { ...counters(), fixRounds: 0, correctionRounds: 0 },
+        publicActivity: activity(
+          "runner",
+          "accept",
+          "accepted",
+          `Custom step ${current.currentStep} accepted.`,
+        ),
+      },
+    );
+  }
+
   async function runCommitTurn() {
+    const commit = stepPolicy.commitService(runtime);
     const current = state();
     const step = planStep();
     let pendingCommit = current.pendingCommit;
@@ -6932,7 +8016,7 @@ ${JSON.stringify(
       }
       let authorization;
       try {
-        authorization = await runtime.git.prepareCommit({
+        authorization = await commit.prepareCommit({
           expectedSnapshot: current.repositoryBaseline,
           subject: step.subject,
           persistPendingCommit: async (preparedAuthorization) => {
@@ -6996,36 +8080,37 @@ ${JSON.stringify(
     if (pendingCommit.status === "prepared") {
       const previousSession = [...currentRun.sessionLineage.children]
         .reverse()
-        .find((child) => child.role === "worker")?.sessionId;
+        .find(
+          (child) =>
+            child.role === "worker" &&
+            child.contextKey !== COMMIT_SESSION_CONTEXT_KEY,
+        )?.sessionId;
       let baseRequest;
       try {
-        baseRequest = await runtime.git.consumeCommit(
-          pendingCommit.authorization,
-          {
-            consumePendingCommit: async () => {
-              commitAuthorizationPersistence = true;
-              await transition(
-                {
-                  ...state(),
-                  pendingCommit: {
-                    status: "consumed",
-                    authorization: pendingCommit.authorization,
-                    preEffectRejection: null,
-                  },
+        baseRequest = await commit.consumeCommit(pendingCommit.authorization, {
+          consumePendingCommit: async () => {
+            commitAuthorizationPersistence = true;
+            await transition(
+              {
+                ...state(),
+                pendingCommit: {
+                  status: "consumed",
+                  authorization: pendingCommit.authorization,
+                  preEffectRejection: null,
                 },
-                {
-                  publicActivity: activity(
-                    "runner",
-                    "commit",
-                    "started",
-                    `Commit ${current.currentStep} authorization consumed.`,
-                  ),
-                },
-              );
-              commitAuthorizationPersistence = false;
-            },
+              },
+              {
+                publicActivity: activity(
+                  "runner",
+                  "commit",
+                  "started",
+                  `Commit ${current.currentStep} authorization consumed.`,
+                ),
+              },
+            );
+            commitAuthorizationPersistence = false;
           },
-        );
+        });
       } catch (cause) {
         if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
           await transition(
@@ -7059,6 +8144,13 @@ ${JSON.stringify(
       );
       const request = {
         ...baseRequest,
+        onSessionCreated: (sessionId) =>
+          recordSession(
+            "worker",
+            sessionId,
+            undefined,
+            COMMIT_SESSION_CONTEXT_KEY,
+          ),
         prompt: rolePrompt(`${COMMIT_INSTRUCTIONS}
 
 Authorized planned commit:
@@ -7079,16 +8171,29 @@ ${step.subject}`),
       }
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
+      const outputExhaustion = runtime.outputExhaustion?.preEffect(agentError);
+      const diagnosticClass =
+        availability == null &&
+        authentication == null &&
+        outputExhaustion == null
+          ? adapterDiagnosticClass(agentError)
+          : undefined;
       const preEffectRejection =
-        agentError?.effectStarted === false
+        agentError?.effectStarted === false &&
+        (runtime.outputExhaustion?.eligible(agentError) !== true ||
+          outputExhaustion != null)
           ? Object.freeze({
               code:
-                authentication === null || authentication === undefined
-                  ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
-                  : "ERR_AUTHENTICATION_REQUIRED",
+                outputExhaustion != null
+                  ? "ERR_OUTPUT_EXHAUSTED"
+                  : authentication === null || authentication === undefined
+                    ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
+                    : "ERR_AUTHENTICATION_REQUIRED",
               recoverable: agentError?.recoverable === true,
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
+              ...(outputExhaustion == null ? {} : { outputExhaustion }),
+              ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
             })
           : null;
       pendingCommit = {
@@ -7097,6 +8202,7 @@ ${step.subject}`),
         preEffectRejection,
       };
       if (preEffectRejection !== null) {
+        commitAuthorizationPersistence = true;
         await transition(
           { ...state(), pendingCommit },
           {
@@ -7108,12 +8214,13 @@ ${step.subject}`),
             ),
           },
         );
+        commitAuthorizationPersistence = false;
       }
     }
 
     let verified;
     try {
-      verified = await runtime.git.verifyCommit(pendingCommit.authorization);
+      verified = await commit.verifyCommit(pendingCommit.authorization);
     } catch (cause) {
       if (
         !["ERR_COMMIT_NOT_CREATED", "ERR_COMMIT_CONTRACT_VIOLATED"].includes(
@@ -7142,7 +8249,10 @@ ${step.subject}`),
             return true;
           }
         }
-        if (pendingCommit.preEffectRejection.authentication !== undefined) {
+        if (
+          pendingCommit.preEffectRejection.authentication !== undefined ||
+          pendingCommit.preEffectRejection.outputExhaustion !== undefined
+        ) {
           await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
           return false;
         }
@@ -7164,12 +8274,30 @@ ${step.subject}`),
         return false;
       }
       const contractViolation = cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      const exhausted =
+        !contractViolation &&
+        runtime.outputExhaustion?.eligible(agentError) === true;
       await pause(
-        contractViolation ? "commit_contract_violated" : "commit_failed",
+        exhausted
+          ? "output_exhausted"
+          : contractViolation
+            ? "commit_contract_violated"
+            : "commit_failed",
         {
-          code: diagnosticCode(cause, "ERR_COMMIT_FAILED"),
-          ...(Array.isArray(cause?.changes) ? { changes: cause.changes } : {}),
-          ...(agentError === undefined
+          code: exhausted
+            ? "ERR_OUTPUT_EXHAUSTED"
+            : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
+          ...(exhausted
+            ? {
+                resumeState: "COMMIT",
+                role: "worker",
+                checkpoint: availabilityCheckpoint,
+              }
+            : {}),
+          ...(!exhausted && Array.isArray(cause?.changes)
+            ? { changes: cause.changes }
+            : {}),
+          ...(exhausted || agentError === undefined
             ? {}
             : {
                 adapterCode: diagnosticCode(
@@ -7182,7 +8310,7 @@ ${step.subject}`),
       return false;
     }
 
-    const nextRepositoryBaseline = await runtime.git.snapshot({
+    const nextRepositoryBaseline = await safety.snapshot({
       allowedPaths: current.repositoryBaseline.allowedPaths,
       projectPath: current.repositoryBaseline.projectPath,
     });
@@ -7222,6 +8350,69 @@ ${step.subject}`),
     return !["WAITING_FOR_USER", "CANCELED"].includes(state().workflowState);
   }
 
+  const replacements = createReplacementCoordinator({
+    state,
+    run: () => currentRun,
+    transition,
+    runtime,
+    runRole,
+    adoptRun: (next) => {
+      currentRun = next;
+      assertRun(currentRun);
+    },
+    discover: (role) => boundedBootstrapRole(role, "bootstrap"),
+    discoveryOutcome: async (role, result) => {
+      switch (result.status) {
+        case "CAPACITY_EXHAUSTED":
+          return pauseForBootstrapCapacity(role, result);
+        case "PRODUCT_DECISION_REQUIRED":
+          return productDecision(result.decision, "IMPLEMENT", {
+            preserveLineage: true,
+          });
+        case "PLAN_REVISION_REQUIRED":
+          return pauseForPlanRevision(result);
+        default:
+          throw workflowError("Unexpected revision-discovery outcome.");
+      }
+    },
+    ensureCapabilities: ensureCheckRequirements,
+    fingerprintInfrastructure: validationInfrastructureFingerprint,
+    ensureReconstructionCapacity: async (sourceContext) => {
+      const evidence = await readCurrentInputs();
+      if (evidence === null) return false;
+      const prompt = completeRolePrompt(
+        `${implementationPrompt(
+          durableContext(planEvidence(evidence), resolvedContext()),
+          { ...state(), implementationDirection: null },
+        )}\n${sourceContext}${planPositionPrompt()}`,
+      );
+      // Match the existing provider-neutral prompt contract without expanding it.
+      if (Buffer.byteLength(prompt) > 32 * 1024 * 1024)
+        throw Object.assign(
+          new Error("Replacement request exceeds capacity."),
+          {
+            code: "ERR_REPLACEMENT_CONTEXT_CAPACITY_EXHAUSTED",
+          },
+        );
+      return true;
+    },
+    pause,
+  });
+  if (
+    !operatorStop &&
+    state().pendingCommit === null &&
+    state().replacementExecution.separations.some(
+      (entry) => entry.phase !== "ready",
+    ) &&
+    (await readCurrentInputs()) === null
+  )
+    return currentRun;
+  if (
+    state().pendingCommit === null &&
+    !(await replacements.recoverSeparation({ stopping: operatorStop }))
+  )
+    return currentRun;
+
   // Read-only plan classification precedes preparation, but never consumed
   // commit verification or operator-stop reconciliation.
   if (!(await ensurePlanPosition())) return currentRun;
@@ -7248,7 +8439,7 @@ ${step.subject}`),
     if (resumeAction === null && canRecoverLegacyConfirmation(currentRun)) {
       const recoveryRevision = currentRun.revision;
       const current = state();
-      const checked = await runtime.git.preflight({
+      const checked = await safety.preflight({
         projectPath: currentRun.projectPath,
         allowedPaths: [current.clarificationPath],
         requiredIgnoredPaths: [current.clarificationPath],
@@ -7299,7 +8490,21 @@ ${step.subject}`),
       interruptedTurn = currentRun.activeTurn;
     }
     if (state().settings === null) {
-      await transition({ ...state(), settings }, { pause: null });
+      // Adopted settings never grant size eligibility the saved run lacked.
+      const automaticCommitSplitting =
+        state().commitSizeAssessment.eligible &&
+        settings.automaticCommitSplitting;
+      await transition(
+        {
+          ...state(),
+          settings: { ...settings, automaticCommitSplitting },
+          commitSizeAssessment: {
+            ...state().commitSizeAssessment,
+            eligible: automaticCommitSplitting,
+          },
+        },
+        { pause: null },
+      );
     }
     if (!operatorStop && !(await prepareFinalizationGuidance())) {
       return currentRun;
@@ -7321,12 +8526,44 @@ ${step.subject}`),
         await runCommitTurn();
         return currentRun;
       }
+      if (state().writableResult !== null) {
+        if (interruptedTurn !== null) {
+          if ((await readCurrentInputs()) === null) return currentRun;
+          const checkpoint = state().writableResult;
+          const original = ["prepared", "invoking"].includes(checkpoint.stage);
+          const inspected = await safety.reconcileInterrupted(
+            state().repositoryBaseline,
+            {
+              allowWorkspaceChanges: original && !checkpoint.budgetExhausted,
+              allowIndexChanges: false,
+            },
+          );
+          if (original) await reconcileWritableResult(inspected);
+          writableCheckpointPersistence = true;
+          currentRun = await runtime.finishAgentTurn(interruptedTurn);
+          writableCheckpointPersistence = false;
+          interruptedTurn = null;
+        } else {
+          if (
+            (await readCurrentInputs({
+              allowProductDecisionAppend:
+                state().writableResult.productDecision !== null,
+            })) === null
+          )
+            return currentRun;
+          await safety.reconcileInterrupted(state().repositoryBaseline, {
+            allowWorkspaceChanges: false,
+            allowIndexChanges: false,
+          });
+        }
+        return currentRun;
+      }
       if (state().repositoryBaseline !== null) {
         const current = state();
         const writable =
           interruptedTurn !== null &&
           interruptedTurnIsWritable(interruptedTurn);
-        const inspected = await runtime.git.reconcileInterrupted(
+        const inspected = await safety.reconcileInterrupted(
           current.repositoryBaseline,
           {
             allowWorkspaceChanges: writable,
@@ -7353,7 +8590,8 @@ ${step.subject}`),
             : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
-              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              ? current.availabilityCorrectionCharged ||
+                current.pendingLazyCorrection?.fixRoundCharged === true
               : current.pendingCorrection;
           await transition(
             {
@@ -7387,8 +8625,16 @@ ${step.subject}`),
       }
       return currentRun;
     }
-    await prepareScopedDiscovery();
-    await prepareCapabilityDiscovery();
+    if (
+      state().writableResult?.productDecision != null &&
+      state().workflowState === state().writableResult.phase &&
+      !(await settleWritableProductDecision())
+    )
+      return currentRun;
+    if (state().writableResult === null) {
+      await prepareScopedDiscovery();
+      await prepareCapabilityDiscovery();
+    }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
     }
@@ -7423,6 +8669,7 @@ ${step.subject}`),
         (!state().preflightComplete ||
           ([
             "authentication_required",
+            "output_exhausted",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",
@@ -7431,6 +8678,7 @@ ${step.subject}`),
             "finalization_transition_invalid",
             "lazy_output_invalid",
             "review_output_invalid",
+            "effective_plan_output_invalid",
           ].includes(currentRun.pause.reason) &&
             [
               "CLARIFY",
@@ -7476,6 +8724,22 @@ ${step.subject}`),
     }
 
     while (true) {
+      if (
+        state().writableResult !== null &&
+        !["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+          state().workflowState,
+        )
+      ) {
+        const pending = state().writableResult;
+        const advance =
+          pending.stage === "prepared" && currentRun.activeTurn === null
+            ? pending.phase === "IMPLEMENT"
+              ? runImplementationTurn
+              : runResolutionTurn
+            : restateWritableResult;
+        if (!(await advance())) return currentRun;
+        continue;
+      }
       if (await prepareScopedDiscovery()) continue;
       if (await prepareCapabilityDiscovery()) {
         if (!(await recoverInterruptedTurn())) return currentRun;
@@ -7532,6 +8796,16 @@ ${step.subject}`),
             ...state(),
             clarificationFrozen: true,
             compatibilityCheckRequired: false,
+            ...(custom && state().customResults !== null
+              ? {
+                  customResults: {
+                    ...state().customResults,
+                    clarificationFingerprint: validationEvidenceFingerprint(
+                      frozen.hash,
+                    ),
+                  },
+                }
+              : {}),
           },
           {
             nextHashes: {
@@ -7690,6 +8964,27 @@ ${step.subject}`),
         continue;
       }
 
+      if (
+        custom &&
+        !["DONE", "FAILED", "WAITING_FOR_USER", "CANCELED"].includes(
+          current.workflowState,
+        )
+      ) {
+        customCheckpointSettlement = true;
+        await prepareCustomOutputs();
+        if (current.workflowState === "ACCEPT") {
+          await acceptCustomStep();
+          customCheckpointSettlement = false;
+          continue;
+        }
+        customCheckpointSettlement = false;
+      }
+      replacementCheckpoint = true;
+      const refinement = await replacements.advance();
+      replacementCheckpoint = false;
+      if (refinement === "stop") return currentRun;
+      if (refinement === "again") continue;
+
       if (current.workflowState === "IMPLEMENT") {
         if (!(await runImplementationTurn())) {
           return currentRun;
@@ -7762,10 +9057,12 @@ ${step.subject}`),
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
-      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
-        cause?.code,
-      )
+      dispositionPausePersistence ||
+      [
+        "ERR_AVAILABILITY_RECOVERY",
+        "ERR_INACTIVITY_RECOVERY",
+        "ERR_PLAN_PROGRESS_PUBLICATION",
+      ].includes(cause?.code)
     )
       throw cause;
     if (isOwnershipFailure(cause) && state().workflowState !== "COMMIT") {
@@ -7781,13 +9078,38 @@ ${step.subject}`),
       throw cause;
     }
     if (
+      custom &&
+      ["ERR_CUSTOM_RESULT_DRIFT", "ERR_WORKSPACE_DRIFT"].includes(cause?.code)
+    ) {
+      return pause("plan_revision_required", {
+        code: cause.code,
+        explanation:
+          "Frozen custom inputs or earlier accepted outputs changed. Preserve the work, revise the plan and start a new run.",
+        evidence: [
+          "Custom acceptance bindings no longer match the inspected workspace.",
+        ],
+      });
+    }
+    // Failed publications retain recovery authority; a verified read-only
+    // violation still requires the ordinary contamination stop.
+    if (
+      ((writableCheckpointPersistence || writableDecisionSettlement) &&
+        cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") ||
+      (replacementCheckpoint &&
+        cause?.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED") ||
+      customCheckpointSettlement ||
       commitCheckpointSettlement ||
       commitAuthorizationPersistence ||
       legacyRecoveryPersistence ||
       cause?.code === "ERR_RUN_REVISION_CHANGED"
     )
       throw cause;
-    if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
+    if (
+      [
+        "ERR_PROJECT_CONFIGURATION_CHANGED",
+        "ERR_PROVIDER_POLICY_CHANGED",
+      ].includes(cause?.code)
+    ) {
       throw cause;
     }
     if (

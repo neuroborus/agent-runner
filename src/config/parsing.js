@@ -1,4 +1,4 @@
-import { posix } from "node:path";
+import { isAbsolute, posix, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -45,7 +45,7 @@ const TOP_LEVEL_FIELDS = new Set([
   "trustedCommandTimeoutMs",
 ]);
 const PROJECT_TOP_LEVEL_FIELDS = new Set(
-  [...TOP_LEVEL_FIELDS].filter(
+  ["infrastructure", ...TOP_LEVEL_FIELDS].filter(
     (field) =>
       !["clientAttribution", "issueReporting", "profiles"].includes(field),
   ),
@@ -151,6 +151,41 @@ function assertArtifactRoot(value, path) {
       `${path} must be a normalized repository-relative directory.`,
     );
   }
+}
+
+function normalizeInfrastructure(value) {
+  const path = "projectConfiguration.infrastructure";
+  assertRecord(value, path);
+  const fields = new Set([
+    "schemaVersion",
+    "placement",
+    "projectPath",
+    "rootPath",
+  ]);
+  rejectUnknownFields(value, fields, path);
+  if (
+    Object.keys(value).length !== fields.size ||
+    value.schemaVersion !== 1 ||
+    !["integrated", "external"].includes(value.placement)
+  ) {
+    throw new ConfigurationError(
+      `${path} must be a version-1 placement binding.`,
+    );
+  }
+  for (const field of ["projectPath", "rootPath"]) {
+    const location = value[field];
+    if (
+      typeof location !== "string" ||
+      !isAbsolute(location) ||
+      resolve(location) !== location ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(location)
+    ) {
+      throw new ConfigurationError(
+        `${path}.${field} must be a canonical absolute path.`,
+      );
+    }
+  }
+  return Object.freeze({ ...value });
 }
 
 export function normalizeRole(role, path, providers = PROVIDER_REGISTRY) {
@@ -273,6 +308,7 @@ function normalizePipeline(
       : resolvedValue;
   }
 
+  if (applyDefaults) assertPipelineSettings(pipeline, normalized, path);
   const inputRoles = input.roles === undefined ? {} : input.roles;
   assertRecord(inputRoles, `${path}.roles`);
   const unknownRole = Object.keys(inputRoles).find(
@@ -294,6 +330,14 @@ function normalizePipeline(
   );
 
   return Object.freeze(normalized);
+}
+
+export function assertPipelineSettings(pipeline, settings, path) {
+  try {
+    pipeline.validateSettings?.(settings);
+  } catch (cause) {
+    throw new ConfigurationError(`${path}: ${cause.message}`, { cause });
+  }
 }
 
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
@@ -573,6 +617,9 @@ export function normalizeProjectConfiguration(
       ),
     ),
   };
+  if (input.infrastructure !== undefined) {
+    normalized.infrastructure = normalizeInfrastructure(input.infrastructure);
+  }
   if (input.trustedCommands !== undefined) {
     normalized.trustedCommands = normalizeTrustedCommands(
       input.trustedCommands,
@@ -624,6 +671,14 @@ export function normalizeProjectConfiguration(
   for (const pipeline of pipelines) {
     const settings = normalized.pipelines[pipeline.id];
     if (settings !== undefined) {
+      assertPipelineSettings(
+        pipeline,
+        {
+          ...runnerConfiguration.pipelines[pipeline.id],
+          ...settings,
+        },
+        `${rootPath}.pipelines.${pipeline.id}`,
+      );
       assertKnownTrustedSelection(
         settings,
         trustedCommands,

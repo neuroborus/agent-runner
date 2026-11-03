@@ -1,25 +1,36 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
   inspectOwnedSessionProcesses,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminateOwnedProcess,
 } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
   assertProjectConfigurationProtected,
+  inspectFinalizationFile,
+  DEFAULT_ARTIFACT_ROOT,
   loadProjectConfiguration,
   loadRunnerConfiguration,
+  PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
+  resolvePipelineSettings,
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
-import { getPipeline, resolveStopBoundary } from "../pipeline-registry.js";
+import {
+  getPipeline as registeredPipeline,
+  resolveStopBoundary,
+} from "../pipeline-registry.js";
+import { createWorkspaceService } from "../workspace/index.js";
+import { createRuntimeAdmission } from "../runtime/index.js";
 import {
   createRunStore,
   deepFreeze,
+  projectObservations,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
@@ -37,11 +48,21 @@ import {
   rejectUnknownFields,
   RunnerError,
 } from "./input.js";
+import { createDispositionPolicy } from "./dispositions.js";
 import { createAuthenticationPolicy } from "./authentication.js";
 import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
-import { pipelineForRun } from "./migration.js";
+import { pipelineForRun as resolvePipelineForRun } from "./migration.js";
+import {
+  bindWorkspace,
+  directorySafety,
+  inspectBoundWorkspace,
+  publishOutputDirectory,
+  workspaceSelection,
+} from "./workspace.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
+import { createPlanProgressPublisher } from "./plan-progress.js";
+import { createSetupRuntime } from "./setup.js";
 import {
   createStopMonitor,
   reconcileOperatorStop,
@@ -51,19 +72,22 @@ import {
 } from "./stops.js";
 import {
   defaultAdapters,
+  capabilityAuthorityFingerprint,
   probeRequiredRoles,
   roleAdapters,
   validateSourceRoles,
 } from "./roles.js";
 
-const WORKTREE_LEASE_PIPELINES = new Set(["plan-execution", "polishing"]);
 const RUNNER_OPTION_FIELDS = new Set([
+  "runtimeAdmission",
   "inactivityTimers",
   "availabilityClock",
   "availabilityWait",
   "adapters",
   "clarifications",
   "git",
+  "workspace",
+  "getPipeline",
   "inspectSessionProcesses",
   "loadConfiguration",
   "onActivity",
@@ -76,32 +100,90 @@ function fileHash(content) {
   return createHash("sha256").update(content).digest("hex");
 }
 
-async function inputFile(path, { optional = false } = {}) {
+async function inputFile(path, { optional = false, workspace, taskPath } = {}) {
   let content;
   try {
-    content = await readFile(path, "utf8");
+    content = workspace
+      ? await workspace.readFile({ path, projectPath: taskPath, optional })
+      : await readFile(path, "utf8");
   } catch (cause) {
     if (optional && cause?.code === "ENOENT") {
       return null;
     }
     throw cause;
   }
-  return Object.freeze({ path, content, hash: fileHash(content) });
+  return content === null
+    ? null
+    : Object.freeze({ path, content, hash: fileHash(content) });
 }
 
-async function readInputs(pipeline, taskPath) {
-  return Object.freeze(
-    Object.fromEntries(
+async function readInputs(
+  pipeline,
+  taskPath,
+  directoryWorkspace,
+  { workspace, settings, projectPath, stateRoot } = {},
+) {
+  const extra =
+    pipeline.resolveTaskInputs?.({ settings, projectPath, taskPath }) ?? {};
+  const inputs = Object.fromEntries(
+    await Promise.all(
+      Object.entries(extra).map(async ([name, definition]) => [
+        name,
+        await inputFile(definition.path, {
+          optional: definition.optional,
+          workspace,
+          taskPath: dirname(definition.path),
+        }),
+      ]),
+    ),
+  );
+  // Static directory inputs are protected by the frozen workspace binding.
+  // Only dynamic declarations contribute this supplemental input hash.
+  const selection = pipeline.resolveWorkspace
+    ? await workspaceSelection(
+        pipeline,
+        {
+          settingOverrides: settings ?? {},
+          projectPath,
+          taskPath,
+        },
+        workspace,
+      )
+    : undefined;
+  if (
+    selection &&
+    (selection.inputPaths?.length ?? 0) + (selection.sourcePaths?.length ?? 0) >
+      0
+  ) {
+    const snapshot = await workspace.snapshotInputs({
+      paths: [
+        ...(selection.inputPaths ?? []),
+        ...(selection.sourcePaths ?? []),
+      ],
+      stateRoot: resolve(stateRoot),
+    });
+    inputs.declaredInputsHash = fileHash(
+      JSON.stringify({
+        bindings: snapshot.bindings,
+        entries: snapshot.entries,
+      }),
+    );
+  }
+  return Object.freeze({
+    ...inputs,
+    ...Object.fromEntries(
       await Promise.all(
         Object.entries(pipeline.taskInputs).map(async ([name, definition]) => [
           name,
           await inputFile(join(taskPath, definition.filename), {
             optional: definition.optional,
+            workspace: directoryWorkspace,
+            taskPath,
           }),
         ]),
       ),
     ),
-  );
+  });
 }
 
 async function writePlan(taskPath, options) {
@@ -130,8 +212,11 @@ async function writePlan(taskPath, options) {
   return expectedPath;
 }
 
-export function pipelineRequiresWorktreeLease(pipelineId) {
-  return WORKTREE_LEASE_PIPELINES.has(pipelineId);
+export function pipelineRequiresWorktreeLease(pipelineId, workspace) {
+  return (
+    (workspace ?? registeredPipeline(pipelineId)?.workspace)?.lease ===
+    "exclusive"
+  );
 }
 
 function isResourceOwnershipFailure(cause) {
@@ -173,24 +258,44 @@ export function createRunner(options = {}) {
   const adapters = options.adapters;
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
+  const workspace = options.workspace ?? createWorkspaceService();
+  const getPipeline = options.getPipeline ?? registeredPipeline;
+  const pipelineForRun = (run, pipeline, settings) =>
+    resolvePipelineForRun(
+      run,
+      pipeline ?? getPipeline(run.pipelineId),
+      settings,
+    );
+  const requiresLease = (run) =>
+    run.workspace?.lease === "exclusive" ||
+    (run.workspace == null &&
+      getPipeline(run.pipelineId)?.workspace?.lease === "exclusive");
+  const leasePath = (run) => run.workspace?.leasePath ?? run.projectPath;
+  const publishPlanProgress = createPlanProgressPublisher({ git });
   const inspectSessionProcesses =
     options.inspectSessionProcesses ?? inspectOwnedSessionProcesses;
   const loadConfiguration =
     options.loadConfiguration ?? (() => loadRunnerConfiguration(providers));
   const onActivity = options.onActivity ?? (async () => {});
   const runStore = options.runStore ?? createRunStore({ resolveStopBoundary });
+  const runtimeAdmission =
+    options.runtimeAdmission ?? createRuntimeAdmission({ runStore });
   const trustedValidation =
-    options.trustedValidation ?? createTrustedValidationService({ git });
+    options.trustedValidation ??
+    createTrustedValidationService({ git, workspace });
   // Stop recovery must reuse the exact in-process reservation; failed
   // reconciliation keeps its handle for same-owner retry and its durable
   // lease for safe reclamation after owner loss.
   const heldWorktreeLeases = new Map();
+  const heldInfrastructureLeases = new Map();
   const retainedRunLeases = new Map();
   const defaultAdapterSets = new Map();
   if (
     (adapters !== undefined && !isRecord(adapters)) ||
     !isRecord(clarifications) ||
     !isRecord(git) ||
+    !isRecord(workspace) ||
+    typeof getPipeline !== "function" ||
     typeof inspectSessionProcesses !== "function" ||
     typeof loadConfiguration !== "function" ||
     typeof onActivity !== "function" ||
@@ -203,6 +308,8 @@ export function createRunner(options = {}) {
     (options.availabilityWait !== undefined &&
       typeof options.availabilityWait !== "function") ||
     !isRecord(runStore) ||
+    !isRecord(runtimeAdmission) ||
+    typeof runtimeAdmission.withAdmission !== "function" ||
     !isRecord(trustedValidation) ||
     typeof trustedValidation.preflight !== "function" ||
     typeof trustedValidation.execute !== "function"
@@ -239,6 +346,14 @@ export function createRunner(options = {}) {
   }
 
   async function publish(activity, run) {
+    const pipeline = getPipeline(run.pipelineId);
+    // Derived output cannot interrupt stop reconciliation. Regenerate after
+    // durable settlement; consumed effects also defer publication below.
+    if (!stopPending(run))
+      await publishPlanProgress(
+        run,
+        pipeline.projections.planProgress?.(run) ?? null,
+      );
     if (activity === undefined || activity === null) {
       return;
     }
@@ -248,13 +363,24 @@ export function createRunner(options = {}) {
         revision: run.revision,
         recordedAt: run.updatedAt,
         ...activity,
+        ...(pipeline.projections.planProgress === undefined
+          ? {}
+          : {
+              refinementProgress: deepFreeze(
+                pipeline.projections.status(run).refinementProgress,
+              ),
+            }),
       }),
     );
   }
 
   async function guardProjectConfiguration(run) {
     await assertProjectConfigurationProtected({
-      inspectPath: (input) => git.inspectPath(input),
+      inspectPath: (input) =>
+        (run.workspace?.kind === "directory" ? workspace : git).inspectPath(
+          input,
+        ),
+      workspaceKind: run.workspace?.kind ?? "git",
       projectPath: run.projectPath,
       protection: run.projectConfigurationProtection,
     });
@@ -287,15 +413,65 @@ export function createRunner(options = {}) {
     return next;
   }
 
+  async function pauseForWorkspaceDrift(run, lease) {
+    if (run.pause?.reason === "workspace_changed") return run;
+    const activity = {
+      actor: "runner",
+      phase: "workspace",
+      kind: "changed",
+      message:
+        "Frozen workspace inputs or controls changed; execution stopped.",
+    };
+    const next = await runStore.transitionRun(
+      lease,
+      {
+        pipelineState: {
+          ...run.pipelineState,
+          workflowState: "WAITING_FOR_USER",
+        },
+        pause: { reason: "workspace_changed", code: "ERR_WORKSPACE_DRIFT" },
+        activeTurn: null,
+      },
+      { activity },
+    );
+    await publish(activity, next);
+    return next;
+  }
+
   function storageForbiddenPaths(run) {
-    return [run.projectPath, run.taskPath, runStore.rootPath].filter(
-      (path) => typeof path === "string",
+    const base = [
+      run.projectPath,
+      run.taskPath,
+      runStore.rootPath,
+      run.projectConfigurationProtection?.infrastructureRoot,
+    ].filter((path) => typeof path === "string");
+    if (run.workspace?.policy == null) return base;
+    const roots = [
+      ...new Set(
+        [
+          ...base,
+          ...Object.values(run.workspace.policy).flatMap((value) =>
+            Array.isArray(value) ? value : [],
+          ),
+        ].filter((path) => typeof path === "string"),
+      ),
+    ];
+    return roots.filter(
+      (path) =>
+        !roots.some((root) => {
+          if (root === path) return false;
+          const name = relative(root, path);
+          return (
+            !isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`)
+          );
+        }),
     );
   }
 
   async function recordAdapterCleanupPending(run, lease) {
     if (
       run.executionResource === null ||
+      run.preparation != null ||
       run.executionProcess !== null ||
       stopPending(run)
     )
@@ -323,17 +499,44 @@ export function createRunner(options = {}) {
         (owner) => owner?.identity === run.executionResource.commandIdentity,
       )?.recover;
     const recover = adapterRecovery ?? trustedValidation.recoverResources;
-    if (run.executionProcess !== null || typeof recover !== "function") {
+    if (
+      run.preparation != null ||
+      run.executionProcess !== null ||
+      typeof recover !== "function"
+    ) {
       throw new RunnerError(
         "Execution storage cleanup requires verified process retirement.",
         { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
       );
     }
     try {
+      const forbiddenPaths = storageForbiddenPaths(run);
+      if (
+        adapterRecovery !== undefined &&
+        run.workspace?.kind === "directory"
+      ) {
+        const { kind: _kind, ...declarations } = run.workspace.policy;
+        // Cleanup protects current controls without accepting frozen inputs.
+        // Deleted inputs still contribute their paths and discovered controls.
+        const inspection = await workspace.inspect({
+          ...declarations,
+          inputPaths: [],
+          sourcePaths: [],
+          configurationPaths: [],
+          artifactPaths: [
+            ...declarations.artifactPaths,
+            ...declarations.inputPaths,
+            ...declarations.sourcePaths,
+            ...declarations.configurationPaths,
+          ],
+        });
+        forbiddenPaths.push(...inspection.controlPaths);
+      }
       await recover({
         resource: run.executionResource,
         projectPath: run.projectPath,
-        storageForbiddenPaths: storageForbiddenPaths(run),
+        workspacePolicy: run.workspace?.policy ?? undefined,
+        storageForbiddenPaths: forbiddenPaths,
         onResource: (value) => runStore.recordExecutionResource(lease, value),
       });
     } catch (cause) {
@@ -359,7 +562,19 @@ export function createRunner(options = {}) {
     onConfigurationFailure = () => {},
   ) {
     let providerResponseRole = null;
+    const safety =
+      run.workspace?.kind === "directory"
+        ? pipeline.setup
+          ? directorySafety(run.workspace, workspace, async () =>
+              inspectPipelineWorkspace(await runStore.loadRun(run.runId)),
+            )
+          : directorySafety(run.workspace, workspace)
+        : git;
     const authentication = createAuthenticationPolicy({ providers });
+    const outputExhaustion = createDispositionPolicy({
+      providers,
+      disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+    });
     const availability =
       monitor === undefined
         ? undefined
@@ -368,7 +583,7 @@ export function createRunner(options = {}) {
             lease,
             runStore,
             providers,
-            git,
+            git: safety,
             publish,
             monitor,
             clock: options.availabilityClock,
@@ -383,7 +598,7 @@ export function createRunner(options = {}) {
             runId: run.runId,
             lease,
             runStore,
-            git,
+            git: safety,
             monitor,
             publish,
             initialRun: run,
@@ -412,33 +627,174 @@ export function createRunner(options = {}) {
         throw cause;
       }
     }
+    async function withResourceRetention(operation) {
+      try {
+        return await operation();
+      } catch (cause) {
+        // Post-operation drift checks may replace a cleanup failure. Preserve
+        // durable ownership on the final error so lease handles remain usable.
+        const current = await runStore.loadRun(run.runId);
+        if (current.executionResource !== null)
+          cause.executionResourceRetained = true;
+        throw cause;
+      }
+    }
     return Object.freeze({
       authentication,
+      ...(pipeline.setup
+        ? {
+            setup: createSetupRuntime({
+              run,
+              workspace,
+              git,
+              runStore,
+              providers,
+              loadConfiguration,
+              executionLease: lease,
+              withInfrastructureOwnership: (path, operation) =>
+                withInfrastructureLease(run.runId, path, operation),
+              getRun: () => run,
+              extendReadScope: async (roots) => {
+                const latest = await runStore.loadRun(run.runId);
+                if (
+                  latest.pipelineState.selection !== null ||
+                  latest.activeTurn !== null ||
+                  !latest.pipelineState.reinspectionRequired
+                )
+                  throw new RunnerError(
+                    "Setup read scopes can change only during authorized clarification.",
+                    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                  );
+                await monitor.check();
+                await guardProjectConfiguration(latest);
+                await inspectBoundWorkspace(latest.workspace, workspace);
+                const selection = {
+                  ...latest.workspace.policy,
+                  kind: "directory",
+                  lease: "exclusive",
+                  infrastructurePaths: [
+                    ...new Set([
+                      ...latest.workspace.policy.infrastructurePaths,
+                      ...roots.filter((path) => path !== latest.projectPath),
+                    ]),
+                  ],
+                };
+                const rebound = await bindWorkspace({
+                  selection,
+                  projectPath: latest.projectPath,
+                  taskPath: latest.taskPath,
+                  taskInputs: pipeline.taskInputs,
+                  configurationPath:
+                    latest.projectConfigurationProtection?.path,
+                  stateRoot: runStore.rootPath,
+                  workspace,
+                });
+                const providerPolicies = await probeRequiredRoles(
+                  pipeline,
+                  latest.roles,
+                  adaptersFor(latest),
+                  latest.sessionLineage.source === null
+                    ? null
+                    : { id: latest.sessionLineage.source },
+                  providers,
+                  rebound.policy,
+                  (role, proof) =>
+                    assertSetupProviderAuthority(latest, role, proof),
+                );
+                await inspectBoundWorkspace(latest.workspace, workspace);
+                run = await runStore.bindWorkspaceReads(lease, {
+                  workspace: rebound,
+                  providerPolicies,
+                  expectedRevision: latest.revision,
+                  worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+                  assertAuthorized: (candidate) => {
+                    if (
+                      candidate.pipelineState.selection !== null ||
+                      !candidate.pipelineState.reinspectionRequired
+                    )
+                      throw new RunnerError(
+                        "Setup clarification read scope is frozen.",
+                        { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                      );
+                  },
+                });
+                selectedAdapters = selectedRoleAdapters(pipeline, run, lease);
+                return run;
+              },
+              assertLease: async () => {
+                await monitor?.check();
+                await checkConfiguration();
+                await runStore.assertWorkspaceLease(
+                  lease,
+                  heldWorktreeLeases.get(run.runId)?.lease,
+                  run.workspace.leasePath,
+                );
+              },
+              publishDirectory: (request) =>
+                monitor.invoke(
+                  ({ signal, onProcess }) =>
+                    publishOutputDirectory(request, {
+                      signal,
+                      onProcess,
+                      cwd: run.projectPath,
+                    }),
+                  {},
+                ),
+            }),
+          }
+        : {}),
+      finalization: {
+        inspectFile: ({ path, policy }) =>
+          inspectFinalizationFile({
+            path,
+            projectPath: run.projectPath,
+            infrastructureRoot:
+              policy === "auto"
+                ? run.projectPath
+                : (run.projectConfigurationProtection?.infrastructureRoot ??
+                  run.projectPath),
+          }),
+      },
+      outputExhaustion,
       availability,
       inactivity,
       adapters:
         monitor === undefined
           ? selectedAdapters
           : Object.fromEntries(
-              Object.entries(selectedAdapters).map(([role, adapter]) => [
+              Object.keys(selectedAdapters).map((role) => [
                 role,
                 {
-                  probe: async () => {
+                  probe: async (options) => {
                     await monitor.check();
-                    return adapter.probe();
+                    return selectedAdapters[role].probe(options);
+                  },
+                  canReadFiles: async (request) => {
+                    await monitor.check();
+                    return selectedAdapters[role].canReadFiles(request);
                   },
                   async run(request) {
                     await checkConfiguration();
+                    const directory = run.workspace?.kind === "directory";
+                    const before = directory ? await safety.snapshot() : null;
+                    if (directory && request.access === "local-commit")
+                      throw new RunnerError(
+                        "Directory workflows cannot request Git effects.",
+                        { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                      );
                     try {
                       const response = await monitor.invoke(
                         (value) =>
                           inactivity.invoke(
                             role,
-                            (attempt) => adapter.run(attempt),
+                            (attempt) => selectedAdapters[role].run(attempt),
                             value,
                           ),
                         {
                           ...request,
+                          ...(directory
+                            ? { workspacePolicy: run.workspace.policy }
+                            : {}),
                           storageForbiddenPaths: storageForbiddenPaths(run),
                           onResource: (value) =>
                             runStore.recordExecutionResource(lease, value),
@@ -447,7 +803,10 @@ export function createRunner(options = {}) {
                       providerResponseRole = role;
                       return response;
                     } catch (cause) {
-                      if (authentication.eligible(cause)) {
+                      if (
+                        authentication.eligible(cause) ||
+                        outputExhaustion.eligible(cause)
+                      ) {
                         providerResponseRole = role;
                       }
                       // Keep stronger provider failures intact while preventing
@@ -464,38 +823,164 @@ export function createRunner(options = {}) {
                       throw cause;
                     } finally {
                       await checkConfiguration();
+                      const retired = directory
+                        ? await runStore.loadRun(run.runId)
+                        : null;
+                      if (
+                        directory &&
+                        retired.executionResource === null &&
+                        retired.executionProcess === null &&
+                        retired.preparation == null
+                      ) {
+                        const after = await safety.snapshot();
+                        workspace.assertUnchanged({
+                          before,
+                          after,
+                          allowOutputs: request.access === "workspace-write",
+                        });
+                      }
                     }
                   },
                 },
               ]),
             ),
-      clarifications,
+      clarifications:
+        run.workspace?.kind !== "directory"
+          ? clarifications
+          : Object.freeze({
+              ...clarifications,
+              async ensureTranscript(request) {
+                const root = await workspace.exclusionPath({
+                  workspacePath: request.artifactRoot,
+                });
+                const marker = await workspace.inspectPath({
+                  projectPath: root,
+                  path: join(root, ".git"),
+                });
+                if (marker.exists) {
+                  const artifact = await git.inspectPath({
+                    projectPath: root,
+                    path: request.transcriptPath,
+                  });
+                  if (artifact.tracked || !artifact.ignored)
+                    throw new RunnerError(
+                      "Repository-local artifact path must be ignored and untracked.",
+                      { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
+                    );
+                }
+                return clarifications.ensureTranscript(request);
+              },
+            }),
+      workspace: Object.freeze({
+        kind: run.workspace?.kind ?? "git",
+        policy: run.workspace?.policy ?? null,
+        snapshot: (...args) => safety.snapshot(...args),
+        assertUnchanged: (...args) => safety.assertUnchanged(...args),
+        inspectPath: (...args) => safety.inspectPath(...args),
+        ...(run.workspace?.kind === "directory"
+          ? {
+              async reportArtifact(request, options) {
+                await monitor?.check();
+                await checkConfiguration();
+                const path = join(run.taskPath, pipeline.reportFilename ?? "");
+                const temporaryPath = join(
+                  run.taskPath,
+                  `.${pipeline.reportFilename}.tmp`,
+                );
+                if (
+                  !pipeline.reportFilename ||
+                  request.path !== path ||
+                  request.temporaryPath !== temporaryPath
+                )
+                  throw new RunnerError("Undeclared report publication.", {
+                    code: "ERR_UNSAFE_WORKSPACE_ACCESS",
+                  });
+                const root = await workspace.exclusionPath({
+                  workspacePath: run.taskPath,
+                });
+                if (
+                  (
+                    await workspace.inspectPath({
+                      projectPath: root,
+                      path: join(root, ".git"),
+                    })
+                  ).exists
+                ) {
+                  for (const artifactPath of [path, temporaryPath]) {
+                    const artifact = await git.inspectPath({
+                      projectPath: root,
+                      path: artifactPath,
+                    });
+                    if (artifact.tracked || !artifact.ignored)
+                      throw new RunnerError(
+                        "Repository-local report artifacts must be ignored and untracked.",
+                        { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
+                      );
+                  }
+                }
+                return safety.reportArtifact(request, options);
+              },
+              inspectOutputDirectory: (path) =>
+                safety.inspectOutputDirectory(path),
+              async prepareOutputDirectory(intent) {
+                await monitor?.check();
+                await checkConfiguration();
+                if (typeof pipeline.assertOutputPreparation !== "function")
+                  throw new RunnerError(
+                    "This pipeline cannot prepare output roots.",
+                    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+                  );
+                const current = await runStore.loadRun(run.runId);
+                pipeline.assertOutputPreparation(current, intent);
+                const prepared = await (monitor === undefined
+                  ? safety.prepareOutputDirectory(intent)
+                  : monitor.invoke(
+                      ({ signal, onProcess }) =>
+                        safety.prepareOutputDirectory(intent, {
+                          signal,
+                          beforeCreate: () => monitor.check(),
+                          publishDirectory: (request) =>
+                            publishOutputDirectory(request, {
+                              signal,
+                              onProcess,
+                              cwd: run.projectPath,
+                            }),
+                        }),
+                      {},
+                    ));
+                return { prepared, run: await runStore.loadRun(run.runId) };
+              },
+            }
+          : {}),
+      }),
       git:
-        monitor === undefined
-          ? git
-          : {
-              ...git,
-              stagePolishingHandoff: async (value) => {
-                await monitor.check();
-                await checkConfiguration();
-                return git.stagePolishingHandoff(value);
-              },
-              prepareCommit: async (value) => {
-                await monitor.check();
-                await checkConfiguration();
-                return git.prepareCommit(value);
-              },
-              consumeCommit: async (...args) => {
-                try {
+        run.workspace?.kind === "directory"
+          ? undefined
+          : monitor === undefined
+            ? git
+            : {
+                ...git,
+                stagePolishingHandoff: async (value) => {
                   await monitor.check();
                   await checkConfiguration();
-                  return await git.consumeCommit(...args);
-                } catch (cause) {
-                  monitor.rejectBeforeCommit(cause);
-                  throw cause;
-                }
+                  return git.stagePolishingHandoff(value);
+                },
+                prepareCommit: async (value) => {
+                  await monitor.check();
+                  await checkConfiguration();
+                  return git.prepareCommit(value);
+                },
+                consumeCommit: async (...args) => {
+                  try {
+                    await monitor.check();
+                    await checkConfiguration();
+                    return await git.consumeCommit(...args);
+                  } catch (cause) {
+                    monitor.rejectBeforeCommit(cause);
+                    throw cause;
+                  }
+                },
               },
-            },
       trustedValidation:
         monitor === undefined
           ? trustedValidation
@@ -504,44 +989,120 @@ export function createRunner(options = {}) {
                 await checkConfiguration();
                 await trustedValidation.preflight({
                   ...value,
+                  projectPath: run.projectPath,
+                  workspacePolicy: run.workspace?.policy ?? undefined,
                   storageForbiddenPaths: storageForbiddenPaths(run),
                 });
                 await validatePersistedBoundary(run);
               },
               inspectRequirements: (request) =>
-                inspectTrustedRequirements(
-                  {
-                    trustedValidation,
-                    runStore,
-                    lease,
-                    run,
-                    monitor,
-                    checkConfiguration,
-                    validatePersistedBoundary,
-                    storageForbiddenPaths,
-                  },
-                  request,
-                ),
-              execute: async (request) => {
-                await checkConfiguration();
-                try {
-                  return await monitor.invoke(
-                    (value) =>
-                      trustedValidation.execute({
-                        ...value,
-                        storageForbiddenPaths: storageForbiddenPaths(run),
-                        onResource: (resource) =>
-                          runStore.recordExecutionResource(lease, resource),
-                      }),
+                withResourceRetention(() =>
+                  inspectTrustedRequirements(
+                    {
+                      trustedValidation,
+                      runStore,
+                      lease,
+                      run,
+                      monitor,
+                      checkConfiguration,
+                      validatePersistedBoundary,
+                      storageForbiddenPaths,
+                    },
                     request,
-                  );
-                } finally {
+                  ),
+                ),
+              execute: (request) =>
+                withResourceRetention(async () => {
                   await checkConfiguration();
-                  await validatePersistedBoundary(run);
-                }
-              },
+                  if (run.workspace?.kind === "directory")
+                    await validatePersistedBoundary(run);
+                  try {
+                    return await monitor.invoke(
+                      (value) =>
+                        trustedValidation.execute({
+                          ...value,
+                          projectPath: run.projectPath,
+                          workspacePolicy: run.workspace?.policy ?? undefined,
+                          storageForbiddenPaths: storageForbiddenPaths(run),
+                          onResource: (resource) =>
+                            runStore.recordExecutionResource(lease, resource),
+                        }),
+                      request,
+                    );
+                  } finally {
+                    await checkConfiguration();
+                    await validatePersistedBoundary(run);
+                  }
+                }),
             },
-      readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
+      preservation:
+        run.workspace?.kind === "directory"
+          ? undefined
+          : Object.freeze({
+              async capture(request) {
+                await monitor?.check();
+                await checkConfiguration();
+                const current = await runStore.loadRun(run.runId);
+                const saved = current.preservationRecords.some(
+                  ({ id }) => id === request.preservationId,
+                )
+                  ? await runStore.readPreservation(
+                      run.runId,
+                      request.preservationId,
+                    )
+                  : null;
+                const capture = (value) =>
+                  runStore.capturePreservation(lease, {
+                    ...value,
+                    expectedRevision:
+                      saved?.binding.revision ?? current.revision,
+                    worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+                    git,
+                  });
+                if (monitor === undefined) await capture(request);
+                else await monitor.invoke(capture, request);
+                return runStore.loadRun(run.runId);
+              },
+              async restore(request) {
+                await monitor?.check();
+                await checkConfiguration();
+                const restore = (value) =>
+                  runStore.restorePreservation(lease, {
+                    ...value,
+                    worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+                    git,
+                  });
+                const receipt =
+                  monitor === undefined
+                    ? await restore(request)
+                    : await monitor.invoke(restore, request);
+                return { run: await runStore.loadRun(run.runId), receipt };
+              },
+              async reconcile(request) {
+                const receipt = await runStore.reconcilePreservation(lease, {
+                  ...request,
+                  worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+                  git,
+                });
+                return { run: await runStore.loadRun(run.runId), receipt };
+              },
+              read: (preservationId) =>
+                runStore.readPreservation(run.runId, preservationId, {
+                  includeSources: true,
+                }),
+            }),
+      readInputs: ({ taskPath }) =>
+        readInputs(
+          pipeline,
+          taskPath,
+          run.workspace?.kind === "directory" ? workspace : undefined,
+          {
+            workspace,
+            settings: run.pipelineState.settings,
+            projectPath: run.projectPath,
+            stateRoot: runStore.rootPath,
+          },
+        ),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
         try {
           await monitor?.check();
@@ -572,8 +1133,11 @@ export function createRunner(options = {}) {
           throw cause;
         }
       },
-      async finishAgentTurn(activeTurn, { repositoryReconciled = true } = {}) {
-        await reconcileProviderResponse({ repositoryReconciled });
+      async finishAgentTurn(
+        activeTurn,
+        { repositoryReconciled = true, repository } = {},
+      ) {
+        await reconcileProviderResponse({ repositoryReconciled, repository });
         return runStore.finishAgentTurn(lease, activeTurn);
       },
       async recordChildSession(child, { activity } = {}) {
@@ -587,6 +1151,11 @@ export function createRunner(options = {}) {
         patch,
         { activity, expectedPipelineState, verifiedCommit },
       ) {
+        if (run.workspace?.kind === "directory")
+          throw new RunnerError(
+            "Directory workflows cannot settle Git effects.",
+            { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+          );
         await reconcileProviderResponse();
         let configurationFailure = null;
         try {
@@ -618,6 +1187,13 @@ export function createRunner(options = {}) {
               patch,
               activity,
               configurationFailure,
+              latest.stopRequest?.effectiveTiming === "after-current-commit" &&
+                isDeepStrictEqual(
+                  pipeline.resolveStopBoundary?.(
+                    deepFreeze({ ...latest, ...patch }),
+                  ),
+                  latest.stopRequest.targetBoundary,
+                ),
             );
             settlementActivity = settlement.activity;
             return {
@@ -693,6 +1269,20 @@ export function createRunner(options = {}) {
         pendingPolicyReceipt = operation.catch(() => {});
         return operation;
       },
+      async (role, sessionId, { status }) => {
+        const activity = {
+          actor: role,
+          phase: "session",
+          kind: "session-naming",
+          message: `Session naming: ${status}.`,
+        };
+        const next = await runStore.recordSessionNaming(lease, {
+          role,
+          sessionId,
+          status,
+        });
+        await publish(activity, next);
+      },
     );
   }
 
@@ -703,6 +1293,7 @@ export function createRunner(options = {}) {
     action = null,
     verifyProviderPolicies = false,
     dispatch = null,
+    onRecoveryStage = () => {},
   ) {
     if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
@@ -729,6 +1320,7 @@ export function createRunner(options = {}) {
       configurationFailure !== null &&
       !stopPending(run) &&
       run.activeTurn === null &&
+      run.preparation == null &&
       run.executionProcess === null &&
       run.executionResource == null
     ) {
@@ -739,13 +1331,15 @@ export function createRunner(options = {}) {
       pipeline.prepareRecovery !== undefined &&
       runStore.loadRunHistory
     ) {
-      const history = await runStore.loadRunHistory(run.runId);
+      const history = await runStore.loadRunHistory(run.runId, {
+        stream: true,
+      });
       if (!isDeepStrictEqual(history.run, run)) {
         throw new RunnerError("Run changed before recovery inspection.", {
           code: "ERR_RUN_REVISION_CHANGED",
         });
       }
-      pipeline.prepareRecovery(run, history);
+      await pipeline.prepareRecovery(run, history);
     }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -753,10 +1347,11 @@ export function createRunner(options = {}) {
         code: "ERR_MISSING_RUN_SETTINGS",
       });
     }
-    const selected = selectedRoleAdapters(pipeline, run, lease);
+    let selected = selectedRoleAdapters(pipeline, run, lease);
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
+        onRecoveryStage,
         inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run,
@@ -768,7 +1363,14 @@ export function createRunner(options = {}) {
         configurationFailure,
       });
     // Recover an orphaned supervised process before examining or replaying work.
+    if (run.preparation != null) {
+      onRecoveryStage("process-recovery");
+      run = await runStore.recoverPreparation(lease, (owner, inspect) =>
+        terminateOwnedProcess(owner.pid, inspect, { inspectSessionProcesses }),
+      );
+    }
     if (run.executionProcess !== null) {
+      onRecoveryStage("process-recovery");
       const owner = await runStore.inspectExecutionProcess(run.runId);
       await terminateOwnedProcess(
         owner.pid,
@@ -783,13 +1385,84 @@ export function createRunner(options = {}) {
         configurationFailure = cause;
       }
     }
+    onRecoveryStage("resource-recovery");
     run = await cleanupExecutionResource(run, lease);
+    onRecoveryStage("state-recovery");
+    if (run.observations?.attempts.at(-1).status === "active")
+      run = await runStore.recoverRun(lease);
+    if (
+      ["project_configuration_changed", "workspace_changed"].includes(
+        run.pause?.reason,
+      ) &&
+      !stopPending(run)
+    ) {
+      // Saved safety blockers permit owned cleanup, never checkpoint replay.
+      return run;
+    }
     if (
       configurationFailure !== null &&
       !stopPending(run) &&
-      run.activeTurn === null
+      (run.activeTurn === null || run.workspace?.kind === "directory")
     ) {
       return pauseForProjectConfiguration(run, lease);
+    }
+    if (run.workspace?.kind === "directory") {
+      try {
+        await validatePersistedBoundary(run);
+      } catch (cause) {
+        if (!cause?.code?.startsWith("ERR_WORKSPACE_")) throw cause;
+        return pauseForWorkspaceDrift(run, lease);
+      }
+    }
+    onRecoveryStage("checkpoint-continuation");
+    if (
+      verifyProviderPolicies &&
+      pipeline.setup &&
+      (run.pipelineState.publication !== null ||
+        run.pipelineState.setupBaseline !== null)
+    ) {
+      // Runner-created directories change native read-policy identities. Accept
+      // fresh read-only receipts only after the original publication proof,
+      // without changing its selection or granting provider writes.
+      const providerPolicies = await probeRequiredRoles(
+        pipeline,
+        run.roles,
+        adaptersFor(run),
+        run.sessionLineage.source,
+        providers,
+        run.workspace.policy,
+        (role, proof) => assertSetupProviderAuthority(run, role, proof),
+      );
+      await validatePersistedBoundary(run);
+      if (!isDeepStrictEqual(providerPolicies, run.providerPolicies)) {
+        if (run.activeTurn !== null)
+          run = await runStore.finishAgentTurn(lease, run.activeTurn);
+        const expectedPublication = run.pipelineState.publication;
+        const expectedBaseline = run.pipelineState.setupBaseline;
+        run = await runStore.bindWorkspaceReads(lease, {
+          workspace: run.workspace,
+          providerPolicies,
+          expectedRevision: run.revision,
+          worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+          assertAuthorized: (candidate) => {
+            if (
+              !isDeepStrictEqual(
+                candidate.pipelineState.publication,
+                expectedPublication,
+              ) ||
+              !isDeepStrictEqual(
+                candidate.pipelineState.setupBaseline,
+                expectedBaseline,
+              )
+            )
+              throw new RunnerError(
+                "Setup publication changed before read-policy recovery.",
+                { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+              );
+          },
+        });
+        selected = selectedRoleAdapters(pipeline, run, lease);
+      }
     }
     if (verifyProviderPolicies && run.pause?.reason !== "environment_blocked") {
       const migrationRequired = Object.entries(run.providerPolicies).some(
@@ -805,13 +1478,15 @@ export function createRunner(options = {}) {
     if (dispatch !== null)
       run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
     if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
-      const history = await runStore.loadRunHistory(run.runId);
+      const history = await runStore.loadRunHistory(run.runId, {
+        stream: true,
+      });
       if (!isDeepStrictEqual(history.run, run)) {
         throw new RunnerError("Run changed before checkpoint continuation.", {
           code: "ERR_RUN_REVISION_CHANGED",
         });
       }
-      pipeline.prepareRecovery(run, history);
+      await pipeline.prepareRecovery(run, history);
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -822,6 +1497,10 @@ export function createRunner(options = {}) {
     let completed;
     try {
       await monitor.check();
+      await publishPlanProgress(
+        run,
+        pipeline.projections.planProgress?.(run) ?? null,
+      );
       completed = await pipeline.workflow.run({
         action,
         run,
@@ -851,6 +1530,7 @@ export function createRunner(options = {}) {
     const latest = await runStore.loadRun(run.runId);
     if (stopPending(latest)) {
       return reconcileOperatorStop({
+        onRecoveryStage,
         inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run: latest,
@@ -909,11 +1589,20 @@ export function createRunner(options = {}) {
       } catch (cause) {
         if (cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED") throw cause;
         const current = await runStore.loadRun(runId);
-        await withStopReconciliationLease(
-          current,
-          () => reconcilePendingStop(lease, runId),
-          lease,
-        );
+        try {
+          await withStopReconciliationLease(
+            current,
+            () => reconcilePendingStop(lease, runId),
+            lease,
+          );
+        } catch (reconciliationCause) {
+          // Publication may fail after durable settlement. The state-owned
+          // release still rejects any pending stop or uncertain execution.
+          try {
+            await lease.release();
+          } catch {}
+          throw reconciliationCause;
+        }
       }
     }
     throw new RunnerError("Operator stop reconciliation is still pending.", {
@@ -935,20 +1624,20 @@ export function createRunner(options = {}) {
     ) {
       return operation(current);
     }
-    if (!pipelineRequiresWorktreeLease(current.pipelineId)) {
+    if (!requiresLease(current)) {
       return operation(current);
     }
     if (ownership === undefined) {
       ownership = {
         lease: await runStore.acquireWorktreeLease(
-          current.projectPath,
+          leasePath(current),
           current.runId,
         ),
-        projectPath: current.projectPath,
+        projectPath: leasePath(current),
         runId: current.runId,
       };
       heldWorktreeLeases.set(current.runId, ownership);
-    } else if (ownership.projectPath !== current.projectPath) {
+    } else if (ownership.projectPath !== leasePath(current)) {
       throw new RunnerError("Held worktree lease boundary changed.", {
         code: "ERR_RUN_PATH_CHANGED",
       });
@@ -989,27 +1678,63 @@ export function createRunner(options = {}) {
   }
 
   async function releaseHeldWorktreeLease(ownership) {
+    const infrastructure = heldInfrastructureLeases.get(ownership.runId);
+    if (infrastructure !== undefined)
+      await releaseInfrastructureLease(infrastructure);
     await ownership.lease.release();
     if (heldWorktreeLeases.get(ownership.runId) === ownership) {
       heldWorktreeLeases.delete(ownership.runId);
     }
   }
 
+  async function releaseInfrastructureLease(ownership) {
+    await ownership.lease.release();
+    if (heldInfrastructureLeases.get(ownership.runId) === ownership)
+      heldInfrastructureLeases.delete(ownership.runId);
+  }
+
+  async function withInfrastructureLease(runId, projectPath, operation) {
+    const ownership = heldInfrastructureLeases.get(runId) ?? {
+      lease: await runStore.acquireInfrastructureLease(projectPath, runId),
+      projectPath,
+      runId,
+    };
+    if (ownership.projectPath !== projectPath)
+      throw new RunnerError("Held infrastructure lease boundary changed.", {
+        code: "ERR_RUN_PATH_CHANGED",
+      });
+    heldInfrastructureLeases.set(runId, ownership);
+    try {
+      return await operation(ownership.lease);
+    } finally {
+      // A failed release retains this exact handle for recovery or stop settlement.
+      await releaseInfrastructureLease(ownership);
+    }
+  }
+
   async function withWorktreeLease(run, operation, executionLease) {
-    if (!pipelineRequiresWorktreeLease(run.pipelineId)) {
+    if (!requiresLease(run)) {
       return operation();
     }
     const ownership = heldWorktreeLeases.get(run.runId) ?? {
-      lease: await runStore.acquireWorktreeLease(run.projectPath, run.runId),
-      projectPath: run.projectPath,
+      lease: await runStore.acquireWorktreeLease(leasePath(run), run.runId),
+      projectPath: leasePath(run),
       runId: run.runId,
     };
-    if (ownership.projectPath !== run.projectPath)
+    if (ownership.projectPath !== leasePath(run))
       throw new RunnerError("Held worktree boundary changed.", {
         code: "ERR_RUN_PATH_CHANGED",
       });
     heldWorktreeLeases.set(run.runId, ownership);
-    return withHeldWorktreeLease(ownership, operation, executionLease);
+    return withHeldWorktreeLease(
+      ownership,
+      async () => {
+        if (run.workspace?.kind === "directory")
+          await validatePersistedBoundary(run, { frozenContent: false });
+        return operation();
+      },
+      executionLease,
+    );
   }
 
   async function withHeldWorktreeLease(ownership, operation, executionLease) {
@@ -1031,12 +1756,195 @@ export function createRunner(options = {}) {
     }
   }
 
-  async function validateBoundary(input) {
+  async function discoverWorkspaceBoundary(
+    pipeline,
+    input,
+    configuration,
+    initialBoundary,
+  ) {
+    const boundary = await runStore.validateStateBoundary(input);
+    const settings = resolvePipelineSettings(
+      pipeline.id,
+      configuration,
+      input.settingOverrides,
+      providers,
+    );
+    const selection = await workspaceSelection(
+      pipeline,
+      {
+        ...input,
+        ...boundary,
+        settingOverrides: settings,
+        preliminary: true,
+      },
+      workspace,
+    );
+    const configurationPath = resolve(
+      boundary.projectPath,
+      input.projectConfigurationPath ??
+        join(DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME),
+    );
+    const localPath = relative(boundary.projectPath, configurationPath);
+    const external =
+      input.projectConfigurationPath !== undefined &&
+      (isAbsolute(localPath) ||
+        localPath === ".." ||
+        localPath.startsWith(`..${sep}`));
+    if (!pipeline.resolveWorkspace) {
+      // Fixed Git workspaces also rebase the target; retain external selectors.
+      return {
+        ...(initialBoundary ??
+          (await validateBoundary({ ...input, ...boundary }, selection))),
+        ...(external ? { projectConfigurationPath: configurationPath } : {}),
+      };
+    }
+    // Resolve an explicit external overlay before selecting Git versus directory
+    // semantics, just as with an existing integrated project configuration.
+    if (external) {
+      try {
+        await loadProjectConfiguration({
+          configurationPath,
+          inspectPath: (request) => workspace.inspectPath(request),
+          workspaceKind: "directory",
+          projectPath: boundary.projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+        return boundary;
+      } catch (cause) {
+        if (cause?.code !== "ERR_PROJECT_CONFIGURATION_BINDING") throw cause;
+      }
+      // A Git selection may name a subdirectory of the bound target. Keep the
+      // exact external selector when resolving that target to its worktree root.
+      return {
+        ...(await runStore.validateStateBoundary({
+          ...boundary,
+          projectPath: await workspace.exclusionPath({
+            workspacePath: boundary.projectPath,
+          }),
+        })),
+        projectConfigurationPath: configurationPath,
+      };
+    }
+    if (selection.kind === "directory") return boundary;
+    if (
+      localPath !== "" &&
+      !isAbsolute(localPath) &&
+      localPath !== ".." &&
+      !localPath.startsWith(`..${sep}`) &&
+      (
+        await workspace.inspectPath({
+          projectPath: boundary.projectPath,
+          path: configurationPath,
+        })
+      ).exists
+    )
+      return boundary;
+    return runStore.validateStateBoundary({
+      ...boundary,
+      projectPath: await workspace.exclusionPath({
+        workspacePath: boundary.projectPath,
+      }),
+    });
+  }
+
+  async function validateBoundary(input, selection) {
     const projectPath = assertNonEmptyString(
       input?.projectPath,
       "run.projectPath",
     );
     const taskPath = assertNonEmptyString(input?.taskPath, "run.taskPath");
+    if (
+      selection === undefined &&
+      getPipeline(input.pipelineId)?.resolveWorkspace
+    ) {
+      const normalized = normalizeRunInput(input, providers);
+      const pipeline = getPipeline(input.pipelineId);
+      const configuration = await loadConfiguration();
+      const boundary = await discoverWorkspaceBoundary(
+        pipeline,
+        normalized,
+        configuration,
+      );
+      const project = await loadProjectConfiguration({
+        configurationPath:
+          boundary.projectConfigurationPath ??
+          normalized.projectConfigurationPath,
+        inspectPath: (request) => workspace.inspectPath(request),
+        workspaceKind: "directory",
+        projectPath: boundary.projectPath,
+        providers,
+        runnerConfiguration: configuration,
+      });
+      const resolved = resolvePipelineConfiguration(
+        pipeline.id,
+        configuration,
+        normalized.roleOverrides,
+        normalized.executionOverrides,
+        normalized.sourceSession,
+        project?.configuration ?? null,
+        normalized.settingOverrides,
+        providers,
+      );
+      selection = await workspaceSelection(
+        pipeline,
+        {
+          ...normalized,
+          ...boundary,
+          settingOverrides: resolved.settings,
+        },
+        workspace,
+      );
+      const selectedBoundary = await validateBoundary(
+        selection.kind === "directory"
+          ? normalized
+          : { ...normalized, ...boundary },
+        selection,
+      );
+      if (
+        project !== null &&
+        project.protection.projectPath !== selectedBoundary.projectPath
+      ) {
+        await loadProjectConfiguration({
+          configurationPath: project.path,
+          inspectPath: (request) =>
+            (selection.kind === "directory" ? workspace : git).inspectPath(
+              request,
+            ),
+          workspaceKind: selection.kind,
+          projectPath: selectedBoundary.projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+      }
+      return selectedBoundary;
+    }
+    selection ??=
+      input.pipelineId === undefined
+        ? { kind: "git" }
+        : await workspaceSelection(
+            getPipeline(input.pipelineId),
+            normalizeRunInput(input, providers),
+            workspace,
+          );
+    if (selection.kind === "directory") {
+      const boundary = await runStore.validateStateBoundary({
+        projectPath,
+        taskPath,
+      });
+      await workspace.inspect({
+        workspacePath: boundary.projectPath,
+        taskPath: boundary.taskPath,
+        stateRoot: resolve(runStore.rootPath),
+      });
+      await runStore.validateStateBoundary({
+        projectPath: await workspace.exclusionPath({
+          workspacePath: boundary.projectPath,
+        }),
+        taskPath: boundary.taskPath,
+      });
+      return boundary;
+    }
     const discovery = await git.preflight({
       allowedPaths: [],
       projectPath,
@@ -1059,8 +1967,11 @@ export function createRunner(options = {}) {
     });
   }
 
-  async function validatePersistedBoundary(run) {
-    const boundary = await validateBoundary(run);
+  async function validatePersistedBoundary(run, { frozenContent = true } = {}) {
+    const boundary = await validateBoundary(
+      run,
+      run.workspace ?? { kind: "git" },
+    );
     if (
       boundary.projectPath !== run.projectPath ||
       boundary.taskPath !== run.taskPath
@@ -1070,19 +1981,69 @@ export function createRunner(options = {}) {
         { code: "ERR_RUN_PATH_CHANGED" },
       );
     }
+    if (run.workspace?.kind === "directory") {
+      if (resolve(runStore.rootPath) !== run.workspace.policy.stateRoot)
+        throw new RunnerError("Workspace state binding changed.", {
+          code: "ERR_RUN_PATH_CHANGED",
+        });
+      if (
+        (await workspace.exclusionPath({ workspacePath: run.projectPath })) !==
+        run.workspace.leasePath
+      )
+        throw new RunnerError("Workspace exclusion key changed.", {
+          code: "ERR_RUN_PATH_CHANGED",
+        });
+      // Retirement needs canonical paths and current control confinement, not
+      // acceptance of the inspected bytes. Frozen inputs are checked after
+      // verified process/resource recovery and before any new provider work.
+      if (frozenContent) await inspectPipelineWorkspace(run);
+    }
+  }
+
+  async function inspectPipelineWorkspace(run) {
+    const pipeline = getPipeline(run.pipelineId);
+    if (
+      pipeline?.inspectWorkspace &&
+      (run.pipelineState.publication !== null ||
+        run.pipelineState.setupBaseline !== null)
+    )
+      return pipeline.inspectWorkspace(
+        run,
+        createSetupRuntime({
+          run,
+          workspace,
+          git,
+          runStore,
+          providers,
+          loadConfiguration,
+        }),
+      );
+    return inspectBoundWorkspace(run.workspace, workspace);
+  }
+
+  function assertSetupProviderAuthority(run, role, proof) {
+    if (
+      capabilityAuthorityFingerprint(proof) !==
+      run.pipelineState.providerAuthority[role]
+    )
+      throw new RunnerError(
+        "Setup provider authority changed; start a new run.",
+        { code: "ERR_PROVIDER_POLICY_CHANGED" },
+      );
   }
 
   async function result(run) {
     return Object.freeze({
       directoryPath: await runStore.getRunDirectory(run.runId),
       run,
+      observations: deepFreeze(projectObservations(run)),
     });
   }
 
   async function recoverCompatibleRun(
     lease,
     runId,
-    { validatePreparedRun } = {},
+    { validatePreparedRun, onRecoveryStage = () => {} } = {},
   ) {
     const storedRun = await runStore.loadRun(runId);
     let configurationChanged = false;
@@ -1097,6 +2058,7 @@ export function createRunner(options = {}) {
         configurationChanged &&
         !stopPending(storedRun) &&
         storedRun.activeTurn === null &&
+        storedRun.preparation == null &&
         storedRun.executionProcess === null &&
         storedRun.executionResource == null
       ) {
@@ -1117,7 +2079,7 @@ export function createRunner(options = {}) {
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
-    await validatePersistedBoundary(storedRun);
+    await validatePersistedBoundary(storedRun, { frozenContent: false });
     validatePreparedRun?.(prepared.run);
     const runtimeMigrationRequired =
       storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
@@ -1129,6 +2091,17 @@ export function createRunner(options = {}) {
       storedRun.pipelineStateVersion !== prepared.run.pipelineStateVersion;
     let run;
     if (runtimeMigrationRequired || pipelineMigrationRequired) {
+      // Custody binds the issued envelope and original journal prefix. Settle
+      // it under that contract before publishing either kind of migration.
+      if (storedRun.preparation != null) {
+        onRecoveryStage("process-recovery");
+        await runStore.recoverPreparation(lease, (owner, inspect) =>
+          terminateOwnedProcess(owner.pid, inspect, {
+            inspectSessionProcesses,
+          }),
+        );
+        onRecoveryStage("state-recovery");
+      }
       const activity = {
         actor: "runner",
         phase: "runtime",
@@ -1147,9 +2120,8 @@ export function createRunner(options = {}) {
         { activity },
       );
       await publish(activity, run);
-    } else {
-      run = await runStore.recoverRun(lease);
     }
+    run = await runStore.recoverRun(lease);
     pipelineForRun(run, prepared.pipeline);
     return Object.freeze({
       pipeline: prepared.pipeline,
@@ -1161,7 +2133,8 @@ export function createRunner(options = {}) {
 
   async function prepare(input, options = {}) {
     const normalized = normalizeRunInput(input, providers);
-    const createOptions = normalizeCreateOptions(options);
+    const createOptions = { ...normalizeCreateOptions(options) };
+    createOptions.runId ??= randomUUID();
     if (typeof normalized.proactiveClarification !== "boolean") {
       throw new RunnerError("run.proactiveClarification must be a boolean.", {
         code: "ERR_INVALID_RUNNER_INPUT",
@@ -1188,18 +2161,34 @@ export function createRunner(options = {}) {
         code: "ERR_UNKNOWN_PIPELINE",
       });
     }
-    const { projectPath, taskPath } = await validateBoundary(normalized);
+    let selection = pipeline.resolveWorkspace
+      ? { kind: "directory" }
+      : await workspaceSelection(pipeline, normalized, workspace);
+    const initialBoundary = pipeline.resolveWorkspace
+      ? null
+      : await validateBoundary(normalized, selection);
     const configuration = await loadConfiguration();
-    const projectConfiguration = await loadProjectConfiguration({
-      configurationPath: normalized.projectConfigurationPath,
-      inspectPath: (options) => git.inspectPath(options),
+    const boundary = await discoverWorkspaceBoundary(
+      pipeline,
+      normalized,
+      configuration,
+      initialBoundary,
+    );
+    let { projectPath, taskPath } = boundary;
+    let projectConfiguration = await loadProjectConfiguration({
+      configurationPath:
+        boundary.projectConfigurationPath ??
+        normalized.projectConfigurationPath,
+      inspectPath: (options) =>
+        (selection.kind === "directory" ? workspace : git).inspectPath(options),
+      workspaceKind: selection.kind,
       projectPath,
       providers,
       runnerConfiguration: configuration,
     });
     let resolved;
-    try {
-      resolved = resolvePipelineConfiguration(
+    const resolveConfiguration = () =>
+      resolvePipelineConfiguration(
         pipeline.id,
         configuration,
         normalized.roleOverrides,
@@ -1209,6 +2198,72 @@ export function createRunner(options = {}) {
         normalized.settingOverrides,
         providers,
       );
+    try {
+      resolved = resolveConfiguration();
+      selection = await workspaceSelection(
+        pipeline,
+        {
+          ...normalized,
+          projectPath,
+          taskPath,
+          settingOverrides: resolved.settings,
+          infrastructureRoot:
+            projectConfiguration?.infrastructure.rootPath ?? projectPath,
+          runId: createOptions.runId,
+          artifactRoot: resolved.artifactRoot,
+        },
+        workspace,
+      );
+      const selectedBoundary = await validateBoundary(
+        selection.kind === "directory"
+          ? normalized
+          : { ...normalized, ...boundary },
+        selection,
+      );
+      projectPath = selectedBoundary.projectPath;
+      taskPath = selectedBoundary.taskPath;
+      if (
+        pipeline.resolveWorkspace &&
+        (selection.kind === "git" ||
+          (projectConfiguration !== null &&
+            projectConfiguration.protection.projectPath !== projectPath))
+      ) {
+        projectConfiguration = await loadProjectConfiguration({
+          configurationPath:
+            projectConfiguration?.path ?? normalized.projectConfigurationPath,
+          inspectPath: (request) =>
+            (selection.kind === "directory" ? workspace : git).inspectPath(
+              request,
+            ),
+          workspaceKind: selection.kind,
+          projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+        resolved = resolveConfiguration();
+        selection = await workspaceSelection(
+          pipeline,
+          {
+            ...normalized,
+            projectPath,
+            taskPath,
+            settingOverrides: resolved.settings,
+            infrastructureRoot:
+              projectConfiguration?.infrastructure.rootPath ?? projectPath,
+            runId: createOptions.runId,
+            artifactRoot: resolved.artifactRoot,
+          },
+          workspace,
+        );
+        const rebound = await validateBoundary(
+          selection.kind === "directory"
+            ? normalized
+            : { ...normalized, ...boundary },
+          selection,
+        );
+        projectPath = rebound.projectPath;
+        taskPath = rebound.taskPath;
+      }
     } catch (cause) {
       if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
         throw cause;
@@ -1224,15 +2279,31 @@ export function createRunner(options = {}) {
       normalized.sourceSession,
       providers,
     );
+    const boundWorkspace = await bindWorkspace({
+      selection,
+      projectPath,
+      taskPath,
+      taskInputs: pipeline.taskInputs,
+      configurationPath: projectConfiguration?.path,
+      stateRoot: runStore.rootPath,
+      workspace,
+    });
+    if (boundWorkspace.kind === "directory")
+      await runStore.validateStateBoundary({
+        projectPath: boundWorkspace.leasePath,
+        taskPath,
+      });
     let capabilityFailure = null;
     if ((resolved.trustedValidation?.commands.length ?? 0) > 0) {
       try {
         await trustedValidation.preflight({
           projectPath,
+          workspacePolicy: boundWorkspace.policy ?? undefined,
           snapshot: resolved.trustedValidation,
           storageForbiddenPaths: storageForbiddenPaths({
             projectPath,
             taskPath,
+            workspace: boundWorkspace,
           }),
         });
       } catch (cause) {
@@ -1249,6 +2320,7 @@ export function createRunner(options = {}) {
     let providerPolicies = Object.fromEntries(
       Object.keys(resolved.roles).map((role) => [role, null]),
     );
+    const providerAuthority = {};
     if (capabilityFailure === null) {
       providerPolicies = await probeRequiredRoles(
         pipeline,
@@ -1256,12 +2328,27 @@ export function createRunner(options = {}) {
         adaptersFor(resolved),
         normalized.sourceSession,
         providers,
+        boundWorkspace.policy ?? undefined,
+        pipeline.setup
+          ? (role, proof) => {
+              providerAuthority[role] = capabilityAuthorityFingerprint(proof);
+            }
+          : undefined,
       );
     }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
+      ...(pipeline.setup
+        ? {
+            configurationPath:
+              normalized.projectConfigurationPath === undefined
+                ? null
+                : resolve(projectPath, normalized.projectConfigurationPath),
+          }
+        : {}),
+      ...(pipeline.setup ? { providerAuthority } : {}),
       ...(resolved.trustedValidation === undefined
         ? {}
         : { trustedValidation: resolved.trustedValidation }),
@@ -1274,6 +2361,7 @@ export function createRunner(options = {}) {
       pipelineStateVersion: pipeline.stateVersion,
       projectPath,
       taskPath,
+      workspace: boundWorkspace,
       projectConfigurationProtection: projectConfiguration?.protection ?? null,
       clientAttribution: resolved.clientAttribution,
       clientAttributionFingerprint: resolved.clientAttributionFingerprint,
@@ -1350,10 +2438,16 @@ export function createRunner(options = {}) {
       try {
         await releaseRunLease(created.lease, created.state.runId);
       } catch (cause) {
-        if (isResourceOwnershipFailure(executionFailure))
+        // Process, preparation or resource ownership can prevent release even
+        // when another failure replaced the original ownership diagnosis.
+        if (
+          isExecutionOwnershipFailure(executionFailure) ||
+          isExecutionOwnershipFailure(cause) ||
+          (await runStore.loadRun(created.state.runId)).executionResource !==
+            null
+        ) {
           retainedRunLeases.set(created.state.runId, created.lease);
-        if (isExecutionOwnershipFailure(executionFailure)) {
-          throw executionFailure;
+          if (executionFailure !== null) throw executionFailure;
         }
         throw cause;
       }
@@ -1361,7 +2455,8 @@ export function createRunner(options = {}) {
     return result(await runStore.loadRun(created.state.runId));
   }
 
-  async function resumeLeased(normalized, lease) {
+  async function resumeLeased(normalized, lease, onRecoveryStage) {
+    onRecoveryStage("state-recovery");
     if (normalized.stopCheckpointRevision !== null) {
       const current = await runStore.loadRun(normalized.runId);
       if (
@@ -1377,10 +2472,22 @@ export function createRunner(options = {}) {
       run: loaded,
       configurationBlocked,
       configurationChanged,
-    } = await recoverCompatibleRun(lease, normalized.runId);
+    } = await recoverCompatibleRun(lease, normalized.runId, {
+      onRecoveryStage,
+    });
     if (configurationBlocked) return loaded;
     let recovered = loaded;
-    if (recovered.pause?.reason === "project_configuration_changed") {
+    const safetyPaused = [
+      "project_configuration_changed",
+      "workspace_changed",
+    ].includes(recovered.pause?.reason);
+    if (
+      safetyPaused &&
+      !stopPending(recovered) &&
+      recovered.preparation == null &&
+      recovered.executionProcess === null &&
+      recovered.executionResource === null
+    ) {
       return recovered;
     }
     if (recovered.pipelineState.workflowState === "CANCELED") {
@@ -1397,16 +2504,40 @@ export function createRunner(options = {}) {
       return recovered;
     }
     if (stopPending(recovered)) {
+      onRecoveryStage("worktree-lease");
       return withStopReconciliationLease(
         recovered,
-        (current) => execute(pipeline, current, lease, null, true),
+        (current) => {
+          onRecoveryStage("checkpoint-continuation");
+          return execute(
+            pipeline,
+            current,
+            lease,
+            null,
+            true,
+            null,
+            onRecoveryStage,
+          );
+        },
         lease,
       );
     }
-    if (configurationChanged) {
+    if (configurationChanged || safetyPaused) {
+      onRecoveryStage("worktree-lease");
       return withWorktreeLease(
         recovered,
-        () => execute(pipeline, recovered, lease, null, true),
+        () => {
+          onRecoveryStage("checkpoint-continuation");
+          return execute(
+            pipeline,
+            recovered,
+            lease,
+            null,
+            true,
+            null,
+            onRecoveryStage,
+          );
+        },
         lease,
       );
     }
@@ -1449,9 +2580,11 @@ export function createRunner(options = {}) {
         });
       }
     }
+    onRecoveryStage("worktree-lease");
     return withWorktreeLease(
       recovered,
       async () => {
+        onRecoveryStage("checkpoint-continuation");
         if (operatorRestore !== null) {
           recovered = await runStore.transitionRun(
             lease,
@@ -1470,7 +2603,7 @@ export function createRunner(options = {}) {
             },
           );
         }
-        await validatePersistedBoundary(recovered);
+        await validatePersistedBoundary(recovered, { frozenContent: false });
         return execute(
           pipeline,
           recovered,
@@ -1478,19 +2611,22 @@ export function createRunner(options = {}) {
           normalized.action,
           true,
           normalized.dispatch,
+          onRecoveryStage,
         );
       },
       lease,
     );
   }
 
-  async function resume(input) {
+  async function resume(input, { onRecoveryStage = () => {} } = {}) {
+    onRecoveryStage("runtime-compatibility");
     const normalized = normalizeResumeInput(input);
     const retained = retainedRunLeases.get(normalized.runId);
     // Taking the private handle synchronously excludes concurrent resumes; all
     // other callers still encounter the live durable lease and are rejected.
     retainedRunLeases.delete(normalized.runId);
     let lease;
+    onRecoveryStage("execution-lease");
     try {
       lease = await runStore.acquireRunLease(normalized.runId, retained);
     } catch (cause) {
@@ -1502,6 +2638,7 @@ export function createRunner(options = {}) {
     }
     let executionFailure = null;
     try {
+      onRecoveryStage("state-recovery");
       const inspected = await runStore.loadRun(normalized.runId);
       if (
         normalized.expectedRevision !== null &&
@@ -1513,7 +2650,7 @@ export function createRunner(options = {}) {
       }
       if (normalized.dispatch !== null)
         await runStore.recordRecoveryDispatch(lease, normalized.dispatch);
-      await resumeLeased(normalized, lease);
+      await resumeLeased(normalized, lease, onRecoveryStage);
       if (
         normalized.dispatch !== null &&
         normalized.stopCheckpointRevision === null &&
@@ -1523,21 +2660,28 @@ export function createRunner(options = {}) {
       }
     } catch (cause) {
       executionFailure = cause;
+      // Directory boundary inspection can fail before cleanup marks retained
+      // storage. Preserve its owner for same-instance recovery in that case.
+      const current = await runStore.loadRun(normalized.runId);
+      if (
+        current.workspace?.kind === "directory" &&
+        current.executionResource !== null
+      )
+        cause.executionResourceRetained = true;
       throw cause;
     } finally {
       try {
         await releaseRunLease(lease, normalized.runId);
       } catch (cause) {
+        // Process or preparation ownership can prevent release before boundary
+        // inspection reaches cleanup. Keep the handle and the original failure.
         if (
           retained !== undefined ||
-          isResourceOwnershipFailure(executionFailure)
-        )
-          retainedRunLeases.set(normalized.runId, lease);
-        if (
-          (retained !== undefined && executionFailure !== null) ||
-          isExecutionOwnershipFailure(executionFailure)
+          isExecutionOwnershipFailure(executionFailure) ||
+          isExecutionOwnershipFailure(cause)
         ) {
-          throw executionFailure;
+          retainedRunLeases.set(normalized.runId, lease);
+          if (executionFailure !== null) throw executionFailure;
         }
         throw cause;
       }
@@ -1548,12 +2692,12 @@ export function createRunner(options = {}) {
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
     const history = runStore.loadRunHistory
-      ? await runStore.loadRunHistory(runId)
+      ? await runStore.loadRunHistory(runId, { stream: true })
       : { run: await runStore.loadRun(runId), events: [] };
     const { pipeline, run } = pipelineForRun(history.run, undefined, {
       allowMigration: true,
     });
-    pipeline.prepareRecovery?.(run, history);
+    await pipeline.prepareRecovery?.(run, history);
     return result(run);
   }
 
@@ -1600,6 +2744,8 @@ export function createRunner(options = {}) {
       await withWorktreeLease(
         run,
         async () => {
+          if (run.workspace?.kind === "directory")
+            await validatePersistedBoundary(run);
           const transcript = await clarifications.writeEditAnswers(
             run.pipelineState.pendingEdit,
             answers,
@@ -1646,10 +2792,34 @@ export function createRunner(options = {}) {
 
   return Object.freeze({
     requestOperatorStop: (input) => runStore.requestOperatorStop(input),
-    create,
+    create: (input, ...args) =>
+      runtimeAdmission.withAdmission(
+        "run",
+        () => create(input, ...args),
+        async () =>
+          [input?.projectPath, input?.taskPath].filter(
+            (path) => typeof path === "string",
+          ),
+      ),
     previewInput,
-    resume,
-    run,
+    resume: (input, ...args) =>
+      runtimeAdmission.withAdmission(
+        "resume",
+        () => resume(input, ...args),
+        async () => {
+          const state = await runStore.loadRun(input?.runId);
+          return [state.projectPath, state.taskPath];
+        },
+      ),
+    run: (input) =>
+      runtimeAdmission.withAdmission(
+        "run",
+        () => run(input),
+        async () =>
+          [input?.projectPath, input?.taskPath].filter(
+            (path) => typeof path === "string",
+          ),
+      ),
     status,
     submitInput,
     validateBoundary,

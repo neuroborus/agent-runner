@@ -46,6 +46,23 @@ export const CLARIFICATION_SCHEMA = deepFreeze({
   additionalProperties: false,
 });
 
+export const CUSTOM_CLARIFICATION_SCHEMA = deepFreeze({
+  ...CLARIFICATION_SCHEMA,
+  properties: {
+    ...CLARIFICATION_SCHEMA.properties,
+    criteria: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: { id: FINDING_ID, condition: TEXT },
+        required: ["id", "condition"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: [...CLARIFICATION_SCHEMA.required, "criteria"],
+});
+
 export const PLANNER_SCHEMA = deepFreeze({
   type: "object",
   properties: {

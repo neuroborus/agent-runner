@@ -54,19 +54,28 @@ export function assertStopProgress(previous, next, resolver) {
 export function runRetainsOwnership(state) {
   return (
     stopIsPending(state) ||
+    state.preparation != null ||
     state.executionProcess != null ||
     state.executionResource != null
   );
 }
 
-export function assertRunCanAdvance(state, resolver) {
+export function assertRunCanAdvance(state, resolver, { childRole } = {}) {
   if (stopBlocksExecution(state, resolver)) {
     throw new RunStoreError(
       "Operator stop must be reconciled before further work.",
       { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
     );
   }
-  if (state.executionProcess != null) {
+  // A live owned process may durably acknowledge only its own turn's child.
+  const acknowledgesLiveChild =
+    childRole !== undefined &&
+    state.preparation == null &&
+    state.activeTurn?.role === childRole;
+  if (
+    state.preparation != null ||
+    (state.executionProcess != null && !acknowledgesLiveChild)
+  ) {
     throw new RunStoreError(
       "Owned execution must stop before advancing its checkpoint.",
       {

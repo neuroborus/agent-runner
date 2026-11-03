@@ -162,7 +162,7 @@ export async function executeCodexLocalCommit({
       encoding: "utf8",
       env,
       maxBuffer: 1024 * 1024,
-      timeout: 10_000,
+      timeout: 60_000,
     },
   );
   const gitDirectories = processOutput(gitResult.stdout)

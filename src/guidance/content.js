@@ -20,6 +20,16 @@ export function unsafePath(cause) {
   );
 }
 
+export function unsafeControls(cause) {
+  return new GuidanceError(
+    "Guidance requires safely resolvable project Git and provider controls.",
+    {
+      cause,
+      code: "ERR_UNSAFE_GUIDANCE_PATH",
+    },
+  );
+}
+
 export function contentHash(content) {
   return createHash("sha256").update(content).digest("hex");
 }

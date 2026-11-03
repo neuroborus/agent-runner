@@ -83,7 +83,7 @@ async function assertDestinationUnchanged(rootPath, before) {
   }
 }
 
-function safeRelativePath(path) {
+export function safeRelativePath(path) {
   return (
     typeof path === "string" &&
     path.length > 0 &&
@@ -97,7 +97,12 @@ function safeRelativePath(path) {
   );
 }
 
-async function withDestination(root, path, callback) {
+export async function withDestination(
+  root,
+  path,
+  callback,
+  { privateDirectories = true, prepareDirectory = null } = {},
+) {
   if (!safeRelativePath(path)) {
     throw materializationError("Git source path is unsafe.");
   }
@@ -105,11 +110,17 @@ async function withDestination(root, path, callback) {
   const opened = [];
   let parent = root;
   try {
-    for (const part of parts.slice(0, -1)) {
+    for (const [index, part] of parts.slice(0, -1).entries()) {
       const directoryPath = join(`/proc/self/fd/${parent.fd}`, part);
-      await mkdir(directoryPath, { mode: 0o700 }).catch((cause) => {
-        if (cause?.code !== "EEXIST") throw cause;
-      });
+      if (prepareDirectory !== null)
+        await prepareDirectory(
+          directoryPath,
+          parts.slice(0, index + 1).join("/"),
+        );
+      else
+        await mkdir(directoryPath, { mode: 0o700 }).catch((cause) => {
+          if (cause?.code !== "EEXIST") throw cause;
+        });
       const directory = await open(
         directoryPath,
         constants.O_RDONLY | constants.O_DIRECTORY | NO_FOLLOW,
@@ -118,7 +129,7 @@ async function withDestination(root, path, callback) {
       if (
         !metadata.isDirectory() ||
         metadata.uid !== BigInt(process.getuid()) ||
-        (metadata.mode & 0o777n) !== 0o700n
+        (privateDirectories && (metadata.mode & 0o777n) !== 0o700n)
       ) {
         await directory.close();
         throw materializationError("Git source projection parent is invalid.");

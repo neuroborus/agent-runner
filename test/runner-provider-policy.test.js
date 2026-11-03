@@ -18,6 +18,7 @@ import { main } from "../src/cli.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
+import { createDispositionPolicy } from "../src/runner/dispositions.js";
 import { createAuthenticationPolicy } from "../src/runner/authentication.js";
 import { RunnerError } from "../src/runner/input.js";
 import { probeRequiredRoles, roleAdapters } from "../src/runner/roles.js";
@@ -69,6 +70,8 @@ const FAILURE_CONFIGURATION = Object.freeze({
 function failureAdapter(classify, run) {
   return roleAdapters(
     {
+      runId: "11111111-1111-4111-8111-111111111111",
+      projectPath: "/workspace/project",
       pipelineId: planExecutionPipeline.id,
       roles: { worker: FAILURE_CONFIGURATION },
       sessionLineage: { source: null },
@@ -186,6 +189,8 @@ test("requested access fails through one provider-neutral diagnosis", async () =
 test("adapter probing verifies the immutable receipt before provider work", async () => {
   const order = [];
   const run = {
+    runId: "11111111-1111-4111-8111-111111111111",
+    projectPath: "/workspace/project",
     pipelineId: planExecutionPipeline.id,
     roles: { worker: CONFIGURATION },
     sessionLineage: { source: null },
@@ -260,6 +265,42 @@ test("adapter probing verifies the immutable receipt before provider work", asyn
     code: "ERR_PROVIDER_POLICY_CHANGED",
   });
   assert.equal(providerRuns, 0);
+});
+
+test("exact-file admission uses the selected adapter only after policy receipt validation", async () => {
+  const order = [];
+  const request = { access: "workspace-write", paths: ["/state/saved/blob"] };
+  const adapter = {
+    async probe() {
+      order.push("probe");
+      return capabilities();
+    },
+    async canReadFiles(value) {
+      assert.deepEqual(value, request);
+      order.push("read-access");
+      return true;
+    },
+    async run() {
+      assert.fail("Read admission cannot start a model turn.");
+    },
+  };
+  const selected = roleAdapters(
+    {
+      runId: "11111111-1111-4111-8111-111111111111",
+      projectPath: "/workspace/project",
+      pipelineId: planExecutionPipeline.id,
+      roles: { worker: CONFIGURATION },
+      sessionLineage: { source: null },
+    },
+    planExecutionPipeline,
+    { codex: adapter },
+    PROVIDER_REGISTRY,
+    async () => order.push("receipt"),
+  );
+  assert.equal(await selected.worker.canReadFiles(request), true);
+  assert.deepEqual(order, ["probe", "receipt", "read-access"]);
+  delete adapter.canReadFiles;
+  assert.equal(await selected.worker.canReadFiles(request), false);
 });
 
 test("an abort race does not derive stop proof from raw cause fields", async () => {
@@ -540,6 +581,7 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     attempt: 2,
     status: "expired",
     reconstructionRevision: 23,
+    expiryRevision: 24,
     configurationFingerprint: "DO_NOT_PROJECT_INACTIVITY_BINDING",
     contentFingerprint: "DO_NOT_PROJECT_INACTIVITY_CONTENT",
   };
@@ -576,7 +618,6 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   );
 
   const control = createMcpControlPlane({
-    issueReporter: {},
     runner,
     runStore: {
       async inspectRunLeaseOwner() {
@@ -593,6 +634,7 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     checkpoint: "implement:workspace-write:1",
     attempt: 2,
     status: "expired",
+    expiryProven: true,
   });
   assert.match(
     output,
@@ -642,7 +684,6 @@ test("CLI and MCP project one fixed authentication recovery action", async () =>
     0,
   );
   const control = createMcpControlPlane({
-    issueReporter: {},
     runner,
     runStore: {
       async inspectRunLeaseOwner() {
@@ -812,7 +853,6 @@ test("CLI and MCP preserve the same bounded capability diagnosis", async () => {
     async release() {},
   };
   const control = createMcpControlPlane({
-    issueReporter: {},
     runIdFactory: () => "fixture-run",
     runStore: {
       async beginAction() {
@@ -874,4 +914,46 @@ test("a late failed source fork retains availability eligibility without authori
       return true;
     },
   );
+});
+
+test("output-exhaustion policy rejects raw causes and contradictory commit proof", () => {
+  const policy = createDispositionPolicy({
+    providers: PROVIDER_REGISTRY,
+    disposition: "output_exhausted",
+  });
+  const record = {
+    failureClass: "turn_output_exhausted",
+    checkpoint: "commit",
+    outcome: "rejected",
+    effect: "possible",
+    retry: "terminal",
+    disposition: "output_exhausted",
+    commitExecutor: "not_started",
+  };
+  const cause = new AgentBoundaryError(
+    { code: "ERR_CODEX_OUTPUT_EXHAUSTED" },
+    record,
+  );
+  assert.equal(policy.eligible(cause), true);
+  assert.deepEqual(policy.preEffect(cause), {
+    disposition: "output_exhausted",
+    commitExecutor: "not_started",
+  });
+  assert.equal(
+    policy.eligible({ failure: record, effectStarted: false }),
+    false,
+  );
+  for (const override of [
+    { effect: "started" },
+    { retry: "transient" },
+    { checkpoint: "turn" },
+    { process: { exitCode: 1 } },
+  ]) {
+    const invalid = Object.assign(Object.create(AgentBoundaryError.prototype), {
+      failure: { ...record, ...override },
+      effectStarted: false,
+    });
+    assert.equal(policy.eligible(invalid), false);
+    assert.equal(policy.preEffect(invalid), null);
+  }
 });

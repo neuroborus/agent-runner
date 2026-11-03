@@ -88,7 +88,10 @@ export {
   LAUNCH_OUTCOMES,
   LAUNCH_RECOVERY_CHECKPOINTS,
   normalizeClientAttribution,
+  normalizeSessionNamingContext,
+  normalizeSessionNamingDiagnostic,
   normalizeFailureRecord,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES,
   RETRY_ELIGIBILITY,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
@@ -100,7 +103,10 @@ export {
   spawnOwnedProcess,
   terminateOwnedProcess,
 } from "./owned-process.js";
-export { readProcessIdentity } from "./process-containment.js";
+export {
+  readProcessIdentity,
+  readProcessNamespace,
+} from "./process-containment.js";
 export {
   createProviderRegistry,
   PROVIDER_REGISTRY,
@@ -108,3 +114,5 @@ export {
 } from "./registry.js";
 
 export const BACKEND_IDS = PROVIDER_REGISTRY.ids;
+
+export { normalizeProviderObservation } from "./observations.js";

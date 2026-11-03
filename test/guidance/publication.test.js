@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
@@ -103,6 +110,110 @@ test("updates respect execution ownership and keep their exact intent retryable"
     await lease.release();
   }
   assert.equal((await f.service.update(input)).updated, true);
+});
+
+test("legacy integrated publication intents and receipts retain their original destination", async (t) => {
+  const f = await fixture(t);
+  await mkdir(join(f.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(
+    join(f.projectPath, "LOCAL_ARTIFACTS", "custom.json"),
+    '{"schemaVersion":1}',
+  );
+  const subdirectory = join(f.projectPath, "directory");
+  await mkdir(subdirectory);
+  const input = f.request("Legacy lesson.", {
+    projectConfigurationPath: "LOCAL_ARTIFACTS/custom.json",
+  });
+  await assert.rejects(
+    f
+      .createService({
+        async onPublicationBoundary(phase) {
+          if (phase === "prepared") throw new Error("Interrupted.");
+        },
+      })
+      .update(input),
+  );
+  const path = join(
+    f.stateRoot,
+    "actions",
+    hash(input.idempotencyKey),
+    "action.json",
+  );
+  const record = JSON.parse(await readFile(path, "utf8"));
+  delete record.context.binding;
+  await writeFile(path, JSON.stringify(record));
+  const retry = { ...input, projectPath: subdirectory };
+  const receipt = await f.createService().update(retry);
+  assert.equal(receipt.localPath, f.localPath);
+  assert.equal(await readFile(f.localPath, "utf8"), "Legacy lesson.");
+  f.setConfiguration({ artifactRoot: "CUSTOM_ARTIFACTS" });
+  assert.deepEqual(await f.createService().update(retry), receipt);
+  await assert.rejects(lstat(join(f.projectPath, "CUSTOM_ARTIFACTS")), {
+    code: "ENOENT",
+  });
+});
+
+test("legacy worktree-relative selectors recover receipts from Git subdirectories", async (t) => {
+  for (const status of ["intent", "completed"]) {
+    await t.test(status, async (t) => {
+      const f = await fixture(t, { initialContent: "Later lesson." });
+      const subdirectory = join(f.projectPath, "source");
+      await mkdir(subdirectory);
+      const input = f.request("Original lesson.", {
+        projectPath: subdirectory,
+        projectConfigurationPath: "../infrastructure/agent-runner.json",
+        expectedHash: hash("Original lesson."),
+      });
+      const identity = {
+        key: input.idempotencyKey,
+        tool: "guidance_update",
+        arguments: {
+          projectPath: f.projectPath,
+          projectConfigurationPath: join(
+            f.root,
+            "infrastructure",
+            "agent-runner.json",
+          ),
+          localContentHash: hash(input.localContent),
+          expectedHash: input.expectedHash,
+        },
+      };
+      const receipt = {
+        projectPath: f.projectPath,
+        localPath: f.localPath,
+        localHash: hash(input.localContent),
+        updated: false,
+      };
+      const action = await f.store.beginAction({
+        ...identity,
+        context: {
+          projectPath: f.projectPath,
+          localPath: f.localPath,
+          configurationHash: hash("Original configuration."),
+          phase: "published",
+          before: null,
+          temporaryName: null,
+          temporaryIdentity: null,
+          receipt,
+        },
+      });
+      try {
+        if (status === "completed") await action.complete(receipt);
+      } finally {
+        await action.release();
+      }
+      const replay = f.createService({
+        loadConfiguration() {
+          assert.fail(
+            "Published legacy actions must retain their receipt without configuration reload.",
+          );
+        },
+      });
+      assert.deepEqual(await replay.update(input), receipt);
+      assert.equal((await f.store.readAction(identity)).status, "completed");
+      assert.equal(await readFile(f.localPath, "utf8"), "Later lesson.");
+    });
+  }
 });
 
 test("two processes cannot publish against the same inspected content", async (t) => {

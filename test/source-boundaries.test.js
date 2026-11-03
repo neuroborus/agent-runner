@@ -194,7 +194,7 @@ test("workspace imports follow root to pipeline to shared-package direction", as
     let target;
     let requiresDeclaration = false;
     if (
-      specifier === "agent-runner" ||
+      specifier === manifests[0].name ||
       specifier.startsWith("@agent-runner/")
     ) {
       target = internal.get(specifier);
@@ -235,6 +235,10 @@ test("runtime policy does not branch on registered provider IDs", async () => {
     join(ROOT, "src/cli.js"),
     ...(await walk(
       join(ROOT, "src/runner"),
+      (path) => extname(path) === ".js",
+    )),
+    ...(await walk(
+      join(ROOT, "src/issues"),
       (path) => extname(path) === ".js",
     )),
     ...(await walk(join(ROOT, "src/mcp"), (path) => extname(path) === ".js")),
@@ -280,6 +284,7 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
     assert.ok(
       path === "src/index.js" ||
         path === "src/cli.js" ||
+        path === "src/runner/setup.js" ||
         path.startsWith("src/mcp/") ||
         path.startsWith("src/guidance/"),
       path,
@@ -291,10 +296,15 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
       isWithin(join(ROOT, "src/runner"), path),
   )) {
     const source = await readFile(path, "utf8");
+    const sourcePath = relative(ROOT, path);
+    // Init's Runner-owned publisher uses the capability as setup data. Other
+    // runner modules and every pipeline role retain the instruction boundary.
     assert.doesNotMatch(
       source,
-      /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
-      relative(ROOT, path),
+      sourcePath === "src/runner/setup.js"
+        ? /OPERATOR_GUIDE\.md|guidance_read/u
+        : /OPERATOR_GUIDE\.md|agent-runner\/rules\.md|guidance_(?:read|update)|createGuidanceService/u,
+      sourcePath,
     );
   }
   const root = await import("../src/index.js");
@@ -302,7 +312,12 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
   assert.equal(root.createGuidanceService, guidance.createGuidanceService);
   assert.deepEqual(
     Object.keys(guidance).sort(),
-    ["GuidanceError", "MAX_GUIDANCE_BYTES", "createGuidanceService"].sort(),
+    [
+      "GuidanceError",
+      "MAX_GUIDANCE_BYTES",
+      "createGuidanceService",
+      "validateGuidanceContent",
+    ].sort(),
   );
 });
 
@@ -316,7 +331,10 @@ test("project configuration protection stays behind the config index and runner"
         resolve(dirname(importer), specifier) === configFiles,
     )
     .map(({ importer }) => relative(ROOT, importer));
-  assert.deepEqual(consumers, ["src/config/index.js"]);
+  assert.deepEqual(consumers.sort(), [
+    "src/config/index.js",
+    "src/config/user-settings.js",
+  ]);
 
   const runnerSource = await readFile(
     join(ROOT, "src/runner/service.js"),

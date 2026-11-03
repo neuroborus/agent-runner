@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readlinkSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -9,8 +11,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { promisify } from "node:util";
+import { join } from "node:path";
+import { isDeepStrictEqual, promisify } from "node:util";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/client";
@@ -19,7 +21,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import {
   createClarificationService,
   createDetachedRuntimeCompatibilityToken,
-  createGitService,
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
@@ -35,6 +36,11 @@ import {
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
+
+import {
+  inspectOwnedSessionProcesses,
+  terminateOwnedProcess,
+} from "../../src/agents/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 
@@ -73,6 +79,129 @@ await writeFile(${JSON.stringify(receipt)}, JSON.stringify({ dispatch, connected
     connected: false,
     marker: false,
   });
+});
+
+test("real detached resume retains safe CLI/MCP causes across restart and identical-key recovery", async (t) => {
+  const paths = await workspace(t, "agent-runner-detached-cause-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const script = join(paths.taskPath, "child.mjs");
+  const diagnosticPath = join(paths.taskPath, "cli-diagnostic.json");
+  await writeFile(
+    script,
+    `import { writeFile } from "node:fs/promises";
+import { main, createRunner, createRunStore, RunStoreError } from ${JSON.stringify(new URL("../../src/index.js", import.meta.url).href)};
+const store = createRunStore({ stateRoot: ${JSON.stringify(paths.stateRoot)} });
+const runner = createRunner({ runStore: {
+  async acquireRunLease() {
+    process.stdout.write("private provider output");
+    process.stderr.write("private native stderr");
+    throw new RunStoreError("private transcript", { code: "ERR_RUN_LEASED", cause: new Error("private cause") });
+  },
+} });
+let diagnostic = "";
+process.exitCode = await main(process.argv.slice(2), {
+  runner, createCommandRunStore: () => store,
+  stderr: { write(chunk) { diagnostic += chunk; } },
+});
+await writeFile(${JSON.stringify(diagnosticPath)}, JSON.stringify({ diagnostic, exitCode: process.exitCode }));
+`,
+  );
+  const exited = Promise.withResolvers();
+  const launcher = createDetachedLauncher({ executablePath: script });
+  const input = {
+    runId: RUN_ID,
+    expectedRevision: initial.revision,
+    action: null,
+    idempotencyKey: "same-recovery-request",
+  };
+  const identity = {
+    key: input.idempotencyKey,
+    tool: "run_resume",
+    arguments: {
+      runId: RUN_ID,
+      expectedRevision: initial.revision,
+      action: null,
+    },
+  };
+  const expectedCause = {
+    stage: "execution-lease",
+    code: "ERR_RUN_LEASED",
+    explanation: "Execution ownership could not be acquired.",
+  };
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun(id, action, options) {
+      return launcher(id, action, {
+        ...options,
+        onExit(code, signal) {
+          options.onExit(code, signal);
+          exited.resolve({ exitCode: code, signal });
+        },
+      });
+    },
+  });
+  await assert.rejects(control.runResume(input), (error) => {
+    assert.equal(error.code, "ERR_DETACHED_START_FAILED");
+    assert.deepEqual(error.dispatchFailure, { exitCode: 1, signal: null });
+    assert.deepEqual(error.recoveryCause, expectedCause);
+    assert.doesNotMatch(
+      JSON.stringify(error),
+      /private|transcript|processIdentity/u,
+    );
+    return true;
+  });
+  assert.deepEqual(await exited.promise, { exitCode: 1, signal: null });
+  const cli = JSON.parse(await readFile(diagnosticPath, "utf8"));
+  assert.equal(cli.exitCode, 1);
+  assert.match(cli.diagnostic, /execution-lease \(ERR_RUN_LEASED\)/u);
+  assert.ok(cli.diagnostic.includes(expectedCause.explanation));
+  assert.doesNotMatch(cli.diagnostic, /private|transcript|stderr/u);
+  const pending = await store.readAction(identity);
+  assert.equal(pending.status, "intent");
+  assert.equal(pending.result, null);
+  assert.deepEqual(await store.loadRun(RUN_ID), initial);
+
+  // A replacement control plane has the durable cause, but no observed exit.
+  // Unverifiable ownership continues to exclude a replacement child.
+  const restarted = createRunStore({ stateRoot: paths.stateRoot });
+  const uncertain = createMcpControlPlane({
+    runner: storedRunner(restarted, paths),
+    runStore: {
+      ...restarted,
+      async inspectDispatchOwner() {
+        return "unverifiable";
+      },
+    },
+    launchRun() {
+      assert.fail("Uncertain ownership must exclude a second child.");
+    },
+  });
+  await assert.rejects(uncertain.runResume(input), (error) => {
+    assert.equal(error.code, "ERR_DETACHED_OWNERSHIP_PENDING");
+    assert.deepEqual(error.dispatchFailure, { exitCode: null, signal: null });
+    assert.deepEqual(error.recoveryCause, expectedCause);
+    return true;
+  });
+  assert.deepEqual(
+    (await restarted.readAction(identity)).context.dispatch,
+    pending.context.dispatch,
+  );
+  let continuations = 0;
+  const recovered = createMcpControlPlane({
+    runner: storedRunner(restarted, paths),
+    runStore: restarted,
+    async launchRun(id, _action, options) {
+      continuations++;
+      assert.notEqual(options.dispatch.id, pending.context.dispatch.id);
+      await advanceMutatingStoredRun(restarted, id, options.dispatch);
+    },
+  });
+  assert.deepEqual(await recovered.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(await recovered.runResume(input), { runId: RUN_ID });
+  assert.equal(continuations, 1);
+  assert.equal((await restarted.readAction(identity)).status, "completed");
 });
 
 async function childNodeStdoutIsAvailable() {
@@ -156,11 +285,6 @@ async function advanceMutatingStoredRun(store, runId, dispatch) {
 async function rewriteRunAsLegacy(directoryPath) {
   const statePath = join(directoryPath, "state.json");
   const eventsPath = join(directoryPath, "events.jsonl");
-  const state = JSON.parse(await readFile(statePath, "utf8"));
-  state.schemaVersion = 1;
-  delete state.providerPolicies;
-  delete state.runtimeCompatibility;
-  delete state.activeTurn;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -183,15 +307,31 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.workspace;
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    delete event.state.observations;
   }
+  const comparable = ({ revision, updatedAt, ...value }) => value;
+  const legacyEvents = events.filter(
+    (event, index) =>
+      index === 0 ||
+      event.activity !== null ||
+      !isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(event.state),
+      ),
+  );
+  legacyEvents.forEach((event, index) => {
+    event.revision = event.state.revision = index + 1;
+  });
+  const state = legacyEvents.at(-1).state;
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
     writeFile(
       eventsPath,
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      `${legacyEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     ),
   ]);
 }
@@ -470,6 +610,9 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     "guidance_read",
     "guidance_update",
+    "issues_list",
+    "issues_read",
+    "issues_update",
     "pipelines_list",
     "run_activity",
     "run_cancel",
@@ -480,6 +623,8 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     "run_status",
     "run_wait",
     "unexpected_issue_report",
+    "update_apply",
+    "update_check",
   ]);
   assert.equal(
     tools.find((tool) => tool.name === "run_status").annotations.readOnlyHint,
@@ -518,6 +663,13 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     /Recommend fresh for a long, multi-topic, or uncertain session/u,
   );
   assert.doesNotMatch(startTool.description, /by default/u);
+  assert.deepEqual(startTool.inputSchema.properties.planKind.enum, [
+    "commit",
+    "custom",
+  ]);
+  assert.equal(startTool.inputSchema.properties.criteriaPath.type, "string");
+  assert.equal(startTool.inputSchema.properties.sourceReferences.type, "array");
+  assert.equal(startTool.inputSchema.properties.outputPaths.type, "array");
   const modeSchema = startTool.inputSchema.properties.mode;
   assert.deepEqual(modeSchema.enum, ["independent", "lazy", "combined"]);
   assert.match(modeSchema.description, /default and recommended/u);
@@ -558,7 +710,7 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
   });
   assert.deepEqual(
     pipelines.structuredContent.pipelines.map(({ id }) => id),
-    ["plan-authoring", "plan-execution", "polishing"],
+    ["plan-authoring", "plan-execution", "polishing", "audit", "init"],
   );
   for (const pipeline of pipelines.structuredContent.pipelines) {
     assert.deepEqual(pipeline.settings.mode, {
@@ -598,10 +750,7 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
   const repositoryPath = paths.projectPath;
   const worktreePath = join(paths.root, "worktree");
   await executeFile("git", ["init", "-q", "-b", "main", repositoryPath]);
-  await Promise.all([
-    writeFile(join(repositoryPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
-    writeFile(join(repositoryPath, "tracked.txt"), "tracked\n"),
-  ]);
+  await writeFile(join(repositoryPath, "tracked.txt"), "tracked\n");
   await executeFile("git", ["-C", repositoryPath, "add", "."]);
   await executeFile("git", [
     "-C",
@@ -626,35 +775,20 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
   ]);
 
   const projectPath = await realpath(worktreePath);
-  const issuesPath = join(
-    projectPath,
-    "LOCAL_ARTIFACTS",
-    "agent-runner",
-    "issues",
-  );
-  const preflight = await createGitService().preflight({
-    projectPath,
-    requiredIgnoredPaths: [issuesPath],
-  });
-  assert.equal(preflight.snapshot.projectPath, projectPath);
-  assert.equal(preflight.snapshot.detached, true);
-  assert.deepEqual(preflight.ignoredPaths, [
-    {
-      changed: false,
-      exists: false,
-      ignored: true,
-      kind: null,
-      path: issuesPath,
-      relativePath: "LOCAL_ARTIFACTS/agent-runner/issues",
-      tracked: false,
-    },
-  ]);
-
+  const root = await realpath(paths.root);
+  const dataHome = join(root, "data");
+  await mkdir(join(root, "home"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["bin/agent-run.js", "mcp"],
     cwd: new URL("../..", import.meta.url).pathname,
-    env: { ...process.env, XDG_STATE_HOME: paths.stateRoot },
+    env: {
+      ...process.env,
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_DATA_HOME: dataHome,
+      XDG_STATE_HOME: paths.stateRoot,
+    },
     stderr: "pipe",
   });
   let diagnostics = "";
@@ -669,21 +803,38 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
     idempotencyKey: "detached-worktree-report",
     projectPath,
     summary: "The detached worktree report path was rejected unexpectedly.",
-    expectedBehavior: "The canonical ignored destination accepts the report.",
+    expectedBehavior: "The global issue store accepts the report.",
     actualBehavior: "This regression verifies successful publication.",
     occurrence: "It occurred through a fresh STDIO MCP process.",
-    unexpectedReason: "Run preflight accepted the exact same destination.",
+    unexpectedReason: "No project ignore rule is required for global storage.",
   };
   const first = await client.callTool({
     name: "unexpected_issue_report",
     arguments: input,
   });
   assert.equal(first.isError, undefined);
-  assert.equal(dirname(first.structuredContent.reportPath), issuesPath);
+  const { issueId, issuePath } = first.structuredContent;
+  assert.equal(
+    issuePath,
+    join(dataHome, "agent-runner", "issues", `${issueId}.json`),
+  );
+  const document = JSON.parse(await readFile(issuePath, "utf8"));
+  assert.deepEqual(document.tracking.origin, {
+    name: "worktree",
+    path: projectPath,
+  });
   assert.match(
-    await readFile(first.structuredContent.reportPath, "utf8"),
+    document.report.markdown,
     /The detached worktree report path was rejected unexpectedly\./u,
   );
+  const { stdout } = await executeFile("git", [
+    "-C",
+    projectPath,
+    "status",
+    "--porcelain",
+    "--ignored",
+  ]);
+  assert.equal(stdout, "");
   const retry = await client.callTool({
     name: "unexpected_issue_report",
     arguments: input,
@@ -1607,7 +1758,9 @@ test("restart recovery bounds noisy observations and preserves recorded child id
   };
   await assert.rejects(
     createMcpControlPlane(options).runResume(input),
-    /server interrupted/u,
+    (error) =>
+      error.code === "ERR_DETACHED_START_FAILED" &&
+      !error.message.includes("server interrupted"),
   );
   await assert.rejects(createMcpControlPlane(options).runResume(input), {
     code: "ERR_DETACHED_OWNERSHIP_PENDING",
@@ -1703,7 +1856,9 @@ test("an admitted dispatch cannot replay after another admission or CLI turn", a
       };
       await assert.rejects(
         createMcpControlPlane(options).runStart(input),
-        /Interrupted after admission/u,
+        (error) =>
+          error.code === "ERR_DETACHED_START_FAILED" &&
+          !error.message.includes("Interrupted after admission"),
       );
       const lease = await store.acquireRunLease(RUN_ID);
       try {
@@ -2193,6 +2348,233 @@ test("retries when a detached loser exits after transient ownership", async (t) 
   assert.deepEqual(launches, [RUN_ID, RUN_ID]);
 });
 
+test("audit clarification works through MCP start/respond and the CLI editor", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "audit-clarification-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const transport of ["mcp", "mcp-proactive", "cli"]) {
+    await t.test(transport, async () => {
+      const projectPath = join(root, transport);
+      const taskPath = join(projectPath, "task");
+      await mkdir(taskPath, { recursive: true });
+      await writeFile(
+        join(taskPath, "task.md"),
+        "Audit the agreed source tree.\n",
+      );
+      let runId = "11111111-1111-4111-8111-111111111111";
+      const runStore = createRunStore({
+        stateRoot: join(root, `state-${transport}`),
+      });
+      const answer = "Inspect src/ only.";
+      const calls = [];
+      const edits = [];
+      const adapter = {
+        async probe(request) {
+          return {
+            version: "fixture",
+            readOnly: true,
+            structuredOutput: true,
+            declaredWorkspace: true,
+            remoteWriteBlocked: true,
+            nativeSessionContinuation: true,
+            policyReceipt: {
+              schemaVersion: 1,
+              fingerprint: createHash("sha256")
+                .update(JSON.stringify(request))
+                .digest("hex"),
+              supportedAccess: ["read-only"],
+            },
+          };
+        },
+        async run(request) {
+          calls.push(request);
+          const evidence = JSON.parse(request.prompt.split("\n").at(-1));
+          if (calls.length === 2)
+            assert.ok(evidence.clarifications.includes(answer));
+          return {
+            sessionId: `child-${calls.length}`,
+            structured:
+              calls.length === 1
+                ? {
+                    status: "QUESTIONS",
+                    inputs: null,
+                    questions: [
+                      {
+                        question: "Which source tree is in scope?",
+                        whyItMatters: "Scope determines the inspected material",
+                      },
+                    ],
+                    reason: "",
+                  }
+                : calls.length === 2
+                  ? {
+                      status: "READY",
+                      inputs: {
+                        scope: ["src/"],
+                        references: [],
+                        exclusions: [],
+                        criteria: ["Established rules"],
+                      },
+                      questions: [],
+                      reason: "",
+                    }
+                  : {
+                      status: "COMPLETE",
+                      snapshotFingerprint: evidence.snapshotFingerprint,
+                      candidates: [],
+                      limitations: [],
+                      hypotheses: [],
+                      reportCorrections: [],
+                    },
+          };
+        },
+      };
+      const runner = createRunner({
+        adapters: { codex: adapter },
+        runStore: {
+          ...runStore,
+          async createRun(input) {
+            runId = input.runId;
+            return runStore.createRun(input);
+          },
+        },
+        loadConfiguration: async () =>
+          parseRunnerConfiguration(
+            JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
+          ),
+        clarifications: createClarificationService({
+          interactive: transport === "cli",
+          env: { EDITOR: "fixture-editor" },
+          async launchEditor(_command, path) {
+            assert.equal(transport, "cli", "MCP must never open an editor");
+            const run = await runStore.loadRun(runId);
+            assert.equal(run.pipelineState.workflowState, "WAITING_FOR_USER");
+            assert.equal(
+              run.pause.inputRequest.id,
+              run.pipelineState.pendingEdit.id,
+            );
+            edits.push(run.pipelineState.pendingEdit.action);
+            if (edits.length === 1) assert.equal(calls.length, 0);
+            else
+              await writeFile(
+                path,
+                `${await readFile(path, "utf8")}\n${answer}\n`,
+              );
+            return { exitCode: 0, signal: null };
+          },
+        }),
+      });
+      if (transport === "cli") {
+        assert.equal(
+          await main(
+            [
+              "run",
+              "audit",
+              "--project",
+              projectPath,
+              "--task",
+              taskPath,
+              "--clarify",
+            ],
+            {
+              runner,
+              stdout: { write() {} },
+              stderr: { write: (value) => assert.fail(value) },
+            },
+          ),
+          0,
+        );
+        assert.deepEqual(edits, [
+          "proactive-clarification",
+          "clarification-answers",
+        ]);
+      } else {
+        let launches = 0;
+        const control = createMcpControlPlane({
+          runner,
+          runStore,
+          runIdFactory: () => runId,
+          async launchRun(
+            id,
+            action,
+            { dispatch, expectedRuntimeCompatibility },
+          ) {
+            launches++;
+            await runner.resume({
+              runId: id,
+              action,
+              dispatch,
+              expectedRuntimeCompatibility,
+            });
+          },
+        });
+        const input = {
+          pipelineId: "audit",
+          projectPath,
+          taskPath,
+          proactiveClarification: transport === "mcp-proactive",
+          sourceSession: null,
+          idempotencyKey: "start-audit",
+        };
+        assert.deepEqual(await control.runStart(input), { runId });
+        assert.deepEqual(await control.runStart(input), { runId });
+        assert.equal(launches, 1);
+        let status = await control.runStatus({ runId });
+        if (input.proactiveClarification) {
+          assert.equal(calls.length, 0);
+          assert.deepEqual(status.pendingInput.questions, []);
+          await control.runRespond({
+            runId,
+            requestId: status.pendingInput.id,
+            expectedRevision: status.revision,
+            answers: [],
+            idempotencyKey: "optional-input",
+          });
+          status = await control.runStatus({ runId });
+        }
+        assert.equal(calls.length, 1);
+        assert.equal(status.pendingInput.kind, "clarification");
+        assert.equal(status.pendingInput.questions[0].id, "q1");
+        assert.deepEqual(status.pause.nextActions, [
+          { type: "respond", requestId: status.pendingInput.id },
+        ]);
+        await assert.rejects(
+          control.runRespond({
+            runId,
+            requestId: status.pendingInput.id,
+            expectedRevision: status.revision,
+            answers: [],
+            idempotencyKey: "incomplete-answer",
+          }),
+          { code: "ERR_INCOMPLETE_INPUT_RESPONSE" },
+        );
+        const response = {
+          runId,
+          requestId: status.pendingInput.id,
+          expectedRevision: status.revision,
+          answers: [{ questionId: "q1", answer }],
+          idempotencyKey: "material-answer",
+        };
+        await control.runRespond(response);
+        await control.runRespond(response);
+        assert.equal(launches, input.proactiveClarification ? 3 : 2);
+        status = await control.runStatus({ runId });
+        assert.equal(status.pendingInput, null);
+        assert.equal(status.auditReport.status, "complete");
+      }
+      const run = await runStore.loadRun(runId);
+      assert.equal(run.pipelineState.workflowState, "DONE");
+      assert.equal(
+        run.pipelineState.proactiveClarification,
+        transport !== "mcp",
+      );
+      assert.equal(run.pipelineState.proactiveClarificationComplete, true);
+      assert.equal(run.pipelineState.clarificationRounds, 1);
+      assert.equal(run.pipelineState.pendingEdit, null);
+      assert.equal(calls.length, 3);
+    });
+  }
+});
+
 test("records complete pending answers before detached continuation", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-respond-");
   const store = createRunStore({ stateRoot: paths.stateRoot });
@@ -2400,7 +2782,7 @@ test("responds to pending input projected from a compatible legacy run", async (
   assert.deepEqual(launches, [paused.run.runId]);
   const persisted = await store.loadRun(paused.run.runId);
   assert.equal(persisted.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.equal(persisted.revision, paused.run.revision + 5);
+  assert.equal(persisted.revision, pendingInput.revision + 5);
   assert.equal(persisted.pause.inputResponse.requestId, pendingInput.id);
 });
 
@@ -2492,19 +2874,21 @@ test("resumes only action-free ownerless interrupted runs at the exact revision"
   assert.equal(launches.length, 2);
 });
 
-test("action-free resume immediately reclaims an exact dead owner", async (t) => {
+test("saved action-free resume retires owned work despite an unassociated session and replays one receipt", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-dead-owner-resume-");
   const bootId = "44444444-4444-4444-8444-444444444444";
+  const executionPid = 2_000_000_001;
+  const group = "0::/shared.scope\n";
   const storeOptions = {
     stateRoot: paths.stateRoot,
     hostName: "test-host",
-    processIsAlive: (pid) => pid !== 100,
+    processIsAlive: (pid) => ![100, executionPid].includes(pid),
     processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
   };
   const ownerStore = createRunStore({ ...storeOptions, processId: 100 });
   await createStoredRun(ownerStore, paths);
   const ownerLease = await ownerStore.acquireRunLease(RUN_ID);
-  const started = await ownerStore.startAgentTurn(
+  await ownerStore.startAgentTurn(
     ownerLease,
     { role: "planner", phase: "clarify" },
     {
@@ -2516,27 +2900,112 @@ test("action-free resume immediately reclaims an exact dead owner", async (t) =>
       },
     },
   );
+  const checkpoint = await ownerStore.recordExecutionProcess(
+    ownerLease,
+    executionPid,
+    {
+      processIdentity: storeOptions.processIdentity(executionPid),
+      namespaceId: readlinkSync("/proc/self/ns/pid"),
+      ancestryBaseline: [{ bootId, pid: 303, startTicks: "303" }],
+      controlGroup: createHash("sha256").update(group).digest("hex"),
+    },
+  );
+  const input = {
+    idempotencyKey: "dead-owner-resume",
+    runId: RUN_ID,
+    expectedRevision: checkpoint.revision,
+    action: null,
+  };
+  const identity = {
+    key: input.idempotencyKey,
+    tool: "run_resume",
+    arguments: {
+      runId: RUN_ID,
+      expectedRevision: checkpoint.revision,
+      action: null,
+    },
+  };
+  const saved = await ownerStore.beginAction({
+    ...identity,
+    context: { runId: RUN_ID, expectedRevision: checkpoint.revision },
+  });
+  const intent = saved.record;
+  await saved.release();
 
   const recoveryStore = createRunStore({ ...storeOptions, processId: 200 });
   let launches = 0;
   const control = createMcpControlPlane({
-    async launchRun(id, _action, options) {
-      launches += 1;
-      await advanceMutatingStoredRun(recoveryStore, id, options.dispatch);
+    async launchRun(id, action, options) {
+      assert.equal(action, null);
+      launches++;
+      const lease = await recoveryStore.acquireRunLease(id);
+      try {
+        await assert.rejects(recoveryStore.acquireRunLease(id), {
+          code: "ERR_RUN_LEASED",
+        });
+        await recoveryStore.recoverRun(lease);
+        await recoveryStore.recordRecoveryDispatch(lease, options.dispatch);
+        await terminateOwnedProcess(
+          executionPid,
+          () => recoveryStore.inspectExecutionProcess(id),
+          {
+            inspectSessionProcesses(session, token, inspection) {
+              return inspectOwnedSessionProcesses(session, token, {
+                ...inspection,
+                getuid: () => 1000,
+                now: () => 0,
+                list: () => ["101", "303"],
+                read(path) {
+                  if (path.endsWith("/stat") && !path.startsWith("/proc/1/")) {
+                    const pid = Number(path.split("/")[2]);
+                    const fields = Array(20).fill("0");
+                    fields[0] = "S";
+                    fields[1] = pid === 101 ? "303" : "1";
+                    fields[3] = String(pid);
+                    fields[19] = String(pid);
+                    return `${pid} (process) ${fields.join(" ")}`;
+                  }
+                  if (path.endsWith("/status"))
+                    return "Uid:\t1000\t1000\t1000\t1000\n";
+                  if (path.endsWith("/cgroup")) return group;
+                  throw Object.assign(new Error("inaccessible metadata"), {
+                    code: "EACCES",
+                  });
+                },
+              });
+            },
+          },
+        );
+        const retired = await recoveryStore.recordExecutionProcess(lease, null);
+        assert.deepEqual(retired.pipelineState, checkpoint.pipelineState);
+        assert.deepEqual(retired.counters, checkpoint.counters);
+        await recoveryStore.recordRecoveryDispatch(
+          lease,
+          options.dispatch,
+          true,
+        );
+      } finally {
+        await lease.release();
+      }
     },
     runner: storedRunner(recoveryStore, paths),
     runStore: recoveryStore,
   });
-  assert.deepEqual(
-    await control.runResume({
-      idempotencyKey: "dead-owner-resume",
-      runId: RUN_ID,
-      expectedRevision: started.revision,
-      action: null,
-    }),
-    { runId: RUN_ID },
-  );
+  assert.deepEqual(await recoveryStore.readAction(identity), intent);
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  const receipt = await recoveryStore.readAction(identity);
+  assert.equal(receipt.status, "completed");
+  assert.deepEqual(await control.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(await recoveryStore.readAction(identity), receipt);
   assert.equal(launches, 1);
+  const { events } = await recoveryStore.loadRunHistory(RUN_ID);
+  const retirement = events.filter(
+    ({ activity }) =>
+      activity?.phase === "execution" && activity.kind === "stopped",
+  );
+  assert.equal(retirement.length, 1);
+  assert.equal(retirement[0].state.executionProcess, null);
+  assert.equal(await recoveryStore.runIsLeased(RUN_ID), false);
 });
 
 test("rejects a live pausing owner and permits an exact-key retry after release", async (t) => {
@@ -2748,6 +3217,7 @@ test("projects live and crashed provider activity through status and wait", asyn
       bootId: "11111111-1111-4111-8111-111111111111",
       startTicks: String(pid),
     }),
+    ownerProbeIntervalMs: 10,
   });
   await createStoredRun(store, paths);
   const lease = await store.acquireRunLease(RUN_ID);
@@ -2810,12 +3280,47 @@ test("projects live and crashed provider activity through status and wait", asyn
     phase: "clarify",
   });
 
+  // An owner death changes no file; a held wait still observes it and
+  // returns without writing state, lease, or process records.
+  const leasePath = join(await store.getRunDirectory(RUN_ID), ".lease");
+  const leaseBytes = await readFile(leasePath);
+  const heldWaitStarted = Promise.withResolvers();
+  const heldControl = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: {
+      ...store,
+      async waitForRunChange(...argumentsList) {
+        heldWaitStarted.resolve();
+        return store.waitForRunChange(...argumentsList);
+      },
+    },
+  });
+  const heldWait = heldControl.runWait({
+    runId: RUN_ID,
+    cursor: started.revision,
+    timeoutMs: 30_000,
+    progress: false,
+  });
+  await heldWaitStarted.promise;
   ownerIsAlive = false;
+  const lostOwnerWait = await heldWait;
+  assert.equal(lostOwnerWait.timedOut, false);
+  assert.equal(lostOwnerWait.revision, registered.revision);
+  assert.deepEqual(lostOwnerWait.execution, {
+    state: "interrupted",
+    leaseOwner: "dead",
+    processRecord: "persisted",
+    role: "planner",
+    phase: "clarify",
+  });
+  assert.deepEqual(await readFile(leasePath), leaseBytes);
+  const retained = await store.loadRun(RUN_ID);
+  assert.equal(retained.revision, registered.revision);
+  assert.deepEqual(retained.executionProcess, registered.executionProcess);
+
   assert.equal(await store.runIsLeased(RUN_ID), true);
   assert.equal(await store.runLeaseOwnerIsLive(RUN_ID), false);
-  const leaseRecord = JSON.parse(
-    await readFile(join(await store.getRunDirectory(RUN_ID), ".lease"), "utf8"),
-  );
+  const leaseRecord = JSON.parse(await readFile(leasePath, "utf8"));
   assert.equal(leaseRecord.pid, ownerProcessId);
   const interruptedWait = await control.runWait({
     runId: RUN_ID,
@@ -2823,7 +3328,7 @@ test("projects live and crashed provider activity through status and wait", asyn
     timeoutMs: 10,
     progress: false,
   });
-  assert.equal(interruptedWait.timedOut, true);
+  assert.equal(interruptedWait.timedOut, false);
   assert.deepEqual(interruptedWait.execution, {
     state: "interrupted",
     leaseOwner: "dead",

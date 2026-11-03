@@ -1,3 +1,4 @@
+import { completedStepCount } from "./step-policy.js";
 import { executionPolicy } from "./mode-policy.js";
 import { validationEvidenceFingerprint } from "./validation-schedule.js";
 
@@ -76,7 +77,7 @@ export function finalizationGatePassed(
     state.finalizationResult?.status === "PASS" &&
     (state.validationScopeLegacy ||
       state.finalizationResult.step ===
-        (state.currentStep ?? state.completedCommits?.length)) &&
+        (state.currentStep ?? completedStepCount(state))) &&
     state.finalizedFingerprint === fingerprint &&
     state.finalizationResult.fingerprint === fingerprint
   );
@@ -113,7 +114,7 @@ function terminalConfirmationGatePassed(
   );
 }
 
-export function commitGatePassed(
+export function stepGatePassed(
   state,
   fingerprint = state.finalizedFingerprint,
 ) {
@@ -124,6 +125,8 @@ export function commitGatePassed(
     state.reviewReconsideration.length === 0
   );
 }
+
+export const commitGatePassed = stepGatePassed;
 
 export function clearedConfirmationGate() {
   return {

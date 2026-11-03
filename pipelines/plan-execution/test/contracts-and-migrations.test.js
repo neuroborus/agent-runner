@@ -28,14 +28,23 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
 } from "../src/schemas.js";
 import {
+  customTurnSchema,
+  normalizeCustomResult,
+} from "../src/custom-results.js";
+import {
   MAX_BOOTSTRAP_ITEMS,
+  createPersistedFinalizationEvidence,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
   normalizeCheckAndFixResult,
   normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
+  normalizeImplementationResult,
+  normalizeResolutionResult,
   normalizePipelineState,
   normalizeReconciliationResult,
 } from "../src/workflow-contract.js";
@@ -46,6 +55,7 @@ import {
   arbitrationProductDecision,
   arbitrationResolved,
   assertArraySchemasDeclareItems,
+  assertStrictSchema,
   bootstrapCapacityExhausted,
   bootstrapCorrection,
   bootstrapProductDecision,
@@ -60,6 +70,7 @@ import {
   hash,
   implementationBlocked,
   implementationCompleted,
+  implementationProductDecision,
   matchesSchemaSubset,
   migrateVersionOneState,
   persistedFinalizationCorrection,
@@ -78,6 +89,351 @@ import {
   versionOneState,
   versionThirteenState,
 } from "./support/index.js";
+
+function writableResultContracts() {
+  const { summary: _blockedSummary, ...blocked } = implementationBlocked();
+  const { summary: _decisionSummary, ...decision } =
+    implementationProductDecision();
+  return [
+    {
+      schema: IMPLEMENTATION_SCHEMA,
+      normalize: normalizeImplementationResult,
+      valid: [
+        implementationCompleted(),
+        implementationBlocked(),
+        implementationProductDecision(),
+      ],
+    },
+    {
+      schema: FINDING_RESOLUTION_SCHEMA,
+      normalize: (value) =>
+        normalizeResolutionResult(value, [{ id: "R1" }], new Set()),
+      valid: [
+        resolution({ id: "R1", decision: "FIX" }),
+        resolution({ id: "R1", decision: "DISPUTE" }),
+        { ...blocked, decisions: [] },
+        { ...decision, decisions: [] },
+      ],
+    },
+  ];
+}
+
+test("writable result schemas agree with status and disposition normalization", () => {
+  for (const { schema, normalize, valid } of writableResultContracts()) {
+    assertStrictSchema(schema);
+    assertArraySchemasDeclareItems(schema);
+    for (const pattern of schemaPatterns(schema))
+      assert.doesNotMatch(pattern, /\(\?(?:[=!]|<[=!])/u);
+    const product = {
+      ...valid.find(({ status }) => status === "PRODUCT_DECISION_REQUIRED"),
+      options: [],
+    };
+    assert.equal(matchesSchemaSubset(schema, { result: product }), true);
+    assert.doesNotThrow(() => normalize(product));
+    for (const value of valid) {
+      assert.equal(matchesSchemaSubset(schema, { result: value }), true);
+      assert.equal(matchesSchemaSubset(schema, value), false);
+      assert.doesNotThrow(() => normalize(value));
+      const invalid = [
+        { ...value, unexpected: "private-value" },
+        { ...value, status: "UNKNOWN" },
+        ...Object.entries(value)
+          .filter(
+            ([field, entry]) =>
+              field !== "status" &&
+              (typeof entry === "string" ||
+                (Array.isArray(entry) &&
+                  (entry.length === 0 || field === "evidence"))),
+          )
+          .map(([field, entry]) => ({
+            ...value,
+            [field]:
+              typeof entry === "string"
+                ? entry === ""
+                  ? "private-value"
+                  : ""
+                : entry.length === 0
+                  ? ["private-value"]
+                  : [],
+          })),
+      ];
+      for (const rejected of invalid) {
+        assert.equal(matchesSchemaSubset(schema, { result: rejected }), false);
+        assert.throws(() => normalize(rejected), {
+          code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+        });
+      }
+    }
+  }
+  const fix = resolution({ id: "F1", decision: "FIX" });
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: fix }),
+    true,
+  );
+  assert.doesNotThrow(() =>
+    normalizeResolutionResult(fix, [{ id: "F1" }], new Set()),
+  );
+  const base = resolution({ id: "R1", decision: "DISPUTE" });
+  for (const change of [
+    { id: "F1" },
+    { id: "invalid" },
+    { decision: "WITHDRAW" },
+    { reason: "" },
+    { evidence: [] },
+    { evidence: [""] },
+    { extra: "private-value" },
+  ]) {
+    const value = { ...base, decisions: [{ ...base.decisions[0], ...change }] };
+    assert.equal(
+      matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: value }),
+      false,
+    );
+    assert.throws(() =>
+      normalizeResolutionResult(value, [{ id: "R1" }, { id: "F1" }], new Set()),
+    );
+  }
+});
+
+test("custom writable schemas keep criterion evidence separate from the status envelope", () => {
+  const customResult = {
+    analysis: "Compared the supplied sources.",
+    evidence: [
+      {
+        criterionId: "coverage",
+        observations: ["Both sources were inspected."],
+      },
+    ],
+    outputPaths: [],
+  };
+  for (const { schema, normalize, valid } of writableResultContracts()) {
+    const custom = customTurnSchema(schema, true);
+    assertStrictSchema(custom);
+    for (const value of valid) {
+      const active = ["COMPLETED", "RESOLVED"].includes(value.status);
+      const output = {
+        result: value,
+        customResult: active ? customResult : null,
+      };
+      assert.equal(matchesSchemaSubset(custom, output), true);
+      assert.equal(matchesSchemaSubset(custom, { result: value }), false);
+      assert.equal(matchesSchemaSubset(schema, output), false);
+      assert.doesNotThrow(() => normalize(output.result));
+      if (active) {
+        assert.doesNotThrow(() =>
+          normalizeCustomResult(output.customResult, {
+            criterionRefs: ["coverage"],
+          }),
+        );
+        assert.equal(
+          matchesSchemaSubset(custom, {
+            ...output,
+            result: { ...value, evidence: customResult.evidence },
+          }),
+          false,
+        );
+      }
+    }
+  }
+});
+
+test("writable normalization diagnostics are bounded and omit rejected values", () => {
+  const privateValue = "PRIVATE_REJECTED_VALUE";
+  for (const { normalize, valid } of writableResultContracts()) {
+    const success = valid[0];
+    const blocked = valid.find(({ status }) => status === "BLOCKED");
+    const product = valid.find(
+      ({ status }) => status === "PRODUCT_DECISION_REQUIRED",
+    );
+    for (const [value, field, constraint] of [
+      [null, "result", "object"],
+      [
+        { ...success, [privateValue]: privateValue },
+        "result",
+        "exact-field-set",
+      ],
+      [{ ...success, reason: privateValue }, "reason", "empty-string"],
+      [{ ...success, evidence: [privateValue] }, "evidence", "empty-array"],
+      [
+        { ...blocked, reason: "" },
+        "reason",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...blocked, evidence: [] },
+        "evidence",
+        "nonempty-array-up-to-32-items",
+      ],
+      [
+        { ...blocked, evidence: ["\0" + privateValue] },
+        "evidence[0]",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, question: "" },
+        "question",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, options: Array(17).fill(privateValue) },
+        "options",
+        "array-up-to-16-items",
+      ],
+      [
+        { ...product, whyBlocked: "" },
+        "whyBlocked",
+        "nonempty-plain-text-up-to-4000-characters",
+      ],
+      [
+        { ...product, evidence: [] },
+        "evidence",
+        "nonempty-array-up-to-32-items",
+      ],
+      [
+        { ...success, reason: privateValue.repeat(100_000) },
+        "result",
+        "maximum-2-mebibytes",
+      ],
+    ]) {
+      assert.throws(
+        () => normalize(value),
+        (cause) => {
+          assert.equal(cause.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+          assert.deepEqual(cause.diagnostic, { field, constraint });
+          assert.doesNotMatch(
+            String(cause) + JSON.stringify(cause),
+            /PRIVATE_REJECTED_VALUE/u,
+          );
+          return true;
+        },
+      );
+    }
+    const cyclic = { ...success };
+    cyclic.reason = cyclic;
+    assert.throws(
+      () => normalize(cyclic),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, {
+          field: "result",
+          constraint: "serializable-json",
+        });
+        return true;
+      },
+    );
+  }
+  const base = resolution({ id: "R1", decision: "FIX" });
+  for (const [decisions, field, constraint, arbitrated] of [
+    [null, "decisions", "array-up-to-32-items"],
+    [Array(33).fill(base.decisions[0]), "decisions", "array-up-to-32-items"],
+    [[null], "decisions[0]", "object"],
+    [
+      [{ ...base.decisions[0], [privateValue]: privateValue }],
+      "decisions[0]",
+      "exact-field-set",
+    ],
+    [
+      [{ ...base.decisions[0], id: privateValue }],
+      "decisions[0].id",
+      "current-blocker-id",
+    ],
+    [
+      [{ ...base.decisions[0], id: "R2" }],
+      "decisions[0].id",
+      "current-blocker-id",
+    ],
+    [
+      [{ ...base.decisions[0], decision: privateValue }],
+      "decisions[0].decision",
+      "fix-or-dispute",
+    ],
+    [
+      [{ ...base.decisions[0], reason: "\0" + privateValue }],
+      "decisions[0].reason",
+      "nonempty-plain-text-up-to-4000-characters",
+    ],
+    [
+      [{ ...base.decisions[0], evidence: ["\0" + privateValue] }],
+      "decisions[0].evidence[0]",
+      "nonempty-plain-text-up-to-4000-characters",
+    ],
+    [
+      resolution({ id: "R1", decision: "DISPUTE" }).decisions,
+      "decisions[0].decision",
+      "disputable-blocker-only",
+      ["R1"],
+    ],
+    [[], "decisions", "every-current-blocker-exactly-once"],
+    [
+      [...base.decisions, ...base.decisions],
+      "decisions",
+      "every-current-blocker-exactly-once",
+    ],
+  ]) {
+    assert.throws(
+      () =>
+        normalizeResolutionResult(
+          { ...base, decisions },
+          [{ id: "R1" }],
+          new Set(arbitrated),
+        ),
+      (cause) => {
+        assert.deepEqual(cause.diagnostic, { field, constraint });
+        assert.doesNotMatch(
+          String(cause) + JSON.stringify(cause),
+          /PRIVATE_REJECTED_VALUE/u,
+        );
+        return true;
+      },
+    );
+  }
+  const decisions = Array.from({ length: 32 }, (_, index) => ({
+    ...base.decisions[0],
+    id: `R${index + 1}`,
+  }));
+  decisions[31].reason = "";
+  assert.throws(
+    () =>
+      normalizeResolutionResult({ ...base, decisions }, decisions, new Set()),
+    (cause) => {
+      assert.equal(cause.diagnostic.field, "decisions[31].reason");
+      return true;
+    },
+  );
+});
+
+for (const phase of ["implementation", "finding-resolution"]) {
+  test(`publishes redacted ${phase} normalization diagnostics`, async (t) => {
+    const malformed = {
+      ...(phase === "implementation"
+        ? implementationCompleted()
+        : resolution({ id: "F1", decision: "FIX" })),
+      reason: "PRIVATE_REJECTED_VALUE",
+    };
+    const fixture = await createFixture(t, {
+      workWorker:
+        phase === "implementation"
+          ? [malformed, malformed]
+          : [
+              implementationCompleted(),
+              finalizationFailed("F1"),
+              malformed,
+              malformed,
+            ],
+    });
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "writable_output_invalid");
+    assert.deepEqual(fixture.currentRun.pause.diagnostic, {
+      role: "worker",
+      phase,
+      contract: phase,
+      field: "reason",
+      constraint: "empty-string",
+    });
+    assert.doesNotMatch(
+      JSON.stringify(fixture.currentRun),
+      /PRIVATE_REJECTED_VALUE/u,
+    );
+  });
+}
 
 test("classifies only journal-proven untouched immediate-stop checkpoints as pre-work", () => {
   const checkpoint = {
@@ -264,6 +620,79 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.requiredChecks[0].command, exactCommand);
   assert.equal(exact.checks[0].command, exactCommand);
   assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("custom finalization can fail criteria without a failing executable check", () => {
+  const passed = finalizationPassed();
+  for (const emptyInventory of [true, false]) {
+    const payload = {
+      ...passed,
+      status: "FAIL",
+      issues: [
+        {
+          id: "F1",
+          command: "criterion:traceability",
+          problem: "The analysis omits the source citation.",
+          evidence: ["The conclusion names no source."],
+        },
+      ],
+      ...(emptyInventory ? { requiredChecks: [], checks: [] } : {}),
+    };
+    assert.throws(() => normalizeFinalizationResult(payload));
+    const workerResult = normalizeFinalizationResult(payload, {
+      allowEmpty: true,
+    });
+    if (!emptyInventory)
+      assert.throws(() =>
+        normalizeFinalizationResult(
+          {
+            ...payload,
+            checks: payload.checks.map((check) => ({
+              ...check,
+              status: "BLOCKED",
+            })),
+          },
+          { allowEmpty: true },
+        ),
+      );
+    assert.throws(() =>
+      normalizeFinalizationResult(
+        { ...payload, issues: [] },
+        { allowEmpty: true },
+      ),
+    );
+    assert.throws(() =>
+      normalizeFinalizationResult(
+        { ...payload, status: "PASS" },
+        { allowEmpty: true },
+      ),
+    );
+    const evidence = {
+      workerResult,
+      issues: workerResult.issues,
+      checks: workerResult.checks.map((check) => ({
+        ...check,
+        executor: "agent",
+        commandIdentity: null,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+      })),
+      validationInfrastructureFingerprint: hash("infrastructure"),
+      trustedCommandFingerprint: hash("commands"),
+      trustedConfigurationFingerprint: hash("configuration"),
+      validationChanged: false,
+      fingerprint: hash("result"),
+    };
+    assert.throws(() => createPersistedFinalizationEvidence(evidence));
+    const persisted = createPersistedFinalizationEvidence({
+      ...evidence,
+      allowEmpty: true,
+    });
+    assert.equal(persisted.status, "FAIL");
+    assert.deepEqual(persisted.issues, workerResult.issues);
+    assert.ok(persisted.checks.every(({ status }) => status === "PASS"));
+  }
 });
 
 test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {
@@ -759,7 +1188,7 @@ test("rejects staging-dependent validation commands while allowing HEAD checks",
 
 test("classifies oversized and unserializable bootstrap contracts", () => {
   const largePaths = Array.from(
-    { length: 32 },
+    { length: 256 },
     (_, index) => `${"😀".repeat(3_990)}-${index}`,
   );
   const cases = [
@@ -778,7 +1207,7 @@ test("classifies oversized and unserializable bootstrap contracts", () => {
       (cause) => {
         assert.deepEqual(cause.diagnostic, {
           field: "result",
-          constraint: "maximum-256-kibibytes",
+          constraint: "maximum-2-mebibytes",
         });
         return true;
       },
@@ -831,6 +1260,41 @@ test("migrates version-1 execution state to the fail-closed shape", () => {
   assert.equal(migrated.reviewResult, null);
 });
 
+test("version 34 migration retains supported legacy setting defaults", () => {
+  for (const mode of ["independent", "lazy", "combined"]) {
+    const current = createPlanExecutionState({
+      settings: { ...SETTINGS, mode },
+    });
+    for (const missing of [
+      [],
+      ["finalization"],
+      ["trustedChecks"],
+      [
+        "preferredCommitLineLimit",
+        "commitSizeAssessmentMultiplier",
+        "finalization",
+      ],
+      [
+        "preferredCommitLineLimit",
+        "commitSizeAssessmentMultiplier",
+        "trustedChecks",
+      ],
+    ]) {
+      const legacy = structuredClone(current);
+      delete legacy.customCandidate;
+      delete legacy.customWritePolicy;
+      delete legacy.settings.planKind;
+      for (const field of missing) delete legacy.settings[field];
+      const saved = structuredClone(legacy);
+      const migrated = planExecutionPipeline.migrations[34]({
+        pipelineState: legacy,
+      });
+      assert.deepEqual(normalizePipelineState(migrated), current);
+      assert.deepEqual(legacy, saved);
+    }
+  }
+});
+
 test("migrates version-3 execution state with no consumed bootstrap corrections", () => {
   const current = createPlanExecutionState();
   const legacy = { ...current };
@@ -842,7 +1306,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 26);
+  assert.equal(planExecutionPipeline.stateVersion, 39);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -850,6 +1314,102 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   });
   assert.deepEqual(authenticationMigration, current);
   assert.ok(Object.isFrozen(authenticationMigration));
+});
+
+test("version 36 pre-effect commit records migrate unchanged and classes stay bounded", async (t) => {
+  let rejectCommit = true;
+  let interruptVerification = true;
+  const fixture = await createFixture(t, {
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Git verification was interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit" && rejectCommit) {
+        rejectCommit = false;
+        throw Object.assign(new Error("The adapter rejected the commit."), {
+          code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+          effectStarted: false,
+        });
+      }
+    },
+  });
+  const { validateRun } = planExecutionPipeline.workflow;
+  const invalidState = { code: "ERR_INVALID_PLAN_EXECUTION_STATE" };
+  const consumed = await fixture.run();
+  const retired = await fixture.run();
+
+  assert.deepEqual(consumed.pipelineState.pendingCommit.preEffectRejection, {
+    code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+    recoverable: false,
+  });
+  assert.equal(retired.pause.reason, "commit_failed");
+  for (const run of [consumed, retired]) {
+    const migrated = planExecutionPipeline.migrations[36](run);
+    assert.deepEqual(migrated, run.pipelineState);
+    const { writableResult: _recovery, ...legacy } = run.pipelineState;
+    assert.deepEqual(
+      planExecutionPipeline.migrations[37]({ ...run, pipelineState: legacy }),
+      run.pipelineState,
+    );
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => validateRun({ ...run, pipelineState: migrated }));
+  }
+
+  const classed = structuredClone(consumed);
+  classed.pipelineState.pendingCommit.preEffectRejection.diagnosticClass =
+    "operation_local_commit_file_change";
+  assert.doesNotThrow(() => validateRun(classed));
+  for (const diagnosticClass of ["native provider value", 7]) {
+    const invalid = structuredClone(classed);
+    invalid.pipelineState.pendingCommit.preEffectRejection.diagnosticClass =
+      diagnosticClass;
+    assert.throws(() => validateRun(invalid), invalidState);
+  }
+  const withProof = structuredClone(classed);
+  Object.assign(withProof.pipelineState.pendingCommit.preEffectRejection, {
+    code: "ERR_AUTHENTICATION_REQUIRED",
+    authentication: {
+      disposition: "authentication_required",
+      commitExecutor: "not_started",
+    },
+  });
+  assert.throws(() => validateRun(withProof), invalidState);
+
+  assert.doesNotThrow(() =>
+    validateRun({
+      ...retired,
+      pause: {
+        ...retired.pause,
+        diagnosticClass: "operation_local_commit_confirmation",
+      },
+    }),
+  );
+  for (const pause of [
+    { ...retired.pause, diagnosticClass: "native provider value" },
+    {
+      ...retired.pause,
+      reason: "backend_unavailable",
+      diagnosticClass: "operation_local_commit_confirmation",
+    },
+  ]) {
+    assert.throws(() => validateRun({ ...retired, pause }), invalidState);
+  }
+  assert.throws(
+    () =>
+      validateRun({
+        ...consumed,
+        pause: {
+          ...consumed.pause,
+          diagnosticClass: "operation_local_commit_confirmation",
+        },
+      }),
+    invalidState,
+  );
 });
 
 test("version 21 migration preserves terminal proof", async (t) => {
@@ -1158,6 +1718,21 @@ test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) 
 
   assert.deepEqual(migrated, completed.pipelineState);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+  const historicalDiagnostic = {
+    ...diagnostic,
+    field: "result",
+    constraint: "maximum-256-kibibytes",
+  };
+  const historical = migratePlanExecutionStateV9({
+    pipelineState: {
+      ...legacy,
+      bootstrapCorrections: [{ attempt: 1, ...historicalDiagnostic }],
+    },
+  });
+  assert.deepEqual(historical.bootstrapCorrections[0].diagnostics, [
+    historicalDiagnostic,
+  ]);
+  assert.doesNotThrow(() => normalizePipelineState(historical));
 });
 
 test("migrates version-10 review state without reconstructing rejected output", async (t) => {
@@ -1571,7 +2146,7 @@ test("invalidates version-1 validation evidence before active execution resumes"
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );
@@ -1580,7 +2155,7 @@ test("invalidates version-1 validation evidence before active execution resumes"
       ({ prompt }) =>
         prompt.includes("versioned-state migration checkpoint") &&
         prompt.includes(
-          "The frozen finalization skill is .agents/skills/finalization/SKILL.md",
+          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
         ),
     ),
   );

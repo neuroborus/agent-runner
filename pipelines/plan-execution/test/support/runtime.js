@@ -16,6 +16,9 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { inspectFinalizationFile } from "../../../../src/config/index.js";
+
+import { assertExecutionRun as assertRun } from "../../src/bootstrap-progress.js";
 import {
   createPlanExecutionState,
   migratePlanExecutionStateV1,
@@ -54,10 +57,11 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  IMPLEMENTATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import {
-  assertRun,
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
   normalizeBootstrapArbitration,
@@ -68,6 +72,11 @@ import {
   normalizePipelineState,
   normalizeReconciliationResult,
 } from "../../src/workflow-contract.js";
+
+import {
+  REPOSITORY_DISCOVERY_SCHEMA,
+  APPLICABILITY_BATCH_SCHEMA,
+} from "../../src/bootstrap-unit-schemas.js";
 
 const executeFile = promisify(execFile);
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -88,6 +97,10 @@ const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
 const SETTINGS = Object.freeze({
+  planKind: "commit",
+  automaticCommitSplitting: true,
+  preferredCommitLineLimit: 900,
+  commitSizeAssessmentMultiplier: 3,
   finalization: "auto",
   maxFixRoundsPerStep: 5,
   maxDisputesPerFinding: 2,
@@ -105,6 +118,7 @@ const VALIDATION_INFRASTRUCTURE = Object.freeze([
 ]);
 const WRAPPED_BOOTSTRAP_SCHEMAS = new Set([
   BOOTSTRAP_SCHEMA,
+  REPOSITORY_DISCOVERY_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
   BOOTSTRAP_ARBITRATION_SCHEMA,
 ]);
@@ -1086,12 +1100,22 @@ function createClarificationService({
 
   async function append(options, section) {
     const snapshot = await inspectTranscript(options);
+    if (
+      options.resultHash !== undefined &&
+      snapshot.hash === options.resultHash
+    )
+      return snapshot;
     assertExpectedHash(snapshot, options.expectedHash);
     const separator = snapshot.content.length === 0 ? "" : "\n\n";
-    writeTranscript(
-      options.transcriptPath,
-      `${snapshot.content}${separator}${section}\n`,
-    );
+    const content = `${snapshot.content}${separator}${section}\n`;
+    const resultHash = hash(content);
+    if (options.resultHash !== undefined)
+      assert.equal(options.resultHash, resultHash);
+    await options.persistAppend?.({
+      expectedHash: snapshot.hash,
+      hash: resultHash,
+    });
+    writeTranscript(options.transcriptPath, content);
     return inspectTranscript(options);
   }
 
@@ -1353,11 +1377,15 @@ async function createFixture(
     arbiter: [...arbiter],
   };
   const calls = { worker: [], reviewer: [], arbiter: [] };
+  const applicabilityCalls = [];
+  const discoveryResults = {};
+
   const contextCalls = [];
   const probeCalls = { worker: 0, reviewer: 0, arbiter: 0 };
   const freshSessionIndexes = { worker: 0, reviewer: 0, arbiter: 0 };
 
   function resultMatchesSchema(result, schema) {
+    if (schema === REPOSITORY_DISCOVERY_SCHEMA) schema = BOOTSTRAP_SCHEMA;
     if (result === MISSING_BOOTSTRAP_RESPONSE) {
       return WRAPPED_BOOTSTRAP_SCHEMAS.has(schema);
     }
@@ -1459,6 +1487,44 @@ async function createFixture(
               sessionId: request.session?.id ?? nextFreshSessionId(role),
             };
           }
+          if (request.schema === APPLICABILITY_BATCH_SCHEMA) {
+            applicabilityCalls.push({ role, ...request });
+            const override = await onRoleRun?.(
+              role,
+              request,
+              applicabilityCalls.length,
+              repositoryControl,
+            );
+            const supplied = JSON.parse(
+              /Applicability request \(data\):\n([^\n]+)/u.exec(
+                request.prompt,
+              )[1],
+            );
+            const steps = new Set(supplied.steps.map(({ number }) => number));
+            return {
+              structured: override ?? {
+                result: {
+                  status: "READY",
+                  unitId: supplied.unitId,
+                  assignments: discoveryResults[role].requiredChecks.flatMap(
+                    ({ id, steps: assigned }) => {
+                      const applicable = (assigned ?? [...steps]).filter(
+                        (step) => steps.has(step),
+                      );
+                      return applicable.length
+                        ? [{ checkId: id, steps: applicable }]
+                        : [];
+                    },
+                  ),
+                  missingCommands: [],
+                  missingInfrastructure: [],
+                  capabilityRequirements: [],
+                  environmentBlockers: [],
+                },
+              },
+              sessionId: request.session?.id ?? nextFreshSessionId(role),
+            };
+          }
           calls[role].push(request);
           assert.match(request.prompt, /Do not delegate/u);
           assert.match(
@@ -1494,7 +1560,7 @@ async function createFixture(
               sessionId: request.session?.id ?? nextFreshSessionId(role),
             };
           }
-          const structured = takeStructured(role, request.schema);
+          let structured = takeStructured(role, request.schema);
           assert.notEqual(structured, undefined, `Unexpected ${role} turn.`);
           if (structured === MISSING_BOOTSTRAP_RESPONSE) {
             return null;
@@ -1539,7 +1605,9 @@ async function createFixture(
             };
           }
           if (
-            request.schema === BOOTSTRAP_SCHEMA &&
+            [BOOTSTRAP_SCHEMA, REPOSITORY_DISCOVERY_SCHEMA].includes(
+              request.schema,
+            ) &&
             Array.isArray(structured.requiredChecks)
           ) {
             structured.requiredChecks = structured.requiredChecks.map(
@@ -1549,6 +1617,33 @@ async function createFixture(
                 ),
                 ...check,
               }),
+            );
+          }
+          if (
+            request.schema === REPOSITORY_DISCOVERY_SCHEMA &&
+            structured.status === "READY"
+          ) {
+            discoveryResults[role] = {
+              ...structured,
+              requiredChecks: structured.requiredChecks,
+            };
+            structured = Object.fromEntries(
+              Object.entries(structured).filter(
+                ([field]) =>
+                  ![
+                    "status",
+                    "capacityField",
+                    "capacityLimit",
+                    "reason",
+                    "question",
+                    "options",
+                    "whyBlocked",
+                    "evidence",
+                  ].includes(field),
+              ),
+            );
+            structured.requiredChecks = structured.requiredChecks?.map(
+              ({ steps, ...check }) => check,
             );
           }
           const candidateStructured = [
@@ -1568,9 +1663,13 @@ async function createFixture(
             : structured;
           return {
             output: "structured",
-            structured: WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema)
-              ? { result: candidateStructured }
-              : candidateStructured,
+            structured:
+              WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema) ||
+              [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
+                request.schema,
+              )
+                ? { result: candidateStructured }
+                : candidateStructured,
             sessionId:
               request.session?.mode === "continue"
                 ? request.session.id
@@ -1678,7 +1777,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 26,
+    pipelineStateVersion: planExecutionPipeline.stateVersion,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -1710,6 +1809,9 @@ async function createFixture(
     onFreeze,
   });
   const runtime = {
+    finalization: {
+      inspectFile: ({ path }) => inspectFinalizationFile({ path, projectPath }),
+    },
     adapters,
     clarifications,
     trustedValidation: {
@@ -1728,6 +1830,18 @@ async function createFixture(
       },
     },
     git: {
+      async measureChanges({ baseHead, expectedContentFingerprint }) {
+        return {
+          baseHead,
+          contentFingerprint: expectedContentFingerprint,
+          additions: 1,
+          deletions: 0,
+          changedLines: 1,
+          changedPaths: ["implementation.txt"],
+          binaryPaths: [],
+          gitlinkPaths: [],
+        };
+      },
       async inspectHead() {
         if (repository === "git") {
           const head = (
@@ -2091,7 +2205,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 26,
+      pipelineStateVersion: planExecutionPipeline.stateVersion,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
@@ -2104,6 +2218,7 @@ async function createFixture(
     artifacts,
     calls,
     contextCalls,
+    applicabilityCalls,
     clarificationPath,
     hasClarification() {
       try {

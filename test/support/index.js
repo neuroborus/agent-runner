@@ -20,3 +20,12 @@ export {
 } from "./runner.js";
 
 export { attachInactivity } from "./inactivity.js";
+
+export {
+  largeFinalizationResult,
+  sizeEvidenceResult,
+  STRUCTURED_RESULT_BYTES,
+} from "./structured-results.js";
+
+export { customExecutionFixture } from "./custom-execution.js";
+export { runtimeFixture, runtimeFixtureDirectory } from "./runtime.js";

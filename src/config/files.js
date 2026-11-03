@@ -1,29 +1,37 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, open, realpath } from "node:fs/promises";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { fileURLToPath } from "node:url";
 
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 
 import {
-  CONFIG_FILENAME,
-  CONFIG_SCHEMA_VERSION,
   ConfigurationError,
   DEFAULT_ARTIFACT_ROOT,
   normalizeConfiguration,
   parseProjectConfiguration,
-  parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
 } from "./parsing.js";
 
-const CONFIG_PATH = fileURLToPath(
-  new URL(`../../${CONFIG_FILENAME}`, import.meta.url),
-);
 const MAX_CONFIGURATION_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = constants.O_NONBLOCK ?? 0;
+
+function assertWorkspaceKind(kind) {
+  if (!["git", "directory"].includes(kind))
+    throw new ConfigurationError("Project workspace kind is invalid.", {
+      code: "ERR_PROJECT_CONFIGURATION_READ",
+    });
+}
 
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
@@ -89,7 +97,11 @@ async function confinedAncestors(projectPath, path) {
   );
 }
 
-async function readConfinedConfiguration(path, projectPath, relativePath) {
+export async function readConfinedConfiguration(
+  path,
+  projectPath,
+  relativePath,
+) {
   let handle;
   try {
     const [pathBefore, ancestorsBefore] = await Promise.all([
@@ -191,6 +203,7 @@ async function readConfinedConfiguration(path, projectPath, relativePath) {
     }
     return Object.freeze({
       content,
+      bytes: source,
       protection: Object.freeze({
         schemaVersion: 1,
         path,
@@ -214,13 +227,84 @@ async function readConfinedConfiguration(path, projectPath, relativePath) {
   }
 }
 
+async function projectAncestors(projectPath) {
+  return confinedAncestors(
+    parse(projectPath).root,
+    join(projectPath, "binding"),
+  );
+}
+
+async function readExternalConfiguration(path, projectPath) {
+  try {
+    const ancestorsBefore = await projectAncestors(projectPath);
+    const rootPath = parse(path).root;
+    const loaded = await readConfinedConfiguration(
+      path,
+      rootPath,
+      relative(rootPath, path),
+    );
+    const ancestorsAfter = await projectAncestors(projectPath);
+    if (!isDeepStrictEqual(ancestorsBefore, ancestorsAfter)) {
+      throw new Error("Target identity changed during configuration reading.");
+    }
+    return { ...loaded, projectAncestors: Object.freeze(ancestorsAfter) };
+  } catch (cause) {
+    if (cause instanceof ConfigurationError) throw cause;
+    throw new ConfigurationError(
+      "Cannot bind external project configuration.",
+      {
+        cause,
+        code: "ERR_PROJECT_CONFIGURATION_READ",
+      },
+    );
+  }
+}
+
+function bindInfrastructure(configuration, projectPath, path, external) {
+  const binding = configuration.infrastructure;
+  const placement = external ? "external" : "integrated";
+  const rootPath = binding?.rootPath ?? projectPath;
+  if (
+    (external && binding === undefined) ||
+    (binding !== undefined &&
+      (binding.projectPath !== projectPath ||
+        binding.placement !== placement)) ||
+    (!external && rootPath !== projectPath) ||
+    (external &&
+      (isWithin(rootPath, projectPath) || isWithin(projectPath, rootPath))) ||
+    !isWithin(rootPath, path) ||
+    path === rootPath
+  ) {
+    throw new ConfigurationError(
+      "Selected project configuration and infrastructure binding disagree.",
+      { code: "ERR_PROJECT_CONFIGURATION_BINDING" },
+    );
+  }
+  return Object.freeze({ schemaVersion: 1, placement, projectPath, rootPath });
+}
+
+function externalProtection(loaded, projectPath, infrastructureRoot) {
+  return Object.freeze({
+    ...loaded.protection,
+    schemaVersion: 2,
+    projectPath,
+    infrastructureRoot,
+    relativePath: relative(infrastructureRoot, loaded.protection.path)
+      .split(sep)
+      .join("/"),
+    projectAncestors: loaded.projectAncestors,
+  });
+}
+
 export async function loadProjectConfiguration({
   configurationPath,
   inspectPath,
   projectPath,
   providers = PROVIDER_REGISTRY,
   runnerConfiguration,
+  workspaceKind = "git",
 }) {
+  assertWorkspaceKind(workspaceKind);
   if (typeof inspectPath !== "function") {
     throw new ConfigurationError(
       "Project configuration path inspection is unavailable.",
@@ -231,15 +315,51 @@ export async function loadProjectConfiguration({
   if (
     explicit &&
     (typeof configurationPath !== "string" ||
-      configurationPath.trim().length === 0)
+      configurationPath.trim().length === 0 ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(configurationPath))
   ) {
     throw new ConfigurationError(
       "Project configuration path must be a non-empty string.",
     );
   }
-  const requestedPath =
-    configurationPath ??
-    join(projectPath, DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME);
+  const normalizedRunnerConfiguration = normalizeConfiguration(
+    runnerConfiguration,
+    providers,
+  );
+  const requestedPath = resolve(
+    projectPath,
+    configurationPath ?? join(DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME),
+  );
+  const external = !isWithin(projectPath, requestedPath);
+  if (external) {
+    const loaded = await readExternalConfiguration(requestedPath, projectPath);
+    const configuration = parseProjectConfiguration(
+      loaded.content,
+      normalizedRunnerConfiguration,
+      providers,
+    );
+    const infrastructure = bindInfrastructure(
+      configuration,
+      projectPath,
+      requestedPath,
+      true,
+    );
+    return Object.freeze({
+      path: requestedPath,
+      configuration,
+      infrastructure,
+      artifactPath: resolve(
+        infrastructure.rootPath,
+        configuration.artifactRoot ??
+          normalizedRunnerConfiguration.artifactRoot,
+      ),
+      protection: externalProtection(
+        loaded,
+        projectPath,
+        infrastructure.rootPath,
+      ),
+    });
+  }
   const inspection = await inspectPath({ path: requestedPath, projectPath });
   if (!inspection.exists) {
     if (!explicit) {
@@ -250,7 +370,7 @@ export async function loadProjectConfiguration({
       { code: "ERR_PROJECT_CONFIGURATION_READ" },
     );
   }
-  if (inspection.tracked || !inspection.ignored) {
+  if (workspaceKind === "git" && (inspection.tracked || !inspection.ignored)) {
     throw new ConfigurationError(
       "Project configuration must be ignored and untracked.",
       { code: "ERR_PROJECT_CONFIGURATION_NOT_IGNORED" },
@@ -261,12 +381,24 @@ export async function loadProjectConfiguration({
     projectPath,
     inspection.relativePath,
   );
+  const configuration = parseProjectConfiguration(
+    loaded.content,
+    normalizedRunnerConfiguration,
+    providers,
+  );
+  const infrastructure = bindInfrastructure(
+    configuration,
+    projectPath,
+    inspection.path,
+    false,
+  );
   return Object.freeze({
     path: inspection.path,
-    configuration: parseProjectConfiguration(
-      loaded.content,
-      runnerConfiguration,
-      providers,
+    configuration,
+    infrastructure,
+    artifactPath: resolve(
+      infrastructure.rootPath,
+      configuration.artifactRoot ?? normalizedRunnerConfiguration.artifactRoot,
     ),
     protection: loaded.protection,
   });
@@ -276,9 +408,36 @@ export async function assertProjectConfigurationProtected({
   inspectPath,
   projectPath,
   protection,
+  workspaceKind = "git",
 }) {
+  assertWorkspaceKind(workspaceKind);
   if (protection === null) return;
   try {
+    if (protection.projectPath !== projectPath) {
+      throw new Error("Project configuration target changed.");
+    }
+    if (protection.schemaVersion === 2) {
+      const current = await readExternalConfiguration(
+        protection.path,
+        projectPath,
+      );
+      if (
+        !isDeepStrictEqual(
+          externalProtection(
+            current,
+            projectPath,
+            protection.infrastructureRoot,
+          ),
+          protection,
+        )
+      ) {
+        throw new Error("External project configuration binding changed.");
+      }
+      return;
+    }
+    if (protection.schemaVersion !== 1) {
+      throw new Error("Unknown protection version.");
+    }
     const inspection = await inspectPath({
       path: protection.path,
       projectPath,
@@ -287,8 +446,7 @@ export async function assertProjectConfigurationProtected({
       !inspection.exists ||
       inspection.path !== protection.path ||
       inspection.relativePath !== protection.relativePath ||
-      inspection.tracked ||
-      !inspection.ignored
+      (workspaceKind === "git" && (inspection.tracked || !inspection.ignored))
     ) {
       throw new Error("Project configuration confinement changed.");
     }
@@ -308,23 +466,88 @@ export async function assertProjectConfigurationProtected({
   }
 }
 
-export async function loadRunnerConfiguration(providers = PROVIDER_REGISTRY) {
-  let source;
+// Finalization is read-only input, never configuration authority. Its fingerprint
+// binds bytes, file identity, real ancestry and the target without retaining text.
+export async function inspectFinalizationFile({
+  path,
+  projectPath,
+  infrastructureRoot = projectPath,
+}) {
+  let absolutePath;
   try {
-    source = await readFile(CONFIG_PATH, "utf8");
-  } catch (cause) {
-    if (cause?.code === "ENOENT") {
-      return normalizeConfiguration(
-        { schemaVersion: CONFIG_SCHEMA_VERSION },
-        providers,
-      );
+    if (
+      typeof path !== "string" ||
+      typeof projectPath !== "string" ||
+      !isAbsolute(projectPath) ||
+      resolve(projectPath) !== projectPath ||
+      typeof infrastructureRoot !== "string" ||
+      !isAbsolute(infrastructureRoot) ||
+      resolve(infrastructureRoot) !== infrastructureRoot ||
+      !path.endsWith(".md") ||
+      /[\\*?[\]{}]/u.test(path) ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(path) ||
+      path.split("/").some((part) => ["", ".", "..", ".git"].includes(part)) ||
+      (infrastructureRoot !== projectPath &&
+        (isWithin(projectPath, infrastructureRoot) ||
+          isWithin(infrastructureRoot, projectPath)))
+    ) {
+      throw new Error("Invalid finalization file selection.");
     }
-
+    absolutePath = resolve(infrastructureRoot, path);
+    if (!isWithin(infrastructureRoot, absolutePath)) {
+      throw new Error("Finalization file escapes its root.");
+    }
+    const ancestors = [infrastructureRoot];
+    for (const part of path.split("/").slice(0, -1)) {
+      ancestors.push(join(ancestors.at(-1), part));
+    }
+    // Inspect parents in order so an absent leaf cannot mask an unsafe ancestor.
+    for (const ancestor of ancestors) {
+      if (
+        !(await lstat(ancestor)).isDirectory() ||
+        (await realpath(ancestor)) !== ancestor
+      ) {
+        throw new Error(
+          "Finalization file ancestors must be real directories.",
+        );
+      }
+    }
+    const loaded =
+      infrastructureRoot === projectPath
+        ? await readConfinedConfiguration(absolutePath, projectPath, path)
+        : await readExternalConfiguration(absolutePath, projectPath);
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify({
+          schemaVersion: 1,
+          projectPath,
+          infrastructureRoot,
+          protection: loaded.protection,
+          projectAncestors: loaded.projectAncestors ?? null,
+        }),
+      )
+      .digest("hex");
+    return Object.freeze({
+      path: absolutePath,
+      relativePath: path,
+      inventoryPath:
+        infrastructureRoot === projectPath ? path : `finalization://${path}`,
+      exists: true,
+      kind: "file",
+      fingerprint,
+    });
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.cause?.code === "ENOENT") {
+      return Object.freeze({
+        path: absolutePath,
+        relativePath: path,
+        exists: false,
+        kind: null,
+      });
+    }
     throw new ConfigurationError(
-      `Cannot read runner configuration at ${CONFIG_PATH}.`,
-      { cause, code: "ERR_CONFIGURATION_READ" },
+      "Finalization guidance is not a safe bounded Markdown file.",
+      { cause, code: "ERR_FINALIZATION_FILE_INVALID" },
     );
   }
-
-  return parseRunnerConfiguration(source, providers);
 }

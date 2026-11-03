@@ -1,4 +1,6 @@
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 import {
   clientAttributionFingerprint,
@@ -9,9 +11,14 @@ import {
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
-import { validStopTiming, validStopSettlement } from "./stop-contract.js";
+import { normalizeObservationState } from "./observations.js";
+import {
+  validStopBoundary,
+  validStopTiming,
+  validStopSettlement,
+} from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 17;
+export const RUN_STATE_SCHEMA_VERSION = 24;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -43,6 +50,13 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   14,
   15,
   16,
+  17,
+  18,
+  19,
+  20,
+  21,
+  22,
+  23,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -61,6 +75,7 @@ const STATE_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "workspace",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -68,6 +83,7 @@ const STATE_FIELDS = new Set([
   "providerInactivityTimeoutMs",
   "providerInactivityFingerprint",
   "inactivityRecovery",
+  "observations",
   "availabilityPolicy",
   "availabilityRetry",
   "counters",
@@ -77,6 +93,8 @@ const STATE_FIELDS = new Set([
   "activeTurn",
   "executionProcess",
   "executionResource",
+  "preparation",
+  "preservationRecords",
   "stopRequest",
   "pipelineState",
   "createdAt",
@@ -127,6 +145,11 @@ const PROJECT_CONFIGURATION_PROTECTION_FIELDS = new Set([
   "identity",
   "ancestors",
 ]);
+const EXTERNAL_CONFIGURATION_PROTECTION_FIELDS = new Set([
+  ...PROJECT_CONFIGURATION_PROTECTION_FIELDS,
+  "infrastructureRoot",
+  "projectAncestors",
+]);
 const FILE_IDENTITY_FIELDS = new Set([
   "device",
   "inode",
@@ -135,7 +158,8 @@ const FILE_IDENTITY_FIELDS = new Set([
   "changedNs",
 ]);
 const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
-const MAX_STATE_BYTES = 1024 * 1024;
+// Pipeline results can be retained in several inventories and gate records.
+const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
 const MAX_OBJECT_KEYS = 1_000;
@@ -158,6 +182,45 @@ export class RunStoreError extends Error {
 
 function fail(message, code = "ERR_INVALID_RUN_STATE") {
   throw new RunStoreError(message, { code });
+}
+
+export function preservationError(cause) {
+  return new RunStoreError(
+    "Durable preservation ownership or content is invalid.",
+    {
+      cause,
+      code: "ERR_INVALID_PRESERVATION",
+    },
+  );
+}
+
+function normalizePreservationRecords(value, schemaVersion) {
+  if (schemaVersion < 23 && value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 1024 ||
+    (schemaVersion < 23 && value.length !== 0)
+  )
+    throw preservationError();
+  const ids = new Set();
+  return value.map((record) => {
+    if (
+      !record ||
+      Object.keys(record).sort().join() !== "fileId,hash,id,identity" ||
+      !/^[a-f0-9]{64}$/u.test(record.hash) ||
+      !record.identity ||
+      Object.keys(record.identity).sort().join() !== "device,inode" ||
+      ![record.identity.device, record.identity.inode].every(
+        (part) => typeof part === "string" && /^\d+$/u.test(part),
+      )
+    )
+      throw preservationError();
+    assertRunId(record.id);
+    assertRunId(record.fileId);
+    if (ids.has(record.id)) throw preservationError();
+    ids.add(record.id);
+    return structuredClone(record);
+  });
 }
 
 function isRecord(value) {
@@ -528,15 +591,15 @@ function normalizeProjectConfigurationProtection(value, state) {
     return null;
   }
   assertRecord(value, "run.projectConfigurationProtection");
-  rejectUnknownFields(
-    value,
-    PROJECT_CONFIGURATION_PROTECTION_FIELDS,
-    "run.projectConfigurationProtection",
-  );
+  const external = value.schemaVersion === 2;
+  const fields = external
+    ? EXTERNAL_CONFIGURATION_PROTECTION_FIELDS
+    : PROJECT_CONFIGURATION_PROTECTION_FIELDS;
+  const basePath = external ? value.infrastructureRoot : state.projectPath;
+  rejectUnknownFields(value, fields, "run.projectConfigurationProtection");
   if (
-    Object.keys(value).length !==
-      PROJECT_CONFIGURATION_PROTECTION_FIELDS.size ||
-    value.schemaVersion !== 1 ||
+    Object.keys(value).length !== fields.size ||
+    ![1, 2].includes(value.schemaVersion) ||
     value.projectPath !== state.projectPath ||
     typeof value.path !== "string" ||
     !isAbsolute(value.path) ||
@@ -544,13 +607,34 @@ function normalizeProjectConfigurationProtection(value, state) {
     typeof value.relativePath !== "string" ||
     value.relativePath.length === 0 ||
     value.relativePath.includes("\\") ||
-    resolve(state.projectPath, value.relativePath) !== value.path ||
-    relative(state.projectPath, value.path).split(sep).join("/") !==
+    typeof basePath !== "string" ||
+    !isAbsolute(basePath) ||
+    resolve(basePath) !== basePath ||
+    resolve(basePath, value.relativePath) !== value.path ||
+    relative(basePath, value.path).split(sep).join("/") !==
       value.relativePath ||
     typeof value.contentHash !== "string" ||
     !/^[a-f0-9]{64}$/u.test(value.contentHash)
   ) {
     fail("run.projectConfigurationProtection is invalid.");
+  }
+  if (external) {
+    const within = (parent, child) => {
+      const path = relative(parent, child);
+      return (
+        path === "" ||
+        (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`))
+      );
+    };
+    if (
+      UNSAFE_TEXT_PATTERN.test(basePath) ||
+      within(basePath, state.projectPath) ||
+      within(state.projectPath, basePath) ||
+      !within(basePath, value.path) ||
+      value.path === basePath
+    ) {
+      fail("run.projectConfigurationProtection.infrastructureRoot is invalid.");
+    }
   }
   assertRecord(value.identity, "run.projectConfigurationProtection.identity");
   rejectUnknownFields(
@@ -570,22 +654,51 @@ function normalizeProjectConfigurationProtection(value, state) {
       ),
     ]),
   );
-  if (!Array.isArray(value.ancestors) || value.ancestors.length === 0) {
-    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  const ancestors = normalizeConfigurationAncestors(
+    value.ancestors,
+    value.path,
+    external ? parse(value.path).root : state.projectPath,
+    "run.projectConfigurationProtection.ancestors",
+  );
+  return {
+    schemaVersion: value.schemaVersion,
+    path: value.path,
+    projectPath: value.projectPath,
+    relativePath: value.relativePath,
+    contentHash: value.contentHash,
+    identity,
+    ancestors,
+    ...(external
+      ? {
+          infrastructureRoot: value.infrastructureRoot,
+          projectAncestors: normalizeConfigurationAncestors(
+            value.projectAncestors,
+            resolve(state.projectPath, "binding"),
+            parse(state.projectPath).root,
+            "run.projectConfigurationProtection.projectAncestors",
+          ),
+        }
+      : {}),
+  };
+}
+
+function normalizeConfigurationAncestors(value, filePath, rootPath, fieldPath) {
+  if (!Array.isArray(value) || value.length === 0) {
+    fail(`${fieldPath} is invalid.`);
   }
   const expectedPaths = [];
-  for (let current = dirname(value.path); ; current = dirname(current)) {
+  for (let current = dirname(filePath); ; current = dirname(current)) {
     expectedPaths.unshift(current);
-    if (current === state.projectPath) break;
+    if (current === rootPath) break;
     if (current === dirname(current)) {
-      fail("run.projectConfigurationProtection.ancestors is invalid.");
+      fail(`${fieldPath} is invalid.`);
     }
   }
-  if (value.ancestors.length !== expectedPaths.length) {
-    fail("run.projectConfigurationProtection.ancestors is invalid.");
+  if (value.length !== expectedPaths.length) {
+    fail(`${fieldPath} is invalid.`);
   }
-  const ancestors = value.ancestors.map((ancestor, index) => {
-    const path = `run.projectConfigurationProtection.ancestors[${index}]`;
+  return value.map((ancestor, index) => {
+    const path = `${fieldPath}[${index}]`;
     assertRecord(ancestor, path);
     rejectUnknownFields(ancestor, ANCESTOR_IDENTITY_FIELDS, path);
     if (
@@ -600,15 +713,6 @@ function normalizeProjectConfigurationProtection(value, state) {
       inode: decimalIdentity(ancestor.inode, `${path}.inode`),
     };
   });
-  return {
-    schemaVersion: 1,
-    path: value.path,
-    projectPath: value.projectPath,
-    relativePath: value.relativePath,
-    contentHash: value.contentHash,
-    identity,
-    ancestors,
-  };
 }
 
 export function assertRunId(runId) {
@@ -776,7 +880,7 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   };
 }
 
-function normalizeStopRequest(value, state) {
+export function normalizeStopRequest(value, state) {
   if (value === undefined && state.schemaVersion < 4) return null;
   if (value === null) return null;
   if (state.schemaVersion < 4)
@@ -933,7 +1037,10 @@ function normalizeProcessAncestryBaseline(value, processIdentity) {
   });
 }
 
-function normalizeExecutionProcess(value, schemaVersion) {
+export function normalizeExecutionProcess(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
   if ((value === undefined && schemaVersion < 5) || value === null) return null;
   assertRecord(value, "run.executionProcess");
   const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
@@ -995,6 +1102,230 @@ function normalizeExecutionProcess(value, schemaVersion) {
     ancestryBaseline,
     controlGroup,
   };
+}
+
+export function preparationHeader(reservation) {
+  return {
+    runId: reservation.owner.runId,
+    id: reservation.id,
+    revision: reservation.revision,
+    digest: reservation.digest,
+  };
+}
+
+export function normalizePreparationCustody(records, reservation) {
+  const invalid = () =>
+    fail(
+      "Preparation custody is invalid.",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+  if (!Array.isArray(records) || records.length < 1 || records.length > 16)
+    invalid();
+  let previous = null;
+  let process = null;
+  let admitted = null;
+  let retired = false;
+  let stopRevision = reservation.revision;
+  const stopIds = new Set();
+  let denied =
+    reservation.stopRequest?.reconciledRevision === null &&
+    (reservation.stopRequest.effectiveTiming !== "after-current-commit" ||
+      !isDeepStrictEqual(
+        reservation.stopRequest.targetBoundary,
+        reservation.targetBoundary,
+      ));
+  for (const record of records) {
+    assertRecord(record, "preparation custody record");
+    const line = JSON.stringify(record);
+    if (
+      Object.keys(record).length !== 3 ||
+      record.previous !== previous ||
+      !Object.hasOwn(record, "value")
+    )
+      invalid();
+    const { kind, value } = record;
+    if (previous === null) {
+      if (
+        kind !== "reserved" ||
+        !isDeepStrictEqual(value, preparationHeader(reservation))
+      )
+        invalid();
+    } else if (kind === "attached") {
+      if (process !== null || admitted !== null || retired) invalid();
+      process = normalizeExecutionProcess(value);
+      if (
+        process === null ||
+        process.processIdentity === null ||
+        process.namespaceId === null ||
+        !isDeepStrictEqual(process, value)
+      )
+        invalid();
+    } else if (kind === "admitted") {
+      if (
+        process === null ||
+        admitted !== null ||
+        retired ||
+        typeof value !== "boolean" ||
+        (value && denied)
+      )
+        invalid();
+      admitted = value;
+    } else if (kind === "stop") {
+      assertRecord(value, "preparation stop disposition");
+      if (
+        retired ||
+        value.reservationId !== reservation.id ||
+        Object.keys(value).length !== 7 ||
+        !/^[a-f0-9]{64}$/u.test(value.requestId) ||
+        !Number.isSafeInteger(value.expectedRevision) ||
+        value.expectedRevision < 1 ||
+        !Number.isSafeInteger(value.acceptedRevision) ||
+        value.acceptedRevision <= value.expectedRevision ||
+        value.acceptedRevision <= stopRevision ||
+        stopIds.has(value.requestId) ||
+        !["pause_requested", "cancel_requested"].includes(value.kind) ||
+        !(value.effectiveTiming === "immediate"
+          ? value.targetBoundary === null
+          : value.effectiveTiming === "after-current-commit" &&
+            validStopBoundary(value.targetBoundary))
+      )
+        invalid();
+      stopRevision = value.acceptedRevision;
+      stopIds.add(value.requestId);
+      denied ||=
+        value.effectiveTiming !== "after-current-commit" ||
+        !isDeepStrictEqual(value.targetBoundary, reservation.targetBoundary);
+    } else if (kind === "revoked") {
+      if (value !== null || retired) invalid();
+      denied = true;
+    } else if (kind === "no-launch") {
+      if (retired || process !== null || value !== null) invalid();
+      retired = true;
+    } else if (kind === "retired") {
+      if (retired || value !== null || process === null) invalid();
+      retired = true;
+    } else invalid();
+    previous = createHash("sha256").update(line).digest("hex");
+  }
+  return { records, endpoint: previous, process, admitted, retired, denied };
+}
+
+function normalizePreparation(value, state) {
+  if ((value === undefined && state.schemaVersion < 22) || value === null)
+    return null;
+  assertRecord(value, "run.preparation");
+  const fields = new Set([
+    "id",
+    "revision",
+    "owner",
+    "certificate",
+    "bindings",
+    "resource",
+    "targetBoundary",
+    "stopRequest",
+    "settlement",
+    "digest",
+  ]);
+  rejectUnknownFields(value, fields, "run.preparation");
+  assertRunId(value.id);
+  assertRecord(value.owner, "preparation.owner");
+  assertRunId(value.owner.token);
+  assertRecord(value.certificate, "preparation.certificate");
+  assertRecord(value.bindings, "preparation.bindings");
+  for (const [name, keys] of [
+    [
+      "owner",
+      [
+        "schemaVersion",
+        "runId",
+        "token",
+        "pid",
+        "hostname",
+        "processIdentity",
+        "acquiredAt",
+      ],
+    ],
+    [
+      "bindings",
+      [
+        "commandIdentity",
+        "commandFingerprint",
+        "configurationFingerprint",
+        "contentFingerprint",
+        "inputFingerprint",
+      ],
+    ],
+    [
+      "certificate",
+      ["runId", "firstRevision", "lastRevision", "directory", "bindings"],
+    ],
+  ]) {
+    rejectUnknownFields(value[name], new Set(keys), `preparation.${name}`);
+    if (Object.keys(value[name]).length !== keys.length)
+      fail("Preparation authority is incomplete.");
+  }
+  if (
+    state.schemaVersion < 22 ||
+    Object.keys(value).length !== fields.size ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 2 ||
+    value.revision > state.revision ||
+    value.certificate.runId !== state.runId ||
+    value.certificate.firstRevision !== 1 ||
+    value.certificate.lastRevision !== value.revision - 1 ||
+    !Array.isArray(value.certificate.bindings) ||
+    value.certificate.bindings.length < 1 ||
+    value.certificate.bindings.length > 1024 ||
+    value.owner.runId !== state.runId ||
+    value.owner.schemaVersion !== 2 ||
+    typeof value.owner.hostname !== "string" ||
+    value.owner.hostname.length < 1 ||
+    value.owner.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.owner.hostname) ||
+    !Number.isSafeInteger(value.owner.pid) ||
+    value.owner.pid < 1 ||
+    validateProcessIdentity(value.owner.processIdentity) === null ||
+    !(
+      value.targetBoundary === null || validStopBoundary(value.targetBoundary)
+    ) ||
+    !Object.hasOwn(value, "stopRequest") ||
+    (value.settlement !== null &&
+      (!Array.isArray(value.settlement.records) ||
+        value.settlement.records.length > 16 ||
+        !/^[a-f0-9]{64}$/u.test(value.settlement.endpoint)))
+  )
+    fail("Preparation reservation is invalid.");
+  normalizeTimestamp(value.owner.acquiredAt, "preparation.owner.acquiredAt");
+  normalizeExecutionResource(value.resource);
+  normalizeStopRequest(value.stopRequest, {
+    ...state,
+    revision: value.revision - 1,
+  });
+  for (const key of [
+    "commandIdentity",
+    "commandFingerprint",
+    "configurationFingerprint",
+    "contentFingerprint",
+    "inputFingerprint",
+  ])
+    if (!/^[a-f0-9]{64}$/u.test(value.bindings[key]))
+      fail("Preparation bindings are invalid.");
+  const { digest, settlement, ...authority } = value;
+  if (
+    digest !==
+    createHash("sha256").update(JSON.stringify(authority)).digest("hex")
+  )
+    fail("Preparation authority digest is invalid.");
+  if (settlement !== null) {
+    const facts = normalizePreparationCustody(settlement.records, value);
+    if (
+      Object.keys(settlement).length !== 2 ||
+      !facts.retired ||
+      facts.endpoint !== settlement.endpoint
+    )
+      fail("Preparation settlement is invalid.");
+  }
+  return cloneRecord(value, "run.preparation");
 }
 
 export function normalizeExecutionResource(
@@ -1071,6 +1402,117 @@ export function normalizeExecutionResource(
   return structuredClone(value);
 }
 
+function normalizeWorkspace(value, run) {
+  if (value == null) return null; // Legacy runs retain Git semantics, never new authority.
+  assertRecord(value, "run.workspace");
+  const fields = new Set([
+    "schemaVersion",
+    "kind",
+    "lease",
+    "leasePath",
+    "policy",
+    "bindingFingerprint",
+    "protectedFingerprint",
+    "ancestorBindings",
+    "absentInputPaths",
+    "retrievalPermissions",
+  ]);
+  rejectUnknownFields(value, fields, "run.workspace");
+  const canonical = (path) =>
+    typeof path === "string" &&
+    isAbsolute(path) &&
+    resolve(path) === path &&
+    path !== sep &&
+    !/[\0\r\n]/u.test(path);
+  const contains = (root, path) => {
+    const name = relative(root, path);
+    return (
+      name === "" ||
+      (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+    );
+  };
+  if (
+    run.schemaVersion < 24 ||
+    Object.keys(value).length !== fields.size ||
+    value.schemaVersion !== 1 ||
+    !["git", "directory"].includes(value.kind) ||
+    !["none", "exclusive"].includes(value.lease) ||
+    !canonical(value.leasePath) ||
+    !contains(value.leasePath, run.projectPath) ||
+    !Array.isArray(value.ancestorBindings) ||
+    !Array.isArray(value.absentInputPaths) ||
+    value.absentInputPaths.length > 256 ||
+    value.absentInputPaths.some(
+      (path, index) =>
+        !canonical(path) ||
+        path === run.taskPath ||
+        !contains(run.taskPath, path) ||
+        (index > 0 && value.absentInputPaths[index - 1] >= path),
+    ) ||
+    value.ancestorBindings.length > 4096 ||
+    value.ancestorBindings.some(
+      (entry, index) =>
+        !isRecord(entry) ||
+        Object.keys(entry).sort().join() !== "device,inode,mode,path" ||
+        (!canonical(entry.path) && entry.path !== sep) ||
+        [entry.device, entry.inode, entry.mode].some(
+          (field) => typeof field !== "string" || !/^[0-9]+$/u.test(field),
+        ) ||
+        (index > 0 && value.ancestorBindings[index - 1].path >= entry.path),
+    ) ||
+    !Array.isArray(value.retrievalPermissions) ||
+    value.retrievalPermissions.length !== 0
+  )
+    fail("run.workspace is invalid.");
+  if (value.kind === "git") {
+    if (
+      value.leasePath !== run.projectPath ||
+      value.policy !== null ||
+      value.bindingFingerprint !== null ||
+      value.protectedFingerprint !== null ||
+      value.ancestorBindings.length !== 0 ||
+      value.absentInputPaths.length !== 0
+    )
+      fail("Git workspace binding is invalid.");
+  } else {
+    const paths = [
+      "inputPaths",
+      "sourcePaths",
+      "outputPaths",
+      "configurationPaths",
+      "artifactPaths",
+      "infrastructurePaths",
+    ];
+    const policy = value.policy;
+    assertRecord(policy, "run.workspace.policy");
+    rejectUnknownFields(
+      policy,
+      new Set(["kind", "workspacePath", "taskPath", "stateRoot", ...paths]),
+      "run.workspace.policy",
+    );
+    if (
+      Object.keys(policy).length !== paths.length + 4 ||
+      value.lease !== "exclusive" ||
+      policy.kind !== "directory" ||
+      policy.workspacePath !== run.projectPath ||
+      policy.taskPath !== run.taskPath ||
+      !canonical(policy.stateRoot) ||
+      paths.some(
+        (name) =>
+          !Array.isArray(policy[name]) ||
+          policy[name].length > 256 ||
+          policy[name].some((path) => !canonical(path)) ||
+          new Set(policy[name]).size !== policy[name].length,
+      ) ||
+      [value.bindingFingerprint, value.protectedFingerprint].some(
+        (entry) => typeof entry !== "string" || !/^[a-f0-9]{64}$/u.test(entry),
+      )
+    )
+      fail("Directory workspace binding is invalid.");
+  }
+  return structuredClone(value);
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -1141,6 +1583,7 @@ export function normalizeRunState(value, expectedRunId) {
     ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
+    workspace: normalizeWorkspace(value.workspace, value),
     projectConfigurationProtection: normalizeProjectConfigurationProtection(
       value.projectConfigurationProtection,
       value,
@@ -1165,6 +1608,11 @@ export function normalizeRunState(value, expectedRunId) {
       value.executionResource,
       value.schemaVersion,
     ),
+    preparation: normalizePreparation(value.preparation, value),
+    preservationRecords: normalizePreservationRecords(
+      value.preservationRecords,
+      value.schemaVersion,
+    ),
     stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,
@@ -1176,8 +1624,9 @@ export function normalizeRunState(value, expectedRunId) {
       normalizeAvailabilityState({ ...value, roles }),
       normalizeInactivityState({ ...value, roles }),
     );
+    normalized.observations = normalizeObservationState({ ...value, roles });
   } catch {
-    fail("Run provider recovery policy or evidence is invalid.");
+    fail("Run provider recovery policy or observation evidence is invalid.");
   }
   assertSerializedSize(normalized, "run");
   return normalized;

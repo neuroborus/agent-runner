@@ -24,6 +24,8 @@ import {
   sep,
 } from "node:path";
 import { promisify } from "node:util";
+
+import { inspectFinalizationFile } from "../../../../src/config/index.js";
 import { createClarificationService } from "../../../../src/clarifications/index.js";
 import { createGitService } from "../../../../src/git/index.js";
 import { createRunStore } from "../../../../src/state/index.js";
@@ -1117,7 +1119,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 18,
+      pipelineStateVersion: 19,
       projectPath,
       taskPath,
       roles,
@@ -1140,7 +1142,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 18,
+      pipelineStateVersion: 19,
       projectPath,
       taskPath,
       roles,
@@ -1410,6 +1412,9 @@ async function createFixture(
       onEdit?.({ transcriptPath }),
   });
   const runtime = {
+    finalization: {
+      inspectFile: ({ path }) => inspectFinalizationFile({ path, projectPath }),
+    },
     adapters,
     clarifications,
     git,

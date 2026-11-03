@@ -32,13 +32,25 @@ Return the following fields inside the schema's result object. Provide a concise
 Each check's steps must be a nonempty ascending list without duplicates or references outside the canonical plan. Independently provide a complete procedure for every plan step: the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects. Include all selected trusted commands in the complete catalog, with their actual step applicability; selection alone does not make a check applicable to every step. Do not execute future-step checks during earlier finalization. The runner preserves each role's accepted assignments and derives stable Worker-first per-step inventories, unioning applicability of identical commands. Reconciliation and arbitration cannot discard or reassign requirements.
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit-message drafting. Generic commit preparation belongs only to COMMIT. Express an applicable content check against HEAD or explicit trees instead of the index.
-Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative file paths; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
+Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative regular files, except for the exact declared label of selected external finalization guidance when supplied; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
 Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
 Report capabilityRequirements and environmentBlockers as bounded arrays (up to 256 each), tied to exact commands in your requiredChecks inventory; use [] when none. Each capability requirement must identify at least one actual need: scratch, cache, a writable source projection, one or more artifacts, or one or more unsupported capabilities. Omit the report instead of returning an entry with no needs. Each requirement has command, commandIdentity (the supplied frozen identity or null), capabilities {scratch: boolean, cache: boolean, sourceProjection: boolean, artifacts: [{url, sha256}]}, and unsupported (up to 16 short capability identifiers). Set sourceProjection to true only when that frozen exact command must write beside the staging-independent source it validates. Any non-null identity must exactly match the selected command's frozen identity; never invent or substitute one. Artifact URLs and SHA-256 must match the canonical HTTPS declaration contract; at most 32 artifacts per report. Do not request projection paths, credentials, or broader authority. Each environment blocker has command, source ("agent-sandbox" or "runner"), and evidence (1–8 concise single-line strings). Report missing runner selection or authority as needs, not as permission to grant them. The runner preserves every role's reports, evaluates the frozen declarations and actual availability, and pauses before writable work when unsatisfied. An agent-sandbox limitation is resolved only for that exact delegated command when runner inspection succeeds; a limitation of another command remains blocking. Do not execute required checks during discovery. Set both arrays to [] for every non-READY outcome.
 For READY, provide summary, requiredChecks, and validationInfrastructure; set capacityField, reason, question, and whyBlocked to "", capacityLimit to 0, and options and evidence to [].
 For CAPACITY_EXHAUSTED, set summary, reason, question, and whyBlocked to "", requiredChecks, validationInfrastructure, options, and evidence to [], and provide capacityField and capacityLimit as described above.
 For PLAN_REVISION_REQUIRED, set summary, capacityField, question, and whyBlocked to "", capacityLimit to 0, and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary, capacityField, and reason to "", capacityLimit to 0, and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
+
+export const REPOSITORY_DISCOVERY_INSTRUCTIONS = `Study the repository, task, complete validated plan, clarifications, project instructions, relevant skills, checks, tests, and Git history independently and without modifying the repository.
+Provide a concise bootstrap summary covering architecture, relevant files, invariants, planned commits, risks, and the complete staging-independent finalization procedure. This discovery is a repository catalog, not a plan applicability matrix. Return the six discovery fields inside result: stepAssessment, summary, requiredChecks, validationInfrastructure, capabilityRequirements, environmentBlockers. Each required check has only id and exact command, without steps. Later focused batches assign applicability.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
+Keep commands unique, normalized, single-line and staging-independent. Use existing canonical regular repository files for infrastructure, plus the exact declared label of selected external finalization guidance when supplied. Include every frozen runner-trusted command. Do not execute required checks, modify content or Git state, or perform commit preparation. Staging, index-relative inspection, and commit-message drafting belong only to COMMIT.
+Report exact-command capability needs and environment blockers using the supplied schema and frozen command identities, or [] when none. Never invent authority, omit requirements, truncate inventories, or persist provider messages. The per-role catalog limit is ${MAX_BOOTSTRAP_ITEMS}; report CAPACITY_EXHAUSTED using the exceptional schema if exceeded, checking requiredChecks before infrastructure.
+For an incompatible plan or an unresolved material product decision, use the corresponding exceptional result schema with empty inventories and summary; technical choices are not product decisions.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
+
+export const APPLICABILITY_INSTRUCTIONS = `Assess only the supplied contiguous canonical plan range against your own accepted repository discovery. Keep the repository and Git state read-only. Do not execute checks, perform finalization, or prepare a commit.
+Return READY with the exact unitId and catalog-order assignments of checkId to ascending canonical steps within this unit. Every step must have its complete applicable procedure: the ordinary fast gate and only slow checks whose documented guarantees that step affects. A selected trusted command is not automatically applicable to every step. Omit a check assignment only when it applies to no step in this range. The complete plan must eventually assign every discovered check.
+If commands, infrastructure, capability needs, or environment blockers are missing from discovery, return CATALOG_CORRECTION_REQUIRED, no assignments, and only new requirements. Do not silently change or drop accepted requirements. READY has empty correction arrays. Use frozen input files if needed; normally continue from accepted discovery without repeating broad repository discovery. Return only the supplied schema's result object.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
 Do not force agreement or modify the repository. Return the following fields inside the schema's result object, with a concise resolved summary or the remaining material disagreement.
@@ -80,6 +92,7 @@ Do not run the project finalization procedure or perform generic commit preparat
 ${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
+Return the status fields inside the schema's result object.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
@@ -158,12 +171,23 @@ If a finding is incorrect, dispute it with concise evidence instead of changing 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 ${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 Do not create a commit in this turn.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+Return the status fields and finding decisions inside the schema's result object.
+For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
+
+const FINALIZATION_RESULT_INSTRUCTIONS = `Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
+Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
+For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
+For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
+For SKILL_MISSING or SKILL_INVALID, provide the attempted selected guidance label in skillPath and reason; set summary, question, and whyBlocked to "", and issues, requiredChecks, validationInfrastructure, checks, and options to []; evidence may be [].
+For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; preserve the complete inventory, report every check as PASS, BLOCKED, or NOT_RUN, set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
+For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.
+${PRODUCT_DECISION_INSTRUCTIONS}`;
 
 export const FINALIZATION_INSTRUCTIONS = `Use only the established active-step inventory. The complete persisted schedule retains future requirements; do not run future-step checks. Inventory amendments apply only to the current step. Any shared infrastructure change must remain valid for future requirements and receive explicit terminal confirmation.
 
@@ -173,29 +197,39 @@ ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Do not perform unrelated fixes or create a commit.
 Keep the finalization inventory staging-independent. When project finalization guidance includes generic commit preparation, defer staging, staged/index-relative inspection, alternate-index workarounds, staged handoff, and commit-message drafting to the authorized COMMIT turn. Do not run git add, inspect the staged diff, or draft a commit message in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS.
 The validated plan subject remains authoritative. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, the constrained COMMIT executor alone runs git add -A, performs fixed runner-owned staged-diff hygiene, and creates the subject-only commit.
-Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
-Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
-Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
-For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".
-For FAIL, provide summary and one or more issues with unique stable F-prefixed numeric IDs, each with command, problem, and evidence; set options and evidence to []; set reason, question, and whyBlocked to "".
-For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative skillPath and reason; set summary, question, and whyBlocked to "", and issues, requiredChecks, validationInfrastructure, checks, and options to []; evidence may be [].
-For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; preserve the complete inventory, report every check as PASS, BLOCKED, or NOT_RUN, set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.
-${PRODUCT_DECISION_INSTRUCTIONS}`;
+${FINALIZATION_RESULT_INSTRUCTIONS}`;
 
-export function finalizationBootstrapInstructions({ selection, skillPath }) {
+const CUSTOM_FINALIZATION_INSTRUCTIONS = `Finalize only the current custom result against its agreed observable criteria and established active-step inventory. Review the analysis, criterion evidence and exact inspected outputs, using explicitly selected frozen guidance when present. Coding checks apply only when the user selected applicable coding requirements. A semantic-only inventory may be empty; every required candidate and terminal review still applies.
+Report unmet criteria as FAIL with concrete issues even when no executable check fails. For a criterion issue, identify the criterion in its command field (for example, criterion:traceability); do not invent an executable check or misreport a passing check as failed.
+Run applicable agent-executed checks in this dedicated turn. Reserve selected runner-trusted commands as ordered NOT_RUN entries; the runner executes their frozen exact vectors. Preserve their identities, capability declarations, applicability and provenance.
+Never stage, inspect an index-relative diff, prepare a commit, create a commit or change Git controls. No custom phase has commit authority. Do not perform unrelated repairs or change the accepted analysis/evidence during finalization; content repairs require fresh convergence.
+${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
+${FINALIZATION_RESULT_INSTRUCTIONS}`;
+
+export function finalizationBootstrapInstructions({
+  selection,
+  skillPath,
+  planKind = "commit",
+}) {
+  if (selection === "fallback" && planKind === "custom")
+    return "No finalization guidance is selected. Discover only criterion-dependent checks; never invent automatic coding gates.";
   if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
-  return `The frozen finalization skill is ${skillPath}. Read only that exact confined repository-relative skill, do not substitute another path, and include it in validationInfrastructure.`;
+  return `The frozen finalization skill or Markdown procedure is ${skillPath}. Read only that exact confined Markdown file, do not substitute another path, and include it in validationInfrastructure.`;
 }
 
-export function finalizationGuidanceInstructions({ skillPath }) {
+export function finalizationGuidanceInstructions({
+  skillPath,
+  planKind = "commit",
+}) {
+  if (skillPath === null && planKind === "custom")
+    return 'No finalization guidance is selected. Derive the gate from agreed custom criteria, preserving explicitly selected coding requirements. For PASS, FAIL or BLOCKED set skillPath to ""; never report SKILL_MISSING or SKILL_INVALID without a selected skill.';
   if (skillPath === null) {
     return `No finalization skill guidance is available for this turn. Derive and run the complete gate from repository instructions and project-defined checks; inspect relevant scripts and established validation commands instead of skipping validation.
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
   }
-  return `The frozen finalization skill is ${skillPath}. Validate that exact confined repository-relative skill before following it; do not substitute another path or fall back to different guidance.
+  return `The frozen finalization skill or Markdown procedure is ${skillPath}. Validate that exact confined Markdown file before following it; do not substitute another path or fall back to different guidance.
 This frozen skill must remain present in validationInfrastructure. If it is missing or invalid, report SKILL_MISSING or SKILL_INVALID; repairing guidance requires a new run.
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
@@ -222,3 +256,74 @@ For CONTINUE_FIXES or REWORK_IMPLEMENTATION, set findingIds, options, and eviden
 For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set findingIds and options to [], and question and whyBlocked to ""; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set findingIds to [] and reason to ""; use the product-decision fields.`;
+
+// Adapt only a source-controlled instruction prefix. Frozen task/plan text,
+// criterion conditions and evidence in the remaining context stay byte-for-byte.
+export function customExecutionPrompt(prompt) {
+  const bases = [
+    CLARIFICATION_INSTRUCTIONS,
+    PLAN_COMPATIBILITY_INSTRUCTIONS,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    APPLICABILITY_INSTRUCTIONS,
+    BOOTSTRAP_INSTRUCTIONS,
+    BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
+    BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
+    BOOTSTRAP_CORRECTION_INSTRUCTIONS,
+    IMPLEMENTATION_INSTRUCTIONS,
+    CHECK_AND_FIX_INSTRUCTIONS,
+    CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
+    CANDIDATE_REVIEW_INSTRUCTIONS,
+    FINALIZATION_INSTRUCTIONS,
+    CLEAN_CONFIRM_INSTRUCTIONS,
+    REVIEW_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    STAGNATION_INSTRUCTIONS,
+  ];
+  const base = bases.find((value) => prompt.startsWith(value));
+  if (base === undefined) return prompt;
+  const instructions =
+    base === FINALIZATION_INSTRUCTIONS
+      ? CUSTOM_FINALIZATION_INSTRUCTIONS
+      : base
+          .replace(
+            "the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects",
+            "only checks required by that step's agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
+          )
+          .replace(
+            "the ordinary fast gate and only slow checks whose documented guarantees that step affects",
+            "only checks required by the agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
+          )
+          .replace(
+            /Staging, [^\n]*?belong only to COMMIT\./gu,
+            "Staging and commit preparation are forbidden throughout custom execution.",
+          )
+          .replace(
+            "Generic commit preparation belongs only to COMMIT.",
+            "No custom phase permits generic commit preparation.",
+          )
+          .replace(
+            "Express an applicable content check against HEAD or explicit trees instead of the index.",
+            "Validate the inspected custom inputs and outputs without staging or requiring Git.",
+          )
+          .replace(
+            "For CHANGED, use only when you changed repository content;",
+            "For CHANGED, use only when you changed workspace content or result data;",
+          )
+          .replace(
+            "For UNCHANGED, use only when you found no problem and changed no repository content;",
+            "For UNCHANGED, use only when you found no problem and changed neither workspace content nor result data;",
+          )
+          .replaceAll(", and Git history", "")
+          .replaceAll("planned commit", "planned step")
+          .replaceAll("authorized commit", "accepted-result checkpoint")
+          .replaceAll("COMMIT", "ACCEPT");
+  return instructions + prompt.slice(base.length);
+}
+
+export const WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS = `Restate the result of the retired Worker turn using the exact advertised schema.
+Selected runner-trusted commands must never execute inside an agent turn. Their sandbox limitations must not cause BLOCKED; use BLOCKED only for external environment constraints affecting work not delegated to a selected runner-trusted command.
+This is a read-only result correction, not another implementation or finding-resolution effect. Do not modify, stage, commit, finalize, execute validation commands, or replay any work. Inspect the preserved candidate and original turn facts below. The original task and plan are context, not authorization to implement them again.
+Return only claims supported by inspected unchanged content and the original blockers. Never invent a FIX or DISPUTE disposition, withdraw a blocker, or infer completion from a malformed or missing response. If the result cannot be established safely, return BLOCKED with the missing proof. Preserve a current environment blocker or genuinely required product decision. Keep custom criterion evidence separate from the status envelope.
+A valid result still requires every original convergence, review, finalization, confirmation and effect gate. Do not run the required-check inventory; it belongs to FINALIZE. Rejected responses are unavailable and must not be reconstructed from provider-private storage.`;

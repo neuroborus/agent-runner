@@ -5,7 +5,7 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import { executionPolicy, primaryFindings } from "./mode-policy.js";
-import { assertRun } from "./workflow-contract.js";
+import { assertExecutionRun as assertRun } from "./bootstrap-progress.js";
 
 // This evidence is deliberately neither persisted on the run nor projected.
 // A restart must obtain proof again from the state-owned validated journal.
@@ -124,7 +124,7 @@ function unchangedExcept(left, right, fields) {
   return isDeepStrictEqual(omit(left), omit(right));
 }
 
-function proveHistory(run, history, migrate) {
+async function proveHistory(run, history, migrate) {
   if (
     !isFailure(run) ||
     run.activeTurn !== null ||
@@ -139,10 +139,9 @@ function proveHistory(run, history, migrate) {
     pipelineState: { ...run.pipelineState, workflowState: "CONFIRM" },
   });
   if (
-    !Array.isArray(history.events) ||
-    history.events.length === 0 ||
+    (!Array.isArray(history.events) &&
+      typeof history.events?.[Symbol.asyncIterator] !== "function") ||
     history.run.revision !== run.revision ||
-    !isDeepStrictEqual(history.events.at(-1).state, history.run) ||
     !isDeepStrictEqual(migrate(history.run), run)
   )
     return false;
@@ -156,7 +155,11 @@ function proveHistory(run, history, migrate) {
   let completedTurn = null;
   let activeRequest = null;
   let failed = false;
-  for (const [index, event] of history.events.entries()) {
+  let count = 0;
+  let lastEvent = null;
+  for await (const event of history.events) {
+    const index = count++;
+    lastEvent = event;
     if (
       event.revision !== index + 1 ||
       event.state.revision !== event.revision ||
@@ -315,6 +318,19 @@ function proveHistory(run, history, migrate) {
             ) ||
               state.validationMigrationPending ||
               state.compatibilityCheckRequired)
+          ) &&
+          !(
+            current.activeTurn.phase === "validation-migration" &&
+            bound &&
+            !contentChanged &&
+            before.workflowState === state.workflowState &&
+            before.validationMigrationPending &&
+            state.validationMigrationPending &&
+            !state.compatibilityCheckRequired &&
+            state.pendingCommit?.status !== "consumed" &&
+            !["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+              state.workflowState,
+            )
           )
         )
           return false;
@@ -426,13 +442,18 @@ function proveHistory(run, history, migrate) {
     previous = current;
     previousRaw = event.state;
   }
-  return failed && candidate !== null && finalization !== null;
+  return (
+    isDeepStrictEqual(lastEvent?.state, history.run) &&
+    failed &&
+    candidate !== null &&
+    finalization !== null
+  );
 }
 
-export function prepareLegacyConfirmationRecovery(run, history, migrate) {
+export async function prepareLegacyConfirmationRecovery(run, history, migrate) {
   provenRuns.delete(run);
   try {
-    if (proveHistory(run, history, migrate))
+    if (await proveHistory(run, history, migrate))
       provenRuns.set(run, structuredClone(run));
   } catch {
     // Invalid or unprovable pipeline history grants no recovery authority.

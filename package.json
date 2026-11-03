@@ -1,5 +1,5 @@
 {
-  "name": "agent-runner",
+  "name": "@your-scope/agent-runner",
   "version": "0.1.0",
   "private": true,
   "description": "Local CLI and STDIO MCP server for durable agent pipelines",
@@ -17,12 +17,28 @@
     "format": "node scripts/format.js --write",
     "format:check": "node scripts/format.js --check",
     "test": "node scripts/test.js",
-    "test:slow": "node scripts/test.js --slow"
+    "test:slow": "node scripts/test.js --slow",
+    "release:assemble": "node scripts/assemble-release.js"
   },
   "engines": {
     "node": ">=24 <25"
   },
+  "agentRunnerCompatibility": {
+    "schemaVersion": 1,
+    "configurationVersion": 1,
+    "runnerVersion": 1,
+    "runStateVersion": 24,
+    "pipelines": {
+      "audit": 5,
+      "init": 1,
+      "plan-authoring": 7,
+      "plan-execution": 39,
+      "polishing": 19
+    }
+  },
   "dependencies": {
+    "@agent-runner/audit": "0.0.0",
+    "@agent-runner/init": "0.0.0",
     "@agent-runner/plan-authoring": "0.0.0",
     "@agent-runner/plan-execution": "0.0.0",
     "@agent-runner/polishing": "0.0.0",
@@ -32,5 +48,22 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
     "prettier": "3.9.6"
-  }
+  },
+  "license": "UNLICENSED",
+  "files": [
+    "bin/agent-run.js",
+    "src/**/*.js",
+    "docs/OPERATOR_GUIDE.md",
+    "README.md",
+    "release-manifest.json"
+  ],
+  "bundleDependencies": [
+    "@agent-runner/audit",
+    "@agent-runner/init",
+    "@agent-runner/plan-authoring",
+    "@agent-runner/plan-execution",
+    "@agent-runner/polishing",
+    "@modelcontextprotocol/server",
+    "zod"
+  ]
 }

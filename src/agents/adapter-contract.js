@@ -16,17 +16,23 @@ const REQUEST_FIELDS = Object.freeze([
   "cwd",
   "model",
   "profile",
+  "readPaths",
   "prompt",
   "recoveryPrompt",
   "schema",
   "session",
+  "sessionNaming",
   "signal",
   "onProcess",
   "onProgress",
+  "onObservation",
   "onCommitExecution",
   "onFreshSession",
+  "onSessionCreated",
+  "onSessionNaming",
   "onResource",
   "storageForbiddenPaths",
+  "workspacePolicy",
 ]);
 const EXECUTION_FIELDS = Object.freeze([
   "contextSize",
@@ -34,6 +40,17 @@ const EXECUTION_FIELDS = Object.freeze([
   "model",
   "profile",
 ]);
+const WORKSPACE_POLICY_PATHS = Object.freeze([
+  "inputPaths",
+  "sourcePaths",
+  "outputPaths",
+  "configurationPaths",
+  "artifactPaths",
+  "infrastructurePaths",
+]);
+const MAX_WORKSPACE_PATHS = 256;
+const MAX_DIRECTORY_STORAGE_PATHS =
+  3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
 export const ADAPTER_FAILURE_CLASS = "adapter_failure";
@@ -68,8 +85,10 @@ export const AVAILABILITY_REASONS = Object.freeze([
   "server_unavailable",
 ]);
 export const AUTHENTICATION_REQUIRED_DISPOSITION = "authentication_required";
+export const OUTPUT_EXHAUSTED_DISPOSITION = "output_exhausted";
 export const FAILURE_DISPOSITIONS = Object.freeze([
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  OUTPUT_EXHAUSTED_DISPOSITION,
 ]);
 export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
   "launch_process_exited",
@@ -104,6 +123,7 @@ const CAPABILITY_FIELDS = Object.freeze([
   "nativeSessionContinuation",
   "nativeSessionFork",
   "policyReceipt",
+  "declaredWorkspace",
 ]);
 const POLICY_RECEIPT_FIELDS = Object.freeze([
   "schemaVersion",
@@ -119,7 +139,8 @@ const CLIENT_ATTRIBUTION_FIELDS = Object.freeze(["name", "title"]);
 const MAX_CLIENT_ATTRIBUTION_LENGTH = 256;
 const UNSAFE_CLIENT_ATTRIBUTION_PATTERN =
   /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/u;
-const MAX_PROMPT_BYTES = 1024 * 1024;
+// Complete recovery context includes accepted results and derived inventories.
+const MAX_PROMPT_BYTES = 32 * 1024 * 1024;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DEPTH = 128;
 const SCHEMA_CHILD_KEYWORDS = Object.freeze([
@@ -261,6 +282,52 @@ export function isDefaultClientAttribution(value) {
     attribution.name === DEFAULT_CLIENT_ATTRIBUTION.name &&
     attribution.title === DEFAULT_CLIENT_ATTRIBUTION.title
   );
+}
+
+// Runner display context is separate from client attribution and native IDs.
+export function normalizeSessionNamingContext(value) {
+  const labels = ["project", "pipeline", "role"];
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["runId", ...labels]) ||
+    typeof value.runId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      value.runId,
+    ) ||
+    labels.some(
+      (field) =>
+        typeof value[field] !== "string" ||
+        !value[field].length ||
+        [...value[field]].length > 128 ||
+        value[field].trim() !== value[field] ||
+        /[\p{Cc}\p{Zl}\p{Zp}\u202a-\u202e\u2066-\u2069]/u.test(value[field]),
+    )
+  )
+    throw new TypeError("Runner session naming context is invalid.");
+  return Object.freeze({
+    runId: value.runId,
+    ...Object.fromEntries(labels.map((field) => [field, value[field]])),
+  });
+}
+
+export function sessionName(context) {
+  if (context === undefined) return undefined;
+  const { runId, project, pipeline, role } = context;
+  const description = [...`${project} / ${pipeline} / ${role}`]
+    .slice(0, 128)
+    .join("")
+    .trim();
+  return `[${runId}] ${description}`;
+}
+
+export function normalizeSessionNamingDiagnostic(value) {
+  if (
+    !isRecord(value) ||
+    !hasExactFields(value, ["status"]) ||
+    !["named", "rejected", "unsupported", "unavailable"].includes(value.status)
+  )
+    throw new TypeError("Session naming diagnosis is invalid.");
+  return Object.freeze({ status: value.status });
 }
 
 function isFailureClassList(value) {
@@ -461,6 +528,7 @@ export function createAdapterContract({
   AdapterError,
   backendName,
   failureClasses = [],
+  declaredWorkspace = false,
 }) {
   const errorPrefix = backendName.toUpperCase();
 
@@ -688,23 +756,124 @@ export function createAdapterContract({
     });
   }
 
+  function normalizeWorkspacePolicy(value, access, cwd) {
+    if (value === undefined) return undefined;
+    const fields = [
+      "kind",
+      "workspacePath",
+      "stateRoot",
+      "taskPath",
+      ...WORKSPACE_POLICY_PATHS,
+    ];
+    if (
+      !isRecord(value) ||
+      !hasExactFields(value, fields, ["kind", "workspacePath", "stateRoot"]) ||
+      value.kind !== "directory" ||
+      !["read-only", "workspace-write"].includes(access)
+    )
+      throw optionsError("Declared workspace policy is invalid.");
+    function path(entry) {
+      assertString(entry, "Declared workspace path");
+      if (
+        !isAbsolute(entry) ||
+        resolve(entry) !== entry ||
+        isFilesystemRoot(entry)
+      )
+        throw optionsError(
+          "Declared workspace paths must be canonical absolute paths.",
+        );
+      return entry;
+    }
+    const result = {
+      kind: "directory",
+      workspacePath: path(value.workspacePath),
+      stateRoot: path(value.stateRoot),
+    };
+    if (cwd !== undefined && cwd !== result.workspacePath)
+      throw optionsError(
+        "Declared workspace must match the request directory.",
+      );
+    if (value.taskPath !== undefined) result.taskPath = path(value.taskPath);
+    for (const name of WORKSPACE_POLICY_PATHS) {
+      const entries = value[name] === undefined ? [] : value[name];
+      if (!Array.isArray(entries) || entries.length > MAX_WORKSPACE_PATHS)
+        throw optionsError("Declared workspace paths are invalid.");
+      result[name] = [...new Set(Array.from(entries, path))].sort();
+    }
+    if (!declaredWorkspace)
+      throw optionsError(
+        "Declared directory workspaces are unsupported by this adapter.",
+      );
+    return deepFreeze(result);
+  }
+
+  function normalizeProbeOptions(value = {}) {
+    assertFields(
+      value,
+      [...EXECUTION_FIELDS, "access", "workspacePolicy"],
+      `${backendName} probe`,
+    );
+    if (value.access !== undefined && !ACCESS_MODES.has(value.access))
+      throw optionsError("Probe access is invalid.");
+    return Object.freeze({
+      ...normalizeExecutionOptions(
+        Object.fromEntries(EXECUTION_FIELDS.map((name) => [name, value[name]])),
+      ),
+      ...(value.access === undefined ? {} : { access: value.access }),
+      ...(value.workspacePolicy === undefined
+        ? {}
+        : {
+            workspacePolicy: normalizeWorkspacePolicy(
+              value.workspacePolicy,
+              value.access,
+            ),
+          }),
+    });
+  }
+
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
+    if (
+      value.readPaths !== undefined &&
+      (!Array.isArray(value.readPaths) ||
+        value.readPaths.length !== 1 ||
+        Array.from(value.readPaths).some(
+          (path) =>
+            typeof path !== "string" ||
+            !isAbsolute(path) ||
+            resolve(path) !== path ||
+            isFilesystemRoot(path) ||
+            /[\0\r\n]/u.test(path),
+        ))
+    ) {
+      throw optionsError(
+        "Selected finalization read must declare one exact file.",
+      );
+    }
     if (
       (value.signal !== undefined && !(value.signal instanceof AbortSignal)) ||
       (value.onProcess !== undefined &&
         typeof value.onProcess !== "function") ||
       (value.onFreshSession !== undefined &&
         typeof value.onFreshSession !== "function") ||
+      (value.onSessionCreated !== undefined &&
+        typeof value.onSessionCreated !== "function") ||
+      (value.onSessionNaming !== undefined &&
+        typeof value.onSessionNaming !== "function") ||
       (value.onCommitExecution !== undefined &&
         typeof value.onCommitExecution !== "function") ||
       (value.onProgress !== undefined &&
         typeof value.onProgress !== "function") ||
+      (value.onObservation !== undefined &&
+        typeof value.onObservation !== "function") ||
       (value.onResource !== undefined &&
         typeof value.onResource !== "function") ||
       (value.storageForbiddenPaths !== undefined &&
         (!Array.isArray(value.storageForbiddenPaths) ||
-          value.storageForbiddenPaths.length > 256 ||
+          value.storageForbiddenPaths.length >
+            (value.workspacePolicy === undefined
+              ? 256
+              : MAX_DIRECTORY_STORAGE_PATHS) ||
           value.storageForbiddenPaths.some(
             (path) =>
               typeof path !== "string" ||
@@ -735,6 +904,9 @@ export function createAdapterContract({
       access: value.access,
       ...execution,
       cwd: value.cwd,
+      ...(value.readPaths === undefined
+        ? {}
+        : { readPaths: Object.freeze([...value.readPaths]) }),
       prompt,
       recoveryPrompt:
         value.recoveryPrompt === undefined
@@ -745,25 +917,50 @@ export function createAdapterContract({
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.sessionNaming === undefined
+        ? {}
+        : {
+            sessionNaming: normalizeSessionNamingContext(value.sessionNaming),
+          }),
+      ...(value.workspacePolicy === undefined
+        ? {}
+        : {
+            workspacePolicy: normalizeWorkspacePolicy(
+              value.workspacePolicy,
+              value.access,
+              value.cwd,
+            ),
+          }),
       ...(value.signal === undefined ? {} : { signal: value.signal }),
       ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
       ...(value.onFreshSession === undefined
         ? {}
         : { onFreshSession: value.onFreshSession }),
+      ...(value.onSessionCreated === undefined
+        ? {}
+        : { onSessionCreated: value.onSessionCreated }),
+      ...(value.onSessionNaming === undefined
+        ? {}
+        : { onSessionNaming: value.onSessionNaming }),
       ...(value.onCommitExecution === undefined
         ? {}
         : { onCommitExecution: value.onCommitExecution }),
       ...(value.onProgress === undefined
         ? {}
         : { onProgress: value.onProgress }),
+      ...(value.onObservation === undefined
+        ? {}
+        : { onObservation: value.onObservation }),
       ...(value.onResource === undefined
         ? {}
         : { onResource: value.onResource }),
-      ...(value.storageForbiddenPaths === undefined
+      ...(value.storageForbiddenPaths === undefined &&
+      value.readPaths === undefined
         ? {}
         : {
             storageForbiddenPaths: Object.freeze([
-              ...value.storageForbiddenPaths,
+              ...(value.storageForbiddenPaths ?? []),
+              ...(value.readPaths ?? []),
             ]),
           }),
     };
@@ -799,6 +996,7 @@ export function createAdapterContract({
       ),
     failure: (value) => normalizeFailureRecord(value, supportedFailureClasses),
     normalizeExecutionOptions,
+    normalizeProbeOptions,
     normalizeRequest,
   });
 }

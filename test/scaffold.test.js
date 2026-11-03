@@ -13,16 +13,22 @@ const REPOSITORY_PATH = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_DIRECTORIES = [
   new URL("../src/", import.meta.url),
   new URL("../packages/commit-plan/src/", import.meta.url),
+  new URL("../packages/custom-plan/src/", import.meta.url),
   new URL("../pipelines/plan-authoring/src/", import.meta.url),
   new URL("../pipelines/plan-execution/src/", import.meta.url),
   new URL("../pipelines/polishing/src/", import.meta.url),
+  new URL("../pipelines/audit/src/", import.meta.url),
+  new URL("../pipelines/init/src/", import.meta.url),
 ];
 const PACKAGE_METADATA_FILES = [
   new URL("../package.json", import.meta.url),
   new URL("../packages/commit-plan/package.json", import.meta.url),
+  new URL("../packages/custom-plan/package.json", import.meta.url),
   new URL("../pipelines/plan-authoring/package.json", import.meta.url),
   new URL("../pipelines/plan-execution/package.json", import.meta.url),
   new URL("../pipelines/polishing/package.json", import.meta.url),
+  new URL("../pipelines/audit/package.json", import.meta.url),
+  new URL("../pipelines/init/package.json", import.meta.url),
 ];
 const SKILLS_DIRECTORY = new URL("../.agents/skills/", import.meta.url);
 const NODE_RANGE_DOCUMENTS = [
@@ -108,16 +114,25 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, planAuthoring, planExecution, polishing] =
-    await Promise.all(
-      PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
-        JSON.parse(await readFile(metadataUrl, "utf8")),
-      ),
-    );
+  const [
+    commitPlan,
+    customPlan,
+    planAuthoring,
+    planExecution,
+    polishing,
+    audit,
+    init,
+  ] = await Promise.all(
+    PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
+      JSON.parse(await readFile(metadataUrl, "utf8")),
+    ),
+  );
 
   assert.deepEqual(packageMetadata.workspaces, ["packages/*", "pipelines/*"]);
   assert.equal(packageMetadata.exports, "./src/index.js");
   assert.deepEqual(Object.keys(packageMetadata.dependencies).sort(), [
+    "@agent-runner/audit",
+    "@agent-runner/init",
     "@agent-runner/plan-authoring",
     "@agent-runner/plan-execution",
     "@agent-runner/polishing",
@@ -125,23 +140,31 @@ test("workspace topology keeps pipelines independent", async () => {
     "zod",
   ]);
   assert.equal(commitPlan.dependencies, undefined);
+  assert.equal(customPlan.dependencies, undefined);
 
   for (const workspace of [
     commitPlan,
+    customPlan,
     planAuthoring,
     planExecution,
     polishing,
+    audit,
+    init,
   ]) {
     assert.equal(workspace.exports, "./src/index.js");
   }
 
   assert.deepEqual(planAuthoring.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",
+    "@agent-runner/custom-plan": "0.0.0",
   });
   assert.deepEqual(planExecution.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",
+    "@agent-runner/custom-plan": "0.0.0",
   });
   assert.equal(polishing.dependencies, undefined);
+  assert.equal(audit.dependencies, undefined);
+  assert.equal(init.dependencies, undefined);
 });
 
 test("canonical project skills have valid instructions", async () => {

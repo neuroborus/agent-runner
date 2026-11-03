@@ -163,6 +163,12 @@ test("commits one exact plan subject through combined root wiring", async (t) =>
   assert.equal(run.pipelineState.workflowState, "DONE");
   assert.equal(run.pipelineState.settings.mode, "combined");
   assert.equal(run.pipelineState.completedCommits.length, 1);
+  assert.deepEqual(run.pipelineState.bootstrapCorrections, []);
+  for (const role of ["worker", "reviewer"]) {
+    assert.deepEqual(run.pipelineState[`${role}Validation`].requiredChecks, [
+      { id: "C1", command: "git diff --check HEAD", steps: [1] },
+    ]);
+  }
   assert.equal(
     await gitOutput(paths.projectPath, ["log", "-1", "--pretty=%s"]),
     "feat(feature): add value",

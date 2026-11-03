@@ -382,6 +382,22 @@ test("reserves guidance capacity in a disjoint maximum inventory", async (t) => 
 
   const completed = await fixture.run();
   const state = completed.pipelineState;
+  const guidance = state.finalizationGuidance;
+  const infrastructure =
+    await fixture.runtime.git.validationInfrastructureFingerprint({
+      paths: derivedPaths.filter((path) => path !== guidance.skillPath),
+      projectPath: fixture.projectPath,
+    });
+  const expectedFingerprint = hash(
+    JSON.stringify({
+      infrastructure,
+      finalizationFile: (
+        await fixture.runtime.finalization.inspectFile({
+          path: guidance.skillPath,
+        })
+      ).fingerprint,
+    }),
+  );
 
   assert.equal(
     state.workerValidation.requiredChecks.length,
@@ -417,10 +433,7 @@ test("reserves guidance capacity in a disjoint maximum inventory", async (t) => 
     );
   }
 
-  assert.equal(
-    state.validationInfrastructureFingerprint,
-    hash(JSON.stringify(derivedPaths.map((path) => [path, `// ${path}\n`]))),
-  );
+  assert.equal(state.validationInfrastructureFingerprint, expectedFingerprint);
   assert.equal(
     state.finalizationResult.validationInfrastructureFingerprint,
     state.validationInfrastructureFingerprint,

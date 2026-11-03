@@ -11,6 +11,13 @@ import {
   MAX_TEXT_LENGTH,
   MAX_VALIDATION_ITEMS,
 } from "./workflow-contract.js";
+import {
+  BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
+  EXACT_COMMAND,
+  PORTABLE_PLAIN_TEXT_PATTERN,
+  REQUIRED_CHECK,
+  VALIDATION_INFRASTRUCTURE,
+} from "./validation-schema-fragments.js";
 
 function deepFreeze(value) {
   if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
@@ -23,10 +30,6 @@ function deepFreeze(value) {
   return value;
 }
 
-const PORTABLE_PLAIN_TEXT_PATTERN =
-  "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$";
-const PORTABLE_REPOSITORY_PATH_PATTERN =
-  "^[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+(?:/[^\\\\/\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+)*$";
 const PORTABLE_NONEMPTY_SUMMARY_PATTERN = "^[^\\u0000\\u2028\\u2029]+$";
 const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
 const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
@@ -51,27 +54,6 @@ const NONEMPTY_TEXT_LIST = {
   minItems: 1,
 };
 const TEXT_OPTIONS = { ...OPTIONS, items: NONEMPTY_TEXT };
-const EXACT_COMMAND = {
-  type: "string",
-  minLength: 1,
-  maxLength: MAX_TEXT_LENGTH,
-  pattern: PORTABLE_PLAIN_TEXT_PATTERN,
-};
-const VALIDATION_PATH = {
-  type: "string",
-  minLength: 1,
-  maxLength: MAX_TEXT_LENGTH,
-  pattern: PORTABLE_REPOSITORY_PATH_PATTERN,
-};
-const REQUIRED_CHECK = {
-  type: "object",
-  properties: {
-    id: { type: "string", maxLength: 10, pattern: "^C[1-9][0-9]{0,8}$" },
-    command: EXACT_COMMAND,
-  },
-  required: ["id", "command"],
-  additionalProperties: false,
-};
 const REQUIRED_CHECKS = {
   type: "array",
   items: REQUIRED_CHECK,
@@ -97,15 +79,6 @@ const EMPTY_REQUIRED_CHECKS = { ...BOOTSTRAP_REQUIRED_CHECKS, maxItems: 0 };
 const NONEMPTY_REQUIRED_CHECKS = {
   ...BOOTSTRAP_REQUIRED_CHECKS,
   minItems: 1,
-};
-const VALIDATION_INFRASTRUCTURE = {
-  type: "array",
-  items: VALIDATION_PATH,
-  maxItems: MAX_VALIDATION_ITEMS,
-};
-const BOOTSTRAP_VALIDATION_INFRASTRUCTURE = {
-  ...VALIDATION_INFRASTRUCTURE,
-  maxItems: MAX_BOOTSTRAP_ITEMS,
 };
 const EMPTY_VALIDATION_INFRASTRUCTURE = {
   ...BOOTSTRAP_VALIDATION_INFRASTRUCTURE,
@@ -436,28 +409,43 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
   ]),
 );
 
-export const IMPLEMENTATION_SCHEMA = deepFreeze({
-  type: "object",
-  properties: {
-    status: {
-      type: "string",
-      enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
-    },
-    summary: SUMMARY,
-    reason: TEXT,
-    ...DECISION_PROPERTIES,
+const IMPLEMENTATION_PROPERTIES = {
+  status: {
+    type: "string",
+    enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
   },
-  required: [
-    "status",
-    "summary",
-    "reason",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
-  additionalProperties: false,
-});
+  summary: SUMMARY,
+  reason: TEXT,
+  ...DECISION_PROPERTIES,
+};
+
+export const IMPLEMENTATION_SCHEMA = deepFreeze(
+  resultUnion([
+    variant("status", ["COMPLETED"], IMPLEMENTATION_PROPERTIES, {
+      summary: NONEMPTY_SUMMARY,
+      reason: EMPTY_TEXT,
+      ...EMPTY_DECISION_PROPERTIES,
+    }),
+    variant("status", ["BLOCKED"], IMPLEMENTATION_PROPERTIES, {
+      summary: EMPTY_TEXT,
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
+    variant(
+      "status",
+      ["PRODUCT_DECISION_REQUIRED"],
+      IMPLEMENTATION_PROPERTIES,
+      {
+        summary: EMPTY_TEXT,
+        reason: EMPTY_TEXT,
+        ...PRODUCT_DECISION_PROPERTIES,
+      },
+    ),
+  ]),
+);
 
 export const FINALIZATION_SCHEMA = deepFreeze({
   type: "object",
@@ -636,41 +624,56 @@ export const CANDIDATE_CLEAN_CONFIRM_SCHEMA = deepFreeze({
   additionalProperties: false,
 });
 
-export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
-  type: "object",
-  properties: {
-    status: {
-      type: "string",
-      enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
-    },
-    decisions: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          id: BLOCKER_ID,
-          decision: { type: "string", enum: ["FIX", "DISPUTE"] },
-          reason: TEXT,
-          evidence: TEXT_LIST,
-        },
-        required: ["id", "decision", "reason", "evidence"],
-        additionalProperties: false,
-      },
-    },
-    reason: TEXT,
-    ...DECISION_PROPERTIES,
+const FINDING_DECISION_PROPERTIES = {
+  id: BLOCKER_ID,
+  decision: { type: "string", enum: ["FIX", "DISPUTE"] },
+  reason: NONEMPTY_TEXT,
+  evidence: { ...TEXT_LIST, items: NONEMPTY_TEXT },
+};
+const FINDING_DECISIONS = {
+  type: "array",
+  maxItems: MAX_ITEMS,
+  items: {
+    anyOf: [
+      variant("decision", ["FIX"], FINDING_DECISION_PROPERTIES, {}),
+      variant("decision", ["DISPUTE"], FINDING_DECISION_PROPERTIES, {
+        id: REVIEW_FINDING_ID,
+        evidence: NONEMPTY_TEXT_LIST,
+      }),
+    ],
   },
-  required: [
-    "status",
-    "decisions",
-    "reason",
-    "question",
-    "options",
-    "whyBlocked",
-    "evidence",
-  ],
-  additionalProperties: false,
-});
+};
+const RESOLUTION_PROPERTIES = {
+  status: {
+    type: "string",
+    enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+  },
+  decisions: FINDING_DECISIONS,
+  reason: TEXT,
+  ...DECISION_PROPERTIES,
+};
+
+export const FINDING_RESOLUTION_SCHEMA = deepFreeze(
+  resultUnion([
+    variant("status", ["RESOLVED"], RESOLUTION_PROPERTIES, {
+      reason: EMPTY_TEXT,
+      ...EMPTY_DECISION_PROPERTIES,
+    }),
+    variant("status", ["BLOCKED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
+    variant("status", ["PRODUCT_DECISION_REQUIRED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: EMPTY_TEXT,
+      ...PRODUCT_DECISION_PROPERTIES,
+    }),
+  ]),
+);
 
 export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
   type: "object",

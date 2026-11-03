@@ -4,15 +4,38 @@ Validation and semantic review are separate sources of evidence. Deterministic
 checks prove executable repository properties; agents assess correctness,
 scope, architecture, and edge cases. Neither substitutes for the other.
 
-Plan execution requires an observed content change for initial implementation of
-each step. Worker completion claims do not suffice. The runner preserves the
+Commit-plan execution requires an observed content change for initial implementation
+of each step. Worker completion claims do not suffice. The runner preserves the
 original step-start evidence across partial work and resume; an unchanged step
 requires plan revision before convergence or finalization. Unchanged corrections
 and confirmations remain valid. Legacy runs without reconstructable original
 evidence pause before further writable work; already-consumed commits still
-settle through verification.
+settle through verification. The custom step policy permits analysis
+without a file diff. Its accepted-result checkpoint requires the same
+mode-specific candidate, finalization and terminal-confirmation gates over
+analysis/evidence and inspected output fingerprints. Provider completion cannot
+settle it; pending publication must reconcile before acceptance. Frozen criteria
+and inputs, earlier accepted outputs and exact permissions remain binding;
+invalidated earlier results require a revised plan and a new run. This checkpoint
+grants no Git effects. Explicit custom execution retains these gates while allowing criterion-dependent empty command inventories and optional selected guidance. Semantic review is still required, and selected trusted commands retain exact provenance.
+Unmet custom criteria remain blocking finalization failures even without a
+failed executable check. They require repair and fresh candidate convergence
+before finalization and terminal confirmation can accept the result.
+
+An authorized compatible product-decision answer changes the active clarification
+version only after read-only plan compatibility. New result fingerprints and
+receipts bind that version; every dependent approval must be earned again.
+Earlier receipts and frozen permissions remain unchanged, and unauthorized
+clarification edits cannot continue the run.
 
 ## Authoring review
+
+Explicit custom authoring reviews agreed user criteria, completeness and feasible
+ordering through the same mode gates. Custom coding requirements apply only when
+selected. Deterministic validation enforces the custom step/reference format and
+exact frozen criterion/source/output declarations; only Runner writes the final
+plan. Commit planning keeps fixed coding and Git guarantees, with any supplied
+criteria as supplements. Reviewed custom plans can be executed sequentially with explicit custom selection.
 
 Combined authoring requires two distinct approvals over the same durable draft:
 a mutation-free Planner clean confirmation after check/fix, then independent
@@ -25,13 +48,23 @@ remain repository-read-only.
 In every authoring mode, exhaustion on deterministic structural failures pauses
 without arbitration; an Arbiter cannot resolve those failures.
 
+Implementation and finding-resolution output mistakes preserve the inspected
+candidate and earlier accepted work. Execution grants one bounded read-only
+result restatement against the original turn facts and blockers. Invalid or lost
+replacement output requires explicit resume for one further read-only retry;
+interruption never renews the automatic allowance or charges the same repair
+twice. Validated exceptional outcomes still block. Corrected status and custom
+criterion evidence grant no approval: every original candidate, finalization,
+terminal-confirmation and effect gate still applies. See
+[writable result recovery](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+
 ## Execution and polishing review
 
 Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
 candidate approvals bind the same content fingerprint. Finalization may format
 that content; a distinct Reviewer terminal confirmation approves its resulting
-fingerprint and validation evidence before one-shot commit authorization.
+fingerprint and validation evidence before the selected commit or accepted-result checkpoint.
 Content repairs restart primary convergence. Self-findings go directly to fixing;
 independent findings retain disputes, withdrawals, exact recorded overrides, and
 fresh on-demand arbitration. Unresolved bootstrap disagreements and primary
@@ -48,7 +81,81 @@ Unresolved bootstrap and exhausted primary budgets pause. Handoff remains
 runner-owned staging without a commit, and resume preserves accepted evidence
 and correction accounting.
 
+## Audit finding verification
+
+Audit's batch gate is separate from coding-pipeline candidate review.
+Every new or materially revised batch requires a distinct read-only recheck of
+relevance, evidence, examples, impact, classification, overlap and optional
+recommendations. Lazy retains the discovering Auditor; independent requires a
+fresh finding Reviewer after each substantive correction. Combined first
+converges with the discovering Auditor, then requires a fresh Reviewer's clean
+first pass. A correcting Reviewer stays through its own series until clean,
+then a replacement must accept on its first pass. Intermediate cleanliness
+does not release pending verification; discovery resumes the same Auditor only
+after batch acceptance. Versioned
+snapshot/report-bound receipts accept only an unchanged exact batch and its
+dispositions. Rejected decisions remain reviewable; additions and revisions
+require verification themselves. This gate has its own finite run-wide 20-pass
+budget and never changes discovery cleanliness or establishes audit completion.
+The [audit specification](../../pipelines/audit/docs/SPEC.md#finding-batch-verification)
+owns these contracts. Runner publication confirms only exact rechecked ledger
+versions. Completion additionally requires the selected clean-discovery gate,
+no pending batch, unchanged bindings and verified complete report publication.
+Critical findings do not fail the audit or create automatic issues. Unavailable
+authorized checks remain explicit limitations; report corrections never grant
+source writes.
+
 ## Bootstrap inventory
+
+New commit-plan runs with `automaticCommitSplitting` enabled, the default, use the
+[commit-size assessment contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
+At reconciled boundaries its policy distinguishes an oversized atomic exception
+from a proposed cohesive split, bound to frozen scope, dependencies, inspected
+content and measurement. A proposal is neither a reviewed effective revision nor
+candidate approval. Assessment is read-only, mode-specific and bounded across
+the original-step lineage, with no budget renewal on reconstruction. Size alone never fails work or requires an override. Legacy and intermediate
+runs remain disabled on resume; new eligible runs assess before further
+convergence or review. Disabled runs skip measurement and assessment entirely and
+validate the predefined plan through the ordinary gates.
+
+The [effective revision contract](../../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation)
+separates a size proposal from reviewed plan authority. Acceptance preserves
+original requirements, dependencies, later steps, exact checks, unresolved
+finding ownership and completed history. Lazy requires a distinct read-only
+Worker confirmation; independent requires Reviewer approval; combined requires
+primary convergence before that approval. Drift or a corrected plan invalidates
+dependent evidence without renewing consumed allowances. Accepted authority is
+durable before boundaries can change; pending commit effects must reconcile
+first. Frozen plan artifacts remain unchanged.
+
+Revision validation separately binds complete
+inventories to accepted effective revisions and exact replacement work.
+Every mode-required role rediscovers applicability read-only; unchanged
+assignments carry forward only through validated correspondence. Commands,
+reports, later coverage and Reviewer-only requirements remain additive, including
+requirements introduced during earlier revision discovery. A complete
+Worker-first schedule requires every active role and does not substitute for
+capability preparation or check execution. Stale schedules and implementation
+evidence cannot gain authority through renumbering. Migration creates no legacy
+revision proof and preserves consumed effects and allowances.
+Confirmed current-step amendments retain their commands, mapped applicability
+and infrastructure across revision acceptance and reload.
+
+After mode-specific plan acceptance and complete capability preparation, the
+runner verifies an external capture of every unfinished change before separation.
+Only the active replacement is reconstructed over its accepted baseline; each
+replacement independently passes candidate convergence, finalization, separate
+terminal confirmation and an exact authorized commit. Accepted siblings stay
+intact and future saved work survives interruption or cancellation. Refinement
+retains consumed corrections and lineage allowances. Finding-specific decisions
+apply only to the same reviewed
+payload version and replacement ownership; sibling-local ID reuse cannot transfer
+arbitration or dispute consumption. Verification-only commit
+settlement precedes new work, and the original step and its deferred stop finish
+only after every replacement verifies.
+Unchanged owned findings retain their IDs across replacements. An authorized
+clarification answer requires fresh plan approval and additive revision discovery;
+historical receipts and consumed assessment/correction allowances remain intact.
 
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
@@ -59,12 +166,25 @@ checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
 Execution inventories are scoped to canonical plan steps. Every active role
-discovers a complete procedure for every step: the ordinary fast gate and only
-slow checks whose documented guarantees that step affects. The runner preserves
+discovers a complete procedure for every step. Commit steps require the ordinary
+fast gate and only slow checks whose documented guarantees that step affects;
+custom steps require only criterion-dependent checks and explicitly selected
+coding requirements. The runner preserves
 the accepted role assignments, merges commands in Worker-first order, and unions
 their applicability. A Reviewer-only requirement survives reconciliation.
 Later requirements remain persisted without executing during earlier finalization.
 Polishing continues to use one workspace inventory.
+
+Execution establishes each role's catalog through broad read-only discovery,
+then accepts bounded applicability batches. Accepted units survive interruption
+when their frozen input, role, repository, infrastructure, and catalog bindings
+remain valid. Complete future-step coverage and capability preparation precede
+writable work. Output exhaustion subdivides only unfinished applicability work
+within a finite persisted allowance; discovery and indivisible exhaustion
+pause. Catalog correction and unexpected drift invalidate dependent evidence
+without renewing output or semantic correction allowances. Partial coverage
+never becomes an inventory. Compatible complete legacy inventories survive
+migration without fabricated batch proof, and consumed commits settle first.
 
 Execution finalization and terminal confirmation bind the active step and its
 exact ordered evidence. A confirmed inventory amendment affects only that
@@ -99,8 +219,12 @@ omission or substitution. A project-required content change is fingerprinted
 after it finishes.
 
 Both workflows freeze their effective finalization-guidance path or fallback
-decision before bootstrap. A selected skill remains mandatory fingerprinted
-validation infrastructure for the run; automatic discovery does not switch or
+decision before bootstrap. Explicit Markdown procedures resolve from the bound
+infrastructure root; automatic skills remain repository-local. New selections pin
+bytes, file identity and real ancestry and grant only the exact file read. A
+selected procedure remains mandatory fingerprinted validation infrastructure for
+the run. External guidance has a distinct inventory identity so it cannot shadow
+repository validation files. Automatic discovery does not switch or
 fall back later. Missing, invalid, or changed frozen guidance requires a new
 run rather than consuming correction or review budgets.
 
@@ -215,6 +339,19 @@ new run persists the resolved value once, so resumes and concurrent runs use
 their own unchanged snapshots. For example, `"trustedCommandTimeoutMs":
 7200000` selects two hours. Capability preparation remains limited to the
 smaller of the resolved value and 10 seconds.
+That single launch-to-close bound includes durable process registration and is
+never renewed by delayed registration or start IPC. Expired or cancelled
+preparation cannot release a payload later; reconciliation drains registration
+and verifies retirement without converting expiry into availability. A bounded
+registration-timeout diagnosis does not assert an isolation incompatibility or
+invent an observed payload exit or signal.
+
+Preparation publishes its canonical reservation before launch, then attaches the
+complete process proof through bounded state-owned custody operations independent
+of journal size. Stop revocation and admission share a gate. After retirement,
+complete canonical settlement precedes cleanup or another probe. This grants no
+required-check evidence and changes no frozen vector, capability or outcome; see
+[preparation custody](../ARCHITECTURE.md#preparation-custody).
 
 A valid but unavailable frozen request pauses durably as `environment_blocked`
 before provider work, including at creation before any preflight evidence exists.
@@ -286,10 +423,26 @@ fix sandbox incompatibility or restore discarded stdout/stderr. A check may
 pass on the host yet fail closed in isolation with only a generic exit code;
 the timeout must not be presented as a diagnostics remedy.
 
+A producer-only test-location protocol is available to the repository harness
+through existing scratch requests; runtime allocation and consumption remain
+inactive. Its entire report is bounded to 4,096 UTF-8 bytes and four locations
+across the original command's batches. Locations contain only canonical
+repository-relative test-source paths of at most 256 UTF-8 bytes, nullable
+integer coordinates from 1 through 1,000,000, and the metadata-derived classes
+`test-failure`, `subtests`, `timeout`, `cancelled`, or `uncaught`. No native output,
+titles, messages, assertion values, stacks, external paths or provider data are
+retained. An exclusive claim prevents nested harness overwrites. Reporting never
+replaces the original outcome with a diagnostic rerun, and unavailable metadata
+cannot change acceptance, grant a retry or explain a historical opaque failure.
+
 Execution and polishing validation infrastructure consists of files that own
 commands, discovery, runners, configuration, or mandatory finalization guidance. Ordinary
 source, individual tests, fixtures, and generated output merely consumed by
 checks are excluded; ownership is semantic rather than inferred from filenames.
+The actual test harness (`scripts/test.js`), structured reporter
+(`scripts/test-reporter.js`) and producer/codec
+(`src/trusted-validation/test-attribution.js`, through its public index) own
+validation execution and reporting and therefore belong to infrastructure.
 Both pipelines permit 256 entries per role field and 512 per merged, persisted,
 or finalization field. Inventories are complete and never truncated; `requiredChecks` overflow has priority over infrastructure overflow.
 Existing byte limits still apply. Legacy evidence in both pipelines migrates

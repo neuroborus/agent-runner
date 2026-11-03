@@ -35,7 +35,11 @@ test("bootstrap instructions preserve independent evidence and arbitration", () 
   assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
   assert.match(
     BOOTSTRAP_INSTRUCTIONS,
-    /canonical repository-relative file paths/u,
+    /canonical repository-relative regular files/u,
+  );
+  assert.match(
+    BOOTSTRAP_INSTRUCTIONS,
+    /except for the exact declared label of selected external finalization guidance/u,
   );
   assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
   assert.match(
@@ -176,6 +180,7 @@ The established required-check inventory is input only to the dedicated FINALIZE
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
+Return the status fields inside the schema's result object.
 For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
@@ -226,7 +231,8 @@ Do not run the project finalization procedure or perform generic commit preparat
 The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
 Do not create a commit in this turn.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+Return the status fields and finding decisions inside the schema's result object.
+For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -280,7 +286,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,
-    /For SKILL_MISSING or SKILL_INVALID, provide the attempted repository-relative skillPath and reason/u,
+    /For SKILL_MISSING or SKILL_INVALID, provide the attempted selected guidance label in skillPath and reason/u,
   );
   assert.match(
     FINALIZATION_INSTRUCTIONS,

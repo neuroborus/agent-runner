@@ -1,9 +1,11 @@
 import { execFile as executeFileCallback, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
+import { canReadFiles } from "../file-access.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   ADAPTER_FAILURE_CLASS,
@@ -16,10 +18,13 @@ import {
   isRecord,
   isolateGitEnvironment,
   normalizeClientAttribution,
+  sessionName,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
 import { createCodexProgress } from "./progress.js";
+import { createCodexObservations } from "./observations.js";
 import { codexAvailabilityEvidence } from "./availability.js";
 import { MAX_HTTP_ERROR_BYTES, parseHttpError } from "./http-error.js";
 import {
@@ -27,6 +32,13 @@ import {
   probeCodexLocalCommit,
 } from "./local-commit.js";
 import { assertCodexSchema } from "./schema.js";
+import {
+  assertDirectoryConfiguration,
+  assertDirectorySelection,
+  directoryPermissionArguments,
+  directoryPolicyError,
+  prepareDirectoryPolicy,
+} from "./directory-policy.js";
 import {
   assertCodexWorkspaceStorage,
   createCodexWorkspaceStorage,
@@ -36,6 +48,7 @@ export const CODEX_BACKEND_ID = "codex";
 
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
+const MINIMUM_DIRECTORY_CODEX_VERSION = Object.freeze([0, 164, 0]);
 const MAX_MCP_SERVERS = 256;
 const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
@@ -44,9 +57,11 @@ const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const CAPABILITY_DIAGNOSTICS = Object.freeze({
+  declaredWorkspace: "capability_declared_workspace",
   autonomousWrite: "capability_autonomous_write",
   gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
+  nativeProfile: "capability_native_profile",
   nativeSessionContinuation: "capability_session_continuation",
   nativeSessionFork: "capability_session_fork",
   readOnly: "capability_read_only",
@@ -76,6 +91,7 @@ const RECOVERABLE_TURN_DIAGNOSTICS = new Set([
   TERMINAL_TURN_DIAGNOSTICS.other,
   TERMINAL_TURN_DIAGNOSTICS.serverOverloaded,
 ]);
+const OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS = "turn_output_exhausted";
 const CLIENT_ERROR_STATUSES = new Map([
   [400, "Bad Request"],
   [401, "Unauthorized"],
@@ -100,6 +116,7 @@ const AUTHENTICATION_ERROR_CODES = new Set(["invalid_api_key"]);
 const REQUEST_ERROR_FIELDS = new Set(["code", "message", "data"]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
+  OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
   "isolation_command_host",
@@ -111,10 +128,14 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   "isolation_network",
   "isolation_notification",
   "isolation_shell_environment",
+  "isolation_workspace_policy",
   "operation_dynamic_tool",
   "operation_hosted_tool",
   "operation_lifecycle_hook",
   "operation_local_commit",
+  "operation_local_commit_confirmation",
+  "operation_local_commit_file_change",
+  "operation_local_commit_git_operation",
   "operation_mcp_tool",
   "operation_memory",
   "operation_multi_agent",
@@ -424,6 +445,7 @@ const codexContract = createAdapterContract({
   AdapterError: CodexAdapterError,
   backendName: "Codex",
   failureClasses: CODEX_FAILURE_CLASSES,
+  declaredWorkspace: true,
 });
 buildCodexFailure = codexContract.failure;
 
@@ -432,6 +454,7 @@ const {
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
+  normalizeProbeOptions,
 } = codexContract;
 
 function validateExecutionOptions(options) {
@@ -701,7 +724,12 @@ function threadOptions(request) {
     approvalPolicy: "never",
     approvalsReviewer: "user",
     cwd: request.cwd,
-    sandbox: threadSandboxFor(request),
+    ...(request.directoryPermissions === undefined
+      ? { sandbox: threadSandboxFor(request) }
+      : {
+          config: request.directoryPermissions,
+          permissions: request.directoryPermissions.default_permissions,
+        }),
   };
   if (request.model !== undefined) {
     options.model = request.model;
@@ -744,7 +772,9 @@ function turnOptions(request, threadId, prompt, workspaceStorage) {
     cwd: request.cwd,
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandboxPolicy: sandboxFor(request, workspaceStorage),
+    ...(request.directoryPermissions === undefined
+      ? { sandboxPolicy: sandboxFor(request, workspaceStorage) }
+      : { permissions: request.directoryPermissions.default_permissions }),
   };
   if (request.model !== undefined) {
     options.model = request.model;
@@ -764,7 +794,9 @@ function assertThreadResponse(value) {
     !isRecord(value) ||
     !isRecord(value.thread) ||
     typeof value.thread.id !== "string" ||
-    value.thread.id.length === 0
+    !value.thread.id.trim() ||
+    value.thread.id.length > 1024 ||
+    /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value.thread.id)
   ) {
     throw new CodexAdapterError("Codex returned an invalid thread.", {
       code: "ERR_CODEX_PROTOCOL",
@@ -856,14 +888,22 @@ async function selectThread(client, request, fresh) {
       ...options,
       serviceName: "agent_runner",
     });
-    return { id: assertThreadResponse(result), model: result.model };
+    assertDirectorySelection(result, request, CodexAdapterError);
+    const threadId = assertThreadResponse(result);
+    if (threadId === request.session?.id)
+      throw new CodexAdapterError("Codex did not create a new thread.", {
+        code: "ERR_CODEX_PROTOCOL",
+      });
+    return { id: threadId, model: result.model };
   }
   if (request.session.mode === "fork") {
     try {
       const result = await client.request("thread/fork", {
         ...options,
         threadId: request.session.id,
+        excludeTurns: true,
       });
+      assertDirectorySelection(result, request, CodexAdapterError);
       const threadId = assertThreadResponse(result);
       if (
         threadId === request.session.id ||
@@ -877,9 +917,11 @@ async function selectThread(client, request, fresh) {
     } catch (cause) {
       if (
         cause instanceof CodexAdapterError &&
-        (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(
-          cause.code,
-        ) ||
+        ([
+          "ERR_CODEX_PROTOCOL",
+          "ERR_UNSUPPORTED_EFFORT",
+          "ERR_CODEX_ISOLATION",
+        ].includes(cause.code) ||
           isAuthenticationRequiredError(cause))
       ) {
         throw cause;
@@ -894,7 +936,9 @@ async function selectThread(client, request, fresh) {
     const result = await client.request("thread/resume", {
       ...options,
       threadId: request.session.id,
+      excludeTurns: true,
     });
+    assertDirectorySelection(result, request, CodexAdapterError);
     const threadId = assertThreadResponse(result);
     if (threadId !== request.session.id) {
       throw new CodexAdapterError("Codex resumed an unexpected thread.", {
@@ -905,7 +949,11 @@ async function selectThread(client, request, fresh) {
   } catch (cause) {
     if (
       cause instanceof CodexAdapterError &&
-      (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code) ||
+      ([
+        "ERR_CODEX_PROTOCOL",
+        "ERR_UNSUPPORTED_EFFORT",
+        "ERR_CODEX_ISOLATION",
+      ].includes(cause.code) ||
         isAuthenticationRequiredError(cause))
     ) {
       throw cause;
@@ -916,6 +964,46 @@ async function selectThread(client, request, fresh) {
       recoverable: true,
     });
   }
+}
+
+async function nameCreatedThread(client, request, threadId) {
+  if (request.sessionNaming === undefined) return;
+  let status = "named";
+  try {
+    const result = await client.request("thread/name/set", {
+      threadId,
+      name: sessionName(request.sessionNaming),
+    });
+    if (!isRecord(result) || !client.usable)
+      throw new Error("Session naming did not complete.");
+  } catch (cause) {
+    request.signal?.throwIfAborted();
+    if (
+      client.usable &&
+      cause instanceof CodexAdapterError &&
+      [
+        "ERR_CODEX_SESSION_NAMING_REJECTED",
+        "ERR_CODEX_SESSION_NAMING_UNSUPPORTED",
+      ].includes(cause.code)
+    ) {
+      status =
+        cause.code === "ERR_CODEX_SESSION_NAMING_UNSUPPORTED"
+          ? "unsupported"
+          : "rejected";
+    } else {
+      status = "unavailable";
+    }
+  }
+  await request.onSessionNaming?.({ status });
+  if (status === "unavailable" || !client.usable)
+    throw new CodexAdapterError(
+      "Codex session naming requires request recovery.",
+      {
+        code: "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
+        method: "thread/name/set",
+        recoverable: true,
+      },
+    );
 }
 
 function isContextWindowExceeded(turn) {
@@ -988,6 +1076,20 @@ function authenticationRequiredError() {
   });
 }
 
+// The native unit `other` variant carries this exact response-incomplete
+// diagnostic. Tool output, additional details, and arbitrary prose are not proof.
+function isOutputExhaustionMessage(message) {
+  return message === "Incomplete response returned, reason: max_output_tokens";
+}
+
+function outputExhaustedError() {
+  return new CodexAdapterError("Codex response output was exhausted.", {
+    code: "ERR_CODEX_OUTPUT_EXHAUSTED",
+    diagnosticClass: OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS,
+    disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+  });
+}
+
 function isStructuredRequestError(error) {
   return (
     isRecord(error) &&
@@ -1029,6 +1131,27 @@ function isEffortRejection(message) {
 }
 
 function classifyRequestError(error, method, request) {
+  if (
+    method === "thread/name/set" &&
+    isStructuredRequestError(error) &&
+    Number.isSafeInteger(error.code) &&
+    typeof error.message === "string"
+  )
+    return new CodexAdapterError("Codex session naming was rejected.", {
+      code:
+        error.code === -32601
+          ? "ERR_CODEX_SESSION_NAMING_UNSUPPORTED"
+          : "ERR_CODEX_SESSION_NAMING_REJECTED",
+      method,
+    });
+  if (
+    method === "turn/start" &&
+    isStructuredRequestError(error) &&
+    [-32603, -32000].includes(error.code) &&
+    isOutputExhaustionMessage(error.message)
+  ) {
+    return outputExhaustedError();
+  }
   if (
     request.effort !== undefined &&
     ["turn/start", "thread/start", "thread/resume", "thread/fork"].includes(
@@ -1112,9 +1235,13 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   }
   let response;
   try {
-    response = await client.request("thread/read", {
+    // This owner has just completed the latest turn. Hydrate only that turn:
+    // complete thread history can exceed the protocol cap after valid results.
+    response = await client.request("thread/turns/list", {
       threadId,
-      includeTurns: true,
+      limit: 1,
+      sortDirection: "desc",
+      itemsView: "full",
     });
   } catch (cause) {
     if (isAuthenticationRequiredError(cause)) throw cause;
@@ -1122,19 +1249,16 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   }
   if (
     !isRecord(response) ||
-    !isRecord(response.thread) ||
-    response.thread.id !== threadId ||
-    !Array.isArray(response.thread.turns)
+    !Array.isArray(response.data) ||
+    response.data.length !== 1
   ) {
     throw invalidCompletedTurn();
   }
-  const matches = response.thread.turns.filter(
-    (candidate) => isRecord(candidate) && candidate.id === turnId,
+  return assertCompletedTurn(
+    { threadId, turn: response.data[0] },
+    threadId,
+    turnId,
   );
-  if (matches.length !== 1) {
-    throw invalidCompletedTurn();
-  }
-  return assertCompletedTurn({ threadId, turn: matches[0] }, threadId, turnId);
 }
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {
@@ -1202,6 +1326,7 @@ async function compactThread(client, threadId) {
       (params) => isRecord(params) && params.threadId === threadId,
     );
     const notificationTurn = assertCompletedTurnEnvelope(completion, threadId);
+    client.selectCompaction(threadId, notificationTurn.id);
     const turn = await resolveCompletedTurn(
       client,
       completion,
@@ -1218,6 +1343,7 @@ async function compactThread(client, threadId) {
         code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
       });
     }
+    client.confirmCompaction(threadId, turn.id);
   } catch (cause) {
     if (isAuthenticationRequiredError(cause)) throw cause;
     throw new CodexAdapterError("Codex context compaction failed.", {
@@ -1296,8 +1422,14 @@ async function runTurn(
       RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
       Object.hasOwn(availability, "status");
     if (canRefine) {
-      // Native availability cannot hide policy, protocol, or isolation violations.
+      // Native refinement cannot hide policy, protocol, or isolation violations.
       auditItems(turn.items, request);
+    }
+    if (
+      turn.error?.codexErrorInfo === "other" &&
+      isOutputExhaustionMessage(turn.error.message)
+    ) {
+      throw outputExhaustedError();
     }
     const parsedRejection =
       canRefine && structuredClientError(turn.error?.message);
@@ -1437,11 +1569,20 @@ function auditItems(items, request) {
               : "ERR_CODEX_READ_ONLY_POLICY",
           diagnosticClass:
             request.access === "local-commit"
-              ? "operation_local_commit"
+              ? "operation_local_commit_file_change"
               : "operation_read_only_write",
         },
       );
     }
+    if (
+      request.directoryBoundary !== undefined &&
+      item.type === "fileChange" &&
+      (!Array.isArray(item.changes) ||
+        item.changes.some(
+          (change) => !request.directoryBoundary.allowsChange(change),
+        ))
+    )
+      throw directoryPolicyError(CodexAdapterError);
     if (
       item.type === "agentMessage" &&
       item.memoryCitation !== undefined &&
@@ -1479,7 +1620,7 @@ function auditItems(items, request) {
           "Codex attempted a forbidden local-commit operation.",
           {
             code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-            diagnosticClass: "operation_local_commit",
+            diagnosticClass: "operation_local_commit_git_operation",
           },
         );
       }
@@ -1533,7 +1674,7 @@ function normalizeResult(turn, request, sessionId) {
       "Codex did not confirm the authorized local commit.",
       {
         code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
-        diagnosticClass: "operation_local_commit",
+        diagnosticClass: "operation_local_commit_confirmation",
       },
     );
   }
@@ -1585,8 +1726,10 @@ export function createCodexAdapter(options = {}) {
   const processEnvironment = isolateGitEnvironment(env);
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
   let probePromise;
+  let accessProbePromise;
+  const profileValidations = new Map();
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(includeCommit = true) {
     let versionResult;
     let helpResult;
     try {
@@ -1616,6 +1759,7 @@ export function createCodexAdapter(options = {}) {
         help.includes(flag),
       );
     const localCommit =
+      includeCommit &&
       supported &&
       (await probeCodexLocalCommit({
         codexBinary,
@@ -1623,30 +1767,115 @@ export function createCodexAdapter(options = {}) {
         execute,
       }));
     return Object.freeze({
-      version: version.text,
-      structuredOutput: supported,
-      readOnly: supported,
-      autonomousWrite: supported,
-      gitMetadataWriteBlocked: supported,
-      workspaceWrite: supported,
-      localCommit,
-      remoteWriteBlocked: supported,
-      nativeSessionContinuation: supported,
-      nativeSessionFork: supported,
+      capabilities: Object.freeze({
+        version: version.text,
+        structuredOutput: supported,
+        readOnly: supported,
+        autonomousWrite: supported,
+        gitMetadataWriteBlocked: supported,
+        workspaceWrite: supported,
+        localCommit,
+        remoteWriteBlocked: supported,
+        nativeSessionContinuation: supported,
+        nativeSessionFork: supported,
+      }),
+      startupConfig: help.includes("--print-startup-config"),
     });
   }
 
-  function probe(value) {
-    const options = normalizeExecutionOptions(value);
-    probePromise ??= inspectCapabilities();
-    if (options.effort !== undefined) {
-      return probePromise.then((capabilities) => {
-        // The supported App Server baseline includes the turn effort control.
-        if (!capabilities.structuredOutput) throw effortError();
-        return capabilities;
-      });
+  function nativeProfileError() {
+    return new CodexAdapterError(
+      "Installed Codex CLI cannot apply the selected profile to app-server.",
+      {
+        code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        diagnosticClass: CAPABILITY_DIAGNOSTICS.nativeProfile,
+      },
+    );
+  }
+
+  async function validateProfile(profile, startupConfig) {
+    // Help output short-circuits profile application, so prove the selected
+    // profile on the model-free App Server startup path. Native output is
+    // discarded and the profile is never ignored or substituted.
+    if (!startupConfig) throw nativeProfileError();
+    try {
+      await execute(
+        codexBinary,
+        nativeArguments({ profile }, [
+          "app-server",
+          "--strict-config",
+          "--print-startup-config",
+        ]),
+        {
+          encoding: "utf8",
+          env: processEnvironment,
+          maxBuffer: 1024 * 1024,
+          timeout: 10_000,
+        },
+      );
+    } catch {
+      throw nativeProfileError();
     }
-    return probePromise;
+  }
+
+  function probe(value) {
+    return probeCapabilities(
+      validateExecutionOptions(normalizeProbeOptions(value)),
+    );
+  }
+
+  async function probeCapabilities(options) {
+    const { capabilities, startupConfig } = await (options.access !==
+      undefined && options.access !== "local-commit"
+      ? (accessProbePromise ??= inspectCapabilities(false))
+      : (probePromise ??= inspectCapabilities()));
+    if (options.profile !== undefined) {
+      if (!profileValidations.has(options.profile)) {
+        profileValidations.set(
+          options.profile,
+          validateProfile(options.profile, startupConfig),
+        );
+      }
+      await profileValidations.get(options.profile);
+    }
+    if (options.effort !== undefined && !capabilities.structuredOutput)
+      throw effortError();
+    if (options.workspacePolicy === undefined) return capabilities;
+    const boundary = await prepareDirectoryPolicy(
+      { ...options, cwd: options.workspacePolicy.workspacePath },
+      CodexAdapterError,
+    );
+    return directoryCapabilities(capabilities, options.access, boundary);
+  }
+
+  function directoryCapabilities(capabilities, access, boundary) {
+    const supported =
+      capabilities.structuredOutput &&
+      versionAtLeast(
+        parseVersion(`codex-cli ${capabilities.version}`),
+        MINIMUM_DIRECTORY_CODEX_VERSION,
+      );
+    return deepFreeze({
+      ...capabilities,
+      declaredWorkspace: supported,
+      readOnly: supported && access === "read-only",
+      workspaceWrite: supported && access === "workspace-write",
+      autonomousWrite: supported && access === "workspace-write",
+      gitMetadataWriteBlocked: supported,
+      localCommit: false,
+      policyReceipt: {
+        schemaVersion: 1,
+        fingerprint: createHash("sha256")
+          .update(
+            JSON.stringify({
+              version: capabilities.version,
+              policy: boundary.fingerprint,
+            }),
+          )
+          .digest("hex"),
+        supportedAccess: supported ? [access] : [],
+      },
+    });
   }
 
   function workspaceStorageFailure() {
@@ -1745,6 +1974,9 @@ export function createCodexAdapter(options = {}) {
           : argument,
       ),
     );
+    argumentsList.push(
+      ...directoryPermissionArguments(request.directoryPermissions),
+    );
     for (const name of mcpServerNames) {
       argumentsList.push("-c", `mcp_servers.${name}.enabled=false`);
     }
@@ -1755,8 +1987,23 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe(executionOptionsFor(request));
+    const base = await probe({
+      ...executionOptionsFor(request),
+      ...(request.workspacePolicy === undefined
+        ? {}
+        : { access: request.access }),
+    });
+    const capabilities =
+      request.directoryBoundary === undefined
+        ? base
+        : directoryCapabilities(
+            base,
+            request.access,
+            request.directoryBoundary,
+          );
     const required = ["remoteWriteBlocked"];
+    if (request.directoryBoundary !== undefined)
+      required.push("declaredWorkspace");
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
     }
@@ -1831,11 +2078,26 @@ export function createCodexAdapter(options = {}) {
     }
   }
 
-  async function runAttempt(request, { fresh = false, recovery = false } = {}) {
+  async function runAttempt(
+    request,
+    { fresh = false, recovery = false, attempt, settlement } = {},
+  ) {
+    settlement.directoryVerified = false;
     request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
+    let processRetired = true;
+    let attemptFailed = false;
     try {
-      const launch = await appServerLaunch(request, workspaceStorage);
+      await request.directoryBoundary?.verify();
+      const attemptRequest =
+        request.directoryBoundary === undefined
+          ? request
+          : Object.freeze({
+              ...request,
+              directoryPermissions:
+                request.directoryBoundary.permissions(workspaceStorage),
+            });
+      const launch = await appServerLaunch(attemptRequest, workspaceStorage);
       let child;
       try {
         request.signal?.throwIfAborted();
@@ -1855,6 +2117,7 @@ export function createCodexAdapter(options = {}) {
                 ownershipMode: "native-sandbox-provider",
               }),
         });
+        processRetired = false;
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);
       }
@@ -1867,12 +2130,18 @@ export function createCodexAdapter(options = {}) {
             });
       ownedFailureSignal?.catch(() => {});
       const progress = createCodexProgress(request.onProgress);
+      const observations = createCodexObservations(
+        request.onObservation,
+        attempt,
+        recovery,
+      );
       const client = createCodexAppServerClient(
         child,
         CodexAdapterError,
         request.signal,
         (error, method) => classifyRequestError(error, method, request),
         progress,
+        observations,
       );
       let result;
       let operationFailed = false;
@@ -1884,7 +2153,10 @@ export function createCodexAdapter(options = {}) {
               title: normalizedClientAttribution.title,
               version: packageMetadata.version,
             },
-            capabilities: null,
+            capabilities:
+              request.directoryBoundary === undefined
+                ? null
+                : { experimentalApi: true },
           });
           client.notify("initialized", {});
           const configuration = await client.request("config/read", {
@@ -1895,10 +2167,23 @@ export function createCodexAdapter(options = {}) {
             launch.mcpServerNames,
             workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
           );
+          assertDirectoryConfiguration(
+            configuration.config,
+            attemptRequest.directoryPermissions,
+            CodexAdapterError,
+          );
           if (request.model !== undefined)
             await validateModel(client, request.model, request.effort);
-          const selectedThread = await selectThread(client, request, fresh);
+          const selectedThread = await selectThread(
+            client,
+            attemptRequest,
+            fresh,
+          );
           const threadId = selectedThread.id;
+          if (fresh || request.session?.mode !== "continue") {
+            await request.onSessionCreated?.(threadId);
+            await nameCreatedThread(client, request, threadId);
+          }
           if (request.model === undefined && request.effort !== undefined) {
             const model =
               selectedThread.model ?? configuration.config.model ?? undefined;
@@ -1916,7 +2201,7 @@ export function createCodexAdapter(options = {}) {
           }
           const turn = await runTurn(
             client,
-            request,
+            attemptRequest,
             threadId,
             turnPrompt(request, recovery),
             turnPrompt(request, "compact"),
@@ -1931,19 +2216,19 @@ export function createCodexAdapter(options = {}) {
         operationFailed = true;
         throw cause;
       } finally {
-        let retired = false;
         try {
           await client.close({
             retainProcess: child.ownedContainmentRetained === true,
           });
-          retired = child.ownedContainmentRetained !== true;
         } catch (cause) {
           if (!operationFailed) {
+            operationFailed = true;
             throw cause;
           }
         } finally {
           await ownedCompletion;
-          if (retired) {
+          if (client.exited && child.ownedContainmentRetained !== true) {
+            processRetired = true;
             try {
               progress.retire();
             } catch {
@@ -1953,16 +2238,65 @@ export function createCodexAdapter(options = {}) {
                 });
             }
           }
+          try {
+            observations?.seal();
+          } catch {
+            if (!operationFailed)
+              throw new CodexAdapterError(
+                "Codex observation observer failed.",
+                {
+                  code: "ERR_CODEX_PROTOCOL",
+                },
+              );
+          }
         }
       }
       return result;
+    } catch (cause) {
+      attemptFailed = true;
+      throw cause;
     } finally {
       await cleanupWorkspaceStorage(workspaceStorage);
+      if (request.directoryBoundary !== undefined) {
+        if (processRetired) {
+          await request.directoryBoundary.verify();
+          settlement.directoryVerified = true;
+        } else if (!attemptFailed)
+          throw directoryPolicyError(CodexAdapterError);
+      }
     }
   }
 
   async function run(value) {
-    const request = normalizeRequest(value);
+    const normalized = normalizeRequest(value);
+    if (
+      normalized.sessionNaming !== undefined &&
+      normalized.onSessionCreated === undefined
+    )
+      throw new CodexAdapterError(
+        "Session naming requires child acknowledgement.",
+        {
+          code: "ERR_INVALID_CODEX_OPTIONS",
+        },
+      );
+    if (
+      normalized.readPaths !== undefined &&
+      !(await canReadFiles(normalized.readPaths))
+    ) {
+      throw directoryPolicyError(CodexAdapterError);
+    }
+    const directoryBoundary = await prepareDirectoryPolicy(
+      normalized,
+      CodexAdapterError,
+    );
+    const request =
+      directoryBoundary === undefined
+        ? normalized
+        : Object.freeze({ ...normalized, directoryBoundary });
+    let attempt = 0;
+    const settlement = { directoryVerified: false };
+    const observedAttempt = (options = {}) =>
+      runAttempt(request, { ...options, attempt: ++attempt, settlement });
     try {
       assertCodexSchema(outputSchemaFor(request), CodexAdapterError);
       await assertCapabilities(request);
@@ -1977,7 +2311,7 @@ export function createCodexAdapter(options = {}) {
     }
     let result;
     try {
-      result = await runAttempt(request);
+      result = await observedAttempt();
     } catch (cause) {
       if (request.signal?.aborted) {
         if (request.access === "local-commit") {
@@ -2012,7 +2346,10 @@ export function createCodexAdapter(options = {}) {
       }
       if (
         cause instanceof CodexAdapterError &&
-        cause.code === "ERR_CODEX_USAGE_LIMIT"
+        [
+          "ERR_CODEX_USAGE_LIMIT",
+          "ERR_CODEX_SESSION_NAMING_UNAVAILABLE",
+        ].includes(cause.code)
       ) {
         throw cause;
       }
@@ -2020,11 +2357,12 @@ export function createCodexAdapter(options = {}) {
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
         cause.availabilityReason === undefined &&
+        (directoryBoundary === undefined || settlement.directoryVerified) &&
         request.session?.mode !== "fork"
       ) {
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           fresh: true,
           recovery: "fresh",
         });
@@ -2038,5 +2376,19 @@ export function createCodexAdapter(options = {}) {
     return result;
   }
 
-  return Object.freeze({ id: CODEX_BACKEND_ID, probe, run });
+  return Object.freeze({
+    id: CODEX_BACKEND_ID,
+    probe,
+    async canReadFiles({ access, paths, workspacePolicy }) {
+      const capabilities = await probe({ access, workspacePolicy });
+      const capability = {
+        "read-only": "readOnly",
+        "workspace-write": "workspaceWrite",
+        "local-commit": "localCommit",
+      }[access];
+      // Codex's root read grant is unchanged by its temporary write exclusions.
+      return capabilities[capability] === true && canReadFiles(paths);
+    },
+    run,
+  });
 }

@@ -15,6 +15,7 @@ import {
 } from "../src/state/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
+import { assertInactivityContinuity } from "../src/state/inactivity.js";
 import { normalizeRunState } from "../src/state/validation.js";
 
 function clock() {
@@ -126,7 +127,10 @@ async function fixture(t, backend = "codex", storeOptions = {}) {
         assert.equal(value.contentFingerprint, repository.contentFingerprint);
       },
     },
-    monitor: { async check() {} },
+    monitor: {
+      async check() {},
+      persist: (write) => write(),
+    },
     publish: async (event) => activities.push(event),
   };
   const input = {
@@ -228,6 +232,7 @@ test("inactivity journals before abort, retains its one reconstruction across re
       checkpoint: f.input.checkpoint,
       status: "expired",
       attempt: 1,
+      expiryProven: true,
     });
     coordinator = await f.restart();
     await coordinator.before(f.input);
@@ -244,14 +249,89 @@ test("inactivity journals before abort, retains its one reconstruction across re
     assert.equal(stored.inactivityRecovery.attempt, 2);
     assert.equal(stored.inactivityRecovery.contentFingerprint, "b".repeat(64));
     assert.deepEqual(
-      f.activities.map(({ kind }) => kind),
+      f.activities
+        .filter(({ phase }) => phase === "inactivity")
+        .map(({ kind }) => kind),
       ["expired", "reconstructing", "expired"],
     );
   }
 });
 
-test("a returned response clears recovery atomically with reconciled partial content", async (t) => {
+test("observation startup persistence does not consume provider inactivity", async (t) => {
+  let f;
+  let inspectStart = false;
+  f = await fixture(t, "codex", {
+    async onTransitionBoundary(point) {
+      if (!inspectStart || point !== "event-appended") return;
+      const current = await f.store.loadRun(f.run.runId);
+      if (current.observations?.attempts.at(-1).status === "active") {
+        inspectStart = false;
+        f.timers.advance(100);
+      }
+    },
+  });
+  await f.coordinator.before(f.input);
+  await f.start();
+  inspectStart = true;
+  assert.equal(
+    await f.coordinator.invoke(
+      "worker",
+      async ({ signal }) => {
+        signal.throwIfAborted();
+        assert.equal(f.timers.size, 1);
+        return "response";
+      },
+      { access: "read-only" },
+    ),
+    "response",
+  );
+  assert.equal(inspectStart, false);
+  assert.equal(f.timers.size, 0);
+  assert.equal((await f.store.loadRun(f.run.runId)).inactivityRecovery, null);
+});
+
+test("fallback observation settlement cannot extend the existing inactivity deadline", async (t) => {
   const f = await fixture(t);
+  await f.coordinator.before(f.input);
+  await f.start();
+  await assert.rejects(
+    f.coordinator.invoke(
+      "worker",
+      async ({ onObservation, onFreshSession, signal }) => {
+        f.timers.advance(99);
+        onObservation({ unsupported: "private" });
+        assert.equal(await onFreshSession(), true);
+        const retired = new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        f.timers.advance(1);
+        return retired;
+      },
+      { access: "read-only" },
+    ),
+    { code: "ERR_PROVIDER_INACTIVE" },
+  );
+  const run = await f.store.loadRun(f.run.runId);
+  assert.equal(run.inactivityRecovery.attempt, 2);
+  assert.equal(run.observations.attempts[0].status, "interrupted");
+});
+
+test("a returned response clears recovery atomically with reconciled partial content", async (t) => {
+  let f;
+  let inspectFlush = false;
+  f = await fixture(t, "codex", {
+    async onTransitionBoundary(point) {
+      if (!inspectFlush || point !== "event-appended") return;
+      const current = await f.store.loadRun(f.run.runId);
+      if (current.observations?.attempts.at(-1).status === "completed") {
+        inspectFlush = false;
+        // Terminal persistence must not let storage latency trigger a retry.
+        f.timers.advance(100);
+      }
+    },
+  });
   await f.coordinator.before(f.input);
   await f.start();
   await expire(f, f.coordinator);
@@ -259,11 +339,13 @@ test("a returned response clears recovery atomically with reconciled partial con
   await f.coordinator.before(f.input);
   await f.start();
   f.repository.contentFingerprint = "b".repeat(64);
+  inspectFlush = true;
   await f.coordinator.invoke(
     "worker",
     async () => ({ structured: { status: "COMPLETED" } }),
     { access: "workspace-write" },
   );
+  assert.equal(inspectFlush, false);
   assert.notEqual(
     (await f.store.loadRun(f.run.runId)).inactivityRecovery,
     null,
@@ -284,6 +366,16 @@ test("a returned response clears recovery atomically with reconciled partial con
     "b".repeat(64),
   );
   assert.equal(run.counters.fixRounds, 1);
+  assert.deepEqual(
+    run.observations.attempts.map(({ status }) => status),
+    ["interrupted", "completed"],
+  );
+  for (const attempt of run.observations.attempts) {
+    assert.equal(attempt.role, "worker");
+    assert.equal(attempt.checkpoint, f.input.checkpoint);
+    assert.equal(attempt.accounting, "incomplete");
+    assert.deepEqual(attempt.observations, []);
+  }
 });
 
 test("commit executor and operator stops cannot acquire an inactivity retry", async (t) => {
@@ -478,6 +570,19 @@ test("both provider roles pause a repeated read-only expiry and resume without r
       settingOverrides: { mode: "lazy" },
     });
     assert.equal(first.run.pause.reason, "backend_unavailable");
+    assert.deepEqual(
+      first.observations,
+      (await createRunner(parameters).status(first.run.runId)).observations,
+    );
+    assert.equal(first.observations.attempts.length, 2);
+    assert.ok(
+      first.observations.attempts.every(
+        ({ status, measurements }) =>
+          status === "interrupted" &&
+          measurements.promptBytes > 0 &&
+          measurements.resultBytes === null,
+      ),
+    );
     assert.equal(first.run.pause.code, "ERR_PROVIDER_INACTIVE");
     assert.equal(calls, 2);
     assert.equal(first.run.inactivityRecovery.attempt, 2);
@@ -522,10 +627,18 @@ test("an expiry already being journaled wins over late progress and settlement",
   watch.progress({ kind: "semantic", activeCommands: 0 });
   assert.equal(timers.size, 0);
   const settled = watch.close();
+  let flushed = false;
+  const flushing = watch.suspend(() => {
+    assert.equal(aborted, true);
+    flushed = true;
+  });
   assert.equal(aborted, false);
+  assert.equal(flushed, false);
   persisted.resolve();
-  await settled;
+  await Promise.all([settled, flushing]);
   assert.equal(aborted, true);
+  assert.equal(flushed, true);
+  assert.equal(timers.size, 0);
 });
 
 test("recovery survives an interrupted attempt-2 launch and cannot be cleared without response", async (t) => {
@@ -665,4 +778,70 @@ test("a provider safety failure keeps precedence over a raced inactivity abort",
   f.timers.advance(100);
   await assert.rejects(attempt, (cause) => cause === safety);
   assert.equal(f.coordinator.eligible(safety), false);
+});
+
+test("reconstruction provenance and legacy markers cannot prove inactivity or replenish recovery", async (t) => {
+  const f = await fixture(t);
+  await f.coordinator.before(f.input);
+  await f.start();
+  await assert.rejects(
+    f.coordinator.invoke(
+      "worker",
+      async ({ onFreshSession }) => {
+        assert.equal(await onFreshSession(), true);
+        throw Object.assign(new Error("Output exhausted"), {
+          code: "ERR_CODEX_OUTPUT_EXHAUSTED",
+        });
+      },
+      { access: "workspace-write" },
+    ),
+    { code: "ERR_CODEX_OUTPUT_EXHAUSTED" },
+  );
+  await f.finish();
+  const run = await f.store.loadRun(f.run.runId);
+  assert.equal(run.inactivityRecovery.attempt, 2);
+  assert.equal(run.inactivityRecovery.expiryRevision, null);
+  assert.equal(await f.coordinator.pending(), false);
+  assert.equal(await f.coordinator.retry(f.input), false);
+  assert.equal(projectInactivityRecovery(run).expiryProven, false);
+  const resumed = await f.restart();
+  await assert.rejects(resumed.before(f.input), {
+    code: "ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED",
+  });
+  for (const status of ["reconstructing", "expired"]) {
+    const legacy = structuredClone(run);
+    legacy.schemaVersion = 19;
+    legacy.runtimeCompatibility = { runnerVersion: 1, runStateVersion: 19 };
+    legacy.inactivityRecovery.status = status;
+    delete legacy.inactivityRecovery.expiryRevision;
+    const migrated = normalizeRunState(legacy, legacy.runId);
+    if (status === "expired") {
+      const previous = {
+        ...migrated,
+        inactivityRecovery: {
+          ...migrated.inactivityRecovery,
+          status: "reconstructing",
+        },
+      };
+      const current = { ...migrated, activeTurn: { role: "worker" } };
+      const activity = {
+        phase: "inactivity",
+        kind: "expired",
+        actor: "worker",
+      };
+      assert.doesNotThrow(() =>
+        assertInactivityContinuity(previous, current, activity),
+      );
+      assert.throws(() =>
+        assertInactivityContinuity(
+          previous,
+          { ...current, schemaVersion: 20 },
+          activity,
+        ),
+      );
+    }
+    assert.equal(migrated.inactivityRecovery.attempt, 2);
+    assert.equal(migrated.inactivityRecovery.expiryRevision, null);
+    assert.equal(projectInactivityRecovery(migrated).expiryProven, false);
+  }
 });

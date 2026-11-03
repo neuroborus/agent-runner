@@ -9,9 +9,13 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@agent-runner/commit-plan": "0.0.0"
+    "@agent-runner/commit-plan": "0.0.0",
+    "@agent-runner/custom-plan": "0.0.0"
   },
   "engines": {
     "node": ">=24 <25"
-  }
+  },
+  "files": [
+    "src/**/*.js"
+  ]
 }

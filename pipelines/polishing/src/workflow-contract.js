@@ -231,8 +231,9 @@ export const MAX_ITEMS = 32;
 export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
-const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
-export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
+const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
+// Twelve result-sized slots cover retained inventories, gate copies, and metadata.
+export const MAX_DURABLE_RUN_BYTES = 24 * 1024 * 1024;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
 export const MAX_DISPUTES_PER_FINDING = 5;
@@ -288,6 +289,17 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  output_exhausted: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "POLISH",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "REVIEW",
+    "CONFIRM",
+    "RESOLVE_FINDINGS",
+  ]),
   authentication_required: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -405,8 +417,8 @@ export function createFinalizationGuidanceDecision({
   configuredPolicy,
   skillPath = null,
   selectedFileFingerprint = null,
+  selection = skillPath === null ? "fallback" : "skill",
 }) {
-  const selection = skillPath === null ? "fallback" : "skill";
   return normalizeFinalizationGuidanceDecision({
     configuredPolicy,
     selection,
@@ -429,16 +441,25 @@ export function normalizeFinalizationGuidanceDecision(value) {
     "Polishing finalization guidance",
   );
   const fallback = value.selection === "fallback";
-  const selected = value.selection === "skill";
+  const selected = ["skill", "file"].includes(value.selection);
   const configuredPolicy = value.configuredPolicy;
+  const selectedPath =
+    value.selection === "file" &&
+    typeof value.skillPath === "string" &&
+    value.skillPath.startsWith("finalization://")
+      ? value.skillPath.slice("finalization://".length)
+      : value.skillPath;
   const validSelectedPath =
     selected &&
-    isFinalizationPolicy(value.skillPath) &&
-    !["auto", "none"].includes(value.skillPath) &&
+    isFinalizationPolicy(selectedPath) &&
+    !["auto", "none"].includes(selectedPath) &&
+    (value.selection !== "skill" ||
+      value.skillPath === "SKILL.md" ||
+      value.skillPath.endsWith("/SKILL.md")) &&
     HASH_PATTERN.test(value.selectedFileFingerprint ?? "") &&
     (configuredPolicy === "auto"
       ? CONVENTIONAL_FINALIZATION_SKILL_PATHS.includes(value.skillPath)
-      : configuredPolicy === value.skillPath);
+      : configuredPolicy === selectedPath);
   if (
     !isFinalizationPolicy(configuredPolicy) ||
     (!fallback && !selected) ||
@@ -791,7 +812,10 @@ function assertExactOutputFields(value, fields, field = "result") {
   }
 }
 
-function assertStructuredResult(payload, diagnostic) {
+function assertStructuredResult(
+  payload,
+  diagnostic = outputConstraint("result", "maximum-2-mebibytes"),
+) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
@@ -1029,7 +1053,7 @@ export function normalizeBootstrapResult(
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   if (
@@ -1155,7 +1179,7 @@ export function normalizeReconciliationResult(payload) {
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
@@ -1255,7 +1279,7 @@ export function normalizeBootstrapArbitration(payload) {
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   const rationale = normalizeText(
@@ -1481,6 +1505,17 @@ function normalizePhaseSafeRequiredChecks(value, code, options) {
 }
 
 function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
+  // This non-path namespace cannot shadow a canonical repository-relative file.
+  if (typeof value === "string" && value.startsWith("finalization://")) {
+    const path = value.slice("finalization://".length);
+    if (
+      isFinalizationPolicy(path) &&
+      path.endsWith(".md") &&
+      path.trim() === path
+    ) {
+      return value;
+    }
+  }
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -2732,7 +2767,8 @@ export function isFinalizationPolicy(value) {
     !value.startsWith("../") &&
     value !== ".git" &&
     !value.startsWith(".git/") &&
-    (value === "SKILL.md" || value.endsWith("/SKILL.md")) &&
+    value.endsWith(".md") &&
+    !value.split("/").includes(".git") &&
     !/[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   );
 }
@@ -3831,7 +3867,7 @@ export function normalizePipelineState(value) {
     resolvedSummary !== null &&
     !value.validationMigrationPending &&
     !guidanceMayBeLegacyPending &&
-    finalizationGuidance?.selection === "skill" &&
+    ["skill", "file"].includes(finalizationGuidance?.selection) &&
     !validationInfrastructure.includes(finalizationGuidance.skillPath)
   ) {
     throw workflowError(
@@ -4723,7 +4759,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 18 ||
+    run.pipelineStateVersion !== 19 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -4978,6 +5014,7 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -4993,6 +5030,27 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Polishing pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "output_exhausted" &&
+      (!hasExactFields(run.pause, [
+        "reason",
+        "code",
+        "resumeState",
+        "role",
+        "checkpoint",
+      ]) ||
+        run.pause.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        !Object.hasOwn(run.roles, run.pause.role) ||
+        typeof run.pause.checkpoint !== "string" ||
+        typeof run.pause.resumeState !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(run.pause.checkpoint) ||
+        !run.pause.checkpoint.startsWith(
+          `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
+        ) ||
+        (state.settings.mode === "lazy" && run.pause.role !== "worker"))
+    ) {
+      throw workflowError("Invalid output-exhaustion pause.");
     }
     if (
       run.pause.reason === "authentication_required" &&
@@ -5149,6 +5207,7 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
     !isRecord(runtime.git) ||
+    typeof runtime.finalization?.inspectFile !== "function" ||
     !isRecord(runtime.trustedValidation) ||
     typeof runtime.trustedValidation.execute !== "function" ||
     typeof runtime.trustedValidation.preflight !== "function"

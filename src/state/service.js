@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
-import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -8,21 +8,30 @@ import { isDeepStrictEqual } from "node:util";
 import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
+  normalizeSessionNamingDiagnostic,
 } from "../agents/index.js";
+import { openRuntimeStorage } from "../runtime/index.js";
 
 import { createActionStore } from "./actions.js";
+import { resolveStateLocation } from "./location/index.js";
+import { createRuntimeAdmissionStore } from "./runtime-admission.js";
 import {
   dispatchActivity,
   isRecoveryPreparation,
+  normalizeDispatchOwner,
   normalizeRecoveryDispatch,
-  publicDispatchActivity,
 } from "./dispatch.js";
 import {
   availabilityActivity,
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
 } from "./availability.js";
-import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
+import {
+  atomicWriteFile,
+  publishExclusiveFile,
+  readOptionalPublishedText,
+  resolveRunArtifactPath,
+} from "./files.js";
 import {
   DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
   providerInactivityFingerprint,
@@ -31,14 +40,26 @@ import {
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
+import {
+  createPreparationService,
+  hasPreparationCustody,
+} from "./preparation.js";
+import {
+  beginObservationAttempt,
+  interruptObservations,
+  recordObservations,
+  observationActivity,
+} from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
+import { createPreservationStore } from "./preservation.js";
+import { createRecoveryFailureStore } from "./recovery-failures.js";
 import { createStopService } from "./stops.js";
-import { projectOperatorStop } from "./stop-projection.js";
 import {
   assertRunCanAdvance,
   assertStopProgress,
   assertRunCanReleaseOwnership,
   runRetainsOwnership,
+  stopIsPending,
 } from "./stop-policy.js";
 import {
   assertRunId,
@@ -74,6 +95,7 @@ const CREATE_RUN_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "workspace",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -92,6 +114,13 @@ const CREATE_RUN_FIELDS = new Set([
 const MAX_RUN_ARTIFACT_BYTES = 1024 * 1024;
 const DEFAULT_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_LIMIT = 100;
+const LEASE_OWNER_STATUSES = Object.freeze([
+  "none",
+  "live",
+  "unverifiable",
+  "dead",
+  "replaced",
+]);
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -218,21 +247,14 @@ export function resolveStateRoot({
   env = process.env,
   homeDirectory = homedir(),
 } = {}) {
-  const xdgStateHome = env?.XDG_STATE_HOME;
-  let basePath;
-  if (typeof xdgStateHome === "string" && isAbsolute(xdgStateHome)) {
-    basePath = xdgStateHome;
-  } else if (typeof homeDirectory === "string" && isAbsolute(homeDirectory)) {
-    basePath = join(homeDirectory, ".local", "state");
-  }
-
-  if (basePath === undefined) {
+  const location = resolveStateLocation({ env, homeDirectory });
+  if (location === null) {
     throw new RunStoreError("State-directory base path must be absolute.", {
       code: "ERR_INVALID_STATE_ROOT",
     });
   }
 
-  return resolve(basePath, "agent-runner");
+  return location;
 }
 
 export function createRunStore({
@@ -244,9 +266,15 @@ export function createRunStore({
   processId = process.pid,
   processIsAlive = defaultProcessIsAlive,
   processIdentity = readProcessIdentity,
+  runtimeProcessNamespace,
   onLeasePublicationBoundary = async () => {},
+  onRecoveryFailurePublicationBoundary = async () => {},
+  onPreservationBoundary = async () => {},
   onTransitionBoundary = async () => {},
+  onPreparationBoundary = async () => {},
+  onRuntimeBoundary = async () => {},
   resolveStopBoundary = null,
+  ownerProbeIntervalMs = 1000,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
     throw new RunStoreError("State root must be an absolute path.", {
@@ -261,14 +289,23 @@ export function createRunStore({
     typeof leaseTokenFactory !== "function" ||
     typeof processIsAlive !== "function" ||
     typeof processIdentity !== "function" ||
+    (runtimeProcessNamespace !== undefined &&
+      typeof runtimeProcessNamespace !== "function") ||
     typeof onLeasePublicationBoundary !== "function" ||
+    typeof onRecoveryFailurePublicationBoundary !== "function" ||
+    typeof onPreservationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
+    typeof onPreparationBoundary !== "function" ||
+    typeof onRuntimeBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
     hostName.length > 255 ||
     /[\p{Cc}\p{Zl}\p{Zp}]/u.test(hostName) ||
     !Number.isSafeInteger(processId) ||
-    processId < 1
+    processId < 1 ||
+    !Number.isSafeInteger(ownerProbeIntervalMs) ||
+    ownerProbeIntervalMs < 1 ||
+    ownerProbeIntervalMs > 2_147_483_647
   ) {
     throw new RunStoreError("Run-store options are invalid.", {
       code: "ERR_INVALID_RUN_STORE_OPTIONS",
@@ -387,6 +424,90 @@ export function createRunStore({
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
   });
+  const recoveryFailures = createRecoveryFailureStore({
+    getRunDirectory,
+    hostName,
+    processId,
+    processIdentity,
+    onPublicationBoundary: onRecoveryFailurePublicationBoundary,
+  });
+  const preservation = createPreservationStore({
+    getRunDirectory,
+    loadRun,
+    onBoundary: onPreservationBoundary,
+    withLease: (lease, worktreeLease, operation, recoveryId = null) =>
+      runLeases.runExclusive(lease, ({ record, runDirectory }) =>
+        worktreeLeases.holdCurrent(worktreeLease, async (worktree) => {
+          let snapshot = await loadSnapshot(runDirectory, record.runId);
+          const state = snapshot.state;
+          if (
+            worktree.record.runId !== state.runId ||
+            worktree.runDirectory !==
+              (await getWorktreeLeaseDirectory(state.projectPath))
+          )
+            throw new RunStoreError(
+              "Preservation requires the run's worktree lease.",
+              { code: "ERR_INVALID_PRESERVATION" },
+            );
+          // Stop recovery may settle an existing preservation intent, never
+          // create one or acquire additional workspace authority.
+          if (!(recoveryId !== null && stopIsPending(state)))
+            assertRunCanAdvance(state, resolveStopBoundary);
+          if (
+            state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+            state.activeTurn !== null ||
+            state.executionProcess !== null ||
+            state.executionResource !== null ||
+            state.preparation != null
+          )
+            throw new RunStoreError(
+              "Preservation requires a migrated, reconciled checkpoint.",
+              { code: "ERR_INVALID_PRESERVATION" },
+            );
+          return operation({
+            runDirectory,
+            state,
+            async publish(reference) {
+              const records = [...snapshot.state.preservationRecords];
+              const index = records.findIndex(({ id }) => id === reference.id);
+              if (index === -1) records.push(reference);
+              else records[index] = reference;
+              const next = normalizeRunState(
+                {
+                  ...snapshot.state,
+                  preservationRecords: records,
+                  revision: snapshot.state.revision + 1,
+                  updatedAt: timestamp(snapshot.state.updatedAt),
+                },
+                record.runId,
+              );
+              await journal.appendTransition(runDirectory, next, snapshot, {
+                actor: "runner",
+                phase: "preservation",
+                kind: "preservation-recorded",
+                message: "Durable unfinished-work authority recorded.",
+              });
+              snapshot = await loadSnapshot(runDirectory, record.runId);
+            },
+          });
+        }),
+      ),
+  });
+
+  const runtimeAdmission = createRuntimeAdmissionStore({
+    rootPath: requestedStateRoot,
+    openStorage: openRuntimeStorage,
+    ensureRoot,
+    ensureDirectory: ensureManagedDirectory,
+    actions,
+    hostName,
+    processId,
+    processIdentity,
+    processIsAlive,
+    processNamespace: runtimeProcessNamespace,
+    onPublicationBoundary: onLeasePublicationBoundary,
+    onBoundary: onRuntimeBoundary,
+  });
 
   async function inspectRoot() {
     const canonicalRoot = await realpath(requestedStateRoot);
@@ -433,9 +554,11 @@ export function createRunStore({
     return directoryPath;
   }
 
-  async function getWorktreeLeaseDirectory(projectPath) {
+  async function getWorktreeLeaseDirectory(projectPath, allowMissing = false) {
     const [canonicalProjectPath, potentialStateRoot] = await Promise.all([
-      canonicalDirectory(projectPath, "Project path"),
+      allowMissing
+        ? canonicalPotentialPath(projectPath)
+        : canonicalDirectory(projectPath, "Project path"),
       canonicalPotentialPath(requestedStateRoot),
     ]);
     assertDisjointStateRoot(
@@ -572,6 +695,7 @@ export function createRunStore({
           runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
+          workspace: input.workspace ?? null,
           projectConfigurationProtection:
             input.projectConfigurationProtection === undefined
               ? null
@@ -593,6 +717,7 @@ export function createRunStore({
               : input.providerInactivityTimeoutMs,
           ),
           inactivityRecovery: null,
+          observations: null,
           availabilityRetry: null,
           providerPolicies:
             input.providerPolicies === undefined
@@ -614,6 +739,8 @@ export function createRunStore({
           activeTurn: null,
           executionProcess: null,
           executionResource: null,
+          preparation: null,
+          preservationRecords: [],
           stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
@@ -635,7 +762,7 @@ export function createRunStore({
       await journal.appendTransition(
         runDirectory,
         state,
-        { events: [], hasPartialTail: false, validByteLength: 0 },
+        { lastEvent: null, hasPartialTail: false, validByteLength: 0 },
         activity,
       );
 
@@ -670,6 +797,21 @@ export function createRunStore({
     return Object.freeze({ projectPath: project, taskPath: task });
   }
 
+  async function assertRuntimeBoundary(paths) {
+    if (
+      !Array.isArray(paths) ||
+      paths.some((path) => typeof path !== "string" || !path)
+    )
+      throw new RunStoreError("Runtime boundaries are invalid.", {
+        code: "ERR_UNSAFE_STATE_ROOT",
+      });
+    const root = await canonicalPotentialPath(requestedStateRoot);
+    for (const path of paths) {
+      const boundary = await canonicalPotentialPath(resolve(path));
+      assertDisjointStateRoot(root, boundary, boundary);
+    }
+  }
+
   async function acquireRunLease(runId, retainedLease) {
     if (retainedLease !== undefined && retainedLease?.runId !== runId) {
       throw new RunStoreError(
@@ -692,8 +834,22 @@ export function createRunStore({
     }
   }
 
-  async function loadSnapshot(runDirectory, runId) {
-    const snapshot = await journal.loadSnapshot(runDirectory, runId);
+  // Custody and state-root checks every service snapshot passes. Only a caller
+  // supplying `reload` may reread once before rejecting unmerged custody.
+  async function authorizeSnapshot(runDirectory, snapshot, reload = null) {
+    if (
+      snapshot.state.preparation === null &&
+      (await hasPreparationCustody(runDirectory))
+    ) {
+      if (reload === null)
+        throw new RunStoreError(
+          "Unmerged preparation custody has no authority.",
+          { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+        );
+      // A lock-free read may precede reservation publication. Reload before
+      // rejecting custody whose canonical authority was lost or rolled back.
+      return authorizeSnapshot(runDirectory, await reload());
+    }
     assertDisjointStateRoot(
       runDirectory,
       snapshot.state.projectPath,
@@ -702,17 +858,34 @@ export function createRunStore({
     return snapshot;
   }
 
+  async function loadSnapshot(runDirectory, runId) {
+    const load = () => journal.loadSnapshot(runDirectory, runId);
+    return authorizeSnapshot(runDirectory, await load(), load);
+  }
+
   async function loadRun(runId) {
     const runDirectory = await getRunDirectory(runId);
     return deepFreeze((await loadSnapshot(runDirectory, runId)).state);
   }
 
-  // Internal runtime evidence: the run and complete validated journal come
-  // from one authoritative snapshot. Public projections must not return events.
-  async function loadRunHistory(runId) {
+  // Internal runtime evidence from one validated prefix. Runtime recovery uses
+  // replay rather than retaining complete historical state copies in memory.
+  async function loadRunHistory(runId, { stream = false } = {}) {
     const runDirectory = await getRunDirectory(runId);
     const snapshot = await loadSnapshot(runDirectory, runId);
-    return deepFreeze({ run: snapshot.state, events: snapshot.events });
+    const events = {
+      async *[Symbol.asyncIterator]() {
+        for await (const event of journal.replaySnapshot(
+          runDirectory,
+          snapshot,
+        ))
+          yield deepFreeze(event);
+      },
+    };
+    return deepFreeze({
+      run: snapshot.state,
+      events: stream ? events : await Array.fromAsync(events),
+    });
   }
 
   async function runIsLeased(runId) {
@@ -728,22 +901,103 @@ export function createRunStore({
     return runLeases.ownerIsLive(runDirectory, runId);
   }
 
-  async function acquireWorktreeLease(projectPath, runId) {
+  async function acquireWorktreeLease(
+    projectPath,
+    runId,
+    allowMissing = false,
+  ) {
     assertRunId(runId);
-    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.acquire(worktreeDirectory, runId);
+    const worktreeDirectory = await getWorktreeLeaseDirectory(
+      projectPath,
+      allowMissing,
+    );
+    const scope = allowMissing
+      ? await canonicalPotentialPath(projectPath)
+      : await canonicalDirectory(projectPath, "Project path");
+    // Serialize admission, rather than check then acquire: parent and child
+    // scopes have distinct keys but must never both gain exclusive ownership.
+    return mutate(dirname(worktreeDirectory), async () => {
+      const scopePath = join(worktreeDirectory, "scope.json");
+      const source = `${JSON.stringify({ schemaVersion: 1, path: scope })}\n`;
+      const saved = await readOptionalPublishedText(scopePath);
+      if (saved === null) await publishExclusiveFile(scopePath, source);
+      else if (saved !== source)
+        throw new RunStoreError("Workspace lease scope changed.", {
+          code: "ERR_INVALID_WORKTREE_LEASE",
+        });
+      const owner = await overlappingWorktreeOwner(
+        worktreeDirectory,
+        scope,
+        runId,
+      );
+      if (owner !== null)
+        throw new RunStoreError("An overlapping workspace is already leased.", {
+          code: "ERR_WORKTREE_LEASED",
+        });
+      return worktreeLeases.acquire(worktreeDirectory, runId);
+    });
+  }
+
+  async function overlappingWorktreeOwner(directory, scope, runId) {
+    const within = (root, path) => {
+      const name = relative(root, path);
+      return (
+        name === "" ||
+        (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+      );
+    };
+    for (const key of await readdir(dirname(directory))) {
+      if (
+        !/^[a-f0-9]{64}$/u.test(key) ||
+        join(dirname(directory), key) === directory
+      )
+        continue;
+      const candidate = await ensureManagedDirectory(
+        join(dirname(directory), key),
+        "Workspace lease path",
+      );
+      const source = await readOptionalPublishedText(
+        join(candidate, "scope.json"),
+      );
+      if (source === null) continue; // Legacy Git keys still use exact exclusion.
+      let binding;
+      try {
+        binding = JSON.parse(source);
+      } catch {}
+      if (
+        binding?.schemaVersion !== 1 ||
+        Object.keys(binding).sort().join() !== "path,schemaVersion" ||
+        typeof binding.path !== "string" ||
+        !isAbsolute(binding.path) ||
+        resolve(binding.path) !== binding.path ||
+        createHash("sha256").update(binding.path).digest("hex") !== key
+      )
+        throw new RunStoreError("Workspace lease scope is invalid.", {
+          code: "ERR_INVALID_WORKTREE_LEASE",
+        });
+      if (!within(scope, binding.path) && !within(binding.path, scope))
+        continue;
+      const owner = await worktreeLeases.reservationOwner(candidate, runId);
+      if (owner !== null) return owner;
+    }
+    return null;
   }
 
   async function worktreeIsLeased(projectPath, runId) {
-    assertRunId(runId);
-    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.isLeased(worktreeDirectory, runId);
+    return (await worktreeLeaseOwner(projectPath, runId)) !== null;
   }
 
   async function worktreeLeaseOwner(projectPath, runId) {
     assertRunId(runId);
     const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.owner(worktreeDirectory, runId);
+    return (
+      (await worktreeLeases.owner(worktreeDirectory, runId)) ??
+      (await overlappingWorktreeOwner(
+        worktreeDirectory,
+        await canonicalDirectory(projectPath, "Project path"),
+        runId,
+      ))
+    );
   }
 
   async function withGuidanceLease(projectPath, operation) {
@@ -764,9 +1018,31 @@ export function createRunStore({
     }
   }
 
+  async function assertWorkspaceLease(lease, workspaceLease, projectPath) {
+    return runLeases.runExclusive(lease, ({ record }) =>
+      worktreeLeases.holdCurrent(workspaceLease, async (owner) => {
+        if (
+          owner.record.runId !== record.runId ||
+          owner.runDirectory !==
+            (await getWorktreeLeaseDirectory(projectPath, true))
+        )
+          throw new RunStoreError(
+            "Setup requires the current workspace lease.",
+            { code: "ERR_INVALID_WORKTREE_LEASE" },
+          );
+      }),
+    );
+  }
+
   async function waitForRunChange(
     runId,
-    { afterRevision, timeoutMs, signal, includeOwnership = false } = {},
+    {
+      afterRevision,
+      timeoutMs,
+      signal,
+      includeOwnership = false,
+      ownerBaseline,
+    } = {},
   ) {
     if (
       !Number.isSafeInteger(afterRevision) ||
@@ -774,6 +1050,8 @@ export function createRunStore({
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs < 0 ||
       typeof includeOwnership !== "boolean" ||
+      (ownerBaseline !== undefined &&
+        (!includeOwnership || !LEASE_OWNER_STATUSES.includes(ownerBaseline))) ||
       (signal !== undefined && !(signal instanceof AbortSignal))
     ) {
       throw new RunStoreError("Run wait options are invalid.", {
@@ -791,11 +1069,19 @@ export function createRunStore({
 
     const runDirectory = await getRunDirectory(runId);
     const directories = includeOwnership
-      ? [runDirectory, await getWorktreeLeaseDirectory(initial.projectPath)]
+      ? [
+          runDirectory,
+          await getWorktreeLeaseDirectory(
+            initial.workspace?.leasePath ?? initial.projectPath,
+          ),
+        ]
       : [runDirectory];
     return new Promise((resolvePromise, rejectPromise) => {
       let settled = false;
       let timer;
+      let ownerProbe;
+      let probing = false;
+      let baseline = ownerBaseline;
       const watchers = [];
       let ownershipChanged = false;
       let loading = false;
@@ -807,6 +1093,7 @@ export function createRunStore({
         }
         settled = true;
         clearTimeout(timer);
+        clearInterval(ownerProbe);
         signal?.removeEventListener("abort", onAbort);
         for (const watcher of watchers) watcher.close();
         operation(value);
@@ -838,6 +1125,26 @@ export function createRunStore({
           rejectPromise,
           signal.reason ?? new DOMException("Aborted", "AbortError"),
         );
+      // Node cannot observe the exit of a non-child owner, and its death need
+      // not change any file. Classify the lease owner read-only; only a
+      // positive loss that differs from the baseline ends the wait.
+      const probe = async () => {
+        if (settled || probing) return;
+        probing = true;
+        try {
+          const owner = await runLeases.inspect(runDirectory, runId);
+          const status = owner?.status ?? "none";
+          baseline ??= status;
+          if (["dead", "replaced"].includes(status) && status !== baseline) {
+            ownershipChanged = true;
+            void load();
+          }
+        } catch {
+          // An unreadable owner is not evidence of loss; the timeout bounds it.
+        } finally {
+          probing = false;
+        }
+      };
 
       try {
         for (const directory of directories) {
@@ -854,7 +1161,8 @@ export function createRunStore({
               if (
                 ownershipChanged ||
                 filename === null ||
-                ["events.jsonl", "state.json"].includes(filename.toString())
+                filename.toString() === "state.json" ||
+                /^events(?:-[0-9]+)?\.jsonl$/u.test(filename.toString())
               ) {
                 void load();
               }
@@ -880,40 +1188,136 @@ export function createRunStore({
         }
       }, timeoutMs);
       void load();
+      if (includeOwnership) {
+        ownerProbe = setInterval(probe, ownerProbeIntervalMs);
+        void probe();
+      }
     });
   }
 
   async function recoverRun(lease) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
-      const snapshot = await loadSnapshot(runDirectory, record.runId);
-      await journal.recover(runDirectory, snapshot);
+      const snapshot = await journal.recover(
+        runDirectory,
+        await loadSnapshot(runDirectory, record.runId),
+      );
+      // Diagnostic retirement cannot precede proof that owned work is settled.
+      if (
+        snapshot.state.preparation != null ||
+        snapshot.state.executionProcess !== null ||
+        snapshot.state.executionResource !== null
+      )
+        return deepFreeze(snapshot.state);
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        interruptObservations(snapshot.state.observations),
+        {
+          actor: "runner",
+          phase: "runtime",
+          kind: "observations-interrupted",
+          message: "Interrupted attempt accounting remains incomplete.",
+        },
+      );
+    });
+  }
+
+  async function persistObservations(
+    runDirectory,
+    snapshot,
+    observations,
+    activity = null,
+  ) {
+    if (isDeepStrictEqual(snapshot.state.observations, observations))
       return deepFreeze(snapshot.state);
+    const next = normalizeRunState(
+      {
+        ...snapshot.state,
+        observations,
+        revision: snapshot.state.revision + 1,
+        updatedAt: timestamp(snapshot.state.updatedAt),
+      },
+      snapshot.state.runId,
+    );
+    await journal.appendTransition(runDirectory, next, snapshot, activity);
+    return deepFreeze(next);
+  }
+
+  async function startObservationAttempt(lease, identity, measurements) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const observations = beginObservationAttempt(
+        snapshot.state,
+        identity,
+        measurements,
+      );
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        observations,
+        observationActivity(observations.attempts.at(-1)),
+      );
+    });
+  }
+
+  async function recordObservationBatch(
+    lease,
+    identity,
+    records,
+    {
+      status = "active",
+      incomplete = false,
+      resultBytes,
+      structuredResultBytes,
+    } = {},
+  ) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      // Terminal diagnostics may flush during a stop or process cleanup. This
+      // operation changes no workflow, process, retry, or effect authority.
+      const observations = recordObservations(
+        snapshot.state,
+        identity,
+        records,
+        status,
+        incomplete,
+        { resultBytes, structuredResultBytes },
+      );
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        observations,
+        observations === null
+          ? null
+          : observationActivity(observations.attempts.at(-1)),
+      );
     });
   }
 
   async function inspectRecoveryDispatch(runId, value) {
     const dispatch = normalizeRecoveryDispatch(value);
-    const { events } = await loadRunHistory(runId);
-    const started = events.some(
-      (event) =>
-        event.revision === dispatch.expectedRevision + 1 &&
-        isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
-    );
-    const ready =
-      started &&
-      events.some(
-        (event) =>
-          event.revision > dispatch.expectedRevision &&
-          isDeepStrictEqual(event.activity, dispatchActivity(dispatch, true)),
-      );
-    const retryable =
-      started &&
-      !ready &&
-      events
-        .slice(dispatch.expectedRevision + 1)
-        .every((event) =>
-          isRecoveryPreparation(events[event.revision - 2].state, event),
+    const history = await loadRunHistory(runId, { stream: true });
+    let started = false;
+    let ready = false;
+    let retryable = true;
+    let previous = null;
+    for await (const event of history.events) {
+      if (event.revision === dispatch.expectedRevision + 1) {
+        started = isDeepStrictEqual(event.activity, dispatchActivity(dispatch));
+      }
+      if (event.revision > dispatch.expectedRevision) {
+        ready ||= isDeepStrictEqual(
+          event.activity,
+          dispatchActivity(dispatch, true),
         );
+      }
+      if (event.revision > dispatch.expectedRevision + 1) {
+        retryable &&= isRecoveryPreparation(previous, event);
+      }
+      previous = event.state;
+    }
+    ready &&= started;
+    retryable &&= started && !ready;
     return { started, ready, retryable };
   }
 
@@ -921,11 +1325,22 @@ export function createRunStore({
     const dispatch = normalizeRecoveryDispatch(value);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      const started = snapshot.events.some(
-        (event) =>
-          event.revision === dispatch.expectedRevision + 1 &&
-          isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
-      );
+      let started = false;
+      let alreadyReady = false;
+      for await (const event of journal.replaySnapshot(
+        runDirectory,
+        snapshot,
+      )) {
+        if (event.revision === dispatch.expectedRevision + 1)
+          started = isDeepStrictEqual(
+            event.activity,
+            dispatchActivity(dispatch),
+          );
+        alreadyReady ||= isDeepStrictEqual(
+          event.activity,
+          dispatchActivity(dispatch, true),
+        );
+      }
       if (
         typeof ready !== "boolean" ||
         (ready
@@ -938,7 +1353,8 @@ export function createRunStore({
       }
       if (
         ready &&
-        (snapshot.state.executionProcess !== null ||
+        (snapshot.state.preparation != null ||
+          snapshot.state.executionProcess !== null ||
           snapshot.state.executionResource !== null)
       ) {
         throw new RunStoreError(
@@ -947,13 +1363,7 @@ export function createRunStore({
         );
       }
       const activity = dispatchActivity(dispatch, ready);
-      if (
-        ready &&
-        snapshot.events.some((event) =>
-          isDeepStrictEqual(event.activity, activity),
-        )
-      )
-        return deepFreeze(snapshot.state);
+      if (ready && alreadyReady) return deepFreeze(snapshot.state);
       const next = normalizeRunState(
         {
           ...snapshot.state,
@@ -969,21 +1379,7 @@ export function createRunStore({
   }
 
   async function inspectDispatchOwner(record) {
-    if (
-      !isRecord(record) ||
-      Object.keys(record).length !== 3 ||
-      !Number.isSafeInteger(record.pid) ||
-      record.pid < 1 ||
-      typeof record.hostname !== "string" ||
-      record.hostname.length < 1 ||
-      record.hostname.length > 255 ||
-      validateProcessIdentity(record.processIdentity) === null
-    ) {
-      throw new RunStoreError("Detached owner identity is invalid.", {
-        code: "ERR_INVALID_MCP_ACTION",
-      });
-    }
-    return inspectProcessOwner(record, {
+    return inspectProcessOwner(normalizeDispatchOwner(record), {
       hostName,
       processIsAlive,
       processIdentity,
@@ -1009,6 +1405,7 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
+        snapshot.state.preparation != null ||
         !Number.isSafeInteger(pipelineStateVersion) ||
         pipelineStateVersion < snapshot.state.pipelineStateVersion ||
         pipelineStateVersion < 1 ||
@@ -1145,6 +1542,7 @@ export function createRunStore({
       if (
         state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
         state.activeTurn !== null ||
+        state.preparation != null ||
         state.executionProcess !== null ||
         state.executionResource !== null
       ) {
@@ -1218,6 +1616,10 @@ export function createRunStore({
           ...state,
           inactivityRecovery: {
             ...recovery,
+            expiryRevision:
+              kind === "expired"
+                ? state.revision + 1
+                : (state.inactivityRecovery?.expiryRevision ?? null),
             reconstructionRevision:
               kind === "reconstructing"
                 ? state.revision + 1
@@ -1284,6 +1686,7 @@ export function createRunStore({
       if (
         state.activeTurn?.role !== role ||
         state[field].role !== role ||
+        state.preparation != null ||
         state.executionProcess !== null ||
         state.executionResource !== null
       ) {
@@ -1369,6 +1772,80 @@ export function createRunStore({
     });
   }
 
+  // A pipeline may bind additional exact read trees before its inputs close.
+  // Ordinary transitions cannot replace workspace or provider-policy bindings.
+  async function bindWorkspaceReads(
+    lease,
+    {
+      workspace,
+      providerPolicies,
+      expectedRevision,
+      worktreeLease,
+      assertAuthorized,
+    },
+  ) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) =>
+      worktreeLeases.holdCurrent(worktreeLease, async (owner) => {
+        const snapshot = await loadSnapshot(runDirectory, record.runId);
+        const state = snapshot.state;
+        assertRunCanAdvance(state, resolveStopBoundary);
+        const old = state.workspace;
+        const { infrastructurePaths: previousReads, ...previousPolicy } =
+          old.policy ?? {};
+        const { infrastructurePaths: nextReads, ...nextPolicy } =
+          workspace.policy ?? {};
+        if (
+          state.revision !== expectedRevision ||
+          old.kind !== "directory" ||
+          workspace.kind !== "directory" ||
+          state.activeTurn !== null ||
+          state.preparation != null ||
+          state.executionProcess !== null ||
+          state.executionResource !== null ||
+          owner.record.runId !== state.runId ||
+          owner.runDirectory !==
+            (await getWorktreeLeaseDirectory(old.leasePath)) ||
+          workspace.leasePath !== old.leasePath ||
+          !isDeepStrictEqual(previousPolicy, nextPolicy) ||
+          !Array.isArray(nextReads) ||
+          !previousReads.every((path) => nextReads.includes(path)) ||
+          !isDeepStrictEqual(
+            workspace.absentInputPaths,
+            old.absentInputPaths,
+          ) ||
+          !isDeepStrictEqual(
+            workspace.retrievalPermissions,
+            old.retrievalPermissions,
+          ) ||
+          typeof assertAuthorized !== "function"
+        )
+          throw new RunStoreError(
+            "Workspace read rebinding is not authorized.",
+            { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+          );
+        await assertAuthorized(deepFreeze(state));
+        const next = normalizeRunState(
+          {
+            ...state,
+            workspace,
+            providerPolicies,
+            revision: state.revision + 1,
+            updatedAt: timestamp(state.updatedAt),
+          },
+          record.runId,
+        );
+        await journal.appendTransition(runDirectory, next, snapshot, {
+          actor: "runner",
+          phase: "clarify",
+          kind: "read-scopes-bound",
+          message:
+            "Bound additional inspected setup read scopes before clarification closed.",
+        });
+        return deepFreeze(next);
+      }),
+    );
+  }
+
   async function startAgentTurn(
     lease,
     activeTurn,
@@ -1413,6 +1890,7 @@ export function createRunStore({
         {
           ...snapshot.state,
           activeTurn: null,
+          observations: interruptObservations(snapshot.state.observations),
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),
         },
@@ -1429,7 +1907,9 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        childRole: normalizedChild.role,
+      });
       if (
         snapshot.state.sessionLineage.children.some(
           (child) => child.sessionId === normalizedChild.sessionId,
@@ -1460,6 +1940,70 @@ export function createRunStore({
         nextState,
         snapshot,
         normalizedActivity,
+      );
+      return deepFreeze(nextState);
+    });
+  }
+
+  async function recordSessionNaming(lease, input) {
+    if (!isRecord(input)) {
+      throw new RunStoreError("Session naming input is invalid.", {
+        code: "ERR_INVALID_RUN_STATE",
+      });
+    }
+    rejectUnknownFields(
+      input,
+      new Set(["role", "sessionId", "status"]),
+      "sessionNaming",
+    );
+    const { role, sessionId } = normalizeChildSession(
+      { role: input.role, sessionId: input.sessionId },
+      "sessionNaming",
+    );
+    let status;
+    try {
+      ({ status } = normalizeSessionNamingDiagnostic({ status: input.status }));
+    } catch {
+      throw new RunStoreError("Session naming status is invalid.", {
+        code: "ERR_INVALID_RUN_STATE",
+      });
+    }
+    const activity = normalizePublicActivity({
+      actor: role,
+      phase: "session",
+      kind: "session-naming",
+      message: `Session naming: ${status}.`,
+    });
+
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        childRole: role,
+      });
+      if (
+        snapshot.state.activeTurn?.role !== role ||
+        !snapshot.state.sessionLineage.children.some(
+          (child) => child.role === role && child.sessionId === sessionId,
+        )
+      ) {
+        throw new RunStoreError("Session naming requires a recorded child.", {
+          code: "ERR_INVALID_CHILD_SESSION",
+        });
+      }
+
+      const nextState = normalizeRunState(
+        {
+          ...snapshot.state,
+          revision: snapshot.state.revision + 1,
+          updatedAt: timestamp(snapshot.state.updatedAt),
+        },
+        record.runId,
+      );
+      await journal.appendTransition(
+        runDirectory,
+        nextState,
+        snapshot,
+        activity,
       );
       return deepFreeze(nextState);
     });
@@ -1507,39 +2051,69 @@ export function createRunStore({
     }
 
     const runDirectory = await getRunDirectory(runId);
-    const { events } = await loadSnapshot(runDirectory, runId);
-    if (afterRevision > events.at(-1).revision) {
+    const snapshot = await loadSnapshot(runDirectory, runId);
+    if (afterRevision > snapshot.state.revision) {
       throw new RunStoreError("Public activity cursor is ahead of the run.", {
         code: "ERR_INVALID_ACTIVITY_CURSOR",
       });
     }
-    const activities = [];
-    let cursor = afterRevision;
-
-    for (const event of events) {
-      if (event.revision <= afterRevision) {
-        continue;
-      }
-      cursor = event.revision;
-      if (event.activity !== null) {
-        activities.push({
-          revision: event.revision,
-          recordedAt: event.recordedAt,
-          ...publicDispatchActivity(event.activity),
-          ...(event.state.stopRequest == null
-            ? {}
-            : { stop: projectOperatorStop(event.state) }),
-        });
+    const drain = async (source) => {
+      const activities = [];
+      let cursor = source.state.revision;
+      for await (const activity of journal.publicActivities(
+        runDirectory,
+        source,
+        afterRevision,
+      )) {
+        // Drain the certified prefix even after filling the bounded page.
+        if (activities.length === limit) continue;
+        activities.push(activity);
         if (activities.length === limit) {
-          break;
+          cursor = activity.revision;
         }
       }
-    }
+      return deepFreeze({ activities, cursor });
+    };
 
-    return deepFreeze({ activities, cursor });
+    try {
+      return await drain(snapshot);
+    } catch (cause) {
+      if (
+        !(cause instanceof RunStoreError) ||
+        cause.code !== "ERR_INVALID_EVENT_LOG"
+      )
+        throw cause;
+      // The owner may publish during this lock-free drain. Stream observations
+      // cannot distinguish that from an edit, so reread once only after the
+      // original certified prefix is proven unchanged and validly extended.
+      const extended = await journal.extendSnapshot(runDirectory, snapshot);
+      if (extended === null) throw cause;
+      return drain(await authorizeSnapshot(runDirectory, extended));
+    }
   }
 
+  const preparation = createPreparationService({
+    runLeases,
+    journal,
+    loadSnapshot,
+    timestamp,
+    hostName,
+    processId,
+    processIdentity,
+    processIsAlive,
+    resolveStopBoundary,
+    onBoundary: onPreparationBoundary,
+    gate: createMutationBoundary({
+      hostName,
+      processId,
+      processIsAlive,
+      processIdentity,
+      onPublicationBoundary: onLeasePublicationBoundary,
+      prefix: ".custody-",
+    }),
+  });
   const stops = createStopService({
+    preparation,
     resolveStopBoundary,
     actions,
     getRunDirectory,
@@ -1624,6 +2198,12 @@ export function createRunStore({
     const normalized = normalizeExecutionResource(resource);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (snapshot.state.preparation != null) {
+        throw new RunStoreError(
+          "Preparation custody must settle before storage changes.",
+          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+        );
+      }
       const previous = snapshot.state.executionResource;
       const { owner: previousOwner, ...withoutOwner } = previous ?? {};
       const settlesAcquisition =
@@ -1695,6 +2275,16 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    capturePreservation: preservation.capture,
+    restorePreservation: preservation.restore,
+    reconcilePreservation: preservation.reconcile,
+    readPreservation: preservation.read,
+    reservePreparation: preparation.reserve,
+    recordPreparationProcess: preparation.record,
+    settlePreparation: preparation.settle,
+    recoverPreparation: preparation.recover,
+    startObservationAttempt,
+    recordObservationBatch,
     recordExecutionResource,
     recordExecutionProcess,
     inspectExecutionProcess,
@@ -1705,9 +2295,18 @@ export function createRunStore({
     loadStopCheckpoint: stops.checkpoint,
     inspectRunLeaseOwner,
     beginAction: actions.begin,
+    admitRuntime: runtimeAdmission.admit,
+    assertRuntimeBoundary,
+    activateRuntime: runtimeAdmission.activate,
+    readRuntime: runtimeAdmission.read,
+    releaseRuntime: runtimeAdmission.release,
     rootPath: requestedStateRoot,
     acquireRunLease,
     acquireWorktreeLease,
+    acquireInfrastructureLease: (path, runId) =>
+      acquireWorktreeLease(path, runId, true),
+    assertWorkspaceLease,
+    bindWorkspaceReads,
     createRun,
     getRunDirectory,
     finishAgentTurn,
@@ -1718,6 +2317,7 @@ export function createRunStore({
     readAction: actions.read,
     recordChildSession,
     recordProviderPolicy,
+    recordSessionNaming,
     scheduleAvailabilityRetry,
     completeAvailabilityTurn,
     completeInactivityTurn,
@@ -1725,6 +2325,8 @@ export function createRunStore({
     recoverRun,
     inspectRecoveryDispatch,
     recordRecoveryDispatch,
+    recordRecoveryFailure: recoveryFailures.record,
+    readRecoveryFailure: recoveryFailures.read,
     inspectDispatchOwner,
     runIsLeased,
     runLeaseOwnerIsLive,
@@ -1735,6 +2337,7 @@ export function createRunStore({
     worktreeIsLeased,
     worktreeLeaseOwner,
     withGuidanceLease,
+    withIssueLease: actions.withIssueLease,
     writeRunArtifact,
   });
 }

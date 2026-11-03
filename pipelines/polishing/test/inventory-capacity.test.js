@@ -115,16 +115,18 @@ test("expanded polishing inventories retain structured-output and per-item byte 
     ...check,
     command: `${check.command} ${"x".repeat(1100)}`,
   }));
-  assert.throws(
-    () => normalizeBootstrapResult(ready, "Worker"),
-    (error) => error.diagnostic.constraint === "maximum-256-kibibytes",
+  assert.ok(Buffer.byteLength(JSON.stringify(ready)) > 256 * 1024);
+  assert.equal(
+    normalizeBootstrapResult(ready, "Worker").requiredChecks.length,
+    256,
   );
   const result = finalization(512);
   result.checks = result.checks.map((check) => ({
     ...check,
     evidence: ["x".repeat(1000)],
   }));
-  assert.throws(() => normalizeFinalizationResult(result), /too large/u);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) > 256 * 1024);
+  assert.equal(normalizeFinalizationResult(result).checks.length, 512);
   const tooLong = {
     ...bootstrapReady("Worker"),
     requiredChecks: [{ id: "C1", command: "x".repeat(4001) }],

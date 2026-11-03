@@ -225,9 +225,15 @@ function recoveryHistory({ accepted = false } = {}) {
   return { run: events.at(-1).state, events };
 }
 for (const accepted of [false, true]) {
-  test(`validated journal recovers original evidence with accepted=${accepted}`, () => {
+  test(`validated journal recovers original evidence with accepted=${accepted}`, async () => {
     const history = recoveryHistory({ accepted });
-    prepareImplementationRecovery(history.run, history, (run) => run);
+    const events = history.events;
+    history.events = {
+      async *[Symbol.asyncIterator]() {
+        yield* events;
+      },
+    };
+    await prepareImplementationRecovery(history.run, history, (run) => run);
     assert.deepEqual(recoveredImplementationEvidence(history.run), {
       step: 1,
       head: "a".repeat(40),
@@ -236,7 +242,7 @@ for (const accepted of [false, true]) {
     });
   });
 }
-test("missing, truncated, or mismatched journals cannot manufacture original evidence", () => {
+test("missing, truncated, or mismatched journals cannot manufacture original evidence", async () => {
   for (const alter of [
     (history) => {
       history.events.shift();
@@ -251,7 +257,7 @@ test("missing, truncated, or mismatched journals cannot manufacture original evi
   ]) {
     const history = recoveryHistory();
     alter(history);
-    prepareImplementationRecovery(history.run, history, (run) => run);
+    await prepareImplementationRecovery(history.run, history, (run) => run);
     assert.equal(recoveredImplementationEvidence(history.run), null);
   }
 });
@@ -308,12 +314,12 @@ test("step evidence is persisted before implementation registration and survives
   );
 });
 
-test("legacy accepted no-op evidence cannot authorize further writes", () => {
+test("legacy accepted no-op evidence cannot authorize further writes", async () => {
   const history = recoveryHistory({ accepted: true });
   history.events.at(
     -1,
   ).state.pipelineState.repositoryBaseline.contentFingerprint = "b".repeat(64);
-  prepareImplementationRecovery(history.run, history, (run) => run);
+  await prepareImplementationRecovery(history.run, history, (run) => run);
   assert.equal(recoveredImplementationEvidence(history.run), null);
 });
 
@@ -404,7 +410,7 @@ test("persisted implementation evidence rejects another step, HEAD, or malformed
   );
 });
 
-test("legacy environment pause before implementation retains its journal-proven clean baseline", () => {
+test("legacy environment pause before implementation retains its journal-proven clean baseline", async () => {
   const history = recoveryHistory();
   history.events[1].state.activeTurn = null;
   const current = history.run.pipelineState;
@@ -416,7 +422,7 @@ test("legacy environment pause before implementation retains its journal-proven 
     reason: "environment_blocked",
     resumeState: "IMPLEMENT",
   };
-  prepareImplementationRecovery(history.run, history, (run) => run);
+  await prepareImplementationRecovery(history.run, history, (run) => run);
   assert.deepEqual(recoveredImplementationEvidence(history.run), {
     step: 1,
     head: "a".repeat(40),

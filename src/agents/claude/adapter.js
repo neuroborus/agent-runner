@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess } from "../owned-process.js";
+import { canReadFiles } from "../file-access.js";
 import {
   ADAPTER_FAILURE_CLASS,
   createAdapterContract,
@@ -15,12 +16,15 @@ import {
   isEnvironment,
   isRecord,
   isolateGitEnvironment,
+  sessionName,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { allocateClaudeStorage, environmentError } from "./storage.js";
 import { claudeAvailabilityReason } from "./availability.js";
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  CLAUDE_COMMAND_SHELL_PROOF,
+  canReadClaudeFiles,
   claudeCommandLauncherSettings,
   createClaudeCommandLauncher,
 } from "./command-launcher.js";
@@ -31,6 +35,11 @@ import {
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 import { createClaudeStream } from "./stream.js";
+import { createClaudeObservations } from "./observations.js";
+import {
+  directoryPolicyError,
+  prepareDirectoryPolicy,
+} from "./directory-policy.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -43,6 +52,7 @@ const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
+  "isolation_workspace_policy",
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
@@ -205,6 +215,8 @@ const CONFIGURATION_ERROR_PATTERN =
   /(?:configuration|config(?:uration)? directory|profile|model)[^\n]{0,80}(?:not found|does not exist|cannot (?:be )?load|missing|unavailable|invalid|inaccessible|permission denied|unsupported)/iu;
 const EFFORT_ERROR_PATTERN =
   /\beffort\b[^\n]{0,160}(?:not supported|unsupported|invalid|not available|only supported|must be|not allowed)|(?:unsupported|invalid|unknown|does not support)[^\n]{0,160}\beffort\b/iu;
+const NAMING_ERROR_PATTERN =
+  /^(?:error: )?(?:unknown option ['"]--name['"]|option ['"](?:-n, )?--name <name>['"] argument missing|(?:failed|unable) to (?:set|save) (?:the )?session name(?:[.:]|$))/imu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
   /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
   /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
@@ -379,6 +391,7 @@ const claudeContract = createAdapterContract({
   AdapterError: ClaudeAdapterError,
   backendName: "Claude",
   failureClasses: CLAUDE_FAILURE_CLASSES,
+  declaredWorkspace: true,
 });
 buildClaudeFailure = claudeContract.failure;
 
@@ -387,6 +400,7 @@ const {
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
+  normalizeProbeOptions,
 } = claudeContract;
 
 function validateExecutionOptions(options) {
@@ -561,16 +575,20 @@ function outputSchemaFor(request) {
 }
 
 function accessConfigurationFor(request) {
+  if (request.workspacePolicy !== undefined)
+    return { ...READ_ONLY_ACCESS, deny: WORKSPACE_DENY_POLICY };
   return request.access === "workspace-write"
     ? WORKSPACE_ACCESS
     : READ_ONLY_ACCESS;
 }
 
-function policyIdentity(isolationPolicies, architecture) {
+function policyIdentity(isolationPolicies, architecture, directory = false) {
   return Object.fromEntries(
     Object.entries(isolationPolicies).map(([access, isolationPolicy]) => {
-      const configuration =
-        access === "workspace-write" ? WORKSPACE_ACCESS : READ_ONLY_ACCESS;
+      const configuration = accessConfigurationFor({
+        access,
+        ...(directory ? { workspacePolicy: {} } : {}),
+      });
       return [
         access,
         {
@@ -643,8 +661,9 @@ function cliSettings(
   isolationPolicy,
 ) {
   // Keep Claude's mount preparation read-only so it neither creates nor
-  // registers absent project paths for cleanup. The authenticated launcher
-  // supplies the exact runner-authorized workspace access.
+  // registers absent project paths for cleanup. The authenticated launcher,
+  // selected through managed bwrapPath or PATH, replaces that reservation with
+  // the exact runner-authorized workspace access and omitted protections.
   const deniedWritePaths = [request.cwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
@@ -670,7 +689,11 @@ function cliSettings(
       allowUnsandboxedCommands: false,
       enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
       credentials: {
-        envVars: credentialEnvironmentNames.map((name) => ({
+        // Claude removes the shell proof inside every sandbox it starts.
+        envVars: [
+          ...credentialEnvironmentNames,
+          CLAUDE_COMMAND_SHELL_PROOF,
+        ].map((name) => ({
           mode: "deny",
           name,
         })),
@@ -717,7 +740,12 @@ function commandArguments(
       isolationPolicy,
     ),
     "--append-system-prompt",
-    SYSTEM_INSTRUCTIONS,
+    request.workspacePolicy === undefined
+      ? SYSTEM_INSTRUCTIONS
+      : "Follow the workspace instructions and declared directory policy. " +
+        "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
+        "configuration, infrastructure, artifacts and controls are read-only. " +
+        "Never stage, commit, mutate Git state, perform remote writes or request permission approval.",
     "--permission-mode",
     accessConfiguration.permissionMode,
     "--tools",
@@ -742,6 +770,8 @@ function commandArguments(
       argumentsList.push("--fork-session");
     }
   }
+  if (request.sessionNaming !== undefined && session?.mode !== "continue")
+    argumentsList.push("--name", sessionName(request.sessionNaming));
   if (
     argumentsList.some(
       (argument) => Buffer.byteLength(argument) > MAX_ARGUMENT_BYTES,
@@ -1230,10 +1260,13 @@ export function createClaudeAdapter(options = {}) {
       .sort(),
   );
   let probePromise;
+  const directoryProbePromises = new Map();
+  const directoryIsolationPolicies = new Map();
   let isolationPolicies;
   let supportedEfforts = new Set();
+  let namingSupported = false;
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(directoryAccess) {
     let versionResult;
     let helpResult;
     let socatAvailable = false;
@@ -1274,6 +1307,7 @@ export function createClaudeAdapter(options = {}) {
     const version = parseVersion(processOutput(versionResult.stdout).trim());
     const help =
       processOutput(helpResult.stdout) + processOutput(helpResult.stderr);
+    namingSupported = /^[ \t]*(?:-n,[ \t]+)?--name(?:[ \t]|$)/mu.test(help);
     const cliSupported =
       versionAtLeast(version, MINIMUM_CLAUDE_VERSION) &&
       REQUIRED_HELP_FLAGS.every((flag) => help.includes(flag));
@@ -1299,21 +1333,25 @@ export function createClaudeAdapter(options = {}) {
         ...(createSocketServer === undefined ? {} : { createSocketServer }),
         env: commandEnvironment,
         execute,
+        ...(directoryAccess === undefined ? {} : { directoryAccess }),
       });
-      localCommitExecutorAvailable = await probeClaudeLocalCommit({
-        bubblewrapBinary: BUBBLEWRAP_BINARY,
-        env: commandEnvironment,
-        execute,
-      });
+      if (directoryAccess === undefined)
+        localCommitExecutorAvailable = await probeClaudeLocalCommit({
+          bubblewrapBinary: BUBBLEWRAP_BINARY,
+          env: commandEnvironment,
+          execute,
+        });
     }
-    isolationPolicies = Object.freeze({
+    const resolvedPolicies = Object.freeze({
       ...selectedPolicies,
       "local-commit": localCommitExecutorAvailable
         ? selectedPolicies["local-commit"]
         : "unavailable",
     });
+    if (directoryAccess === undefined) isolationPolicies = resolvedPolicies;
+    else directoryIsolationPolicies.set(directoryAccess, resolvedPolicies);
     const supportedAccess = Object.freeze(
-      Object.entries(isolationPolicies)
+      Object.entries(resolvedPolicies)
         .filter(([, policy]) => policy !== "unavailable")
         .map(([access]) => access),
     );
@@ -1322,27 +1360,31 @@ export function createClaudeAdapter(options = {}) {
       fingerprint: createHash("sha256")
         .update(
           JSON.stringify({
-            accessPolicies: policyIdentity(isolationPolicies, architecture),
-            contract: Object.values(isolationPolicies).includes(
+            accessPolicies: policyIdentity(
+              resolvedPolicies,
+              architecture,
+              directoryAccess !== undefined,
+            ),
+            contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v8"
-              : "claude-isolation-v2",
-            policies: isolationPolicies,
+              ? "claude-command-boundary-v9"
+              : "claude-isolation-v3",
+            policies: resolvedPolicies,
             version: version.text,
           }),
         )
         .digest("hex"),
       supportedAccess,
     });
-    const readOnlyAvailable = isolationPolicies["read-only"] !== "unavailable";
+    const readOnlyAvailable = resolvedPolicies["read-only"] !== "unavailable";
     const readOnlyPolicyAvailable =
       READ_ONLY_ACCESS.permissionMode === "auto" &&
       READ_ONLY_ACCESS.autoAllowBashIfSandboxed &&
       READ_ONLY_ACCESS.tools === READ_ONLY_TOOLS &&
       READ_ONLY_ACCESS.deny === COMMON_DENY_POLICY;
     const workspaceWriteAvailable =
-      isolationPolicies["workspace-write"] !== "unavailable";
+      resolvedPolicies["workspace-write"] !== "unavailable";
     const remoteWriteBlocked = supportedAccess.length > 0;
     return Object.freeze({
       version: version.text,
@@ -1352,7 +1394,7 @@ export function createClaudeAdapter(options = {}) {
       gitMetadataWriteBlocked: workspaceWriteAvailable,
       workspaceWrite: workspaceWriteAvailable,
       localCommit:
-        isolationPolicies["local-commit"] !== "unavailable" &&
+        resolvedPolicies["local-commit"] !== "unavailable" &&
         localCommitExecutorAvailable &&
         readOnlyPolicyAvailable,
       remoteWriteBlocked,
@@ -1363,7 +1405,7 @@ export function createClaudeAdapter(options = {}) {
   }
 
   function probe(value) {
-    const options = normalizeExecutionOptions(value);
+    const options = validateExecutionOptions(normalizeProbeOptions(value));
     if (customClientAttribution) {
       return Promise.reject(
         new ClaudeAdapterError(
@@ -1372,20 +1414,67 @@ export function createClaudeAdapter(options = {}) {
         ),
       );
     }
-    probePromise ??= inspectCapabilities();
-    if (options.effort !== undefined) {
-      return probePromise.then((capabilities) => {
+    return (async () => {
+      const boundary = await prepareDirectoryPolicy(
+        { ...options, cwd: options.workspacePolicy?.workspacePath },
+        ClaudeAdapterError,
+      );
+      let capabilities;
+      if (boundary === undefined) {
+        capabilities = await (probePromise ??= inspectCapabilities());
+      } else {
+        if (!directoryProbePromises.has(options.access))
+          directoryProbePromises.set(
+            options.access,
+            inspectCapabilities(options.access),
+          );
+        capabilities = await directoryProbePromises.get(options.access);
+        const supported = capabilities.policyReceipt.supportedAccess.includes(
+          options.access,
+        );
+        capabilities = deepFreeze({
+          ...capabilities,
+          declaredWorkspace: supported,
+          readOnly: supported && options.access === "read-only",
+          workspaceWrite: supported && options.access === "workspace-write",
+          autonomousWrite: supported && options.access === "workspace-write",
+          gitMetadataWriteBlocked: supported,
+          localCommit: false,
+          policyReceipt: {
+            schemaVersion: 1,
+            fingerprint: createHash("sha256")
+              .update(
+                JSON.stringify({
+                  policy: capabilities.policyReceipt.fingerprint,
+                  directory: boundary.fingerprint,
+                }),
+              )
+              .digest("hex"),
+            supportedAccess: supported ? [options.access] : [],
+          },
+        });
+      }
+      if (options.effort !== undefined) {
         if (!supportedEfforts.has(nativeEffort(options.effort)))
           throw effortError();
-        return capabilities;
-      });
-    }
-    return probePromise;
+      }
+      return capabilities;
+    })();
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe(executionOptionsFor(request));
+    const capabilities = await probe({
+      ...executionOptionsFor(request),
+      ...(request.workspacePolicy === undefined
+        ? {}
+        : {
+            access: request.access,
+            workspacePolicy: request.workspacePolicy,
+          }),
+    });
     const required = ["remoteWriteBlocked"];
+    if (request.workspacePolicy !== undefined)
+      required.push("declaredWorkspace");
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
     }
@@ -1492,20 +1581,83 @@ export function createClaudeAdapter(options = {}) {
     ]);
   }
 
-  async function runAttempt(request, { recovery, session } = {}) {
+  async function runAttempt(
+    request,
+    { recovery, session, attempt, settlement } = {},
+  ) {
     request.signal?.throwIfAborted();
-    const gitDirectories = await gitMetadataDirectories(request);
+    await request.directoryBoundary?.verify();
+    const gitDirectories = [
+      ...(request.directoryBoundary?.mounts.protectedPaths ??
+        (await gitMetadataDirectories(request))),
+      ...(request.readPaths ?? []),
+    ];
     const selectedSession = session === undefined ? request.session : session;
-    const isolationPolicy = isolationPolicies?.[request.access];
+    const isolationPolicy =
+      request.isolationPolicy ?? isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
+    const observations = createClaudeObservations(
+      request.onObservation,
+      attempt,
+      recovery,
+    );
     const stream = createClaudeStream(
       request.onProgress,
       () =>
         new ClaudeAdapterError("Claude returned an invalid JSON stream.", {
           code: "ERR_CLAUDE_PROTOCOL",
         }),
+      observations,
+      selectedSession,
     );
+    let acknowledgedChild;
+    async function acknowledgeChild(sessionId, status) {
+      if (
+        sessionId !== undefined &&
+        selectedSession?.mode !== "continue" &&
+        sessionId !== selectedSession?.id &&
+        sessionId !== acknowledgedChild
+      ) {
+        await request.onSessionCreated?.(sessionId);
+        acknowledgedChild = sessionId;
+        if (request.sessionNaming !== undefined)
+          await request.onSessionNaming?.({ status });
+      }
+    }
+    async function rejectNaming(payload, standardError) {
+      if (
+        request.sessionNaming === undefined ||
+        selectedSession?.mode === "continue" ||
+        (payload !== null &&
+          (!isClaudeErrorResult(payload) ||
+            payload.permission_denials?.length ||
+            payload.api_error_status !== undefined ||
+            !["success", "error_during_execution"].includes(
+              payload.subtype,
+            ))) ||
+        !NAMING_ERROR_PATTERN.test(
+          `${standardError}\n${diagnosticText(payload)}`.slice(
+            0,
+            MAX_DIAGNOSTIC_INPUT_LENGTH,
+          ),
+        )
+      )
+        return;
+      if (payload !== null) stream.assertValid();
+      await acknowledgeChild(
+        payload === null ? stream.sessionId : payloadSessionId(payload),
+        "rejected",
+      );
+      throw new ClaudeAdapterError(
+        "Claude session naming requires request recovery.",
+        {
+          code: "ERR_CLAUDE_SESSION_NAMING_UNAVAILABLE",
+          diagnosticClass: "backend_unavailable",
+          recoverable: true,
+        },
+      );
+    }
     let processRetired = true;
     let primaryError;
     try {
@@ -1520,6 +1672,7 @@ export function createClaudeAdapter(options = {}) {
           directory: storage.directory,
           environment: baseEnvironment,
           gitDirectories,
+          directoryPolicy: await request.directoryBoundary?.bindMounts(),
           isolationPolicy,
           unsetEnvironmentNames: credentialEnvironmentNames,
         });
@@ -1592,6 +1745,7 @@ export function createClaudeAdapter(options = {}) {
         }
         const standardOutput = processOutput(cause?.stdout);
         const payload = stream.finish(standardOutput);
+        await rejectNaming(payload, standardError);
         if (payload === null) {
           if (stream.hasRecords) stream.assertValid();
           const reportedError = outputError(
@@ -1627,6 +1781,7 @@ export function createClaudeAdapter(options = {}) {
           });
         }
         stream.assertValid();
+        await acknowledgeChild(sessionId, "unavailable");
         throw outputError(payload, request, selectedSession);
       }
       if (
@@ -1644,11 +1799,14 @@ export function createClaudeAdapter(options = {}) {
         );
       }
       const payload = stream.finish(processOutput(processResult.stdout));
+      await rejectNaming(payload, processOutput(processResult.stderr));
       if (
         !Array.isArray(payload?.permission_denials) ||
         payload.permission_denials.length === 0
       )
         stream.assertValid();
+      if (isClaudeErrorResult(payload) && !payload.permission_denials?.length)
+        await acknowledgeChild(payloadSessionId(payload), "unavailable");
       const result = normalizeResult(payload, request, selectedSession);
       if (
         selectedSession?.mode === "fork" &&
@@ -1667,29 +1825,55 @@ export function createClaudeAdapter(options = {}) {
           { code: "ERR_CLAUDE_PROTOCOL" },
         );
       }
+      await acknowledgeChild(result.sessionId, "named");
       return result;
     } catch (cause) {
       primaryError = cause;
       throw cause;
     } finally {
-      // An unretired process may still use its storage. Recovery owns cleanup
-      // under the execution lease after proving that every descendant retired.
-      if (processRetired) {
-        try {
-          await storage.remove();
-        } catch (cause) {
-          if (
-            primaryError?.ambiguous === true ||
-            primaryError?.failure?.retry === "terminal"
-          ) {
-            throw primaryError;
+      try {
+        // An unretired process may still use its storage. Recovery owns cleanup
+        // under the execution lease after proving that every descendant retired.
+        if (processRetired) {
+          try {
+            await storage.remove();
+          } catch (cause) {
+            if (
+              primaryError?.ambiguous === true ||
+              primaryError?.failure?.retry === "terminal"
+            ) {
+              throw primaryError;
+            }
+            throw cause;
           }
-          throw cause;
+          try {
+            stream.retire();
+          } catch (cause) {
+            throw primaryError ?? cause;
+          }
+          await request.directoryBoundary?.verify();
+          settlement.directoryVerified = true;
         }
+        if (
+          !processRetired &&
+          primaryError === undefined &&
+          request.directoryBoundary !== undefined
+        )
+          throw directoryPolicyError(ClaudeAdapterError);
+      } catch (cause) {
+        primaryError ??= cause;
+        throw cause;
+      } finally {
         try {
-          stream.retire();
-        } catch (cause) {
-          throw primaryError ?? cause;
+          observations?.seal(primaryError === undefined);
+        } catch {
+          if (primaryError === undefined)
+            throw new ClaudeAdapterError(
+              "Claude observation observer failed.",
+              {
+                code: "ERR_CLAUDE_PROTOCOL",
+              },
+            );
         }
       }
     }
@@ -1739,7 +1923,77 @@ export function createClaudeAdapter(options = {}) {
   }
 
   async function run(value) {
-    const request = normalizeRequest(value);
+    const normalized = normalizeRequest(value);
+    if (
+      normalized.sessionNaming !== undefined &&
+      normalized.onSessionCreated === undefined
+    )
+      throw new ClaudeAdapterError(
+        "Session naming requires child acknowledgement.",
+        {
+          code: "ERR_INVALID_CLAUDE_OPTIONS",
+        },
+      );
+    if (
+      normalized.readPaths !== undefined &&
+      !(await canReadFiles(normalized.readPaths))
+    ) {
+      throw directoryPolicyError(ClaudeAdapterError);
+    }
+    const directoryBoundary = await prepareDirectoryPolicy(
+      normalized,
+      ClaudeAdapterError,
+    );
+    let request =
+      directoryBoundary === undefined
+        ? normalized
+        : Object.freeze({
+            ...normalized,
+            directoryBoundary,
+            storageForbiddenPaths: Object.freeze([
+              ...(normalized.storageForbiddenPaths ?? []),
+              ...directoryBoundary.forbiddenPaths,
+            ]),
+          });
+    let attempt = 0;
+    const settlement = { directoryVerified: false };
+    function assertNamingSupported(session) {
+      request.signal?.throwIfAborted();
+      if (
+        request.sessionNaming !== undefined &&
+        session?.mode !== "continue" &&
+        !namingSupported
+      ) {
+        const cause = new ClaudeAdapterError(
+          "Installed Claude CLI does not support session naming.",
+          {
+            code: "ERR_UNSUPPORTED_CLAUDE_SESSION_NAMING",
+            diagnosticClass: "capability_unavailable",
+            recoverable: true,
+          },
+        );
+        if (attempt === 0)
+          cause.failure = buildClaudeFailure({
+            failureClass: "capability_unavailable",
+            checkpoint: "initialize",
+            outcome: "not_started",
+            effect: "none",
+            retry: "transient",
+          });
+        throw cause;
+      }
+    }
+    const observedAttempt = (options = {}) => {
+      assertNamingSupported(
+        options.session === undefined ? request.session : options.session,
+      );
+      settlement.directoryVerified = false;
+      return runAttempt(request, {
+        ...options,
+        attempt: ++attempt,
+        settlement,
+      });
+    };
     if (
       request.session !== undefined &&
       !SESSION_ID_PATTERN.test(request.session.id)
@@ -1750,6 +2004,14 @@ export function createClaudeAdapter(options = {}) {
     }
     try {
       await assertCapabilities(request);
+      // Access-specific probes share no mutable selection with another kind.
+      request = Object.freeze({
+        ...request,
+        isolationPolicy:
+          request.workspacePolicy === undefined
+            ? isolationPolicies[request.access]
+            : directoryIsolationPolicies.get(request.access)?.[request.access],
+      });
     } catch (cause) {
       if (
         request.access === "local-commit" &&
@@ -1761,7 +2023,7 @@ export function createClaudeAdapter(options = {}) {
     }
     let result;
     try {
-      result = await runAttempt(request);
+      result = await observedAttempt();
     } catch (cause) {
       if (request.signal?.aborted) {
         if (request.access === "local-commit") {
@@ -1776,6 +2038,8 @@ export function createClaudeAdapter(options = {}) {
         }
         throw cause;
       }
+      if (directoryBoundary !== undefined && !settlement.directoryVerified)
+        throw cause;
       if (!(cause instanceof ClaudeAdapterError)) {
         if (
           request.access === "local-commit" &&
@@ -1824,12 +2088,14 @@ export function createClaudeAdapter(options = {}) {
         }
         if (sessionId !== undefined) {
           try {
-            return await runAttempt(request, {
+            return await observedAttempt({
               recovery: "compact",
               session: { id: sessionId, mode: "continue" },
             });
           } catch (recoveryCause) {
             if (
+              (directoryBoundary !== undefined &&
+                !settlement.directoryVerified) ||
               !(recoveryCause instanceof ClaudeAdapterError) ||
               recoveryCause.code !== "ERR_CLAUDE_CONTEXT_EXHAUSTED"
             ) {
@@ -1849,9 +2115,10 @@ export function createClaudeAdapter(options = {}) {
             }
           }
         }
+        assertNamingSupported(null);
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           recovery: "fresh",
           session: null,
         });
@@ -1859,9 +2126,10 @@ export function createClaudeAdapter(options = {}) {
         cause.code === "ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE" &&
         request.session?.mode === "continue"
       ) {
+        assertNamingSupported(null);
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           recovery: "fresh",
           session: null,
         });
@@ -1875,5 +2143,27 @@ export function createClaudeAdapter(options = {}) {
     return result;
   }
 
-  return Object.freeze({ id: CLAUDE_BACKEND_ID, probe, run });
+  return Object.freeze({
+    id: CLAUDE_BACKEND_ID,
+    probe,
+    async canReadFiles({ access, paths, workspacePolicy }) {
+      await probe({ access, workspacePolicy });
+      const policies =
+        workspacePolicy === undefined
+          ? isolationPolicies
+          : directoryIsolationPolicies.get(access);
+      const boundary = await prepareDirectoryPolicy(
+        { access, workspacePolicy },
+        ClaudeAdapterError,
+      );
+      return canReadClaudeFiles(
+        paths,
+        policies?.[access],
+        boundary === undefined
+          ? []
+          : [workspacePolicy.workspacePath, ...boundary.mounts.protectedPaths],
+      );
+    },
+    run,
+  });
 }

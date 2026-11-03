@@ -13,6 +13,7 @@ import {
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { claimTestAttribution } from "../src/trusted-validation/index.js";
 import { temporaryRoots } from "./test-storage.js";
 
 const CONTAINMENT_TESTS = new Set([
@@ -98,6 +99,7 @@ const files = argumentsList.length
       .sort();
 if (files.length === 0) throw new Error("No test files selected.");
 
+const attribution = claimTestAttribution();
 const directory = temporaryDirectory();
 const concurrency = Math.min(slow ? 4 : 8, availableParallelism());
 const batches = slow
@@ -131,16 +133,25 @@ try {
         `Test batch: ${batch.files.length} files; concurrency: ${batch.concurrency}`,
       );
     }
-    const captured = runCaptured(
-      [
-        "--test",
-        `--test-concurrency=${batch.concurrency}`,
-        `--test-reporter=${slow ? "spec" : "dot"}`,
-        ...batch.files,
-      ],
-      join(directory, `test-output-${index}.log`),
-      env,
-    );
+    const testArguments = [
+      "--test",
+      `--test-concurrency=${batch.concurrency}`,
+      `--test-reporter=${attribution ? new URL("./test-reporter.js", import.meta.url).href : slow ? "spec" : "dot"}`,
+      ...batch.files,
+    ];
+    const captured = attribution
+      ? {
+          content: "",
+          result: spawnSync(process.execPath, testArguments, {
+            env,
+            stdio: "ignore",
+          }),
+        }
+      : runCaptured(
+          testArguments,
+          join(directory, `test-output-${index}.log`),
+          env,
+        );
     if (captured.result.error) throw captured.result.error;
     output += captured.content;
     forward(process.stdout.fd, captured.content);
@@ -151,7 +162,7 @@ try {
       report(`Tests terminated by ${captured.result.signal}.`);
     }
   }
-  if (exitCode !== 0) {
+  if (exitCode !== 0 && !attribution) {
     const failedFiles = [
       ...new Set(
         [

@@ -2,9 +2,9 @@
 
 ## 1. Goal
 
-Define the `plan-execution` pipeline that executes a predefined coding plan
-autonomously, one planned commit at a time, using local coding agents through
-the shared Agent Runner CLI/runtime.
+Define the `plan-execution` pipeline that executes a reviewed commit or custom
+plan sequentially through the shared Agent Runner CLI/runtime. Commit plans
+produce verified local commits; custom plans settle criterion-bound results.
 
 The runner must:
 
@@ -32,6 +32,12 @@ This is a local orchestration CLI, not a general agent framework.
 
 ---
 
+The descriptor explicitly selects a Git workspace for commit plans or a directory
+workspace for custom plans, with an exclusive canonical exclusion lease.
+The root resolves that selection before Git-specific inspection; a missing Git
+repository never selects a directory workflow. Role access and repository-local
+ignored artifacts retain their existing guarantees.
+
 ## 2. Technology Baseline
 
 Implement the runner as plain modern JavaScript on Node.js with native ES modules.
@@ -43,7 +49,7 @@ Verified baseline as of **2026-08-16**:
 - npm: use the version bundled with the selected Node.js 24.x release
 - Codex CLI stable release used as the V1 compatibility baseline: **0.147.0**
 - Claude Code current release used as the V1 compatibility baseline: **2.1.233**
-- Git: required external executable
+- Git: required for commit execution; ordinary-directory custom execution needs no Git
 
 Use Node.js 24.x LTS. The supported range is **`>=24 <25`**. Do not target the Current Node.js line.
 
@@ -107,7 +113,7 @@ Do not hard-pin their versions in workflow logic. Detect and log installed versi
 
 The runner receives:
 
-1. a local Git repository;
+1. a local Git repository for commit plans, or a directory for custom plans;
 2. a task directory.
 
 ```bash
@@ -128,7 +134,7 @@ task/
 
 - `task.md`: task/problem statement.
 - `clarifications.md`: optional product decisions captured during plan authoring.
-- `plan.md`: ordered commit-by-commit implementation plan.
+- `plan.md`: ordered plan of the explicitly selected kind.
 - `context.md`: optional extra context supplied by the user.
 
 The execution run keeps its own clarification transcript at:
@@ -139,11 +145,11 @@ The execution run keeps its own clarification transcript at:
 
 This local artifact uses the common Markdown transcript format and contains
 execution-specific questions and answers. Before creating it, preflight must
-use `git check-ignore` to verify that the target
-repository ignores the resolved path. `artifactRoot` is a persisted normalized
-repository-relative selection and defaults to `LOCAL_ARTIFACTS`. If the path is
-not ignored, pause
-with `local_artifacts_not_ignored`; never edit `.gitignore` or
+verify that any enclosing target repository ignores the resolved path with
+`git check-ignore`; ordinary directories require no Git inspection.
+`artifactRoot` is a persisted normalized project-relative selection and
+defaults to `LOCAL_ARTIFACTS`. If a repository-contained path is not ignored,
+pause with `local_artifacts_not_ignored`; never edit `.gitignore` or
 `.git/info/exclude` automatically. The artifact is not runner state and must
 never enter a planned commit. The task directory may be located inside or
 outside the target repository. Runner state must therefore **never** be stored
@@ -153,14 +159,172 @@ inside the task directory or target repository.
 
 ## 4. Plan Format
 
-The authoritative shared contract lives in
-[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md). Before
-bootstrap, this pipeline must parse and validate the plan with that deterministic
-contract rather than an LLM.
+Commit plans use the authoritative shared
+[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md) contract;
+custom plans use
+[`@agent-runner/custom-plan`](../../../packages/custom-plan/README.md). Before
+bootstrap, this pipeline must parse and validate the explicitly selected kind
+with its deterministic contract rather than an LLM.
 
-The Worker must use the validated subject exactly as returned by the parser. The
-runner must never ask an agent to generate or rewrite it, and multiple planned
-commits must never be merged into one implementation step.
+For commit plans, the Worker must use the validated subject exactly as returned
+by the parser. The runner must never ask an agent to generate or rewrite it,
+and multiple planned commits must never be merged into one implementation step.
+
+### Plan-kind step policies
+
+Private `step-policy.js` owns the differences between commit and custom steps:
+deterministic parsing/serialization, step context and agreed criteria, workspace
+inspection, initial content-change requirements, role capabilities/access and
+the terminal effect. `commit-workspace.js` owns the existing two-pass Git
+preflight and stale-plan inspection. Commit steps retain clean-worktree and
+identity requirements, ignored clarification artifacts, exact subjects and
+runner-observed nonempty initial implementation. A matching HEAD subject never
+counts as completed work. Consumed commit verification and operator-stop
+reconciliation still precede stale-plan inspection or new implementation proof.
+
+The private custom policy consumes `@agent-runner/custom-plan`, carries each
+step's referenced observable conditions, work, expected results and frozen
+declarations, and permits analysis without an artificial file diff. It selects
+directory inspection through the root-supplied bound capability, grants neither
+retrieval nor paths from plan declarations, and has no `local-commit` access or
+Git effect service. Analysis eligibility is not result acceptance. `custom-results.js` supplies accepted-result checkpoints. CLI `--plan-kind custom`, MCP `planKind: "custom"` and configuration `pipelines.plan-execution.planKind` explicitly select this route. Omitted and legacy kinds stay commit; plan syntax or absent Git never infers a kind. Execution consumes criteria and input/output declarations from the frozen plan, rather than accepting authoring-only criteria/source/output overrides.
+
+The existing mode policy, finding/correction loops, availability handling,
+output-exhaustion recovery and fingerprint-bound gate evidence remain shared
+within this pipeline. Commit-specific effective revisions, validation rebinding,
+replacement execution and derived progress retain their existing contracts and
+eligibility rules. There is no second runner or cross-pipeline dependency.
+
+### Custom execution and accepted results
+
+The custom checkpoint uses the existing leased, revision-bound,
+write-ahead pipeline transition capability. Its ledger binds the canonical plan,
+agreed criteria, immutable input hashes, protected workspace fingerprint and
+exact frozen permissions. References grant neither retrieval nor writes.
+Each contiguous accepted record chains its predecessor receipt and contains
+bounded analysis, criterion observations, exact selected output fingerprints,
+the inspected snapshot and candidate/finalization/terminal-confirmation bindings.
+Analysis is limited to 32 KiB, each observation to 4,000 bytes, each result to
+128 KiB and the complete ledger to 1 MiB. Unknown fields, missing/unknown
+criteria, unbound outputs and inconsistent receipts are rejected.
+Selected output fingerprints also bind each symlink's inspected resolution
+hops and readable target tree, recursively including links reached through
+directories. Unrelated output siblings remain available to subsequent steps.
+
+Worker success cannot accept a result. The runner must observe every
+mode-required candidate gate, passing finalization and distinct terminal
+confirmation for the result fingerprint, which includes analysis and evidence
+as well as workspace content. Pending acceptance is journaled before settlement.
+Reconstruction verifies the exact inspected content, output identities and gate
+bindings before accepting that same record; it never asks a provider to replay
+publication. The checkpoint alone advances no workflow cursor and invokes no
+Git operation. Earlier accepted outputs remain immutable; changed frozen
+criteria/inputs or invalidated earlier results require revised planning and a
+new execution run.
+
+Authorized product-decision answers still require the read-only plan-compatibility
+gate and fresh candidate/finalization/confirmation evidence. Execution clarification
+versions are bound in active result fingerprints and per result receipt,
+separately from the immutable ledger binding. Only successful compatibility
+and refreezing advance the active version. Compatible answers require fresh
+convergence without rewriting earlier receipts or changing frozen input/output
+authority. Unauthorized transcript edits remain input drift.
+
+Output-directory preparation journals the exact declared root, its prior state,
+real parent and a unique allocation path in private durable state before
+creation. It pins the empty allocation with a no-follow descriptor before
+publication, then journals the prepared identity before settlement. An owned
+GNU no-clobber, no-copy move refuses even an empty concurrently appearing root;
+no workspace siblings are allocated. Missing roots require private state storage
+on the same filesystem and `/usr/bin/mv` with GNU coreutils 9.4's
+`--no-clobber --no-copy --no-target-directory` support. Unsupported publication
+fails closed without a copy fallback; existing roots need no utility.
+The descriptor remains open through synchronization and final identity checks,
+rejecting empty replacements before the first public-path identity read.
+The workflow saves that verified prepared identity and its workspace baseline in
+one transition, accepting only the exact empty-root creation. Recovery cannot
+mistake a journaled preparation for unrelated drift or adopt intervening output edits.
+Resume checks every required directory's settled preparation record, including
+interruptions after ledger initialization or between separate root preparations.
+An interrupted allocation or publication without a recorded identity stays
+ambiguous; its exact journaled allocation and root are preserved. Only an explicitly
+authorized output directory can be published; its parent must already exist.
+A file output never grants its parent as a
+writable mount. This preserves Claude's existing-root requirement without
+broadening authority. Descriptor-anchored effects reject aliases, substitutions
+and protected overlaps. Recovery verifies a published directory identity;
+an existing directory after an absent intent without that proof is ambiguous
+and remains preserved. Stops admit no new preparation or acceptance; pending
+intent survives for reconciliation after authorized resume. The monitor's signal
+and a fresh stop check guard allocation and publication after preflight. Owned
+process retirement returns the current run revision before identity publication.
+There is no cleanup
+or rollback of unrelated content.
+
+Pipeline state version 33 persists required `planKind`. New execution states use
+`commit`; the ordered version-32 migration assigns explicit legacy commit
+semantics without changing counters, sessions, saved mode, refinement eligibility,
+validation evidence, completed commits or pending one-shot authorizations.
+Prepared and consumed commits keep their original recovery contract; migration
+never manufactures new effect authority.
+
+State version 34 adds `customResults`, initially `null`. Its version-33
+migration initializes no acceptance or preparation evidence and changes no
+existing gates, counters, effects or eligibility. Commit runs reject a non-null
+custom ledger. Version 35 adds nullable `customCandidate`, a nullable
+`customWritePolicy` receipt and explicit setting defaults. Its version-34 migration
+preserves commit semantics, gates, counters and consumed effects without granting
+custom access or a writable policy receipt.
+
+Custom execution uses the existing sequential state machine. `IMPLEMENT` produces
+bounded `customResult` data: analysis, observations in exact current criterion-reference
+order, and absolute inspected output paths. Writable check/fix and finding
+resolution return the complete result; inactive outcomes use `customResult: null`.
+This field is a sibling of the status contract, separate from the strict
+`result` status envelope used by implementation and finding resolution. Root
+status evidence never carries custom criterion observations. Criterion-reference
+order, result bounds and inspected output authority remain independently validated.
+Analysis/evidence changes invalidate dependent gates just like output changes.
+Every role sees the current and earlier accepted results, the current step's
+work/expected results and agreed criteria. Coding requirements apply only when
+selected by the user; unrelated repository coding gates are never automatic.
+
+Independent candidate review, lazy check/fix plus distinct read-only clean
+confirmation, and combined convergence followed by independent review retain
+their ordinary bounded finding and correction contracts. Validation inventories
+and schedules may be empty for semantic-only criteria, but discovery still covers
+every step and retains every selected trusted command with its exact provenance.
+Custom `finalization: auto` selects no coding skill; `none` also selects none,
+while an explicit confined skill remains frozen and verified. Criterion-dependent
+finalization and distinct read-only terminal confirmation bind the result,
+content and exact validation evidence before `ACCEPT` journals and settles it.
+Unmet criteria produce `FAIL` with concrete `F`-prefixed issues even when the
+inventory is empty or all executable checks pass. Each semantic issue identifies
+its criterion in `command`, without adding a fictitious check. These failures
+must be fixed and return through fresh mode-required candidate convergence,
+finalization and terminal confirmation before acceptance.
+Only settled receipts advance the cursor; interruption reconciles pending
+acceptance before another step. No custom state can enter `COMMIT`, carry a
+pending commit, record completed commits or activate commit refinement.
+
+Preliminary boundary discovery selects the workspace policy without reading
+the plan. After project configuration and run overrides resolve, workspace
+selection reads the explicit custom contract through a confined task reader
+before Git inspection, binds local inputs and exact output authority and
+grants no URL retrieval. Existing files or directories can be outputs; a trailing
+`/` explicitly requests a directory root and permits journaled preparation under
+an existing parent. An absent file never grants parent writes. Claude writable
+mounts still require existing roots, so use an existing file or a declared
+output directory for new files. Startup proves read-only access; after output
+preparation the runner proves the exact writable access. Execution pins its
+separate receipt before the first writable turn and requires the same proof
+before subsequent writes, including reconstruction. Policy drift fails closed
+without replacing the frozen startup receipt or broadening the workspace.
+Repository-contained execution shares canonical exclusion and protects Git
+controls. Its local clarification path must already be ignored and untracked.
+Outputs remain unstaged, and completion exposes accepted-step receipts and
+bounded results rather than commit SHAs. Source or accepted-output drift requires
+revised planning and a new execution run.
 
 ---
 
@@ -170,6 +334,7 @@ Required commands:
 
 ```bash
 agent-run run plan-execution --project <repo> --task <task-dir>
+agent-run run plan-execution --project <directory> --task <task-dir> --plan-kind custom
 agent-run resume --run <run-id>
 agent-run status --run <run-id>
 ```
@@ -376,16 +541,35 @@ owns the string `finalization` setting. Its default `auto`
 selects the first safely inspectable canonical regular conventional
 `finalization` skill and otherwise falls back to repository instructions and
 project-defined checks. `none` selects that fallback directly; any other valid
-value is a normalized repository-relative path ending in `SKILL.md` and
-requires that exact skill. The runner resolves this decision after Git
+value is a normalized infrastructure-relative Markdown path and requires that
+exact procedure (including an adjacent `RUNNER.md`). The runner resolves this decision after workspace
 preflight and before bootstrap, then persists the configured policy, selected
 path or fallback, selected-file fingerprint when applicable, and a fingerprint
-of the complete decision. Resume never rediscovers or switches guidance.
+of the complete decision. Resume never rediscovers or switches guidance. Explicit paths resolve from the
+frozen selected infrastructure root, while `auto` retains conventional discovery
+inside the target. A bound external `finalization/SKILL.md` requires only that
+exact file read; neither the original skill nor any parent is changed or granted
+additional access. New `file` decisions fingerprint bytes, file identity, real
+ancestors, target and root without retaining procedure text. The existing
+`skillPath` field supplies its inventory label: an integrated repository-relative
+path or `finalization://<infrastructure-relative-path>` for external guidance.
+The latter never replaces repository-relative validation entries, including
+same-relative-path files. Prompts also declare the exact absolute read. Only this selected label may name external
+validation infrastructure. Replacement (even identical bytes), links, missing
+files and drift block without switching guidance or consuming repair budgets.
+
+State version 36 preserves version-35 decisions and all accounting and effect
+evidence unchanged through its leased migration. Legacy `skill` decisions retain
+their original repository path and fingerprint algorithm; no identity proof is
+inferred and no frozen selection is rediscovered. Consumed commits and completed
+handoffs remain verification-only. New selection adds no model checkpoint.
+
 Runner overrides live directly under `pipelines.plan-execution`. The root
 loader strictly validates both versioned envelopes and delegates these values
 to the descriptor rather than duplicating pipeline policy. It discovers only
 the ignored `LOCAL_ARTIFACTS/agent-runner.json` project file unless CLI/MCP
-explicitly selects another confined ignored path. It never creates the file or
+explicitly selects another integrated ignored path or target-bound external
+configuration under the root configuration contract. It never creates the file or
 changes ignore rules. All configured role objects are validated
 deterministically. CLI/MCP pipeline-setting overrides then win over the project
 overlay, runner values, and descriptor defaults. Only active roles are
@@ -433,6 +617,18 @@ source-projection authority. Version 1 and version 2 retain their exact policy
 and evidence bindings and use the deterministic one-hour fallback. Migration
 never upgrades authority or reloads declarations. Capability preparation uses
 the smaller of the snapshot deadline and 10 seconds.
+This is one absolute monotonic launch-to-close deadline including durable
+registration, checked again by the supervisor at payload admission. Expiry or
+cancellation permanently closes release; pending registration and verified
+retirement must drain, with uncertain ownership retained. Reconciliation never
+turns an expired preparation into availability or required-check evidence.
+Common envelope version 22 routes only preparation through canonical reservation,
+bounded attachment/admission, and endpoint-bound canonical settlement. The root's
+custody gate preserves accepted immediate stops even with delayed observation;
+matching deferred targets retain current-step permission, while an explicit null
+target supports ordinary preparation. No restart releases an old attempt, and
+custody settles before cleanup, availability or further work. Existing consumed-
+effect verification remains first; see [preparation custody](../../../docs/ARCHITECTURE.md#preparation-custody).
 
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per
@@ -504,6 +700,14 @@ Worker and never probes Reviewer or Arbiter.
 
 ## 6. Persistent State
 
+Each structured role result permits exactly 2 MiB (2,097,152 bytes) of
+serialized UTF-8 JSON; one-byte overflow is rejected. This is byte headroom,
+not a token budget. Semantic text, item, path, inventory, dispute, and correction
+bounds remain unchanged. New size diagnostics use `maximum-2-mebibytes` while
+historical `maximum-256-kibibytes` records remain valid. Rejected output is never
+retained. The root owns larger state/recovery containers and complete segmented
+journal recovery; see [the enclosing budgets](../../../docs/ARCHITECTURE.md#structured-result-headroom).
+
 Runner state must live outside both the task directory and target repository.
 
 Use an OS/user state directory, for example:
@@ -530,6 +734,7 @@ State layout:
 ├── .lease            # present only while a mutating owner is active
 ├── state.json
 ├── events.jsonl
+├── events-000001.jsonl # present after journal rollover; retain every segment
 ├── progress.md
 └── context/
     ├── worker.md
@@ -590,6 +795,7 @@ Persist at least:
 - complete per-step validation schedule, active required-check inventory,
   optional current-step amendment, legacy-scope marker, validation-infrastructure
   file list, and runner-computed infrastructure fingerprint;
+- per-role durable discovery/applicability work and consumed output-subdivision allowances;
 - bounded bootstrap-correction attempts containing only attempt number and
   deduplicated role, phase, contract, field, and constraint diagnostic batches;
 - the current step's bounded finalization-correction ledger and optional
@@ -613,7 +819,8 @@ Persist at least:
   source-fork marker;
 - escalation reason when paused;
 - an optional finite adapter diagnostic class normalized by the root boundary
-  for any terminal role turn, without native provider data.
+  for any terminal role turn or retired pre-effect `commit_failed` pause,
+  without native provider data.
 
 The common envelope also persists an optional opaque source-session reference,
 its resolved trusted profile when known, and every direct Worker, Reviewer, or
@@ -651,6 +858,13 @@ pending commit. The record contains only a bounded diagnostic code and whether
 the rejection is recoverable. Its version-2 migration sets the record to
 `null`, retaining every legacy consumed authorization on the verification-only
 path rather than inventing proof.
+
+Pipeline state version 37 lets that record carry an optional bounded adapter
+`diagnosticClass` when no availability, authentication, or output-exhaustion
+proof applies; the class and a proof are mutually exclusive. A retired
+`commit_failed` pause resuming at `COMMIT` may carry the same class. Its
+version-36 identity migration keeps records without a class valid and never
+infers one; older runtimes refuse version-37 state rather than drop the class.
 
 Pipeline state version 4 adds the bounded bootstrap-correction ledger. Its
 version-3 migration initializes an empty ledger without changing accepted
@@ -714,8 +928,9 @@ replaying or recounting consumed work.
 
 Pipeline state version 9 makes finding overrides unique by exact finding ID and
 reviewed content fingerprint and requires finalization validation
-infrastructure to contain only existing canonical repository-relative regular
-files. Its version-8 migration deduplicates legacy override audit entries,
+infrastructure to contain existing canonical repository-relative regular files
+(extended in version 36 only for the exact selected external finalization-file
+label). Its version-8 migration deduplicates legacy override audit entries,
 preserves completed commits, safe current-step content, counters, Git controls,
 and consumed one-shot effect safety, invalidates provisional finalization and
 review evidence, and routes every prepared active run through fresh independent
@@ -794,9 +1009,11 @@ polling, daemon, or heartbeat. Same-host reads check owner process liveness
 immediately while exclusive acquisition and stale recovery retain their
 existing age threshold.
 
-### `events.jsonl`
+### Event journal
 
-Append-only machine-readable event history.
+Append-only machine-readable event history starts in `events.jsonl` and rolls
+over into contiguous segments under the root
+[journal contract](../../../docs/ARCHITECTURE.md#agent-context-recovery).
 
 Never rewrite previous events.
 
@@ -945,10 +1162,22 @@ A request should contain only runner-level concepts such as:
   effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
+  sessionNaming: { runId, project, pipeline, role }, // Runner-owned display data
+  onSessionCreated, // awaited durable acknowledgement of a verified new child
+  onSessionNaming, // awaited bounded metadata diagnosis; no execution authority
   authorizationId, // local-commit only
   commit: { expectedHead, message } // local-commit only
 }
 ```
+
+Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
+The creation acknowledgement records a verified new child at this pipeline's
+existing logical context key before a naming diagnosis or metadata failure is
+returned; the eventual response does not record it twice. Naming diagnoses grant
+no retry, source fork, replacement,
+owner cycle or workflow/effect authority. Continuation preserves historical sessions.
+Fresh commit-readiness children have their own context key and remain excluded
+from ordinary Worker continuation; acknowledging them grants no full-role context.
 
 Backend-specific CLI flags belong only inside the adapter.
 
@@ -971,8 +1200,11 @@ non-recoverable `ERR_UNSUPPORTED_EFFORT` / `effort_unsupported` without native
 diagnostics, downgrade, or availability retry. A rejected readiness turn keeps
 the commit executor unstarted. See the provider model for the shared contract.
 
-`probe()` validates installed CLI features and enforceable local isolation. It
-does not apply a selected native profile or attest that the profile's
+`probe()` validates installed CLI features and enforceable local isolation.
+Codex also validates a selected named profile model-free on the App Server
+startup path; a profile that does not apply there fails before any launch with
+`ERR_UNSUPPORTED_CODEX_CAPABILITY` / `capability_native_profile` and is never
+ignored or substituted. `probe()` does not attest that the profile's
 authentication and provider are usable. The first real `run()` request uses the
 effective profile and reports a bounded classified failure when it cannot be
 used.
@@ -1187,6 +1419,11 @@ Local-commit readiness failures remain pre-effect rejections and never replay
 the executor. Recognition and redaction belong to the adapter as specified in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
 state migration is needed.
+Recognized native output exhaustion remains a terminal failure with the shared
+`output_exhausted` disposition and bypasses automatic replay, compaction, availability,
+quota, and output-correction recovery. The
+[provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
+owns its recognition and evidence limits.
 
 Worker:
 
@@ -1253,6 +1490,13 @@ and final Git-state verification; it is never replayed. Policy, capability,
 provider, or confirmation-turn rejection before executor invocation carries
 `effectStarted: false`, including `ERR_CODEX_LOCAL_COMMIT_POLICY`. The adapter
 preserves the original bounded error code and recoverable classification.
+`ERR_CODEX_LOCAL_COMMIT_POLICY` carries one diagnostic class per refusing rule:
+`operation_local_commit_file_change` for a reported file change,
+`operation_local_commit_git_operation` for a forbidden Git command, and
+`operation_local_commit_confirmation` for a missing or invalid `{ ready: true }`
+confirmation. These classes never expose commands, paths, output, or native
+messages. The retired single class `operation_local_commit` remains valid in
+historical failure records but is no longer emitted.
 
 ### Claude Code
 
@@ -1367,6 +1611,11 @@ credential material.
 Fresh turns omit resume flags. Continuation uses `--resume <session-id>`, and a
 supplied source session uses `--resume <session-id> --fork-session`; persist the
 returned child ID and reject the source ID as invalid fork lineage. An
+original fresh or forked Claude launch also receives the supported `--name`
+flag from Runner context; continuation and compaction omit it. A verified child
+is retained before a bounded metadata failure is returned, without a replacement
+launch or replayed turn/commit. The [provider contract](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context)
+owns naming support, title bounds and acknowledgement timing. An
 unavailable continuation may reconstruct a fresh turn, but an unavailable fork
 source is an error. Classify source-session and continuation-session failures
 from the attempted session mode. On a fresh turn, distinguish effective-profile,
@@ -1403,17 +1652,19 @@ Finalization is a dedicated pipeline gate, not a Codex-only or Claude-only
 feature. A repository-defined skill may guide it, but the gate does not depend
 on optional guidance being present.
 
-Before bootstrap, the runner resolves the persisted policy with the existing
-Git path inspection and validation-infrastructure fingerprint capabilities.
+Before bootstrap, the runner resolves the persisted policy with the root
+configuration capability's confined, identity-bound Markdown inspection.
+Legacy `skill` decisions keep their original Git inspection and fingerprinting.
 For `auto`, it freezes the first safely inspectable canonical regular
 conventional skill or a fallback decision when none qualifies. `none` freezes
 the fallback directly. An explicit path must already identify a safely confined
 canonical regular file. Missing or deterministically invalid explicit guidance
 pauses before provider probing and requires a new run after repair.
 
-Bootstrap and validation migration receive only the frozen repository-relative
-path or fallback decision. They never receive copied skill content and do not
-add a guidance-specific provider turn. A selected skill is included in the
+Bootstrap and validation migration receive the frozen inventory label or fallback
+decision. New `file` selections also supply the exact absolute read declaration.
+They never receive copied procedure content or add a guidance-specific provider
+turn. A selected skill is included in the
 established validation-infrastructure inventory. Its exact path and
 selected-file fingerprint are verified before bootstrap, validation migration,
 finalization, bounded correction, and resumed work. Drift or later
@@ -1543,9 +1794,9 @@ capability preparation, or stale-plan inspection. Independent branch, ref,
 remote, identity, index, and workspace violations retain their Git-safety
 checks and diagnostics. Plan revision requires a revised plan and a new run.
 
-A fresh `run` requires a clean Git working tree, including untracked non-ignored files.
+A fresh commit-plan `run` requires a clean Git working tree, including untracked non-ignored files.
 
-Before any implementation work:
+Before commit-plan implementation work:
 
 - verify the project is a Git repository;
 - record the initial HEAD;
@@ -1808,6 +2059,12 @@ through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
 
+The root runtime applies immutable runtime admission to CLI/MCP lifetimes and
+new-run/resume effects.
+Associated live users defer activation, while unknown owned identity blocks it;
+admission cannot migrate, resume or expand authority for a legacy run. The root
+runtime contract owns this boundary and retains all existing pipeline gates.
+
 Through MCP, the root runtime never opens an editor. It projects the same
 pending authorization with identified questions and accepts an empty response
 for optional proactive clarification or one exact answer per Worker question
@@ -1927,7 +2184,7 @@ Persist concise summaries:
 
 ```text
 context/worker.md
-context/reviewer.md  # independent mode only
+context/reviewer.md  # independent and combined modes only
 ```
 
 Each summary should cover:
@@ -1939,27 +2196,36 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
-Each active bootstrap role returns an independently discovered ordered inventory
-of stable `C`-prefixed IDs, exact commands, and `steps`: a nonempty ascending
+Each active bootstrap role establishes an independently discovered ordered inventory
+through discovery and accepted applicability batches. The final role inventory has stable `C`-prefixed IDs, exact commands, and `steps`: a nonempty ascending
 array of unique canonical plan step numbers. Missing applicability, invalid
 references, and missing step coverage are rejected. Every role discovers a
 complete procedure for every step, including the repository's ordinary fast
 gate and only slow checks whose documented guarantees that exact step affects.
 It also reports every canonical repository-relative validation-infrastructure
-file. Independent and combined modes preserve accepted Worker evidence followed
+file and the exact declared label of selected external finalization guidance.
+Independent and combined modes preserve accepted Worker evidence followed
 by Reviewer evidence; lazy mode uses Worker evidence alone. The runner unions
 applicability for identical commands, preserves first-seen command order, and
 assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
 arbitration cannot discard or reassign requirements. Infrastructure paths are
 deduplicated globally and fingerprinted by the runner.
 
-`validationSchedule` persists the complete ordered `{step, requiredChecks}`
-schedule and must equal the deterministic derivation from accepted role
-assignments. `requiredChecks` is the selected step's inventory. A confirmed
+`validationSchedule` persists one ordered `commands` catalog and a `steps` array
+of `{step, commandIndexes}` entries. Indexes are zero-based references into that
+catalog, so command text is retained once rather than repeated for every step.
+The schedule must equal the deterministic derivation from accepted role
+assignments. `requiredChecks` expands the selected step's inventory with its
+contiguous local check IDs. A confirmed
 `validationAmendment` records only that step, its amended inventory, and the
 confirming evidence fingerprint. It does not rewrite original role assignments
 or another step's schedule. Verified advancement clears the amendment and prior
 gates before selecting the next persisted inventory.
+
+State version 27 replaces the expanded schedule representation. Its leased
+version-26 migration verifies the old schedule against accepted role assignments
+before converting it, preserving all other evidence, amendments, correction
+accounting, and prepared or consumed effects. A null legacy schedule stays null.
 
 Each summary and inventory covers every substantive validation requirement but
 must not require staging, staged handoff, index mutation or inspection, an
@@ -2001,15 +2267,17 @@ them.
 Every inventory-producing bootstrap prompt, including validation-migration
 discovery, requires unique check IDs, unique exact single-line commands already
 normalized without boundary whitespace, and unique existing canonical
-repository-relative validation files. A symlink or path through a symlink is an
-invalid alias even when its target is confined to the repository.
+repository-relative validation files, with the sole exception of the exact
+declared label of selected external finalization guidance. A symlink or path
+through a symlink is an invalid alias even when its target is confined to the
+repository.
 Provider-facing structured-output schemas are portable approximations limited
 to the common backend Structured Outputs subset and do not use regex
 lookaround. They retain strict objects, bounds, safe lexical patterns, and
 status-specific variants. Deterministic pipeline normalization remains
 authoritative for exact nonempty text, commands, uniqueness, and safe
 repository-relative paths. Each bootstrap schema keeps a strict object root
-and places its discriminated variants in a nested `result` union. A rejected
+and places its outcome variants in a nested `result` union. A rejected
 bootstrap result persists and publishes only its bounded, deduplicated role,
 phase, contract, field, and violated-constraint diagnostic batch; it never
 retains a rejected value, command, path, or raw role output.
@@ -2028,9 +2296,11 @@ pending batch before any product-decision pause, while its history remains
 consumed. Repeated or still-invalid output fails closed.
 
 Before any inventory is accepted or fingerprinted, the runner asks the root
-Git boundary to inspect each validation-infrastructure path. The path must
-exist as a regular file and the returned canonical repository-relative path
-must exactly equal the proposed value. Every inspectable missing file,
+Git or directory boundary to inspect each repository validation path, and the
+configuration capability to inspect a new selected finalization file. Each path
+must exist as a regular file and the returned canonical repository-relative path
+must exactly equal the proposed value; external guidance uses its frozen
+namespaced inventory label instead. Every inspectable missing file,
 directory, symlink, and symlink-traversing path returns to the producing role in
 the same bounded `existing-canonical-repository-file` diagnostic batch; these
 violations do not surface later as generic unsafe-path failures and are never
@@ -2038,6 +2308,111 @@ followed or silently rewritten.
 
 In independent mode, the Reviewer summary additionally states what it intends
 to verify. Lazy mode creates no Reviewer summary.
+
+### Durable bounded bootstrap
+
+`bootstrap-unit-schemas.js` and `bootstrap-units.js` define completed
+repository-discovery and applicability reports and pure work-record transitions.
+Both initial `BOOTSTRAP` and validation-migration discovery use them. Each
+mode-required role normally performs broad read-only repository discovery once,
+including a distinct semantic plan-context review, then supplies focused
+applicability batches. Worker and Reviewer discovery remain independent in
+independent and combined modes; lazy uses only Worker. No writable effect may
+begin until every required role has complete canonical coverage, the stable
+Worker-first union is established, and capability preparation succeeds.
+
+Shared inventory fragments live in `validation-schema-fragments.js`, keeping
+`schemas.js` exports limited to complete object-root response schemas.
+
+Discovery contains the producing role's repository summary, selected-step
+assessment, ordered command catalog without `steps`, canonical infrastructure
+paths, capability requirements, and environment blockers. Its validators reuse
+the existing exact-command, staging-independence, path, capability, structured
+result size, and inventory bounds. Root-owned inspection of existing canonical
+regular files and semantic plan-position review remain separate obligations;
+pure validation cannot establish either from an agent assertion.
+
+A work record binds contract version 1, role, frozen-input and canonical-plan
+fingerprints, repository and infrastructure fingerprints, frozen trusted-command
+authority, selected position, and accepted discovery. Applicability requests
+contain this binding, the discovery catalog and its fingerprint, a deterministic
+unit ID, and a contiguous canonical plan range. The workflow persists fixed
+limits of four canonical steps and 262,144 supplied JSON bytes per unit,
+partitioning the plan in order. Oversized
+ranges bisect deterministically through single-step units; an oversized
+single-step request raises `ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED`. The byte
+measurement covers exactly the supplied request JSON, excluding referenced-file
+reads and provider framing; it implies no native output-token limit.
+
+Each accepted batch identifies its exact unit and supplies unique catalog-order
+check IDs with ascending steps inside that range. Every step needs coverage.
+Reload rejects gaps, overlaps, noncanonical subdivisions, reordered, duplicate,
+foreign, stale, or cross-role evidence. Assembly requires complete ordered
+coverage, every discovered command assigned, and the original aggregate bounds;
+only then does the existing bootstrap normalizer produce a ready role inventory.
+Final-batch acceptance also validates that assembled inventory. A failed final
+batch remains unaccepted so it can use the remaining shared role correction
+allowance without discarding earlier accepted batches.
+Accepted assignments, applicability unions, capability reports, and blockers
+remain available to the existing schedule and inspection contracts.
+
+A batch may instead request catalog correction with no accepted assignments,
+reporting missing commands, infrastructure paths, capability requirements, or
+environment blockers. Before a correction invocation, the caller must persist
+`consumeBootstrapCorrection` and charge the existing producing-role bootstrap
+ledger. Catalog and invalid-unit repairs share its single attempt. Corrected
+discovery must retain accepted commands and reports and include every new
+requirement; it invalidates all dependent units and coverage. Reload takes the
+saved role attempt as a lower bound. Rebinding a corrected catalog to newly
+fingerprinted infrastructure, subdivision, rediscovery, reconstruction, and
+resume must retain the consumed attempt. Pending correction authorization permits reconstruction of that same
+attempt, never a new allowance. Subdivision replaces only an unaccepted leaf,
+so each catalog admits at most plan-step-count minus one splits. The workflow
+additionally retains at most 16 output-triggered subdivisions per role for the
+entire run, separately from semantic correction accounting. Accepted discovery
+and each accepted unit are journaled before advancement. Output exhaustion can
+split only the unfinished read-only applicability unit; the split and consumed
+allowance persist atomically with the exhaustion record before continuation.
+Discovery exhaustion, an exhausted single-step unit, or exhaustion after that
+allowance is consumed pauses without accepting partial output. A supplied
+single-step request exceeding the byte limit pauses for capacity instead.
+
+Pipeline state version 28 adds strict `bootstrapProgress` records for Worker and
+Reviewer, each containing nullable bound work and a consumed subdivision count.
+After a role inventory is published, its temporary work is retired but consumed
+allowances remain. A compatible native session receives focused instructions;
+reconstruction receives frozen input-file references and hashes, its accepted
+catalog and exact current unit, without routinely repeating broad discovery or
+the entire applicability matrix. Native session survival is never required.
+Reload validates partitions, ordered accepted units, role bindings, the exact
+selected plan position, and the shared correction ledger. Live reuse also checks
+input, repository, infrastructure, and trusted-command fingerprints. Unexpected
+drift invalidates affected proof under the existing input and Git guards;
+rediscovery and catalog correction never replenish either allowance.
+Migration bootstrap turns persist the read-only `validation-migration` identity
+instead of inheriting their suspended workflow phase. Interrupted recovery and
+operator stops therefore retain read-only reconciliation even when the workflow
+is suspended at `IMPLEMENT` or `FINALIZE`. Exhaustion pauses retain that migration
+checkpoint and the suspended workflow's resume state. Repository drift pauses
+and clears stale bootstrap work atomically while preserving consumed allowances.
+Saved version-27 availability and inactivity retries retain their exact legacy
+checkpoint only for the same role and suspended phase's read-only migration.
+Retry accounting remains consumed while new turns use `validation-migration`;
+successful provider reconciliation retires the saved recovery record normally.
+Journal-proven confirmation recovery accepts this identity only behind the
+pending migration barrier with unchanged workflow, input, and repository
+bindings and no pending consumed commit effect. Later candidate acceptance and
+passing finalization still require their complete journal provenance.
+
+The ordered version-27 migration initializes empty work and zero subdivision
+counts because older states contain no such proof or consumed output allowance.
+Compatible complete legacy role inventories, schedules, current-step amendments,
+completed commits, corrections, and historical confirmation evidence remain
+unchanged. Unfinished roles perform discovery without fabricated batch evidence;
+older incompatible inventories retain their existing migration barrier. A
+consumed commit settles by verification before discovery or another writable
+effect. No contract truncates an oversized inventory or treats partial coverage
+as ready.
 
 ### Reconciliation
 
@@ -2147,6 +2522,33 @@ The Worker then:
 2. performs a concise self-review;
 3. returns control to the runner.
 
+Implementation and finding resolution advertise strict object roots containing
+a `result` union of status-specific strict objects, following the bootstrap
+schema convention. `COMPLETED` requires a nonempty summary and empty reason,
+question, options, whyBlocked and root evidence. `RESOLVED` requires empty
+inapplicable root fields and one decision per current blocker. Each `FIX` or
+`DISPUTE` decision requires a bounded nonempty reason; `FIX` evidence may be
+empty, while `DISPUTE` requires evidence and an R-prefixed finding ID.
+`BLOCKED` requires nonempty reason and evidence, with other outcome fields
+empty. `PRODUCT_DECISION_REQUIRED` requires question, whyBlocked and evidence,
+permits empty options, and leaves ordinary outcome fields empty. Inactive
+finding-resolution outcomes require no decisions.
+
+These schemas encode expressible status/disposition constraints without
+relaxing deterministic validation. Normalization additionally enforces exact
+field sets, text rules, the overall byte limit, current blocker ownership,
+exactly-once decisions and dispute restrictions, including already upheld
+findings. Every implementation or resolution normalization failure supplies a
+bounded diagnostic: Worker role, implementation or finding-resolution phase
+and contract, and allowlisted field and constraint identities. Decision and
+list positions are bounded by the 32-item limits; rejected values, blocker IDs,
+commands, arbitrary messages and raw output never enter diagnostics. Existing
+valid historical diagnostics remain readable without migration.
+
+Synthetic nonempty root reason/evidence cases establish schema/normalizer
+agreement regressions. The exact rejected fields in the reported real turns
+remain unknown; these cases do not establish what those turns returned.
+
 Implementation does not invoke the project finalization procedure, stage
 changes, inspect a post-staging cached diff, or draft a commit message. Those
 actions belong to the dedicated `FINALIZE` and `COMMIT` phases.
@@ -2175,6 +2577,434 @@ content and pauses with `environment_blocked` at `IMPLEMENT`.
 The Worker must not create a Git commit during implementation, finalization, or
 finding resolution. Commit creation is allowed only in the dedicated,
 runner-authorized `COMMIT` turn after the gate passes.
+
+### Commit-size assessment foundation
+
+The descriptor owns `preferredCommitLineLimit = 900` and
+`commitSizeAssessmentMultiplier = 3`. Both accept only positive safe integers;
+their product must also be a safe integer after root/project resolution. Project
+values take precedence per setting. The resolved pair is persisted at creation
+and reused on resume without configuration reload. This execution policy is
+separate from authoring's anticipated additions-plus-deletions heuristic.
+
+The descriptor also owns the strict boolean `automaticCommitSplitting = true`,
+resolved through the same root/project precedence without coercion or a CLI/MCP
+run option. Creation persists it in frozen settings; a commit-plan run is
+eligible only when it is `true`, and custom runs are always ineligible. A
+disabled run never measures size, reserves or invokes an assessment, or
+proposes, reviews or separates replacements: it executes the predefined plan
+unchanged through every ordinary gate, and large planned commits remain valid.
+Both size settings and their safe product are validated even when disabled.
+Persisted eligibility must equal the frozen switch for commit runs; contradictory
+records are rejected. A legacy run with null settings adopts runtime settings
+with the switch limited to its saved eligibility.
+
+The private `commit-size-assessment.js` contract prepares assessment only for
+eligible commit-plan work at a reconciled boundary after implementation or
+content-changing repairs, before another convergence/review loop. Pending commit
+effects exclude assessment until settlement. Text additions plus deletions must
+be strictly above the product: 2,700 does not qualify; 2,701 does. Binary and
+gitlink counts remain separate. Size alone cannot fail a step or require an
+override, including when the bounded assessment allowance is exhausted.
+
+| Mode          | Read-only assessment checkpoint                                               |
+| ------------- | ----------------------------------------------------------------------------- |
+| `lazy`        | Distinct turn in the continuing logical Worker session                        |
+| `independent` | Distinct configured Reviewer checkpoint, independent of Worker                |
+| `combined`    | Same independent Reviewer checkpoint, without waiting for primary convergence |
+
+Existing session selection and reconstruction rules apply; assessment introduces
+no role, provider branch, write permission or source-fork exception. Its focused
+instructions request a concrete atomic justification or a cohesive ordered
+replacement plan. Replacement subjects and contiguous numbering use the shared
+commit-plan parser. Structural validity grants no semantic scope approval.
+The proposal must preserve requirements, dependencies, findings, checks and later
+steps, with independently valid intermediate states rather than arbitrary patch
+chunks. Assessment grants no revision, preservation, materialization or commit
+authority; acceptance and separation have distinct persisted gates.
+
+The runner-controlled binding records the original-step lineage, frozen plan
+and input fingerprints, assessed implementation scope and dependencies, baseline
+HEAD, content fingerprint, measured text size, separate binary/gitlink counts,
+target and threshold. Results echo its deterministic fingerprint. Scope and
+dependency fingerprints describe implementation within frozen requirements;
+changed frozen inputs are rejected, never accepted as new requirements.
+
+Each original step and all eventual replacements share at most three reserved
+assessments, including split proposals. Publish a pending reservation before
+invocation; restart reuses the same checkpoint and consumes no second attempt.
+Only a matching result settles it; unresolved changed reservations require
+reconciliation. Later content repairs alone do not repeat an atomic assessment.
+Reassessment requires changed implementation scope/dependencies or growth of
+strictly more than one further preferred target over the last assessment. Neither
+refinement nor reconstruction resets this lineage allowance or correction budgets.
+
+State version 29 adds `commitSizeAssessment`, initially ineligible with no
+lineages. The ordered version-28 migration adds that same disabled record and
+default settings without reloading configuration or changing workflow, bootstrap,
+findings, correction accounting, approvals or pending effects. Version 32 activates assessment only at creation of new commit-plan runs.
+Intermediate and legacy runs cannot acquire eligibility by resuming; changing
+these settings does not activate refinement for those runs.
+
+State version 39 adds `automaticCommitSplitting` to non-null settings. The
+ordered version-38 migration copies it from saved eligibility, never from
+configuration or the new default, and preserves lineages, accepted or pending
+revisions, separations, pending effects, inventories, progress, counters and
+native sessions. Historically ineligible runs stay disabled; null legacy settings
+stay null. No operator action switches an existing run.
+
+### Durable preservation foundation
+
+The public state/Git capabilities preserve unfinished commit work. The
+primitives alone cannot change eligibility, invoke an assessment, accept a
+revision or authorize a commit. Eligible execution coordinates their use only
+after reviewed acceptance and complete replacement validation.
+
+Capture requires both run and worktree leases at a reconciled checkpoint. A
+write-ahead intent binds the exact run, revision and inspected snapshot before
+storage allocation. Verified manifests retain changed paths against the
+immutable baseline, including binary bytes, deletions, executable modes and
+link targets represented as ordinary blobs. Large content remains outside
+bounded state JSON and is never treated as transient validation storage.
+
+Restoration requires a journaled operation and verified saved ownership before
+removal. Only explicitly authorized paths may change, and their current HEAD
+baseline must still match the saved baseline. Child commits outside those paths
+remain intact. Recovery accepts only original or intended content, verifies
+unrelated paths and unchanged index/Git controls, and reconciles prepared atomic
+replacements by identity. Unsafe aliases, substituted ancestors/storage,
+unproved temporaries and external drift cannot authorize overwrites. Interrupted
+capture/restoration, cancellation and disconnect retain saved work; no automatic
+disposal, staging, stash, reset or second clone is involved. Common envelope
+version 23 journals compact immutable-record references with an explicit empty
+legacy migration; the pipeline state version and workflow remain unchanged.
+
+### Reviewed effective revision foundation
+
+The private `effective-plan.js` policy persists proposed and accepted flat
+revisions separately from frozen `canonicalPlan` and `plan.md`. Eligible
+execution consumes accepted authority; proposals alone cannot select
+replacements, materialize work or authorize effects.
+
+A proposal replaces only the current unfinished effective step with two to
+sixteen commits validated by `packages/commit-plan`. The runner copies all other
+subjects and bodies unchanged, renumbers contiguously and records every effective
+step's original step and replacement ordinal. Completed-prefix records bind
+exact subjects, mapping and verified commit SHAs. Further splits remain flat;
+accepted ancestry and completed provenance cannot be rewritten. Later revisions
+cannot split an ancestor's already completed prefix, even when their proposal
+and review fingerprints match. Logical deferred stop targets resolve through
+their accepted revision to the original step and all its current replacements,
+retaining the original target receipt.
+Finding ownership outside the replaced step follows the unchanged step through
+renumbering; only ownership on the replaced step may move to its new children.
+Each revision retains complete finding payloads keyed by ID and payload
+fingerprint. Different versions sharing an ID remain separately owned through
+acceptance and reload; later revisions cannot omit inherited owners.
+
+Each proposal binds a reserved SPLIT assessment, frozen plan/input/scope and
+dependency fingerprints, inspected content and baseline HEAD, mode, complete
+validation declarations and infrastructure, and finding versions with explicit
+replacement ownership. Live drift prevents review or acceptance. Assessment
+alone supplies no approval. Semantic reports must explicitly preserve
+requirements, dependencies, later-step meaning, checks and findings; a negative
+preservation judgment cannot be CLEAN.
+
+Lazy acceptance requires Worker `CHECK_AND_FIX` followed by a distinct read-only
+`CLEAN_CONFIRM`; independent requires independent Reviewer `REVIEW`; combined
+requires both primary checkpoints before independent review. All these plan
+turns are repository-read-only and have distinct revision/phase checkpoint keys.
+Findings block acceptance; a corrected draft retains its predecessor and clears
+dependent plan approvals. Every gate binds the exact proposal fingerprint.
+Repeated identical proposals and published review receipts are idempotent.
+Proposal identity includes the complete binding; changed validation or consumed
+allowances require fresh reports even when the replacement text is unchanged.
+
+Publish accepted authority through the existing leased write-ahead transition
+before any boundary change. Acceptance retires candidate, implementation,
+finalization and terminal-confirmation proof without clearing finding ownership,
+correction history, finalization recovery or assessment allowances. Draft
+corrections remain bounded across the original lineage by the saved correction
+allowance plus its three assessment proposals; accepted attempts cannot be
+reused. Each proposal binds the lineage's nondecreasing additional-round grant;
+reload validates cumulative proposal consumption against that saved allowance.
+Step advancement cannot discard historical grants or renew consumed proposals.
+Any pending, consumed or ambiguous COMMIT excludes revision operations
+until reconciliation. No revision operation stages, commits or rewrites history.
+
+Acceptance retains the latest bounded batch as previous findings and combined
+primary self-findings for fixing. The complete versioned payloads and ownership
+remain in revision authority, without merging batches into the bounded,
+ID-unique legacy field. Deferred finding references remain valid against that
+authority at the acceptance boundary. Replacement execution must restore
+applicable owned blockers, including lazy self-findings,
+before invoking its content gates. Pending content corrections select
+mode-specific candidate convergence. Acceptance retires pending
+protocol markers with their invalidated proof, retaining the lazy and finalization
+correction ledgers and recovery counts. Consumed candidate-review and terminal-
+confirmation corrections are bound to each proposal and inherited across the
+original lineage even after their scoped proof is retired; replacement
+execution preserves those consumed allowances.
+
+Pipeline state version 30 adds `effectivePlanRevisions`. The version-29 migration
+adds only an empty ledger, preserving eligibility, frozen inputs, inventories,
+approvals, findings, budgets and pending effects. Historical assessments never
+become fabricated revision approval. Validation rebinding and replacement
+execution retain their separate preparation and effect gates.
+
+### Revision-bound validation foundation
+
+`revision-validation.js` composes the existing bounded bootstrap with accepted
+effective authority. Pipeline state version 31 adds `effectiveValidation`, an
+ordered set of revision-specific role receipts and nullable merged schedules.
+Frozen-plan inventories remain unchanged. These receipts alone grant no
+writable, materialization or commit authority.
+
+Each role independently rediscovers the complete catalog and applicability
+read-only. Scope and unit IDs bind accepted revision number and fingerprint,
+effective plan hash, exact selected replacement and step hash, prior inventory,
+frozen inputs, repository, infrastructure and trusted commands. Requests include
+the accepted flat steps and original/replacement correspondence. Proposed plans
+cannot select work. Interrupted units retain their exact bindings; stale work
+is retired without renewing correction or subdivision allowances. Acceptance of
+a new plan retires pending units while preserving their consumed ledgers.
+
+Rebinding preserves each role's ordered command catalog, infrastructure,
+capability reports and blockers additively. Correspondence follows every accepted
+splice, checking unchanged subject/body and origin before carrying assignments
+forward. Every prior assignment survives on its unchanged step or at least one
+descendant of a split step. Replacement applicability is rediscovered, never
+copied by ordinal. New checks can supplement that minimum. Later-step coverage,
+Reviewer-only obligations and requirements added by earlier revision discovery
+survive further splits. Revision receipts retain the confirmed current-step
+amendment, including its infrastructure and confirmation fingerprint. Scope and
+unit bindings include that complete amendment; its commands, mapped applicability
+and infrastructure must survive in the replacement Worker's inventory on
+acceptance and reload, even after the active amendment clears. Discovery rejects
+omitted amendment commands or infrastructure. Applicability rejects a dropped
+assignment as soon as its last possible descendant has been inspected, leaving
+the responsible unit unaccepted under the existing role correction allowance.
+An amendment inherited from the split parent retains its descendant mapping
+across clarification rediscovery. An amendment confirmed later in the accepted
+revision remains assigned to its exact replacement, including later siblings;
+it is not remapped as another parent amendment.
+
+Only complete bounded coverage can publish a role receipt. Lazy requires Worker;
+independent and combined require both separately accepted roles. The compact
+schedule remains absent until all required roles finish, keeps Worker-first
+union order, and binds the accepted revision. Capability preparation must still
+consume every role's complete reports before materialization; a ready schedule
+is not capability readiness or validation evidence. Selected trusted identities,
+vectors and capabilities remain frozen, and checks execute only in FINALIZE.
+Old schedules cannot select checks under newer authority. Revised implementation
+evidence and selected plan context name the exact accepted replacement; an old
+step ordinal or approval cannot become valid by renumbering.
+
+The compatible version-30 migration initializes no revision-validation receipts.
+It retains frozen-plan inventories, trusted authority, historical gates, consumed
+effects and accounting. If accepted revisions exist, unbound pending units and
+implementation evidence are retired, retaining subdivision totals. It never
+fabricates applicability, approval, or legacy refinement eligibility. Pending
+commits still settle by verification before discovery or new effects.
+
+### Preserved replacement execution
+
+Pipeline state version 32 activates assessment/revision execution only for newly
+created commit-plan runs. The version-31 migration adds an empty
+`replacementExecution` ledger and preserves disabled eligibility without
+creating approval, validation, saved bytes or effect authority. All older
+migrations still traverse that disabled boundary. Resolved settings remain
+frozen. Independent remains the default/recommended mode; lazy is explicit.
+
+At a reconciled content checkpoint, `replacement-execution.js` measures against
+the immutable step-start HEAD. It binds the exact effective step, sorted changed
+paths, frozen inputs, validation infrastructure and inspected content. Repeated
+unchanged checkpoints in the same invocation need no repeat measurement. The
+strict threshold and three-assessment original lineage ledger still apply.
+Atomic decisions continue through ordinary gates; size alone never pauses work.
+Split results are proposals only. Distinct read-only mode-specific plan gates
+precede acceptance. Rejected plans return to bounded read-only Worker draft
+correction without arbitration or writable authority. Neither reconstruction
+nor a corrected draft renews consumed proposal allowances.
+An unchanged repair retains its rejected proposal and findings, pausing at
+`effective_plan_output_invalid` for an explicit retry of the same read-only
+repair. It cannot attempt acceptance or retire the rejected report.
+
+Output exhaustion retains the exact read-only assessment, plan-review/repair or
+revision-discovery checkpoint, independently of the suspended content phase.
+Resume reconstructs that checkpoint without reserving another assessment or
+granting a fresh correction allowance.
+Repository mutation during any read-only refinement turn persists the ordinary
+`read_only_agent_mutated_repository` stop before preservation or commit; failed
+publication recovery cannot suppress that contamination diagnosis.
+
+Accepted authority is published before selection changes. Each mode-required
+role then completes additive revision discovery; every complete capability
+report must be satisfied before separation. Frozen role inventories remain
+historical, while the selected schedule and capability inspection consume the
+accepted revision's complete receipts. Unchanged later subjects/bodies and all
+future checks retain validated correspondence. Completed bootstrap work units
+are retired when their complete revision schedule is selected; their receipts,
+correction consumption and subdivision totals survive.
+Discovery capacity exhaustion retains its field/limit diagnostics under the
+ordinary capacity pause. A material product decision uses the clarification
+service's `IMPLEMENT` compatibility route, preserving the suspended content
+checkpoint separately from accepted revision authority and lineage accounting.
+Recording a product question journals its prior input binding and checkpoint
+through `replacement-inputs.js`. Authorized answer consumption records the new
+binding and archives any completed revision receipts without rewriting them.
+Phase-local pending correction markers retire before implementation resumes;
+consumed counters, correction history and versioned finding obligations remain.
+The unchanged accepted plan requires fresh mode-specific read-only plan approval
+against the answer, followed by complete role rediscovery; earlier role additions
+remain mandatory. Pending work units retire while correction and subdivision
+consumption survives. Subsequent size assessments may use the authorized new
+binding, retaining earlier attempts and the same three-attempt lineage limit.
+A clarification that invalidates accepted boundaries requires a revised plan and
+new run. A saved negative plan review remains blocking after interruption;
+recovery publishes the same plan-revision stop before discovery or workspace
+effects, including when the original pause publication was interrupted.
+A plan-revision outcome retains its reason and evidence;
+none of these outcomes can authorize separation.
+Frozen-input drift and read-only contamination retire active selection,
+implementation and gate evidence while retaining historical inventories needed
+to validate durable revision receipts. Pending separation records remain
+recoverable under the blocking outcome without restoring execution authority.
+
+A separation record binds the revision, unique preservation/restore operation
+IDs, inspected snapshot and capture/restore/ready phase. Root runtime supplies
+both held leases to state-owned preservation, using the latest serialized
+capture revision even when capability preparation has published events. The
+entire unfinished candidate is captured and every byte read back before any
+removal. One journaled restoration restores all captured paths to their saved
+accepted baseline without touching the index. Its verified clean snapshot is
+published before ordinary Worker implementation. Interrupted restoration settles
+through the same operation before generic repository-drift checks; substituted
+storage, controls or unrelated content cause a safety pause.
+Ready publication retires the former candidate's pending correction marker
+before entering `IMPLEMENT`, retaining consumed lineage budgets and owned findings.
+Immediate pause/cancellation recovery settles an already journaled restoration
+before inspecting generic drift. Recovery cannot start capture or a new
+restoration; unstarted operations remain suspended until an authorized resume.
+
+Worker reconstructs only the selected replacement from verified external
+manifest and content-addressed blob references. The state service verifies all
+saved bytes before returning references; prompts contain no complete file bytes.
+Read only the listed manifests and needed blobs, checking manifest/file hashes,
+sizes and saved before/after descriptors. References grant no preservation writes
+or access to unrelated state. Their cumulative context is bounded to 65,536
+UTF-8 bytes. Before restoration, the complete first reconstruction prompt must
+also fit the existing 32 MiB adapter contract; capacity failure preserves the
+saved candidate without starting a new restoration. The Worker adapter must also
+confirm command-level read access to every exact referenced manifest and
+non-deleted before/after blob. Admission
+uses the selected provider's proved policy and host file readability, without a
+model turn or new mount grants. Claude runner-boundary command masks hide host
+`/tmp` and `/run`; native Read cannot substitute for byte-exact binary recovery.
+Inaccessible sources or missing adapter admission support pause as
+`environment_blocked` with the candidate and captured bytes intact, and resume
+rechecks access before restoration. This is ordinary initial implementation with
+durable step-start evidence, including reconstruction after
+native-session loss. No complete large diff is retained in the inspected
+workspace while arbitrary subsets commit. Future work stays in external
+preservation storage; later replacements start from the preceding verified
+child's baseline, never restore over an earlier child, and can reread saved
+work. Cancellation and cleanup cannot dispose of that work.
+
+Every replacement passes its complete mode-specific candidate convergence,
+finalization, distinct terminal confirmation and exact one-shot commit gate. Persisted implementation
+or gate evidence under an accepted revision requires its ready separation and
+selected complete revision schedule; unprepared authority cannot carry approval.
+Versioned findings remain owned by their mapped replacements and are included
+in their context. Finding-specific dispute decisions, pending disputes and
+Reviewer reconsideration requests, stable-finding consumption and exact overrides
+are stored against the reviewed payload fingerprint and
+ownership. Sibling working IDs start empty; only the same owned version can
+inherit those records. Reusing an ID for another finding grants no prior decision
+or consumption. Reconstruction suspends owned pending disputes, their counts
+and Reviewer reconsideration requests in the versioned ledger and restores them
+at candidate convergence; `IMPLEMENT` does not project those requests or resolve
+them. A disposition that removes the last active payload retains its final
+history entry against that version. Review and clean-confirmation normalization checks stable IDs
+against applicable owned payloads as well as the sibling's current findings;
+renaming an unchanged owned finding is invalid output. Switching the active payload also retires its old ID-only working
+records before binding the new version. Any correction newly charged by that
+transition belongs to the new version; earlier version consumption and lineage
+totals remain preserved. Siblings retain lineage fix/stagnation budgets,
+lineage output-correction consumption and semantic-finalization retry allowances;
+these inherited correction records apply only to their refined original step.
+Later unsplit steps retain their ordinary scoped correction rules. Content
+approvals are invalidated rather than renumbered. Only verified
+settlement appends a child SHA and selects the next effective step. Pending or
+ambiguous consumed effects settle verification-only before any refinement.
+
+Deferred stops retain the original logical step's start checkpoint across flat
+splits and child commits. Verified intermediate-child settlement preserves the
+pending stop, while the last child atomically completes it. The original step
+is complete only when all mapped replacements have verified commits. An unborn
+original baseline remains `null` throughout its replacement sequence; the first
+child commit cannot substitute its own HEAD into the stop target. No new CLI
+command, Markdown authority, staging exception or commit authority is introduced
+by replacement preparation.
+Legacy stop admission and journal replay use the frozen plan's original
+boundaries when no effective-revision ledger exists, before pipeline migration.
+
+### Derived refinement progress
+
+Runner publishes `plan.progress.md` beside the frozen `plan.md` after durable
+state publication. The pipeline's deterministic projection retains every original
+`## Commit N: <exact subject>` heading and body, adding size-decision footnotes
+and original/replacement progress. Assessment measurements report changed text
+lines, binary-file and gitlink counts separately, with the structured decision
+and reason. Before an assessment exists, measurement and decision are unavailable.
+The advisory planning target (default 900 lines) differs from the strict
+execution assessment threshold (default **more than** 2,700); neither rejects
+work solely for size.
+
+Atomic decisions retain their indivisibility justification. Split progress is
+proposed until mode-specific approval publishes accepted authority, accepted
+while validation/separation prepares, executing after preparation, and completed
+only when every mapped replacement has a verified SHA. Proposed replacements
+are explicitly pending and cannot supersede accepted work. Each accepted
+replacement shows its exact subject, pending/active/completed state and verified
+SHA, when available. Decimal original/replacement labels appear only in the
+Markdown footnotes and are display-only;
+effective integer positions and exact subjects remain the execution contract.
+
+The root Runner confines publication to that one task-relative path, under its
+existing mutation ownership. An identifying comment binds the file to the run;
+unowned files, another run's file, symbolic/hard links, special files and aliased
+parents are rejected. Repository-local output and publication temporaries must
+already be ignored and untracked; Runner never edits ignore rules. Atomic
+replacement follows synced temporary writing and renewed path/identity checks.
+All file operations, including cleanup after ancestor substitution, use a
+validated open directory descriptor.
+Concurrent activity producers publish through one per-run queue; older state
+snapshots cannot replace progress from a newer observed revision. A failed
+publication leaves the queue available for regeneration of that same revision.
+Publication failure reports `ERR_PLAN_PROGRESS_PUBLICATION` without replacing
+already published authority with a stale failure state. Resume regenerates a
+missing or stale owned artifact, including after verified commit settlement.
+Runner defers publication from commit consumption through verification and
+durable settlement, including executor admission, so artifact failure cannot strand an
+unattempted commit. Consumed commit reconciliation remains verification-only.
+Pending operator stops likewise defer artifact publication until durable stop
+settlement. A subsequent artifact failure is reported after settlement without
+preventing safe run/worktree lease release, including release-time reconciliation.
+Lock-free status reads never write the artifact. Manual Markdown edits cannot
+accept a revision, complete a step or authorize/replay an effect. Keep the
+ownership comment to allow automatic regeneration; an ownership conflict must be
+resolved externally.
+
+CLI status and live activity expose the same `refinementProgress` projection as
+MCP status/wait and activity: artifact path, accepted effective revision, advisory
+target, threshold, each original step's decision/measurement/reason, and mapped
+replacement states/subjects/SHAs. MCP activity's progress describes its current
+snapshot, identified by `refinementProgressRevision`, separately from historical
+event pagination. These projections consume durable state without reading the
+Markdown. Safety activity published before legacy size settings migrate carries
+no refinement progress until the existing migration supplies those settings.
+No new persisted authority, state migration or provider checkpoint is needed.
 
 ### 13.2 Candidate convergence and finalization
 
@@ -2296,8 +3126,8 @@ non-resumably and requires a new run after repair; automatic selection never
 switches guidance late. A safe structured result is one of `PASS`, `FAIL`,
 `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly permitted
 `PRODUCT_DECISION_REQUIRED`. `FAIL` supplies stable `F`-prefixed issue IDs for
-the current procedure output. Skill-guided results identify the frozen
-repository-relative skill path; skill-less `PASS`, `FAIL`, and `BLOCKED`
+the current procedure output. Guided results identify the frozen
+guidance label in `skillPath`; skill-less `PASS`, `FAIL`, and `BLOCKED`
 results carry no path. A blocked procedure retains resumable environment
 recovery; unavailable frozen guidance requires a new run.
 
@@ -2379,8 +3209,8 @@ Pipeline state version 16 expands inventory capacities to 256 per role and 512
 for aggregate evidence. Its leased version-15 migration preserves accepted
 64/128 inventories, finalization and review evidence, counters, terminal history,
 and consumed commit authorization without replaying effects or reloading
-configuration. Per-item and structured-output byte limits are unchanged; a
-count-valid result can still exceed the 256 KiB structured-result limit.
+configuration. Per-item and structured-output byte limits were unchanged by
+that migration; a count-valid result can still exceed the structured-result byte ceiling.
 
 Pipeline state version 15 adds `finalizationRecovery`, containing consumed
 `attempts`, explicit `additionalAttempts`, `required` and `pending` flags, and
@@ -2939,7 +3769,10 @@ If no commit is created, pause with `commit_failed`. If the adapter also proved
 `effectStarted: false`, persist its bounded rejection metadata before Git
 verification and durably retire the consumed authorization only after that
 verification reports no commit. A non-recoverable policy rejection remains
-`commit_failed`; a recoverable provider rejection remains
+`commit_failed`; its bounded adapter diagnostic class, when present, is copied
+into that pause, named by the authorization-retired activity, and projected as
+`Adapter diagnostic: <class>.` without commands, paths, output, or native
+messages. A recoverable provider rejection remains
 `backend_unavailable`. Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
@@ -3068,6 +3901,7 @@ finalization_cannot_pass
 finalization_evidence_rejected
 lazy_output_invalid
 review_output_invalid
+effective_plan_output_invalid
 read_only_agent_mutated_repository
 unexpected_git_ref_change
 unexpected_remote_configuration_change
@@ -3178,7 +4012,7 @@ the override resolves that blocker without changing the persisted Reviewer
 decision to `ACCEPTED`. The same applicable override is neither offered nor
 stored again.
 
-A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
+A user override must be explicitly recorded in the event journal and `progress.md`.
 
 ---
 
@@ -3207,25 +4041,18 @@ descendant-bearing recorded process, clears a retired record under the
 replacement execution lease, and makes process retirement plus checkpoint
 settlement independently retryable across interruption.
 
-Common envelope version 12 persists the bounded frozen boot/PID/start ancestry
-baseline captured before supervisor launch. Replacement ownership may exclude
-a new unrelated process only after every stabilized hop reaches an unchanged
-baseline identity without bypassing observed session or token ownership. A
-stable inaccessible intermediate environment can be crossed only when the same
-walk reaches that exact anchor. Version 14 also persists the owner's
-control-group identity; inaccessible current environment metadata is unrelated
-only when its stable identity differs. PID reuse, a stale or missing anchor,
-boot or namespace mismatch, cycles, missing or matching control-group evidence,
-malformed identities, and surviving or escaping descendants remain fail-closed
-ownership barriers. Older envelopes migrate with null new evidence and gain no
-recovery authority. A recorded previous boot remains independent proof that
-the old process tree is absent. Each current-boot snapshot entry has three
-attempts bound to its first readable start tick. Transient disappearance or
-reparenting restarts that PID and its new ancestry from scratch; only a fresh
-absent read discards the exited entry. Reuse, malformed evidence, unresolved
-permission denial, live ownership, surviving descendants, and exhausted churn
-retain the process record. Action-free CLI and MCP recovery use this same
-inspection before immediate pause or cancellation settlement.
+Shared-host supervision and owner-loss recovery associate processes through
+owned-session membership, a matching launch token or observed owned ancestry.
+Available parent links continue through inaccessible environments, and observed
+association survives later evidence loss. Unassociated processes neither block
+progress nor receive signals because metadata is unreadable, their session is
+newer or their cgroup is shared. Historical ancestry and control-group fields
+remain strictly validated but optional; new launches store null values. Required
+supervisor identity and namespace, live-owner exclusion, bounded inspection and
+journaled retirement remain mandatory. Recovery never signals persisted host
+PIDs. Shared-host discovery cannot prove absence against arbitrary same-user
+processes hiding all ancestry and token evidence; see the
+[safety contract](../../../docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
 The descriptor owns one fail-closed `pre-work` classification for an applicable
 immediate stop saved against the untouched initial `CLARIFY` checkpoint. The
@@ -3332,6 +4159,85 @@ prepared effects remain uninvoked during stop reconciliation, and consumed
 effects remain verification-only even when invocation never began.
 Successful verification resolves a provisional commit-verification failure;
 its earlier diagnostic remains in history while unrelated blockers stay intact.
+
+### Writable result recovery
+
+Pipeline state version 38 adds nullable `writableResult`. The explicit version-37
+migration initializes it to `null`, preserving valid historical diagnostics,
+terminal outcomes, accepted commits, counters and consumed effects. It does not
+infer recovery authority for a historical rejected response. Unsupported forward
+versions remain rejected; the legacy version-27 repair is unchanged.
+
+Before an implementation or finding-resolution invocation, Runner journals the
+original phase, step, content/result baseline, rework facts, validated blocker
+ownership and dispute restrictions, fix accounting, and a binding to the frozen
+plan, inventories, implementation evidence and earlier accepted work. It publishes
+`invoking` with the active turn. After the provider finishes, one transition binds the safely
+reconciled candidate, invalidates dependent approvals and charges changed rework
+or resolution once. Existing blocker records remain authoritative; failed
+finalization evidence is retained as a blocker, never an approval. No rejected
+response is stored. Custom criterion data is normalized separately and adopted
+only with a valid status result and original gate transition.
+
+A still-prepared reservation with no published active turn proves invocation
+never began. After unchanged-input, content and authority checks, resume uses
+that same original reservation without consuming result-correction allowance.
+Once invocation is published, recovery cannot infer that native work was absent
+and uses read-only restatement. Legacy interrupted writable turns retain their
+existing continuation contract: persist the safely reconciled baseline and any
+pending fix charge before creating a new result checkpoint, keeping the original
+step-start implementation evidence and blocker ownership unchanged.
+
+Normalization failures and the established provider `structured-output` class
+receive one automatically authorized read-only Worker result restatement, using
+the original schema, inspected candidate and saved turn facts. Pending recovery
+precedes ordinary dispatch, refinement and another writable turn. It never
+replays implementation or resolution. The dedicated prompt prohibits repair,
+validation execution and invented finding dispositions. Fresh reconstruction
+uses no new source-session fork; lazy source-fork accounting remains consumed.
+Inputs, native read-only policy, filesystem authority, original blockers,
+initial implementation evidence, custom output/accepted-result bindings and
+unchanged candidate fingerprints are rechecked. A valid completion enters the
+original mode-required convergence route; no review, finalization, confirmation,
+custom acceptance or commit gate is replaced by result correction.
+
+Runner durably consumes the attempt before invoking it. Interruption during
+reservation or invocation consumes that attempt, even without a response.
+Reconciliation precedes retirement of interrupted original writable turns, and
+lost acceptance responses preserve the published gate transition. Invalid or
+lost correction results pause in `WAITING_FOR_USER` with
+`writable_output_invalid`, the original resume phase and an allowlisted
+role/phase/contract/field/constraint diagnostic. Decision and list indices are
+bounded; unknown diagnostic identities become `result`/`semantic-contract`.
+Rejected values, IDs, commands, exception messages, prompts, native output and
+provider-private storage are never diagnostic sources.
+
+An exhausted restatement publishes the exact
+`writable-result:read-only:commit:<step>` checkpoint, bound to Worker, its
+original `IMPLEMENT` or `RESOLVE_FINDINGS` resume phase and the consumed attempt.
+Reconstruction retains that allowance consumption; it cannot reinterpret the
+checkpoint as writable work or another step's retry.
+
+`agent-run resume --run <run-id>` (MCP null-action resume at the inspected
+revision) explicitly authorizes exactly one additional read-only restatement of
+this same checkpoint. That authorization and consumption are persisted
+separately from the single automatic allowance. A validated environment blocker
+after correction, or after charged implementation rework, retains a read-only checkpoint
+and requires explicit resume after resolving that blocker. A validated product
+decision is journaled in the result checkpoint with its original clarification
+hash and question number before transcript mutation. The clarification service
+persists the exact resulting hash before replacement and reuses only that
+verified append on reconstruction. Recovery settles this intent before ordinary
+input inspection or role dispatch. Checkpoint retirement, decision counting,
+the new transcript hash and pending editor authorization publish together with
+the durable product-decision suspension; lost acknowledgements cannot replay
+writable work or lose the question. Answers retain the existing
+compatibility/replanning flow. Unsafe drift pauses without
+adopting edits; read-only contamination requires an uncontaminated new run.
+Publication failures preserve recovery authority. Resume and operator-stop
+reconciliation preserve candidate bytes, prior accepted commits and receipts,
+fix/dispute accounting and consumed effect authority; they never renew a budget,
+transfer an approval, skip a blocker or duplicate a commit.
 
 ## 16. Resume
 
@@ -3594,7 +4500,8 @@ At minimum cover:
     rejection without claiming Reviewer acceptance, and become inapplicable
     after content drift.
 64. finalization candidates accept only existing canonical repository-relative
-    regular validation files before fingerprinting or review, and version-8
+    regular validation files or the exact selected finalization-file label
+    before fingerprinting or review, and version-8
     active runs migrate through fresh independent discovery without losing
     completed commits or safe current-step content.
 65. version-9 consumed and pending bootstrap diagnostics migrate losslessly to
@@ -3627,9 +4534,10 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 26 to
-    `independent` without reviving terminal runs or replaying completed or
-    pending commit effects; unfinished work freezes guidance and repeats
+74. every supported legacy version migrates through state version 35, preserving
+    its saved mode and defaulting missing modes to `independent`, without
+    fabricating effective-revision approval, reviving terminal runs or replaying
+    completed or pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.
 75. lazy provider and deterministic contract failures receive one scoped
     fresh-session correction; writable mutation re-finalizes and is counted
@@ -3762,8 +4670,9 @@ Do not build:
     agent-sandbox limitations alone cannot block pre-finalization repairs.
 31. Bootstrap role inventories use unique check IDs, unique normalized exact
     commands, and unique existing canonical repository-relative validation
-    files; the runner derives the final stable union and assigns contiguous IDs,
-    while invalid output receives at most one read-only diagnostic-batch
+    files plus the exact selected external guidance label when applicable; the
+    runner derives the final stable union and assigns contiguous IDs, while
+    invalid output receives at most one read-only diagnostic-batch
     correction per producing role, phase, and contract.
 32. Provider usage-exhaustion recovery persists no denied input or native
     provider text, never retries the rejected turn, and reconstructs the request
@@ -3793,8 +4702,9 @@ Do not build:
     the exact finding on the applicable candidate-reviewed or terminal-confirmed content; they never record Reviewer
     acceptance or weaken another finding or validation gate.
 38. Every finalization validation-infrastructure candidate is an ordered set of
-    existing canonical repository-relative regular files before it can be
-    fingerprinted, trusted, or reviewed.
+    existing canonical repository-relative regular files, plus the exact selected
+    external guidance label when applicable, before it can be fingerprinted,
+    trusted, or reviewed.
 39. Detached MCP compatibility binds the root run-envelope tuple and every
     loaded pipeline ID/state version, is frozen at server startup, and fails
     before lease acquisition, recovery, or migration without changing durable
@@ -3900,6 +4810,51 @@ scaffolding. Read-only mutation, containment failure, and ambiguous consumed
 effects keep their existing precedence. Only bounded environment class/stage
 and trusted command identity/outcome evidence may be retained, not diagnostics.
 
+## Output-exhausted checkpoints
+
+The pipeline consumes only the normalized `output_exhausted` disposition after
+process/resource retirement and repository reconciliation. It enters
+`WAITING_FOR_USER` with the exact closed pause `{ reason: "output_exhausted",
+code: "ERR_OUTPUT_EXHAUSTED", resumeState, role, checkpoint }`. The checkpoint
+is the complete logical phase/access/checkpoint key, not a native identifier.
+CLI/MCP expose a bounded explanation, suspended-role/checkpoint evidence, and
+one explicit null resume action. Repeated exhaustion pauses again; it never
+starts writable replay, backoff, compaction, or malformed-output correction.
+An operator may explicitly retry the saved checkpoint or start a new run with
+smaller work units; retry does not replenish automatic recovery allowances.
+
+An exhausted read-only narrative review retains its `plan-context` checkpoint.
+Resume reconstructs the unaccepted producing result read-only and reviews it
+again under the same recovery allowance; no provider result is retained merely
+to reconstruct that turn. Prerequisite reconstruction and narrative review
+share one reserved recovery attempt only for the immediate transition from a
+successful prerequisite to its review. Failed prerequisite or review retries
+reserve the normal bounded allowance. The prerequisite response does not clear
+the consumed allowance; only a returned narrative-review response with matching
+repository reconciliation clears it.
+
+Accepted progress, findings, pending correction attempts, and session lineage
+survive. Possible source-fork effects retain the existing compatibility-named
+`authenticationSourceForkRecovery` role/context marker; only no-effect evidence
+may restore an unused lazy fork. Safety, ownership, authentication, review,
+and ordinary availability policies retain their separate precedence.
+
+Safe partial writes, affected gate invalidation, correction accounting, active-
+turn retirement, and the exhaustion pause are persisted together. Content-changing
+check/fix and finding-resolution work is charged once across explicit retries;
+repairs require candidate convergence and fresh dependent gate evidence. A failed
+finalization preserves its safe content without accepting a finalization result;
+terminal confirmation remains distinct and read-only.
+
+At `COMMIT`, a validated not-started executor proof is persisted as
+`preEffectRejection.outputExhaustion: { disposition: "output_exhausted",
+commitExecutor: "not_started" }` with the fixed code before Git verification.
+Only unchanged verification proving no commit retires that authorization and
+exposes explicit retry at `commit:<step>`. Interruption retains both authorization
+and proof for verification-only recovery. Without proof, the consumed authorization
+survives the exhaustion pause and resume performs verification only. A completed
+valid commit settles normally; contract violations retain their blocking policy.
+
 ## Provider inactivity recovery
 
 The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
@@ -3917,6 +4872,12 @@ boundary before requesting a fresh reconstruction. It retains the same logical
 checkpoint and complete durable prompt, never reforks the source, and preserves
 partial-content correction accounting while invalidating stale approvals.
 Native fresh fallback and inactivity share one durably consumed allowance.
+Common-envelope version 20 distinguishes `reconstructionRevision` from proven
+`expiryRevision`. Generic and legacy reconstruction markers consume the same
+allowance but establish no timeout proof and cannot relax correction budgets.
+Public recovery adds `expiryProven`; unproven reconstruction is labeled as such.
+An interrupted consumed reconstruction without expiry proof pauses with
+`ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED`, rather than claiming inactivity.
 Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
 Restart preserves the allowance; an offered explicit resume attempts the same
 checkpoint once without replenishing automatic recovery. A returned provider

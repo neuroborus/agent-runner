@@ -12,6 +12,7 @@ import { createTrustedValidationSnapshot } from "../trusted-validation/index.js"
 import {
   assertBackend,
   assertRecord,
+  assertPipelineSettings,
   assertSelection,
   ConfigurationError,
   CURRENT,
@@ -33,9 +34,11 @@ function normalizeExecution(value, path, providers) {
 
 function normalizeSettingOverrides(pipeline, input) {
   const path = "settingOverrides";
-  const acceptedSettings = Object.keys(pipeline.settings).filter((name) =>
-    pipeline.runOptions.includes(name),
-  );
+  const acceptedSettings = Object.entries(pipeline.settings)
+    .filter(([name, definition]) =>
+      pipeline.runOptions.includes(definition.option ?? name),
+    )
+    .map(([name]) => name);
   assertRecord(input, path);
   rejectUnknownFields(input, new Set(acceptedSettings), path);
 
@@ -54,6 +57,40 @@ function normalizeSettingOverrides(pipeline, input) {
         ];
       }),
     ),
+  );
+}
+
+function pipelineSettings(pipeline, configuration, project, overrides) {
+  const { roles: _roles, ...runnerSettings } =
+    configuration.pipelines[pipeline.id];
+  const { roles: _projectRoles, ...projectSettings } =
+    project?.pipelines[pipeline.id] ?? {};
+  const settings = Object.freeze({
+    ...runnerSettings,
+    ...projectSettings,
+    ...normalizeSettingOverrides(pipeline, overrides),
+  });
+  assertPipelineSettings(pipeline, settings, `pipelines.${pipeline.id}`);
+  return settings;
+}
+
+// Workspace discovery needs settings before project roles can be resolved.
+export function resolvePipelineSettings(
+  pipelineId,
+  configuration,
+  settingOverrides = {},
+  providers = PROVIDER_REGISTRY,
+) {
+  const pipeline = getPipeline(pipelineId);
+  if (pipeline === undefined)
+    throw new ConfigurationError(`Unknown pipeline: ${pipelineId}.`, {
+      code: "ERR_UNKNOWN_PIPELINE",
+    });
+  return pipelineSettings(
+    pipeline,
+    normalizeConfiguration(configuration, providers),
+    null,
+    settingOverrides,
   );
 }
 
@@ -123,11 +160,6 @@ export function resolvePipelineConfiguration(
     sourceSession,
     providers,
   );
-  const normalizedSettingOverrides = normalizeSettingOverrides(
-    pipeline,
-    settingOverrides,
-  );
-
   const unknownRole = Object.keys(roleOverrides).find(
     (role) => !pipeline.roles.includes(role),
   );
@@ -148,14 +180,12 @@ export function resolvePipelineConfiguration(
   const pipelineConfiguration = normalizedConfiguration.pipelines[pipelineId];
   const projectPipelineConfiguration =
     normalizedProjectConfiguration?.pipelines[pipelineId] ?? {};
-  const { roles: _roles, ...runnerSettings } = pipelineConfiguration;
-  const { roles: _projectRoles, ...projectSettings } =
-    projectPipelineConfiguration;
-  const settings = Object.freeze({
-    ...runnerSettings,
-    ...projectSettings,
-    ...normalizedSettingOverrides,
-  });
+  const settings = pipelineSettings(
+    pipeline,
+    normalizedConfiguration,
+    normalizedProjectConfiguration,
+    settingOverrides,
+  );
   const selectedRoles = pipeline.resolveActiveRoles(settings);
   if (
     !Array.isArray(selectedRoles) ||

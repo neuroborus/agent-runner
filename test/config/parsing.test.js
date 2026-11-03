@@ -56,6 +56,10 @@ test("tracked example is valid and local configuration is ignored", async () => 
     900,
   );
   assert.equal(configuration.pipelines["plan-execution"].mode, "independent");
+  assert.equal(
+    configuration.pipelines["plan-execution"].automaticCommitSplitting,
+    true,
+  );
   assert.equal(configuration.pipelines.polishing.mode, "independent");
   assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
     backend: "claude",
@@ -102,6 +106,10 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 900,
@@ -109,6 +117,10 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
     roles: {},
   });
   assert.deepEqual(configuration.pipelines["plan-execution"], {
+    planKind: "commit",
+    automaticCommitSplitting: true,
+    preferredCommitLineLimit: 900,
+    commitSizeAssessmentMultiplier: 3,
     finalization: "auto",
     maxFixRoundsPerStep: 20,
     maxDisputesPerFinding: 5,
@@ -290,7 +302,7 @@ test("configuration rejects unsupported shapes and values", () => {
       /mode must be independent, lazy, or combined/u,
     ],
     [
-      '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.md"}}}',
+      '{"schemaVersion":1,"pipelines":{"polishing":{"finalization":"checks/finalize.txt"}}}',
       /finalization must be auto, none/u,
     ],
     [
@@ -308,6 +320,10 @@ test("configuration rejects unsupported shapes and values", () => {
     [
       '{"schemaVersion":1,"pipelines":{"plan-execution":{"stagnationWindowRounds":0}}}',
       /stagnationWindowRounds must be a positive integer/u,
+    ],
+    [
+      '{"schemaVersion":1,"pipelines":{"plan-execution":{"automaticCommitSplitting":"false"}}}',
+      /automaticCommitSplitting must be a boolean/u,
     ],
     [
       '{"schemaVersion":1,"pipelines":{"polishing":{"maxFixRounds":0}}}',

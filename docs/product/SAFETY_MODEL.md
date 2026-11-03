@@ -13,7 +13,10 @@ Each role turn receives the narrowest access required by its phase:
 - implementation, polishing, finalization, finding resolution, and lazy
   check-and-fix may change safe workspace content only;
 - plan execution's constrained commit executor is a separate one-shot effect;
-- polishing staging is a runner-owned handoff effect, not an agent permission.
+- polishing staging is a runner-owned handoff effect, not an agent permission;
+- every audit role remains read-only, including report corrections. Runner alone
+  publishes its exact task-owned report artifacts. Findings grant no repair,
+  Git, retrieval or issue-creation authority.
 
 The runner snapshots content, index state, `HEAD`, branch or detached context,
 local refs, remotes, and Git identity around turns. Read-only mutation is a
@@ -21,9 +24,20 @@ safety failure. Writable turns still reject index, history, ref, remote, or
 identity changes. The runner never discards unexpected user work
 automatically.
 
+A malformed writable execution result grants no replay authority. Runner first
+binds reconciled candidate bytes, original blockers and accounting in durable
+pipeline state, then permits only a read-only result restatement. The attempt is
+consumed before invocation and remains consumed across interruption; another
+retry requires explicit resume of the same checkpoint. Input, native-policy,
+filesystem, custom-output and content bindings are rechecked. Drift is preserved
+and blocks progress; read-only mutation retains the contamination stop. New
+recovery diagnostics contain only bounded allowlisted identities, never rejected
+values, commands, exception messages or native output. Existing review and
+one-shot effect ownership remain mandatory.
+
 ## Git ownership
 
-Plan execution permits exactly one ordinary local commit for each validated
+Commit-plan execution permits exactly one ordinary local commit for each validated
 plan step. Only the Worker may trigger it, only after the fingerprint-bound
 gate, and only with a fresh one-shot authorization. The commit must use the
 exact subject from the plan, the existing Git identity, and no body, footer, or
@@ -54,22 +68,103 @@ change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses
 instead of being bypassed.
 
+Change measurement is read-only and bound to an inspected content fingerprint
+and immutable baseline. It counts the final workspace rather than summing
+staged and unstaged diffs, excludes ignored untracked files, and reports binary
+changes separately. Link targets are never followed to obtain line counts.
+Measurement grants no staging, commit, refinement, or acceptance authority.
+
+Preservation saves unfinished changes in verified
+external state storage before any checked removal. Both run and worktree
+ownership are required. Raw bytes, deletions, executable modes and unfollowed
+link targets remain recoverable through verified manifests and journaled
+operation intents. Restoration changes only authorized paths whose saved
+baseline remains valid; it rejects unrelated content, index, ancestor, control
+or storage substitution. Saved work survives child commits, interruption,
+cancellation and disconnect independently of transient resource cleanup.
+Preservation grants no revision, commit or acceptance authority and never stages,
+stashes, resets or clones a repository. New eligible execution runs publish
+reviewed revision authority and complete validation receipts before separation,
+then restore only the captured paths to the accepted baseline. Reconstruction
+requires provider-compatible command access to all exact preserved manifests
+and blobs before restoration. Unavailable access pauses with the candidate
+intact; the runner never broadens the sandbox to expose hidden state storage.
+Reconstruction ports only the active replacement; saved future bytes and earlier verified
+commits retain separate ownership.
+
 ## Inputs, artifacts, and state
+
+The directory-workspace inspection foundation protects unrelated content and
+explicit inputs, references, configuration, artifacts, infrastructure and
+filesystem-discovered Git/provider controls. Only declared confined outputs may
+differ under its writable-content guard; redundant read declarations never
+grant writes. It rejects escaping aliases, special files, overlapping protected outputs,
+ancestor substitution and snapshot races without requiring Git. External state
+cannot overlap workspace, task, infrastructure, declared reads or discovered controls. This capability
+does not itself grant provider permissions. Codex enforces declared directory
+outputs with a native permission profile; Claude uses authenticated command
+mounts and omits native editing tools for directory turns. Both check protected
+content after every retired attempt, including failures before reconstruction. Directory
+access cannot request a Git commit, and unsupported providers fail closed.
+Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
+[filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
+
+The runner can bind a descriptor-selected directory lifecycle without Git.
+Workspace kind, permissions, exact local input/criterion paths, protected-content
+and identity evidence, and the exclusion key are immutable run input. Directory
+workspaces inside a repository contend with Git workflows on the same canonical
+worktree key. Ordinary directory leases also exclude overlapping parent/child
+scopes; stale reservations require recovery on their original key. Outputs cannot enter a nested worktree requiring a different
+key; read-only nested worktrees remain supported. Recovery, stops and selected
+trusted checks use the filesystem capability; a directory role receives no Git
+effects. Resume retires verified owned execution before reporting frozen-content
+drift, then persists a blocker without probing or invoking providers. References and URLs confer no fetching authority: retrieval permissions
+remain empty. Legacy runs retain Git semantics. Explicit custom authoring uses read-only directory roles and frozen criteria
+and source bindings; intended outputs grant no authoring writes. Runner alone
+writes its task-owned clarification and plan artifacts. Custom execution uses the same frozen directory bindings without Git effects.
 
 Task, plan, context, and clarification inputs are hashed and revalidated before
 recovery. Clarification writes occur only through a persisted one-shot editor
-or MCP authorization. Repository-local artifacts must be confined, ignored,
-and non-overlapping with protected inputs.
+or MCP authorization. Repository-local clarification artifacts must be confined,
+ignored, untracked and non-overlapping with protected inputs, including custom
+authoring. Ordinary-directory authoring uses confined task-owned artifacts;
+neither placement adds ignore rules.
+
+Init has a separate reviewed infrastructure-publication
+boundary. Runner alone may publish the exact approved artifacts, destination
+configuration and derived finalization procedure under exclusive ownership,
+with write-ahead intents and verified identities/readback. Integrated publication
+may also update the approved `.gitignore`. External publication writes only to
+the selected target-bound infrastructure; target content and Git controls stay
+unchanged, without pointer files, ignore edits or global registration. Existing
+skills that predate the run and unrelated settings stay intact. Its task and
+clarification artifacts remain external; ordinary pipeline artifact creation
+still cannot change ignore rules.
+Guidance publishes last through its existing durable expected-hash action under
+the held leases. Completion requires distinct read-only confirmation of the
+complete unchanged prepared snapshot. Recovery verifies exact original intents,
+identities and receipts; it cannot redirect writes or adopt intervening edits.
 
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.
+Explicit external selection additionally requires a versioned binding to the
+canonical target and disjoint infrastructure root. It pins the target directory
+identity as well as the configuration ancestry and never broadens provider
+access or project configuration authority. Integrated Git files retain their
+ignored/untracked requirements; ordinary directories need no Git prerequisite.
 The runner checks that evidence around provider turns and before recovery,
 trusted validation, commit, handoff, and stop reconciliation. Removal,
 replacement even with identical bytes, content drift, links, or ancestor
 redirection fails closed as one bounded provider-neutral safety pause. The
 runner never restores the file or derives missing evidence for a legacy run,
 and begun irreversible effects remain verification-only.
+
+Explicit finalization Markdown files use confined, identity-bound reads from
+the selected infrastructure root. They grant no configuration authority or
+parent-directory access, and cannot be replaced or redirected on resume. The
+[validation contract](VALIDATION_AND_REVIEW.md#finalization-and-semantic-review)
+owns selection, legacy decisions and the mandatory guidance gate.
 
 The same protected resolution freezes `trustedCommandTimeoutMs` into each new
 run's version-4 trusted-validation snapshot. It is a strict `1` through
@@ -89,12 +184,72 @@ cannot alter it. Legacy envelopes receive only the generic default without
 configuration reload. Prompts, public projections, activity, and bounded
 diagnostics retain neither attribution string.
 
+Session naming context is Runner-owned display data with the full existing run
+UUID and bounded descriptions, separate from client attribution and native IDs.
+Only a newly acknowledged child may receive one bounded metadata receipt.
+Metadata failure grants no retry, replacement, source fork, workflow progress or
+Git effect; continuation preserves existing sessions. Labels and native errors
+are excluded from naming activity. See the [provider contract](PROVIDER_MODEL.md#sessions-and-context).
+
 Authoritative run state is external to both repository and task. These trees
 must be disjoint: neither the project nor task may contain or be contained by
 the state root. Atomic files,
 write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
+
+Update-candidate preparation uses the same bounded action intents and recoverable
+leases without creating or advancing a run. Exact official metadata/integrity,
+private directory identities and pre-effect process proof bind each attempt.
+Native commands see a read-only filesystem with only their descriptor-bound
+candidate/smoke storage writable; offline install and smoke have no network.
+Archive and pinned payload mounts remain read-only. Uncertain owned processes
+or changed storage block recovery without signaling recorded PIDs or deleting
+unproved trees. Complete installed bytes are reconciled before retry; failed
+partial attempts remain separate and bounded. No existing payload, target
+project, settings, run, controller selection or global link is overwritten.
+Project content, pipeline roles and findings grant no preparation authority.
+Candidate attempts are separate from workflow correction accounting and never
+renew a consumed execution, fix or stagnation allowance.
+
+Candidate activation requires the exact completed preparation under its lease,
+unchanged payload/storage proof and current compatibility. A separate action
+persists the candidate and runtime-operation identity before serialized selection,
+then publishes the durable active/deferred outcome without restarting anything.
+Recovery consumes that original effect once. Pending admission authority is bound
+to the originating activation action; historical pending identities gain no such
+proof. Another associated live runtime defers selection, and uncertain owned
+identity remains blocking. Unrelated host processes acquire no veto or signals.
+Previous payloads and saved runs remain unchanged. Explicit later resume retains
+frozen configuration, leased migrations and consumed-effect recovery; activation
+grants no legacy/intermediate execution or refinement authority and cannot roll
+back persisted migrations.
+
+CLI/MCP update apply remains an explicit managing-operator action, not a pipeline
+operation or a project setting. Its action intent precedes effects, freezes exact
+selection and owns the bounded recoverable receipt. Concurrent requests cannot
+duplicate the same version's preparation. MCP requires an explicit operator
+acknowledgement; existing provider isolation disables MCP in pipeline sessions.
+Wait cancellation does not revoke or replay the operation. No update transport
+accepts a source URL, changes global links, restarts clients or advances saved runs.
+
+Journal reuse requires a certificate of the originally validated run/revision
+prefix, ordered contiguous segment namespace, file identities and exact byte
+ranges. Fresh consumed-byte digests and stable directory identity and file
+handle/path observations establish unchanged history. Unrelated control-claim
+publication cannot substitute for or invalidate that proof through directory
+timestamps alone. Namespace, replacement, link, ownership and restored-mtime
+tamper checks remain mandatory. Certificates are independent of optional bounded
+checkpoint retention; absent cache evidence requires canonical validation.
+Authorized tail repair proves the original prefix, namespace, directory and
+captured file observations before truncation, then the same prefix and exact
+repaired size through stable handle/path observations after syncing. Only that
+proof produces an immutable recovery value with updated filesystem evidence;
+the semantic certificate, state, revision endpoint and original capture stay
+unchanged. Recovery and subsequent observation retirement consume this value
+without redundant repair or replacement history. Failed verification grants no
+repaired proof or diagnostic retirement, and ownership settlement retains
+precedence.
 
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended
@@ -130,6 +285,22 @@ worktree exclusion and reconciliation.
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
+Trusted preparation uses one unchanged launch-to-close deadline, including
+registration. Expiry and cancellation irreversibly deny payload release;
+late registration must drain and retire rather than revive the attempt.
+The supervisor independently checks the same absolute monotonic deadline before
+admitting queued start IPC. Completion awaits registration and retirement;
+uncertain durable publication or descendant retirement keeps ownership reserved.
+Preparation's canonical launch reservation and bounded subordinate custody log
+retain exclusion through verified retirement, canonical settlement and log removal.
+A state-owned gate serializes admission with durable stop dispositions before
+canonical acceptance, so delayed monitoring cannot admit a blocking stop accepted
+before attachment. Matching deferred targets retain permission; explicit null
+targets are valid without granting deferred-stop support. A replacement owner
+can reconcile or retire an old attempt, never release it. Missing authority stays
+reserved; legacy process proofs and independent descendant inspection are unchanged.
+See [preparation custody](../ARCHITECTURE.md#preparation-custody).
+
 Trusted command capability requests are closed and fingerprinted. Scratch/cache
 declarations cannot name host paths or environment bindings. Artifact declarations
 pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,
@@ -190,22 +361,24 @@ processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may
 use session/token ownership on the initial host namespace; verified live
 ancestry and same-user token discovery retain descendants that create another
-session or namespace. Complete unrelated ancestry excludes a candidate only
-after every stabilized hop reaches an unchanged pre-launch identity. Before
-provider work, the session path durably records a bounded,
-ordered baseline of boot ID, PID, and start tick identities captured before
-supervisor launch plus the supervisor's control-group identity. Parent loss
-before target launch exits the inert supervisor
-directly because no provider descendant can yet exist. Live supervision and
-recovery traverse the same frozen evidence, checking observed session and token
-ownership before accepting an anchor. An inaccessible intermediate environment
-may be crossed only when the walk still reaches that exact anchor.
-An inaccessible current environment is excluded only when its lineage reaches no
-owned evidence and its stable control-group identity differs. PID reuse, a stale or missing anchor, a boot mismatch,
-missing or matching current control-group evidence, cycles, owned evidence,
-malformed identities, a recovery namespace mismatch, or otherwise unproven
-candidates fail closed whenever the session scan is needed. Legacy records do
-not gain baseline or control-group authority through migration or recovery.
+session or namespace. Live supervision and external recovery share one positive
+association policy: owned-session membership, a matching launch token, or observed
+owned ancestry. Available ancestry continues through inaccessible environments.
+Each descendant is inspected independently, and observed association survives
+session changes, reparenting and lost token access until absence is observed.
+Unassociated processes neither block progress nor receive signals because their
+metadata is unreadable, their session is newer or their cgroup is shared.
+Shared-host discovery cannot prove absence against arbitrary same-user processes
+hiding all ancestry and token evidence. Private PID namespaces remain the stronger
+containment boundary.
+
+No global pre-launch census or unrelated-process exclusion proof is required.
+Historical ancestry and control-group fields retain strict shape, size, ordering
+and boot validation but grant no authority; new launches store null values.
+Valid historical records with or without those proofs follow the same policy.
+Required supervisor identity and namespace remain mandatory. Parent loss before
+payload release retires the inert supervisor directly because no provider work
+can yet exist.
 A recorded previous boot remains independent proof that the old process tree
 cannot survive. Nested runner tests inside the trusted-validation namespace
 retain the owned-session path when that enclosing sandbox denies another PID
@@ -220,21 +393,29 @@ token used to detect survivors after supervisor loss without signalling them.
 PID replacement, unverifiable ownership, or surviving descendants retains
 exclusion. A PID disappearing between the live and identity observations is
 rechecked before it can be classified dead.
-Each shared-host snapshot entry pins its first readable start tick and receives
-at most three attempts to classify that same identity. Transient
-`ENOENT`/`ESRCH` or a changed parent/session restarts the current PID and its
-ancestry from scratch; a then-absent PID is an exited snapshot entry, while a
-different start tick is reuse. Malformed metadata, permission denial outside
-the stable-intermediate anchored-lineage rule, live ownership evidence,
-surviving descendants, and attempt exhaustion remain fail-closed.
+Each shared-host snapshot entry receives at most three classification attempts.
+Transient disappearance or parent/session change restarts that entry. Positively
+associated identities stay pinned across retries and live scans, including when
+a later directory listing omits them. A cached ancestor grants no new descendant
+association until its current identity and parent/session observations are
+verified; failed checks retain only previously established ownership.
+Replacement, unreadable or malformed identity, or exhausted owned-process churn
+stays blocking; a fresh absent stat retires the association. Unassociated churn
+supplies no ownership authority.
 Transiently incomplete completion inspection is retried only within one
 non-resetting one-second descendant-grace deadline. This cleanup grace verifies
 containment after work has ended; it is a fixed safety invariant, not a
 configurable user-work timeout. Persistent uncertainty keeps the original
 fail-closed error while the current owner makes one bounded teardown through
 its private child handle and control channel. It clears registration only after
-an empty owned session is proved. Otherwise the parent leaves durable ownership
-for replacement-lease recovery and never signals from the persisted PID alone.
+an empty owned session is proved. Parent-side cleanup requires the supervisor's
+frozen retained associations before it can prove absence; termination or a
+watchdog cannot substitute an empty parent cache for a missing handoff.
+IPC disconnect after handoff returns cleanup to the supervisor with its retained
+identities. Its original termination deadline still applies, but exit requires
+proven descendant absence; surviving or uncertain owned work keeps it live.
+Otherwise the parent leaves durable ownership for replacement-lease recovery
+and never signals from the persisted PID alone.
 Codex observes owned-process failure independently of App Server protocol
 completion. A retained containment boundary may keep protocol pipes open, but
 the ownership failure still triggers bounded adapter cleanup and propagates as
@@ -283,24 +464,52 @@ operator pause preserves the reconciled checkpoint and existing blockers;
 cancellation is terminal. Neither outcome authorizes replaying an effect,
 restoring contaminated content, or adopting replacement configuration.
 
-Local operating guidance uses the same new-run configuration and Git safety
-boundaries. Its target and temporary files must be ignored, untracked, confined,
-and separate from configuration and protected control paths. Linked, unsafe,
+Local operating guidance uses the same new-run configuration and workspace safety
+boundaries. Integrated target and temporary files in Git must be ignored and
+untracked; external files stay confined to the explicitly selected target-bound
+infrastructure without target writes. Ordinary directories need no Git.
+All destinations stay separate from configuration, state and protected control paths. Linked, unsafe,
 non-regular, malformed, or oversized documents fail closed, including unsafe
-absent destinations. Reading does not create files. Both common and local
+absent destinations. An internal provider-control directory alias, such as
+`.claude` linked to `.agents`, is accepted and its resolved target protected;
+unsupported control aliases fail with a control diagnostic rather than blaming
+the destination. Reading does not create files. Both common and local
 documents are bounded; document bodies never enter action metadata or errors.
 
-Guidance replacement holds the canonical-worktree lease, excluding active
-execution and competing publishers. It compares the expected hash inside the
+Guidance replacement holds the canonical-worktree lease and, for external
+destinations outside that scope, the infrastructure-root lease. These exclude
+active execution and competing publishers, including other targets selecting
+overlapping infrastructure. It compares the expected hash inside the
 publication boundary and atomically replaces only the local file. Pinned
-directory descriptors prevent ancestor replacement from redirecting filesystem
+directory descriptors and durable selection ancestry prevent ancestor replacement from redirecting filesystem
 effects. Durable temporary-file identity distinguishes an interrupted
 publication from another writer's identical content; retries preserve later
-edits and cannot redirect through changed configuration. A completed receipt
+edits and cannot redirect through changed configuration or placement on restart.
+Directory targets share their enclosing worktree's exclusion lease. A completed receipt
 is replayed without repeating publication. Local additions cannot weaken
-common contracts and never enter role prompts or run state.
+common contracts or instruct pipeline roles. Ordinary pipeline prompts and run
+state exclude them; init alone reviews and persists proposed guidance as setup
+data for its publication, without acquiring instructions or permissions from it.
 
 ## Effect reconciliation
+
+The private custom-result checkpoint persists acceptance intent before
+settlement and verifies exact inspected outputs on reconstruction without Git
+effects or provider replay. Output-directory preparation publishes only an
+explicitly authorized root under an already existing pinned parent. A journaled
+private-state allocation is pinned before owned no-clobber publication, preserving
+even empty arriving or substituted roots without workspace sibling allocations.
+The move never falls back to copying; missing-root preparation requires private
+state storage on the same filesystem and the supported GNU move utility.
+The no-follow descriptor stays open through identity verification. Accepted-output
+fingerprints include symlink resolution hops and readable target trees.
+A directory appearing after an absent intent without a published identity
+remains ambiguous; recovery preserves it, its private allocation and the pending
+evidence. Fresh cancellation checks after preflight prevent new allocation and
+publication effects. Stops prevent new effects and
+acceptance, and cancellation never disposes of output content. Frozen input or
+earlier accepted-output drift requires revised planning and a new execution run.
+Explicit custom execution settles criterion-bound results only after mode-required candidate, finalization and terminal confirmation gates. Result-only changes invalidate approvals; a settled receipt, never provider success, advances the cursor.
 
 Legacy terminal-confirmation recovery is gated by complete journal provenance,
 current inputs and Git controls, unchanged finalized content, and valid
@@ -331,6 +540,29 @@ resulting fingerprint. A commit or handoff proceeds only when current content
 and validation infrastructure still match the accepted fingerprints and no
 mutation can occur between the final read-only gate and the runner-owned
 effect.
+
+### Ownership-repair operational acceptance
+
+After both ownership fixes have passed their review and commit gates, the
+supervising operator freezes a separate immutable runtime at a clean, quiescent
+boundary, including all accepted prerequisites and both fixes. Before dependent
+work, recheck the original repository's current user/worktree ownership and
+frozen guards, then recover the
+original interrupted ownership case through its unchanged pending idempotent
+request. Separately recover the interrupted read/readiness case with its existing
+key and arguments. Preserve frozen inputs, configuration, completed commits,
+accounting and budgets in both cases. Retain the unrelated connection, old
+immutable payload and uncommitted accepted candidate. Use the byte-for-byte saved
+resume request without refreshing its key, revision or arguments, replacing the
+run or granting correction rounds. Record actual recovery evidence and account
+for integration of the repair into the feature/release lineage before final
+handoff, without modifying the interrupted feature workspace during repair.
+Synthetic tests, replacement runs and one case's recovery do not establish the
+other's operational acceptance. If original recovery is unavailable, the ownership
+prerequisite remains incomplete and
+dependent work stops. Only normal journaled reconciliation may clear ownership;
+never kill unknown processes or delete/rewrite records to pass this gate. The
+original execution owner's disappearance remains unexplained.
 
 ## Redaction and provider isolation
 
@@ -391,7 +623,23 @@ inspection; collaboration, editing, and web restrictions remain explicit, and
 the sandbox continues to deny repository content writes, Git and remote
 mutation, credentials, process escape, network access, and host Unix sockets.
 Workspace-write turns retain their existing command denials and
-autonomous-write restrictions. The access-specific effective policy is part of
+autonomous-write restrictions. Claude prepares every command against a
+read-only workspace reservation; each turn makes both the spawning-parent
+policy and `PATH` select the authenticated launcher, which alone replaces that
+reservation with the authorized workspace access. Sandboxed commands can then
+create, rename, and delete ordinary source files. The launcher restores the Git
+metadata, selected inputs, and existing built-in shell, tool, and settings
+controls that the reservation had covered, without materializing absent ones,
+and keeps Claude's descendant masks. It decides the effective mount tree from
+the complete program: no later mount may hide the workspace grant or a
+protection, and every movable ancestor of a protected path is pinned as a mount
+point so it cannot be renamed and recreated around that path. Unsupported or
+replaceable compositions, including symlinked controls, fail before the command
+starts. Claude's own fallback without the launcher therefore never grants
+workspace writes. If a higher administrator policy tier makes Claude select
+another bubblewrap, Claude's command shell refuses the command, so the fallback's
+weaker settings never run a command without the launcher's socket filter and
+private process view. The access-specific effective policy is part of
 the immutable provider receipt, so resume fails closed after policy drift.
 
 Action-free process-proof failure preserves the active checkpoint instead of
@@ -400,14 +648,31 @@ accepted before ownership is settled. Recovery reuses an owned worktree handle
 or reclaims the same run's stale reservation under the existing exclusive lease
 protocol. A retained reservation does not count as a live execution owner.
 
-Shared-host inspection bounds total work and elapsed time across baseline
-validation, every candidate, ancestry traversal, and churn. Exhaustion remains
-unverifiable; current identities and descendants still require complete proof.
+Shared-host inspection bounds total work and elapsed time across retained
+associations, every candidate, ancestry traversal and churn. Exhaustion remains
+unverifiable; recorded owners and associated descendants still require complete
+retirement evidence.
 Detached admission saves child identity before releasing its IPC barrier and
 journals progress under the run lease. Matching acknowledgement evidence, not a
 lease's mere existence or unrelated state advancement, permits receipt completion.
 Public activity omits dispatch identities; persisted PIDs never grant signalling
 authority. Caller disconnect cannot release another execution's ownership.
+
+State-owned recovery-failure sidecars are diagnostic evidence only. Publication
+does not require the execution lease whose acquisition may have failed, and
+reading requires the exact run/dispatch/revision and recorded child identity.
+Their immutable, bounded, closed records discard arbitrary error text and native
+output. They cannot approve work, mark dispatch ready, complete a request, fail
+resumable work terminally, or clear ownership; missing or mismatched records
+provide no cause.
+
+CLI resume diagnostics and MCP dispatch errors project only those safe cause
+fields. Exit code and signal remain separate observations, with nulls for
+unknown facts after restart; they cannot establish a recovery cause. Failed
+diagnostic publication preserves the original error outcome. Detached native
+streams remain ignored, and structured tool errors expose no child identity,
+raw error text, provider output or transcripts. Identical-key retries retain
+the existing readiness, settlement and ownership checks.
 
 Claude sandbox scaffolding is adapter-owned content outside project and task
 trees, including tool HOME/config projections and provider temporary storage.
@@ -432,6 +697,12 @@ restart cannot replenish that allowance, and reconstruction never repeats a
 source fork. Partial writes invalidate prior approvals and preserve charged
 correction accounting. Recovery evidence clears only with a returned response
 and matching reconciliation. Persistence failure grants no retry authority.
+Reconstruction provenance alone, including legacy markers, proves no inactivity.
+Output exhaustion requires a reconciled durable pause and explicit retry; it
+cannot authorize automatic writable replay. Safe partial content, invalidated
+gates, and charged corrections settle atomically with that pause. Commit effects
+remain verification-only unless validated not-started proof and Git verification
+retire an unused authorization.
 
 Only validated semantic progress resets inactivity. Owned overlapping commands
 suspend it until all complete; transport traffic and process liveness do not.

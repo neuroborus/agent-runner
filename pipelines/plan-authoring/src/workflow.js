@@ -1,13 +1,16 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { CommitPlanValidationError } from "@agent-runner/commit-plan";
+import { CustomPlanValidationError } from "@agent-runner/custom-plan";
 import {
-  CommitPlanValidationError,
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+  assertCustomAuthoringBudget,
+  canonicalAuthoringPlan,
+  normalizeAgreedCriteria,
+} from "./plan-contract.js";
 
 import {
+  customAuthoringInstructions,
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
@@ -24,6 +27,7 @@ import {
 import {
   CHECK_AND_FIX_SCHEMA,
   CLARIFICATION_SCHEMA,
+  CUSTOM_CLARIFICATION_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   PLANNER_SCHEMA,
   REVIEW_SCHEMA,
@@ -79,6 +83,10 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
   "ENOENT",
   "ENOTDIR",
   "EPERM",
+  "ERR_WORKSPACE_PATH",
+  "ERR_WORKSPACE_INSPECTION",
+  "ERR_WORKSPACE_SNAPSHOT_RACE",
+  "ERR_WORKSPACE_DRIFT",
 ]);
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
@@ -258,17 +266,32 @@ export async function runPlanAuthoring({
 }) {
   assertRun(run);
   if (run.pipelineState.workflowState === "CANCELED") return run;
-  assertRuntime(runtime, Object.keys(run.roles));
+  const custom = run.pipelineState.settings?.planKind === "custom";
+  assertRuntime(runtime, Object.keys(run.roles), custom);
+  const safety = custom
+    ? {
+        ...runtime.workspace,
+        reconcileInterrupted: (baseline) =>
+          runtime.workspace.assertUnchanged(baseline),
+      }
+    : runtime.git;
+  const instructions = (phase, commitInstructions) =>
+    custom ? customAuthoringInstructions(phase) : commitInstructions;
   if (!run.pipelineState.preflightComplete) {
     assertSettings(settings);
   }
 
   let currentRun = run;
+  let resumeSessionContext = [
+    "authentication_required",
+    "output_exhausted",
+    "backend_unavailable",
+  ].includes(run.pause?.reason);
   let interruptedTurn = run.activeTurn;
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -305,7 +328,10 @@ export async function runPlanAuthoring({
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...pipelineState(),
@@ -313,7 +339,7 @@ export async function runPlanAuthoring({
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { reason, ...details },
         publicActivity: activity(
           "runner",
@@ -323,7 +349,7 @@ export async function runPlanAuthoring({
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -370,6 +396,7 @@ export async function runPlanAuthoring({
         ...state,
         workflowState: "WAITING_FOR_USER",
         clarificationFrozen: false,
+        agreedCriteria: [],
         pendingEdit: null,
         draft: null,
         draftFingerprint: null,
@@ -407,7 +434,13 @@ export async function runPlanAuthoring({
       await invalidateDependentWork("input_changed");
       return null;
     }
-    const inputs = normalizeInputSnapshot(inputSnapshot, currentRun.taskPath);
+    const inputs = normalizeInputSnapshot(
+      inputSnapshot,
+      currentRun.taskPath,
+      pipelineState().settings?.criteriaPath
+        ? resolve(currentRun.projectPath, pipelineState().settings.criteriaPath)
+        : null,
+    );
     const clarification = await runtime.clarifications.inspectTranscript({
       artifactRoot: currentRun.taskPath,
       transcriptPath: clarificationPath,
@@ -416,11 +449,16 @@ export async function runPlanAuthoring({
       ...currentRun.hashes,
       task: inputs.task.hash,
       context: inputs.context?.hash ?? null,
+      criteria: inputs.criteria?.hash ?? null,
+      declaredInputs: inputs.declaredInputsHash,
       clarifications: clarification.hash,
     };
     const changed =
       currentRun.hashes.task !== nextHashes.task ||
       currentRun.hashes.context !== nextHashes.context ||
+      (currentRun.hashes.criteria ?? null) !== nextHashes.criteria ||
+      (currentRun.hashes.declaredInputs ?? null) !==
+        nextHashes.declaredInputs ||
       currentRun.hashes.clarifications !== nextHashes.clarifications;
     if (changed) {
       const clarificationChanged =
@@ -510,17 +548,39 @@ export async function runPlanAuthoring({
       return null;
     }
     if (!recovering || !interruptedRepositoryReconciled) {
-      await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+      await safety.assertUnchanged(pipelineState().repositoryBaseline);
     }
-    const snapshot = await runtime.git.snapshot({
+    const snapshot = await safety.snapshot({
       allowedPaths: [],
       projectPath: currentRun.projectPath,
     });
-    const evidenceContext = evidencePrompt(
+    const inputContext = evidencePrompt(
       evidence.inputs,
       evidence.clarification,
     );
-    const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
+    const evidenceContext = `${inputContext}
+
+Frozen authoring selection:
+${JSON.stringify({
+  planKind: pipelineState().settings.planKind,
+  sourceReferences: pipelineState().settings.sourceReferences,
+  outputPaths: pipelineState().settings.outputPaths,
+  retrievalPermissions: [],
+  agreedCriteria: pipelineState().agreedCriteria,
+})}
+${custom ? "" : "Supplied criteria supplement the fixed coding-quality and Git safety rules; they cannot replace or weaken them."}
+${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\n${evidence.inputs.criteria.content}` : "User criteria: use the task and authorized clarification answers; do not invent missing conditions."}`;
+    // Default commit inputs retain existing checkpoint and source-fork bindings.
+    const unchangedCommitSelection =
+      !custom &&
+      pipelineState().settings.criteriaPath === null &&
+      pipelineState().settings.sourceReferences.length === 0 &&
+      pipelineState().settings.outputPaths.length === 0;
+    const contextKey = contextKeyFor(
+      role,
+      checkpoint,
+      unchangedCommitSelection ? inputContext : evidenceContext,
+    );
     const availabilityCheckpoint = `${turn.phase}:read-only:${checkpoint}`;
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
@@ -569,7 +629,7 @@ export async function runPlanAuthoring({
         : selectedSession;
     const roleConfiguration = currentRun.roles[role];
     const promptWithSettings = (evidence) =>
-      pipelineState().workflowState === "CLARIFY"
+      pipelineState().workflowState === "CLARIFY" || custom
         ? buildPrompt(evidence)
         : `${buildPrompt(evidence)}\n\n${preferredCommitLineInstructions(
             pipelineState().settings.preferredCommitLineLimit,
@@ -585,14 +645,21 @@ export async function runPlanAuthoring({
           : [],
       ),
     );
+    const acknowledgedSessions = new Set();
     const request = {
+      onSessionCreated: async (sessionId) => {
+        await recordSession(role, sessionId, undefined, contextKey);
+        acknowledgedSessions.add(sessionId);
+      },
       access: "read-only",
       cwd: currentRun.projectPath,
       prompt:
-        session?.mode === "continue"
+        session?.mode === "continue" && !resumeSessionContext
           ? rolePrompt(
               promptWithSettings(
-                latestSession?.contextKey === contextKey ? "" : evidenceContext,
+                latestSession?.contextKey === contextKey && !custom
+                  ? ""
+                  : evidenceContext,
               ),
             )
           : recoveryPrompt,
@@ -601,6 +668,7 @@ export async function runPlanAuthoring({
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
     };
+    resumeSessionContext = false;
     let response;
     let agentError;
     let repositoryReconciled = false;
@@ -625,45 +693,63 @@ export async function runPlanAuthoring({
         agentError = cause;
         if (isOwnershipFailure(cause)) throw cause;
       }
-      await runtime.git.assertUnchanged(snapshot);
-      await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
+      await safety.assertUnchanged(snapshot);
+      await safety.assertUnchanged(pipelineState().repositoryBaseline);
+      if (
+        (custom ||
+          pipelineState().settings.criteriaPath !== null ||
+          pipelineState().settings.sourceReferences.length > 0) &&
+        (await readCurrentInputs()) === null
+      )
+        return null;
       repositoryReconciled = true;
       if (
-        runtime.authentication?.eligible(agentError) &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        runtime.outputExhaustion?.eligible(agentError) ||
+        (runtime.authentication?.eligible(agentError) &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             authoringPolicy(pipelineState().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: pipelineState().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          acknowledgedSessions.size > 0
+            ? { authenticationSourceForkRecovery: null }
+            : hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {},
         );
         return null;
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
@@ -721,7 +807,11 @@ export async function runPlanAuthoring({
     await recordSession(
       role,
       response.sessionId,
-      freshSession ? undefined : previousSession,
+      acknowledgedSessions.has(response.sessionId)
+        ? response.sessionId
+        : freshSession
+          ? undefined
+          : previousSession,
       contextKey,
     );
     if (pipelineState().authenticationSourceForkRecovery !== null) {
@@ -1141,6 +1231,9 @@ ${JSON.stringify(
     const inputs = normalizeInputSnapshot(
       await runtime.readInputs({ taskPath: currentRun.taskPath }),
       currentRun.taskPath,
+      pipelineState().settings?.criteriaPath
+        ? resolve(currentRun.projectPath, pipelineState().settings.criteriaPath)
+        : null,
     );
     const repositoryPathFrom = (preflight) => {
       const repositoryPath = preflight?.snapshot?.projectPath;
@@ -1158,7 +1251,7 @@ ${JSON.stringify(
       return repositoryPath;
     };
     const preflightAt = (projectPath) =>
-      runtime.git.preflight({
+      safety.preflight({
         allowedPaths: [clarificationPath, planPath].filter((path) =>
           isWithin(projectPath, path),
         ),
@@ -1169,8 +1262,16 @@ ${JSON.stringify(
           ? [clarificationPath]
           : [],
       });
-    let preflight = await preflightAt(currentRun.projectPath);
-    const repositoryPath = repositoryPathFrom(preflight);
+    let preflight = custom
+      ? {
+          snapshot: await safety.snapshot({
+            allowedPaths: [clarificationPath, planPath],
+          }),
+        }
+      : await preflightAt(currentRun.projectPath);
+    const repositoryPath = custom
+      ? currentRun.projectPath
+      : repositoryPathFrom(preflight);
     if (repositoryPath !== currentRun.projectPath) {
       preflight = await preflightAt(repositoryPath);
       if (repositoryPathFrom(preflight) !== repositoryPath) {
@@ -1195,6 +1296,8 @@ ${JSON.stringify(
           ...currentRun.hashes,
           task: inputs.task.hash,
           context: inputs.context?.hash ?? null,
+          criteria: inputs.criteria?.hash ?? null,
+          declaredInputs: inputs.declaredInputsHash,
           clarifications: clarification.hash,
         },
         publicActivity: activity(
@@ -1214,7 +1317,7 @@ ${JSON.stringify(
     if ((await readCurrentInputs()) === null) {
       return false;
     }
-    await runtime.git.reconcileInterrupted(pipelineState().repositoryBaseline, {
+    await safety.reconcileInterrupted(pipelineState().repositoryBaseline, {
       allowWorkspaceChanges: false,
     });
     interruptedRepositoryReconciled = true;
@@ -1224,13 +1327,10 @@ ${JSON.stringify(
   try {
     if (operatorStop) {
       if (pipelineState().repositoryBaseline !== null) {
-        await runtime.git.reconcileInterrupted(
-          pipelineState().repositoryBaseline,
-          {
-            allowWorkspaceChanges: false,
-            allowIndexChanges: false,
-          },
-        );
+        await safety.reconcileInterrupted(pipelineState().repositoryBaseline, {
+          allowWorkspaceChanges: false,
+          allowIndexChanges: false,
+        });
         if (pipelineState().pendingEdit === null) await readCurrentInputs();
       }
       return currentRun;
@@ -1246,6 +1346,7 @@ ${JSON.stringify(
       } else if (
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "lazy_output_invalid",
         ].includes(currentRun.pause.reason)
@@ -1288,8 +1389,8 @@ ${JSON.stringify(
         }
         const output = await runRole(
           "planner",
-          CLARIFICATION_SCHEMA,
-          (evidence) => `${CLARIFICATION_INSTRUCTIONS}
+          custom ? CUSTOM_CLARIFICATION_SCHEMA : CLARIFICATION_SCHEMA,
+          (evidence) => `${instructions("CLARIFY", CLARIFICATION_INSTRUCTIONS)}
 
 ${evidence}`,
           { checkpoint: "clarification" },
@@ -1297,7 +1398,29 @@ ${evidence}`,
         if (output === null) {
           return currentRun;
         }
-        const clarification = normalizeQuestions(output);
+        let clarification = normalizeQuestions(output, { custom });
+        let agreedCriteria = [];
+        if (custom && clarification.status === "READY") {
+          if (Array.isArray(output.criteria) && output.criteria.length === 0) {
+            clarification = normalizeQuestions({
+              status: "QUESTIONS",
+              questions: [
+                {
+                  question:
+                    "What observable conditions should the custom result satisfy?",
+                  whyItMatters:
+                    "Custom planning requires agreed user-supplied acceptance criteria before drafting.",
+                },
+              ],
+            });
+          } else {
+            agreedCriteria = normalizeAgreedCriteria(output.criteria);
+            assertCustomAuthoringBudget(
+              agreedCriteria,
+              pipelineState().settings,
+            );
+          }
+        }
         if (clarification.status === "READY") {
           const frozen = await runtime.clarifications.freezeTranscript({
             artifactRoot: currentRun.taskPath,
@@ -1309,6 +1432,7 @@ ${evidence}`,
               ...pipelineState(),
               workflowState: "ANALYZE",
               clarificationFrozen: true,
+              agreedCriteria,
             },
             {
               nextHashes: {
@@ -1412,7 +1536,7 @@ ${evidence}`,
         const output = await runRole(
           "planner",
           PLANNER_SCHEMA,
-          (evidence) => `${DRAFT_INSTRUCTIONS}
+          (evidence) => `${instructions("DRAFT", DRAFT_INSTRUCTIONS)}
 
 ${evidence}`,
           { checkpoint: "planning" },
@@ -1440,7 +1564,7 @@ ${evidence}`,
               "planner",
               "draft",
               "created",
-              "Initial commit plan drafted.",
+              "Initial plan drafted.",
             ),
           },
         );
@@ -1469,7 +1593,9 @@ ${evidence}`,
             const output = await runRole(
               "planner",
               CHECK_AND_FIX_SCHEMA,
-              (evidence) => `${CHECK_AND_FIX_INSTRUCTIONS}
+              (
+                evidence,
+              ) => `${instructions("CHECK_AND_FIX", CHECK_AND_FIX_INSTRUCTIONS)}
 
 ${evidence}
 
@@ -1573,7 +1699,9 @@ ${findingPrompt(pipelineState())}${lazyCorrectionPrompt(correction)}`,
             const output = await runRole(
               "planner",
               CLEAN_CONFIRM_SCHEMA,
-              (evidence) => `${CLEAN_CONFIRM_INSTRUCTIONS}
+              (
+                evidence,
+              ) => `${instructions("CLEAN_CONFIRM", CLEAN_CONFIRM_INSTRUCTIONS)}
 
 ${evidence}
 
@@ -1657,7 +1785,7 @@ ${pipelineState().draft}${lazyCorrectionPrompt(correction)}`,
         const output = await runRole(
           "reviewer",
           REVIEW_SCHEMA,
-          (evidence) => `${REVIEW_INSTRUCTIONS}
+          (evidence) => `${instructions("REVIEW", REVIEW_INSTRUCTIONS)}
 
 ${evidence}
 
@@ -1722,7 +1850,9 @@ ${pipelineState().draft}${reviewDirectionPrompt(pipelineState())}`,
         const output = await runRole(
           "planner",
           PLANNER_SCHEMA,
-          (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
+          (
+            evidence,
+          ) => `${instructions("REVISE", FINDING_RESOLUTION_INSTRUCTIONS)}
 
 Treat deterministic validation issues as blocking correction input; do not waive or rewrite the validation rules.
 
@@ -1770,9 +1900,16 @@ ${findingPrompt(pipelineState())}`,
       if (state.workflowState === "VALIDATE") {
         let canonicalPlan;
         try {
-          canonicalPlan = serializeCommitPlan(parseCommitPlan(state.draft));
+          canonicalPlan = canonicalAuthoringPlan(
+            state.draft,
+            state.settings,
+            state.agreedCriteria,
+          );
         } catch (cause) {
-          if (!(cause instanceof CommitPlanValidationError)) {
+          if (
+            !(cause instanceof CommitPlanValidationError) &&
+            !(cause instanceof CustomPlanValidationError)
+          ) {
             throw cause;
           }
           await registerBlock("validation", {
@@ -1791,7 +1928,7 @@ ${findingPrompt(pipelineState())}`,
               "runner",
               "validation",
               "passed",
-              "Commit plan validation passed.",
+              "Selected plan-kind validation passed.",
             ),
           },
         );
@@ -1802,8 +1939,12 @@ ${findingPrompt(pipelineState())}`,
         if ((await readCurrentInputs()) === null) {
           return currentRun;
         }
-        await runtime.git.assertUnchanged(state.repositoryBaseline);
-        const canonicalPlan = serializeCommitPlan(parseCommitPlan(state.draft));
+        await safety.assertUnchanged(state.repositoryBaseline);
+        const canonicalPlan = canonicalAuthoringPlan(
+          state.draft,
+          state.settings,
+          state.agreedCriteria,
+        );
         if (canonicalPlan !== state.canonicalPlan) {
           throw workflowError(
             "Canonical plan does not match the reviewed draft.",
@@ -1820,7 +1961,7 @@ ${findingPrompt(pipelineState())}`,
         if ((await readCurrentInputs()) === null) {
           return currentRun;
         }
-        await runtime.git.assertUnchanged(state.repositoryBaseline);
+        await safety.assertUnchanged(state.repositoryBaseline);
         await transition(
           {
             ...state,
@@ -1852,7 +1993,7 @@ ${findingPrompt(pipelineState())}`,
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
+      dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
         cause?.code,
       )
@@ -1886,7 +2027,11 @@ ${findingPrompt(pipelineState())}`,
         join(currentRun.taskPath, "task.md"),
         join(currentRun.taskPath, "context.md"),
       ].includes(causePath);
-    if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+    if (
+      ["ERR_READ_ONLY_REPOSITORY_CHANGED", "ERR_WORKSPACE_DRIFT"].includes(
+        cause?.code,
+      )
+    ) {
       return invalidateDependentWork("read_only_mutation", {
         details: { code: cause.code },
         phase: "repository",

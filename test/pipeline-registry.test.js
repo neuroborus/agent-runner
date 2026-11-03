@@ -49,7 +49,7 @@ test("registry exposes explicit immutable pipeline descriptors", () => {
 
   assert.deepEqual(
     pipelines.map((pipeline) => pipeline.id),
-    ["plan-authoring", "plan-execution", "polishing"],
+    ["plan-authoring", "plan-execution", "polishing", "audit", "init"],
   );
 
   for (const pipeline of pipelines) {
@@ -521,6 +521,10 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
     "mode",
+    "plan-kind",
+    "criteria",
+    "source",
+    "output",
     "planner",
     "reviewer",
     "arbiter",
@@ -529,6 +533,7 @@ test("pipelines own their pipeline-specific run options", () => {
     "project",
     "task",
     "mode",
+    "plan-kind",
     "worker",
     "reviewer",
     "arbiter",

@@ -9,6 +9,7 @@ const FIELDS = [
   "attempt",
   "status",
   "reconstructionRevision",
+  "expiryRevision",
   "configurationFingerprint",
   "contentFingerprint",
 ];
@@ -50,10 +51,20 @@ export function normalizeInactivityState(state) {
     legacy && state.providerInactivityFingerprint === undefined
       ? fingerprint
       : state.providerInactivityFingerprint;
-  const recovery =
+  const savedRecovery =
     legacy && state.inactivityRecovery === undefined
       ? null
       : state.inactivityRecovery;
+  // Old reconstruction records consume the allowance but prove no expiry.
+  const recovery =
+    savedRecovery != null &&
+    typeof savedRecovery === "object" &&
+    !Array.isArray(savedRecovery) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(savedRecovery)) &&
+    state.schemaVersion < 20 &&
+    !Object.hasOwn(savedRecovery, "expiryRevision")
+      ? { ...savedRecovery, expiryRevision: null }
+      : savedRecovery;
   if (
     binding !== fingerprint ||
     (legacy &&
@@ -82,6 +93,12 @@ export function normalizeInactivityState(state) {
         : !Number.isSafeInteger(recovery.reconstructionRevision) ||
           recovery.reconstructionRevision < 1 ||
           recovery.reconstructionRevision > state.revision) ||
+      (state.schemaVersion < 20 && recovery.expiryRevision !== null) ||
+      (recovery.expiryRevision !== null &&
+        (!Number.isSafeInteger(recovery.expiryRevision) ||
+          recovery.expiryRevision < 1 ||
+          recovery.expiryRevision > state.revision)) ||
+      (recovery.attempt === 1 && recovery.status !== "expired") ||
       recovery.configurationFingerprint !== fingerprint ||
       typeof recovery.contentFingerprint !== "string" ||
       !HASH.test(recovery.contentFingerprint))
@@ -99,14 +116,20 @@ export function inactivityActivity(recovery, kind) {
     actor: recovery.role,
     phase: "inactivity",
     kind,
-    message: `${recovery.role} ${recovery.checkpoint}: provider inactivity ${kind}; attempt ${recovery.attempt} of 2.`,
+    message: `${recovery.role} ${recovery.checkpoint}: provider ${kind === "expired" || recovery.expiryRevision != null ? "inactivity" : "reconstruction"} ${kind}; attempt ${recovery.attempt} of 2.`,
   };
 }
 
 export function projectInactivityRecovery(run) {
   if (run.inactivityRecovery == null) return null;
   const { role, checkpoint, attempt, status } = run.inactivityRecovery;
-  return { role, checkpoint, attempt, status };
+  return {
+    role,
+    checkpoint,
+    attempt,
+    status,
+    expiryProven: run.inactivityRecovery.expiryRevision != null,
+  };
 }
 
 export function assertInactivityContinuity(previous, current, activity) {
@@ -117,7 +140,9 @@ export function assertInactivityContinuity(previous, current, activity) {
     activity?.phase === "inactivity" &&
     activity.actor === (after ?? before).role;
   const retired =
-    current.executionProcess === null && current.executionResource === null;
+    current.preparation == null &&
+    current.executionProcess === null &&
+    current.executionResource === null;
   if (
     !validActivity ||
     (before !== null &&
@@ -140,6 +165,8 @@ export function assertInactivityContinuity(previous, current, activity) {
       activity.kind !== "expired" ||
       current.activeTurn?.role !== after.role ||
       after.attempt !== (before?.attempt ?? 1) ||
+      after.expiryRevision !==
+        (current.schemaVersion < 20 ? null : current.revision) ||
       after.reconstructionRevision !== (before?.reconstructionRevision ?? null)
     )
       throw new TypeError("Inactivity expiry has no active attempt.");
@@ -148,6 +175,7 @@ export function assertInactivityContinuity(previous, current, activity) {
     !retired ||
     after.attempt !== 2 ||
     after.reconstructionRevision !== current.revision ||
+    after.expiryRevision !== (before?.expiryRevision ?? null) ||
     (before === null
       ? current.activeTurn?.role !== after.role
       : current.activeTurn !== null)

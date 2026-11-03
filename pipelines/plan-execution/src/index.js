@@ -1,6 +1,27 @@
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+
+import {
+  planKindPolicy,
+  PLAN_KIND_SETTING,
+  resolveExecutionWorkspace,
+} from "./step-policy.js";
+import { writableResultDiagnostic } from "./writable-result.js";
+import { assertCustomOutputPreparation } from "./custom-results.js";
+import {
+  COMMIT_SIZE_DEFAULTS,
+  commitSizeThreshold,
+  createCommitSizeAssessment,
+} from "./commit-size-assessment.js";
+import { assertExecutionRun as validateRun } from "./bootstrap-progress.js";
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+} from "./validation-schedule.js";
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
+import { createEffectivePlanRevisions } from "./effective-plan.js";
+import { projectPlanProgress, renderPlanProgress } from "./plan-progress.js";
 import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
@@ -26,7 +47,6 @@ import {
   WORKFLOW_STATES,
 } from "./workflow.js";
 import {
-  assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
@@ -103,16 +123,23 @@ function trustedCheckSelection(value) {
 }
 
 const ROLES = resolveActiveRoles();
-const ROLE_ACCESS = Object.freeze({
-  worker: Object.freeze(["read-only", "workspace-write", "local-commit"]),
-  reviewer: Object.freeze(["read-only"]),
-  arbiter: Object.freeze(["read-only"]),
-});
 const SETTINGS = Object.freeze({
+  planKind: PLAN_KIND_SETTING,
+  automaticCommitSplitting: Object.freeze({
+    defaultValue: true,
+    errorMessage: "must be a boolean",
+    validate: (value) => typeof value === "boolean",
+  }),
+  preferredCommitLineLimit: positiveIntegerSetting(
+    COMMIT_SIZE_DEFAULTS.preferredCommitLineLimit,
+  ),
+  commitSizeAssessmentMultiplier: positiveIntegerSetting(
+    COMMIT_SIZE_DEFAULTS.commitSizeAssessmentMultiplier,
+  ),
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
     errorMessage:
-      "must be auto, none, or a normalized repository-relative SKILL.md path",
+      "must be auto, none, or a normalized infrastructure-relative Markdown path",
     validate: isFinalizationPolicy,
   }),
   maxFixRoundsPerStep: positiveIntegerSetting(20),
@@ -143,6 +170,7 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -153,6 +181,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
+  "effective_plan_output_invalid",
   "unsafe_git_state",
 ]);
 const RESUMABLE_WORKFLOW_STATES = new Set([
@@ -166,6 +195,7 @@ const RESUMABLE_WORKFLOW_STATES = new Set([
   "REVIEW",
   "RESOLVE_FINDINGS",
   "COMMIT",
+  "ACCEPT",
 ]);
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
@@ -173,6 +203,10 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_canceled: "The operator canceled this run; it cannot resume.",
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
+  writable_output_invalid:
+    "The writable result remains invalid. Resume this same checkpoint to authorize one additional read-only result restatement; candidate work and existing blockers are preserved.",
+  output_exhausted:
+    "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
     "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
@@ -223,6 +257,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   review_output_invalid:
     "The candidate Reviewer result remains invalid and requires an explicit read-only retry.",
+  effective_plan_output_invalid:
+    "The rejected replacement plan is unchanged and requires an explicit read-only repair retry.",
   task_input_changed: "A task or plan input changed after the run began.",
   unexpected_git_identity_change:
     "The effective Git identity changed during execution.",
@@ -245,6 +281,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "plan_revision_required",
   "lazy_output_invalid",
   "review_output_invalid",
+  "effective_plan_output_invalid",
 ]);
 const PUBLIC_FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const MAX_PUBLIC_EVIDENCE_ITEMS = 32;
@@ -264,7 +301,7 @@ function publicResumeState(run) {
 
 function publicExplanation(pause, fallback) {
   if (
-    pause.reason === "internal_failure" &&
+    ["internal_failure", "commit_failed"].includes(pause.reason) &&
     typeof pause.diagnosticClass === "string" &&
     /^[a-z][a-z0-9_]{0,63}$/u.test(pause.diagnosticClass)
   ) {
@@ -306,6 +343,22 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  if (pause.reason === "writable_output_invalid") {
+    const phase = pause.resumeState;
+    const diagnostic = writableResultDiagnostic(
+      { diagnostic: pause.diagnostic },
+      phase,
+    );
+    return Object.freeze([
+      `${diagnostic.phase}: ${diagnostic.field} (${diagnostic.constraint}).`,
+    ]);
+  }
+  if (pause.reason === "output_exhausted") {
+    return Object.freeze([
+      `Suspended role: ${pause.role}.`,
+      `Suspended checkpoint: ${pause.checkpoint}.`,
+    ]);
+  }
   if (finalizationIssueIds.length > 0) {
     return Object.freeze(
       finalizationIssueIds.map(
@@ -485,7 +538,14 @@ function projectStatus(run) {
   const state = run.pipelineState;
   return Object.freeze({
     currentStep: state.currentStep,
+    planKind: state.planKind,
+    acceptedSteps: Object.freeze(
+      state.customResults?.accepted.map(({ step, receipt, result }) =>
+        Object.freeze({ step, receipt, result }),
+      ) ?? [],
+    ),
     planPath: state.planPath ?? join(run.taskPath, "plan.md"),
+    refinementProgress: projectPlanProgress(run),
     findings: Object.freeze(
       publicFindings(state).map(({ id, problem }) =>
         Object.freeze({ id, summary: problem }),
@@ -511,10 +571,26 @@ function validateResumeAction(run, action) {
   )
     return;
   if (action === null && canRecoverLegacyConfirmation(run)) return;
+  if (
+    action === null &&
+    run.pause?.reason === "writable_output_invalid" &&
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    run.pipelineState.writableResult?.stage === "exhausted" &&
+    Number.isSafeInteger(
+      run.pipelineState.writableResult.additionalAttempts + 2,
+    )
+  )
+    return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
   }
+  if (
+    state.writableResult?.stage === "blocked" &&
+    run.pause?.reason === "environment_blocked" &&
+    !Number.isSafeInteger(state.writableResult.additionalAttempts + 2)
+  )
+    throw new Error("Writable result retry allowance is too large.");
   if (state.pendingEdit !== null) {
     if (action !== null) {
       throw new Error("A pending input edit does not accept a resume action.");
@@ -600,6 +676,7 @@ function validateResumeAction(run, action) {
         (!state.preflightComplete ||
           ([
             "authentication_required",
+            "output_exhausted",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",
@@ -609,6 +686,7 @@ function validateResumeAction(run, action) {
             "finalization_evidence_rejected",
             "lazy_output_invalid",
             "review_output_invalid",
+            "effective_plan_output_invalid",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
   ) {
@@ -1341,11 +1419,134 @@ export function migratePlanExecutionStateV25(run) {
   });
 }
 
+export function migratePlanExecutionStateV26(run) {
+  const current = run.pipelineState;
+  if (current.validationSchedule === null) return Object.freeze({ ...current });
+  const validationSchedule = deriveValidationSchedule(
+    [current.workerValidation, current.reviewerValidation],
+    current.validationSchedule.length,
+  );
+  const expanded = validationSchedule.steps.map(({ step }) => ({
+    step,
+    requiredChecks: scheduledChecks({ validationSchedule }, step),
+  }));
+  if (!isDeepStrictEqual(current.validationSchedule, expanded)) {
+    throw new PlanExecutionWorkflowError(
+      "Legacy validation schedule does not preserve the accepted role assignments.",
+      { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
+    );
+  }
+  return Object.freeze({ ...current, validationSchedule });
+}
+
+export function migratePlanExecutionStateV27(run) {
+  // Compatible complete inventories are already independently accepted. Never
+  // manufacture discovery or batch proof for unfinished legacy roles.
+  return Object.freeze({
+    ...run.pipelineState,
+    bootstrapProgress: Object.freeze({
+      worker: Object.freeze({ work: null, subdivisions: 0 }),
+      reviewer: Object.freeze({ work: null, subdivisions: 0 }),
+    }),
+  });
+}
+
+export function migratePlanExecutionStateV28(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...COMMIT_SIZE_DEFAULTS,
+            ...current.settings,
+          }),
+    commitSizeAssessment: createCommitSizeAssessment(),
+  });
+}
+
+export function migratePlanExecutionStateV29(run) {
+  // No historical revision or review proof can be inferred from an assessment.
+  return Object.freeze({
+    ...run.pipelineState,
+    effectivePlanRevisions: createEffectivePlanRevisions(),
+  });
+}
+
+export function migratePlanExecutionStateV30(run) {
+  const current = run.pipelineState;
+  const revised = current.effectivePlanRevisions.revisions.some(
+    (entry) => entry.accepted,
+  );
+  return Object.freeze({
+    ...current,
+    // Historical inventories and consumed effects remain readable; they cannot
+    // acquire effective-revision applicability or implementation proof.
+    effectiveValidation: [],
+    ...(revised
+      ? {
+          stepImplementation: null,
+          bootstrapProgress: Object.fromEntries(
+            Object.entries(current.bootstrapProgress).map(
+              ([role, progress]) => [role, { ...progress, work: null }],
+            ),
+          ),
+        }
+      : {}),
+  });
+}
+
+export function migratePlanExecutionStateV31(run) {
+  // Previously persisted runs never gain production refinement on resume.
+  return Object.freeze({
+    ...run.pipelineState,
+    commitSizeAssessment: {
+      ...run.pipelineState.commitSizeAssessment,
+      eligible: false,
+    },
+    replacementExecution: {
+      separations: [],
+      corrections: [],
+      findingAccounting: [],
+      inputChanges: [],
+    },
+  });
+}
+
+export function migratePlanExecutionStateV32(run) {
+  // Version 32 only executed commit plans. Migration confers no custom access
+  // and preserves every approval, completed commit and consumed authorization.
+  return Object.freeze({ ...run.pipelineState, planKind: "commit" });
+}
+
+export function migratePlanExecutionStateV33(run) {
+  // Existing runs have no accepted custom results or output preparation intent.
+  return Object.freeze({ ...run.pipelineState, customResults: null });
+}
+
+export function migratePlanExecutionStateV38(run) {
+  // Freeze the switch from saved eligibility, never from current configuration
+  // or the new default, so historically ineligible runs stay ineligible.
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            automaticCommitSplitting: current.commitSizeAssessment.eligible,
+          }),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
+  assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 26,
+  stateVersion: 39,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1377,23 +1578,64 @@ export const planExecutionPipeline = Object.freeze({
       }),
     24: migratePlanExecutionStateV24,
     25: migratePlanExecutionStateV25,
+    26: migratePlanExecutionStateV26,
+    27: migratePlanExecutionStateV27,
+    28: migratePlanExecutionStateV28,
+    29: migratePlanExecutionStateV29,
+    30: migratePlanExecutionStateV30,
+    31: migratePlanExecutionStateV31,
+    32: migratePlanExecutionStateV32,
+    33: migratePlanExecutionStateV33,
+    34: (run) => {
+      if (
+        run.pipelineState.planKind !== "commit" ||
+        run.pipelineState.customResults !== null
+      )
+        throw new PlanExecutionWorkflowError(
+          "Legacy execution has no custom result authority.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        customCandidate: null,
+        customWritePolicy: null,
+        settings:
+          run.pipelineState.settings === null
+            ? null
+            : { planKind: "commit", ...run.pipelineState.settings },
+      });
+    },
+    // Preserve existing path/fallback decisions and consumed-effect evidence.
+    35: (run) => Object.freeze({ ...run.pipelineState }),
+    // Older rejections and pauses carry no adapter class. Never infer one.
+    36: (run) => Object.freeze({ ...run.pipelineState }),
+    // Do not infer a lost result or manufacture replay authority for old runs.
+    37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
+    38: migratePlanExecutionStateV38,
   }),
   roles: ROLES,
-  roleAccess: ROLE_ACCESS,
+  roleAccess: planKindPolicy("commit").roleAccess,
+  workspace: planKindPolicy("commit").workspace,
+  resolveWorkspace: resolveExecutionWorkspace,
+  initialRoleAccess: ({ workspacePolicy }) =>
+    workspacePolicy ? ["read-only"] : undefined,
+  resolveRoleAccess: ({ role, workspacePolicy }) =>
+    planKindPolicy(workspacePolicy ? "custom" : "commit").roleAccess[role],
   resolveActiveRoles,
   settings: SETTINGS,
+  validateSettings: commitSizeThreshold,
   taskInputs: TASK_INPUTS,
-  runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
+  runOptions: Object.freeze(["project", "task", "mode", "plan-kind", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description:
-    "Execute, converge, finalize, confirm, and commit each plan step.",
+    "Execute reviewed commit plans or criterion-driven custom steps.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,
+    planProgress: renderPlanProgress,
     status: projectStatus,
   }),
   validateResumeAction,
-  prepareRecovery(run, history) {
+  async prepareRecovery(run, history) {
     const migrate = (historicalRun) => {
       let current = historicalRun;
       while (
@@ -1410,8 +1652,8 @@ export const planExecutionPipeline = Object.freeze({
       validateRun(current);
       return current;
     };
-    prepareLegacyConfirmationRecovery(run, history, migrate);
-    prepareImplementationRecovery(run, history, migrate);
+    await prepareLegacyConfirmationRecovery(run, history, migrate);
+    await prepareImplementationRecovery(run, history, migrate);
   },
   workflow: Object.freeze({
     createState: createPlanExecutionState,

@@ -22,6 +22,8 @@ import {
 } from "./content.js";
 import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
+import { measureChangesAtRoot } from "./measurement.js";
+import { createGitPreservationService } from "./preservation.js";
 
 export { GitSafetyError };
 
@@ -436,6 +438,28 @@ export function createGitService(options = {}) {
     ).contentFingerprint;
   }
 
+  // Measure the worktree once against a caller-verified immutable step baseline.
+  // The expected fingerprint binds the result to the inspected candidate.
+  async function measureChanges(options) {
+    assertOptions(options, "Change-measurement options");
+    const { baseHead, expectedContentFingerprint, projectPath } = options;
+    if (
+      (baseHead !== null &&
+        (typeof baseHead !== "string" || !OBJECT_ID_PATTERN.test(baseHead))) ||
+      typeof expectedContentFingerprint !== "string" ||
+      !SHA256_PATTERN.test(expectedContentFingerprint)
+    ) {
+      throw new GitSafetyError("Change-measurement options are invalid.", {
+        code: "ERR_INVALID_GIT_OPTIONS",
+      });
+    }
+    const repositoryPath = await resolveRepository(runGit, projectPath);
+    return measureChangesAtRoot(contentContext, repositoryPath, {
+      baseHead,
+      expectedContentFingerprint,
+    });
+  }
+
   async function validationInfrastructureFingerprint(options) {
     assertOptions(options, "Validation-infrastructure options");
     const { paths, projectPath } = options;
@@ -639,6 +663,13 @@ export function createGitService(options = {}) {
 
   return Object.freeze({
     assertUnchanged,
+    ...createGitPreservationService({
+      contentContext,
+      assertSnapshot,
+      assertUnchanged,
+      reconcileInterrupted,
+      snapshot,
+    }),
     ...commitService,
     ...handoffService,
     contentFingerprint,
@@ -647,6 +678,7 @@ export function createGitService(options = {}) {
     reconcileInterrupted,
     inspectHead,
     materializeSource,
+    measureChanges,
     resolveProject,
     snapshot,
     validationInfrastructureFingerprint,

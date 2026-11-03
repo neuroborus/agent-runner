@@ -105,6 +105,9 @@ export function createBackend(
       return capabilities();
     },
     async run(request) {
+      const resultProperties =
+        request.schema?.properties?.result?.anyOf?.[0]?.properties ??
+        request.schema?.properties;
       const position = /Runner-selected plan position[^\n]*\n([^\n]+)/u.exec(
         request.prompt,
       );
@@ -138,7 +141,24 @@ export function createBackend(
 
       let role = "worker";
       let structured;
-      if (
+      if (resultProperties?.unitId !== undefined) {
+        const unit = JSON.parse(
+          /Applicability request \(data\):\n([^\n]+)/u.exec(request.prompt)[1],
+        );
+        role = unit.binding.role;
+        structured = {
+          status: "READY",
+          unitId: unit.unitId,
+          assignments: unit.discovery.requiredChecks.map(({ id }) => ({
+            checkId: id,
+            steps: unit.steps.map(({ number }) => number),
+          })),
+          missingCommands: [],
+          missingInfrastructure: [],
+          capabilityRequirements: [],
+          environmentBlockers: [],
+        };
+      } else if (
         request.prompt.includes(
           "Return the complete revised plan only when content changed.",
         ) ||
@@ -225,9 +245,10 @@ export function createBackend(
         request.prompt.includes("Return a concise bootstrap summary")
       ) {
         const reviewer = request.prompt.includes("As Reviewer");
+        const isDiscovery = resultProperties.status === undefined;
         role = reviewer ? "reviewer" : "worker";
         structured = {
-          status: "READY",
+          ...(isDiscovery ? {} : { status: "READY" }),
           summary:
             `${reviewer ? "Reviewer" : "Worker"} understands the task, ` +
             "plan, risks, and finalization procedure.",
@@ -235,8 +256,7 @@ export function createBackend(
             {
               id: "C1",
               command: "git diff --check HEAD",
-              ...(request.schema?.properties?.result?.anyOf?.[0]?.properties
-                ?.requiredChecks?.items?.properties?.steps
+              ...(resultProperties.requiredChecks.items.properties.steps
                 ? {
                     steps: [
                       ...new Set(
@@ -250,18 +270,20 @@ export function createBackend(
             },
           ],
           validationInfrastructure: [],
-          ...((request.schema?.properties?.result?.anyOf?.[0]?.properties
-            ?.capabilityRequirements ??
-          request.schema?.properties?.capabilityRequirements)
+          ...(resultProperties.capabilityRequirements
             ? { capabilityRequirements: [], environmentBlockers: [] }
             : {}),
-          capacityField: "",
-          capacityLimit: 0,
-          reason: "",
-          question: "",
-          options: [],
-          whyBlocked: "",
-          evidence: [],
+          ...(isDiscovery
+            ? {}
+            : {
+                capacityField: "",
+                capacityLimit: 0,
+                reason: "",
+                question: "",
+                options: [],
+                whyBlocked: "",
+                evidence: [],
+              }),
         };
       } else if (
         request.prompt.includes("Reconcile the independent Worker and Reviewer")
@@ -351,12 +373,7 @@ export function createBackend(
         throw new Error("Unexpected fake backend turn.");
       }
 
-      if (
-        (
-          request.schema?.properties?.result?.anyOf?.[0]?.properties ??
-          request.schema?.properties
-        )?.stepAssessment
-      )
+      if (resultProperties?.stepAssessment)
         structured.stepAssessment = assessment;
       return {
         output: "structured",

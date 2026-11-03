@@ -140,7 +140,30 @@ async function createExecutionLifecycle() {
       },
     },
     {
-      runStore: store,
+      runStore: {
+        ...store,
+        async startAgentTurn(lease, turn, options) {
+          if (
+            turn.phase === "implement" &&
+            checkpoints.preImplementation === undefined
+          )
+            checkpoints.preImplementation = await captureCheckpoint(
+              fixture,
+              store,
+              runId,
+              "pre-implementation",
+              (run) => {
+                assert.equal(run.pipelineState.workflowState, "IMPLEMENT");
+                assert.equal(
+                  run.pipelineState.writableResult.stage,
+                  "prepared",
+                );
+                assert.equal(run.activeTurn, null);
+              },
+            );
+          return store.startAgentTurn(lease, turn, options);
+        },
+      },
       git: {
         ...git,
         async prepareCommit(options) {
@@ -180,6 +203,7 @@ async function createExecutionLifecycle() {
   const completed = (await runner.resume({ runId, action: null })).run;
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.notEqual(checkpoints.implementation, undefined);
+  assert.notEqual(checkpoints.preImplementation, undefined);
   assert.notEqual(checkpoints.commit, undefined);
   return checkpoints;
 }
@@ -797,7 +821,7 @@ test("runner fails closed when operator stop monitoring fails", async (t) => {
 });
 
 test("operator stop contains native provider work and preserves writable content", async (t) => {
-  const fixture = await executionLifecycle.implementation.restore();
+  const fixture = await executionLifecycle.preImplementation.restore();
   const store = createRunStore({ stateRoot: fixture.stateRoot });
   const delegate = createExecutionAdapter();
   const started = Promise.withResolvers();
@@ -841,7 +865,8 @@ test("operator stop contains native provider work and preserves writable content
   ]);
   const before = await store.loadRun(fixture.runId);
   assert.equal(before.executionProcess.pid, child.ownedPid);
-  assert.ok(before.executionProcess.ancestryBaseline.length > 0);
+  assert.equal(before.executionProcess.ancestryBaseline, null);
+  assert.equal(before.executionProcess.controlGroup, null);
   assert.equal(await store.runIsLeased(fixture.runId), true);
   await runner.requestOperatorStop({
     runId: fixture.runId,
@@ -864,11 +889,12 @@ test("operator stop contains native provider work and preserves writable content
   );
 });
 
-test("operator pause preserves writable partial content and reconstructs the primary without reforking", async () => {
-  const fixture = await executionLifecycle.implementation.restore();
+test("operator pause preserves partial content and restates the result read-only without reforking", async () => {
+  const fixture = await executionLifecycle.preImplementation.restore();
   const store = createRunStore({ stateRoot: fixture.stateRoot });
   const delegate = createExecutionAdapter();
   let primaryTurns = 0;
+  let restatements = 0;
   let runner;
   runner = runnerFor(
     fixture,
@@ -876,10 +902,40 @@ test("operator pause preserves writable partial content and reconstructs the pri
       codex: {
         ...delegate,
         async run(request) {
+          if (
+            request.prompt.startsWith(
+              "Restate the result of the retired Worker turn",
+            )
+          ) {
+            assert.equal(request.access, "read-only");
+            assert.equal(request.session, undefined);
+            restatements++;
+            const current = await store.loadRun(fixture.runId);
+            await runner.requestOperatorStop({
+              runId: fixture.runId,
+              expectedRevision: current.revision,
+              kind: "cancel_requested",
+              idempotencyKey: "stop-restatement",
+            });
+            return {
+              sessionId: "recovered-result",
+              structured: {
+                result: {
+                  status: "COMPLETED",
+                  summary: "Inspected the preserved candidate.",
+                  reason: "",
+                  question: "",
+                  whyBlocked: "",
+                  options: [],
+                  evidence: [],
+                },
+              },
+            };
+          }
           if (request.access !== "workspace-write")
             return delegate.run(request);
           primaryTurns += 1;
-          if (primaryTurns === 2) assert.equal(request.session, undefined);
+          assert.equal(primaryTurns, 1);
           await writeFile(
             join(fixture.projectPath, "partial.js"),
             "export const partial = true;\n",
@@ -888,7 +944,7 @@ test("operator pause preserves writable partial content and reconstructs the pri
           await runner.requestOperatorStop({
             runId: fixture.runId,
             expectedRevision: current.revision,
-            kind: primaryTurns === 1 ? "pause_requested" : "cancel_requested",
+            kind: "pause_requested",
             idempotencyKey: `stop-${primaryTurns}`,
           });
           return delegate.run(request);
@@ -909,7 +965,8 @@ test("operator pause preserves writable partial content and reconstructs the pri
   const canceled = (await runner.resume({ runId: fixture.runId, action: null }))
     .run;
   assert.equal(canceled.pipelineState.workflowState, "CANCELED");
-  assert.equal(primaryTurns, 2);
+  assert.equal(primaryTurns, 1);
+  assert.equal(restatements, 1);
   assert.deepEqual(canceled.sessionLineage, paused.sessionLineage);
 });
 
@@ -1330,10 +1387,8 @@ test("operator stop after host loss reclaims ownership and reconciles before fur
     commit: null,
   });
   assert.equal(canceled.pipelineState.completedCommits.length, 0);
-  assert.deepEqual(
-    canceled.pause.operatorResume.activeTurn,
-    checkpoint.activeTurn,
-  );
+  assert.equal(canceled.pause.operatorResume.activeTurn, null);
+  assert.equal(canceled.pipelineState.writableResult.stage, "ready");
   assert.equal(await rebooted.runIsLeased(fixture.runId), false);
   assert.equal(
     await rebooted.worktreeIsLeased(fixture.projectPath, fixture.runId),
@@ -1394,11 +1449,20 @@ test("action-free recovery retires a dead session before further provider work",
     {
       codex: {
         ...delegate,
-        async run() {
+        async run(request) {
           resumedTurns++;
+          assert.equal(request.access, "read-only");
+          assert.match(
+            request.prompt,
+            /^Restate the result of the retired Worker turn/u,
+          );
+          const current = await recoveredStore.loadRun(fixture.runId);
+          assert.equal(current.executionProcess, null);
+          const interrupted = checkpoint.observations.attempts.at(-1).id;
           assert.equal(
-            (await recoveredStore.loadRun(fixture.runId)).executionProcess,
-            null,
+            current.observations.attempts.find(({ id }) => id === interrupted)
+              .status,
+            "interrupted",
           );
           throw Object.assign(new Error("Retryable proof failure"), {
             code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
@@ -1411,8 +1475,6 @@ test("action-free recovery retires a dead session before further provider work",
       inspectSessionProcesses(sessionId, _token, inspection) {
         assert.equal(sessionId, executionPid);
         assert.deepEqual(inspection, {
-          ancestryBaseline,
-          controlGroup: null,
           includeSession: true,
         });
         retirementInspections++;
@@ -1437,7 +1499,11 @@ test("action-free recovery retires a dead session before further provider work",
   assert.equal(settled.executionProcess, null);
   assert.equal(retirementInspections, 1);
   assert.equal(resumedTurns, 1);
-  assert.deepEqual(settled.activeTurn, checkpoint.activeTurn);
+  assert.deepEqual(settled.activeTurn, {
+    role: "worker",
+    phase: "writable-result",
+  });
+  assert.equal(settled.pipelineState.writableResult.attempts, 1);
   assert.equal(settled.pause, null);
   assert.equal(await recoveredStore.runIsLeased(fixture.runId), false);
   assert.equal(
@@ -1452,12 +1518,11 @@ test("action-free recovery retires a dead session before further provider work",
   assert.equal(repositoryAfterRecovery, repositoryBeforeRecovery);
 });
 
-test("legacy recovery evidence remains non-mutating and compatibility-blocked", async () => {
+test("recovery without the required namespace remains non-mutating and blocked", async () => {
   const fixture = await executionLifecycle.implementation.restore();
   const bootId = "11111111-1111-4111-8111-111111111111";
   const executionPid = 2_000_000_002;
   const launchIdentity = { bootId, startTicks: String(executionPid) };
-  const namespaceId = readlinkSync("/proc/self/ns/pid");
   const options = {
     stateRoot: fixture.stateRoot,
     resolveStopBoundary,
@@ -1474,7 +1539,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
   await store.acquireWorktreeLease(fixture.projectPath, fixture.runId);
   const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
     processIdentity: launchIdentity,
-    namespaceId,
+    namespaceId: null,
   });
   await assert.rejects(lease.release(), {
     code: "ERR_EXECUTION_PROCESS_ACTIVE",
@@ -1493,7 +1558,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
       codex: {
         ...delegate,
         run: () =>
-          assert.fail("Compatibility recovery must not invoke a provider."),
+          assert.fail("Incomplete ownership must not invoke a provider."),
       },
     },
     { runStore: recoveredStore },
@@ -1515,8 +1580,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
     recoveredRunner.resume({ runId: fixture.runId, action: null }),
     {
       code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
-      message:
-        "Owned execution process predates frozen ancestry recovery evidence.",
+      message: "Owned execution process cannot be safely reconciled.",
     },
   );
   assert.deepEqual(await recoveredStore.loadRun(fixture.runId), durableBefore);
@@ -1530,7 +1594,7 @@ test("legacy recovery evidence remains non-mutating and compatibility-blocked", 
 });
 
 test("stop recovery preserves containment failure without reacquiring its held worktree lease", async () => {
-  const fixture = await executionLifecycle.implementation.restore();
+  const fixture = await executionLifecycle.preImplementation.restore();
   const bootA = "11111111-1111-4111-8111-111111111111";
   const bootB = "22222222-2222-4222-8222-222222222222";
   let originalOwnerAlive = true;

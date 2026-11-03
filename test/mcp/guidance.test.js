@@ -294,6 +294,72 @@ test("MCP delegates content and destination safety without disclosing rejected b
   assert.equal(await readFile(f.localPath, "utf8"), "Before.");
 });
 
+test("CLI and MCP resolve the same external guidance for an ordinary-directory target", async (t) => {
+  const f = await fixture(t, { gitWorkspace: false });
+  const rootPath = join(f.root, "infrastructure");
+  await mkdir(rootPath);
+  const projectConfigurationPath = join(rootPath, "agent-runner.json");
+  await writeFile(
+    projectConfigurationPath,
+    JSON.stringify({
+      schemaVersion: 1,
+      artifactRoot: "artifacts",
+      infrastructure: {
+        schemaVersion: 1,
+        placement: "external",
+        projectPath: f.projectPath,
+        rootPath,
+      },
+    }),
+  );
+  const client = await connect(t, control(f));
+  const selectors = { projectPath: f.projectPath, projectConfigurationPath };
+  assert.equal(
+    (await call(client, "guidance_read", selectors)).localHash,
+    null,
+  );
+  const receipt = await call(
+    client,
+    "guidance_update",
+    f.request("External directory lesson.", selectors),
+  );
+  assert.equal(
+    receipt.localPath,
+    join(rootPath, "artifacts", "agent-runner", "rules.md"),
+  );
+  let output = "";
+  assert.equal(
+    await main(
+      [
+        "guidance",
+        "--project",
+        f.projectPath,
+        "--project-config",
+        projectConfigurationPath,
+      ],
+      {
+        guidance: f.service,
+        stdout: {
+          write(chunk) {
+            output += chunk;
+          },
+        },
+        stderr: {
+          write() {
+            assert.fail("External guidance should be readable.");
+          },
+        },
+      },
+    ),
+    0,
+  );
+  assert.equal(
+    output,
+    (await call(client, "guidance_read", selectors)).combinedContent + "\n",
+  );
+  assert.deepEqual(await readdir(f.projectPath), [".gitignore"]);
+});
+
 test("completed MCP retries replay receipts after CLI edits while stale hashes and conflicting keys fail", async (t) => {
   const f = await fixture(t);
   const client = await connect(t, control(f));

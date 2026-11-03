@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -29,11 +30,12 @@ const RESERVED_RUN_PATHS = new Set([
   "events.jsonl",
   "progress.md",
   "state.json",
+  ".preparation-custody.jsonl",
 ]);
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const READ_REPLACEMENT_ATTEMPTS = 5;
 
-async function openRegularFile(filePath, flags, mode) {
+export async function openRegularFile(filePath, flags, mode) {
   const attempts = flags === constants.O_RDONLY ? READ_REPLACEMENT_ATTEMPTS : 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     let handle;
@@ -102,7 +104,7 @@ async function openRegularFile(filePath, flags, mode) {
   );
 }
 
-async function syncDirectory(directoryPath) {
+export async function syncDirectory(directoryPath) {
   let handle;
   try {
     handle = await open(directoryPath, "r");
@@ -148,19 +150,43 @@ export async function atomicWriteFile(filePath, content) {
   }
 }
 
-export async function appendDurableLine(filePath, value) {
+export async function appendDurableLine(
+  filePath,
+  value,
+  { stable = false } = {},
+) {
   const handle = await openRegularFile(
     filePath,
     constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY,
     0o600,
   );
   try {
-    await handle.writeFile(`${value}\n`);
+    const before = stable ? await handle.stat({ bigint: true }) : null;
+    const line = `${value}\n`;
+    await handle.writeFile(line);
     await handle.sync();
+    if (stable) {
+      await syncDirectory(dirname(filePath));
+      const after = await handle.stat({ bigint: true });
+      const path = await lstat(filePath, { bigint: true });
+      const identity = ["dev", "ino", "mode", "uid", "gid", "nlink"];
+      if (
+        path.isSymbolicLink() ||
+        after.nlink !== 1n ||
+        after.size !== before.size + BigInt(Buffer.byteLength(line)) ||
+        identity.some(
+          (key) => before[key] !== after[key] || after[key] !== path[key],
+        ) ||
+        ["size", "mtimeNs", "ctimeNs"].some((key) => after[key] !== path[key])
+      )
+        throw new RunStoreError("Compact publication changed during append.", {
+          code: "ERR_UNSAFE_STATE_FILE",
+        });
+    }
   } finally {
     await handle.close();
   }
-  await syncDirectory(dirname(filePath));
+  if (!stable) await syncDirectory(dirname(filePath));
 }
 
 function isPublicationTemporaryName(filePath, name) {
@@ -296,11 +322,30 @@ export async function publishExclusiveFile(
   }
 }
 
-export async function readOptionalText(filePath) {
+export async function readOptionalText(filePath, { maxBytes = null } = {}) {
   let handle;
   try {
     handle = await openRegularFile(filePath, constants.O_RDONLY);
-    return await handle.readFile("utf8");
+    if (maxBytes === null) return await handle.readFile("utf8");
+    const tooLarge = () =>
+      new RunStoreError("Managed state file exceeds its size limit.", {
+        code: "ERR_STATE_FILE_TOO_LARGE",
+      });
+    if ((await handle.stat()).size > maxBytes) throw tooLarge();
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw tooLarge();
+    return buffer.toString("utf8", 0, length);
   } catch (cause) {
     if (cause?.code === "ENOENT") {
       return null;
@@ -311,11 +356,11 @@ export async function readOptionalText(filePath) {
   }
 }
 
-export async function readOptionalPublishedText(filePath) {
+export async function readOptionalPublishedText(filePath, options) {
   for (let attempt = 0; ; attempt += 1) {
     await settleExclusivePublication(filePath);
     try {
-      return await readOptionalText(filePath);
+      return await readOptionalText(filePath, options);
     } catch (cause) {
       // A replacement can publish its temporary link after the settlement read.
       // Retry settlement; every attempt still requires an isolated regular file.
@@ -329,19 +374,65 @@ export async function readOptionalPublishedText(filePath) {
   }
 }
 
-export async function removeFile(filePath) {
-  await unlinkIfPresent(filePath);
-  await syncDirectory(dirname(filePath));
-}
-
-export async function truncateDurableFile(filePath, size) {
-  const handle = await openRegularFile(filePath, constants.O_RDWR);
+// Compact authority reads must bind the opened bytes to the current path.
+export async function readStableText(filePath, maxBytes) {
+  const handle = await openRegularFile(filePath, constants.O_RDONLY);
   try {
-    await handle.truncate(size);
-    await handle.sync();
+    const before = await handle.stat({ bigint: true });
+    if (before.size > BigInt(maxBytes))
+      throw new RunStoreError("Compact state exceeds its bound.", {
+        code: "ERR_UNSAFE_STATE_FILE",
+      });
+    const buffer = Buffer.alloc(Number(before.size) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (!isUtf8(buffer.subarray(0, length)))
+      throw new RunStoreError("Compact state is not valid UTF-8.", {
+        code: "ERR_UNSAFE_STATE_FILE",
+      });
+    const source = buffer.toString("utf8", 0, length);
+    const after = await handle.stat({ bigint: true });
+    const path = await lstat(filePath, { bigint: true });
+    const fields = [
+      "dev",
+      "ino",
+      "mode",
+      "uid",
+      "gid",
+      "nlink",
+      "size",
+      "mtimeNs",
+      "ctimeNs",
+    ];
+    if (
+      before.nlink !== 1n ||
+      length !== Number(before.size) ||
+      path.isSymbolicLink() ||
+      fields.some(
+        (key) => before[key] !== after[key] || after[key] !== path[key],
+      )
+    )
+      throw new RunStoreError("Compact state changed during inspection.", {
+        code: "ERR_UNSAFE_STATE_FILE",
+      });
+    return source;
   } finally {
     await handle.close();
   }
+}
+
+export async function removeFile(filePath) {
+  await unlinkIfPresent(filePath);
+  await syncDirectory(dirname(filePath));
 }
 
 function isWithin(parentPath, childPath) {
@@ -409,7 +500,11 @@ export async function resolveRunArtifactPath(runDirectory, relativePath) {
     normalizedPath === ".." ||
     normalizedPath.startsWith(`..${sep}`) ||
     RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase()) ||
-    topLevelPath.toLowerCase().startsWith(".mutation-")
+    /^events-[0-9]+\.jsonl$/iu.test(topLevelPath) ||
+    topLevelPath.toLowerCase().startsWith(".recovery-failure-") ||
+    topLevelPath.toLowerCase().startsWith(".preservation-") ||
+    topLevelPath.toLowerCase().startsWith(".mutation-") ||
+    topLevelPath.toLowerCase().startsWith(".custody-")
   ) {
     throw new RunStoreError("Run artifact path escapes its declared area.", {
       code: "ERR_UNSAFE_RUN_ARTIFACT_PATH",

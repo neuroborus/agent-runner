@@ -3,7 +3,13 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+
 import { normalizeAdapterFailure } from "../../../src/agents/index.js";
+import { polishingPipeline, runPolishing } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
@@ -95,12 +101,13 @@ test("reconstructs a persisted bootstrap correction after interruption", async (
 });
 
 for (const mode of ["lazy", "combined"]) {
-  test(`reconciles an interrupted content-changing ${mode} correction once`, async (t) => {
+  test(`reconciles an already-charged interrupted ${mode} correction at the one-round boundary`, async (t) => {
     const processLoss = new Error("Process stopped during lazy correction.");
     let checkTurns = 0;
     let correctionChanged = false;
     const fixture = await createFixture(t, {
       mode,
+      modeSettings: { maxFixRounds: 1 },
       worker: [
         clarificationReady(),
         bootstrapReady("Worker"),
@@ -116,11 +123,11 @@ for (const mode of ["lazy", "combined"]) {
       async onRoleRun(role, request, _turn, { projectPath }) {
         if (role === "worker" && request.schema === CHECK_AND_FIX_SCHEMA) {
           checkTurns += 1;
-          if (checkTurns === 2) {
-            correctionChanged = true;
+          if (checkTurns <= 2) {
+            correctionChanged = checkTurns === 2;
             await writeFile(
               join(projectPath, "interrupted-lazy-correction.txt"),
-              "fixed\n",
+              `Correction ${checkTurns}\n`,
             );
           }
         }
@@ -167,7 +174,7 @@ for (const mode of ["lazy", "combined"]) {
       fixture.currentRun.pipelineState.pendingLazyCorrection,
       null,
     );
-    assert.equal(fixture.currentRun.counters.fixRounds, 0);
+    assert.equal(fixture.currentRun.counters.fixRounds, 1);
 
     processStopped = false;
     await fixture.recover();
@@ -1539,3 +1546,105 @@ for (const mode of ["independent", "lazy"]) {
     }
   }
 }
+
+for (const schema of [POLISH_SCHEMA, FINALIZATION_SCHEMA, REVIEW_SCHEMA]) {
+  test(`output exhaustion preserves polishing ${schema === POLISH_SCHEMA ? "work" : schema === FINALIZATION_SCHEMA ? "finalization" : "confirmation"}`, async (t) => {
+    let failures = 0;
+    const fixture = await createFixture(t, {
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (request.schema === schema && failures < 2) {
+          failures++;
+          if (request.access === "workspace-write") {
+            await writeFile(
+              join(projectPath, "partial.txt"),
+              `Progress ${failures}\n`,
+            );
+          }
+          throw outputExhaustion();
+        }
+      },
+    });
+    attachOutputExhaustion(fixture);
+    const first = await fixture.run();
+    assert.equal(failures, 1);
+    assert.equal(first.pause.reason, "output_exhausted");
+    assert.equal(first.activeTurn, null);
+    assert.equal(first.pipelineState.reviewedFingerprint, null);
+    const second = await fixture.run();
+    assert.equal(failures, 2);
+    assert.deepEqual(second.pause, first.pause);
+    assert.deepEqual(second.counters, first.counters);
+    const projected = polishingPipeline.projections.pause(second);
+    assert.deepEqual(projected.evidence, [
+      `Suspended role: ${second.pause.role}.`,
+      `Suspended checkpoint: ${second.pause.checkpoint}.`,
+    ]);
+    assert.deepEqual(projected.nextActions, [{ type: "resume", action: null }]);
+    if (schema !== REVIEW_SCHEMA) {
+      assert.equal(
+        await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+        "Progress 2\n",
+      );
+    }
+    assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  });
+}
+
+test("combined polishing preserves a charged exhausted correction and reconverges", async (t) => {
+  let failures = 0;
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    modeSettings: { maxFixRounds: 1 },
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      checkAndFix(),
+      candidateClean(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(_role, request, _turn, { projectPath }) {
+      if (request.schema === CHECK_AND_FIX_SCHEMA && failures < 2) {
+        failures++;
+        await writeFile(
+          join(projectPath, "partial.txt"),
+          `Correction ${failures}\n`,
+        );
+        throw outputExhaustion();
+      }
+    },
+  });
+  attachOutputExhaustion(fixture);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const paused = await fixture.run();
+    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+    assert.equal(paused.counters.fixRounds, 1);
+    assert.equal(paused.pipelineState.candidateConfirmationFingerprint, null);
+    assert.equal(paused.pipelineState.candidateReviewedFingerprint, null);
+    assert.equal(paused.pipelineState.finalizationResult, null);
+  }
+  await fixture.runtime.transition({
+    pipelineState: {
+      ...fixture.currentRun.pipelineState,
+      workflowState: "CHECK_AND_FIX",
+    },
+    pause: null,
+  });
+  await fixture.runtime.startAgentTurn({
+    role: "worker",
+    phase: "check-and-fix",
+  });
+  await writeFile(join(fixture.projectPath, "partial.txt"), "Stopped repair\n");
+  const calls = fixture.calls.worker.length;
+  const stopped = await runPolishing({
+    run: fixture.currentRun,
+    runtime: fixture.runtime,
+    operatorStop: true,
+  });
+  assert.equal(stopped.counters.fixRounds, 1);
+  assert.equal(fixture.calls.worker.length, calls);
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+});

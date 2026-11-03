@@ -107,7 +107,7 @@ const SETTINGS = Object.freeze({
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
     errorMessage:
-      "must be auto, none, or a normalized repository-relative SKILL.md path",
+      "must be auto, none, or a normalized infrastructure-relative Markdown path",
     validate: isFinalizationPolicy,
   }),
   maxFixRounds: positiveIntegerSetting(20),
@@ -137,6 +137,7 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
+  "output_exhausted",
   "bootstrap_disagreement",
   "backend_unavailable",
   "confirmation_output_invalid",
@@ -168,6 +169,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
+  output_exhausted:
+    "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
     "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
@@ -263,6 +266,13 @@ function publicExplanation(pause, fallback) {
 }
 
 function publicEvidence(run) {
+  const pause = run.pause;
+  if (pause.reason === "output_exhausted") {
+    return Object.freeze([
+      `Suspended role: ${pause.role}.`,
+      `Suspended checkpoint: ${pause.checkpoint}.`,
+    ]);
+  }
   if (run.pause.reason === "lazy_output_invalid") {
     return Object.freeze(
       (run.pipelineState.pendingLazyCorrection?.diagnostics ?? [])
@@ -273,7 +283,6 @@ function publicEvidence(run) {
         .slice(0, 32),
     );
   }
-  const pause = run.pause;
   return Object.freeze(
     PUBLIC_DETAIL_REASONS.has(pause.reason) && Array.isArray(pause.evidence)
       ? pause.evidence
@@ -1106,7 +1115,7 @@ export function migratePolishingStateV17(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 18,
+  stateVersion: 19,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1130,9 +1139,12 @@ export const polishingPipeline = Object.freeze({
       }),
     16: migratePolishingStateV16,
     17: migratePolishingStateV17,
+    // Preserve existing path/fallback decisions and consumed-effect evidence.
+    18: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
+  workspace: Object.freeze({ kind: "git", lease: "exclusive" }),
   resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,

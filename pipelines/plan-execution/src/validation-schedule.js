@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { effectivePlanAuthority } from "./plan-position.js";
 
 // Role assignments remain immutable. An accepted amendment overlays only the
-// selected step; advancement always selects the next original inventory.
-export function deriveValidationSchedule(validations, stepCount) {
+// selected step; revision schedules retain their accepted authority.
+export function deriveValidationSchedule(
+  validations,
+  stepCount,
+  planBinding = null,
+) {
   const commands = new Map();
   for (const validation of validations.filter(Boolean)) {
     for (const { command, steps } of validation.requiredChecks) {
@@ -10,19 +16,42 @@ export function deriveValidationSchedule(validations, stepCount) {
       for (const step of steps) commands.get(command).add(step);
     }
   }
-  return Array.from({ length: stepCount }, (_, index) => ({
-    step: index + 1,
-    requiredChecks: [...commands]
-      .filter(([, steps]) => steps.has(index + 1))
-      .map(([command], checkIndex) => ({ id: `C${checkIndex + 1}`, command })),
-  }));
+  return {
+    ...(planBinding === null ? {} : { effectivePlan: planBinding }),
+    commands: [...commands.keys()],
+    steps: Array.from({ length: stepCount }, (_, index) => ({
+      step: index + 1,
+      commandIndexes: [...commands.values()].flatMap((steps, commandIndex) =>
+        steps.has(index + 1) ? [commandIndex] : [],
+      ),
+    })),
+  };
 }
 
 export function scheduledChecks(state, step = state.currentStep) {
-  return (
-    state.validationSchedule?.find((entry) => entry.step === step)
-      ?.requiredChecks ?? null
-  );
+  const schedule = state.validationSchedule;
+  if (
+    !schedule?.effectivePlan &&
+    state.effectivePlanRevisions?.revisions.some(
+      (revision) => revision.accepted,
+    )
+  )
+    return null;
+  if (
+    schedule?.effectivePlan &&
+    !isDeepStrictEqual(
+      schedule.effectivePlan,
+      effectivePlanAuthority(state).binding,
+    )
+  )
+    return null;
+  const entry = schedule?.steps.find((entry) => entry.step === step);
+  return entry
+    ? entry.commandIndexes.map((commandIndex, checkIndex) => ({
+        id: `C${checkIndex + 1}`,
+        command: schedule.commands[commandIndex],
+      }))
+    : null;
 }
 
 export function validationCatalog(state) {
@@ -31,9 +60,8 @@ export function validationCatalog(state) {
     for (const check of validation?.requiredChecks ?? [])
       commands.add(check.command);
   }
-  for (const entry of state.validationSchedule ?? []) {
-    for (const check of entry.requiredChecks) commands.add(check.command);
-  }
+  for (const command of state.validationSchedule?.commands ?? [])
+    commands.add(command);
   for (const check of state.requiredChecks ?? []) commands.add(check.command);
   return [...commands];
 }
@@ -74,4 +102,16 @@ export function acceptedValidationAmendment(state) {
     validationInfrastructureFingerprint:
       evidence.validationInfrastructureFingerprint,
   };
+}
+
+// Frozen role inventories remain historical; capability checks use the current
+// accepted revision receipts once their complete schedule is selected.
+export function validationReports(state) {
+  const record = state.effectiveValidation?.find(
+    (entry) =>
+      entry.revision === state.validationSchedule?.effectivePlan?.revision,
+  );
+  return record?.schedule
+    ? [record.worker.inventory, record.reviewer?.inventory ?? null]
+    : [state.workerValidation, state.reviewerValidation];
 }

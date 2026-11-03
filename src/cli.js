@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
 import packageMetadata from "../package.json" with { type: "json" };
+import { migrateRunnerConfiguration } from "./config/index.js";
 import { createGuidanceService } from "./guidance/index.js";
+import { createIssueService } from "./issues/index.js";
 import {
   awaitDetachedDispatch,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
@@ -11,15 +13,22 @@ import {
 } from "./mcp/index.js";
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
+import { createRuntimeAdmission } from "./runtime/index.js";
+import { createUpdateService, isUpdateVersion } from "./update/index.js";
 import {
+  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
+  projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
+  recoveryFailureDetails,
 } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
+  config: Object.freeze(["from"]),
+  update: Object.freeze(["check", "release", "idempotency-key"]),
   guidance: Object.freeze(["project", "project-config"]),
   pause: Object.freeze([
     "run",
@@ -54,6 +63,8 @@ const COMMON_RUN_OPTIONS = Object.freeze([
   "project-config",
 ]);
 const REQUIRED_COMMAND_OPTIONS = Object.freeze({
+  update: Object.freeze([]),
+  config: Object.freeze(["from"]),
   guidance: Object.freeze(["project"]),
   pause: Object.freeze(["run"]),
   cancel: Object.freeze(["run"]),
@@ -63,7 +74,35 @@ const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   mcp: Object.freeze([]),
 });
 
-const COMMANDS = new Set(["run", ...Object.keys(COMMAND_OPTIONS)]);
+// Issue management is a thin projection; deliberate creation stays MCP-only.
+const ISSUE_ACTIONS = Object.freeze({
+  list: Object.freeze({
+    options: Object.freeze(["origin", "status", "limit", "cursor"]),
+    required: Object.freeze([]),
+  }),
+  read: Object.freeze({
+    options: Object.freeze(["issue"]),
+    required: Object.freeze(["issue"]),
+  }),
+  update: Object.freeze({
+    options: Object.freeze([
+      "issue",
+      "expected-revision",
+      "expected-hash",
+      "idempotency-key",
+      "status",
+      "plan-reference",
+      "clear-plan-references",
+      "commit-reference",
+      "clear-commit-references",
+      "note",
+      "clear-note",
+    ]),
+    required: Object.freeze(["issue", "expected-revision", "expected-hash"]),
+  }),
+});
+
+const COMMANDS = new Set(["run", "issues", ...Object.keys(COMMAND_OPTIONS)]);
 const GLOBAL_OPTIONS = new Set(["help", "version"]);
 const PIPELINES = listPipelines();
 const PIPELINE_RUN_OPTIONS = new Set(
@@ -79,6 +118,9 @@ const PIPELINE_RUN_OPTIONS = new Set(
 const OPTIONS = Object.freeze({
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
+  from: { type: "string" },
+  check: { type: "boolean" },
+  release: { type: "string" },
   run: { type: "string" },
   "expected-revision": { type: "string" },
   "idempotency-key": { type: "string" },
@@ -92,8 +134,37 @@ const OPTIONS = Object.freeze({
   model: { type: "string" },
   profile: { type: "string" },
   "project-config": { type: "string" },
+  origin: { type: "string" },
+  status: { type: "string", multiple: true },
+  limit: { type: "string" },
+  cursor: { type: "string" },
+  issue: { type: "string" },
+  "expected-hash": { type: "string" },
+  "plan-reference": { type: "string", multiple: true },
+  "clear-plan-references": { type: "boolean" },
+  "commit-reference": { type: "string", multiple: true },
+  "clear-commit-references": { type: "boolean" },
+  note: { type: "string" },
+  "clear-note": { type: "boolean" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
+  ),
+  ...Object.fromEntries(
+    PIPELINES.flatMap((pipeline) =>
+      Object.entries(pipeline.settings).flatMap(([, definition]) =>
+        definition.option
+          ? [
+              [
+                definition.option,
+                {
+                  type: "string",
+                  ...(definition.multiple ? { multiple: true } : {}),
+                },
+              ],
+            ]
+          : [],
+      ),
+    ),
   ),
   clarify: { type: "boolean" },
 });
@@ -105,13 +176,18 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <workspace> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--expected-revision <revision>] [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run status --run <run-id>
-  agent-run guidance --project <repo> [--project-config <path>]
-  agent-run guidance edit --project <repo> [--project-config <path>]
+  agent-run guidance --project <directory> [--project-config <path>]
+  agent-run guidance edit --project <directory> [--project-config <path>]
+  agent-run config migrate --from <legacy-file>
+  agent-run update [--check] [--release <exact-version>] [--idempotency-key <key>]
+  agent-run issues list [--origin <recorded-path>] [--status <status>]... [--limit <count>] [--cursor <cursor>]
+  agent-run issues read --issue <issue-id>
+  agent-run issues update --issue <issue-id> --expected-revision <revision> --expected-hash <hash> [--status <status>] [--plan-reference <text>]... [--commit-reference <text>]... [--note <markdown>] [--clear-plan-references] [--clear-commit-references] [--clear-note] [--idempotency-key <key>]
   agent-run pipelines
   agent-run mcp
 
@@ -119,19 +195,30 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
+      --check              Check the approved official release without installing
+      --release            Select an exact version, required for prereleases
+                           update apply is managing-operator-only; never restarts clients
+      --from               Validate and copy legacy settings to the user location
+                           Only an absent destination is created; conflicts fail
+      --plan-kind          Select commit (default) or custom authoring/execution
+      --criteria           Read user criteria from a local Markdown file
+      --source             Declare a source path or reference (repeatable; no retrieval)
+      --output             Declare an intended output path (repeatable; no authoring writes)
       --clarify            Open the clarification editor before agent questions
       --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely
                            independent review, but uses more context and tokens;
                            lazy is opt-in, uses less, and has no independent review;
                            combined adds primary convergence before independent review
-                           and is available for all three pipelines
+                           and is available for all registered pipelines;
+                           audit uses separate discovery and finding recheck cycles
+      --placement          Init placement: integrated or external; separate from mode
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
                            lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
-      --project-config     Load an explicit ignored project configuration
+      --project-config     Select integrated or target-bound external configuration
       --model              Set the run-wide backend-native model
       --effort             Set run-wide effort: current|low|medium|high|xhigh
                            current retains the provider default
@@ -143,8 +230,20 @@ Options:
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
-      --expected-revision  Bind a resume, pause, or cancel request revision
-      --idempotency-key    Bind an explicit pause or cancel retry identity
+      --expected-revision  Bind a resume, pause, cancel, or issues update revision
+      --expected-hash      Bind an issues update to the inspected documentHash
+      --idempotency-key    Bind an explicit pause, cancel, update, or issues update retry identity
+      --origin             Filter issues by exact recorded origin path; never inspected
+      --status             Filter issues by status (repeatable), or set one on update:
+                           open|queued|in_progress|resolved|dismissed
+      --limit              Issue page size from 1 to 100 (default 50)
+      --cursor             Continue an issue list from its opaque nextCursor
+      --issue              Select one issue ID from the global issue store
+      --plan-reference     Replace plan references (repeatable; never retrieved)
+      --commit-reference   Replace resolving commit references (repeatable; never retrieved)
+      --note               Replace the concise disposition note
+      --clear-plan-references, --clear-commit-references, --clear-note
+                           Clear that optional tracking metadata
       --timing             immediate (default) or after-current-commit for pause/cancel
                            Deferred stops require a selected execution step; pauses,
                            failures, or interruptions settle without extra work
@@ -162,6 +261,32 @@ function writeActivity(stdout, activity) {
   stdout.write(
     `[${activity.actor}/${activity.phase}] ${activity.message}${runReference}\n`,
   );
+}
+
+function refinementProgressLines(progress) {
+  if (progress == null) return [];
+  const line = (text) => text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+  return [
+    `Plan progress: ${progress.artifactPath}`,
+    `Effective revision: ${progress.effectiveRevision}; advisory planning target: ${progress.preferredCommitLineLimit}; execution assessment threshold: >${progress.threshold}`,
+    ...progress.originalSteps.flatMap((entry) => [
+      `Original step ${entry.originalStep}: ${entry.subject}; ${entry.status}${entry.refinement ? `; refinement ${entry.refinement}` : ""}${entry.head ? `; verified SHA: ${entry.head}` : ""}`,
+      ...(entry.measurement
+        ? [
+            `  Measured: ${entry.measurement.changedLines} changed text lines; ${entry.measurement.binaryFiles} binary files; ${entry.measurement.gitlinks} gitlinks; decision: ${entry.decision ?? "pending"}`,
+            `  Reason: ${line(entry.reason ?? "No size decision recorded")}`,
+          ]
+        : []),
+      ...entry.replacements.map(
+        (replacement) =>
+          `  ${replacement.label} (effective Commit ${replacement.step}): ${replacement.subject}; ${replacement.status}; verified SHA: ${replacement.head ?? "pending"}`,
+      ),
+      ...entry.proposedReplacements.map(
+        (replacement) =>
+          `  Proposed ${replacement.label}: ${replacement.subject}; pending; verified SHA: pending`,
+      ),
+    ]),
+  ];
 }
 
 function shortFingerprint(value) {
@@ -234,9 +359,26 @@ function runSummary({ directoryPath, run }) {
   const inactivity = projectInactivityRecovery(run);
   if (inactivity !== null)
     lines.push(
-      `Provider inactivity: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
+      `Provider ${inactivity.expiryProven === false ? "reconstruction" : "inactivity"}: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
     );
   const retry = projectAvailabilityRetry(run);
+  const observations = projectObservations(run);
+  if (observations !== null) {
+    const latest = observations.attempts.at(-1);
+    const known = (value) => value ?? "unknown";
+    const measured = latest.measurements;
+    lines.push(
+      `Observations: attempt ${latest.id}; ${latest.role} ${latest.checkpoint}; ${latest.status}; accounting ${latest.accounting}; omitted attempts ${observations.omittedAttempts}`,
+      `Supplied context bytes: prompt ${known(measured?.promptBytes)}; reconstruction prompt ${known(measured?.recoveryPromptBytes)}; schema ${known(measured?.schemaBytes)}`,
+      `Result bytes: output ${known(measured?.resultBytes)}; structured JSON ${known(measured?.structuredResultBytes)}; referenced file bytes/count unknown`,
+    );
+    for (const value of latest.observations) {
+      lines.push(
+        `  Native attempt ${value.attempt} turn ${value.turn} (${value.kind}): ${value.outcome}; accounting ${value.accounting}; commands ${value.commandCompletions}; compactions ${value.compactions}; facts incomplete ${value.factsIncomplete}`,
+        `  Tokens (last request / cumulative ${value.cumulativeScope}): input ${known(value.last?.inputTokens)}/${known(value.cumulative?.inputTokens)}; output ${known(value.last?.outputTokens)}/${known(value.cumulative?.outputTokens)}; context capacity ${known(value.contextCapacity)}`,
+      );
+    }
+  }
   if (retry !== null) {
     lines.push(
       `Availability retry: ${retry.role} ${retry.checkpoint}; ${retry.reason}; attempt ${retry.attempt}; delay ${retry.delayMs}ms; deadline ${retry.nextRetryAt}`,
@@ -275,6 +417,28 @@ function runSummary({ directoryPath, run }) {
   if (status.planPath !== null) {
     lines.push(`Plan: ${status.planPath}`);
   }
+  if (status.auditReport) {
+    lines.push(
+      `Audit report: ${status.auditReport.path} (${status.auditReport.status})`,
+      `Audit findings: ${status.auditReport.confirmedFindings} confirmed; ${status.auditReport.pendingCandidates} pending (unverified)`,
+    );
+  }
+  if (status.setup) {
+    lines.push(
+      `Setup: ${status.setup.placement}`,
+      `Target: ${status.setup.projectPath}`,
+      `Project configuration: ${status.setup.configurationPath}`,
+      `Artifacts: ${status.setup.artifactPath}`,
+      `Working directory: ${status.setup.workingDirectory}`,
+      "Configured checks:",
+      ...status.setup.checks.map((command) => `  ${command}`),
+      "Resources:",
+      ...status.setup.resources.map(
+        ({ path, status }) => `  ${status}: ${path}`,
+      ),
+    );
+  }
+  lines.push(...refinementProgressLines(status.refinementProgress));
   if (status.findings.length > 0) {
     lines.push("Open findings:");
     for (const finding of status.findings) {
@@ -291,6 +455,15 @@ function runSummary({ directoryPath, run }) {
   }
   if (reviewed !== null) {
     lines.push(`Reviewed fingerprint: ${reviewed}`);
+  }
+  if (status.planKind === "custom") {
+    lines.push(`Accepted steps: ${status.acceptedSteps.length}`);
+    for (const { step, receipt, result } of status.acceptedSteps) {
+      lines.push(
+        `Step ${step} receipt: ${shortFingerprint(receipt)}`,
+        result.analysis,
+      );
+    }
   }
   if (status.completedCommits.length > 0) {
     lines.push(
@@ -323,15 +496,58 @@ function explicitStopIdentity(values) {
   };
 }
 
+function positiveInteger(value, option) {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`--${option} must be a positive integer.`);
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`--${option} is too large.`);
+  }
+  return number;
+}
+
 function parseExpectedRevision(revision) {
-  if (!/^[1-9][0-9]*$/u.test(revision)) {
-    throw new Error("--expected-revision must be a positive integer.");
+  return positiveInteger(revision, "expected-revision");
+}
+
+function issueListInput(values) {
+  return {
+    ...(values.origin === undefined ? {} : { projectPath: values.origin }),
+    ...(values.status === undefined ? {} : { statuses: values.status }),
+    ...(values.limit === undefined
+      ? {}
+      : { limit: positiveInteger(values.limit, "limit") }),
+    ...(values.cursor === undefined ? {} : { cursor: values.cursor }),
+  };
+}
+
+// Omitted fields stay unchanged; explicit clear flags map to MCP's empty
+// arrays and null so both projections share one tracking contract.
+function issueUpdateInput(values, idempotencyKey) {
+  if (values.status?.length > 1) {
+    throw new Error("--status may be supplied only once for issues update.");
   }
-  const expectedRevision = Number(revision);
-  if (!Number.isSafeInteger(expectedRevision)) {
-    throw new Error("--expected-revision is too large.");
+  const changes = {};
+  for (const [option, clear, field, cleared] of [
+    ["plan-reference", "clear-plan-references", "planReferences", []],
+    ["commit-reference", "clear-commit-references", "commitReferences", []],
+    ["note", "clear-note", "note", null],
+  ]) {
+    if (values[option] !== undefined && values[clear]) {
+      throw new Error(`Use either --${option} or --${clear}, not both.`);
+    }
+    if (values[clear]) changes[field] = cleared;
+    else if (values[option] !== undefined) changes[field] = values[option];
   }
-  return expectedRevision;
+  return {
+    idempotencyKey,
+    issueId: values.issue,
+    expectedRevision: parseExpectedRevision(values["expected-revision"]),
+    expectedHash: values["expected-hash"],
+    ...(values.status === undefined ? {} : { status: values.status[0] }),
+    ...changes,
+  };
 }
 
 function effortSelection(value, option) {
@@ -398,13 +614,17 @@ function settingOverrides(pipeline, values) {
   return Object.freeze(
     Object.fromEntries(
       Object.entries(pipeline.settings).flatMap(([name, definition]) => {
-        if (!pipeline.runOptions.includes(name) || values[name] === undefined) {
+        const option = definition.option ?? name;
+        if (
+          !pipeline.runOptions.includes(option) ||
+          values[option] === undefined
+        ) {
           return [];
         }
-        if (!definition.validate(values[name])) {
-          throw new Error(`--${name} ${definition.errorMessage}.`);
+        if (!definition.validate(values[option])) {
+          throw new Error(`--${option} ${definition.errorMessage}.`);
         }
-        return [[name, values[name]]];
+        return [[name, values[option]]];
       }),
     ),
   );
@@ -446,29 +666,68 @@ function detachedStopCheckpoint(environment) {
   return Number(value);
 }
 
-export async function main(
+export async function main(args = process.argv.slice(2), options = {}) {
+  let parsed;
+  try {
+    parsed = parseCommand(args);
+  } catch {
+    return runCommand(args, options);
+  }
+  const admission =
+    options.runtimeAdmission ??
+    createRuntimeAdmission({ runStore: createRunStore() });
+  try {
+    return await admission.withAdmission(
+      parsed.positionals[0] === "mcp" ? "mcp" : "cli",
+      () => runCommand(args, options, parsed),
+      async () =>
+        [parsed.values.project, parsed.values.task].filter(
+          (path) => typeof path === "string",
+        ),
+    );
+  } catch (error) {
+    if (!error?.code?.startsWith("ERR_RUNTIME_")) throw error;
+    (options.stderr ?? process.stderr).write(
+      "Runtime admission or retirement could not be verified.\n",
+    );
+    return 1;
+  }
+}
+
+function parseCommand(args) {
+  return parseArgs({
+    args,
+    allowPositionals: true,
+    strict: true,
+    tokens: true,
+    options: OPTIONS,
+  });
+}
+
+async function runCommand(
   args = process.argv.slice(2),
   {
     stdout = process.stdout,
     stderr = process.stderr,
     runner,
     createCommandRunner = createRunner,
+    createCommandRunStore = createRunStore,
     guidance,
     createCommandGuidance = createGuidanceService,
+    issues,
+    createCommandIssues = createIssueService,
+    migrateConfiguration = migrateRunnerConfiguration,
+    updateService,
+    createCommandUpdate = createUpdateService,
     startMcp = serveMcp,
     environment = process.env,
     idempotencyKeyFactory = randomUUID,
   } = {},
+  previouslyParsed,
 ) {
   let parsed;
   try {
-    parsed = parseArgs({
-      args,
-      allowPositionals: true,
-      strict: true,
-      tokens: true,
-      options: OPTIONS,
-    });
+    parsed = previouslyParsed ?? parseCommand(args);
   } catch (error) {
     if (
       error instanceof Error &&
@@ -505,7 +764,11 @@ export async function main(
     return 1;
   }
 
-  const maximumPositionals = ["run", "guidance"].includes(command) ? 2 : 1;
+  const maximumPositionals = ["run", "guidance", "config", "issues"].includes(
+    command,
+  )
+    ? 2
+    : 1;
   if (positionals.length > maximumPositionals) {
     stderr.write(
       `Unexpected argument: ${positionals[maximumPositionals]}\n\n${USAGE}`,
@@ -518,8 +781,22 @@ export async function main(
   let requiredOptions = REQUIRED_COMMAND_OPTIONS[command];
   let commandLabel = command;
 
-  if (command === "guidance") {
-    if (positionals[1] !== undefined && positionals[1] !== "edit") {
+  if (command === "config" && positionals[1] !== "migrate") {
+    stderr.write(`Expected config migrate.\n\n${USAGE}`);
+    return 1;
+  }
+
+  if (command === "issues" && !Object.hasOwn(ISSUE_ACTIONS, positionals[1])) {
+    stderr.write(`Expected issues list, read, or update.\n\n${USAGE}`);
+    return 1;
+  }
+
+  if (["guidance", "config", "update", "issues"].includes(command)) {
+    if (
+      command === "guidance" &&
+      positionals[1] !== undefined &&
+      positionals[1] !== "edit"
+    ) {
       stderr.write(`Unknown guidance action: ${positionals[1]}\n\n${USAGE}`);
       return 1;
     }
@@ -527,7 +804,7 @@ export async function main(
     for (const token of parsed.tokens.filter(
       (token) => token.kind === "option",
     )) {
-      if (seen.has(token.name)) {
+      if (seen.has(token.name) && !OPTIONS[token.name]?.multiple) {
         stderr.write(`Option '--${token.name}' may be supplied only once.\n`);
         return 1;
       }
@@ -558,6 +835,12 @@ export async function main(
     ];
     requiredOptions = pipeline.requiredRunOptions;
     commandLabel = `${command} ${pipelineId}`;
+  }
+
+  if (command === "issues") {
+    ({ options: supportedOptions, required: requiredOptions } =
+      ISSUE_ACTIONS[positionals[1]]);
+    commandLabel = `${command} ${positionals[1]}`;
   }
 
   const unsupportedOption = Object.keys(values).find(
@@ -598,7 +881,8 @@ export async function main(
   }
   if (command === "mcp") {
     try {
-      await startMcp({ stderr });
+      const server = await startMcp({ stderr });
+      await server?.closed;
       return 0;
     } catch {
       stderr.write("Agent Runner MCP failed to start.\n");
@@ -606,7 +890,80 @@ export async function main(
     }
   }
 
+  let recoveryDispatch;
+  let recoveryStarted = false;
+  let recoveryStage = "runtime-compatibility";
   try {
+    if (command === "update") {
+      if (values.check && values["idempotency-key"] !== undefined)
+        throw new Error("--idempotency-key requires update apply.");
+      if (values.release !== undefined && !isUpdateVersion(values.release))
+        throw new Error("--release requires an exact version.");
+      try {
+        const request =
+          values.release === undefined ? {} : { version: values.release };
+        const key = values.check
+          ? undefined
+          : (values["idempotency-key"] ?? idempotencyKeyFactory());
+        if (
+          !values.check &&
+          (typeof key !== "string" ||
+            key.length > 1024 ||
+            !key.trim() ||
+            /[\p{Cc}\p{Zl}\p{Zp}]/u.test(key))
+        )
+          throw new Error("Invalid update retry identity.");
+        const service = updateService ?? createCommandUpdate();
+        if (!values.check && values["idempotency-key"] === undefined)
+          stderr.write(`Update retry key: ${key}\n`);
+        const result = values.check
+          ? await service.check(request)
+          : await service.apply({ ...request, idempotencyKey: key });
+        stdout.write(
+          `${JSON.stringify(values.check ? result : { ...result, idempotencyKey: key })}\n`,
+        );
+        return result.status === "blocked" ? 1 : 0;
+      } catch {
+        stderr.write("Update could not be verified.\n");
+        return 1;
+      }
+    }
+    if (command === "config") {
+      const receipt = await migrateConfiguration({
+        from: values.from,
+        env: environment,
+      });
+      stdout.write(
+        receipt.migrated
+          ? "User configuration migrated.\n"
+          : "User configuration unchanged.\n",
+      );
+      return 0;
+    }
+    if (command === "issues") {
+      const action = positionals[1];
+      const input =
+        action === "list"
+          ? issueListInput(values)
+          : action === "read"
+            ? { issueId: values.issue }
+            : issueUpdateInput(
+                values,
+                values["idempotency-key"] ?? idempotencyKeyFactory(),
+              );
+      const service = issues ?? createCommandIssues({ env: environment });
+      if (action === "update" && values["idempotency-key"] === undefined)
+        stderr.write(`Issue update retry key: ${input.idempotencyKey}\n`);
+      const result = await service[action](input);
+      stdout.write(
+        `${JSON.stringify(
+          action === "update"
+            ? { ...result, idempotencyKey: input.idempotencyKey }
+            : result,
+        )}\n`,
+      );
+      return 0;
+    }
     if (command === "guidance") {
       const service = guidance ?? createCommandGuidance({ env: environment });
       const input = {
@@ -632,11 +989,18 @@ export async function main(
       }
       return 0;
     }
+    let lastRefinementProgress;
     const commandRunner =
       runner ??
       createCommandRunner({
         onActivity(activity) {
           writeActivity(stdout, activity);
+          const progress = JSON.stringify(activity.refinementProgress);
+          if (progress !== lastRefinementProgress) {
+            const lines = refinementProgressLines(activity.refinementProgress);
+            if (lines.length) stdout.write(`${lines.join("\n")}\n`);
+            lastRefinementProgress = progress;
+          }
         },
       });
     if (command === "run") {
@@ -674,11 +1038,12 @@ export async function main(
     }
     if (command === "resume") {
       const dispatch = await awaitDetachedDispatch(environment);
+      recoveryDispatch = dispatch;
       const expectedRevision =
         values["expected-revision"] === undefined
           ? undefined
           : parseExpectedRevision(values["expected-revision"]);
-      const result = await commandRunner.resume({
+      const resumeInput = {
         runId: values.run,
         action: resumeAction(values),
         ...(dispatch === undefined ? {} : { dispatch }),
@@ -694,6 +1059,12 @@ export async function main(
               expectedRuntimeCompatibility:
                 environment[DETACHED_RUNTIME_COMPATIBILITY_ENV],
             }),
+      };
+      recoveryStarted = true;
+      const result = await commandRunner.resume(resumeInput, {
+        onRecoveryStage(stage) {
+          recoveryStage = stage;
+        },
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
@@ -731,7 +1102,38 @@ export async function main(
     stdout.write(runSummary(result));
     return 0;
   } catch (error) {
-    stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    const details = recoveryStarted
+      ? recoveryFailureDetails(recoveryStage, error)
+      : null;
+    if (
+      details !== null &&
+      (details.code !== null ||
+        recoveryDispatch !== undefined ||
+        environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] !== undefined)
+    ) {
+      if (recoveryDispatch !== undefined) {
+        try {
+          await createCommandRunStore().recordRecoveryFailure(
+            values.run,
+            recoveryDispatch,
+            { stage: recoveryStage, error },
+          );
+        } catch {
+          // Diagnostics cannot replace the original failure or grant recovery.
+        }
+      }
+      stderr.write(
+        `Recovery failed at ${details.stage} (${details.code ?? "unavailable"}): ${details.explanation}\n`,
+      );
+      if (error?.code === "ERR_RUNTIME_VERSION_SKEW")
+        stderr.write(
+          "Restart the Agent Runner MCP server and retry the same idempotency key.\n",
+        );
+    } else {
+      stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
     return error?.code === "ERR_RUNTIME_VERSION_SKEW"
       ? RUNTIME_VERSION_SKEW_EXIT_CODE
       : 1;

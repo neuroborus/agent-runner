@@ -1,15 +1,23 @@
 # Pipeline Model
 
-Agent Runner hosts three explicit local workflows. They share runtime safety and
+Agent Runner hosts five explicit local workflows. They share runtime safety and
 durability services, but each pipeline owns its roles, prompts, settings, state,
 and completion rules. The product is not a general workflow framework, and one
 pipeline never calls another.
 
 ## Plan authoring
 
-Plan authoring turns a task into a reviewed, commit-by-commit `plan.md`. It may
+Plan authoring turns a task into a reviewed `plan.md`. Omitted `planKind` stays
+`commit`, with exact Conventional Commit subjects. Explicit `custom` selects
+criterion-driven planning in a Git-independent directory workspace. Material
+missing criteria are resolved during bounded clarification; criteria may be
+ordinary Markdown. The reviewed custom plan carries agreed stable criterion
+references, observable results and input/output declarations. Sources remain
+read-only, URLs grant no retrieval, and declared outputs grant no authoring
+writes. Custom prompts inherit coding requirements only when selected by the
+user. Plan authoring may
 clarify material requirements first, but it keeps the target project read-only
-apart from the resolved clarification and plan artifact paths. The resulting
+apart from the resolved clarification and plan artifact paths. Commit-plan
 headings contain the exact subject-only Conventional Commit messages that plan
 execution will later consume unchanged.
 
@@ -25,8 +33,9 @@ or guarantee that a later worktree will remain compatible with the plan.
 
 ## Plan execution
 
-Plan execution accepts a deterministically validated plan and implements one
-step at a time. Each accepted step becomes exactly one verified local commit
+Plan execution accepts an explicitly selected, deterministically validated commit or custom plan and implements one step at a time. Omitted kind stays commit. Custom execution uses agreed criteria in an ordinary directory, including analysis-only steps, and accepts durable result receipts after all mode-required candidate, finalization and terminal-confirmation gates. Analysis/evidence and inspected outputs bind those gates. It never stages or commits, even inside a repository; coding checks apply only when selected requirements make them relevant.
+
+For commit plans, each accepted step becomes exactly one verified local commit
 with the subject from its plan heading. Findings are resolved within that step,
 not by adding separate review-fix commits. A completed earlier commit is durable
 history and is never rewritten automatically when later work encounters a
@@ -37,9 +46,15 @@ uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
 read-only candidate confirmation. Combined mode requires primary convergence
 followed by the complete independent candidate review. The stable candidate
 then passes full finalization and one distinct read-only terminal confirmation
-immediately before the constrained commit.
+before its selected commit or accepted-result checkpoint.
 
-The plan defines the authorized commit boundaries. Clarification may explain a
+The plan defines the authorized commit boundaries. New eligible commit-plan
+runs may replace an oversized unfinished step with a reviewed flat sequence,
+without changing the frozen input. Mode-specific plan approval, complete
+replacement validation and verified external preservation precede separation.
+Every replacement passes all ordinary gates independently; the original step
+and its deferred stop complete only after every replacement commits. Legacy
+and intermediate runs never acquire this eligibility by resuming. Clarification may explain a
 requirement, but it cannot silently expand, reorder, or reinterpret those
 boundaries. A conflicting clarification or product decision requires a revised
 plan and a new execution run.
@@ -57,16 +72,57 @@ access and never changes `HEAD`.
 Ignored files are outside the polishing change set. Task inputs inside the
 repository must not overlap writable changes.
 
+## Audit
+
+Audit inspects the agreed Git or ordinary workspace read-only and produces
+`audit.md`. It starts with bounded clarification of scope, references, exclusions
+and criteria. References grant no retrieval or write authority. Every new or
+materially revised finding batch requires distinct verification in every mode;
+accepting findings never cleans discovery. Discovery and recheck budgets are
+separate finite run-wide totals, each capped at 20, preserved across resume.
+
+Lazy continues one logical Auditor. Independent starts a fresh Auditor per
+discovery pass and fresh finding Reviewers after corrections. Combined keeps
+each Auditor through its series until clean, then requires a later fresh
+Auditor's clean first discovery pass. Each batch converges with its discovering
+Auditor before fresh clean-first finding review; correcting Reviewers finish
+their own series before replacement. Reconstruction creates no fresh opportunity.
+
+Runner publishes an in-progress report after accepted updates. Only exact
+rechecked versions appear confirmed; pending candidates and hypotheses remain
+explicitly unverified. Complete publication requires the selected clean gate,
+no pending verification and unchanged bindings. Zero or Critical findings can
+both accompany success. Findings create no automatic issues or repair authority;
+fixes require a separately authorized workflow. The
+[audit specification](../../pipelines/audit/docs/SPEC.md) owns report shape,
+classification, cycle/session rules and recoverable publication.
+
 ## Review modes
+
+Init reviews and prepares infrastructure for either
+integrated or external placement, independently of these review modes. It reuses
+an unambiguous target-bound setup, defaults new setup to integrated, and resolves
+competing placements before freezing clarification. All proposal turns are
+read-only. Lazy requires primary convergence and a distinct clean confirmation;
+independent requires separate review; combined requires both. Accepted proposals
+are internal evidence and do not claim published or usable infrastructure. See
+the [init specification](../../pipelines/init/docs/SPEC.md).
+Runner publishes prerequisites with identity-bound receipts, verifies their
+availability, then publishes merged local guidance last. A distinct read-only
+terminal confirmation accepts the complete prepared snapshot before completion:
+primary in lazy, Reviewer in independent/combined. Findings renew the proposal
+gates and publication verification without resetting bounded accounting. Setup grants no staging, commit or
+pipeline-start authority.
 
 `independent` is the default and recommended mode. A primary role produces the
 work and a separately configured Reviewer supplies genuine semantic review;
-an Arbiter is available only for the pipeline's bounded disagreements. This
+in coding pipelines an Arbiter is available only for the pipeline's bounded disagreements. This
 costs more provider context and tokens because the review context is genuinely
 separate.
 
 `lazy` is an explicit lower-consumption choice. It resolves and invokes only
-the Planner or Worker and provides no independent review. The primary role
+the primary role and provides no independent review. Audit uses the read-only
+Auditor and its own discovery/recheck gates described above. In coding pipelines, the primary role
 alternates between a check-and-fix pass and a distinct read-only clean
 confirmation. Authoring returns draft changes as structured output; execution
 and polishing may change safe workspace content during check/fix. Findings go
@@ -85,7 +141,7 @@ Combined execution runs Worker check/fix and a separate read-only clean
 confirmation before the complete independent candidate Reviewer gate. Both
 candidate approvals bind the same content fingerprint. Finalization may format
 that content; a distinct Reviewer terminal confirmation approves its resulting
-fingerprint and validation evidence before one-shot commit authorization.
+fingerprint and validation evidence before its selected commit or accepted-result checkpoint.
 Content repairs restart primary convergence. Self-findings go directly to fixing;
 independent findings retain disputes, withdrawals, exact recorded overrides, and
 fresh on-demand arbitration. Unresolved bootstrap disagreements and primary

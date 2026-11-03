@@ -7,6 +7,7 @@ import {
   parseProjectConfiguration,
   parseRunnerConfiguration,
   resolvePipelineConfiguration,
+  resolvePipelineSettings,
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
 
@@ -114,6 +115,10 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     },
   });
   assert.deepEqual(resolved.settings, {
+    planKind: "commit",
+    automaticCommitSplitting: true,
+    preferredCommitLineLimit: 900,
+    commitSizeAssessmentMultiplier: 3,
     finalization: "auto",
     maxFixRoundsPerStep: 8,
     maxDisputesPerFinding: 5,
@@ -173,6 +178,10 @@ test("role resolution normalizes configuration objects", () => {
       },
     },
     settings: {
+      planKind: "commit",
+      criteriaPath: null,
+      sourceReferences: [],
+      outputPaths: [],
       maxRevisionRounds: 4,
       mode: "independent",
       preferredCommitLineLimit: 900,
@@ -353,20 +362,131 @@ test("preferred commit line targets validate and resolve through configuration p
       /preferredCommitLineLimit/u,
     );
   }
+});
+
+test("execution size settings resolve independently and reject unsafe threshold arithmetic", () => {
+  const root = (settings = {}) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-execution": settings },
+  });
+  const resolve = (runner, project = null) =>
+    resolvePipelineConfiguration(
+      "plan-execution",
+      runner,
+      {},
+      {},
+      null,
+      project,
+    ).settings;
+  assert.equal(resolve(root()).preferredCommitLineLimit, 900);
+  assert.equal(resolve(root()).commitSizeAssessmentMultiplier, 3);
+  const resolved = resolve(
+    root({ preferredCommitLineLimit: 800, commitSizeAssessmentMultiplier: 4 }),
+    root({ preferredCommitLineLimit: 700 }),
+  );
+  assert.equal(resolved.preferredCommitLineLimit, 700);
+  assert.equal(resolved.commitSizeAssessmentMultiplier, 4);
+  for (const field of [
+    "preferredCommitLineLimit",
+    "commitSizeAssessmentMultiplier",
+  ]) {
+    for (const value of [
+      0,
+      -1,
+      1.5,
+      "900",
+      true,
+      null,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      assert.throws(
+        () => resolve(root({ [field]: value })),
+        new RegExp(field, "u"),
+      );
+      assert.throws(
+        () => resolve(root(), root({ [field]: value })),
+        new RegExp(field, "u"),
+      );
+    }
+  }
+  const largest = Number.MAX_SAFE_INTEGER;
+  assert.equal(
+    resolve(
+      root({
+        preferredCommitLineLimit: largest,
+        commitSizeAssessmentMultiplier: 1,
+      }),
+    ).preferredCommitLineLimit,
+    largest,
+  );
+  assert.throws(
+    () => resolve(root({ preferredCommitLineLimit: largest })),
+    /threshold/u,
+  );
   assert.throws(
     () =>
-      resolvePipelineConfiguration(
-        "plan-execution",
-        configuration(700),
-        {},
-        {},
-        null,
-        {
-          schemaVersion: 1,
-          pipelines: { "plan-execution": { preferredCommitLineLimit: 900 } },
-        },
+      resolve(
+        root({
+          preferredCommitLineLimit: 1,
+          commitSizeAssessmentMultiplier: largest,
+        }),
+        root({ preferredCommitLineLimit: 2 }),
       ),
-    /preferredCommitLineLimit/u,
+    /threshold/u,
+  );
+});
+
+test("automatic commit splitting is a strict boolean with root and project precedence", () => {
+  const root = (settings = {}) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-execution": settings },
+  });
+  const resolve = (runner, project = null) =>
+    resolvePipelineConfiguration(
+      "plan-execution",
+      runner,
+      {},
+      {},
+      null,
+      project,
+    ).settings;
+  assert.equal(resolve(root()).automaticCommitSplitting, true);
+  const disabled = { automaticCommitSplitting: false };
+  assert.equal(resolve(root(disabled)).automaticCommitSplitting, false);
+  assert.equal(
+    resolve(root(disabled), root({ automaticCommitSplitting: true }))
+      .automaticCommitSplitting,
+    true,
+  );
+  assert.equal(resolve(root(), root(disabled)).automaticCommitSplitting, false);
+  const customized = resolve(
+    root({ ...disabled, commitSizeAssessmentMultiplier: 4 }),
+  );
+  assert.equal(customized.automaticCommitSplitting, false);
+  assert.equal(customized.preferredCommitLineLimit, 900);
+  assert.equal(customized.commitSizeAssessmentMultiplier, 4);
+  for (const value of ["false", "true", 0, 1, null]) {
+    const invalid = { automaticCommitSplitting: value };
+    assert.throws(() => resolve(root(invalid)), /automaticCommitSplitting/u);
+    assert.throws(
+      () => resolve(root(), root(invalid)),
+      /automaticCommitSplitting/u,
+    );
+  }
+  // Disabled runs still validate the existing size settings and their product.
+  assert.throws(
+    () => resolve(root({ ...disabled, commitSizeAssessmentMultiplier: 0 })),
+    /commitSizeAssessmentMultiplier/u,
+  );
+  assert.throws(
+    () =>
+      resolve(
+        root(disabled),
+        root({ preferredCommitLineLimit: Number.MAX_SAFE_INTEGER }),
+      ),
+    /threshold/u,
   );
 });
 
@@ -894,5 +1014,74 @@ test("provider inactivity timeout is strict, shared, and project-overridable wit
         { providerInactivityTimeoutMs: 1 },
       ),
     /not supported/u,
+  );
+});
+
+test("authoring plan selection resolves additively without inferring kind from criteria", () => {
+  const root = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        "plan-authoring": {
+          criteriaPath: "criteria.md",
+          sourceReferences: ["sources/a.md"],
+        },
+      },
+    }),
+  );
+  assert.equal(
+    resolvePipelineConfiguration("plan-authoring", root).settings.planKind,
+    "commit",
+  );
+  const project = parseProjectConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: {
+        "plan-authoring": {
+          planKind: "custom",
+          outputPaths: ["reports/a.md"],
+        },
+      },
+    }),
+    root,
+  );
+  const resolved = resolvePipelineConfiguration(
+    "plan-authoring",
+    root,
+    {},
+    {},
+    null,
+    project,
+    { sourceReferences: ["sources/b.md"] },
+  );
+  assert.equal(resolved.settings.planKind, "custom");
+  assert.equal(resolved.settings.criteriaPath, "criteria.md");
+  assert.deepEqual(resolved.settings.sourceReferences, ["sources/b.md"]);
+  assert.deepEqual(resolved.settings.outputPaths, ["reports/a.md"]);
+  assert.equal(
+    resolvePipelineConfiguration("plan-execution", root, {}, {}, null, null, {
+      planKind: "custom",
+    }).settings.planKind,
+    "custom",
+  );
+});
+
+test("workspace discovery resolves settings before a project supplies role backends", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: { "plan-authoring": { planKind: "custom" } },
+    }),
+  );
+  assert.equal(
+    resolvePipelineSettings("plan-authoring", configuration).planKind,
+    "custom",
+  );
+  assert.equal(
+    resolvePipelineSettings("plan-authoring", configuration, {
+      planKind: "commit",
+    }).planKind,
+    "commit",
   );
 });

@@ -17,8 +17,13 @@ export async function inspectTrustedRequirements(
 ) {
   await checkConfiguration();
   await monitor.check();
+  if (run.workspace?.kind === "directory") await validatePersistedBoundary(run);
   const current = await runStore.loadRun(run.runId);
-  if (current.executionResource != null || current.executionProcess != null) {
+  if (
+    current.preparation != null ||
+    current.executionResource != null ||
+    current.executionProcess != null
+  ) {
     throw new RunnerError(
       "Capability inspection requires settled resource ownership.",
       {
@@ -37,10 +42,39 @@ export async function inspectTrustedRequirements(
         trustedValidation.inspectRequirements({
           ...value,
           projectPath: current.projectPath,
+          workspacePolicy: current.workspace?.policy ?? undefined,
           snapshot: current.pipelineState.trustedValidation,
           storageForbiddenPaths: storageForbiddenPaths(current),
+          onPreparation: async (bindings) => {
+            const authority = await monitor.persist(() =>
+              runStore.reservePreparation(lease, bindings),
+            );
+            const onProcess = async (pid, proof, admission) => {
+              const allowed = await runStore.recordPreparationProcess(
+                lease,
+                authority,
+                pid,
+                proof,
+                admission,
+              );
+              if (pid === null)
+                await monitor.persist(() => runStore.settlePreparation(lease));
+              return allowed;
+            };
+            onProcess.noLaunch = async () => {
+              await runStore.recordPreparationProcess(
+                lease,
+                authority,
+                undefined,
+              );
+              await monitor.persist(() => runStore.settlePreparation(lease));
+            };
+            return onProcess;
+          },
           onResource: (resource) =>
-            runStore.recordExecutionResource(lease, resource),
+            monitor.persist(() =>
+              runStore.recordExecutionResource(lease, resource),
+            ),
         }),
       request,
     );

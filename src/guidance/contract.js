@@ -7,7 +7,7 @@ import {
   sep,
 } from "node:path";
 
-import { GuidanceError, unsafePath } from "./content.js";
+import { GuidanceError } from "./content.js";
 
 export const HASH = /^[a-f0-9]{64}$/u;
 const TEMPORARY_NAME = /^\.rules\.[a-f0-9-]{36}\.tmp$/u;
@@ -91,7 +91,7 @@ function validateIdentity(value) {
   );
 }
 
-export function assertReceipt(value, projectPath, hash) {
+export function assertReceipt(value, projectPath, hash, localPath) {
   if (
     !exactFields(value, ["projectPath", "localPath", "localHash", "updated"]) ||
     value.projectPath !== projectPath ||
@@ -99,7 +99,7 @@ export function assertReceipt(value, projectPath, hash) {
     typeof value.updated !== "boolean" ||
     typeof value.localPath !== "string" ||
     resolve(value.localPath) !== value.localPath ||
-    !isWithin(projectPath, value.localPath) ||
+    value.localPath !== localPath ||
     basename(value.localPath) !== "rules.md" ||
     basename(dirname(value.localPath)) !== "agent-runner"
   ) {
@@ -110,13 +110,61 @@ export function assertReceipt(value, projectPath, hash) {
   return Object.freeze({ ...value });
 }
 
+function validBinding(binding, projectPath, localPath) {
+  return (
+    exactFields(binding, [
+      "schemaVersion",
+      "basePath",
+      "leasePath",
+      "ancestors",
+    ]) &&
+    binding.schemaVersion === 1 &&
+    [binding.basePath, binding.leasePath].every(
+      (path) =>
+        typeof path === "string" && isAbsolute(path) && resolve(path) === path,
+    ) &&
+    isWithin(binding.leasePath, projectPath) &&
+    (binding.basePath === projectPath ||
+      (!isWithin(projectPath, binding.basePath) &&
+        !isWithin(binding.basePath, projectPath))) &&
+    isWithin(binding.basePath, localPath) &&
+    Array.isArray(binding.ancestors) &&
+    binding.ancestors.length > 0 &&
+    binding.ancestors.length <= 4096 &&
+    binding.ancestors.some((ancestor) => ancestor?.path === binding.basePath) &&
+    binding.ancestors.every(
+      (ancestor, index, all) =>
+        exactFields(ancestor, ["path", "device", "inode", "mode"]) &&
+        typeof ancestor.path === "string" &&
+        isAbsolute(ancestor.path) &&
+        resolve(ancestor.path) === ancestor.path &&
+        isWithin(ancestor.path, dirname(localPath)) &&
+        (index === 0
+          ? dirname(ancestor.path) === ancestor.path
+          : dirname(ancestor.path) === all[index - 1].path) &&
+        ["device", "inode", "mode"].every(
+          (key) =>
+            typeof ancestor[key] === "string" &&
+            /^\d{1,32}$/u.test(ancestor[key]),
+        ),
+    )
+  );
+}
+
 export function assertContext(value, projectPath, hash, expectedHash) {
   if (
-    !exactFields(value, CONTEXT_FIELDS) ||
+    !exactFields(
+      value,
+      value?.binding === undefined
+        ? CONTEXT_FIELDS
+        : [...CONTEXT_FIELDS, "binding"],
+    ) ||
     value.projectPath !== projectPath ||
     typeof value.localPath !== "string" ||
     resolve(value.localPath) !== value.localPath ||
-    !isWithin(projectPath, value.localPath) ||
+    (value.binding === undefined
+      ? !isWithin(projectPath, value.localPath)
+      : !validBinding(value.binding, projectPath, value.localPath)) ||
     basename(value.localPath) !== "rules.md" ||
     basename(dirname(value.localPath)) !== "agent-runner" ||
     typeof value.configurationHash !== "string" ||
@@ -147,7 +195,6 @@ export function assertContext(value, projectPath, hash, expectedHash) {
     });
   }
   if (value.phase === "published") {
-    assertReceipt(value.receipt, projectPath, hash);
-    if (value.receipt.localPath !== value.localPath) throw unsafePath();
+    assertReceipt(value.receipt, projectPath, hash, value.localPath);
   }
 }

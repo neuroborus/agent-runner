@@ -1,5 +1,5 @@
 #!/usr/bin/env node
 
-import { main } from "../src/index.js";
+import { startApplication } from "../src/runtime/index.js";
 
-process.exitCode = await main();
+process.exitCode = await startApplication();

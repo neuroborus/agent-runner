@@ -1,0 +1,68 @@
+name: Approved npm release
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.event.release.draft == false && github.event.release.prerelease == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      integrity: ${{ steps.validate.outputs.integrity }}
+      artifactId: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - id: validate
+        run: node scripts/publish-release.js validate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
+        with:
+          name: validated-npm-release-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/npm-release/candidate.tgz
+            dist/npm-release/candidate.json
+            dist/npm-release/manifest.json
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifactId }}
+          merge-multiple: true
+          path: dist/npm-release
+      - run: node scripts/publish-release.js publish
+        env:
+          EXPECTED_INTEGRITY: ${{ needs.validate.outputs.integrity }}

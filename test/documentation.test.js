@@ -41,7 +41,7 @@ function modeTable(document) {
   const lines = document.split("\n");
   const start = lines.findIndex((line) => /^\| Mode\s*\|/u.test(line));
   assert.ok(
-    start > 0 && start < 30,
+    start > 0 && start < 40,
     "Mode guidance belongs near the beginning.",
   );
   const end = lines.findIndex(
@@ -103,7 +103,7 @@ test("operator guidance and transports retain mode and deferred-stop choices", a
   assert.match(help, /independent is default and recommended/u);
   assert.match(MCP_INSTRUCTIONS, /independent is the default and recommended/u);
   for (const text of [help, MCP_INSTRUCTIONS]) {
-    assert.match(text, /all three pipelines/u);
+    assert.match(text, /all registered pipelines/u);
     assert.match(text, /lazy is opt-in/u);
     assert.match(text, /after-current-commit/u);
     assert.match(text, /selected (?:plan-execution|execution) step/u);
@@ -139,7 +139,7 @@ test("MCP discovery describes supported modes and execution-only deferred stops"
   const start = tools.find(({ name }) => name === "run_start");
   assert.match(start.description, /independent is default and recommended/u);
   assert.match(start.description, /lazy is opt-in/u);
-  assert.match(start.description, /combined.*all three pipelines/u);
+  assert.match(start.description, /combined.*all registered pipelines/u);
   assert.deepEqual(start.inputSchema.properties.mode.enum, [
     "independent",
     "lazy",
@@ -300,7 +300,11 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     assert.match(document, /one-second network-denial observation\s+deadline/u);
     assert.match(
       document,
-      /both\s+providers' pre-effect\s+local-commit Git metadata\s+lookups[^.]*10-second\s+bound/iu,
+      /Codex's\s+pre-effect\s+local-commit\s+Git metadata\s+lookup uses a 60-second\s+bound/iu,
+    );
+    assert.match(
+      document,
+      /Claude's\s+pre-effect\s+local-commit\s+Git metadata\s+lookup retains the 10-second\s+bound/iu,
     );
     assert.match(
       document,
@@ -385,7 +389,6 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     architecture,
     /Generated run IDs try at most\s+ten\s+candidates/u,
   );
-  assert.match(architecture, /at most\s+1,010\s+collision-safe\s+names/u);
   assert.match(
     architecture,
     /fixed correctness guards rather than workflow\s+budgets/u,
