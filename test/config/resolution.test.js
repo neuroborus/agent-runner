@@ -116,6 +116,7 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
   });
   assert.deepEqual(resolved.settings, {
     planKind: "commit",
+    automaticCommitSplitting: true,
     preferredCommitLineLimit: 900,
     commitSizeAssessmentMultiplier: 3,
     finalization: "auto",
@@ -431,6 +432,59 @@ test("execution size settings resolve independently and reject unsafe threshold 
           commitSizeAssessmentMultiplier: largest,
         }),
         root({ preferredCommitLineLimit: 2 }),
+      ),
+    /threshold/u,
+  );
+});
+
+test("automatic commit splitting is a strict boolean with root and project precedence", () => {
+  const root = (settings = {}) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-execution": settings },
+  });
+  const resolve = (runner, project = null) =>
+    resolvePipelineConfiguration(
+      "plan-execution",
+      runner,
+      {},
+      {},
+      null,
+      project,
+    ).settings;
+  assert.equal(resolve(root()).automaticCommitSplitting, true);
+  const disabled = { automaticCommitSplitting: false };
+  assert.equal(resolve(root(disabled)).automaticCommitSplitting, false);
+  assert.equal(
+    resolve(root(disabled), root({ automaticCommitSplitting: true }))
+      .automaticCommitSplitting,
+    true,
+  );
+  assert.equal(resolve(root(), root(disabled)).automaticCommitSplitting, false);
+  const customized = resolve(
+    root({ ...disabled, commitSizeAssessmentMultiplier: 4 }),
+  );
+  assert.equal(customized.automaticCommitSplitting, false);
+  assert.equal(customized.preferredCommitLineLimit, 900);
+  assert.equal(customized.commitSizeAssessmentMultiplier, 4);
+  for (const value of ["false", "true", 0, 1, null]) {
+    const invalid = { automaticCommitSplitting: value };
+    assert.throws(() => resolve(root(invalid)), /automaticCommitSplitting/u);
+    assert.throws(
+      () => resolve(root(), root(invalid)),
+      /automaticCommitSplitting/u,
+    );
+  }
+  // Disabled runs still validate the existing size settings and their product.
+  assert.throws(
+    () => resolve(root({ ...disabled, commitSizeAssessmentMultiplier: 0 })),
+    /commitSizeAssessmentMultiplier/u,
+  );
+  assert.throws(
+    () =>
+      resolve(
+        root(disabled),
+        root({ preferredCommitLineLimit: Number.MAX_SAFE_INTEGER }),
       ),
     /threshold/u,
   );

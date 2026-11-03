@@ -148,8 +148,13 @@ frozen. Independent remains default/recommended in either completion contract.
 Execution's descriptor-owned `preferredCommitLineLimit` and
 `commitSizeAssessmentMultiplier` default to 900 and 3, resolve independently
 through root then project configuration and persist for resume. Positive safe
-integers must produce a safe-integer product. These prepared assessment settings
-do not enable splitting: production routing and run eligibility remain inactive.
+integers must produce a safe-integer product. By default, new commit-plan runs
+assess work strictly above that product and may keep a justified atomic commit or execute a
+separately reviewed replacement sequence. The strict boolean
+`automaticCommitSplitting` defaults to `true`; `false` executes the predefined
+plan unchanged without measurement or assessment while every ordinary gate
+remains. All three values are frozen at creation, so configuration changes never
+toggle an existing run; migrated and custom runs never gain eligibility.
 See the [execution contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
 Runner-root configuration is the only source of trusted profile

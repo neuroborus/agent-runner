@@ -964,7 +964,11 @@ test("version-29 migration adds no revision authority and preserves consumed eff
     ...legacy,
     effectivePlanRevisions: createEffectivePlanRevisions(),
   });
-  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      planExecutionPipeline.migrations[38]({ pipelineState: migrated }),
+    ),
+  );
   const pending = {
     ...legacy,
     pendingCommit: { status: "consumed" },

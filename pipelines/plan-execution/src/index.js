@@ -125,6 +125,11 @@ function trustedCheckSelection(value) {
 const ROLES = resolveActiveRoles();
 const SETTINGS = Object.freeze({
   planKind: PLAN_KIND_SETTING,
+  automaticCommitSplitting: Object.freeze({
+    defaultValue: true,
+    errorMessage: "must be a boolean",
+    validate: (value) => typeof value === "boolean",
+  }),
   preferredCommitLineLimit: positiveIntegerSetting(
     COMMIT_SIZE_DEFAULTS.preferredCommitLineLimit,
   ),
@@ -1520,12 +1525,28 @@ export function migratePlanExecutionStateV33(run) {
   return Object.freeze({ ...run.pipelineState, customResults: null });
 }
 
+export function migratePlanExecutionStateV38(run) {
+  // Freeze the switch from saved eligibility, never from current configuration
+  // or the new default, so historically ineligible runs stay ineligible.
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...current.settings,
+            automaticCommitSplitting: current.commitSizeAssessment.eligible,
+          }),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 38,
+  stateVersion: 39,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1589,6 +1610,7 @@ export const planExecutionPipeline = Object.freeze({
     36: (run) => Object.freeze({ ...run.pipelineState }),
     // Do not infer a lost result or manufacture replay authority for old runs.
     37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
+    38: migratePlanExecutionStateV38,
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

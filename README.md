@@ -832,6 +832,7 @@ Pipeline settings use these defaults:
 | `plan-authoring` | `stagnationWindowRounds`         |             3 |
 | `plan-execution` | `planKind`                       |      `commit` |
 | `plan-execution` | `mode`                           | `independent` |
+| `plan-execution` | `automaticCommitSplitting`       |        `true` |
 | `plan-execution` | `preferredCommitLineLimit`       |           900 |
 | `plan-execution` | `commitSizeAssessmentMultiplier` |             3 |
 | `plan-execution` | `maxFixRoundsPerStep`            |            20 |
@@ -923,6 +924,32 @@ baseline. Worker reconstructs only the active replacement; every replacement
 passes its own complete gates and exact-subject commit. Frozen plans stay
 unchanged, and legacy/intermediate runs remain ineligible on resume. See the
 [assessment contract](pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
+
+`automaticCommitSplitting` is a strict boolean under `pipelines.plan-execution`
+and defaults to `true`, which keeps the assessment above. Root configuration and
+the safe project overlay resolve it with the same precedence; there is no CLI or
+MCP run override. With `false`, a new commit-plan run never measures size,
+requests an assessment or proposes replacements; it executes the predefined
+plan unchanged through every ordinary validation, review, finalization,
+terminal-confirmation and commit gate, and large planned commits remain valid.
+Both size settings stay validated as positive integers with a safe product while
+disabled. For example:
+
+```json
+{
+  "pipelines": {
+    "plan-execution": {
+      "automaticCommitSplitting": false,
+      "commitSizeAssessmentMultiplier": 4
+    }
+  }
+}
+```
+
+Re-enabling it with that multiplier assesses strictly above 3,600 lines. The
+resolved switch is frozen at creation, so changing configuration never toggles
+an existing run; migrated runs keep their saved eligibility. Custom runs are
+never assessed, and plan authoring's advisory target is unaffected.
 
 Execution publishes `plan.progress.md` beside unchanged `plan.md`, retaining its
 exact headings and adding size-decision footnotes, original/replacement states,

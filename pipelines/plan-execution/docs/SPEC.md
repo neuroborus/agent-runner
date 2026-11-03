@@ -2587,6 +2587,18 @@ values take precedence per setting. The resolved pair is persisted at creation
 and reused on resume without configuration reload. This execution policy is
 separate from authoring's anticipated additions-plus-deletions heuristic.
 
+The descriptor also owns the strict boolean `automaticCommitSplitting = true`,
+resolved through the same root/project precedence without coercion or a CLI/MCP
+run option. Creation persists it in frozen settings; a commit-plan run is
+eligible only when it is `true`, and custom runs are always ineligible. A
+disabled run never measures size, reserves or invokes an assessment, or
+proposes, reviews or separates replacements: it executes the predefined plan
+unchanged through every ordinary gate, and large planned commits remain valid.
+Both size settings and their safe product are validated even when disabled.
+Persisted eligibility must equal the frozen switch for commit runs; contradictory
+records are rejected. A legacy run with null settings adopts runtime settings
+with the switch limited to its saved eligibility.
+
 The private `commit-size-assessment.js` contract prepares assessment only for
 eligible commit-plan work at a reconciled boundary after implementation or
 content-changing repairs, before another convergence/review loop. Pending commit
@@ -2633,6 +2645,13 @@ default settings without reloading configuration or changing workflow, bootstrap
 findings, correction accounting, approvals or pending effects. Version 32 activates assessment only at creation of new commit-plan runs.
 Intermediate and legacy runs cannot acquire eligibility by resuming; changing
 these settings does not activate refinement for those runs.
+
+State version 39 adds `automaticCommitSplitting` to non-null settings. The
+ordered version-38 migration copies it from saved eligibility, never from
+configuration or the new default, and preserves lineages, accepted or pending
+revisions, separations, pending effects, inventories, progress, counters and
+native sessions. Historically ineligible runs stay disabled; null legacy settings
+stay null. No operator action switches an existing run.
 
 ### Durable preservation foundation
 

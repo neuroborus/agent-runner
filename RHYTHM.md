@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-11-03
 
+- **Automatic commit splitting has an explicit frozen switch.**
+  `pipelines.plan-execution.automaticCommitSplitting` is a strict boolean that
+  defaults to `true`, preserving size assessment for new commit-plan runs.
+  `false` executes the predefined plan unchanged, skipping measurement,
+  assessment calls and replacement proposals before any model call, while every
+  ordinary gate still applies. It is a descriptor setting rather than a run
+  option, so it uses the existing configuration precedence and adds no second
+  override path. The existing size settings and their safe product stay
+  validated while it is disabled, so re-enabling it cannot expose an invalid
+  threshold. State version 39 freezes the switch in settings. The version-38
+  migration derives it from saved eligibility rather than the new default, so
+  historically ineligible runs stay ineligible and enabled runs keep every
+  lineage, revision and consumed effect.
+
 - **Global issue tracking is also available from the CLI.**
   `agent-run issues list`, `issues read`, and `issues update` are thin
   projections of the shared issue capability, so operators can triage the

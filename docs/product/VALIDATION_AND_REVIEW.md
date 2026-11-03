@@ -107,7 +107,7 @@ source writes.
 
 ## Bootstrap inventory
 
-New commit-plan runs use the
+New commit-plan runs with `automaticCommitSplitting` enabled, the default, use the
 [commit-size assessment contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 At reconciled boundaries its policy distinguishes an oversized atomic exception
 from a proposed cohesive split, bound to frozen scope, dependencies, inspected
@@ -115,7 +115,8 @@ content and measurement. A proposal is neither a reviewed effective revision nor
 candidate approval. Assessment is read-only, mode-specific and bounded across
 the original-step lineage, with no budget renewal on reconstruction. Size alone never fails work or requires an override. Legacy and intermediate
 runs remain disabled on resume; new eligible runs assess before further
-convergence or review.
+convergence or review. Disabled runs skip measurement and assessment entirely and
+validate the predefined plan through the ordinary gates.
 
 The [effective revision contract](../../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation)
 separates a size proposal from reviewed plan authority. Acceptance preserves

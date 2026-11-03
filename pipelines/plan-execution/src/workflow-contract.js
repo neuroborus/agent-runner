@@ -375,6 +375,7 @@ const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
   "planKind",
+  "automaticCommitSplitting",
   "preferredCommitLineLimit",
   "commitSizeAssessmentMultiplier",
   "finalization",
@@ -387,7 +388,13 @@ const SETTINGS_FIELDS = Object.freeze([
 ]);
 const NUMERIC_SETTINGS_FIELDS = SETTINGS_FIELDS.filter(
   (field) =>
-    !["finalization", "mode", "trustedChecks", "planKind"].includes(field),
+    ![
+      "automaticCommitSplitting",
+      "finalization",
+      "mode",
+      "trustedChecks",
+      "planKind",
+    ].includes(field),
 );
 const EDIT_PAUSE_REASONS = Object.freeze({
   "clarification-answers": "clarification_answers_required",
@@ -4306,6 +4313,16 @@ export function normalizePipelineState(value) {
   } catch {
     throw workflowError("Invalid persisted commit-size assessment.");
   }
+  // Eligibility is frozen at creation from the resolved switch.
+  if (
+    value.settings !== null &&
+    value.commitSizeAssessment.eligible !==
+      (value.settings.planKind === "commit" &&
+        value.settings.automaticCommitSplitting)
+  )
+    throw workflowError(
+      "Commit-size eligibility differs from frozen automatic commit splitting.",
+    );
   const finalizationGuidance = normalizeFinalizationGuidanceDecision(
     value.finalizationGuidance,
   );
@@ -5742,7 +5759,10 @@ export function createPlanExecutionState({
       writableResult: null,
       implementationEvidenceLegacy: false,
       commitSizeAssessment: createCommitSizeAssessment({
-        eligible: planKind === "commit",
+        // Null settings are adopted later, limited to this eligibility.
+        eligible:
+          planKind === "commit" &&
+          (settings === null || settings.automaticCommitSplitting),
       }),
       effectivePlanRevisions: createEffectivePlanRevisions(),
       effectiveValidation: [],
@@ -5987,7 +6007,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 38 ||
+    run.pipelineStateVersion !== 39 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6495,6 +6515,11 @@ export function assertSettings(settings) {
   }
   if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-execution setting mode is invalid.");
+  }
+  if (typeof settings.automaticCommitSplitting !== "boolean") {
+    throw workflowError(
+      "Plan-execution setting automaticCommitSplitting is invalid.",
+    );
   }
   for (const field of NUMERIC_SETTINGS_FIELDS) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {

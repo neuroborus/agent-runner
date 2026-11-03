@@ -281,7 +281,11 @@ and assessment allowances survive reconstruction and future replacement steps;
 they grant no execution approval or effect authority. State version 29 persists
 the resolved size settings and disabled eligibility, with a default-only
 version-28 migration preserving existing progress. Version 32 activates dispatch
-only for new commit-plan runs; migrations keep historical eligibility disabled. See the
+only for new commit-plan runs; migrations keep historical eligibility disabled.
+State version 39 freezes `automaticCommitSplitting` in settings: new commit runs
+are eligible only when it is `true`, disabled runs skip measurement and
+assessment before any model call, and the version-38 migration derives the
+switch from saved eligibility. See the
 [owning contract](../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
 Execution's private `effective-plan.js` owns the reviewed-revision
@@ -1310,7 +1314,9 @@ Descriptors may additionally validate relationships among resolved settings;
 configuration applies this hook to complete root settings and merged project
 settings before role resolution. Execution uses it to reject unsafe multiplication
 of its positive-safe-integer `preferredCommitLineLimit` (900) and
-`commitSizeAssessmentMultiplier` (3). Both values remain frozen on resume.
+`commitSizeAssessmentMultiplier` (3), including when its strict boolean
+`automaticCommitSplitting` (default `true`) disables assessment. All three
+values remain frozen on resume.
 
 Plan authoring additionally owns the positive-safe-integer
 `preferredCommitLineLimit`, default 900. Root configuration and a safe project

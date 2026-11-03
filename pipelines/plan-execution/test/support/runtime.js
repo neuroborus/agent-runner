@@ -98,6 +98,7 @@ const PLAN = `## Commit 1: feat(test): add behavior
 Implement the requested behavior.`;
 const SETTINGS = Object.freeze({
   planKind: "commit",
+  automaticCommitSplitting: true,
   preferredCommitLineLimit: 900,
   commitSizeAssessmentMultiplier: 3,
   finalization: "auto",

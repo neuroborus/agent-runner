@@ -296,7 +296,11 @@ test("new runs are eligible, intermediate migration stays disabled and resume re
   assert.deepEqual(migrated.commitSizeAssessment, createCommitSizeAssessment());
   assert.equal(migrated.settings.preferredCommitLineLimit, 900);
   assert.equal(migrated.settings.commitSizeAssessmentMultiplier, 3);
-  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  assert.doesNotThrow(() =>
+    normalizePipelineState(
+      planExecutionPipeline.migrations[38]({ pipelineState: migrated }),
+    ),
+  );
   assert.deepEqual(migrated, {
     ...legacy,
     settings: { ...COMMIT_SIZE_DEFAULTS, ...oldSettings },
@@ -317,4 +321,91 @@ test("new runs are eligible, intermediate migration stays disabled and resume re
   };
   // A ledger bound to different frozen settings cannot be reused on resume.
   assert.throws(() => normalizePipelineState(active), /commit-size/u);
+});
+
+test("automatic splitting freezes creation eligibility and migrates saved eligibility unchanged", () => {
+  const resolved = Object.fromEntries(
+    Object.entries(planExecutionPipeline.settings).map(([name, definition]) => [
+      name,
+      definition.defaultValue,
+    ]),
+  );
+  assert.equal(resolved.automaticCommitSplitting, true);
+  const create = (overrides) =>
+    createPlanExecutionState({ settings: { ...resolved, ...overrides } });
+  const enabled = create({});
+  const disabled = create({
+    automaticCommitSplitting: false,
+    commitSizeAssessmentMultiplier: 4,
+  });
+  assert.equal(enabled.commitSizeAssessment.eligible, true);
+  assert.equal(disabled.commitSizeAssessment.eligible, false);
+  for (const automaticCommitSplitting of [true, false])
+    assert.equal(
+      create({ planKind: "custom", automaticCommitSplitting })
+        .commitSizeAssessment.eligible,
+      false,
+    );
+  const restored = normalizePipelineState(JSON.parse(JSON.stringify(disabled)));
+  assert.deepEqual(restored.settings, disabled.settings);
+  assert.equal(restored.commitSizeAssessment.eligible, false);
+  // Size settings stay validated while the switch is disabled.
+  for (const overrides of [
+    { commitSizeAssessmentMultiplier: 0 },
+    { preferredCommitLineLimit: 1.5 },
+    { preferredCommitLineLimit: Number.MAX_SAFE_INTEGER },
+  ])
+    assert.throws(
+      () => create({ automaticCommitSplitting: false, ...overrides }),
+      /commit-size threshold|preferredCommitLineLimit|commitSizeAssessmentMultiplier/u,
+    );
+  for (const automaticCommitSplitting of ["false", 0, 1, null, undefined])
+    assert.throws(
+      () => create({ automaticCommitSplitting }),
+      /automaticCommitSplitting|settings are invalid/u,
+    );
+  const forged = [
+    { ...disabled, commitSizeAssessment: eligible() },
+    { ...enabled, commitSizeAssessment: createCommitSizeAssessment() },
+    {
+      ...create({ automaticCommitSplitting: false }),
+      commitSizeAssessment: reserve(eligible()).ledger,
+    },
+  ];
+  for (const state of forged)
+    assert.throws(
+      () => normalizePipelineState(state),
+      /commit-size|splitting/iu,
+    );
+
+  const migrate = (pipelineState) =>
+    planExecutionPipeline.migrations[38]({ pipelineState });
+  const saved = (state, changes = {}) => {
+    const { automaticCommitSplitting: _flag, ...settings } = state.settings;
+    return { ...state, settings, ...changes };
+  };
+  // Saved eligibility, not the new default, decides the frozen switch.
+  for (const [current, changes] of [
+    [enabled, {}],
+    [disabled, {}],
+    [
+      enabled,
+      {
+        pendingCommit: { status: "consumed" },
+        completedCommits: ["a".repeat(40)],
+        additionalFixRounds: 4,
+      },
+    ],
+  ]) {
+    const legacy = saved(current, changes);
+    const migrated = migrate(legacy);
+    assert.deepEqual(migrated, {
+      ...legacy,
+      settings: current.settings,
+    });
+  }
+  assert.doesNotThrow(() => normalizePipelineState(migrate(saved(enabled))));
+  assert.doesNotThrow(() => normalizePipelineState(migrate(saved(disabled))));
+  const legacyNull = { ...disabled, settings: null };
+  assert.deepEqual(migrate(legacyNull), legacyNull);
 });

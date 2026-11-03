@@ -118,6 +118,15 @@ indivisible larger change remains valid with a rationale in the plan. This is a
 planning preference, not an execution limit. Resume retains the saved target;
 legacy runs receive 900.
 
+Execution assesses commit-plan work strictly above `preferredCommitLineLimit`
+times `commitSizeAssessmentMultiplier` (900 and 3 by default; both positive
+integers with a safe product). Set `pipelines.plan-execution.automaticCommitSplitting`
+to `false` to execute the predefined plan unchanged without size measurement,
+assessment calls or replacement proposals; ordinary validation, review,
+finalization and commit gates still apply. It defaults to `true` and accepts
+only booleans. The resolved value is frozen when a run is created, so edit
+configuration before starting a run; it never toggles an existing run.
+
 User-global configuration lives outside installations at the platform locations
 listed in [README](../README.md#configuration). Before starting a new workflow,
 an operator may run `agent-run config migrate --from <legacy-file>` to validate

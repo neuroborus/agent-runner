@@ -1409,6 +1409,17 @@ for (const mode of ["lazy", "independent", "combined"]) {
     assert.doesNotThrow(() =>
       normalizeExecutionState(JSON.parse(JSON.stringify(result.pipelineState))),
     );
+    // Every saved enabled checkpoint migrates with unchanged authority.
+    for (const { patch } of f.transitions) {
+      if (!patch?.pipelineState?.settings) continue;
+      const { automaticCommitSplitting, ...saved } =
+        patch.pipelineState.settings;
+      assert.equal(automaticCommitSplitting, true);
+      const migrated = planExecutionPipeline.migrations[38]({
+        pipelineState: { ...patch.pipelineState, settings: saved },
+      });
+      assert.deepEqual(migrated, patch.pipelineState);
+    }
     if (mode === "combined") {
       const unprepared = structuredClone(result.pipelineState);
       unprepared.replacementExecution.separations = [];
@@ -1662,6 +1673,55 @@ test("the exact threshold does not assess, separate or grant revision authority"
   assert.deepEqual(result.pipelineState.effectivePlanRevisions.revisions, []);
 });
 
+for (const mode of ["lazy", "independent", "combined"]) {
+  test(`${mode} disabled splitting executes the large predefined commit through ordinary gates`, async (t) => {
+    const { f, turns, captured, commits } = await fixture(t, { mode });
+    f.persistPipelineState(
+      createPlanExecutionState({
+        settings: { ...SETTINGS, mode, automaticCommitSplitting: false },
+      }),
+    );
+    f.runtime.git.measureChanges = async () => {
+      throw new Error("Disabled splitting measured changes.");
+    };
+    for (const adapter of Object.values(f.runtime.adapters)) {
+      const original = adapter.run;
+      adapter.run = async (request) => {
+        assert.notEqual(request.schema, COMMIT_SIZE_ASSESSMENT_SCHEMA);
+        assert.notEqual(request.schema, EFFECTIVE_PLAN_REVIEW_SCHEMA);
+        return original(request);
+      };
+    }
+    // A changed runtime setting cannot enable the frozen disabled run.
+    const result = await f.run({ automaticCommitSplitting: true });
+    assert.equal(
+      result.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(result.pause),
+    );
+    assert.equal(result.pipelineState.settings.automaticCommitSplitting, false);
+    assert.deepEqual(result.pipelineState.commitSizeAssessment, {
+      eligible: false,
+      lineages: [],
+    });
+    assert.deepEqual(result.pipelineState.effectivePlanRevisions.revisions, []);
+    assert.equal(commits(), 1);
+    assert.equal(captured.size, 0);
+    assert.deepEqual(
+      effectivePlanAuthority(result.pipelineState).steps.map(
+        ({ subject }) => subject,
+      ),
+      ["feat(test): add behavior"],
+    );
+    assert.equal(turns.filter(([, phase]) => phase === "finalize").length, 1);
+    assert.equal(turns.filter(([, phase]) => phase === "confirm").length, 1);
+    assert.equal(
+      turns.filter(([, phase]) => phase === "review").length,
+      mode === "lazy" ? 0 : 1,
+    );
+  });
+}
+
 test("version-31 migration keeps legacy eligibility disabled without resetting effects or accounting", () => {
   const current = createPlanExecutionState({ settings: SETTINGS });
   assert.equal(current.commitSizeAssessment.eligible, true);
@@ -1682,5 +1742,9 @@ test("version-31 migration keeps legacy eligibility disabled without resetting e
   });
   for (const field of Object.keys(legacy))
     assert.deepEqual(migrated[field], legacy[field]);
-  assert.doesNotThrow(() => normalizeExecutionState(migrated));
+  const frozen = planExecutionPipeline.migrations[38]({
+    pipelineState: migrated,
+  });
+  assert.equal(frozen.settings.automaticCommitSplitting, false);
+  assert.doesNotThrow(() => normalizeExecutionState(frozen));
 });

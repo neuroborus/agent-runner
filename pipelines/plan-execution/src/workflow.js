@@ -8490,7 +8490,21 @@ ${step.subject}`),
       interruptedTurn = currentRun.activeTurn;
     }
     if (state().settings === null) {
-      await transition({ ...state(), settings }, { pause: null });
+      // Adopted settings never grant size eligibility the saved run lacked.
+      const automaticCommitSplitting =
+        state().commitSizeAssessment.eligible &&
+        settings.automaticCommitSplitting;
+      await transition(
+        {
+          ...state(),
+          settings: { ...settings, automaticCommitSplitting },
+          commitSizeAssessment: {
+            ...state().commitSizeAssessment,
+            eligible: automaticCommitSplitting,
+          },
+        },
+        { pause: null },
+      );
     }
     if (!operatorStop && !(await prepareFinalizationGuidance())) {
       return currentRun;

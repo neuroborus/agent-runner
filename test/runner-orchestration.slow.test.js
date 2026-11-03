@@ -1468,7 +1468,11 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
       },
     },
     pipelines: {
-      "plan-execution": { trustedChecks: ["service-check"] },
+      "plan-execution": {
+        trustedChecks: ["service-check"],
+        automaticCommitSplitting: false,
+        commitSizeAssessmentMultiplier: 4,
+      },
     },
   };
   let configurationLoads = 0;
@@ -1537,6 +1541,10 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     { runId: PREPARED_RUN },
   );
   const durableSnapshot = prepared.run.pipelineState.trustedValidation;
+  const frozenSettings = prepared.run.pipelineState.settings;
+  assert.equal(frozenSettings.automaticCommitSplitting, false);
+  assert.equal(frozenSettings.commitSizeAssessmentMultiplier, 4);
+  assert.equal(prepared.run.pipelineState.commitSizeAssessment.eligible, false);
   assert.equal(durableSnapshot.schemaVersion, 4);
   assert.equal(durableSnapshot.timeoutMs, 12_345);
   assert.deepEqual(durableSnapshot.commands[0].capabilities, {
@@ -1560,6 +1568,8 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     resumed.run.pipelineState.trustedValidation,
     durableSnapshot,
   );
+  assert.deepEqual(resumed.run.pipelineState.settings, frozenSettings);
+  assert.equal(resumed.run.pipelineState.commitSizeAssessment.eligible, false);
   assert.equal(configurationLoads, 1);
   assert.deepEqual(trustedPreflights, [
     {
