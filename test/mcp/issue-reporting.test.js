@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import { createRunStore, parseRunnerConfiguration } from "../../src/index.js";
+import { createIssueService } from "../../src/issues/index.js";
 import {
   createMcpControlPlane,
   createMcpServer,
@@ -293,6 +294,34 @@ test("writes only caller-supplied Markdown to the configured ignored root", asyn
     }),
   );
   assert.match(collision.reportPath, /_001\.md$/u);
+});
+
+test("MCP delegates publication to the shared issue capability", async (t) => {
+  const paths = await repository(t, "agent-runner-issue-delegation-");
+  await writeFile(join(paths.projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n");
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const issues = createIssueService({
+    clock: () => FIXED_TIME,
+    loadConfiguration: async () => runnerConfiguration(),
+    runStore,
+    tokenFactory: () => TOKEN,
+  });
+  const input = reportInput(paths.projectPath);
+
+  const receipt = await issues.report(input);
+  const control = createMcpControlPlane({
+    reportingOptions: {
+      async loadConfiguration() {
+        throw new Error("A completed receipt must not reload configuration.");
+      },
+    },
+    runStore,
+  });
+
+  assert.deepEqual(await control.unexpectedIssueReport(input), receipt);
+  assert.deepEqual(await readdir(dirname(receipt.reportPath)), [
+    basename(receipt.reportPath),
+  ]);
 });
 
 test("bounds reads of oversized collision files", async (t) => {

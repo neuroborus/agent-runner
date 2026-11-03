@@ -2125,9 +2125,12 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── index.js
+│   ├── issues/
+│   │   ├── index.js
+│   │   ├── publication.js
+│   │   └── service.js
 │   ├── mcp/
 │   │   ├── index.js
-│   │   ├── reporting.js
 │   │   └── service.js
 │   ├── pipeline-registry.js
 │   ├── runner/

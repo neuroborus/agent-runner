@@ -607,5 +607,5 @@ export function createUnexpectedIssueReporter({
     );
   }
 
-  return Object.freeze({ report, resolveProject: git.resolveProject });
+  return Object.freeze({ report });
 }

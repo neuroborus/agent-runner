@@ -419,9 +419,16 @@ out of pipeline descriptors.
 
 The MCP capability lives under `src/mcp/` behind its public `index.js`. The
 index exposes only the control-plane and STDIO server contracts consumed by
-the root runtime and capability tests; private service and reporting modules
-keep protocol schemas, projections, revision waits, detached dispatch, and
-local issue publication within the capability.
+the root runtime and capability tests; private service and detached modules
+keep protocol schemas, projections, revision waits, and detached dispatch
+within the capability.
+
+The issue capability lives under `src/issues/` behind its public `index.js`,
+which exposes only `createIssueService()`. Its private service owns the
+deliberate-report action lifecycle over the run store's durable action
+primitives, and its private publication module owns local report placement,
+filesystem guards, and interrupted-publication recovery. Transports project
+its operations without duplicating action wrappers or effects.
 
 The Claude provider lives under `src/agents/claude/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter,
@@ -1726,8 +1733,9 @@ owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status
 `guidance_update`, `update_check`, `update_apply`, and the
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
-implementation. The private `src/mcp/reporting.js` module owns the narrow local
-publication service. Standard output belongs exclusively to MCP; bounded
+implementation. The report tool delegates directly to `src/issues/index.js`,
+sharing the control plane's run store and current configuration loader.
+Standard output belongs exclusively to MCP; bounded
 protocol diagnostics go to standard error without prompts or model transcripts.
 
 One compact startup instruction asks the supervisor to call `guidance_read`

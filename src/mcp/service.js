@@ -12,11 +12,11 @@ import packageMetadata from "../../package.json" with { type: "json" };
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import { loadRunnerConfiguration } from "../config/index.js";
-import { createGitService } from "../git/index.js";
 import {
   createGuidanceService,
   MAX_GUIDANCE_BYTES,
 } from "../guidance/index.js";
+import { createIssueService } from "../issues/index.js";
 import {
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
@@ -40,7 +40,6 @@ import {
   recoveryFailureDetails,
 } from "../state/index.js";
 import { createUpdateService, isUpdateVersion } from "../update/index.js";
-import { createUnexpectedIssueReporter } from "./reporting.js";
 import { launchDetachedRun } from "./detached.js";
 export {
   awaitDetachedDispatch,
@@ -555,18 +554,19 @@ export function createMcpControlPlane(options = {}) {
   }
 
   const runIdFactory = options.runIdFactory ?? randomUUID;
-  const reportingGit = options.reportingOptions?.git ?? createGitService();
-  const issueReporter =
-    options.issueReporter ??
-    createUnexpectedIssueReporter({
+  let issues = options.issues;
+  function issueService() {
+    issues ??= createIssueService({
       ...options.reportingOptions,
-      git: reportingGit,
       loadConfiguration:
         options.reportingOptions?.loadConfiguration ??
         options.loadConfiguration ??
         (() => loadRunnerConfiguration(providers)),
       providers,
+      runStore,
     });
+    return issues;
+  }
 
   async function projectStatus(current, leaseOwner) {
     return statusProjection(
@@ -1320,72 +1320,6 @@ export function createMcpControlPlane(options = {}) {
     return receipt;
   }
 
-  async function unexpectedIssueReport(input) {
-    const projectPath = await reportingGit.resolveProject(input.projectPath);
-    const boundary = await runStore.validateStateBoundary({
-      projectPath,
-      taskPath: projectPath,
-    });
-    const argumentsValue = {
-      ...actionArguments(input),
-      projectPath: boundary.projectPath,
-    };
-    const identity = {
-      key: input.idempotencyKey,
-      tool: "unexpected_issue_report",
-      arguments: argumentsValue,
-    };
-    const existing = await runStore.readAction(identity);
-    if (existing?.status === "completed") {
-      return existing.result;
-    }
-    const action = await runStore.beginAction({
-      ...identity,
-      context: {
-        issuesPath: null,
-        publicationPhase: null,
-        projectPath: null,
-        reportPath: null,
-        temporaryPath: null,
-      },
-    });
-    try {
-      if (action.record.status === "completed") {
-        return action.record.result;
-      }
-      const reportPath = await issueReporter.report(argumentsValue, {
-        reservedIssuesPath: action.record.context.issuesPath,
-        reservedPath: action.record.context.reportPath,
-        reservedPublicationPhase: action.record.context.publicationPhase,
-        reservedProjectPath: action.record.context.projectPath,
-        reservedTemporaryPath: action.record.context.temporaryPath,
-        async prepare(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-        async publish(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-        async reserve(identityValue) {
-          await action.updateContext({
-            ...action.record.context,
-            ...identityValue,
-          });
-        },
-      });
-      const receipt = { reportPath };
-      await action.complete(receipt);
-      return receipt;
-    } finally {
-      await action.release();
-    }
-  }
-
   return Object.freeze({
     updateCheck: (input) =>
       updateService().check(updateCheckSchema.parse(input)),
@@ -1427,7 +1361,7 @@ export function createMcpControlPlane(options = {}) {
       detachedAction("run_start", runStart, input, context),
     runStatus,
     runWait,
-    unexpectedIssueReport,
+    unexpectedIssueReport: (input) => issueService().report(input),
   });
 }
 

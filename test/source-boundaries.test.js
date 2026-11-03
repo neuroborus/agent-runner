@@ -237,6 +237,10 @@ test("runtime policy does not branch on registered provider IDs", async () => {
       join(ROOT, "src/runner"),
       (path) => extname(path) === ".js",
     )),
+    ...(await walk(
+      join(ROOT, "src/issues"),
+      (path) => extname(path) === ".js",
+    )),
     ...(await walk(join(ROOT, "src/mcp"), (path) => extname(path) === ".js")),
     ...(await walk(
       join(ROOT, "pipelines"),

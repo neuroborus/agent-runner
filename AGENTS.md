@@ -252,7 +252,9 @@ All pipelines additionally require:
 | `src/cli.js`                      | Argument parsing and terminal-facing command dispatch                 |
 | `src/editor.js`                   | Shared shell-free editor selection, launch, and exit outcomes         |
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                         |
-| `src/mcp/`                        | Private schemas, projections, waits, detached dispatch, reporting     |
+| `src/mcp/`                        | Private schemas, projections, waits, and detached dispatch            |
+| `src/issues/index.js`             | Public deliberate issue-report capability boundary                    |
+| `src/issues/`                     | Private report action lifecycle, guarded publication, and recovery    |
 | `src/config/index.js`             | Public runner-configuration capability boundary                       |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
 | `src/config/release/index.js`     | Shared immutable release identity and approval policy                 |

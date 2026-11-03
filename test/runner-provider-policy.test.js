@@ -618,7 +618,6 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
   );
 
   const control = createMcpControlPlane({
-    issueReporter: {},
     runner,
     runStore: {
       async inspectRunLeaseOwner() {
@@ -685,7 +684,6 @@ test("CLI and MCP project one fixed authentication recovery action", async () =>
     0,
   );
   const control = createMcpControlPlane({
-    issueReporter: {},
     runner,
     runStore: {
       async inspectRunLeaseOwner() {
@@ -855,7 +853,6 @@ test("CLI and MCP preserve the same bounded capability diagnosis", async () => {
     async release() {},
   };
   const control = createMcpControlPlane({
-    issueReporter: {},
     runIdFactory: () => "fixture-run",
     runStore: {
       async beginAction() {
