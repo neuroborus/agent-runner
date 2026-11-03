@@ -424,11 +424,13 @@ keep protocol schemas, projections, revision waits, and detached dispatch
 within the capability.
 
 The issue capability lives under `src/issues/` behind its public `index.js`,
-which exposes only `createIssueService()`. Its private service owns the
-deliberate-report action lifecycle over the run store's durable action
-primitives, and its private publication module owns local report placement,
-filesystem guards, and interrupted-publication recovery. Transports project
-its operations without duplicating action wrappers or effects.
+which exposes `createIssueService()` and the pure `resolveIssueStorePath()`
+location mapping. Its private service owns the deliberate-report action
+lifecycle over the run store's durable action primitives. Private contract,
+location, and store modules own the issue document schema, the per-user store
+location, descriptor-bound filesystem guards, and interrupted-publication
+recovery. Transports project its operations without duplicating action
+wrappers or effects.
 
 The Claude provider lives under `src/agents/claude/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter,
@@ -1734,7 +1736,7 @@ owns the nine pipeline-control tools: `pipelines_list`, `run_start`, `run_status
 conditionally registered MCP-only `unexpected_issue_report`. It contains
 transport schemas and concise projections, not a second workflow
 implementation. The report tool delegates directly to `src/issues/index.js`,
-sharing the control plane's run store and current configuration loader.
+sharing the control plane's run store.
 Standard output belongs exclusively to MCP; bounded
 protocol diagnostics go to standard error without prompts or model transcripts.
 
@@ -1769,14 +1771,38 @@ never invoke it, and backend role sessions are not exposed to the MCP server.
 The caller supplies bounded English Markdown for every diagnostic section and
 optional bounded details, run ID, and error code. The service never gathers or
 attaches logs, transcripts, prompts, environment values, credentials, secrets,
-or other diagnostic data automatically. It canonicalizes the Git project,
-validates the external-state boundary before action persistence, loads the same
-current runner and optional confined project configuration used for a new run,
-and resolves `<artifactRoot>/agent-runner/issues/`. Git and filesystem guards
-require that destination to be ignored, untracked, confined, and free of
-symbolic- or hard-link escapes. Publication uses a sortable colon-free UTC name,
-an exclusive atomic link, and collision retries without changing ignore rules
-or overwriting an existing path.
+or other diagnostic data automatically. The shared capability validates the
+same field bounds as the MCP schema. It first replays a completed receipt for
+the lexically resolved request, then canonicalizes the Git project and
+validates the external-state boundary before action persistence. The origin is
+recorded as bounded context and grants no storage authority; no configuration
+is loaded and `projectConfigurationPath` only remains part of the request
+identity.
+
+Issues live in one private per-user store selected from environment, home, and
+platform inputs injected at composition: `$XDG_DATA_HOME/agent-runner/issues`
+on Linux, with unset or relative XDG values falling back to `~/.local/share`,
+user Application Support on macOS, and `%LOCALAPPDATA%` on Windows. Mapping
+requires bounded safe absolute paths and grants no execution-platform support.
+The store must neither contain nor lie inside the origin project, the state
+root, the user settings file, the installation, or the installed runtime
+payload root; ordinary shared parents such as `agent-runner/` are allowed.
+Every path component is opened without following links; missing components
+are created with mode `0700`, and the final directory must belong to the
+current user without group or other access. Operations use the
+descriptor-bound directory and reverify each component identity and the
+store's private ownership, so link, permission, or replacement attacks fail. Publication never touches the project or its ignore
+rules.
+
+Each issue is `<issueId>.json`, a canonical, bounded, schema-versioned JSON
+document whose random UUID v4 ID is bound to its filename. It holds the
+immutable rendered Markdown with its SHA-256 hash and one authoritative
+tracking record: revision, a finite status (`open`, `queued`, `in_progress`,
+`resolved`, or `dismissed`), origin name and canonical path, creation and
+update times, optional run ID and error code, bounded plan and resolving commit
+references, and an optional note. Creation writes revision `1`, status `open`,
+and empty tracking metadata. Strict parsing rejects unknown or duplicate
+fields, non-canonical bytes, and invalid IDs, statuses, hashes, or bounds.
 
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action
@@ -2142,12 +2168,30 @@ inside the target or task directory. Read-only `readAction` accepts exact
 arguments or a synchronous resolver over frozen saved context; both forms
 require the same tool and canonical argument hash before returning the record.
 
-An unexpected-issue action persists its intent and reserved report path before
-publication. It records a published phase while the temporary hard link still
-proves ownership, then removes that link and persists the path receipt before
-returning. Recovery adopts a report-only path only with that durable ownership
-proof; otherwise a matching file is a collision. An exact retry returns the
-same path, while key reuse with different arguments fails.
+An unexpected-issue action keeps the existing tool namespace and canonical
+argument binding. Its intent reserves the request selector and canonical
+origin, store path and directory identity, issue ID, creation time, document
+hash, and a private temporary name before publication. A saved selector maps an
+exact retry, including one naming a project subdirectory, to its verified
+canonical arguments without consulting a deleted origin. The temporary file is
+created exclusively with mode `0600`, its device, inode, and birth time are
+bound in the intent before content is written, and it is synced and hard-linked to its final
+name, which never replaces an existing file. The directory is synced and its
+identity and private ownership are rechecked before the action records a
+published phase, while the temporary link still proves ownership; it then
+removes that link, verifies the published bytes, and persists the
+`{ issueId, issuePath }` receipt before returning. Only the bound temporary
+file is ever removed; an unbound or substituted entry is preserved and fails
+with `ERR_ISSUE_REPORT_OWNERSHIP`. Recovery republishes
+only in the reserved store with the reserved ID and bytes: a relocated or
+replaced store directory fails with `ERR_ISSUE_STORE_CHANGED`, and an identity
+collision or extra hard link fails without adoption. An exact retry returns the receipt, while key
+reuse with different arguments fails. Historical completed receipts, including
+repository-local `{ reportPath }` receipts, replay unchanged before any origin
+inspection; an intent that
+never reserved a local destination is rebound to the global store, and any
+other incomplete local intent fails with
+`ERR_ISSUE_REPORT_LEGACY_PUBLICATION` without touching its files.
 
 Canonical-worktree leases live under
 `worktrees/<sha256(canonical-worktree-path)>/` in that external root. The hash
@@ -2192,8 +2236,7 @@ replacement; lease acquisition, including reclaim-marker and owner
 reconciliation, makes at most five passes. Runner release of either an
 execution or canonical-worktree lease makes at most five stop-aware attempts;
 exhaustion leaves stop reconciliation pending. Generated run IDs try at most
-ten candidates. Unexpected-issue publication tries at most 1,010
-collision-safe names, ending with random-token candidates. None of these loops
+ten candidates. None of these loops
 waits for user work or makes an external service more available, so exposing
 their counts as configuration would weaken the persistence proof without
 creating a useful operator control.

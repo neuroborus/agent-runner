@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-11-03
 
+- **Deliberate issue reports move to one private per-user global store.**
+  Repository-local reports required an ignored artifact directory and were lost
+  with their checkout, and a global link to such a file would have kept that
+  weakness. `unexpected_issue_report` now publishes `<issueId>.json` under the
+  per-user data location (`$XDG_DATA_HOME/agent-runner/issues` on Linux), so
+  publication needs no ignore rule and never writes to the project. Each
+  document combines the immutable Markdown and its hash with one authoritative
+  tracking record (origin, times, revision, finite status, optional references
+  and note); a separate card file would have needed cross-file consistency.
+  Completed receipts replay before origin or store resolution, so retries
+  survive origin deletion. Intents bind the store path and directory identity,
+  issue ID and document hash, so interrupted publication finishes in place and
+  a moved or replaced store fails instead of redirecting. Compatibility with
+  old local reports and the optional local issue index was deliberately not
+  kept: they are neither discovered nor migrated, their files stay untouched,
+  and an incomplete historical local publication fails explicitly.
+
 - **Claude workspace-write commands reach the authorized launcher with an
   effective mount tree.** A workspace-write Worker could edit through native
   tools, but every sandboxed Bash workspace write returned `EROFS`: Claude
@@ -856,7 +873,7 @@ remain in the owning documentation.
   change before handoff.
 
 - **The local issue index records order and a durable processing cursor.** The
-  [operator contract](docs/product/OPERATOR_MODEL.md#local-issue-index) specifies
+  former operator contract specified
   the ignored `LOCAL_ARTIFACTS/agent-runner/issues/index.json` artifact while
   keeping issue Markdown authoritative. Maintenance preserves the stored prefix
   and appends unique discoveries in timestamp/path order. Invalid paths and

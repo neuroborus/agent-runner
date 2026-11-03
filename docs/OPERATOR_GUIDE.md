@@ -859,11 +859,12 @@ Keep these outcomes separate:
   guide; a task or product requirement belongs in task context or tracked
   project documentation.
 
-For deliberate local issue processing, follow the
-[local issue index contract](product/OPERATOR_MODEL.md#local-issue-index) for
-`LOCAL_ARTIFACTS/agent-runner/issues/index.json`. It defines append order, safe
-paths, missing-file handling, and durable cursor advancement. Issue Markdown
-remains authoritative; the runner does not load or maintain this backlog.
+Reports go to one private per-user [global issue store](product/OPERATOR_MODEL.md#global-issue-store)
+that is shared across projects and survives deletion of the originating
+checkout. The target project needs no ignore rule. Each issue keeps its
+Markdown together with one authoritative tracking record that starts `open`.
+Earlier repository-local reports and issue indexes are no longer read or
+maintained; leave them in place.
 
 The shipped common guide and optional `<artifactRoot>/agent-runner/rules.md`
 are returned complete with explicit boundaries, using current new-run

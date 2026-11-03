@@ -41,7 +41,7 @@ function modeTable(document) {
   const lines = document.split("\n");
   const start = lines.findIndex((line) => /^\| Mode\s*\|/u.test(line));
   assert.ok(
-    start > 0 && start < 30,
+    start > 0 && start < 40,
     "Mode guidance belongs near the beginning.",
   );
   const end = lines.findIndex(
@@ -389,7 +389,6 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     architecture,
     /Generated run IDs try at most\s+ten\s+candidates/u,
   );
-  assert.match(architecture, /at most\s+1,010\s+collision-safe\s+names/u);
   assert.match(
     architecture,
     /fixed correctness guards rather than workflow\s+budgets/u,

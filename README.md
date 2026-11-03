@@ -1,5 +1,14 @@
 # Agent Runner
 
+It works as a level 4 software factory on
+[Dan Shapiro's five levels of AI-assisted coding](https://simonwillison.net/2026/Jan/28/the-five-levels/):
+you own the spec and the plan, but you don't have to write them by hand. Shape
+them in a conversation with your coding agent, and the agent drives Agent Runner
+over MCP: it starts the pipeline, waits for it, and brings product decisions
+back to you. Inside the pipeline, agents implement and review each other's work,
+and you review the result. It is not a level 5 "dark factory": a human still
+reads what ships.
+
 Agent Runner is a local CLI and STDIO MCP server for durable agent pipelines.
 
 ## Quickstart
@@ -701,11 +710,11 @@ entries contain provider selectors and execution preferences. A selected alias
 supplies its backend; a conflicting explicit backend is invalid.
 
 `issueReporting` is a runner-local boolean and defaults to `true`. It controls
-the MCP-only unexpected-issue tool described below. Set it to `false` and
-restart the MCP server to remove the tool, its schema, and all related server
-instructions from discovery. This discovery switch is restart-scoped; each
-fresh report reloads the current runner configuration. Its scope is the
-runner-local configuration.
+deliberate capture through the MCP-only unexpected-issue tool described below.
+Set it to `false` and restart the MCP server to remove the tool, its schema,
+and all related server instructions from discovery. This discovery switch is
+restart-scoped and does not select issue storage. Its scope is the runner-local
+configuration.
 
 `clientAttribution` is a runner-root-only exact `{ "name", "title" }` object
 for provider-visible client identity. It defaults to
@@ -1852,8 +1861,8 @@ Independent and combined modes then fork the complete source context into
 primary and review roles, so each child can consume provider context and quota. Lazy mode forks it
 once into the primary role and never invokes Reviewer or Arbiter. Recommend a
 fresh start for a long, multi-topic, or uncertain current session. The
-configured artifact root applies to runner-owned execution, polishing, and
-issue-report artifacts; plan-authoring artifacts remain beside `task.md`.
+configured artifact root applies to runner-owned execution and polishing
+artifacts; plan-authoring artifacts remain beside `task.md`.
 
 `unexpected_issue_report` is deliberately separate from pipeline execution.
 Use it after the supervising client agent explicitly concludes that Agent Runner
@@ -1866,14 +1875,28 @@ outcomes. The supervising MCP client owns this tool surface.
 The caller supplies concise English Markdown for the summary, expected and
 actual behavior, occurrence, and reason the behavior was unexpected, with
 optional details, run ID, and error code. Reports contain caller-supplied
-bounded fields. The same runner and optional project
-configuration rules resolve `artifactRoot`; the report is created under
-`<artifactRoot>/agent-runner/issues/` when that destination is ignored,
-untracked, confined, and link-safe. Ignore rules remain operator-managed.
-The canonical project and external-state boundary are validated before its
-idempotency intent reserves the collision-safe UTC filename. Publication
-records durable ownership while the temporary hard link still proves it, so an
-exact retry or interrupted receipt recovery returns its previously owned path.
+bounded fields. Each new issue is published once in one cross-project,
+private per-user issue store: `$XDG_DATA_HOME/agent-runner/issues/` on Linux,
+falling back to `~/.local/share/agent-runner/issues/`. The location maps to
+user Application Support on macOS and local application data on Windows
+without extending execution-platform support. The store is user data,
+separate from settings, installed payloads, run state, and caches, and it
+survives deletion of the originating checkout. Publication needs no project
+ignore rule and never writes to the project. `projectConfigurationPath` stays
+part of the request identity but does not select storage.
+
+The result is `{ "issueId", "issuePath" }`. `<issueId>.json` is one versioned
+document holding the immutable rendered Markdown with its hash and the
+authoritative tracking record: revision `1`, status `open`, origin project
+name and canonical path, creation and update times, optional run ID and error
+code, and empty plan references, resolving commit references, and note. The
+statuses are `open`, `queued`, `in_progress`, `resolved`, and `dismissed`. An
+exact retry returns the original receipt before origin or store resolution, so
+it still succeeds after the checkout is deleted. Interrupted publication
+recovers the reserved issue ID in the reserved store without duplication.
+Repository-local reports from earlier versions are neither discovered nor
+imported and remain untouched; an incomplete historical local publication
+fails explicitly and needs a new key.
 
 Call `run_wait` once for the desired interval. Its `timeoutMs` accepts up to 24
 hours; configure the MCP client's tool timeout above the requested wait.
@@ -1941,7 +1964,7 @@ Activity entries carry the stop summary at that event's revision. Waits treat
 Mutating tools persist an action intent before mutation and a receipt before
 returning. Exact retries return the original result, while reusing a key with
 different arguments is rejected. Issue reporting uses that contract for its
-single local file creation. Accepted stop requests notify the live execution
+single global document creation. Accepted stop requests notify the live execution
 owner or start detached same-run reconciliation when ownership was lost. Runs
 continue in detached local children, so MCP disconnects and wait cancellation
 affect only the client call. Ordinary detached start or resume rejects active
@@ -2126,9 +2149,11 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   └── service.js
 │   ├── index.js
 │   ├── issues/
+│   │   ├── contract.js
 │   │   ├── index.js
-│   │   ├── publication.js
-│   │   └── service.js
+│   │   ├── location.js
+│   │   ├── service.js
+│   │   └── store.js
 │   ├── mcp/
 │   │   ├── index.js
 │   │   └── service.js

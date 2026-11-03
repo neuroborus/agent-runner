@@ -254,7 +254,7 @@ All pipelines additionally require:
 | `src/mcp/index.js`                | Public STDIO MCP protocol capability boundary                         |
 | `src/mcp/`                        | Private schemas, projections, waits, and detached dispatch            |
 | `src/issues/index.js`             | Public deliberate issue-report capability boundary                    |
-| `src/issues/`                     | Private report action lifecycle, guarded publication, and recovery    |
+| `src/issues/`                     | Private issue documents, global store, publication, and recovery      |
 | `src/config/index.js`             | Public runner-configuration capability boundary                       |
 | `src/config/`                     | Private parsing, confined loading, profiles, and resolution           |
 | `src/config/release/index.js`     | Shared immutable release identity and approval policy                 |

@@ -631,88 +631,44 @@ Unexpected-issue reporting is an optional MCP-only operator action for behavior
 that contradicts the documented runner contract. Expected pauses, invalid
 input, configured limits, and environmental blockers are not unexpected
 issues. Reports contain only caller-supplied bounded Markdown; the runner does
-not attach logs or secrets automatically.
+not attach logs or secrets automatically. Reports are published to the
+[global issue store](#global-issue-store).
 
-## Local issue index
+## Global issue store
 
-`LOCAL_ARTIFACTS/agent-runner/issues/index.json` is an optional, repository-relative
-operator artifact for tracking deliberate processing of local issue reports.
-Issue Markdown files remain authoritative; the index contains only their order
-and a cursor, never copied report content or a second issue-status model. This
-convention adds no CLI command, MCP tool, prompt input, public run projection,
-or automatic backlog loading. Existing issue reporting does not maintain the
-index. The literal path does not override `artifactRoot` or relocate reports
-published under another configured root.
+Deliberately reported issues form one cross-project backlog in a private
+per-user data store, not in any project: `$XDG_DATA_HOME/agent-runner/issues/`
+on Linux with the `~/.local/share` fallback, user Application Support on macOS,
+and local application data on Windows. The mapping adds no execution-platform
+support. Reports are durable user data, separate from settings, installed
+payloads, run state, and caches, and they remain after the originating
+checkout, worktree, or directory is deleted. Publication requires no project
+ignore rule, never changes ignore rules, and never writes to the project; the
+origin is recorded as context, not used as a storage location.
 
-Before creating or replacing the index, require `git check-ignore` to confirm
-that its resolved repository-relative path is ignored and verify that it is
-untracked. Never change ignore rules to make it eligible. The index and issue
-paths must stay inside the repository, with real directory parents and no
-symbolic-link components. An existing index and present issue files must be
-regular files with a single hard link.
+Each issue has a stable opaque ID and one document combining the immutable
+caller-authored Markdown with its single authoritative tracking record. The
+record holds the origin project name and path, creation and update times,
+revision, optional run ID and error code, and a status from the finite set
+`open`, `queued`, `in_progress`, `resolved`, and `dismissed`. Resolved and
+dismissed account for repaired and deliberately irrelevant issues. Optional
+bounded plan references, resolving commit references, and a concise
+disposition note are caller-supplied text; the runner never dereferences them,
+inspects another project, or validates remote state. New issues start `open`
+with empty references and no note.
 
-The JSON object has exactly these fields:
+Creation is idempotent and interruption-safe: an exact retry returns the
+original receipt even after the origin is deleted, and recovery completes the
+reserved issue in the reserved store without duplication. A changed store
+location or replaced store directory fails rather than replaying elsewhere.
+Unsafe permissions, symbolic or hard links, and overlap with projects,
+settings, run state, or the installation are rejected.
 
-```json
-{
-  "schemaVersion": 1,
-  "entries": [
-    "LOCAL_ARTIFACTS/agent-runner/issues/issue_2026-09-30_090000.000Z.md",
-    "LOCAL_ARTIFACTS/agent-runner/issues/issue_2026-09-30_090000.000Z_001.md"
-  ],
-  "lastProcessed": null
-}
-```
-
-`schemaVersion` is the integer `1`. `entries` is an ordered array of unique
-normalized issue Markdown paths. `lastProcessed` is either `null` or exactly
-one of those strings. Null means no entry has been processed; otherwise every
-entry through that cursor, inclusive, is processed and the suffix is pending.
-An empty list requires a null cursor. A missing index starts from an empty list
-and null cursor; it does not imply that any discovered report was processed.
-Reject malformed JSON, duplicate object fields, unknown fields or versions,
-invalid entries, duplicate stored entries, and a cursor absent from the list.
-Do not silently repair, reorder, or reset an invalid stored index.
-
-Normalized entries use the exact repository-relative prefix
-`LOCAL_ARTIFACTS/agent-runner/issues/` and one report basename, separated by
-forward slashes. Report names have the existing form
-`issue_YYYY-MM-DD_HHMMSS.sssZ.md`, optionally inserting `_NNN` (three digits) or
-`_<token>` (12 lowercase hexadecimal characters) before `.md`.
-The encoded timestamp must be a valid UTC date and time. Reject absolute,
-drive-qualified, backslash, empty-component, `.` or `..` paths, symbolic links,
-directories, and non-issue files. Never resolve traversal, follow links, strip
-an absolute prefix, or reinterpret another Markdown file as an issue. Discovery
-produces the same normalized form; repeated discoveries of one path do not
-create additional entries.
-
-Maintenance first validates the complete stored index and the confined paths.
-Preserve every existing entry in its existing position as an unchanged ordered
-prefix. Discover regular issue Markdown files in that directory, collapse
-duplicate discoveries, and exclude paths already in the prefix. Sort only the
-new paths by their filename's UTC timestamp ascending, then by the complete
-normalized path in bytewise ascending order, and append that batch. Do not use
-filesystem modification times, locale ordering, or a global resort; even a
-newly discovered older report goes after the existing prefix.
-
-A missing unprocessed issue blocks cursor advancement: never skip it or delete
-its entry to reach later work. Discovery may append entries without moving the
-cursor. A missing already processed file may remain in the preserved prefix
-only as historical evidence anchoring the cursor, including when it is the
-`lastProcessed` entry itself. It supplies no report content or authority to
-reprocess a different path. Cursor membership is determined by the validated
-list, not by searching for a replacement file. The historical exception never
-permits a symbolic link, path escape, or replacement non-issue file.
-
-Process pending entries in order. Advance `lastProcessed` to the next entry
-only after that issue has been successfully processed; failed or incomplete
-processing grants no advancement. Serialize maintenance and do not overwrite
-a concurrent index change. Publish each update as the complete validated JSON:
-write an exclusive temporary regular file in the same confined, ignored
-directory, sync that file, atomically replace `index.json`, then sync the parent
-directory. Never patch the cursor in place. Do not claim a durable advancement
-until publication and syncing succeed; after an uncertain publication, reread
-and validate the complete index before continuing.
+Earlier repository-local reports and the optional repository-local issue index
+are not current: the runner neither discovers, imports, nor migrates them and
+never changes those files. A historical completed receipt still replays
+unchanged. An incomplete historical local publication fails explicitly without
+touching its files; retry with a new idempotency key to publish globally.
 
 ## Project-local operating guidance
 

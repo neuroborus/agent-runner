@@ -294,7 +294,12 @@ const unexpectedIssueReportSchema = z
       .string()
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u)
       .optional(),
-    projectConfigurationPath: z.string().min(1).max(16_384).optional(),
+    projectConfigurationPath: z
+      .string()
+      .min(1)
+      .max(16_384)
+      .optional()
+      .describe("Retained request selector; it does not choose issue storage."),
   })
   .strict();
 
@@ -556,15 +561,7 @@ export function createMcpControlPlane(options = {}) {
   const runIdFactory = options.runIdFactory ?? randomUUID;
   let issues = options.issues;
   function issueService() {
-    issues ??= createIssueService({
-      ...options.reportingOptions,
-      loadConfiguration:
-        options.reportingOptions?.loadConfiguration ??
-        options.loadConfiguration ??
-        (() => loadRunnerConfiguration(providers)),
-      providers,
-      runStore,
-    });
+    issues ??= createIssueService({ ...options.reportingOptions, runStore });
     return issues;
   }
 
@@ -1575,7 +1572,7 @@ export function createMcpServer(options = {}) {
       "unexpected_issue_report",
       {
         description:
-          "Create one deliberate local report only after the supervising client agent explicitly concludes Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable. Supply only concise English Markdown explicitly; no logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics are collected automatically.",
+          "Create one deliberate issue in the private per-user global issue store only after the supervising client agent explicitly concludes Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable. Supply only concise English Markdown explicitly; no logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics are collected automatically.",
         inputSchema: unexpectedIssueReportSchema,
         annotations: localCreation,
       },

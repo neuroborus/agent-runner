@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 import test from "node:test";
 
@@ -21,7 +21,6 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import {
   createClarificationService,
   createDetachedRuntimeCompatibilityToken,
-  createGitService,
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
@@ -748,10 +747,7 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
   const repositoryPath = paths.projectPath;
   const worktreePath = join(paths.root, "worktree");
   await executeFile("git", ["init", "-q", "-b", "main", repositoryPath]);
-  await Promise.all([
-    writeFile(join(repositoryPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
-    writeFile(join(repositoryPath, "tracked.txt"), "tracked\n"),
-  ]);
+  await writeFile(join(repositoryPath, "tracked.txt"), "tracked\n");
   await executeFile("git", ["-C", repositoryPath, "add", "."]);
   await executeFile("git", [
     "-C",
@@ -776,35 +772,20 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
   ]);
 
   const projectPath = await realpath(worktreePath);
-  const issuesPath = join(
-    projectPath,
-    "LOCAL_ARTIFACTS",
-    "agent-runner",
-    "issues",
-  );
-  const preflight = await createGitService().preflight({
-    projectPath,
-    requiredIgnoredPaths: [issuesPath],
-  });
-  assert.equal(preflight.snapshot.projectPath, projectPath);
-  assert.equal(preflight.snapshot.detached, true);
-  assert.deepEqual(preflight.ignoredPaths, [
-    {
-      changed: false,
-      exists: false,
-      ignored: true,
-      kind: null,
-      path: issuesPath,
-      relativePath: "LOCAL_ARTIFACTS/agent-runner/issues",
-      tracked: false,
-    },
-  ]);
-
+  const root = await realpath(paths.root);
+  const dataHome = join(root, "data");
+  await mkdir(join(root, "home"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["bin/agent-run.js", "mcp"],
     cwd: new URL("../..", import.meta.url).pathname,
-    env: { ...process.env, XDG_STATE_HOME: paths.stateRoot },
+    env: {
+      ...process.env,
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: join(root, "config"),
+      XDG_DATA_HOME: dataHome,
+      XDG_STATE_HOME: paths.stateRoot,
+    },
     stderr: "pipe",
   });
   let diagnostics = "";
@@ -819,21 +800,38 @@ test("reports unexpected issues from a detached worktree over fresh STDIO", asyn
     idempotencyKey: "detached-worktree-report",
     projectPath,
     summary: "The detached worktree report path was rejected unexpectedly.",
-    expectedBehavior: "The canonical ignored destination accepts the report.",
+    expectedBehavior: "The global issue store accepts the report.",
     actualBehavior: "This regression verifies successful publication.",
     occurrence: "It occurred through a fresh STDIO MCP process.",
-    unexpectedReason: "Run preflight accepted the exact same destination.",
+    unexpectedReason: "No project ignore rule is required for global storage.",
   };
   const first = await client.callTool({
     name: "unexpected_issue_report",
     arguments: input,
   });
   assert.equal(first.isError, undefined);
-  assert.equal(dirname(first.structuredContent.reportPath), issuesPath);
+  const { issueId, issuePath } = first.structuredContent;
+  assert.equal(
+    issuePath,
+    join(dataHome, "agent-runner", "issues", `${issueId}.json`),
+  );
+  const document = JSON.parse(await readFile(issuePath, "utf8"));
+  assert.deepEqual(document.tracking.origin, {
+    name: "worktree",
+    path: projectPath,
+  });
   assert.match(
-    await readFile(first.structuredContent.reportPath, "utf8"),
+    document.report.markdown,
     /The detached worktree report path was rejected unexpectedly\./u,
   );
+  const { stdout } = await executeFile("git", [
+    "-C",
+    projectPath,
+    "status",
+    "--porcelain",
+    "--ignored",
+  ]);
+  assert.equal(stdout, "");
   const retry = await client.callTool({
     name: "unexpected_issue_report",
     arguments: input,
