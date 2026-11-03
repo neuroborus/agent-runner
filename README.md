@@ -714,8 +714,8 @@ deliberate capture through the MCP-only unexpected-issue tool described below.
 Set it to `false` and restart the MCP server to remove the tool, its schema,
 and all related server instructions from discovery. This discovery switch is
 restart-scoped and does not select issue storage. Backlog management through
-`issues_list`, `issues_read`, and `issues_update` stays available when capture
-is disabled. Its scope is the runner-local configuration.
+`issues_list`, `issues_read`, `issues_update`, and `agent-run issues` stays
+available when capture is disabled. Its scope is the runner-local configuration.
 
 `clientAttribution` is a runner-root-only exact `{ "name", "title" }` object
 for provider-visible client identity. It defaults to
@@ -1310,6 +1310,9 @@ agent-run resume --run <run-id>
 agent-run status --run <run-id>
 agent-run guidance --project /path/to/repository
 agent-run guidance edit --project /path/to/repository
+agent-run issues list [--origin /path/to/repository] [--status open]
+agent-run issues read --issue <issue-id>
+agent-run issues update --issue <issue-id> --expected-revision <revision> --expected-hash <hash> --status resolved
 agent-run pipelines
 agent-run mcp
 ```
@@ -1404,6 +1407,32 @@ An unchanged close is a checked no-op, including when no local file exists.
 An empty edited document removes all additions. Editor failure, unsafe content,
 or a concurrent change preserves the local document; reread and reconcile a
 stale edit. These commands do not create a pipeline run.
+
+`issues list`, `issues read`, and `issues update` manage the
+[global issue backlog](#mcp) through the same shared capability as
+`issues_list`, `issues_read`, and `issues_update`, with the same records,
+validation, and conflicts. They need no configuration, ignore `issueReporting`,
+construct no run, and never inspect the origin project, so they work after the
+checkout is deleted. Each prints one JSON result. `--origin` matches the
+recorded origin path exactly; repeat `--status` to select several statuses, and
+continue with `--limit` and the returned `nextCursor` as `--cursor`. For
+example, record a repair from the inspected `tracking.revision` and
+`documentHash`:
+
+```bash
+agent-run issues update --issue <issue-id> \
+  --expected-revision 1 --expected-hash <documentHash> --status resolved \
+  --plan-reference plan.md#commit-2 --commit-reference 0123456789abcdef \
+  --note "Repaired by the referenced commit." --idempotency-key repair-1
+```
+
+Update changes only the supplied tracking fields. Repeated `--plan-reference`
+or `--commit-reference` values replace that list, and `--clear-plan-references`,
+`--clear-commit-references`, and `--clear-note` clear it. Without
+`--idempotency-key`, the generated retry key is printed on stderr before the
+update and included in its JSON receipt; retry an uncertain update with that
+key and the same arguments. After a stale-revision failure, read again and use
+a new key. Deliberate new reports remain MCP-only.
 
 Run-wide preferences use `--profile`, `--model`, `--context-size`, and `--effort`.
 Role-specific values use derived flags such as `--worker-profile`,

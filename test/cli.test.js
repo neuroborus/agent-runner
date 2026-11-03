@@ -310,6 +310,53 @@ test("guidance rejects unsupported actions, extra arguments, duplicate selectors
   }
 });
 
+test("issues rejects malformed management commands before dispatch", async () => {
+  const ISSUE = "11111111-1111-4111-8111-111111111111";
+  const update = [
+    "issues",
+    "update",
+    "--issue",
+    ISSUE,
+    "--expected-revision",
+    "1",
+    "--expected-hash",
+    "a".repeat(64),
+  ];
+  for (const args of [
+    ["issues"],
+    ["issues", "create"],
+    ["issues", "list", "extra"],
+    ["issues", "list", "--project", "/project"],
+    ["issues", "list", "--limit", "0"],
+    ["issues", "list", "--cursor", "a", "--cursor", "b"],
+    ["issues", "read"],
+    ["issues", "read", "--issue", ISSUE, "--status", "open"],
+    ["issues", "update", "--issue", ISSUE, "--expected-hash", "a".repeat(64)],
+    [...update.slice(0, -2)],
+    [...update, "--expected-revision", "2"],
+    [...update, "--status", "open", "--status", "resolved"],
+    [...update, "--note", "Repaired.", "--clear-note"],
+    [...update, "--plan-reference", "plan.md", "--clear-plan-references"],
+    [...update, "--commit-reference", "abc", "--clear-commit-references"],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    assert.equal(
+      await main(args, {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunner: () => assert.fail("must not construct a runner"),
+        createCommandIssues: () =>
+          assert.fail("must not dispatch invalid input"),
+      }),
+      1,
+      args.join(" "),
+    );
+    assert.equal(stdout.read(), "");
+    assert.notEqual(stderr.read(), "");
+  }
+});
+
 test("help describes the required commands", async () => {
   const stdout = createSink();
   const stderr = createSink();
@@ -331,6 +378,9 @@ test("help describes the required commands", async () => {
   assert.match(stdout.read(), /agent-run mcp/);
   assert.match(stdout.read(), /agent-run guidance --project/);
   assert.match(stdout.read(), /agent-run guidance edit --project/);
+  assert.match(stdout.read(), /agent-run issues list/);
+  assert.match(stdout.read(), /agent-run issues read --issue/);
+  assert.match(stdout.read(), /agent-run issues update --issue/);
   assert.match(stdout.read(), /plan-authoring/);
   assert.match(stdout.read(), /plan-execution/);
   assert.match(stdout.read(), /polishing/);

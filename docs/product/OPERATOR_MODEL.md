@@ -664,9 +664,11 @@ location or replaced store directory fails rather than replaying elsewhere.
 Unsafe permissions, symbolic or hard links, and overlap with projects,
 settings, run state, or the installation are rejected.
 
-The backlog is managed with list, read, and update operations that remain
-available when deliberate capture is disabled; disabling capture only removes
-new-report creation. They use only the issue store and issue coordination,
+The backlog is managed with list, read, and update operations, projected
+identically through MCP (`issues_list`, `issues_read`, `issues_update`) and
+the CLI (`agent-run issues list|read|update`). They remain available when
+deliberate capture is disabled; disabling capture only removes new-report
+creation, which stays MCP-only. They use only the issue store and issue coordination,
 never inspect an origin project, and never take or pause a worktree lease, so
 they work after the origin is deleted and while unrelated runs execute. Listing
 covers all projects and statuses unless filtered by exact recorded origin path

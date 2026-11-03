@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-03
 
+- **Global issue tracking is also available from the CLI.**
+  `agent-run issues list`, `issues read`, and `issues update` are thin
+  projections of the shared issue capability, so operators can triage the
+  backlog without an MCP client while records, validation, conflicts, and
+  retry identities stay identical to the MCP tools. Explicit `--clear-*` flags
+  stand in for MCP's empty arrays and `null`, because an omitted flag must keep
+  meaning "unchanged". The list filter is `--origin` rather than `--project`
+  so the recorded path is never treated as a workspace that admission or Git
+  would inspect. Deliberate creation stays MCP-only because it is reserved for
+  a supervising client agent's explicit conclusion.
+
 - **The global issue backlog is managed by revisioned MCP operations.**
   `issues_list`, `issues_read`, and `issues_update` read and update the shared
   store from any project, including after the origin is deleted and when

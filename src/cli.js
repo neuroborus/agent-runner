@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import packageMetadata from "../package.json" with { type: "json" };
 import { migrateRunnerConfiguration } from "./config/index.js";
 import { createGuidanceService } from "./guidance/index.js";
+import { createIssueService } from "./issues/index.js";
 import {
   awaitDetachedDispatch,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
@@ -73,7 +74,35 @@ const REQUIRED_COMMAND_OPTIONS = Object.freeze({
   mcp: Object.freeze([]),
 });
 
-const COMMANDS = new Set(["run", ...Object.keys(COMMAND_OPTIONS)]);
+// Issue management is a thin projection; deliberate creation stays MCP-only.
+const ISSUE_ACTIONS = Object.freeze({
+  list: Object.freeze({
+    options: Object.freeze(["origin", "status", "limit", "cursor"]),
+    required: Object.freeze([]),
+  }),
+  read: Object.freeze({
+    options: Object.freeze(["issue"]),
+    required: Object.freeze(["issue"]),
+  }),
+  update: Object.freeze({
+    options: Object.freeze([
+      "issue",
+      "expected-revision",
+      "expected-hash",
+      "idempotency-key",
+      "status",
+      "plan-reference",
+      "clear-plan-references",
+      "commit-reference",
+      "clear-commit-references",
+      "note",
+      "clear-note",
+    ]),
+    required: Object.freeze(["issue", "expected-revision", "expected-hash"]),
+  }),
+});
+
+const COMMANDS = new Set(["run", "issues", ...Object.keys(COMMAND_OPTIONS)]);
 const GLOBAL_OPTIONS = new Set(["help", "version"]);
 const PIPELINES = listPipelines();
 const PIPELINE_RUN_OPTIONS = new Set(
@@ -105,6 +134,18 @@ const OPTIONS = Object.freeze({
   model: { type: "string" },
   profile: { type: "string" },
   "project-config": { type: "string" },
+  origin: { type: "string" },
+  status: { type: "string", multiple: true },
+  limit: { type: "string" },
+  cursor: { type: "string" },
+  issue: { type: "string" },
+  "expected-hash": { type: "string" },
+  "plan-reference": { type: "string", multiple: true },
+  "clear-plan-references": { type: "boolean" },
+  "commit-reference": { type: "string", multiple: true },
+  "clear-commit-references": { type: "boolean" },
+  note: { type: "string" },
+  "clear-note": { type: "boolean" },
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
@@ -144,6 +185,9 @@ Usage:
   agent-run guidance edit --project <directory> [--project-config <path>]
   agent-run config migrate --from <legacy-file>
   agent-run update [--check] [--release <exact-version>] [--idempotency-key <key>]
+  agent-run issues list [--origin <recorded-path>] [--status <status>]... [--limit <count>] [--cursor <cursor>]
+  agent-run issues read --issue <issue-id>
+  agent-run issues update --issue <issue-id> --expected-revision <revision> --expected-hash <hash> [--status <status>] [--plan-reference <text>]... [--commit-reference <text>]... [--note <markdown>] [--clear-plan-references] [--clear-commit-references] [--clear-note] [--idempotency-key <key>]
   agent-run pipelines
   agent-run mcp
 
@@ -186,8 +230,20 @@ Options:
       --<role>-context-size Override a role decimal token context size
       --extra-fix-rounds   Grant a positive additional fix budget on resume
       --override-finding   Override one applicable open finding on resume
-      --expected-revision  Bind a resume, pause, or cancel request revision
-      --idempotency-key    Bind an explicit pause, cancel, or update retry identity
+      --expected-revision  Bind a resume, pause, cancel, or issues update revision
+      --expected-hash      Bind an issues update to the inspected documentHash
+      --idempotency-key    Bind an explicit pause, cancel, update, or issues update retry identity
+      --origin             Filter issues by exact recorded origin path; never inspected
+      --status             Filter issues by status (repeatable), or set one on update:
+                           open|queued|in_progress|resolved|dismissed
+      --limit              Issue page size from 1 to 100 (default 50)
+      --cursor             Continue an issue list from its opaque nextCursor
+      --issue              Select one issue ID from the global issue store
+      --plan-reference     Replace plan references (repeatable; never retrieved)
+      --commit-reference   Replace resolving commit references (repeatable; never retrieved)
+      --note               Replace the concise disposition note
+      --clear-plan-references, --clear-commit-references, --clear-note
+                           Clear that optional tracking metadata
       --timing             immediate (default) or after-current-commit for pause/cancel
                            Deferred stops require a selected execution step; pauses,
                            failures, or interruptions settle without extra work
@@ -440,15 +496,58 @@ function explicitStopIdentity(values) {
   };
 }
 
+function positiveInteger(value, option) {
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw new Error(`--${option} must be a positive integer.`);
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`--${option} is too large.`);
+  }
+  return number;
+}
+
 function parseExpectedRevision(revision) {
-  if (!/^[1-9][0-9]*$/u.test(revision)) {
-    throw new Error("--expected-revision must be a positive integer.");
+  return positiveInteger(revision, "expected-revision");
+}
+
+function issueListInput(values) {
+  return {
+    ...(values.origin === undefined ? {} : { projectPath: values.origin }),
+    ...(values.status === undefined ? {} : { statuses: values.status }),
+    ...(values.limit === undefined
+      ? {}
+      : { limit: positiveInteger(values.limit, "limit") }),
+    ...(values.cursor === undefined ? {} : { cursor: values.cursor }),
+  };
+}
+
+// Omitted fields stay unchanged; explicit clear flags map to MCP's empty
+// arrays and null so both projections share one tracking contract.
+function issueUpdateInput(values, idempotencyKey) {
+  if (values.status?.length > 1) {
+    throw new Error("--status may be supplied only once for issues update.");
   }
-  const expectedRevision = Number(revision);
-  if (!Number.isSafeInteger(expectedRevision)) {
-    throw new Error("--expected-revision is too large.");
+  const changes = {};
+  for (const [option, clear, field, cleared] of [
+    ["plan-reference", "clear-plan-references", "planReferences", []],
+    ["commit-reference", "clear-commit-references", "commitReferences", []],
+    ["note", "clear-note", "note", null],
+  ]) {
+    if (values[option] !== undefined && values[clear]) {
+      throw new Error(`Use either --${option} or --${clear}, not both.`);
+    }
+    if (values[clear]) changes[field] = cleared;
+    else if (values[option] !== undefined) changes[field] = values[option];
   }
-  return expectedRevision;
+  return {
+    idempotencyKey,
+    issueId: values.issue,
+    expectedRevision: parseExpectedRevision(values["expected-revision"]),
+    expectedHash: values["expected-hash"],
+    ...(values.status === undefined ? {} : { status: values.status[0] }),
+    ...changes,
+  };
 }
 
 function effortSelection(value, option) {
@@ -615,6 +714,8 @@ async function runCommand(
     createCommandRunStore = createRunStore,
     guidance,
     createCommandGuidance = createGuidanceService,
+    issues,
+    createCommandIssues = createIssueService,
     migrateConfiguration = migrateRunnerConfiguration,
     updateService,
     createCommandUpdate = createUpdateService,
@@ -663,7 +764,9 @@ async function runCommand(
     return 1;
   }
 
-  const maximumPositionals = ["run", "guidance", "config"].includes(command)
+  const maximumPositionals = ["run", "guidance", "config", "issues"].includes(
+    command,
+  )
     ? 2
     : 1;
   if (positionals.length > maximumPositionals) {
@@ -683,7 +786,12 @@ async function runCommand(
     return 1;
   }
 
-  if (["guidance", "config", "update"].includes(command)) {
+  if (command === "issues" && !Object.hasOwn(ISSUE_ACTIONS, positionals[1])) {
+    stderr.write(`Expected issues list, read, or update.\n\n${USAGE}`);
+    return 1;
+  }
+
+  if (["guidance", "config", "update", "issues"].includes(command)) {
     if (
       command === "guidance" &&
       positionals[1] !== undefined &&
@@ -727,6 +835,12 @@ async function runCommand(
     ];
     requiredOptions = pipeline.requiredRunOptions;
     commandLabel = `${command} ${pipelineId}`;
+  }
+
+  if (command === "issues") {
+    ({ options: supportedOptions, required: requiredOptions } =
+      ISSUE_ACTIONS[positionals[1]]);
+    commandLabel = `${command} ${positionals[1]}`;
   }
 
   const unsupportedOption = Object.keys(values).find(
@@ -823,6 +937,30 @@ async function runCommand(
         receipt.migrated
           ? "User configuration migrated.\n"
           : "User configuration unchanged.\n",
+      );
+      return 0;
+    }
+    if (command === "issues") {
+      const action = positionals[1];
+      const input =
+        action === "list"
+          ? issueListInput(values)
+          : action === "read"
+            ? { issueId: values.issue }
+            : issueUpdateInput(
+                values,
+                values["idempotency-key"] ?? idempotencyKeyFactory(),
+              );
+      const service = issues ?? createCommandIssues({ env: environment });
+      if (action === "update" && values["idempotency-key"] === undefined)
+        stderr.write(`Issue update retry key: ${input.idempotencyKey}\n`);
+      const result = await service[action](input);
+      stdout.write(
+        `${JSON.stringify(
+          action === "update"
+            ? { ...result, idempotencyKey: input.idempotencyKey }
+            : result,
+        )}\n`,
       );
       return 0;
     }

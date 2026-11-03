@@ -430,8 +430,8 @@ lifecycle and the list, read, and revisioned update operations over the run
 store's durable action primitives and narrow per-issue lease. Private contract,
 location, and store modules own the issue document schema, the per-user store
 location, descriptor-bound filesystem guards, and interrupted-publication
-recovery. Transports project its operations without duplicating action
-wrappers or effects.
+recovery. MCP and the `agent-run issues` CLI project its operations without
+duplicating action wrappers or effects.
 
 The Claude provider lives under `src/agents/claude/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter,
@@ -1826,6 +1826,19 @@ field is required. It requires `expectedRevision`, `expectedHash`, and an
 idempotency key. A mismatch fails with `ERR_ISSUE_REVISION_CONFLICT` without
 mutation. Success increments the revision, advances `updatedAt` monotonically,
 and returns `{ issueId, revision, documentHash }`.
+
+`agent-run issues list`, `issues read`, and `issues update` call the same
+service methods directly from `src/cli.js` with the CLI environment, without
+constructing a runner, loading configuration, or consulting `issueReporting`.
+They map `--origin`, repeatable `--status`, `--limit`, `--cursor`, `--issue`,
+`--expected-revision`, `--expected-hash`, repeatable references, and `--note`
+onto the shared inputs; `--clear-*` flags supply `[]` or `null`, and combining
+a value with its clear flag fails before dispatch. Admission receives no origin
+path, so the list filter remains uninspected. Stdout carries one JSON result;
+an update without `--idempotency-key` first prints its generated key on stderr
+and adds it to the receipt, under the same `issues_update` action identity as
+MCP. Errors print their message on stderr with exit code `1`. Creation remains
+MCP-only.
 
 Mutating MCP calls require an opaque idempotency key. The state layer hashes the
 key, binds it to the tool and canonical arguments, and durably records an action

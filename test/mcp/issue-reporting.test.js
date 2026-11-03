@@ -24,7 +24,11 @@ import { promisify } from "node:util";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
-import { createRunStore, parseRunnerConfiguration } from "../../src/index.js";
+import {
+  createRunStore,
+  main,
+  parseRunnerConfiguration,
+} from "../../src/index.js";
 import {
   createIssueService,
   ISSUE_STATUSES,
@@ -972,6 +976,163 @@ test("manages the global backlog over MCP when capture is disabled", async (t) =
   assert.equal(
     (await control.issuesRead({ issueId })).tracking.status,
     "dismissed",
+  );
+});
+
+test("projects the same backlog through the CLI when capture is disabled", async (t) => {
+  const paths = await repository(t, "agent-runner-issue-cli-");
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const control = reportingControl(paths, {}, runStore);
+  const { issueId } = await control.unexpectedIssueReport(
+    reportInput(paths.projectPath),
+  );
+  await rm(paths.projectPath, { recursive: true, force: true });
+  const { client, server } = await discoveredServer(false, control);
+  t.after(() => client.close().catch(() => {}));
+  t.after(() => server.close().catch(() => {}));
+  const environment = issueOptions(paths).env;
+  const mcp = (name, argumentsValue) =>
+    client.callTool({ name, arguments: argumentsValue });
+  const cli = async (args) => {
+    let stdout = "";
+    let stderr = "";
+    const exitCode = await main(["issues", ...args], {
+      environment,
+      stdout: { write: (chunk) => (stdout += chunk) },
+      stderr: { write: (chunk) => (stderr += chunk) },
+      idempotencyKeyFactory: () => "cli-generated-key",
+      createCommandRunner: () => assert.fail("must not construct a runner"),
+      createCommandIssues(options) {
+        assert.deepEqual(options, { env: environment });
+        return createIssueService({
+          ...issueOptions(paths),
+          ...options,
+          runStore,
+        });
+      },
+    });
+    return { exitCode, stdout, stderr };
+  };
+  const output = async (args) => {
+    const { exitCode, stdout, stderr } = await cli(args);
+    assert.equal(exitCode, 0, stderr);
+    return { value: JSON.parse(stdout), stderr };
+  };
+
+  const read = (await mcp("issues_read", { issueId })).structuredContent;
+  assert.deepEqual((await output(["read", "--issue", issueId])).value, read);
+  assert.deepEqual(
+    (
+      await output([
+        "list",
+        "--origin",
+        paths.projectPath,
+        "--status",
+        "queued",
+        "--status",
+        "open",
+        "--limit",
+        "1",
+      ])
+    ).value,
+    (
+      await mcp("issues_list", {
+        projectPath: paths.projectPath,
+        statuses: ["open", "queued"],
+        limit: 1,
+      })
+    ).structuredContent,
+  );
+
+  // Both projections reject the same invalid request without mutation.
+  const base = [
+    "update",
+    "--issue",
+    issueId,
+    "--expected-revision",
+    "1",
+    "--expected-hash",
+    read.documentHash,
+  ];
+  const invalid = await cli([...base, "--status", "closed"]);
+  assert.equal(invalid.exitCode, 1);
+  assert.equal(invalid.stdout, "");
+  assert.equal(
+    (await mcp("issues_update", { ...updateInput(read), status: "closed" }))
+      .isError,
+    true,
+  );
+
+  // A CLI mutation shares the MCP action identity, so an exact MCP retry
+  // returns the same receipt instead of applying another revision.
+  const updated = await output([
+    ...base,
+    "--status",
+    "resolved",
+    "--commit-reference",
+    "0123456789abcdef",
+    "--note",
+    "Repaired.",
+  ]);
+  assert.equal(updated.stderr, "Issue update retry key: cli-generated-key\n");
+  const { idempotencyKey, ...receipt } = updated.value;
+  assert.equal(idempotencyKey, "cli-generated-key");
+  assert.deepEqual(
+    (
+      await mcp(
+        "issues_update",
+        updateInput(read, {
+          idempotencyKey,
+          commitReferences: ["0123456789abcdef"],
+          note: "Repaired.",
+        }),
+      )
+    ).structuredContent,
+    receipt,
+  );
+
+  // A stale request fails in both projections and leaves the record intact.
+  const stale = await cli([
+    ...base,
+    "--status",
+    "dismissed",
+    "--idempotency-key",
+    "cli-stale",
+  ]);
+  assert.equal(stale.exitCode, 1);
+  assert.equal(stale.stdout, "");
+  assert.match(stale.stderr, /stale/u);
+  assert.equal(
+    (
+      await mcp(
+        "issues_update",
+        updateInput(read, { idempotencyKey: "mcp-stale", status: "dismissed" }),
+      )
+    ).isError,
+    true,
+  );
+  const current = (await mcp("issues_read", { issueId })).structuredContent;
+  assert.equal(current.documentHash, receipt.documentHash);
+
+  // Explicit clear flags map to the MCP empty array and null.
+  const cleared = await output([
+    "update",
+    "--issue",
+    issueId,
+    "--expected-revision",
+    String(receipt.revision),
+    "--expected-hash",
+    receipt.documentHash,
+    "--clear-commit-references",
+    "--clear-note",
+    "--idempotency-key",
+    "cli-clear",
+  ]);
+  assert.equal(cleared.stderr, "");
+  const { tracking } = (await output(["read", "--issue", issueId])).value;
+  assert.deepEqual(
+    [tracking.status, tracking.commitReferences, tracking.note],
+    ["resolved", [], null],
   );
 });
 
