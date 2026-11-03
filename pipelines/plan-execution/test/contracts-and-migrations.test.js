@@ -411,19 +411,16 @@ for (const phase of ["implementation", "finding-resolution"]) {
     const fixture = await createFixture(t, {
       workWorker:
         phase === "implementation"
-          ? [malformed]
-          : [implementationCompleted(), finalizationFailed("F1"), malformed],
+          ? [malformed, malformed]
+          : [
+              implementationCompleted(),
+              finalizationFailed("F1"),
+              malformed,
+              malformed,
+            ],
     });
-    await assert.rejects(fixture.run(), (cause) => {
-      assert.deepEqual(cause.diagnostic, {
-        role: "worker",
-        phase,
-        contract: phase,
-        field: "reason",
-        constraint: "empty-string",
-      });
-      return true;
-    });
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "writable_output_invalid");
     assert.deepEqual(fixture.currentRun.pause.diagnostic, {
       role: "worker",
       phase,
@@ -1309,7 +1306,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 37);
+  assert.equal(planExecutionPipeline.stateVersion, 38);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -1354,6 +1351,11 @@ test("version 36 pre-effect commit records migrate unchanged and classes stay bo
   for (const run of [consumed, retired]) {
     const migrated = planExecutionPipeline.migrations[36](run);
     assert.deepEqual(migrated, run.pipelineState);
+    const { writableResult: _recovery, ...legacy } = run.pipelineState;
+    assert.deepEqual(
+      planExecutionPipeline.migrations[37]({ ...run, pipelineState: legacy }),
+      run.pipelineState,
+    );
     assert.ok(Object.isFrozen(migrated));
     assert.doesNotThrow(() => validateRun({ ...run, pipelineState: migrated }));
   }

@@ -48,6 +48,16 @@ remain repository-read-only.
 In every authoring mode, exhaustion on deterministic structural failures pauses
 without arbitration; an Arbiter cannot resolve those failures.
 
+Implementation and finding-resolution output mistakes preserve the inspected
+candidate and earlier accepted work. Execution grants one bounded read-only
+result restatement against the original turn facts and blockers. Invalid or lost
+replacement output requires explicit resume for one further read-only retry;
+interruption never renews the automatic allowance or charges the same repair
+twice. Validated exceptional outcomes still block. Corrected status and custom
+criterion evidence grant no approval: every original candidate, finalization,
+terminal-confirmation and effect gate still applies. See
+[writable result recovery](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+
 ## Execution and polishing review
 
 Combined execution runs Worker check/fix and a separate read-only clean

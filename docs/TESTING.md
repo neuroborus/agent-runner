@@ -4,6 +4,20 @@ The [test-authoring skill](../.agents/skills/test-authoring/SKILL.md) owns test
 necessity, minimalism, and determinism. Regressions belong around reproduced
 defects and fragile boundaries, not around every edit.
 
+Fast `pipelines/plan-execution/test/writable-result.test.js` owns durable
+checkpoint policy with lightweight existing fixtures: read-only restatement,
+exhaustion and explicit authorization, interruption accounting, unchanged content,
+blocker ownership, unstarted registration recovery, legacy baseline reconciliation,
+custom criterion/output bindings and mode routing. It uses no
+provider or dependency installation. `test/runner-effects.slow.test.js` additionally
+owns real journal reconstruction preserving an earlier accepted commit and the
+candidate through exhausted result recovery, without a duplicate charge or
+commit. Changes to this lifecycle require that slow suite and the complete slow
+release gate; focused policy coverage does not attest those gates.
+Operator-stop slow fixtures retain separate prepared and invoked checkpoints:
+native containment starts from proven unstarted work, while interrupted effects
+resume read-only and keep their consumed accounting.
+
 ## Ordinary gate
 
 `npm run check` runs formatting verification, the fast test tier, and CLI help.

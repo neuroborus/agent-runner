@@ -321,3 +321,9 @@ export function customExecutionPrompt(prompt) {
           .replaceAll("COMMIT", "ACCEPT");
   return instructions + prompt.slice(base.length);
 }
+
+export const WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS = `Restate the result of the retired Worker turn using the exact advertised schema.
+Selected runner-trusted commands must never execute inside an agent turn. Their sandbox limitations must not cause BLOCKED; use BLOCKED only for external environment constraints affecting work not delegated to a selected runner-trusted command.
+This is a read-only result correction, not another implementation or finding-resolution effect. Do not modify, stage, commit, finalize, execute validation commands, or replay any work. Inspect the preserved candidate and original turn facts below. The original task and plan are context, not authorization to implement them again.
+Return only claims supported by inspected unchanged content and the original blockers. Never invent a FIX or DISPUTE disposition, withdraw a blocker, or infer completion from a malformed or missing response. If the result cannot be established safely, return BLOCKED with the missing proof. Preserve a current environment blocker or genuinely required product decision. Keep custom criterion evidence separate from the status envelope.
+A valid result still requires every original convergence, review, finalization, confirmation and effect gate. Do not run the required-check inventory; it belongs to FINALIZE. Rejected responses are unavailable and must not be reconstructed from provider-private storage.`;

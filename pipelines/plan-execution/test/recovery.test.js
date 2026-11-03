@@ -514,6 +514,7 @@ test("clears a reconciled correction marker without replaying the turn", async (
       implementationCompleted(),
       finalizationPassed(),
       resolution({ id: "R1", decision: "FIX" }),
+      resolution({ id: "R1", decision: "FIX" }),
       finalizationPassed(),
     ],
   });
@@ -527,7 +528,7 @@ test("clears a reconciled correction marker without replaying the turn", async (
     const next = await transition(patch, options);
     if (
       next.activeTurn?.phase === "resolve-findings" &&
-      next.pipelineState.workflowState === "REVIEW" &&
+      next.pipelineState.writableResult?.stage === "ready" &&
       next.pipelineState.pendingCorrection
     ) {
       processStopped = true;
@@ -546,7 +547,10 @@ test("clears a reconciled correction marker without replaying the turn", async (
     role: "worker",
     phase: "resolve-findings",
   });
-  assert.equal(fixture.currentRun.pipelineState.workflowState, "REVIEW");
+  assert.equal(
+    fixture.currentRun.pipelineState.workflowState,
+    "RESOLVE_FINDINGS",
+  );
   assert.equal(fixture.currentRun.pipelineState.pendingCorrection, true);
   assert.equal(fixture.currentRun.counters.fixRounds, 1);
   const resolutionTurns = fixture.calls.worker.filter(({ prompt }) =>
@@ -1715,6 +1719,11 @@ for (const mode of ["independent", "lazy"]) {
             if (attempts === 1) {
               fixture.calls.worker.push(request);
               if (stopKind === "interrupted") {
+                if (schema === IMPLEMENTATION_SCHEMA)
+                  await writeFile(
+                    join(request.cwd, "partial-implementation.txt"),
+                    "owned partial candidate\n",
+                  );
                 stopped = true;
                 throw processLoss;
               }

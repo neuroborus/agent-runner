@@ -23,7 +23,9 @@ import {
   createExecutionAdapter,
   createFixture,
   executeFile,
+  operatorFixture,
   PLAN,
+  requestedStepAssessment,
   runnerFor,
   RUNNER_CONFIGURATION,
 } from "./support/index.js";
@@ -34,6 +36,99 @@ const SECOND_PLAN = `${PLAN}
 
 Refine the behavior.
 `;
+
+test("durable writable-result recovery preserves an accepted commit and candidate without replay", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(join(fixture.taskPath, "plan.md"), SECOND_PLAN);
+  const adapter = createExecutionAdapter();
+  const run = adapter.run.bind(adapter);
+  let writes = 0;
+  let restatements = 0;
+  adapter.run = async (request) => {
+    const writableSchema = request.schema?.properties?.result?.anyOf?.some(
+      (branch) => branch.properties.status?.enum?.includes("COMPLETED"),
+    );
+    if (!writableSchema || requestedStepAssessment(request)?.step !== 2)
+      return run(request);
+    const result = {
+      status: "COMPLETED",
+      summary: "Implemented the second step.",
+      reason: "",
+      question: "",
+      options: [],
+      whyBlocked: "",
+      evidence: [],
+    };
+    if (request.access === "workspace-write") {
+      writes++;
+      await writeFile(
+        join(fixture.projectPath, "candidate.txt"),
+        "preserved candidate bytes\n",
+      );
+      result.reason = "PRIVATE_REJECTED_VALUE";
+    } else {
+      restatements++;
+      if (restatements === 1) result.reason = "PRIVATE_REJECTED_VALUE";
+    }
+    return {
+      structured: { result },
+      sessionId: `result-${writes}-${restatements}`,
+    };
+  };
+  const adapters = { codex: adapter };
+  const runner = runnerFor(fixture, adapters);
+  const runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    })
+  ).run.runId;
+  const paused = (await runner.resume({ runId })).run;
+  assert.equal(paused.pause.reason, "writable_output_invalid");
+  assert.equal(paused.pipelineState.completedCommits.length, 1);
+  const [accepted] = paused.pipelineState.completedCommits;
+  assert.equal(
+    (
+      await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
+    ).stdout.trim(),
+    accepted,
+  );
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const saved = await store.loadRun(runId);
+  assert.equal(saved.pipelineState.writableResult.attempts, 1);
+  assert.equal(saved.pipelineState.writableResult.additionalAttempts, 0);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(saved.pipelineState.pendingCommit, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "preserved candidate bytes\n",
+  );
+  assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_REJECTED_VALUE/u);
+  const reconstructed = runnerFor(fixture, adapters, { runStore: store });
+  const done = (
+    await reconstructed.resume({ runId, expectedRevision: saved.revision })
+  ).run;
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.equal(done.pipelineState.completedCommits.length, 2);
+  assert.equal(done.pipelineState.completedCommits[0], accepted);
+  assert.equal(done.counters.fixRounds, 0);
+  assert.equal(done.pipelineState.writableResult, null);
+  assert.equal(writes, 1);
+  assert.equal(restatements, 2);
+  assert.equal(
+    (
+      await executeFile("git", [
+        "-C",
+        fixture.projectPath,
+        "rev-list",
+        "--count",
+        "HEAD",
+      ])
+    ).stdout.trim(),
+    "3",
+  );
+});
 const checkpointWorkspaces = [];
 let oneStepCheckpoint;
 let twoStepCheckpoint;

@@ -6,6 +6,7 @@ import {
   PLAN_KIND_SETTING,
   resolveExecutionWorkspace,
 } from "./step-policy.js";
+import { writableResultDiagnostic } from "./writable-result.js";
 import { assertCustomOutputPreparation } from "./custom-results.js";
 import {
   COMMIT_SIZE_DEFAULTS,
@@ -197,6 +198,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_canceled: "The operator canceled this run; it cannot resume.",
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
+  writable_output_invalid:
+    "The writable result remains invalid. Resume this same checkpoint to authorize one additional read-only result restatement; candidate work and existing blockers are preserved.",
   output_exhausted:
     "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
@@ -335,6 +338,16 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  if (pause.reason === "writable_output_invalid") {
+    const phase = pause.resumeState;
+    const diagnostic = writableResultDiagnostic(
+      { diagnostic: pause.diagnostic },
+      phase,
+    );
+    return Object.freeze([
+      `${diagnostic.phase}: ${diagnostic.field} (${diagnostic.constraint}).`,
+    ]);
+  }
   if (pause.reason === "output_exhausted") {
     return Object.freeze([
       `Suspended role: ${pause.role}.`,
@@ -553,10 +566,26 @@ function validateResumeAction(run, action) {
   )
     return;
   if (action === null && canRecoverLegacyConfirmation(run)) return;
+  if (
+    action === null &&
+    run.pause?.reason === "writable_output_invalid" &&
+    run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+    run.pipelineState.writableResult?.stage === "exhausted" &&
+    Number.isSafeInteger(
+      run.pipelineState.writableResult.additionalAttempts + 2,
+    )
+  )
+    return;
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
   }
+  if (
+    state.writableResult?.stage === "blocked" &&
+    run.pause?.reason === "environment_blocked" &&
+    !Number.isSafeInteger(state.writableResult.additionalAttempts + 2)
+  )
+    throw new Error("Writable result retry allowance is too large.");
   if (state.pendingEdit !== null) {
     if (action !== null) {
       throw new Error("A pending input edit does not accept a resume action.");
@@ -1496,7 +1525,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 37,
+  stateVersion: 38,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1558,6 +1587,8 @@ export const planExecutionPipeline = Object.freeze({
     35: (run) => Object.freeze({ ...run.pipelineState }),
     // Older rejections and pauses carry no adapter class. Never infer one.
     36: (run) => Object.freeze({ ...run.pipelineState }),
+    // Do not infer a lost result or manufacture replay authority for old runs.
+    37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

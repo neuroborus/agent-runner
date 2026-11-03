@@ -24,6 +24,17 @@ safety failure. Writable turns still reject index, history, ref, remote, or
 identity changes. The runner never discards unexpected user work
 automatically.
 
+A malformed writable execution result grants no replay authority. Runner first
+binds reconciled candidate bytes, original blockers and accounting in durable
+pipeline state, then permits only a read-only result restatement. The attempt is
+consumed before invocation and remains consumed across interruption; another
+retry requires explicit resume of the same checkpoint. Input, native-policy,
+filesystem, custom-output and content bindings are rechecked. Drift is preserved
+and blocks progress; read-only mutation retains the contamination stop. New
+recovery diagnostics contain only bounded allowlisted identities, never rejected
+values, commands, exception messages or native output. Existing review and
+one-shot effect ownership remain mandatory.
+
 ## Git ownership
 
 Commit-plan execution permits exactly one ordinary local commit for each validated

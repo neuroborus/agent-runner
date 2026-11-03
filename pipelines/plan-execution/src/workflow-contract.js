@@ -15,6 +15,7 @@ import {
   normalizeCustomResult,
   executionContentFingerprint,
 } from "./custom-results.js";
+import { assertWritableResult } from "./writable-result.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
 import {
   assertCommitSizeAssessment,
@@ -84,6 +85,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "customWritePolicy",
   "planContextVersion",
   "stepImplementation",
+  "writableResult",
   "implementationEvidenceLegacy",
   "artifactRoot",
   "preflightComplete",
@@ -452,6 +454,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "COMMIT",
   ]),
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
+  writable_output_invalid: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
@@ -5675,6 +5678,36 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-execution state has not completed preflight.");
   }
+  assertWritableResult(value, {
+    validateProductDecision(decision) {
+      try {
+        if (isDeepStrictEqual(decision, normalizeProductDecision(decision)))
+          return;
+      } catch {}
+      throw workflowError("Invalid writable product-decision settlement.");
+    },
+    validateBlockers(blockers) {
+      for (const blocker of blockers) {
+        const { source, ...content } = blocker;
+        const normalized =
+          source === "review"
+            ? normalizeReviewFindings(
+                [content],
+                "ERR_INVALID_PLAN_EXECUTION_STATE",
+              )[0]
+            : source === "finalization"
+              ? normalizeFinalizationIssues(
+                  [content],
+                  "ERR_INVALID_PLAN_EXECUTION_STATE",
+                )[0]
+              : null;
+        if (!isDeepStrictEqual(content, normalized))
+          throw workflowError("Invalid writable result blocker ownership.");
+      }
+      if (new Set(blockers.map(({ id }) => id)).size !== blockers.length)
+        throw workflowError("Invalid writable result blocker identities.");
+    },
+  });
   return value;
 }
 
@@ -5706,6 +5739,7 @@ export function createPlanExecutionState({
       preflightComplete: false,
       planContextVersion: 1,
       stepImplementation: null,
+      writableResult: null,
       implementationEvidenceLegacy: false,
       commitSizeAssessment: createCommitSizeAssessment({
         eligible: planKind === "commit",
@@ -5841,6 +5875,19 @@ function repositoryRelativePath(projectPath, path) {
   return pathFromProject.split(sep).join("/");
 }
 
+function matchesWritableResultOutputCheckpoint(state, pause) {
+  const recovery = state.writableResult;
+  return (
+    recovery?.stage === "correcting" &&
+    recovery.productDecision === null &&
+    recovery.phase === pause.resumeState &&
+    pause.role === "worker" &&
+    recovery.attempts > 0 &&
+    recovery.attempts === recovery.additionalAttempts + 1 &&
+    pause.checkpoint === `writable-result:read-only:commit:${recovery.step}`
+  );
+}
+
 function matchesRefinementOutputCheckpoint(state, pause) {
   if (
     !state.commitSizeAssessment.eligible ||
@@ -5940,7 +5987,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 37 ||
+    run.pipelineStateVersion !== 38 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6108,6 +6155,42 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-execution pause state is invalid.");
   }
+  if (
+    state.writableResult !== null &&
+    normalizedCounters(run.counters).fixRounds !==
+      state.writableResult.fixRoundsBefore +
+        (state.writableResult.fixCharged ? 1 : 0)
+  )
+    throw workflowError("Writable result correction accounting changed.");
+  const pendingProductDecision = state.writableResult?.productDecision;
+  if (
+    pendingProductDecision != null &&
+    (pendingProductDecision.number !==
+      normalizedCounters(run.counters).productDecisions + 1 ||
+      pendingProductDecision.expectedHash !==
+        run.hashes.executionClarifications ||
+      run.activeTurn !== null)
+  )
+    throw workflowError(
+      "Writable product-decision settlement changed authority.",
+    );
+  const writableOutputPause =
+    state.workflowState === "WAITING_FOR_USER" &&
+    run.pause?.reason === "writable_output_invalid";
+  if (
+    writableOutputPause &&
+    (!hasExactFields(run.pause, [
+      "reason",
+      "code",
+      "resumeState",
+      "diagnostic",
+    ]) ||
+      run.pause.code !== INVALID_OUTPUT_CODE ||
+      state.writableResult?.stage !== "exhausted" ||
+      run.pause.resumeState !== state.writableResult.phase ||
+      !isDeepStrictEqual(run.pause.diagnostic, state.writableResult.diagnostic))
+  )
+    throw workflowError("Invalid writable result recovery pause.");
   const outputFailure =
     state.workflowState === "FAILED" &&
     run.pause?.reason === "internal_failure" &&
@@ -6115,8 +6198,9 @@ export function assertRun(run) {
   const hasOutputDiagnostic = Object.hasOwn(run.pause ?? {}, "diagnostic");
   if (
     (hasOutputDiagnostic &&
-      (!outputFailure ||
-        !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS) ||
+      (!(outputFailure || writableOutputPause) ||
+        (!writableOutputPause &&
+          !hasExactFields(run.pause, OUTPUT_FAILURE_FIELDS)) ||
         !isOutputDiagnostic(run.pause.diagnostic))) ||
     (outputFailure &&
       !hasExactFields(
@@ -6252,6 +6336,7 @@ export function assertRun(run) {
         ) &&
           !run.pause.checkpoint.startsWith("plan-context:read-only:") &&
           !matchesRefinementOutputCheckpoint(state, run.pause) &&
+          !matchesWritableResultOutputCheckpoint(state, run.pause) &&
           !(
             state.validationMigrationPending &&
             !state.compatibilityCheckRequired &&
@@ -6259,6 +6344,8 @@ export function assertRun(run) {
             run.pause.checkpoint ===
               "validation-migration:read-only:validation-migration"
           )) ||
+        (state.writableResult?.stage === "correcting" &&
+          !matchesWritableResultOutputCheckpoint(state, run.pause)) ||
         (run.pause.resumeState === "COMMIT" &&
           (run.pause.role !== "worker" ||
             run.pause.checkpoint !== `commit:${state.currentStep}`)) ||

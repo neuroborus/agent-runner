@@ -1896,6 +1896,13 @@ are appended verbatim to the durable clarification transcript before detached
 execution continues. Editing the artifact and using `run_resume` remains
 supported.
 
+Execution also preserves candidate work after malformed implementation or
+finding-resolution output. One automatic read-only result restatement precedes
+`writable_output_invalid`; explicit resume of that same checkpoint authorizes
+one additional read-only retry. It preserves earlier accepted work, blockers and
+fix accounting and still requires every original review and commit/result gate.
+See [writable result recovery](pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+
 Action-free recovery uses the same leased runner path through CLI and MCP.
 CLI `resume --run <run-id> --expected-revision <revision>` can bind an inspected
 revision explicitly. An action-free process-proof failure retains its checkpoint,

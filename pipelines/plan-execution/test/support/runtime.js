@@ -1099,12 +1099,22 @@ function createClarificationService({
 
   async function append(options, section) {
     const snapshot = await inspectTranscript(options);
+    if (
+      options.resultHash !== undefined &&
+      snapshot.hash === options.resultHash
+    )
+      return snapshot;
     assertExpectedHash(snapshot, options.expectedHash);
     const separator = snapshot.content.length === 0 ? "" : "\n\n";
-    writeTranscript(
-      options.transcriptPath,
-      `${snapshot.content}${separator}${section}\n`,
-    );
+    const content = `${snapshot.content}${separator}${section}\n`;
+    const resultHash = hash(content);
+    if (options.resultHash !== undefined)
+      assert.equal(options.resultHash, resultHash);
+    await options.persistAppend?.({
+      expectedHash: snapshot.hash,
+      hash: resultHash,
+    });
+    writeTranscript(options.transcriptPath, content);
     return inspectTranscript(options);
   }
 

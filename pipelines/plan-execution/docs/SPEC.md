@@ -4141,6 +4141,85 @@ effects remain verification-only even when invocation never began.
 Successful verification resolves a provisional commit-verification failure;
 its earlier diagnostic remains in history while unrelated blockers stay intact.
 
+### Writable result recovery
+
+Pipeline state version 38 adds nullable `writableResult`. The explicit version-37
+migration initializes it to `null`, preserving valid historical diagnostics,
+terminal outcomes, accepted commits, counters and consumed effects. It does not
+infer recovery authority for a historical rejected response. Unsupported forward
+versions remain rejected; the legacy version-27 repair is unchanged.
+
+Before an implementation or finding-resolution invocation, Runner journals the
+original phase, step, content/result baseline, rework facts, validated blocker
+ownership and dispute restrictions, fix accounting, and a binding to the frozen
+plan, inventories, implementation evidence and earlier accepted work. It publishes
+`invoking` with the active turn. After the provider finishes, one transition binds the safely
+reconciled candidate, invalidates dependent approvals and charges changed rework
+or resolution once. Existing blocker records remain authoritative; failed
+finalization evidence is retained as a blocker, never an approval. No rejected
+response is stored. Custom criterion data is normalized separately and adopted
+only with a valid status result and original gate transition.
+
+A still-prepared reservation with no published active turn proves invocation
+never began. After unchanged-input, content and authority checks, resume uses
+that same original reservation without consuming result-correction allowance.
+Once invocation is published, recovery cannot infer that native work was absent
+and uses read-only restatement. Legacy interrupted writable turns retain their
+existing continuation contract: persist the safely reconciled baseline and any
+pending fix charge before creating a new result checkpoint, keeping the original
+step-start implementation evidence and blocker ownership unchanged.
+
+Normalization failures and the established provider `structured-output` class
+receive one automatically authorized read-only Worker result restatement, using
+the original schema, inspected candidate and saved turn facts. Pending recovery
+precedes ordinary dispatch, refinement and another writable turn. It never
+replays implementation or resolution. The dedicated prompt prohibits repair,
+validation execution and invented finding dispositions. Fresh reconstruction
+uses no new source-session fork; lazy source-fork accounting remains consumed.
+Inputs, native read-only policy, filesystem authority, original blockers,
+initial implementation evidence, custom output/accepted-result bindings and
+unchanged candidate fingerprints are rechecked. A valid completion enters the
+original mode-required convergence route; no review, finalization, confirmation,
+custom acceptance or commit gate is replaced by result correction.
+
+Runner durably consumes the attempt before invoking it. Interruption during
+reservation or invocation consumes that attempt, even without a response.
+Reconciliation precedes retirement of interrupted original writable turns, and
+lost acceptance responses preserve the published gate transition. Invalid or
+lost correction results pause in `WAITING_FOR_USER` with
+`writable_output_invalid`, the original resume phase and an allowlisted
+role/phase/contract/field/constraint diagnostic. Decision and list indices are
+bounded; unknown diagnostic identities become `result`/`semantic-contract`.
+Rejected values, IDs, commands, exception messages, prompts, native output and
+provider-private storage are never diagnostic sources.
+
+An exhausted restatement publishes the exact
+`writable-result:read-only:commit:<step>` checkpoint, bound to Worker, its
+original `IMPLEMENT` or `RESOLVE_FINDINGS` resume phase and the consumed attempt.
+Reconstruction retains that allowance consumption; it cannot reinterpret the
+checkpoint as writable work or another step's retry.
+
+`agent-run resume --run <run-id>` (MCP null-action resume at the inspected
+revision) explicitly authorizes exactly one additional read-only restatement of
+this same checkpoint. That authorization and consumption are persisted
+separately from the single automatic allowance. A validated environment blocker
+after correction, or after charged implementation rework, retains a read-only checkpoint
+and requires explicit resume after resolving that blocker. A validated product
+decision is journaled in the result checkpoint with its original clarification
+hash and question number before transcript mutation. The clarification service
+persists the exact resulting hash before replacement and reuses only that
+verified append on reconstruction. Recovery settles this intent before ordinary
+input inspection or role dispatch. Checkpoint retirement, decision counting,
+the new transcript hash and pending editor authorization publish together with
+the durable product-decision suspension; lost acknowledgements cannot replay
+writable work or lose the question. Answers retain the existing
+compatibility/replanning flow. Unsafe drift pauses without
+adopting edits; read-only contamination requires an uncontaminated new run.
+Publication failures preserve recovery authority. Resume and operator-stop
+reconciliation preserve candidate bytes, prior accepted commits and receipts,
+fix/dispute accounting and consumed effect authority; they never renew a budget,
+transfer an approval, skip a blocker or duplicate a commit.
+
 ## 16. Resume
 
 `agent-run resume --run <run-id>` must reconstruct the workflow from persisted

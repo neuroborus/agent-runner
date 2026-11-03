@@ -110,7 +110,26 @@ for (const mode of ["independent", "lazy", "combined"]) {
     assert.equal(completed.pipelineState.workflowState, "DONE");
     assert.equal(completed.pipelineState.completedCommits.length, 1);
     const repair = fixture.transitions.find(
-      ({ patch }) => patch?.pipelineState.pendingCorrection === true,
+      ({ patch }) =>
+        patch?.pipelineState.pendingCorrection === true &&
+        patch.pipelineState.writableResult === null,
+    );
+    const reconciled = fixture.transitions.find(
+      ({ patch }) =>
+        patch?.pipelineState.writableResult?.phase === "RESOLVE_FINDINGS" &&
+        patch.pipelineState.writableResult.stage === "ready",
+    );
+    assert.equal(
+      reconciled.patch.pipelineState.finalizationResult.status,
+      "FAIL",
+    );
+    assert.equal(
+      reconciled.patch.pipelineState.writableResult.blockers[0].id,
+      "F1",
+    );
+    assert.equal(
+      reconciled.patch.counters.fixRounds,
+      beforeRepair.counters.fixRounds + 1,
     );
     assert.equal(
       repair.patch.counters.fixRounds,
@@ -234,13 +253,13 @@ for (const mode of ["independent", "lazy", "combined"]) {
       runtime: fixture.runtime,
       operatorStop: true,
     });
-    assert.equal(
-      reconciled.pipelineState.workflowState,
-      mode !== "independent" ? "CHECK_AND_FIX" : "REVIEW",
-    );
+    assert.equal(reconciled.pipelineState.workflowState, "RESOLVE_FINDINGS");
     assert.equal(reconciled.counters.fixRounds, before.counters.fixRounds + 1);
     assert.equal(reconciled.pipelineState.pendingCorrection, true);
-    assert.equal(reconciled.pipelineState.finalizationResult, null);
+    assert.equal(reconciled.pipelineState.finalizationResult.status, "FAIL");
+    assert.equal(reconciled.pipelineState.writableResult.stage, "ready");
+    assert.equal(reconciled.pipelineState.writableResult.fixCharged, true);
+    assert.equal(reconciled.pipelineState.writableResult.blockers[0].id, "F1");
     assert.equal(reconciled.pipelineState.candidateReviewedFingerprint, null);
     assert.equal(reconciled.activeTurn, null);
     assert.notEqual(

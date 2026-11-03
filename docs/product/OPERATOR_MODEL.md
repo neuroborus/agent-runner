@@ -11,6 +11,15 @@ transport. A pause is not completion: follow its current `nextActions`, resolve
 only the permitted cause, and resume the same run when resumable. Do not finish,
 validate, rewrite, discard, or commit resumable work manually.
 
+For an implementation or finding-resolution result-format failure, execution
+preserves candidate work and earlier accepted progress and attempts one
+read-only result restatement. `writable_output_invalid` means that allowance was
+consumed: resume the same checkpoint to authorize one further read-only retry.
+It grants no writable replay, additional fix budget or approval. Resolve a
+validated environment blocker before resuming; unsafe drift or contamination
+retains its existing stop. See the
+[execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+
 ## Local application artifacts
 
 Application distribution currently provides local candidate assembly with neutral

@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-03
+
+- **Writable result correction preserves work without replaying it.** Execution
+  journals original implementation/resolution facts, blockers and accounting,
+  reconciles the candidate and invalidates approvals before retiring the turn,
+  then permits one read-only result restatement for normalization or established
+  provider structured-output failure. Attempts survive interruption; exhaustion
+  offers an explicit same-checkpoint read-only retry rather than terminal run
+  loss. Custom criterion/output validation, earlier accepted work, fix charges,
+  source-fork accounting and all mode-required gates retain their authority.
+  State version 38 initializes absent recovery state without inventing historical
+  proof or touching the legacy version-27 repair. Diagnostics allow identities
+  only. Synthetic malformed cases prove contract behavior; the exact rejected
+  fields in the reported real failures remain unknown.
+
 ## 2026-11-02
 
 - **Internal provider-control directory aliases resolve instead of blaming

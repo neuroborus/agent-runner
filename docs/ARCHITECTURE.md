@@ -3815,6 +3815,40 @@ and resume preserve the pending marker without retaining rejected output,
 replaying accepted progress, consuming revision or correction budgets, or
 writing `plan.md` early.
 
+Plan execution owns durable implementation/finding-resolution result recovery
+in private `writable-result.js` and its workflow integration. State version 38
+adds nullable `writableResult`; the version-37 migration initializes absence
+without inferring recovery evidence or changing terminal history, accepted work
+or consumed effects. Before invocation, the pipeline binds original phase,
+step, content, blocker ownership, restrictions, inventories and accounting.
+Reconciliation atomically publishes the inspected candidate, approval
+invalidation and any fix charge before retiring the writable turn. Only
+allowlisted normalization diagnostics are retained, never rejected output.
+Unstarted prepared reservations resume under their existing authority after
+unchanged-state checks; published invocations require result restatement.
+Legacy writable continuations bind their reconciled baseline and retained fix
+accounting before checkpoint creation, preserving original implementation proof.
+Validated product decisions remain journaled settlement intents until the
+transcript append and product-decision suspension complete. The existing
+clarification service binds append replacement to a persisted result hash;
+recovery reuses those exact bytes before input checks or another role turn.
+The checkpoint retires atomically with the suspension and editor authorization.
+
+One durably reserved read-only Worker restatement uses the original schema and
+facts under unchanged content, frozen inputs, native policy and filesystem
+permissions. Custom result data and output authority remain independently
+validated and settle with the valid gate transition. Interrupted attempts remain
+consumed; lost acceptance responses use the published state. Repeated invalid
+output pauses with `writable_output_invalid`; explicit null-action resume
+journals one additional read-only retry without renewing the automatic allowance.
+Output-exhausted restatements require their exact read-only checkpoint bound to
+Worker, the original implementation/resolution phase, step and consumed attempt.
+Validated blockers remain blocking. Recovery precedes ordinary dispatch and
+never repeats writable work, invents dispositions, duplicates fix charges or
+commits, or replaces a mode-required gate. The owning
+[execution specification](../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery)
+defines the checkpoint and pause contract.
+
 Plan execution also owns lazy structured-output recovery. Provider and
 deterministic checkpoint failures are reduced to bounded diagnostics, then one
 fresh Worker session receives the complete durable checkpoint request with its
