@@ -1929,8 +1929,10 @@ prove native fork support at its capability probe.
 `run_wait` is one revision-driven server-side wait that ends at an unresolved
 `WAITING_FOR_USER`, `DONE`, `FAILED`, `CANCELED`, an `interrupted` execution
 whose lease owner is positively `dead` or `replaced`, or its caller-selected
-timeout. An owner can exit without changing any file, and Node reports no exit
-for a non-child process, so the wait also watches lease files and runs a
+timeout. Positive owner loss interrupts a checkpoint requiring continuation even
+between turns, with no active turn, execution process, preparation record, or
+revision change. An owner can exit without changing any file, and Node reports
+no exit for a non-child process, so the wait also watches lease files and runs a
 read-only lease-owner probe once per second. The probe uses the same
 classification as `run_status`, against the classification the caller already
 inspected. Only a change to `dead` or `replaced` wakes the wait. The probe
@@ -1952,12 +1954,15 @@ MCP status and wait also project one bounded `execution` object. Its finite
 `processRecord` is `none` or `persisted`; neither field exposes process
 identity. `state` remains the conservative action summary: `running` while the
 lease owner is live or unverifiable, `interrupted` when a persisted active turn
-or process record has no exclusionary owner, and `idle` otherwise. Nullable
-`role` and `phase` come only from the common run envelope. A read applies the
-same exact same-host process-identity classification used for exclusive
-acquisition without changing ownership. A timeout therefore distinguishes live
-lease ownership, unresolved lease identity, and durable process ownership
-without a heartbeat or journal polling.
+or execution process/preparation record has no exclusionary owner, or when a
+positively dead or replaced owner leaves a checkpoint requiring continuation,
+and `idle` otherwise. Terminal states and unresolved `WAITING_FOR_USER` retain
+their existing semantics; owner loss alone does not make them interrupted.
+Nullable `role` and `phase` come only from the common run envelope. A read
+applies the same exact same-host process-identity classification used for
+exclusive acquisition without changing ownership. A timeout therefore
+distinguishes live lease ownership, unresolved lease identity, and durable
+process ownership without a heartbeat or journal polling.
 `pipelines_list` projects descriptor-owned setting values, defaults, and
 recommendations. Status, wait, and activity project the persisted resolved mode
 without inactive role configuration or provider-private data. `run_activity`

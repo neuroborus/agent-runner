@@ -1988,9 +1988,11 @@ setting above to the operator's longest expected wait. A client timeout or
 cancelled wait affects the wait call while the pipeline continues. Recover with
 `run_status` and another explicit wait. A wait also returns promptly with
 `execution.state: "interrupted"` when the execution owner is positively
-observed dead or replaced; recover that run with an explicit `run_resume`. Use
-`run_activity` for deliberate inspection and `run_wait` for long event-driven
-waits.
+observed dead or replaced at a checkpoint requiring continuation, including
+between turns with no execution records or revision change. Recover that run
+with an explicit `run_resume` using `action: null`, the inspected revision,
+and a new idempotency key. Use `run_activity` for deliberate inspection and
+`run_wait` for long event-driven waits.
 
 MCP represents paused clarification and product decisions as structured
 `pendingInput`. `run_respond` requires the request ID,

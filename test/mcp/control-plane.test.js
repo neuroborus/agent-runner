@@ -143,6 +143,82 @@ test("status and wait expose bounded observation evidence without private run or
   assert.deepEqual(waited.observations, status.observations);
 });
 
+test("empty checkpoint projections preserve terminal, input and conservative ownership semantics", async () => {
+  const run = {
+    runId: RUN_ID,
+    revision: 5,
+    pipelineId: "plan-authoring",
+    taskPath: "/task",
+    activeTurn: null,
+    executionProcess: null,
+    preparation: null,
+    pause: null,
+    pipelineState: { workflowState: "CLARIFY" },
+  };
+  let leaseOwner;
+  const control = createMcpControlPlane({
+    runner: { status: async () => ({ run, directoryPath: "/state/run" }) },
+    runStore: { inspectRunLeaseOwner: async () => ({ status: leaseOwner }) },
+  });
+  const inspect = async (state, timedOut) => {
+    const status = await control.runStatus({ runId: RUN_ID });
+    const waited = await control.runWait({
+      runId: RUN_ID,
+      cursor: run.revision,
+      timeoutMs: 0,
+    });
+    assert.deepEqual(status.execution, {
+      state,
+      leaseOwner,
+      processRecord: "none",
+      role: null,
+      phase: null,
+    });
+    assert.deepEqual(waited.execution, status.execution);
+    assert.deepEqual(waited.pendingInput, status.pendingInput);
+    assert.equal(waited.timedOut, timedOut);
+    assert.equal(waited.revision, run.revision);
+    return status;
+  };
+  for (const [owner, state] of [
+    ["live", "running"],
+    ["unverifiable", "running"],
+    ["none", "idle"],
+  ]) {
+    leaseOwner = owner;
+    await inspect(state, true);
+  }
+  const inputRequest = {
+    id: "request-1",
+    kind: "clarification",
+    questions: [{ id: "q1", question: "Choose?", options: ["A", "B"] }],
+    rationale: "Required for scope.",
+    artifactPath: "/task/clarifications.md",
+  };
+  for (const owner of ["dead", "replaced"]) {
+    leaseOwner = owner;
+    for (const workflowState of ["DONE", "FAILED", "CANCELED"]) {
+      run.pipelineState.workflowState = workflowState;
+      run.pause = null;
+      await inspect("idle", false);
+    }
+    run.pipelineState.workflowState = "WAITING_FOR_USER";
+    run.pause = { reason: "backend_unavailable" };
+    await inspect("idle", false);
+    run.pause = { reason: "clarification_answers_required", inputRequest };
+    const pending = await inspect("idle", false);
+    assert.deepEqual(pending.pendingInput, { ...inputRequest, revision: 5 });
+    assert.deepEqual(pending.pause.nextActions, [
+      { type: "respond", requestId: inputRequest.id },
+    ]);
+    run.pause.inputResponse = {
+      requestId: inputRequest.id,
+      transcriptHash: "a".repeat(64),
+    };
+    assert.equal((await inspect("interrupted", false)).pendingInput, null);
+  }
+});
+
 test("a wait reaching its deadline reports an owner lost before it", async (t) => {
   t.mock.timers.enable({ apis: ["Date"] });
   const run = {
