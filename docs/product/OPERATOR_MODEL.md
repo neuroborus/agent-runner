@@ -612,15 +612,18 @@ finalization and fresh confirmation. Provider availability or interruption
 resumes an already pending attempt without charging another retry.
 
 Public activity records the actor, phase, event kind, and concise message. The
-active role and phase combine with lease ownership to distinguish running,
-interrupted, and idle work without polling a provider or depending on a
-heartbeat. MCP status and wait additionally report the finite lease-owner
-classification and whether a process record is persisted, without exposing a
-PID or process identity. A held or new MCP wait also completes promptly and
-reports `interrupted` when the lease owner is positively observed dead or
-replaced, even if no run revision follows. Unavailable identity, another host,
-and released or transferring leases keep waiting. The wait never writes state
-or replays effects; recovery is an explicit `run_resume`. An interrupted owner
+workflow checkpoint, active role and phase combine with lease ownership to
+distinguish running, interrupted, and idle work without polling a provider or
+depending on a heartbeat. MCP status and wait additionally report the finite
+lease-owner classification and whether a process record is persisted, without
+exposing a PID or process identity. A held or new MCP wait also completes
+promptly and reports `interrupted` when the lease owner is positively observed dead or
+replaced at a checkpoint requiring continuation, even between turns with no
+active turn, execution process, preparation record, or revision change. Terminal
+states and unresolved user input keep their existing semantics. Unavailable
+identity, another host, and released or transferring leases keep waiting. The
+wait never writes state or replays effects; recovery is an explicit `run_resume`
+with `action: null`, the inspected revision, and a new idempotency key. An interrupted owner
 reconstructs work from durable state after revalidating inputs and the
 repository.
 

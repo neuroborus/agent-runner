@@ -3205,6 +3205,115 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
   assert.equal((await store.loadRun(SECOND_RUN_ID)).revision, 1);
 });
 
+test(
+  "status and waits expose owner loss between turns without changing the checkpoint",
+  { timeout: 10_000 },
+  async (t) => {
+    const paths = await workspace(t, "agent-runner-mcp-checkpoint-owner-");
+    const ownerProcessId = 4242;
+    let ownerIsAlive = true;
+    let startTicks = "4242";
+    let onLivenessCheck = () => {};
+    const store = createRunStore({
+      stateRoot: paths.stateRoot,
+      processId: ownerProcessId,
+      processIsAlive(pid) {
+        onLivenessCheck();
+        return pid === ownerProcessId && ownerIsAlive;
+      },
+      processIdentity: () => ({
+        bootId: "11111111-1111-4111-8111-111111111111",
+        startTicks,
+      }),
+    });
+    const checkpoint = await createStoredRun(store, paths);
+    assert.equal(checkpoint.activeTurn, null);
+    assert.equal(checkpoint.executionProcess, null);
+    assert.equal(checkpoint.preparation, null);
+    const lease = await store.acquireRunLease(RUN_ID);
+    const abort = new AbortController();
+    try {
+      const directory = await store.getRunDirectory(RUN_ID);
+      const readCanonical = () =>
+        Promise.all(
+          ["state.json", "events.jsonl", ".lease"].map((name) =>
+            readFile(join(directory, name)),
+          ),
+        );
+      const canonicalBytes = await readCanonical();
+      let onWait = () => {};
+      const control = createMcpControlPlane({
+        runner: storedRunner(store, paths),
+        runStore: {
+          ...store,
+          async waitForRunChange(...argumentsList) {
+            onWait();
+            return store.waitForRunChange(...argumentsList);
+          },
+        },
+        launchRun() {
+          assert.fail("Read-only observation must not launch a continuation.");
+        },
+      });
+      const input = {
+        runId: RUN_ID,
+        cursor: checkpoint.revision,
+        timeoutMs: 60_000,
+        progress: false,
+      };
+      // The clock never reaches the deadline; only the existing owner probe can
+      // end the held wait when no canonical file or run revision changes.
+      t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+      for (const leaseOwner of ["dead", "replaced"]) {
+        ownerIsAlive = true;
+        startTicks = "4242";
+        assert.equal(
+          (await control.runStatus(input)).execution.state,
+          "running",
+        );
+        const checked = Promise.withResolvers();
+        onWait = () => {
+          onLivenessCheck = checked.resolve;
+        };
+        const waiting = control.runWait(input, { signal: abort.signal });
+        await checked.promise;
+        // After the injected liveness read, inspection finishes through microtasks.
+        await new Promise(setImmediate);
+        onLivenessCheck = () => {};
+        onWait = () => {};
+        if (leaseOwner === "dead") ownerIsAlive = false;
+        else startTicks = "4343";
+        t.mock.timers.tick(1_000);
+        const held = await waiting;
+        const status = await control.runStatus(input);
+        onWait = () => {
+          assert.fail("Positive owner loss must return without another wait.");
+        };
+        const fresh = await control.runWait(input);
+        onWait = () => {};
+        for (const result of [held, status, fresh]) {
+          assert.equal(result.status, "CLARIFY");
+          assert.equal(result.revision, checkpoint.revision);
+          assert.deepEqual(result.execution, {
+            state: "interrupted",
+            leaseOwner,
+            processRecord: "none",
+            role: null,
+            phase: null,
+          });
+        }
+        assert.equal(held.timedOut, false);
+        assert.equal(fresh.timedOut, false);
+        assert.deepEqual(await readCanonical(), canonicalBytes);
+      }
+    } finally {
+      abort.abort();
+      t.mock.timers.reset();
+      await lease.release();
+    }
+  },
+);
+
 test("projects live and crashed provider activity through status and wait", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-provider-activity-");
   const ownerProcessId = 424_242;

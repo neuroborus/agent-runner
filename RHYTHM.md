@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-04
+
+- **Positive execution-owner loss interrupts checkpoints between turns.**
+  MCP status and both new and held waits now expose `interrupted` for a
+  positively dead or replaced lease owner at a checkpoint requiring
+  continuation, even when active turn, execution process and preparation
+  records are absent and no revision changes. The shared projection uses the
+  existing ownership evidence and event-driven wait; observation remains
+  read-only and recovery requires explicit action-free `run_resume`. Terminal
+  states, pending user input, uncertain ownership and released or transferring
+  leases retain their existing semantics.
+
 ## 2026-11-03
 
 - **Automatic commit splitting has an explicit frozen switch.**

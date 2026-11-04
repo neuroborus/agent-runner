@@ -372,9 +372,11 @@ the original receipt. Ownerless applicable-stop recovery is a separate
 `run_resume` mutation with a new key, not a recreated pause/cancel receipt.
 Use `run_wait` for event-driven waiting and cursor-based `run_activity` for
 deliberate inspection; never poll at a fixed cadence. Omitted
-`run_wait.timeoutMs` waits 30 seconds, with a 24-hour maximum. A wait that
-returns `interrupted` with a `dead` or `replaced` lease owner needs an explicit
-`run_resume`; do not wait again for that owner.
+`run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held
+waits return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners
+at continuation checkpoints, even between turns without records or revision
+changes. Use action-free `run_resume` below. Ownerless `idle` does not prove
+loss; terminal states and pending input still end waits.
 
 Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
 and checkpoint. Compare byte measurements and token snapshots separately;
@@ -383,7 +385,7 @@ omitted attempts are evidence limits. Never infer a service output limit, sum
 cumulative snapshots, or collect private provider content to fill those gaps.
 
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
-work continues. Inspect `execution.leaseOwner` (live/dead/replaced/unverifiable)
+work continues. Inspect `execution.leaseOwner` (none/live/dead/replaced/unverifiable)
 and `execution.processRecord` (durable ownership present, without identity).
 An ownerless nonterminal unpaused checkpoint or `applicable` stop may accept
 action-free recovery through

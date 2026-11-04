@@ -476,11 +476,13 @@ function executionProjection(run, leaseOwner) {
   const leaseOwnerStatus = leaseOwner?.status ?? "none";
   const state = ["live", "unverifiable"].includes(leaseOwnerStatus)
     ? "running"
-    : run.activeTurn === null &&
-        run.executionProcess === null &&
-        run.preparation == null
-      ? "idle"
-      : "interrupted";
+    : (["dead", "replaced"].includes(leaseOwnerStatus) &&
+          !waitIsTerminal(run)) ||
+        run.activeTurn !== null ||
+        run.executionProcess !== null ||
+        run.preparation != null
+      ? "interrupted"
+      : "idle";
   return {
     state,
     leaseOwner: leaseOwnerStatus,
