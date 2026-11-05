@@ -19,6 +19,7 @@ export {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
+  RunObservationBusyError,
   RunStoreError,
 } from "./validation.js";
 

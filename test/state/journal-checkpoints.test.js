@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
-import {
+import nativeFilesystem, {
   constants,
   copyFileSync,
   mkdirSync,
@@ -32,6 +32,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  createPlanAuthoringState,
+  planAuthoringPipeline,
+} from "@agent-runner/plan-authoring";
+
+import {
   readProcessIdentity,
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
@@ -46,10 +51,18 @@ import {
 } from "../../src/trusted-validation/index.js";
 import { sandboxTrustedCommand } from "../../src/trusted-validation/execution.js";
 
-import { createRunStore } from "../../src/state/index.js";
+import {
+  createRunStore,
+  RunObservationBusyError,
+} from "../../src/state/index.js";
 import { createStateJournal } from "../../src/state/journal.js";
+import { createRunner } from "../../src/runner/index.js";
+import { createMcpControlPlane } from "../../src/mcp/index.js";
 
-async function fixture(t, { pipelineId = "plan-execution", ...options } = {}) {
+async function fixture(
+  t,
+  { pipelineId = "plan-execution", runInput = {}, ...options } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-checkpoint-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const input = {
@@ -59,6 +72,7 @@ async function fixture(t, { pipelineId = "plan-execution", ...options } = {}) {
     taskPath: join(root, "task"),
     roles: { worker: { backend: "codex", model: "base" } },
     pipelineState: { workflowState: "IMPLEMENT" },
+    ...runInput,
   };
   await Promise.all([mkdir(input.projectPath), mkdir(input.taskPath)]);
   const stateRoot = join(root, "state");
@@ -872,8 +886,8 @@ function pageEntries(page) {
 // Publish through the lease owner once each selected stream has taken its
 // opening observation of the active segment, before it reads. Loading a
 // snapshot or an extension proof observes that segment twice, and each stream
-// observes it when opening and closing, so a read's stream opens at the third
-// observation and its single reread's stream at the seventh.
+// observes it when opening and closing, so the three bounded drains open at
+// observations three, seven and eleven. Writer observations are excluded.
 async function publishDuringStreams(t, path, openings, publish) {
   const metadata = await stat(path, { bigint: true });
   const handle = await open(path, "r");
@@ -916,6 +930,143 @@ function publishActivity(store, created, rounds) {
     { counters: { rounds } },
     { activity: concurrentActivity },
   );
+}
+
+for (const mode of ["new-warm", "held-cold", "new-evicted"]) {
+  test(`MCP waits retain their activity proof through a second concurrent publication: ${mode}`, async (t) => {
+    const { store, created, input, stateRoot } = await fixture(t, {
+      pipelineId: "plan-authoring",
+      runInput: {
+        pipelineStateVersion: planAuthoringPipeline.stateVersion,
+        roles: Object.fromEntries(
+          planAuthoringPipeline.roles.map((role) => [
+            role,
+            { backend: "codex" },
+          ]),
+        ),
+        pipelineState: createPlanAuthoringState(),
+      },
+    });
+    const { runId } = created.state;
+    const held = mode === "held-cold";
+    const observer = createRunStore({ stateRoot });
+    const wakeCompleted = Promise.withResolvers();
+    let pageStore = observer;
+    let publications = 0;
+    let canonical;
+    const readCanonical = () =>
+      Promise.all(
+        ["events.jsonl", "state.json", "progress.md"].map((name) =>
+          readFile(join(created.directoryPath, name), "utf8"),
+        ),
+      );
+    const reader = {
+      ...observer,
+      async readPublicActivity(...args) {
+        if (held) await wakeCompleted.promise;
+        if (mode === "held-cold") pageStore = createRunStore({ stateRoot });
+        if (mode === "new-evicted") {
+          for (let index = 0; index < 8; index += 1) {
+            const extra = await observer.createRun(input);
+            await extra.lease.release();
+          }
+        }
+        await publishDuringStreams(
+          t,
+          join(created.directoryPath, "events.jsonl"),
+          [3, 7],
+          async () => {
+            publications += 1;
+            await store.transitionRun(
+              created.lease,
+              {
+                counters: { revisionRounds: publications + Number(held) },
+                ...(publications === 2
+                  ? {
+                      pause: {
+                        reason: "workspace_changed",
+                        code: "ERR_WORKSPACE_DRIFT",
+                      },
+                      pipelineState: {
+                        ...created.state.pipelineState,
+                        workflowState: "WAITING_FOR_USER",
+                      },
+                    }
+                  : {}),
+              },
+              { activity: concurrentActivity },
+            );
+            canonical = await readCanonical();
+          },
+        );
+        const decoded = eventDecodes(t);
+        const page = await pageStore.readPublicActivity(...args);
+        assert.equal(decoded.normalized.includes(1), mode !== "new-warm");
+        return page;
+      },
+    };
+    const control = createMcpControlPlane({
+      runner: createRunner({ runStore: reader }),
+      runStore: reader,
+    });
+    const watching = Promise.withResolvers();
+    if (held) {
+      const watch = nativeFilesystem.watch;
+      t.mock.method(nativeFilesystem, "watch", (...args) => {
+        const watcher = watch(...args);
+        watching.resolve();
+        return watcher;
+      });
+      syncBuiltinESMExports();
+      t.after(() => {
+        t.mock.restoreAll();
+        syncBuiltinESMExports();
+      });
+    }
+    const abort = new AbortController();
+    const progress = [];
+    const waiting = control.runWait(
+      {
+        runId,
+        cursor: held ? 1 : 0,
+        timeoutMs: held ? 10_000 : 0,
+        progress: true,
+      },
+      {
+        signal: abort.signal,
+        progressToken: "wait-progress",
+        notify: async ({ params }) => progress.push(params.progress),
+      },
+    );
+    t.after(async () => {
+      wakeCompleted.resolve();
+      abort.abort();
+      await waiting.catch(() => {});
+    });
+    if (held) {
+      await Promise.race([watching.promise, waiting]);
+      try {
+        await store.transitionRun(
+          created.lease,
+          { counters: { revisionRounds: 1 } },
+          { activity: concurrentActivity },
+        );
+      } finally {
+        wakeCompleted.resolve();
+      }
+    }
+    const waited = await waiting;
+    assert.equal(publications, 2);
+    assert.equal(waited.status, "WAITING_FOR_USER");
+    assert.equal(waited.timedOut, false);
+    assert.equal(waited.revision, held ? 4 : 3);
+    assert.deepEqual(progress, held ? [2, 3, 4] : [1, 2, 3]);
+    assert.deepEqual(
+      await readCanonical(),
+      canonical,
+      "observation writes nothing",
+    );
+  });
 }
 
 test("a retained activity page rereads once after a proven concurrent publication", async (t) => {
@@ -979,7 +1130,7 @@ test("an overflow activity stream rereads once after a proven concurrent publica
   assert.equal(next.cursor, published.revision);
 });
 
-test("an activity page rereads at most once for concurrent publications", async (t) => {
+test("proved publication exhaustion returns a retryable observation outcome", async (t) => {
   const { store, created } = await fixture(t);
   const { runId } = created.state;
   await store.loadRun(runId);
@@ -987,19 +1138,49 @@ test("an activity page rereads at most once for concurrent publications", async 
   await publishDuringStreams(
     t,
     join(created.directoryPath, "events.jsonl"),
-    [3, 7],
+    [3, 7, 11],
     async () => {
       rounds += 1;
       await publishActivity(store, created, rounds);
     },
   );
-  await assert.rejects(store.readPublicActivity(runId), {
-    code: "ERR_INVALID_EVENT_LOG",
-    message: "Run changed during projection streaming.",
+  await assert.rejects(store.readPublicActivity(runId), (error) => {
+    assert.ok(error instanceof RunObservationBusyError);
+    assert.equal(error.code, "ERR_RUN_OBSERVATION_BUSY");
+    assert.equal(error.retryable, true);
+    return true;
   });
-  assert.equal(rounds, 2, "both drains observed a publication");
-  assert.equal((await store.readPublicActivity(runId)).cursor, 3);
+  assert.equal(rounds, 3, "each bounded drain observed a publication");
+  assert.equal((await store.readPublicActivity(runId)).cursor, 4);
 });
+
+for (const interference of ["edited-prefix", "unavailable-proof"]) {
+  test(`publication exhaustion cannot classify ${interference} as retryable`, async (t) => {
+    const { store, created, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    const path = join(created.directoryPath, "events.jsonl");
+    let publications = 0;
+    await publishDuringStreams(t, path, [3, 7, 11], async () => {
+      await publishActivity(store, created, ++publications);
+      if (publications !== 3) return;
+      if (interference === "unavailable-proof") {
+        await link(path, join(stateRoot, "linked-events"));
+      } else {
+        const source = await readFile(path, "utf8");
+        const metadata = await stat(path);
+        await writeFile(path, source.replace("Run created.", "Run updated."));
+        await utimes(path, metadata.atime, metadata.mtime);
+        // A nested reader may cache different, semantically valid history.
+        // It cannot replace this operation's original byte certificate.
+        await store.loadRun(runId);
+      }
+    });
+    await assert.rejects(store.readPublicActivity(runId), {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+    assert.equal(publications, 3);
+  });
+}
 
 test("a concurrent publication cannot certify a prefix edited in place", async (t) => {
   const { store, created } = await fixture(t);

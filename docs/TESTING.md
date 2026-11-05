@@ -759,9 +759,18 @@ and legacy/redaction equivalence retain their original-prefix checks. A controll
 historical edit during lagging-snapshot matching also proves that canonical
 validation cannot replace the original publication certificate. A one-shot
 file-handle hook awaits a real lease-owner transition after a drain's stream
-opens: retained and overflow pages reread once with exact cursors, a second
-publication during the reread rejects, and a same-length restored-mtime prefix
-edit beside a real publication still rejects. A negative table proves that
+opens: retained and overflow pages continue with exact cursors. The real MCP
+wait and Runner status path also exercises two publications in successive drains
+for a new warm wait, a held wait with cold activity proof, and an evicted
+checkpoint. These controlled interleavings reproduce the formerly generic
+second-drain failure; they do not establish the historical interleaving.
+Three raced drains require one more certified extension before returning typed
+retryable exhaustion. A same-length restored-mtime prefix edit beside a real
+publication still rejects, including during the third drain after a nested
+reader caches the edited history. Unavailable proof during that continuation
+also rejects. The fast MCP control-plane suite checks the typed structured tool
+error for both observation tools, without automatic retries or code-based
+classification of an unproved failure. A negative table proves that
 runtime version skew, malformed state, a hard-linked state file and injected
 `EIO` and `TypeError` failures found by the extension propagate instead of the
 original read error, while the overflow hard-link case stays unavailable proof.

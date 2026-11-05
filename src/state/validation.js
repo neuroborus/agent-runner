@@ -180,6 +180,16 @@ export class RunStoreError extends Error {
   }
 }
 
+export class RunObservationBusyError extends RunStoreError {
+  constructor() {
+    super("Concurrent publication exhausted the bounded activity read.", {
+      code: "ERR_RUN_OBSERVATION_BUSY",
+    });
+    this.name = "RunObservationBusyError";
+    this.retryable = true;
+  }
+}
+
 function fail(message, code = "ERR_INVALID_RUN_STATE") {
   throw new RunStoreError(message, { code });
 }

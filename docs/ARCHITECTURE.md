@@ -1960,7 +1960,13 @@ does not end the wait. `live`, `unverifiable`, and `none` (a released or
 transferring lease) keep waiting, so recovery stays an explicit `run_resume`.
 Optional MCP progress notifications carry only bounded public activity with
 role labels; they do not wake a model or alter the run. Cancellation cancels
-only that wait.
+only that wait. Activity drains retain operation-local journal proof through
+bounded concurrent-publication continuations using the journal certificate
+rules below. Exhaustion after a proved extension returns
+`ERR_RUN_OBSERVATION_BUSY` with `retryable: true` as a structured MCP tool error
+for `run_activity` or `run_wait`. It ends only that observation; a later explicit
+observation is safe. MCP does not retry it automatically or classify other
+errors by matching their code or prose.
 
 An omitted `run_wait.timeoutMs` means 30 seconds and the public maximum is 24
 hours; either deadline ends only the client wait. Internal detached-dispatch
@@ -4982,13 +4988,21 @@ lock-free page's drain fails with `ERR_INVALID_EVENT_LOG`, the journal's
 every original binding's digest, identity, link count and stable observation,
 the recognized namespace, and continuity of the appended records. Only a
 certified snapshot with a strictly later revision, passing the same custody and
-state-root checks, permits exactly one second drain under the same cursor and
-limit rules. Proof is unavailable only for `CheckpointInvalid`, which includes
+state-root checks, permits another drain under the same cursor and limit rules.
+A page permits two such continuations (three drains). Each extension uses the
+preceding operation-local certificate, preserving the original run identity and
+every original byte binding transitively; optional checkpoint replacement or
+eviction grants no new proof. If the third drain fails, the same extension proof
+and authorization are still required before returning the typed
+`RunObservationBusyError` (`ERR_RUN_OBSERVATION_BUSY`, `retryable: true`). No
+partial page or cursor escapes, and only a new explicit observation starts a
+new bound. Proof is unavailable only for `CheckpointInvalid`, which includes
 a certificate-bound segment that can no longer be opened safely; then the
 original error is rethrown. Every other extension failure, such as runtime
 version skew, invalid or unsafe state, a filesystem or programming error, and
-any authorization or second-drain failure propagates. The extension writes
-nothing, takes no lease and populates no checkpoint.
+any authorization failure propagates. Changed bytes, rollback, substitution or
+unavailable proof never receive the retryable classification. The extension
+writes nothing, takes no lease and populates no checkpoint.
 
 Progress publication uses retained records when they cover the complete run;
 overflow uses the same certified record stream with identical text. An

@@ -422,12 +422,16 @@ states; every activity, event-specific stop summary, revision, and progress line
 remains available. Even early-limit pages and atomic progress replacement
 require proof of the entire original prefix. Missing evidence requires bounded
 canonical validation before streaming; uncertain evidence returns no page or
-replacement. Activity reads and waits no longer fail only because the owner
-published during the read: a page rereads once, and only after the original
-prefix is proven unchanged and extended by a later revision. Corruption,
-uncertain evidence, or another publication during that reread still returns no
-page. Publication callbacks cannot replace the original certificate
-with different history, including through snapshot rollback or nested reads.
+replacement. Activity reads and waits permit two bounded continuations only
+after each preceding certified prefix is proven unchanged and extended by a
+later revision. This retains the original run identity and byte proof through
+both continuations. Further proved publication exhausting that bound returns
+`ERR_RUN_OBSERVATION_BUSY` with `retryable: true`; a later explicit observation
+is safe and the run continues unchanged. MCP projects that typed outcome without
+automatically retrying. Corruption, rollback, substitution or uncertain proof
+still returns no page and grants no retryable classification. Publication
+callbacks cannot replace the original certificate with different history,
+including through snapshot rollback or nested reads.
 Public projections remain bounded and exclude private results. These byte
 limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified

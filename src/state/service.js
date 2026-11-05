@@ -75,6 +75,7 @@ import {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
+  RunObservationBusyError,
   RunStoreError,
 } from "./validation.js";
 
@@ -114,6 +115,7 @@ const CREATE_RUN_FIELDS = new Set([
 const MAX_RUN_ARTIFACT_BYTES = 1024 * 1024;
 const DEFAULT_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_LIMIT = 100;
+const MAX_ACTIVITY_PUBLICATION_RETRIES = 2;
 const LEASE_OWNER_STATUSES = Object.freeze([
   "none",
   "live",
@@ -2075,20 +2077,25 @@ export function createRunStore({
       return deepFreeze({ activities, cursor });
     };
 
-    try {
-      return await drain(snapshot);
-    } catch (cause) {
-      if (
-        !(cause instanceof RunStoreError) ||
-        cause.code !== "ERR_INVALID_EVENT_LOG"
-      )
-        throw cause;
-      // The owner may publish during this lock-free drain. Stream observations
-      // cannot distinguish that from an edit, so reread once only after the
-      // original certified prefix is proven unchanged and validly extended.
-      const extended = await journal.extendSnapshot(runDirectory, snapshot);
-      if (extended === null) throw cause;
-      return drain(await authorizeSnapshot(runDirectory, extended));
+    let source = snapshot;
+    for (let retries = 0; ; retries += 1) {
+      try {
+        return await drain(source);
+      } catch (cause) {
+        if (
+          !(cause instanceof RunStoreError) ||
+          cause.code !== "ERR_INVALID_EVENT_LOG"
+        )
+          throw cause;
+        // Every continuation extends the preceding operation-local certificate,
+        // retaining the original bytes and run identity even after cache eviction.
+        // Error codes alone grant neither a retry nor a retryable outcome.
+        const extended = await journal.extendSnapshot(runDirectory, source);
+        if (extended === null) throw cause;
+        source = await authorizeSnapshot(runDirectory, extended);
+        if (retries === MAX_ACTIVITY_PUBLICATION_RETRIES)
+          throw new RunObservationBusyError();
+      }
     }
   }
 

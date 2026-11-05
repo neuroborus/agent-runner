@@ -17,8 +17,60 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
+import {
+  RunObservationBusyError,
+  RunStoreError,
+} from "../../src/state/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
+
+test("MCP exposes only proved observation exhaustion as a retryable tool result", async (t) => {
+  let failure;
+  let calls = 0;
+  const observe = async () => {
+    calls += 1;
+    throw failure;
+  };
+  const control = { runWait: observe, runActivity: observe };
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({ control, issueReportingEnabled: false });
+  const client = new Client({ name: "observation-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  for (const name of ["run_wait", "run_activity"]) {
+    for (const proved of [true, false]) {
+      failure = proved
+        ? new RunObservationBusyError()
+        : Object.assign(
+            new RunStoreError("Unclassified observation failure.", {
+              code: "ERR_RUN_OBSERVATION_BUSY",
+            }),
+            { retryable: true },
+          );
+      const before = calls;
+      const response = await client.callTool({
+        name,
+        arguments: { runId: RUN_ID },
+      });
+      assert.equal(calls, before + 1, "MCP never retries observation errors");
+      assert.equal(response.isError, true);
+      if (proved) {
+        assert.deepEqual(response.structuredContent, {
+          code: "ERR_RUN_OBSERVATION_BUSY",
+          message: failure.message,
+          retryable: true,
+        });
+      } else {
+        assert.equal(response.structuredContent, undefined);
+      }
+    }
+  }
+});
 
 test("status, wait and activity share derived revision progress with an explicit current-snapshot revision", async () => {
   const run = {

@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Wait observations retain proof through bounded publication races.** A
+  controlled public MCP wait with real Runner status reads reproduced an owner
+  publication during each of two activity drains, causing the former second
+  drain to report a generic invalid journal. This demonstrates a real supported
+  interleaving without attributing the historical failure. Activity reads now
+  permit two continuations, each extending the preceding operation-local byte
+  certificate and preserving the original run identity and prefix despite cache
+  eviction or replacement. Further proved publication returns typed retryable
+  observation exhaustion; corruption and unavailable proof stay fail-closed.
+  MCP projects that outcome without automatic retries. Observation neither
+  acquires execution ownership nor writes history, replays providers or renews
+  workflow allowances. Canonical state and pipeline versions remain unchanged.
+
 - **Audit retries retain checkpoint-bound semantic feedback.**
   Invalid results atomically retain bounded canonical diagnostics with their
   rejected checkpoint and exact snapshot/report/batch bindings. Supported resume

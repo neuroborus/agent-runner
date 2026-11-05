@@ -1997,6 +1997,12 @@ with an explicit `run_resume` using `action: null`, the inspected revision,
 and a new idempotency key. Use `run_activity` for deliberate inspection and
 `run_wait` for long event-driven waits.
 
+Concurrent journal publication permits bounded, byte-proved activity rereads.
+If publication exhausts that bound, `run_activity` and `run_wait` return a
+structured tool error with `code: "ERR_RUN_OBSERVATION_BUSY"` and
+`retryable: true`. A later explicit observation is safe; the run is unchanged.
+Corruption or unavailable proof receives no such classification.
+
 MCP represents paused clarification and product decisions as structured
 `pendingInput`. `run_respond` requires the request ID,
 run revision, an answer for every identified question, and a new idempotency

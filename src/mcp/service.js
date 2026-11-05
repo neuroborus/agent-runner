@@ -35,6 +35,7 @@ import {
   projectOperatorStop,
   projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RunObservationBusyError,
   RunStoreError,
   normalizeRecoveryDispatch,
   recoveryFailureDetails,
@@ -367,6 +368,18 @@ function result(value) {
     content: [{ type: "text", text: JSON.stringify(value) }],
     structuredContent: value,
   };
+}
+
+async function observationResult(operation) {
+  try {
+    return result(await operation());
+  } catch (error) {
+    if (!(error instanceof RunObservationBusyError)) throw error;
+    return {
+      ...result({ code: error.code, message: error.message, retryable: true }),
+      isError: true,
+    };
+  }
 }
 
 async function detachedResult(operation) {
@@ -1564,7 +1577,7 @@ export function createMcpServer(options = {}) {
     "run_activity",
     {
       description:
-        "Read bounded explicit or historical public activity after a cursor. This is not a polling primitive.",
+        "Read bounded explicit or historical public activity after a cursor. This is not a polling primitive. ERR_RUN_OBSERVATION_BUSY with retryable: true means proved concurrent publication exhausted the bounded read; a later explicit observation is safe and the run is unchanged.",
       inputSchema: z
         .object({
           runId,
@@ -1574,13 +1587,13 @@ export function createMcpServer(options = {}) {
         .strict(),
       annotations: readOnly,
     },
-    async (input) => result(await control.runActivity(input)),
+    async (input) => observationResult(() => control.runActivity(input)),
   );
   server.registerTool(
     "run_wait",
     {
       description:
-        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
+        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call. ERR_RUN_OBSERVATION_BUSY with retryable: true means proved concurrent publication exhausted the bounded read; a later explicit observation is safe and the run is unchanged.",
       inputSchema: z
         .object({
           runId,
@@ -1597,8 +1610,8 @@ export function createMcpServer(options = {}) {
       annotations: readOnly,
     },
     async (input, context) =>
-      result(
-        await control.runWait(input, {
+      observationResult(() =>
+        control.runWait(input, {
           notify: context.mcpReq.notify,
           progressToken: context.mcpReq._meta?.progressToken,
           signal: context.mcpReq.signal,
