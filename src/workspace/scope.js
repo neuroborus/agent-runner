@@ -13,10 +13,26 @@ export function isExcluded(path, excludePaths = []) {
   return excludePaths.some((excluded) => within(excluded, path));
 }
 
+// A file selection never authorizes descent if a leaf is replaced by a directory.
+export function assertInspectionDirectory(path, declarations) {
+  assertSafe(
+    !declarations.inspectionFilesOnly ||
+      !declarations.inspectionPaths.includes(path),
+    "File-only inspection paths cannot be directories.",
+  );
+}
+
 // Scope restricts inspection only; protected reads and outputs retain their
 // separate declarations. Excluded leaves and their descendants stay opaque.
 export async function inspectScope(fs, options, controlNames, checkpoint) {
   const { workspacePath } = options;
+  const { inspectionFilesOnly } = options;
+  assertSafe(
+    inspectionFilesOnly === undefined ||
+      (typeof inspectionFilesOnly === "boolean" &&
+        options.inspectionPaths !== undefined),
+    "File-only inspection requires explicit inspection paths and a boolean.",
+  );
   const declared =
     options.inspectionPaths !== undefined || options.excludePaths !== undefined;
   if (!declared) return { declarations: {}, bindings: [] };
@@ -84,9 +100,16 @@ export async function inspectScope(fs, options, controlNames, checkpoint) {
   const bindings = [];
   for (const path of selectedPaths) {
     await checkpoint("controls");
-    bindings.push(
-      await inspectPath(fs, path, { missing: true, allowLink: true }),
-    );
+    const binding = await inspectPath(fs, path, {
+      missing: true,
+      allowLink: true,
+    });
+    if (binding.kind === "directory")
+      assertInspectionDirectory(path, {
+        inspectionPaths: selectedPaths,
+        inspectionFilesOnly,
+      });
+    bindings.push(binding);
   }
   for (const path of new Set(excludePaths.map((path) => dirname(path)))) {
     await checkpoint("controls");
@@ -101,6 +124,7 @@ export async function inspectScope(fs, options, controlNames, checkpoint) {
     // Relative exclusions can be passed back to inspect without expanding scope.
     declarations: {
       inspectionPaths,
+      ...(inspectionFilesOnly === undefined ? {} : { inspectionFilesOnly }),
       excludePaths: excludePaths.map((path) => relative(workspacePath, path)),
     },
     bindings,

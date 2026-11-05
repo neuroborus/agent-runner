@@ -15,7 +15,7 @@ import {
   within,
 } from "./paths.js";
 import { readControlFile } from "./snapshot.js";
-import { exclusions, isExcluded } from "./scope.js";
+import { assertInspectionDirectory, exclusions, isExcluded } from "./scope.js";
 
 export const CONTROL_NAMES = [
   ".git",
@@ -85,6 +85,7 @@ export async function discoverControls(
         "Provider control aliases cannot traverse writable outputs or state storage.",
       );
       const stat = await metadata(fs, current);
+      if (stat?.isDirectory()) assertInspectionDirectory(current, declarations);
       assertSafe(
         stat && (stat.isDirectory() || stat.isFile() || stat.isSymbolicLink()),
         "Provider control aliases must resolve to ordinary content.",
@@ -156,6 +157,7 @@ export async function discoverControls(
     for (const component of value.split(sep).filter(Boolean)) {
       await checkpoint("controls");
       path = location(path, component);
+      assertInspectionDirectory(path, declarations);
       assertSafe(
         !isExcluded(path, excludePaths),
         "Git metadata dependencies cannot enter excluded trees.",
@@ -169,6 +171,7 @@ export async function discoverControls(
     return path;
   }
   async function directory(path, stateOnly) {
+    assertInspectionDirectory(path, declarations);
     protect(path, stateOnly);
     const inspection = await inspectPath(fs, path);
     assertSafe(
@@ -196,6 +199,7 @@ export async function discoverControls(
     { reserve = false, ancestor = false, stateOnly = false } = {},
   ) {
     await checkpoint("controls");
+    assertInspectionDirectory(parent, declarations);
     const [head, objects, refs] = await Promise.all(
       ["HEAD", "objects", "refs"].map((name) =>
         isExcluded(join(parent, name), excludePaths)
@@ -275,6 +279,8 @@ export async function discoverControls(
       missing: true,
       allowLink: true,
     });
+    if (binding.kind === "directory")
+      assertInspectionDirectory(scope, declarations);
     if (recursive && traverse && !stateOnly && binding.kind === "directory")
       roots.push({ path: scope, stateOnly });
     for (

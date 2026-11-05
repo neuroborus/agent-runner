@@ -74,6 +74,19 @@ staged and unstaged diffs, excludes ignored untracked files, and reports binary
 changes separately. Link targets are never followed to obtain line counts.
 Measurement grants no staging, commit, refinement, or acceptance authority.
 
+Git-owned source selection enumerates unchanged and ignored tracked worktree
+files as well as non-ignored untracked sources, retaining tracked deletions.
+Ignored untracked trees are pruned instead of recursively inspected. Its frozen
+membership and Git provenance bind workspace-owned confined capture, which
+separately verifies source bytes, identities, controls and link safety. A file-only
+constraint rejects a selected or missing leaf replaced by a directory before
+descendant discovery or capture. Selection must be rechecked around capture and
+reconstruction; it grants no Git effects or provider authority. Unsupported
+gitlinks, embedded repositories and routing
+aliases fail closed. The [source-selection contract](../ARCHITECTURE.md#root-runner-ownership)
+owns the exact result, drift guard and traversal limitations; ordinary directory
+inspection continues to require no Git.
+
 Preservation saves unfinished changes in verified
 external state storage before any checked removal. Both run and worktree
 ownership are required. Raw bytes, deletions, executable modes and unfollowed

@@ -16,7 +16,7 @@ import {
   same,
   within,
 } from "./paths.js";
-import { isExcluded } from "./scope.js";
+import { assertInspectionDirectory, isExcluded } from "./scope.js";
 
 const RACE = "ERR_WORKSPACE_SNAPSHOT_RACE";
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -123,8 +123,14 @@ export async function capture(
   protectedPaths,
   verifyBindings,
   linkResolutions = [],
-  { excludePaths = [], checkpoint = async () => {}, linkPaths = [] } = {},
+  {
+    excludePaths = [],
+    checkpoint = async () => {},
+    linkPaths = [],
+    inspectionFilesOnly,
+  } = {},
 ) {
+  const selection = { inspectionPaths: linkPaths, inspectionFilesOnly };
   const entries = new Map();
   const observed = new Map();
   const bindings = [];
@@ -169,6 +175,7 @@ export async function capture(
         "A workspace link crosses a writable boundary.",
       );
       const stat = await metadata(fs, current);
+      if (stat?.isDirectory()) assertInspectionDirectory(current, selection);
       observe(current, stat);
       dependencies.add(current);
       assertSafe(
@@ -198,8 +205,10 @@ export async function capture(
             targetRoot !== undefined,
             "Workspace snapshot link escapes its declared tree.",
           );
-          current = targetRoot;
-          suffix = target.slice(targetRoot.length);
+          // Process the selected root itself before its suffix, including its
+          // file-only constraint, link hops and resolution-dependency binding.
+          current = dirname(targetRoot);
+          suffix = basename(targetRoot) + target.slice(targetRoot.length);
         } else current = dirname(current);
         pending = [...suffix.split(sep), ...pending];
       } else
@@ -227,6 +236,7 @@ export async function capture(
     if (isExcluded(path, excludePaths)) return;
     await checkpoint("capture");
     const before = await metadata(fs, sourcePath);
+    if (before?.isDirectory()) assertInspectionDirectory(path, selection);
     observe(path, before);
     if (before === null) {
       entries.set(path, {

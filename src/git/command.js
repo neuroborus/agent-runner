@@ -45,7 +45,9 @@ export function hashBuffer(value) {
 
 export function decodeUtf8(value, name) {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(value);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      value,
+    );
   } catch (cause) {
     throw new GitSafetyError(`${name} contains invalid UTF-8.`, {
       cause,

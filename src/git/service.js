@@ -24,6 +24,7 @@ import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
 import { measureChangesAtRoot } from "./measurement.js";
 import { createGitPreservationService } from "./preservation.js";
+import { selectSourcesAtRoot } from "./selection.js";
 
 export { GitSafetyError };
 
@@ -205,6 +206,29 @@ export function createGitService(options = {}) {
 
   async function resolveProject(projectPath) {
     return resolveRepository(runGit, projectPath);
+  }
+
+  async function selectSources(options) {
+    assertOptions(options, "Source-selection options");
+    const { projectPath, expectedSelectionFingerprint } = options;
+    if (
+      Object.keys(options).some(
+        (key) => !["projectPath", "expectedSelectionFingerprint"].includes(key),
+      ) ||
+      (expectedSelectionFingerprint !== undefined &&
+        (typeof expectedSelectionFingerprint !== "string" ||
+          !SHA256_PATTERN.test(expectedSelectionFingerprint)))
+    ) {
+      throw new GitSafetyError("Source-selection options are invalid.", {
+        code: "ERR_INVALID_GIT_OPTIONS",
+      });
+    }
+    const repositoryPath = await resolveRepository(runGit, projectPath);
+    return selectSourcesAtRoot(
+      { currentHead, indexFingerprint, runGit },
+      repositoryPath,
+      expectedSelectionFingerprint,
+    );
   }
 
   async function inspectPath(options) {
@@ -680,6 +704,7 @@ export function createGitService(options = {}) {
     materializeSource,
     measureChanges,
     resolveProject,
+    selectSources,
     snapshot,
     validationInfrastructureFingerprint,
   });

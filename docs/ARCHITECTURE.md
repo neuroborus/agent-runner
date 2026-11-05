@@ -53,9 +53,9 @@ write-ahead journal, durable actions, execution leases, and state validation.
 The Git capability lives under `src/git/` behind its public `index.js`. The
 small index exposes only the service factory and shared safety error; its
 private service composes command execution, content and snapshot inspection,
-change measurement, exact source materialization, commit verification, and
-polishing handoff modules without exposing their implementation contracts to
-root consumers.
+change measurement, complete source selection, exact source materialization,
+commit verification, and polishing handoff modules without exposing their
+implementation contracts to root consumers.
 
 The filesystem-only workspace capability lives under `src/workspace/` behind
 `createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
@@ -92,6 +92,12 @@ declarations are normalized before recursive discovery and frozen with the
 inspection. Selected roots become absolute; exclusions remain workspace-relative
 for reconstruction. Real routing ancestors remain pinned. Selected leaf links
 are captured only when their resolution stays in selected or protected trees.
+Optional boolean `inspectionFilesOnly` requires explicit `inspectionPaths` and,
+when true, restricts every selected root to a regular file, leaf link or missing
+path. Directory replacements fail before descendant reads at admission, control
+discovery, link resolution and capture, including after reconstruction. The
+constraint remains frozen with the declarations and binds snapshot fingerprints
+and unchanged checks; omission retains the existing directory-root behavior.
 
 Excluded leaves and descendants receive no metadata/content reads or traversal.
 Their routing ancestors must be real directories or missing, and exclusions
@@ -152,6 +158,8 @@ resolution to the declared tree or explicitly bound protected trees. Real
 ancestors may connect those trees without granting reads of their other
 children, supporting `.claude/skills` links to protected `.agents/skills`.
 Unbound intermediate hops, escaping, dangling and cyclic links fail.
+Absolute targets re-enter their selected root through the same component checks
+before processing any suffix, preserving file-only constraints and root dependency evidence.
 Resolution dependencies participate in snapshot
 race checks; snapshots return sorted `linkResolutions` alongside entries so
 output consumers can bind readable dependencies outside a selected subtree.
@@ -193,6 +201,41 @@ injection supports deterministic race tests without Git or providers.
 Directory lifecycle protected fingerprints exempt only declared outputs and
 artifacts. A task root coinciding with or containing the workspace never exempts
 other project content; runner-owned task artifacts must be declared explicitly.
+
+`git.selectSources({projectPath, expectedSelectionFingerprint?})` resolves an
+existing worktree and enumerates complete current sources independently of the
+changed-path snapshot. `trackedPaths` is the sorted union of the literal HEAD
+tree and index entries, retaining staged-deletion names and ignored tracked
+files. `untrackedPaths` adds only non-ignored untracked files. Git's
+`ls-files --others --exclude-standard` prunes ignored untracked trees; Node does
+not recursively enumerate source directories. HEAD tree enumeration disables
+replacement objects. Strict UTF-8 decoding preserves literal names, including
+leading U+FEFF. Unchanged, assume-unchanged and skip-worktree files are selected
+and read from the working tree by subsequent workspace capture, never from
+staged blobs.
+
+The immutable result includes canonical `projectPath`, `head`, the existing Git
+`indexFingerprint`, relative tracked/untracked/deleted path lists and an
+`inspection` declaration containing absolute `inspectionPaths` together with
+`inspectionFilesOnly: true`. Consumers pass this complete declaration to
+workspace inspection; file paths alone lose the leaf constraint. Missing tracked
+files and missing tracked ancestors remain explicit missing inspection roots. The
+`selectionFingerprint` binds these declarations and provenance, not file bytes
+or content approval. Selection checks membership/provenance and file kinds
+twice; callers reselect with the saved fingerprint around confined capture and
+on reconstruction to reject membership, deletion or index/HEAD drift with
+`ERR_GIT_SOURCE_SELECTION_CHANGED`. Workspace capture separately owns content,
+identity, routing/control bindings and link resolution; a frozen file list alone
+cannot detect newly appearing untracked sources.
+
+Leaf symlinks remain links and grant no target reads at selection. Routing
+aliases, special files, file/directory replacements, unresolved index entries,
+gitlinks and embedded repositories fail closed rather than becoming recursive
+inspection roots. Submodule traversal is unsupported by this selector; existing
+Git snapshot and measurement gitlink behavior is unchanged. Selection neither
+initializes Git nor writes source, index, refs, remotes or identity, and grants
+no provider, staging or commit authority. Ordinary-directory consumers remain
+Git-independent. Pipeline activation and scope settings are separately owned.
 
 `readFile({path, projectPath, optional})` confines text input reads to a real
 regular file beneath the supplied root, reusing descriptor-anchored snapshot
@@ -3471,6 +3514,9 @@ and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
 `cwd`. Optional `inspectionPaths` contains confined canonical absolute inspection
 roots; optional `excludePaths` contains literal workspace-relative subtrees.
 Both lists are normalized, copied and frozen, with at most 256 entries each.
+Optional boolean `inspectionFilesOnly` requires explicit inspection roots and
+preserves their file/link/missing restriction through both providers' workspace
+checks, receipts and reconstruction without granting new native permissions.
 Omitting both retains whole-directory inspection and the existing policy receipt.
 The workspace capability validates scope before discovery, preserving required
 reads, outputs, controls and link dependencies. The same selection binds provider

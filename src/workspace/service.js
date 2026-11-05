@@ -41,6 +41,7 @@ const DECLARATIONS = [
   "infrastructurePaths",
   "stateRoot",
   "inspectionPaths",
+  "inspectionFilesOnly",
   "excludePaths",
 ];
 
@@ -142,6 +143,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
       {
         ...declarations,
         inspectionPaths: options.inspectionPaths,
+        inspectionFilesOnly: options.inspectionFilesOnly,
         excludePaths: options.excludePaths,
       },
       CONTROL_NAMES,
@@ -391,6 +393,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
           excludePaths: exclusions(current),
           checkpoint,
           linkPaths: current.inspectionPaths,
+          inspectionFilesOnly: current.inspectionFilesOnly,
         },
       );
       const scope =
@@ -398,6 +401,9 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
           ? {}
           : {
               inspectionPaths: current.inspectionPaths,
+              ...(current.inspectionFilesOnly === undefined
+                ? {}
+                : { inspectionFilesOnly: current.inspectionFilesOnly }),
               excludePaths: current.excludePaths,
             };
       signal?.throwIfAborted();
@@ -455,6 +461,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         before.workspacePath === after.workspacePath &&
         same(before.outputPaths, after.outputPaths) &&
         same(before.inspectionPaths, after.inspectionPaths) &&
+        before.inspectionFilesOnly === after.inspectionFilesOnly &&
         same(before.excludePaths, after.excludePaths),
       "Workspace snapshots do not share the same scope.",
       "ERR_WORKSPACE_DRIFT",

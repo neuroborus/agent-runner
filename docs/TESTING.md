@@ -753,6 +753,21 @@ public Git service; measurement itself runs no tests or agents and changes no
 index or history. Adding this unused capability does not change workflow,
 migration or effect ownership and requires no durable slow workflow matrix.
 
+The fast Git `source-selection.test.js` suite owns complete HEAD/index and
+non-ignored untracked membership, missing tracked paths, index-hidden worktree
+content, ignored-tree non-visitation through workspace capture, unchanged Git
+controls/index bytes, literal names, links, unsupported recursive boundaries,
+unborn/non-Git directories and controlled membership publication races. It uses
+isolated repositories and the public Git/workspace services without providers.
+Controlled file and missing-leaf replacements at handoff, discovery and capture
+assert zero descendant reads, including reconstructed declarations and absolute
+links entering a selected missing root replaced during capture. Valid absolute
+file links retain root dependency evidence. Provider
+receipt fixtures separately bind the optional file-only constraint and reject
+malformed declarations before activity.
+This capability does not activate pipeline scope selection or change run state;
+workflow and durable preparation coverage remains with their owning changes.
+
 The fast state `journal-checkpoints.test.js` suite owns namespace certification:
 real repeated choosing/ready claims during controlled directory observations
 must preserve unchanged-prefix reuse, while cold reads validate every event.

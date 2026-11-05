@@ -114,6 +114,8 @@ test("scope admission rejects escapes, hidden protected declarations and aliased
   const service = createWorkspaceService();
   const base = { workspacePath: f.workspacePath, stateRoot: f.stateRoot };
   for (const scope of [
+    { inspectionFilesOnly: true },
+    { inspectionPaths: [], inspectionFilesOnly: "true" },
     { inspectionPaths: null },
     { excludePaths: null },
     { inspectionPaths: ["../outside"] },

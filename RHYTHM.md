@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Git source membership is separate from changed-content fingerprints.**
+  A read-only selector freezes literal HEAD/index sources, including unchanged,
+  ignored tracked and index-hidden files, plus non-ignored untracked sources.
+  Tracked deletions remain explicit; membership and existing index/HEAD provenance
+  bind a recheckable selection for workspace-owned confined capture. Ignored
+  untracked trees are pruned without source recursion. Leaf links retain
+  workspace confinement; unsupported gitlinks, embedded repositories and
+  directory replacements never become recursive inspection roots. The handoff
+  groups paths with a frozen file-only constraint, enforced before descendant
+  discovery and capture even for missing leaves or reconstructed inspections;
+  both provider receipts preserve it. Selection
+  grants no effects or provider authority, leaves ordinary-directory inspection
+  independent of Git and changes no pipeline state or scope settings.
+
 - **Directory adapters retain frozen filesystem inspection scopes.** Optional
   inspection roots and literal exclusions pass through the strict shared request
   and probe contract into both providers' existing directory policies. Receipts,

@@ -2922,6 +2922,22 @@ test("binds directory receipts to the inspected selection without visiting opaqu
     hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
   );
   assert.equal(fixture.processes.length, 0);
+  const files = {
+    ...directory.workspacePolicy,
+    inspectionPaths: [directory.selectedFile],
+  };
+  const loose = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: files,
+  });
+  const strict = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: { ...files, inspectionFilesOnly: true },
+  });
+  assert.notEqual(
+    strict.policyReceipt.fingerprint,
+    loose.policyReceipt.fingerprint,
+  );
 });
 
 test("uses exact scoped directory output permissions across reconstruction and retires each attempt", async (t) => {
@@ -3254,6 +3270,12 @@ test("validates directory declarations before activity", async (t) => {
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
     { ...directory.workspacePolicy, outputPaths: null },
     { ...directory.workspacePolicy, inspectionPaths: null },
+    { ...directory.workspacePolicy, inspectionFilesOnly: true },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: [],
+      inspectionFilesOnly: "true",
+    },
     { ...directory.workspacePolicy, inspectionPaths: ["relative"] },
     { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
     {

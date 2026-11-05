@@ -764,6 +764,7 @@ export function createAdapterContract({
       "stateRoot",
       "taskPath",
       "inspectionPaths",
+      "inspectionFilesOnly",
       "excludePaths",
       ...WORKSPACE_POLICY_PATHS,
     ];
@@ -804,6 +805,16 @@ export function createAdapterContract({
     }
     // Omission retains legacy whole-directory inspection and its receipt.
     // Scope narrows inspection only; read/write/storage declarations stay separate.
+    if (value.inspectionFilesOnly !== undefined) {
+      if (
+        typeof value.inspectionFilesOnly !== "boolean" ||
+        value.inspectionPaths === undefined
+      )
+        throw optionsError(
+          "File-only inspection requires explicit inspection paths and a boolean.",
+        );
+      result.inspectionFilesOnly = value.inspectionFilesOnly;
+    }
     for (const name of ["inspectionPaths", "excludePaths"]) {
       if (value[name] === undefined) continue;
       const entries = value[name];

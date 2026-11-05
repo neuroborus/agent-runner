@@ -1580,6 +1580,22 @@ test("binds directory receipts to the inspected selection without visiting opaqu
     hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
   );
   assert.equal(turnCalls(fixture).length, 0);
+  const files = {
+    ...directory.workspacePolicy,
+    inspectionPaths: [directory.selectedFile],
+  };
+  const loose = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: files,
+  });
+  const strict = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: { ...files, inspectionFilesOnly: true },
+  });
+  assert.notEqual(
+    strict.policyReceipt.fingerprint,
+    loose.policyReceipt.fingerprint,
+  );
 });
 
 test("executes the fallback directory probe with a file reference inside private temporary storage", async (t) => {
@@ -2551,6 +2567,12 @@ test("fails closed on invalid directory declarations and unsupported isolation",
     { ...directory.workspacePolicy, extra: true },
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
     { ...directory.workspacePolicy, inspectionPaths: null },
+    { ...directory.workspacePolicy, inspectionFilesOnly: true },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: [],
+      inspectionFilesOnly: "true",
+    },
     { ...directory.workspacePolicy, inspectionPaths: ["relative"] },
     { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
     {
