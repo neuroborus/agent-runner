@@ -198,7 +198,10 @@ migration dispatch and argument validation without creating a runner.
 Fast `pipelines/audit/test/report.test.js` owns the pure audit report contract:
 strict evidence/examples and classification values, shared-cause consolidation,
 stable severity/ID ordering, optional recommendations, separate uncertainty,
-zero findings, and safe catalog-derived Markdown. It uses no providers,
+zero findings, safe catalog-derived Markdown, and bounded sanitized semantic
+diagnostics. Discovery/recheck fixtures verify role-field locations and exact
+fingerprint rejection; the Codex schema compatibility fixture includes audit.
+Report coverage uses no providers,
 processes, Git repositories, or temporary storage.
 Fast `pipelines/audit/test/discovery.test.js` owns frozen scope, read-only discovery,
 lazy/independent session isolation, duplicate/revised candidates, pending-batch

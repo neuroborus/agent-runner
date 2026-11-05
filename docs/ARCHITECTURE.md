@@ -669,7 +669,13 @@ catalog supplies classification validation, severity ordering and map text.
 Confirmed findings require evidence, impact/severity rationale and labeled
 concrete examples; unsupported claims remain separate hypotheses, and repeated
 cause keys require consolidation. The renderer returns `audit.md` text without
-filesystem or provider effects. Its descriptor selects read-only
+filesystem or provider effects. Audit schemas share portable constraints with
+semantic normalization; instructions cover normalized uniqueness and exact-copy
+bindings. Recognized validation errors expose one immutable finite-code diagnostic
+at a schema-owned, bounded field location, retaining existing error identities
+and excluding rejected keys/values and native causes. This adds no persisted
+evidence or retry authority; the audit specification owns the exact contract.
+Its descriptor selects read-only
 directory inspection and an exclusive canonical workspace lease. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
 transition capabilities; it grants no new root authority. Frozen scope,

@@ -7,15 +7,19 @@ import {
   cyclePosition,
   findingRecheckCycle,
 } from "./cycles.js";
-import { normalizeAuditReport, texts } from "./findings.js";
+import {
+  MAX_COLLECTION_LENGTH,
+  MAX_QUESTION_LENGTH,
+  MAX_QUESTIONS,
+  MAX_STRING_LENGTH,
+} from "./constraints.js";
+import { auditDiagnostic, diagnosticIssues } from "./diagnostics.js";
+import { normalizeAuditReport, normalizeFinding, texts } from "./findings.js";
 
 export const MAX_DISCOVERY_PASSES = 20;
 export const MAX_FINDING_RECHECK_PASSES = 20;
 export const MAX_CLARIFICATION_ROUNDS = 3;
 const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
-// Match the enclosing run store's field limits without importing root policy.
-const MAX_STRING_LENGTH = 100_000;
-const MAX_COLLECTION_LENGTH = 10_000;
 export const AUDIT_MODES = Object.freeze(["independent", "lazy", "combined"]);
 export const validDiscoveryBudget = (value) =>
   Number.isSafeInteger(value) && value > 0 && value <= MAX_DISCOVERY_PASSES;
@@ -40,10 +44,15 @@ const OUTCOMES = [
 ];
 
 export class AuditWorkflowError extends Error {
-  constructor(message, code = "ERR_INVALID_AUDIT_STATE") {
+  constructor(message, code = "ERR_INVALID_AUDIT_STATE", diagnostic) {
     super(message);
     this.name = "AuditWorkflowError";
     this.code = code;
+    if (diagnostic !== undefined) {
+      this.diagnostics = Object.freeze([
+        auditDiagnostic(diagnostic.field, diagnostic.code),
+      ]);
+    }
   }
 }
 
@@ -51,32 +60,43 @@ export function assertAudit(condition, message) {
   if (!condition) throw new AuditWorkflowError(message);
 }
 
+export function assertAuditResult(condition, field, code) {
+  if (!condition) {
+    const diagnostic = auditDiagnostic(field, code);
+    throw new AuditWorkflowError(
+      diagnosticIssues(diagnostic)[0],
+      "ERR_INVALID_AUDIT_STATE",
+      diagnostic,
+    );
+  }
+}
+
 export function assertAuditResultSize(value) {
   let serialized;
   try {
     serialized = JSON.stringify(value);
   } catch {
-    throw new AuditWorkflowError("Audit role result must be serializable.");
+    assertAuditResult(false, "result", "unserializable");
   }
-  assertAudit(
+  assertAuditResult(
     typeof serialized === "string" &&
       Buffer.byteLength(serialized) <= MAX_STRUCTURED_RESULT_BYTES,
-    "Audit role result exceeds the two-MiB limit.",
+    "result",
+    "result-size",
   );
   function assertFields(item, depth = 0) {
-    assertAudit(
-      depth < 20,
-      "Audit result exceeds the persistent nesting limit.",
-    );
+    assertAuditResult(depth < 20, "result", "nesting-limit");
     if (typeof item === "string") {
-      assertAudit(
+      assertAuditResult(
         item.length <= MAX_STRING_LENGTH,
-        "Audit text exceeds the persistent field limit.",
+        "result",
+        "field-limit",
       );
     } else if (Array.isArray(item)) {
-      assertAudit(
+      assertAuditResult(
         item.length <= MAX_COLLECTION_LENGTH,
-        "Audit list exceeds the persistent collection limit.",
+        "result",
+        "collection-limit",
       );
       item.forEach((entry) => assertFields(entry, depth + 1));
     } else if (item !== null && typeof item === "object") {
@@ -86,7 +106,27 @@ export function assertAuditResultSize(value) {
   assertFields(value);
 }
 
-export function exact(value, fields) {
+export function exact(value, fields, path) {
+  if (path !== undefined) {
+    assertAuditResult(
+      value !== null &&
+        typeof value === "object" &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(value)),
+      path,
+      "invalid-record",
+    );
+    assertAuditResult(
+      Object.keys(value).every((key) => fields.includes(key)),
+      path,
+      "unsupported-fields",
+    );
+    assertAuditResult(
+      fields.every((key) => Object.hasOwn(value, key)),
+      path,
+      "required-fields",
+    );
+    return;
+  }
   assertAudit(
     value !== null &&
       typeof value === "object" &&
@@ -153,54 +193,74 @@ export function emptyReport(inputs, snapshot) {
 }
 
 export function normalizeAuditInputs(value) {
-  exact(value, ["scope", "references", "exclusions", "criteria"]);
+  exact(
+    value,
+    ["scope", "references", "exclusions", "criteria"],
+    "clarification.inputs",
+  );
   return {
-    scope: texts(value.scope, "inputs.scope", 1),
-    references: texts(value.references, "inputs.references"),
-    exclusions: texts(value.exclusions, "inputs.exclusions"),
-    criteria: texts(value.criteria, "inputs.criteria", 1),
+    scope: texts(value.scope, "clarification.inputs.scope", 1),
+    references: texts(value.references, "clarification.inputs.references"),
+    exclusions: texts(value.exclusions, "clarification.inputs.exclusions"),
+    criteria: texts(value.criteria, "clarification.inputs.criteria", 1),
   };
 }
 
 export function normalizeClarification(value) {
-  exact(value, ["status", "inputs", "questions", "reason"]);
-  assertAudit(
-    Array.isArray(value.questions) && typeof value.reason === "string",
-    "Invalid audit clarification response.",
+  exact(value, ["status", "inputs", "questions", "reason"], "clarification");
+  assertAuditResult(
+    Array.isArray(value.questions),
+    "clarification.questions",
+    "required-items",
+  );
+  assertAuditResult(
+    typeof value.reason === "string",
+    "clarification.reason",
+    "invalid-outcome",
   );
   if (value.status === "READY") {
-    assertAudit(
+    assertAuditResult(
       value.questions.length === 0 && value.reason === "",
-      "READY cannot ask questions or block.",
+      "clarification",
+      "invalid-outcome",
     );
     return { ...value, inputs: normalizeAuditInputs(value.inputs) };
   }
-  assertAudit(value.inputs === null, "Only READY may freeze audit inputs.");
+  assertAuditResult(
+    value.inputs === null,
+    "clarification.inputs",
+    "invalid-outcome",
+  );
   const concise = (text) =>
     typeof text === "string" &&
     text.trim().length > 0 &&
-    text.length <= 4000 &&
+    text.length <= MAX_QUESTION_LENGTH &&
     !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(text);
   if (value.status === "BLOCKED") {
-    assertAudit(
+    assertAuditResult(
       value.questions.length === 0 && concise(value.reason),
-      "BLOCKED requires a concise reason without questions.",
+      "clarification",
+      "invalid-outcome",
     );
     return { ...value, reason: value.reason.trim() };
   }
-  assertAudit(
+  assertAuditResult(
     value.status === "QUESTIONS" &&
       value.questions.length > 0 &&
-      value.questions.length <= 32 &&
+      value.questions.length <= MAX_QUESTIONS &&
       value.reason === "",
-    "Invalid audit clarification outcome.",
+    "clarification",
+    "invalid-outcome",
   );
-  for (const question of value.questions) {
-    exact(question, ["question", "whyItMatters"]);
-    assertAudit(
-      concise(question.question) && concise(question.whyItMatters),
-      "Audit questions must be concise plain text.",
-    );
+  for (const [index, question] of value.questions.entries()) {
+    const path = `clarification.questions[${index}]`;
+    exact(question, ["question", "whyItMatters"], path);
+    for (const field of ["question", "whyItMatters"])
+      assertAuditResult(
+        concise(question[field]),
+        `${path}.${field}`,
+        "invalid-text",
+      );
   }
   return value;
 }
@@ -514,34 +574,53 @@ export function assertDiscoveryRun(run) {
 
 /** Normalize each candidate before duplicate comparison; conflicting shared causes fail closed. */
 export function acceptDiscovery(state, value) {
-  exact(value, [
-    "status",
-    "snapshotFingerprint",
-    "candidates",
-    "limitations",
-    "hypotheses",
-    "reportCorrections",
-  ]);
-  assertAudit(
-    ["COMPLETE", "INCOMPLETE"].includes(value.status) &&
-      value.snapshotFingerprint ===
-        state.repositoryBaseline.contentFingerprint &&
-      Array.isArray(value.candidates),
-    "Audit discovery output is incomplete or bound to a different snapshot.",
+  exact(
+    value,
+    [
+      "status",
+      "snapshotFingerprint",
+      "candidates",
+      "limitations",
+      "hypotheses",
+      "reportCorrections",
+    ],
+    "discovery",
   );
-  const report = normalizeAuditReport({
-    ...state.report,
-    limitations: value.limitations,
-    hypotheses: value.hypotheses,
-  });
+  assertAuditResult(
+    ["COMPLETE", "INCOMPLETE"].includes(value.status),
+    "discovery.status",
+    "unsupported-value",
+  );
+  assertAuditResult(
+    value.snapshotFingerprint === state.repositoryBaseline.contentFingerprint,
+    "discovery.snapshotFingerprint",
+    "binding-mismatch",
+  );
+  assertAuditResult(
+    Array.isArray(value.candidates),
+    "discovery.candidates",
+    "required-items",
+  );
+  const fields = {
+    findings: "discovery.candidates",
+    limitations: "discovery.limitations",
+    hypotheses: "discovery.hypotheses",
+    ids: "discovery",
+  };
+  const report = normalizeAuditReport(
+    {
+      ...state.report,
+      limitations: value.limitations,
+      hypotheses: value.hypotheses,
+    },
+    fields,
+  );
   const corrections = texts(
     value.reportCorrections,
     "discovery.reportCorrections",
   );
-  const candidates = value.candidates.map(
-    (finding) =>
-      normalizeAuditReport({ ...report, findings: [finding], hypotheses: [] })
-        .findings[0],
+  const candidates = value.candidates.map((finding, index) =>
+    normalizeFinding(finding, `discovery.candidates[${index}]`),
   );
   // Deduplicate exact repeats, but never silently merge conflicting accounts.
   const unique = [
@@ -549,7 +628,7 @@ export function acceptDiscovery(state, value) {
       candidates.map((finding) => [fingerprint(finding), finding]),
     ).values(),
   ];
-  normalizeAuditReport({ ...report, findings: unique });
+  normalizeAuditReport({ ...report, findings: unique }, fields);
   // An incomplete pass cannot publish a partial candidate batch or report update.
   if (value.status !== "COMPLETE") return finishPass(state, "incomplete");
   const ledger = [...state.ledger];
@@ -562,11 +641,12 @@ export function acceptDiscovery(state, value) {
         entry.finding.causeId === finding.causeId,
     );
     if (previous && same(previous.finding, finding)) continue;
-    assertAudit(
+    assertAuditResult(
       !previous ||
         (previous.finding.id === finding.id &&
           previous.finding.causeId === finding.causeId),
-      "Audit revisions must preserve finding and cause identities.",
+      `discovery.candidates[${candidates.indexOf(finding)}]`,
+      "identity-mismatch",
     );
     const entry = {
       finding,
@@ -577,9 +657,10 @@ export function acceptDiscovery(state, value) {
     else ledger.push(entry);
     entries.push(entry);
   }
-  assertAudit(
+  assertAuditResult(
     ledger.length <= MAX_COLLECTION_LENGTH,
-    "Audit ledger exceeds the persistent collection limit.",
+    "discovery.candidates",
+    "collection-limit",
   );
   const reportFingerprint = fingerprint(report);
   const outcome =

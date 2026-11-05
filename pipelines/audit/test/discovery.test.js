@@ -11,6 +11,10 @@ import {
   MAX_DISCOVERY_PASSES,
   runAuditDiscovery,
 } from "../src/index.js";
+import {
+  acceptDiscovery,
+  normalizeClarification,
+} from "../src/discovery-contract.js";
 
 import {
   HASH,
@@ -22,6 +26,124 @@ import {
   pendingRun,
   recheck,
 } from "./support/index.js";
+
+test("role schemas and semantic diagnostics constrain the actual discovery request", async () => {
+  const f = fixture([
+    READY,
+    (request) => {
+      const properties = request.schema.properties;
+      const findingSchema = properties.candidates.items.anyOf[0].properties;
+      assert.equal(findingSchema.id.maxLength, 64);
+      assert.doesNotMatch("INVALID", new RegExp(findingSchema.id.pattern, "u"));
+      assert.equal(findingSchema.evidence.minItems, 1);
+      assert.equal(findingSchema.examples.minItems, 1);
+      assert.equal(findingSchema.impact.minLength, 1);
+      assert.doesNotMatch(" ", new RegExp(findingSchema.impact.pattern, "u"));
+      assert.equal(
+        properties.candidates.items.anyOf[0].additionalProperties,
+        false,
+      );
+      assert.match(
+        request.prompt,
+        /Copy the supplied snapshotFingerprint exactly/u,
+      );
+      const state = f.run().pipelineState;
+      const before = structuredClone(state);
+      for (const [patch, field, code] of [
+        [
+          { snapshotFingerprint: "b".repeat(64) },
+          "discovery.snapshotFingerprint",
+          "binding-mismatch",
+        ],
+        [
+          { candidates: [finding({ id: "UPPERCASE" })] },
+          "discovery.candidates[0].id",
+          "invalid-id",
+        ],
+        [
+          { candidates: [finding({ evidence: [] })] },
+          "discovery.candidates[0].evidence",
+          "required-items",
+        ],
+        [
+          { limitations: [" Note\r\ntext ", "Note\ntext"] },
+          "discovery.limitations",
+          "duplicate-items",
+        ],
+        [
+          {
+            hypotheses: [
+              {
+                id: "uncertain",
+                title: "Possible cost",
+                evidence: [],
+                uncertainty: "",
+              },
+            ],
+          },
+          "discovery.hypotheses[0].uncertainty",
+          "invalid-text",
+        ],
+      ]) {
+        assert.throws(
+          () => acceptDiscovery(state, complete(patch)),
+          (error) => {
+            assert.deepEqual(error.diagnostics, [{ field, code }]);
+            return true;
+          },
+        );
+        assert.deepEqual(state, before);
+      }
+      return complete();
+    },
+  ]);
+  assert.equal(
+    (await f.execute()).pipelineState.workflowState,
+    "DISCOVERY_CLEAN",
+  );
+});
+
+test("clarification diagnostics use bounded schema fields for invalid inputs and questions", () => {
+  for (const [value, field, code] of [
+    [
+      { ...READY, inputs: { ...INPUTS, criteria: [] } },
+      "clarification.inputs.criteria",
+      "required-items",
+    ],
+    [
+      { ...READY, inputs: { ...INPUTS, scope: ["Scope", " Scope "] } },
+      "clarification.inputs.scope",
+      "duplicate-items",
+    ],
+    [
+      {
+        status: "QUESTIONS",
+        inputs: null,
+        reason: "",
+        questions: [{ question: "Scope?", whyItMatters: "" }],
+      },
+      "clarification.questions[0].whyItMatters",
+      "invalid-text",
+    ],
+    [
+      { ...READY, ["PRIVATE_KEY"]: "PRIVATE_VALUE" },
+      "clarification",
+      "unsupported-fields",
+    ],
+  ]) {
+    assert.throws(
+      () => normalizeClarification(value),
+      (error) => {
+        assert.deepEqual(error.diagnostics, [{ field, code }]);
+        assert.doesNotMatch(
+          JSON.stringify(error),
+          /PRIVATE_KEY|PRIVATE_VALUE/u,
+        );
+        return true;
+      },
+    );
+  }
+});
 
 test("independent discovery freezes full scope and starts a fresh Auditor for each pass", async () => {
   const corrected = { limitations: ["Live checks unavailable"] };

@@ -6,6 +6,8 @@ import {
   createAuditState,
   MAX_FINDING_RECHECK_PASSES,
 } from "../src/index.js";
+import { fingerprint } from "../src/discovery-contract.js";
+import { acceptRecheck, reserveRecheck } from "../src/verification-contract.js";
 import {
   complete,
   decision,
@@ -14,6 +16,63 @@ import {
   pendingRun,
   recheck,
 } from "./support/index.js";
+
+test("recheck semantic diagnostics retain exact bindings and payload field locations", async () => {
+  const saved = await pendingRun();
+  const state = reserveRecheck(saved);
+  const before = structuredClone(state);
+  const valid = {
+    status: "COMPLETE",
+    snapshotFingerprint: state.pendingBatch.snapshotFingerprint,
+    reportFingerprint: state.pendingBatch.reportFingerprint,
+    batchFingerprint: fingerprint(state.pendingBatch),
+    decisions: [decision("negative-count")],
+    additions: [],
+  };
+  const cases = [
+    ...["snapshotFingerprint", "reportFingerprint", "batchFingerprint"].map(
+      (field) => [
+        { [field]: "b".repeat(64) },
+        `recheck.${field}`,
+        "binding-mismatch",
+      ],
+    ),
+    [{ decisions: [] }, "recheck.decisions", "candidate-mismatch"],
+    [
+      { decisions: [decision("negative-count", { rationale: " " })] },
+      "recheck.decisions[0].rationale",
+      "invalid-text",
+    ],
+    [
+      {
+        decisions: [
+          decision("negative-count", {
+            kind: "correct",
+            finding: finding({ impact: "" }),
+          }),
+        ],
+      },
+      "recheck.decisions[0].finding.impact",
+      "invalid-text",
+    ],
+    [
+      { additions: [finding({ id: "a".repeat(65) })] },
+      "recheck.additions[0].id",
+      "invalid-id",
+    ],
+  ];
+  for (const [patch, field, code] of cases) {
+    assert.throws(
+      () => acceptRecheck(state, { ...valid, ...patch }),
+      (error) => {
+        assert.deepEqual(error.diagnostics, [{ field, code }]);
+        return true;
+      },
+    );
+    assert.deepEqual(state, before);
+  }
+  assert.equal(acceptRecheck(state, valid).acceptedBatches.length, 1);
+});
 
 test("every disposition is rechecked, with fresh independent Reviewers after material changes", async () => {
   const candidate = (id) => finding({ id, causeId: `${id}-cause` });
@@ -62,6 +121,7 @@ test("every disposition is rechecked, with fresh independent Reviewers after mat
   );
   const result = await f.execute();
   const state = result.pipelineState;
+  assert.equal(f.calls[0].schema.properties.decisions.minItems, 1);
   assert.equal(state.workflowState, "DISCOVERY_CLEAN");
   assert.deepEqual(
     state.recheckHistory.map(({ outcome }) => outcome),

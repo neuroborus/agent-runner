@@ -104,6 +104,10 @@ no pending batch, unchanged bindings and verified complete report publication.
 Critical findings do not fail the audit or create automatic issues. Unavailable
 authorized checks remain explicit limitations; report corrections never grant
 source writes.
+Role schemas and instructions describe the same strict semantic constraints.
+Recognized validation errors identify one bounded schema field and finite
+constraint code without retaining rejected keys, values or native diagnostics;
+these details supply no approval or renewed attempt allowance.
 
 ## Bootstrap inventory
 

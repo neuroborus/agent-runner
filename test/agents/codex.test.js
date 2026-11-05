@@ -20,6 +20,7 @@ import { createWorkspaceService } from "../../src/workspace/index.js";
 
 import { largeFinalizationResult } from "../support/index.js";
 import packageMetadata from "../../package.json" with { type: "json" };
+import * as auditSchemas from "../../pipelines/audit/src/schemas.js";
 import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
 import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
 import * as planExecutionBootstrapUnitSchemas from "../../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
@@ -3832,6 +3833,7 @@ test("accepts every Runner-owned pipeline response schema", async (t) => {
     "plan-execution": planExecutionSchemas,
     "plan-execution-bootstrap-units": planExecutionBootstrapUnitSchemas,
     polishing: polishingSchemas,
+    audit: auditSchemas,
   })) {
     for (const [name, schema] of Object.entries(schemas)) {
       await t.test(`${pipeline}/${name}`, async () => {

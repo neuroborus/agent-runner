@@ -1,4 +1,11 @@
 import { AUDIT_CATALOG } from "./catalog.js";
+import {
+  MAX_COLLECTION_LENGTH,
+  MAX_ID_LENGTH,
+  MAX_QUESTION_LENGTH,
+  MAX_QUESTIONS,
+  MAX_STRING_LENGTH,
+} from "./constraints.js";
 
 export const AUDIT_INSTRUCTIONS = `Audit the agreed workspace read-only, including ordinary directories and unchanged content.
 Inspect only dirty changes when that limitation was explicitly agreed. Never write sources, the index, Git metadata or reports.
@@ -6,16 +13,24 @@ References grant no retrieval or write authority. Do not fetch URLs or expand de
 Use relevant established rules and agreed task criteria; invent no rules, finding quotas or observations.
 Deduplicate shared causes. Findings require supported evidence, impact/severity rationale and concrete observed or code-derived examples.
 Keep unsupported hypotheses explicitly unverified. Recommendations are optional. Zero findings is valid.
+Use only the schema's fields and exact classification values. Supply every required collection as an array, even when empty.
+Finding, cause and hypothesis IDs must start with a lowercase ASCII letter, use lowercase letters/digits separated by single hyphens, and contain at most ${MAX_ID_LENGTH} characters without whitespace.
+Finding and hypothesis IDs are unique across the report. Consolidate each shared cause under one causeId; preserve finding/cause IDs across corrections.
+Prose must be nonempty after trimming and CRLF/CR-to-LF normalization, without control characters except tabs/newlines. Titles and locations must be single-line without tabs.
+Every text list must be unique AFTER that normalization. Findings require at least one location, evidence entry and example; hypotheses may have empty evidence.
+Omit recommendation when unused; when present it must be nonempty. Keep each string within ${MAX_STRING_LENGTH} characters, each collection within ${MAX_COLLECTION_LENGTH} entries and the complete JSON result within two MiB of UTF-8.
 Return structured content only. Do not generate or review the static classification map.
 Classification and default criteria: ${JSON.stringify(AUDIT_CATALOG)}`;
 
 export const CLARIFICATION_INSTRUCTIONS = `Resolve scope, references, exclusions and criteria before discovery.
 Use repository evidence rather than asking questions it can answer. Ask only material questions, using QUESTIONS with null inputs and an empty reason.
 READY requires complete agreed inputs, no questions and an empty reason. BLOCKED requires a concise reason, null inputs and no questions.
+READY scope and criteria must each have at least one entry; references and exclusions may be empty. QUESTIONS requires 1–${MAX_QUESTIONS} questions. Each question/whyItMatters and BLOCKED reason must be nonempty plain single-line text without controls, at most ${MAX_QUESTION_LENGTH} characters.
 Empty clarification text and an authorized editor close without changes are valid; neither consumes a question round.`;
 
 export const DISCOVERY_INSTRUCTIONS = `Clarification is closed; do not ask ordinary questions.
 Inspect the frozen scope at the supplied snapshot. Receive only frozen inputs and compact accumulated findings when starting fresh.
+Copy the supplied snapshotFingerprint exactly; do not derive it from inspected files, shorten it or substitute another fingerprint.
 Assess accumulated findings, including evidence, concrete examples, impact/severity rationale, classification consistency and optional recommendations.
 Return material finding corrections as candidates with their existing finding/cause IDs.
 COMPLETE means this discovery pass finished, not that the audit or any proposed finding is accepted.

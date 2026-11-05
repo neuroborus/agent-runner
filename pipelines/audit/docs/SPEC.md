@@ -146,6 +146,14 @@ omitted. Malformed, interrupted, incomplete or stale-snapshot output never
 supplies clean evidence. Partial results are not adopted. Source or frozen-input
 drift rejects the result and remains blocking.
 
+Role schemas share the audit-owned ID, text-length and collection constraints,
+required nonempty collections, catalog values and closed records. Instructions
+also require normalized text-list uniqueness, report-local ID/cause uniqueness,
+single-line titles/locations and exact-copy snapshot/report/batch fingerprints.
+Discovery must copy the supplied snapshot fingerprint, never recompute it.
+Portable schemas cannot express all cross-field or normalization rules;
+deterministic normalization remains authoritative.
+
 Clarification, discovery and recheck role results share the two-MiB serialized UTF-8
 limit, independently of the enclosing store's 100,000-character string and
 10,000-item collection limits. Clarification questions additionally retain the
@@ -365,7 +373,16 @@ checks merely to manufacture an example.
 `normalizeAuditReport` validates and returns a detached, deeply frozen content
 copy. Invalid input throws `AuditReportValidationError` with code
 `ERR_INVALID_AUDIT_REPORT` and a path-based `issues` list without raw input
-values. It grants no durable state or publication authority.
+values. Recognized semantic role failures retain the existing `AuditWorkflowError`
+and `ERR_INVALID_AUDIT_STATE` identity. Both expose immutable `diagnostics` with
+one fail-fast `{field, code}` entry. Codes and explanatory issue text come from
+the finite audit-owned vocabulary in `src/diagnostics.js`; fields resolve only
+through the owning schemas (`report`, `clarification`, `discovery`, `recheck`),
+with numeric indices from 0 through 9999 and at most 256 field characters.
+Unknown locations/codes fall back to `result`/`invalid-result`; unknown keys,
+rejected values, native messages and causes are never copied. Size/serialization
+failures use the `result` location. These error details grant no durable state,
+retry, acceptance or publication authority and change no saved evidence.
 
 ## Rendering
 

@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Audit role contracts expose bounded semantic diagnostics.**
+  Portable schemas share ID and size constraints with the owning normalizers;
+  role instructions make normalized uniqueness and exact-copy bindings explicit.
+  Rejections retain their existing error identities and expose one finite-code,
+  schema-owned field diagnostic without rejected keys, values or native causes.
+  Validation stays strict and saved evidence, budgets and acceptance are unchanged.
+
 - **Global issue capture accepts ordinary directory origins.**
   Workspace control inspection distinguishes a confined non-Git directory from
   Git origins, which still require successful canonical worktree resolution.

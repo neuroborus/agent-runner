@@ -7,6 +7,7 @@ import {
   normalizeAuditReport,
   renderAuditReport,
 } from "../src/index.js";
+import { MAX_AUDIT_DIAGNOSTICS } from "../src/diagnostics.js";
 
 function finding(overrides = {}) {
   return {
@@ -209,6 +210,75 @@ test("strict finding and report boundaries reject unsupported or incomplete clai
   assert.throws(
     () => renderAuditReport(report({ findings: [finding({ evidence: [] })] })),
     AuditReportValidationError,
+  );
+});
+
+test("semantic diagnostics identify trusted fields without retaining rejected keys or values", () => {
+  const cases = [
+    [{ id: "INVALID" }, "id", "invalid-id"],
+    [{ causeId: "a".repeat(65) }, "causeId", "invalid-id"],
+    [{ title: " " }, "title", "invalid-text"],
+    [{ locations: [] }, "locations", "required-items"],
+    [{ evidence: ["A\r\nB", " A\nB "] }, "evidence", "duplicate-items"],
+    [{ severity: "unsupported" }, "severity", "unsupported-value"],
+    [
+      { examples: [{ ...finding().examples[0], actual: "" }] },
+      "examples[0].actual",
+      "invalid-text",
+    ],
+  ];
+  for (const [patch, field, code] of cases) {
+    assert.throws(
+      () => normalizeAuditReport(report({ findings: [finding(patch)] })),
+      (error) => {
+        assert.equal(error.code, "ERR_INVALID_AUDIT_REPORT");
+        assert.deepEqual(error.diagnostics, [
+          { field: `report.findings[0].${field}`, code },
+        ]);
+        assert.ok(Object.isFrozen(error.diagnostics[0]));
+        return true;
+      },
+    );
+  }
+  const invalid = finding({ id: "PRIVATE_VALUE", title: "", impact: "" });
+  assert.throws(
+    () => normalizeAuditReport(report({ findings: [invalid] })),
+    (error) => {
+      assert.equal(error.diagnostics.length, MAX_AUDIT_DIAGNOSTICS);
+      assert.ok(Object.isFrozen(error.diagnostics));
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_VALUE/u);
+      return true;
+    },
+  );
+  const extra = { ...finding(), ["PRIVATE_KEY/credential"]: "PRIVATE_VALUE" };
+  assert.throws(
+    () => normalizeAuditReport(report({ findings: [extra] })),
+    (error) => {
+      assert.deepEqual(error.diagnostics, [
+        { field: "report.findings[0]", code: "unsupported-fields" },
+      ]);
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_KEY|PRIVATE_VALUE/u);
+      return true;
+    },
+  );
+  for (const field of [
+    "report.findings[10000].id",
+    "report.findings[0001].id",
+    "clarification.questions[32].question",
+    "report.constructor",
+    "constructor",
+    "report.findings[0].PRIVATE_KEY",
+  ]) {
+    const error = new AuditReportValidationError(field, "PRIVATE_CODE");
+    assert.deepEqual(error.diagnostics, [
+      { field: "result", code: "invalid-result" },
+    ]);
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE|constructor|10000/u);
+  }
+  assert.deepEqual(
+    new AuditReportValidationError("report.findings[9999].id", "invalid-id")
+      .diagnostics,
+    [{ field: "report.findings[9999].id", code: "invalid-id" }],
   );
 });
 
