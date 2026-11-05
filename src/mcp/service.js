@@ -282,7 +282,13 @@ const markdownContent = (maximumLength) =>
 const unexpectedIssueReportSchema = z
   .object({
     idempotencyKey,
-    projectPath: z.string().min(1).max(16_384),
+    projectPath: z
+      .string()
+      .min(1)
+      .max(16_384)
+      .describe(
+        "Origin Git worktree or ordinary directory. Git origins bind to the canonical worktree root; non-Git origins bind to the canonical selected directory.",
+      ),
     summary: markdownContent(1_000),
     expectedBehavior: markdownContent(4_000),
     actualBehavior: markdownContent(4_000),

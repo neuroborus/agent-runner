@@ -871,8 +871,8 @@ Keep these outcomes separate:
   project documentation.
 
 Reports go to one private per-user [global issue store](product/OPERATOR_MODEL.md#global-issue-store)
-that is shared across projects and survives deletion of the originating
-checkout. The target project needs no ignore rule. Each issue keeps its
+that is shared across projects and survives deletion of its Git or directory
+origin. No project ignore rule is needed. Each issue keeps its
 Markdown together with one authoritative tracking record that starts `open`.
 Earlier repository-local reports and issue indexes are no longer read or
 maintained; leave them in place. Manage the backlog with MCP `issues_list`,

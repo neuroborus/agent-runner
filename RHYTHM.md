@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Global issue capture accepts ordinary directory origins.**
+  Workspace control inspection distinguishes a confined non-Git directory from
+  Git origins, which still require successful canonical worktree resolution.
+  Reports retain their existing format and global storage, with no source-file
+  reads, configuration loading or Git effects. Bound interrupted publications
+  use the saved canonical origin without reinspection, so deletion or replacement
+  cannot redirect recovery; completed receipts retain their early replay path.
+
 - **Claude native initialization owns a separate startup directory.**
   Native turns launch inside the existing journaled allocation so cwd-relative
   atomic staging occurs outside source and control trees before tools start.

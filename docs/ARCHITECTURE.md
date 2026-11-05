@@ -1782,11 +1782,15 @@ optional bounded details, run ID, and error code. The service never gathers or
 attaches logs, transcripts, prompts, environment values, credentials, secrets,
 or other diagnostic data automatically. The shared capability validates the
 same field bounds as the MCP schema. It first replays a completed receipt for
-the lexically resolved request, then canonicalizes the Git project and
-validates the external-state boundary before action persistence. The origin is
-recorded as bounded context and grants no storage authority; no configuration
-is loaded and `projectConfigurationPath` only remains part of the request
-identity.
+the lexically resolved request, then resolves the origin through the workspace
+and external-state boundaries before action persistence. An enclosing Git
+marker requires successful Git resolution to the canonical worktree root;
+failed Git inspection never falls back to a directory. Without a marker,
+controls-only workspace inspection rejects unsafe controls and bare metadata,
+and the canonical selected directory is the origin. Source files are not read
+or snapshotted. The origin grants no storage or Git-effect authority; no
+configuration is loaded and `projectConfigurationPath` only remains part of
+the request identity.
 
 Issues live in one private per-user store selected from environment, home, and
 platform inputs injected at composition: `$XDG_DATA_HOME/agent-runner/issues`
@@ -2220,8 +2224,10 @@ argument binding. Its intent reserves the request selector and canonical
 origin, store path and directory identity, issue ID, creation time, document
 hash, and a private temporary name before publication. A saved selector maps an
 exact retry, including one naming a project subdirectory, to its verified
-canonical arguments without consulting a deleted origin. The temporary file is
-created exclusively with mode `0600`, its device, inode, and birth time are
+canonical arguments without consulting a deleted origin. Bound pending
+publications also retain their canonical origin for storage separation without
+resolving it again; replacement or deletion cannot redirect recovery. The
+temporary file is created exclusively with mode `0600`, its device, inode, and birth time are
 bound in the intent before content is written, and it is synced and hard-linked to its final
 name, which never replaces an existing file. The directory is synced and its
 identity and private ownership are rechecked before the action records a

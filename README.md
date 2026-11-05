@@ -1942,8 +1942,11 @@ user Application Support on macOS and local application data on Windows
 without extending execution-platform support. The store is user data,
 separate from settings, installed payloads, run state, and caches, and it
 survives deletion of the originating checkout. Publication needs no project
-ignore rule and never writes to the project. `projectConfigurationPath` stays
-part of the request identity but does not select storage.
+ignore rule and never writes to the project. `projectPath` accepts a Git
+worktree or an ordinary directory: Git origins use the canonical worktree root,
+while non-Git origins use the canonical selected directory. Unsafe controls and
+failed Git inspection are rejected. `projectConfigurationPath` stays part of
+the request identity but does not load configuration or select storage.
 
 The result is `{ "issueId", "issuePath" }`. `<issueId>.json` is one versioned
 document holding the immutable rendered Markdown with its hash and the

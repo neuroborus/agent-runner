@@ -654,6 +654,12 @@ checkout, worktree, or directory is deleted. Publication requires no project
 ignore rule, never changes ignore rules, and never writes to the project; the
 origin is recorded as context, not used as a storage location.
 
+Capture accepts Git worktrees and ordinary directories. A Git selector binds to
+its canonical worktree root; a non-Git selector binds to the canonical selected
+directory. Unsafe control-tree origins and failed Git inspection are rejected.
+Origin selection reads no source-file contents, loads no project configuration,
+and grants no Git effects.
+
 Each issue has a stable opaque ID and one document combining the immutable
 caller-authored Markdown with its single authoritative tracking record. The
 record holds the origin project name and path, creation and update times,
