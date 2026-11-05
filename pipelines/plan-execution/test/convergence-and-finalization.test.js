@@ -1498,55 +1498,61 @@ test("turns a runner-trusted check failure into a bounded finalization issue", a
   ]);
 });
 
-test("validates runner-trusted evidence before attempting finalization advancement", async (t) => {
-  const trustedValidation = trustedValidationSnapshot();
-  const finalization = finalizationWithTrustedCheck(trustedValidation);
-  const fixture = await createFixture(t, {
-    trustedValidation,
-    worker: [
-      clarificationReady(),
-      {
-        ...bootstrapReady("Worker"),
-        requiredChecks: finalization.requiredChecks,
+for (const [name, invalidEvidence] of [
+  ["inconsistent runner exit status", { exitCode: 7 }],
+  ["substituted runner identity", { commandIdentity: "f".repeat(64) }],
+]) {
+  test(`rejects ${name} before attempting finalization advancement`, async (t) => {
+    const trustedValidation = trustedValidationSnapshot();
+    const finalization = finalizationWithTrustedCheck(trustedValidation);
+    const fixture = await createFixture(t, {
+      trustedValidation,
+      worker: [
+        clarificationReady(),
+        {
+          ...bootstrapReady("Worker"),
+          requiredChecks: finalization.requiredChecks,
+        },
+        reconciliationResolved(),
+      ],
+      reviewer: [
+        {
+          ...bootstrapReady("Reviewer"),
+          requiredChecks: finalization.requiredChecks,
+        },
+      ],
+      workReviewer: [],
+      workWorker: [implementationCompleted(), finalization],
+      onTrustedValidation(options) {
+        return {
+          status: "PASS",
+          commandIdentity: options.commandIdentity,
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          evidence: ["Invalid runner evidence must not be persisted."],
+          ...options.bindings,
+          ...invalidEvidence,
+        };
       },
-      reconciliationResolved(),
-    ],
-    reviewer: [
-      {
-        ...bootstrapReady("Reviewer"),
-        requiredChecks: finalization.requiredChecks,
-      },
-    ],
-    workReviewer: [],
-    workWorker: [implementationCompleted(), finalization],
-    onTrustedValidation(options) {
-      return {
-        status: "PASS",
-        commandIdentity: options.commandIdentity,
-        exitCode: 7,
-        signal: null,
-        timedOut: false,
-        evidence: ["Invalid runner evidence must not be persisted."],
-        ...options.bindings,
-      };
-    },
+    });
+
+    const paused = await fixture.run({ trustedChecks: ["service-check"] });
+
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.equal(paused.pause.reason, "finalization_transition_invalid");
+    assert.equal(paused.pipelineState.finalizationResult, null);
+    assert.doesNotMatch(JSON.stringify(paused), /Invalid runner evidence/u);
+    assert.equal(
+      fixture.transitions.some(
+        ({ patch }) =>
+          patch?.pipelineState?.finalizationResult !== undefined &&
+          patch.pipelineState.finalizationResult !== null,
+      ),
+      false,
+    );
   });
-
-  const paused = await fixture.run({ trustedChecks: ["service-check"] });
-
-  assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(paused.pause.reason, "finalization_transition_invalid");
-  assert.equal(paused.pipelineState.finalizationResult, null);
-  assert.doesNotMatch(JSON.stringify(paused), /Invalid runner evidence/u);
-  assert.equal(
-    fixture.transitions.some(
-      ({ patch }) =>
-        patch?.pipelineState?.finalizationResult !== undefined &&
-        patch.pipelineState.finalizationResult !== null,
-    ),
-    false,
-  );
-});
+}
 
 test("rejects unsafe trusted execution and pauses unverifiable storage cleanup", async (t) => {
   for (const [name, code, reason = "unsafe_git_state"] of [

@@ -176,7 +176,8 @@ custom steps require only criterion-dependent checks and explicitly selected
 coding requirements. The runner preserves
 the accepted role assignments, merges commands in Worker-first order, and unions
 their applicability. A Reviewer-only requirement survives reconciliation.
-Later requirements remain persisted without executing during earlier finalization.
+Later requirements retain their accepted schedule; a justified current-step
+amendment can additionally require one of those checks for the current change.
 Polishing continues to use one workspace inventory.
 
 Execution establishes each role's catalog through broad read-only discovery,
@@ -196,8 +197,17 @@ step; advancing clears its amendment and gate evidence and selects the next
 persisted inventory. Shared infrastructure remains fingerprinted for the run,
 and confirmation must explicitly assess authorized changes against future
 requirements. Trusted capability preparation retains the complete catalog and
-both roles' reports, while finalization reserves and executes only active
-trusted commands. The frozen command vectors and identities never change.
+both roles' reports. Agent turns reserve every selected trusted command,
+including future requirements. A justified execution amendment may add an exact
+already selected check originally assigned elsewhere, without requiring all
+selected checks. The Worker reports selected candidate entries as `NOT_RUN`;
+only Runner executes the selected commands explicitly included in that resulting
+inventory. Selected agent attestations and unselected `NOT_RUN` entries are
+rejected. Persisted selected-check evidence must carry Runner provenance and
+the exact selected identity. Command vectors, capabilities and identities stay
+frozen; execution binds fresh evidence to the current content, infrastructure and
+trusted-command/configuration fingerprints. The amendment becomes active only
+after distinct fingerprint-bound terminal confirmation.
 
 Legacy execution inventories have no reliable applicability. Version-22 state
 migrates explicitly to version 23 with provisional historical evidence; fresh

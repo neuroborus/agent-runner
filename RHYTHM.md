@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Execution amendments can reuse already selected checks from later steps.**
+  A justified current-step finalization inventory may include an exact frozen
+  selected command whose original applicability belongs elsewhere. Every selected
+  command stays reserved in normal, correction and reconstruction prompts;
+  selected candidate entries require `NOT_RUN`, and only their explicit inclusion
+  authorizes Runner execution with the original vectors, capabilities and bindings.
+  Runner provenance and exact command identity remain mandatory in persisted
+  evidence. The existing distinct terminal confirmation accepts the step-local amendment; advancement
+  clears it without changing role inventories, later schedules or retry allowances.
+  No state version, historical recovery or generic retry channel changes.
+
 - **Audit role contracts expose bounded semantic diagnostics.**
   Portable schemas share ID and size constraints with the owning normalizers;
   role instructions make normalized uniqueness and exact-copy bindings explicit.

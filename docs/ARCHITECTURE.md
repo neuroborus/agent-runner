@@ -2989,6 +2989,18 @@ its role evidence; only a confirmed current-step amendment may overlay the
 active inventory. Verified advancement clears that amendment and prior gates
 and selects the next schedule entry.
 
+An amendment can add an exact selected trusted command originally assigned
+elsewhere. Finalization normalizes against the full frozen selected catalog,
+requiring `NOT_RUN` even for newly proposed entries. Its normal, correction and
+reconstruction prompts retain that complete reservation list, as does terminal
+confirmation. `validation-schedule.js` intersects the resulting explicit
+candidate inventory with the frozen selection for execution; it never runs all
+future checks automatically. Original vectors, capabilities and bindings remain
+authoritative; persisted selected results require runner provenance and the exact
+command identity.
+Only the existing distinct terminal confirmation accepts the step-local amendment;
+role inventories, later schedules, state shape and version remain unchanged.
+
 State version 27 stores that schedule as one ordered `commands` catalog and
 per-step zero-based `commandIndexes`, expanding contiguous local check IDs only
 for the selected step. This prevents long commands from multiplying by the
@@ -3034,8 +3046,9 @@ Finalization records its active step and exact ordered checks; terminal
 confirmation hashes the complete canonical evidence tuple. Resume validates
 both bindings before reuse. Confirmation also sees future requirements when
 assessing shared infrastructure changes. Trusted capability inspection uses the
-complete catalog and both roles' additive reports; finalization reserves and
-executes only active selected commands. The frozen snapshot, vectors, identities,
+complete catalog and both roles' additive reports. Finalization reserves the full
+selection and executes only selected entries in the explicit current candidate
+inventory, including justified amendments. The frozen snapshot, vectors, identities,
 and command/configuration fingerprints stay intact.
 
 The explicit version-22 migration retains historical unscoped evidence under a
