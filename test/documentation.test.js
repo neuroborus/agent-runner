@@ -229,7 +229,27 @@ test("document-map links resolve and finalization covers the operator surfaces",
     assert.equal(url.protocol, "file:", target);
     assert.ok((await stat(url)).isFile(), target);
   }
-  const skill = await readDocument(".agents/skills/finalization/SKILL.md");
+  const skillRoot = new URL(".agents/skills/finalization/", ROOT);
+  const instructions = new Map();
+  async function readInstructions(url) {
+    if (instructions.has(url.href)) return;
+    const text = await readFile(url, "utf8");
+    instructions.set(url.href, text);
+    for (const [, reference] of text.matchAll(/\]\(([^)]+)\)/gu)) {
+      const target = new URL(reference, url);
+      target.hash = "";
+      assert.equal(target.protocol, "file:", reference);
+      assert.ok((await stat(target)).isFile(), reference);
+      if (
+        target.pathname.startsWith(skillRoot.pathname) &&
+        target.pathname.endsWith(".md")
+      ) {
+        await readInstructions(target);
+      }
+    }
+  }
+  await readInstructions(new URL("SKILL.md", skillRoot));
+  const skill = [...instructions.values()].join("\n");
   for (const surface of [
     "README.md",
     "docs/OPERATOR_GUIDE.md",

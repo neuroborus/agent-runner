@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-05
+
+- **Skill maintenance preserves complete gates through bounded references.**
+  The canonical skill-authoring procedure requires instruction files of at most
+  100 physical lines, local validation, and separate author/fixer and independent
+  reviewer iterations. Existing structure and finalization entry points retain
+  their anchors and mandatory reading routes while focused references carry
+  complete checklists. Project review procedures now check role-contract and
+  diagnostic alignment, incidental backend writes, proof-based concurrent
+  observation, and scope selection across Git and ordinary directories. These
+  are engineering review gates; runtime behavior and permissions remain owned by
+  their existing specifications. Interface YAML keeps its local-only policy.
+
 ## 2026-11-04
 
 - **Positive execution-owner loss interrupts checkpoints between turns.**

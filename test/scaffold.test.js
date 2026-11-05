@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readdir, readFile, readlink } from "node:fs/promises";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -197,6 +198,25 @@ test("canonical project skills have valid instructions", async () => {
       /\bTODO\b/u,
       `${skillPath} has unfinished content`,
     );
+    const resources = await readdir(
+      new URL(`${directory.name}/`, SKILLS_DIRECTORY),
+      {
+        recursive: true,
+        withFileTypes: true,
+      },
+    );
+    for (const resource of resources) {
+      if (!resource.isFile() || !/\.(?:md|markdown)$/iu.test(resource.name))
+        continue;
+      const path = join(resource.parentPath, resource.name);
+      const bytes = await readFile(path);
+      const lines =
+        bytes.length === 0
+          ? 0
+          : bytes.toString("utf8").split("\n").length -
+            Number(bytes.at(-1) === 10);
+      assert.ok(lines <= 100, `${path} exceeds 100 physical instruction lines`);
+    }
   }
 });
 
