@@ -2163,6 +2163,8 @@ appear confirmed; pending candidates and hypotheses remain explicitly unverified
 Completion requires the selected clean-discovery gate, no pending batch and
 unchanged bindings. Both budgets are run-wide and capped at 20, including after
 interruption. Status exposes the report path/status/hash and finding/pass counts.
+Invalid role results expose bounded field diagnostics in CLI/MCP pause evidence;
+resume supplies structured correction feedback within the existing pass budgets.
 Zero or Critical findings can accompany success; findings create no automatic
 issues or repair permissions. Unavailable evidence remains visible. Report
 publication resumes without replaying accepted model work; unexpected report edits

@@ -1,4 +1,5 @@
 import { acceptsCleanRecheck, recheckRole } from "./cycles.js";
+import { assertCorrectionFeedback } from "./correction-feedback.js";
 import {
   assertAudit,
   assertAuditResult,
@@ -169,6 +170,7 @@ export function assertAuditRun(run) {
     "Audit recheck history is required.",
   );
   assertDiscoveryRun(run);
+  assertCorrectionFeedback(run);
   assertPublication(run);
   assertAudit(
     state.recheckHistory.length <= state.settings.maxFindingRecheckPasses &&

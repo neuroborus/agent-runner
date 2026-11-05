@@ -19,6 +19,8 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../src/agents/index.js";
 import { createClarificationService } from "../src/clarifications/index.js";
+import { main } from "../src/index.js";
+import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createAuthenticationPolicy } from "../src/runner/authentication.js";
 import { createDispositionPolicy } from "../src/runner/dispositions.js";
 import { bindWorkspace, directorySafety } from "../src/runner/workspace.js";
@@ -284,8 +286,21 @@ test("normalized structured-output failures pause as invalid audit passes and re
           JSON.stringify(waiting),
           /Private malformed provider output/u,
         );
+        const feedback = structuredClone(
+          waiting.pipelineState.correctionFeedback,
+        );
+        assert.deepEqual(feedback.diagnostics, [
+          { field: "result", code: "invalid-result" },
+        ]);
         const resumed = await f.execute();
         assert.equal(resumed.pipelineState.workflowState, "DISCOVERY_CLEAN");
+        assert.equal(resumed.pipelineState.correctionFeedback, null);
+        assert.deepEqual(
+          JSON.parse(
+            f.calls[phase === "clarify" ? 1 : 2].prompt.split("\n").at(-1),
+          ).correctionFeedback,
+          feedback,
+        );
         assert.deepEqual(
           resumed.pipelineState.history.map(({ outcome }) => outcome),
           phase === "clarify" ? ["clean"] : ["invalid", "clean"],
@@ -409,6 +424,71 @@ test("audit rejects persistence field overflow before freezing inputs or accepti
   const result = await f.execute();
   assert.equal(result.pause.reason, "invalid_discovery");
   assert.equal(result.pipelineState.inputs, null);
+});
+
+test("audit pause diagnostics survive transition normalization and project identically through CLI and MCP", async () => {
+  const f = policyFixture([
+    READY,
+    {
+      ...COMPLETE,
+      candidates: [{ id: "PRIVATE_VALUE", PRIVATE_KEY: "SECRET_VALUE" }],
+    },
+    COMPLETE,
+  ]);
+  const waiting = await f.execute();
+  const feedback = waiting.pipelineState.correctionFeedback;
+  assert.deepEqual(feedback.diagnostics, [
+    { field: "discovery.candidates[0]", code: "unsupported-fields" },
+  ]);
+  assert.deepEqual(
+    normalizeTransitionPatch({ pipelineState: waiting.pipelineState })
+      .pipelineState.correctionFeedback,
+    feedback,
+  );
+  const runner = {
+    status: async () => ({ run: waiting, directoryPath: "/state/run" }),
+  };
+  const control = createMcpControlPlane({
+    runner,
+    runStore: { inspectRunLeaseOwner: async () => ({ status: "none" }) },
+  });
+  const status = await control.runStatus({ runId: waiting.runId });
+  assert.deepEqual(status.pause, auditPipeline.projections.pause(waiting));
+  assert.deepEqual(status.pause.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.match(
+    status.pause.evidence[0],
+    /DISCOVER: \[unsupported-fields\] discovery\.candidates\[0\]/u,
+  );
+  let output = "";
+  assert.equal(
+    await main(["status", "--run", waiting.runId], {
+      runner,
+      stdout: {
+        write: (value) => {
+          output += value;
+        },
+      },
+      stderr: { write: (value) => assert.fail(value) },
+    }),
+    0,
+  );
+  assert.ok(output.includes(status.pause.evidence[0]));
+  assert.doesNotMatch(
+    JSON.stringify({ waiting, status, output }),
+    /PRIVATE_KEY|PRIVATE_VALUE|SECRET_VALUE/u,
+  );
+  const result = await f.execute();
+  assert.equal(result.pipelineState.correctionFeedback, null);
+  assert.deepEqual(
+    JSON.parse(f.calls[2].prompt.split("\n").at(-1)).correctionFeedback,
+    feedback,
+  );
+  assert.deepEqual(
+    result.pipelineState.history.map(({ outcome }) => outcome),
+    ["invalid", "clean"],
+  );
 });
 
 test("persistent text limits retain the aggregate two-MiB audit-result allowance", async () => {

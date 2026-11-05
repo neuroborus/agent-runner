@@ -56,3 +56,8 @@ Only a later fresh Auditor's clean FIRST discovery pass satisfies discovery; eve
 Every new or revised batch first converges through distinct rechecks by its discovering Auditor, then goes to a fresh finding Reviewer.
 A correcting Reviewer continues until clean, then a fresh Reviewer must accept on its FIRST pass. Additions require verification themselves.
 Batch acceptance resumes the same discovering Auditor; it never cleans discovery. The Runner derives cycle gates from preserved pass history, not session reconstruction.`;
+
+export const CORRECTION_INSTRUCTIONS = `The supplied correctionFeedback identifies constraints rejected at this checkpoint, not accepted evidence.
+Correct those fields using the schema and audit instructions, then return the complete structured result for the current request.
+Copy bindings from the current request exactly. Preserve frozen scope, established IDs and supported prior decisions; do not invent findings, cleanliness or approval to satisfy validation.
+This retry retains the existing session policy and consumed pass budgets. It grants no new access, questions after clarification, or other authority.`;

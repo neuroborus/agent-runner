@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Audit retries retain checkpoint-bound semantic feedback.**
+  Invalid results atomically retain bounded canonical diagnostics with their
+  rejected checkpoint and exact snapshot/report/batch bindings. Supported resume
+  supplies fixed correction instructions to that checkpoint, replacing feedback
+  on rejection and clearing it after validation. CLI/MCP share actionable pause
+  evidence without rejected content or native causes. State version 6 initializes
+  legacy feedback to null; histories, dispositions, receipts, session ownership
+  and consumed budgets remain authoritative.
+
 - **Execution amendments can reuse already selected checks from later steps.**
   A justified current-step finalization inventory may include an exact frozen
   selected command whose original applicability belongs elsewhere. Every selected

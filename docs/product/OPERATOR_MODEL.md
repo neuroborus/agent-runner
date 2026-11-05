@@ -377,6 +377,12 @@ exposes its Auditor/Reviewer roles, independent default/recommendation and finit
 path/status/hash, finding counts and consumed pass totals. Pending candidates
 remain unverified; unavailable evidence stays in the report. Audit completion
 with Critical findings creates no automatic issue and authorizes no repair.
+Invalid audit role results expose bounded field/constraint diagnostics in the
+shared CLI/MCP pause evidence. Resume targets the saved checkpoint with structured
+correction feedback, preserving consumed passes, pending findings and prior
+decisions; it never exposes rejected output or renews a budget. The
+[audit specification](../../pipelines/audit/docs/SPEC.md#structured-report)
+owns diagnostic and compatibility details.
 
 ## Durable state and local artifacts
 

@@ -2,6 +2,10 @@ import { join } from "node:path";
 
 import { recheckRole } from "./cycles.js";
 import {
+  CORRECTION_STATES,
+  createCorrectionFeedback,
+} from "./correction-feedback.js";
+import {
   acceptDiscovery,
   assertAudit,
   assertAuditResultSize,
@@ -17,6 +21,7 @@ import {
   AUDIT_INSTRUCTIONS,
   CLARIFICATION_INSTRUCTIONS,
   COMBINED_INSTRUCTIONS,
+  CORRECTION_INSTRUCTIONS,
   DISCOVERY_INSTRUCTIONS,
   RECHECK_INSTRUCTIONS,
 } from "./prompts.js";
@@ -74,6 +79,32 @@ export async function runAuditDiscovery({
     );
     return current;
   };
+  async function rejectResult(phase, cause) {
+    const pipelineState =
+      phase === "recheck"
+        ? finishRecheck(state(), "invalid")
+        : phase === "discovery"
+          ? finishPass(state(), "invalid")
+          : state();
+    await save(
+      {
+        ...pipelineState,
+        workflowState: "WAITING_FOR_USER",
+        correctionFeedback: createCorrectionFeedback(
+          current,
+          phase,
+          cause?.diagnostics,
+        ),
+      },
+      {
+        pause: {
+          reason: phase === "recheck" ? "invalid_recheck" : "invalid_discovery",
+          resumeState: CORRECTION_STATES[phase],
+        },
+      },
+    );
+    return current;
+  }
   async function inspectInputs() {
     const inputs = await runtime.readInputs({ taskPath: run.taskPath });
     const clarification =
@@ -186,12 +217,7 @@ export async function runAuditDiscovery({
   async function attempt(phase, evidence) {
     const recheck = phase === "recheck";
     const role = recheck ? recheckRole(state()) : "auditor";
-    const resumeState = recheck
-      ? "VERIFY_FINDINGS"
-      : phase === "clarify"
-        ? "CLARIFY"
-        : "DISCOVER";
-    const invalid = recheck ? "invalid_recheck" : "invalid_discovery";
+    const resumeState = CORRECTION_STATES[phase];
     const finishReserved = async (outcome) => {
       if (recheck) await save(finishRecheck(state(), outcome));
       else if (phase === "discovery") await save(finishPass(state(), outcome));
@@ -265,7 +291,9 @@ export async function runAuditDiscovery({
             : state().sourceForkContexts,
       },
     });
-    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}\n\n${JSON.stringify(evidence)}`;
+    const feedback = state().correctionFeedback;
+    const correcting = feedback?.phase === phase;
+    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}${correcting ? `\n\n${CORRECTION_INSTRUCTIONS}` : ""}\n\n${JSON.stringify({ ...evidence, ...(correcting ? { correctionFeedback: feedback } : {}) })}`;
     const configuration = current.roles[role];
     let response;
     let agentError;
@@ -373,8 +401,8 @@ export async function runAuditDiscovery({
       }
       current = await runtime.finishAgentTurn(activeTurn);
       if (agentError.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS) {
-        await finishReserved("invalid");
-        return { failure: invalid };
+        await rejectResult(phase);
+        return { paused: true };
       }
       if (
         runtime.inactivity?.eligible(agentError) &&
@@ -432,8 +460,8 @@ export async function runAuditDiscovery({
         ))
     ) {
       current = await runtime.finishAgentTurn(activeTurn);
-      await finishReserved("invalid");
-      return { failure: invalid };
+      await rejectResult(phase);
+      return { paused: true };
     }
     if (
       !acknowledgedSessions.has(response.sessionId) &&
@@ -452,8 +480,8 @@ export async function runAuditDiscovery({
       assertAuditResultSize(response.structured);
     } catch (cause) {
       if (!(cause instanceof AuditWorkflowError)) throw cause;
-      await finishReserved("invalid");
-      return { failure: invalid };
+      await rejectResult(phase, cause);
+      return { paused: true };
     }
     return { output: response.structured };
   }
@@ -609,8 +637,10 @@ export async function runAuditDiscovery({
         cause?.code !== "ERR_INVALID_AUDIT_REPORT"
       )
         throw cause;
-      return pause("invalid_discovery", "CLARIFY");
+      return rejectResult("clarify", cause);
     }
+    if (state().correctionFeedback !== null)
+      await save({ ...state(), correctionFeedback: null });
     if (output.status === "READY") {
       const inputs = output.inputs;
       const frozen = await runtime.clarifications.freezeTranscript({
@@ -717,7 +747,10 @@ export async function runAuditDiscovery({
         return pause(result.failure, "VERIFY_FINDINGS", result.details);
       let accepted;
       try {
-        accepted = acceptRecheck(state(), result.output);
+        accepted = {
+          ...acceptRecheck(state(), result.output),
+          correctionFeedback: null,
+        };
         assertUpdateSize(accepted);
       } catch (cause) {
         if (
@@ -725,8 +758,7 @@ export async function runAuditDiscovery({
           cause?.code !== "ERR_INVALID_AUDIT_REPORT"
         )
           throw cause;
-        await save(finishRecheck(state(), "invalid"));
-        return pause("invalid_recheck", "VERIFY_FINDINGS");
+        return rejectResult("recheck", cause);
       }
       await save(accepted);
       if (state().recheckHistory.at(-1).outcome === "incomplete")
@@ -788,7 +820,10 @@ export async function runAuditDiscovery({
     if ((await inspectInputs()) === null) return current;
     let accepted;
     try {
-      accepted = acceptDiscovery(state(), result.output);
+      accepted = {
+        ...acceptDiscovery(state(), result.output),
+        correctionFeedback: null,
+      };
       assertUpdateSize(accepted);
     } catch (cause) {
       if (
@@ -796,8 +831,7 @@ export async function runAuditDiscovery({
         cause?.code !== "ERR_INVALID_AUDIT_REPORT"
       )
         throw cause;
-      await save(finishPass(state(), "invalid"));
-      return pause("invalid_discovery", "DISCOVER");
+      return rejectResult("discovery", cause);
     }
     await save(accepted);
     if (state().history.at(-1).outcome === "incomplete")

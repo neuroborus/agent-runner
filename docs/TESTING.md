@@ -209,6 +209,8 @@ blocking, invalid/incomplete output, drift, write-ahead interruption and finite
 exhaustion recovery using injected root capabilities. It also covers the two-MiB
 role-result limit, complete frozen inputs/findings in fresh discovery prompts and
 propagation of unsettled execution ownership.
+Discovery also covers persisted clarification/discovery correction feedback,
+replacement, checkpoint confinement and rejection of unsafe diagnostics.
 Fast `pipelines/audit/test/verification.test.js` owns all five finding dispositions,
 fresh independent versus continuing lazy rechecks, review additions, retained
 rejections, version invalidation, stale/malformed/incomplete output, interrupted
@@ -216,6 +218,9 @@ reservations, exact acceptance recovery, Auditor-only legacy migration/resume
 without fabricated approval or role expansion, and run-wide recheck exhaustion.
 It shares injected effect-free fixtures with discovery through the pipeline's
 test support index.
+Recheck feedback coverage preserves pending dispositions and prior rejection
+history across lazy/independent resume and the version-5 migration; combined
+coverage keeps an invalid Reviewer's original clean-first accounting.
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
 same-Auditor batch convergence, correcting Reviewer continuity/additions and
@@ -232,6 +237,8 @@ provider structured-output failures remain resumable invalid passes. The actual
 transition normalizer proves persistent field/collection overflow is rejected
 before acceptance without reducing the two-MiB aggregate role allowance. No provider
 or Git process is needed for those policy tests.
+The same lightweight fixture verifies normalized feedback persistence and matching
+sanitized CLI/MCP pause evidence without a new storage or provider integration.
 Fast `pipelines/audit/test/publication.test.js` owns escaped report-size rejection
 before ledger acceptance and resumable retry, exact confirmed/pending
 projection, zero/Critical findings, all-mode completion, lost publication

@@ -33,7 +33,7 @@ const LAZY_ROLES = Object.freeze(["auditor"]);
 
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 5,
+  stateVersion: 6,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -62,6 +62,7 @@ export const auditPipeline = Object.freeze({
       proactiveClarification: false,
       proactiveClarificationComplete: true,
     }),
+    5: ({ pipelineState }) => ({ ...pipelineState, correctionFeedback: null }),
   }),
   roles: ROLES,
   resolveActiveRoles: (settings) =>

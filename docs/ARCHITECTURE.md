@@ -673,8 +673,10 @@ filesystem or provider effects. Audit schemas share portable constraints with
 semantic normalization; instructions cover normalized uniqueness and exact-copy
 bindings. Recognized validation errors expose one immutable finite-code diagnostic
 at a schema-owned, bounded field location, retaining existing error identities
-and excluding rejected keys/values and native causes. This adds no persisted
-evidence or retry authority; the audit specification owns the exact contract.
+and excluding rejected keys/values and native causes. Audit-owned correction
+feedback retains only those constraints and exact checkpoint bindings for supported
+resume; it grants no acceptance or additional retry allowance. The audit
+specification owns the exact contract.
 Its descriptor selects read-only
 directory inspection and an exclusive canonical workspace lease. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
@@ -720,6 +722,13 @@ State version 5 persists proactive clarification and defaults legacy runs to no
 proactive request. Audit uses the common one-shot editor and identified MCP input
 requests before its first Auditor turn and for material clarification questions;
 unanswered material requests remain pending without spending another round.
+State version 6 adds nullable checkpoint correction feedback; its version-5
+migration initializes absence without changing saved evidence. Rejection saves
+feedback, invalid accounting and the pause together. Only the matching role
+checkpoint receives canonical diagnostics with fixed correction instructions;
+validation replaces or clears feedback without changing session or budget rules.
+The descriptor exposes the same bounded constraint evidence through CLI/MCP pause
+projections, excluding native messages and rejected content.
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies

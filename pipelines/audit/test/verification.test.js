@@ -392,6 +392,90 @@ test("stale, malformed, incomplete and invalid merge responses cannot accept a b
   }
 });
 
+test("checkpoint feedback retains pending dispositions and obeys lazy and independent recheck ownership", async () => {
+  for (const mode of ["lazy", "independent"]) {
+    const saved = await pendingRun(undefined, {
+      mode,
+      source: "source-session",
+    });
+    const f = fixture(
+      [
+        (request) =>
+          recheck(request, {
+            decisions: [
+              decision("negative-count", {
+                kind: "reject",
+                rationale: "The caller already enforces the required range",
+              }),
+            ],
+          }),
+        (request) => recheck(request, { batchFingerprint: "f".repeat(64) }),
+      ],
+      { saved },
+    );
+    const waiting = await f.execute();
+    const feedback = waiting.pipelineState.correctionFeedback;
+    assert.equal(feedback.phase, "recheck");
+    assert.equal(feedback.number, 2);
+    assert.deepEqual(feedback.diagnostics, [
+      { field: "recheck.batchFingerprint", code: "binding-mismatch" },
+    ]);
+    assert.equal(waiting.pipelineState.acceptedBatches.length, 0);
+    assert.equal(
+      waiting.pipelineState.pendingBatch.dispositions[0].kind,
+      "reject",
+    );
+    const resumed = fixture([recheck], {
+      saved: JSON.parse(JSON.stringify(waiting)),
+    });
+    resumed.stopAt("DISCOVER");
+    await assert.rejects(resumed.execute(), /gate response loss/u);
+    const result = resumed.run();
+    const evidence = JSON.parse(resumed.calls[0].prompt.split("\n").at(-1));
+    assert.deepEqual(evidence.correctionFeedback, feedback);
+    assert.deepEqual(
+      evidence.priorDecisions,
+      waiting.pipelineState.recheckHistory.slice(0, 1),
+    );
+    assert.deepEqual(
+      result.pipelineState.recheckHistory.map(({ outcome }) => outcome),
+      ["corrected", "invalid", "clean"],
+    );
+    assert.deepEqual(
+      result.pipelineState.recheckHistory.slice(0, 2),
+      waiting.pipelineState.recheckHistory,
+    );
+    assert.deepEqual(
+      result.pipelineState.acceptedBatches[0].batch,
+      waiting.pipelineState.pendingBatch,
+    );
+    assert.equal(result.pipelineState.correctionFeedback, null);
+    assert.deepEqual(
+      resumed.calls[0].session,
+      mode === "lazy"
+        ? {
+            mode: "continue",
+            id: waiting.sessionLineage.children.at(-1).sessionId,
+          }
+        : { mode: "fork", id: "source-session" },
+    );
+
+    const legacy = structuredClone(result);
+    delete legacy.pipelineState.correctionFeedback;
+    const migrated = auditPipeline.migrations[5](legacy);
+    assert.deepEqual(migrated, {
+      ...legacy.pipelineState,
+      correctionFeedback: null,
+    });
+    assert.doesNotThrow(() =>
+      auditPipeline.workflow.validateRun({
+        ...legacy,
+        pipelineState: migrated,
+      }),
+    );
+  }
+});
+
 test("terminal recheck failures preserve a valid failed run without replaying verification", async () => {
   const saved = await pendingRun();
   const cause = Object.assign(new Error("Synthetic provider safety failure"), {

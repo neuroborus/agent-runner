@@ -29,7 +29,7 @@
     "runnerVersion": 1,
     "runStateVersion": 24,
     "pipelines": {
-      "audit": 5,
+      "audit": 6,
       "init": 1,
       "plan-authoring": 7,
       "plan-execution": 39,

@@ -68,7 +68,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 5 retains the workspace baseline, frozen declarations and their
+State version 6 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -381,8 +381,33 @@ through the owning schemas (`report`, `clarification`, `discovery`, `recheck`),
 with numeric indices from 0 through 9999 and at most 256 field characters.
 Unknown locations/codes fall back to `result`/`invalid-result`; unknown keys,
 rejected values, native messages and causes are never copied. Size/serialization
-failures use the `result` location. These error details grant no durable state,
-retry, acceptance or publication authority and change no saved evidence.
+failures use the `result` location.
+
+Invalid clarification, discovery and finding-recheck results pause at their owning
+checkpoint. State version 6 adds nullable `correctionFeedback`; the version-5
+migration initializes it to null without changing saved evidence, roles, frozen
+inputs, histories, receipts or budgets. A rejection atomically records the invalid
+pass outcome (when reserved), pause and feedback. Feedback contains only the phase,
+rejected round/pass number, logical context key, exact snapshot/report/batch
+bindings and the bounded canonical diagnostics above. Structured-output or other
+invalid results without recognized semantic details use `result`/`invalid-result`;
+native error text and rejected output are never retained.
+
+Resume supplies feedback only to the matching clarification, discovery or recheck
+request, alongside fixed instructions to return a complete corrected result using
+the current request's bindings. A further rejection replaces feedback; successful
+validation clears it, including for an incomplete result. Persisted validation
+rejects stale bindings, unsupported diagnostics or feedback without its invalid
+history entry. No feedback can create acceptance, cleanliness, freshness or an
+allowance: ordinary reservation, session, correction and finite-budget rules still
+apply. Clarification feedback consumes no question round. Legacy invalid results
+without diagnostics retain their original supported resume behavior.
+
+The descriptor projects fixed corrective guidance and bounded evidence strings
+with the checkpoint, finite diagnostic code, schema field and constraint through
+the existing CLI/MCP `pause` surface. Its null resume action requests another role
+result within the remaining budget; it cannot edit frozen input or open a general
+chat channel. These diagnostics carry no finding acceptance or publication authority.
 
 ## Rendering
 

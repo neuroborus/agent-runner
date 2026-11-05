@@ -248,10 +248,20 @@ test("invalid Reviewer output keeps verification pending until a later fresh cle
   const invalid = await f.execute();
   assert.equal(invalid.pause.reason, "invalid_recheck");
   assert.equal(invalid.pipelineState.acceptedBatches.length, 0);
+  const feedback = structuredClone(invalid.pipelineState.correctionFeedback);
   const resumed = fixture([recheck, recheck], { saved: invalid });
   resumed.stopAt("DISCOVER");
   await assert.rejects(resumed.execute(), /gate response loss/u);
   const state = resumed.run().pipelineState;
+  assert.deepEqual(
+    JSON.parse(resumed.calls[0].prompt.split("\n").at(-1)).correctionFeedback,
+    feedback,
+  );
+  assert.equal(
+    JSON.parse(resumed.calls[1].prompt.split("\n").at(-1)).correctionFeedback,
+    undefined,
+  );
+  assert.equal(state.correctionFeedback, null);
   assert.deepEqual(outcomes(state.recheckHistory), [
     "clean",
     "invalid",
