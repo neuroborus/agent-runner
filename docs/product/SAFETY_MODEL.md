@@ -109,6 +109,17 @@ access cannot request a Git commit, and unsupported providers fail closed.
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 
+The filesystem capability can freeze a confined inspection selection with
+literal subtree exclusions before discovery. Excluded trees remain opaque:
+discovery and hashing never descend into them, and exclusion grants no read,
+output or storage authority. Required inputs, declared outputs, protected
+controls and link dependencies cannot be hidden. Scope and routing bindings
+survive reconstruction and participate in drift checks. Cancellation interrupts
+costly inspection without source writes; bounded progress reveals no source
+names or content. Omitted selection preserves whole-directory behavior. This is
+an inspection capability, separate from provider permissions and pipeline scope
+settings; see the same filesystem contract for its exact declarations.
+
 The runner can bind a descriptor-selected directory lifecycle without Git.
 Workspace kind, permissions, exact local input/criterion paths, protected-content
 and identity evidence, and the exclusion key are immutable run input. Directory

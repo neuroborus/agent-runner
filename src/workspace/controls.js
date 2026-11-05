@@ -15,6 +15,7 @@ import {
   within,
 } from "./paths.js";
 import { readControlFile } from "./snapshot.js";
+import { exclusions, isExcluded } from "./scope.js";
 
 export const CONTROL_NAMES = [
   ".git",
@@ -32,9 +33,10 @@ function resolutionMetadata(stat) {
 export async function discoverControls(
   fs,
   declarations,
-  { recursive = true } = {},
+  { recursive = true, checkpoint = async () => {} } = {},
 ) {
   const { workspacePath, stateRoot } = declarations;
+  const excludePaths = exclusions(declarations);
   assertSafe(
     !workspacePath.split(sep).some((part) => CONTROL_NAMES.includes(part)),
     "Workspace cannot be inside a control tree.",
@@ -42,6 +44,10 @@ export async function discoverControls(
   const paths = new Set();
   const roots = [];
   function protect(path, stateOnly) {
+    assertSafe(
+      excludePaths.every((excluded) => !overlaps(path, excluded)),
+      "Exclusions overlap a protected control boundary.",
+    );
     assertSafe(
       !overlaps(path, stateRoot),
       "State storage must be disjoint from discovered controls.",
@@ -64,10 +70,15 @@ export async function discoverControls(
     let links = 0;
     const observed = new Map();
     while (pending.length) {
+      await checkpoint("controls");
       const component = pending.shift();
       if (component === "" || component === ".") continue;
       current =
         component === ".." ? dirname(current) : join(current, component);
+      assertSafe(
+        !isExcluded(current, excludePaths),
+        "Control dependencies cannot enter excluded trees.",
+      );
       assertSafe(
         !within(stateRoot, current) &&
           declarations.outputPaths.every((output) => !within(output, current)),
@@ -143,7 +154,12 @@ export async function discoverControls(
   async function pointerDirectory(base, value) {
     let path = isAbsolute(value) ? sep : base;
     for (const component of value.split(sep).filter(Boolean)) {
+      await checkpoint("controls");
       path = location(path, component);
+      assertSafe(
+        !isExcluded(path, excludePaths),
+        "Git metadata dependencies cannot enter excluded trees.",
+      );
       const inspection = await inspectPath(fs, path);
       assertSafe(
         inspection.kind === "directory",
@@ -153,6 +169,7 @@ export async function discoverControls(
     return path;
   }
   async function directory(path, stateOnly) {
+    protect(path, stateOnly);
     const inspection = await inspectPath(fs, path);
     assertSafe(
       inspection.kind === "directory",
@@ -162,7 +179,6 @@ export async function discoverControls(
       !within(path, workspacePath),
       "Control metadata cannot contain the workspace.",
     );
-    protect(path, stateOnly);
     roots.push({ path, stateOnly });
   }
   async function gitMetadata(path, stateOnly) {
@@ -179,15 +195,26 @@ export async function discoverControls(
     parent,
     { reserve = false, ancestor = false, stateOnly = false } = {},
   ) {
+    await checkpoint("controls");
     const [head, objects, refs] = await Promise.all(
       ["HEAD", "objects", "refs"].map((name) =>
-        metadata(fs, join(parent, name)),
+        isExcluded(join(parent, name), excludePaths)
+          ? null
+          : metadata(fs, join(parent, name)),
       ),
     );
+    // An opaque marker cannot disguise a bare control boundary when the other
+    // markers match. Protect the boundary without inspecting the excluded leaf.
     if (
-      (head?.isFile() || head?.isSymbolicLink()) &&
-      (objects?.isDirectory() || objects?.isSymbolicLink()) &&
-      (refs?.isDirectory() || refs?.isSymbolicLink())
+      (head?.isFile() ||
+        head?.isSymbolicLink() ||
+        isExcluded(join(parent, "HEAD"), excludePaths)) &&
+      (objects?.isDirectory() ||
+        objects?.isSymbolicLink() ||
+        isExcluded(join(parent, "objects"), excludePaths)) &&
+      (refs?.isDirectory() ||
+        refs?.isSymbolicLink() ||
+        isExcluded(join(parent, "refs"), excludePaths))
     ) {
       await gitMetadata(parent, stateOnly);
     }
@@ -243,9 +270,12 @@ export async function discoverControls(
       await gitMetadata(gitDirectory, stateOnly);
     }
   }
-  async function inspectScope(scope, stateOnly = false) {
-    const binding = await inspectPath(fs, scope, { missing: true });
-    if (recursive && !stateOnly && binding.kind === "directory")
+  async function inspectScope(scope, stateOnly = false, traverse = true) {
+    const binding = await inspectPath(fs, scope, {
+      missing: true,
+      allowLink: true,
+    });
+    if (recursive && traverse && !stateOnly && binding.kind === "directory")
       roots.push({ path: scope, stateOnly });
     for (
       let path = binding.kind === "directory" ? scope : dirname(scope);
@@ -261,13 +291,21 @@ export async function discoverControls(
       if (path === dirname(path)) break;
     }
   }
-  for (const scope of new Set([
+  await inspectScope(
     workspacePath,
+    false,
+    declarations.inspectionPaths === undefined,
+  );
+  for (const scope of new Set([
+    ...(declarations.inspectionPaths ?? []),
     ...declarations.inputPaths,
     ...declarations.sourcePaths,
     ...declarations.configurationPaths,
     ...declarations.artifactPaths,
     ...declarations.infrastructurePaths,
+    ...(declarations.inspectionPaths === undefined
+      ? []
+      : declarations.outputPaths),
     ...(declarations.taskPath ? [declarations.taskPath] : []),
   ]))
     await inspectScope(scope);
@@ -277,6 +315,7 @@ export async function discoverControls(
   // A later full traversal upgrades an earlier state-only visit.
   const visited = new Map();
   async function descend(path, stateOnly) {
+    if (isExcluded(path, excludePaths)) return;
     if (visited.has(path) && (stateOnly || !visited.get(path))) return;
     visited.set(path, stateOnly);
     await inspectControls(path, { stateOnly });
@@ -284,6 +323,7 @@ export async function discoverControls(
     try {
       const names = await readDirectory(fs, parent.anchor);
       for (const entry of names) {
+        await checkpoint("controls");
         if (entry.directory) await descend(join(path, entry.name), stateOnly);
       }
       assertSafe(

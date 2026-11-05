@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Filesystem inspection can freeze a confined selection before traversal.**
+  Optional inspection roots and literal subtree exclusions govern both control
+  discovery and capture. Excluded trees stay opaque; routing ancestors, explicit
+  inputs, outputs, controls and link dependencies retain their separate safety
+  boundaries. Scope binds fingerprints and reconstruction without changing
+  omitted-scope snapshots or granting provider/storage authority. Cancellation
+  checkpoints cover descent, file hashing and verification, with bounded
+  anonymous progress and handle retirement. Pipeline/provider activation remains
+  separately owned.
+
 - **Wait observations retain proof through bounded publication races.** A
   controlled public MCP wait with real Runner status reads reproduced an owner
   publication during each of two activity drains, causing the former second

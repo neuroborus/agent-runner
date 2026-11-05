@@ -349,6 +349,12 @@ read/ancestor races. It also owns bounded internal provider-control directory
 aliases: canonical target protection, full-inspection alias-binding rejection,
 control-specific escaping, dangling, cyclic, file, FIFO, parent, Git-metadata,
 Git-link and state-overlap rejections, and target replacement during resolution.
+Scoped fixtures reject reads of excluded/unselected trees through both ordinary
+and descriptor paths, preserve protected inputs/controls and required link
+dependencies, bind reconstructed selections and routing identities, and cancel
+discovery/file hashing with verified handle closure and bounded anonymous progress.
+`test/workspace/output-directory.test.js` retains ordinary output preparation and
+scoped output authority independently of source selection.
 Temporary directories and injected filesystem effects need neither Git nor live
 providers. Workflow/provider integration remains separately owned as those
 consumers land. Fast `test/agents/codex.test.js` owns the public adapter's

@@ -59,9 +59,10 @@ root consumers.
 
 The filesystem-only workspace capability lives under `src/workspace/` behind
 `createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
-Private `paths.js`, `controls.js` and `snapshot.js` own confinement, filesystem
-control discovery and guarded capture; `service.js` composes inspection and
-mutation guards.
+Private `paths.js`, `scope.js`, `controls.js` and `snapshot.js` own confinement,
+inspection selection, filesystem control discovery and guarded capture;
+`traversal.js` owns cancellation/progress checkpoints and `service.js` composes
+inspection and mutation guards.
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
 capability. Authoring explicitly selects Git for commit plans or the directory
@@ -81,6 +82,27 @@ Outputs must be proper workspace descendants disjoint from all protected
 declarations and control trees. State is disjoint from workspace, task,
 infrastructure, declared read trees and discovered controls. Inspection grants
 no provider access, retrieval, publication, Git effect or write authority.
+
+Optional `inspectionPaths` selects literal workspace-confined file or directory
+roots, including missing paths; `[]` selects no ordinary source content. Omission
+selects the whole workspace. Optional `excludePaths` prunes literal
+workspace-relative subtrees; duplicate/descendant declarations collapse, dot-dot
+components and absolute exclusions fail, and no glob expansion occurs. Both
+declarations are normalized before recursive discovery and frozen with the
+inspection. Selected roots become absolute; exclusions remain workspace-relative
+for reconstruction. Real routing ancestors remain pinned. Selected leaf links
+are captured only when their resolution stays in selected or protected trees.
+
+Excluded leaves and descendants receive no metadata/content reads or traversal.
+Their routing ancestors must be real directories or missing, and exclusions
+cannot hide exact selected roots, required input/source/configuration/task/
+artifact/infrastructure declarations, authorized outputs, reserved control
+components, discovered control boundaries or required link dependencies.
+Controls in selected trees, their routing ancestors, explicit protected trees
+and output roots retain discovery and protection. Excluded trees are opaque;
+undiscovered controls inside them grant no authority. No selection grants reads,
+outputs or state storage there, and state remains disjoint from the entire
+workspace. Omitted declarations retain the previous whole-directory behavior.
 
 Filesystem discovery protects `.git`, `.codex`, `.claude`, `.agents` and
 `.claude.json`, including nested controls and enclosing repository controls for
@@ -133,12 +155,13 @@ Unbound intermediate hops, escaping, dangling and cyclic links fail.
 Resolution dependencies participate in snapshot
 race checks; snapshots return sorted `linkResolutions` alongside entries so
 output consumers can bind readable dependencies outside a selected subtree.
-Existing entry and input fingerprints remain unchanged.
+Omitted-scope entry and input fingerprints remain unchanged.
 Links cannot cross writable boundaries in either direction, including
 through intermediate resolution hops.
 
-`snapshot({inspection})` rechecks pinned ancestors and control bindings and
-captures the complete workspace plus explicit external protected paths. On the
+`snapshot({inspection, signal, onProgress})` rechecks pinned ancestors and control
+bindings and captures the selected workspace roots plus protected declarations
+and authorized outputs, pruning exclusions before descent or hashing. On the
 current Linux runtime, pinned directory descriptors through `/proc/self/fd`
 anchor enumeration and regular-file reads; unavailable descriptor access fails
 closed. Handle/path metadata and directory listings are checked around reads
@@ -146,7 +169,17 @@ and again before completing capture, including missing-path ancestor bindings.
 Workspace and protected-path identities remain pinned throughout capture.
 Results contain sorted metadata and hashes, never file bytes. Content
 fingerprints bind paths, kinds, modes, sizes and content; separate identity
-fingerprints also bind inodes and file timestamps.
+fingerprints also bind inodes and file timestamps. Explicit scope declarations
+participate in both fingerprints and the unchanged guard, even for an empty
+selection; legacy omitted-scope fingerprint construction stays unchanged.
+`inspect(declarations, {signal, onProgress})` and snapshot accept an optional
+AbortSignal and awaited progress hook. Control descent, per-entry capture,
+regular-file read chunks and final verification check cancellation, closing owned
+handles on interruption without writing source content. Progress contains only
+`phase` (`controls`, `capture` or `verify`) and an increasing `completed` operation
+counter, emitted at phase changes and every 128 checkpoints. Hooks grant no
+filesystem authority; cancellation preserves the signal's reason. These options
+remain transient and never enter frozen declarations.
 `snapshotInputs({paths, stateRoot})` captures only explicitly declared read trees
 with the same confined, race-checked reads and ancestor bindings. It rejects
 state overlap and grants no reads of unrelated workspace content. Supplemental
