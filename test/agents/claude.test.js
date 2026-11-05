@@ -1423,6 +1423,26 @@ async function directoryWorkspace(t) {
   };
 }
 
+async function scopedDirectoryWorkspace(t) {
+  const directory = await directoryWorkspace(t);
+  const selected = join(directory.cwd, "src");
+  const excluded = join(selected, "cache");
+  const unselected = join(directory.cwd, "unselected");
+  for (const tree of [excluded, unselected]) {
+    await mkdir(tree, { recursive: true });
+    // Either control discovery or content capture would reject this tree.
+    await writeFile(join(tree, ".git"), "invalid\n");
+    await symlink("missing", join(tree, "dangling"));
+  }
+  const selectedFile = join(selected, "source.md");
+  await writeFile(selectedFile, "Selected source\n");
+  Object.assign(directory.workspacePolicy, {
+    inspectionPaths: [selected],
+    excludePaths: ["src/cache"],
+  });
+  return { ...directory, selectedFile, excluded, unselected };
+}
+
 function directoryCommandArguments(directory, access, native) {
   return [
     "--new-session",
@@ -1518,6 +1538,48 @@ test("proves directory access without Git or commit preparation and binds each r
     assert.equal((await fixture.adapter.probe()).localCommit, true);
     assert.ok(fixture.calls.some(isProbeRepositorySetup));
   }
+});
+
+test("binds directory receipts to the inspected selection without visiting opaque trees", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
+  const fixture = createFixture();
+  const options = {
+    access: "read-only",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  const before = await fixture.adapter.probe(options);
+  assert.equal(before.declaredWorkspace, true);
+  await writeFile(join(directory.excluded, "changed.md"), "Opaque change\n");
+  assert.deepEqual(
+    (await fixture.adapter.probe(options)).policyReceipt,
+    before.policyReceipt,
+  );
+  for (const scope of [
+    { inspectionPaths: [directory.input] },
+    { excludePaths: ["src/cache", "unselected"] },
+    { inspectionPaths: undefined, excludePaths: ["src/cache", "unselected"] },
+  ]) {
+    const changed = await fixture.adapter.probe({
+      ...options,
+      workspacePolicy: { ...directory.workspacePolicy, ...scope },
+    });
+    assert.notEqual(
+      changed.policyReceipt.fingerprint,
+      before.policyReceipt.fingerprint,
+    );
+  }
+  await assert.rejects(
+    fixture.adapter.probe({
+      ...options,
+      workspacePolicy: {
+        ...directory.workspacePolicy,
+        inspectionPaths: undefined,
+        excludePaths: undefined,
+      },
+    }),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(turnCalls(fixture).length, 0);
 });
 
 test("executes the fallback directory probe with a file reference inside private temporary storage", async (t) => {
@@ -1832,7 +1894,9 @@ test("projects native and fallback directory commands onto declared outputs only
 
 test("isolates native initialization before directory commands and retains it until retirement", async (t) => {
   for (const native of [true, false]) {
-    const directory = await directoryWorkspace(t);
+    const directory = native
+      ? await scopedDirectoryWorkspace(t)
+      : await directoryWorkspace(t);
     if (native) await rm(directory.control, { recursive: true });
     else {
       await mkdir(join(directory.control, ".cc-writes"), { mode: 0o700 });
@@ -2180,8 +2244,14 @@ test("accepts missing nested directory artifact and state exclusions without cre
 });
 
 test("rejects directory drift after failed attempts before reconstruction", async (t) => {
-  for (const target of ["input", "source", "control", "output"]) {
-    const directory = await directoryWorkspace(t);
+  for (const target of [
+    "input",
+    "source",
+    "control",
+    "selectedFile",
+    "output",
+  ]) {
+    const directory = await scopedDirectoryWorkspace(t);
     let fresh = 0;
     const observations = [];
     const fixture = createFixture({
@@ -2194,7 +2264,11 @@ test("rejects directory drift after failed attempts before reconstruction", asyn
             : target === "output"
               ? join(directory.output, "result.md")
               : directory[target];
-        await writeFile(path, "Unexpected change.\n");
+        if (target === "selectedFile") {
+          const replacement = join(directory.output, "replacement.md");
+          await writeFile(replacement, await readFile(path));
+          await rename(replacement, path);
+        } else await writeFile(path, "Unexpected change.\n");
         throw processFailure(
           undefined,
           `No conversation found with session ID: ${SOURCE_SESSION}`,
@@ -2250,7 +2324,7 @@ test("retains retiring directory turns when current controls reference storage o
           });
         }
       });
-      directory = await directoryWorkspace(t);
+      directory = await scopedDirectoryWorkspace(t);
       const metadata = join(directory.root, "metadata");
       pointer = join(directory.cwd, ".git");
       await mkdir(metadata);
@@ -2375,8 +2449,8 @@ test("retains directory storage and forbids reconstruction without process retir
   assert.ok((await stat(turnCalls(fixture)[0].commandLauncherPath)).isFile());
 });
 
-test("reconstructs directory output turns under the same policy without Git", async (t) => {
-  const directory = await directoryWorkspace(t);
+test("reconstructs scoped directory output turns under the same frozen policy without Git", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
   let fresh = 0;
   let attempts = 0;
   const fixture = createFixture({
@@ -2385,6 +2459,8 @@ test("reconstructs directory output turns under the same policy without Git", as
       if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
       if (++attempts === 1) {
         await writeFile(join(directory.output, "partial.md"), "Preserved.\n");
+        directory.workspacePolicy.inspectionPaths[0] = directory.cwd;
+        directory.workspacePolicy.excludePaths.length = 0;
         throw processFailure(
           undefined,
           `No conversation found with session ID: ${SOURCE_SESSION}`,
@@ -2474,6 +2550,19 @@ test("fails closed on invalid directory declarations and unsupported isolation",
   for (const policy of [
     { ...directory.workspacePolicy, extra: true },
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+    { ...directory.workspacePolicy, inspectionPaths: null },
+    { ...directory.workspacePolicy, inspectionPaths: ["relative"] },
+    { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: Array(257).fill(directory.cwd),
+    },
+    { ...directory.workspacePolicy, excludePaths: null },
+    { ...directory.workspacePolicy, excludePaths: [directory.output] },
+    { ...directory.workspacePolicy, excludePaths: ["../outside"] },
+    { ...directory.workspacePolicy, excludePaths: ["file://cache"] },
+    { ...directory.workspacePolicy, excludePaths: ["."] },
+    { ...directory.workspacePolicy, excludePaths: Array(257).fill("cache") },
   ])
     await assert.rejects(
       fixture.adapter.run(
@@ -2499,6 +2588,9 @@ test("fails closed on invalid directory declarations and unsupported isolation",
   for (const policy of [
     { ...directory.workspacePolicy, outputPaths: [directory.input] },
     { ...directory.workspacePolicy, stateRoot: directory.output },
+    { ...directory.workspacePolicy, excludePaths: ["input.md"] },
+    { ...directory.workspacePolicy, excludePaths: ["out"] },
+    { ...directory.workspacePolicy, excludePaths: [".claude"] },
     {
       ...directory.workspacePolicy,
       outputPaths: [join(directory.cwd, "absent")],

@@ -47,6 +47,14 @@ declaration before provider work. Custom authoring uses read-only directory
 turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
+Directory policies may carry frozen filesystem inspection roots and literal
+subtree exclusions. Capability receipts bind that selection, and preparation,
+retired-attempt verification, reconstruction and owned-storage cleanup retain
+it without inspecting excluded descendants. Required inputs and controls remain
+protected; exclusions grant no additional native access, outputs or storage
+placement. Omission preserves existing whole-directory behavior and receipts.
+Providers consume these filesystem declarations without selecting Git sources.
+
 Execution and polishing may supply `readPaths` containing one exact selected
 finalization Markdown file. Adapters reject directories and malformed declarations
 before launch. Codex retains its root read policy and protects the exact file in

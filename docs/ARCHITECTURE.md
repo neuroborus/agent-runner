@@ -3468,12 +3468,21 @@ The strict provider-neutral turn contract also accepts an optional
 and `stateRoot`, optional `taskPath`, and the workspace service's six path arrays:
 `inputPaths`, `sourcePaths`, `outputPaths`, `configurationPaths`, `artifactPaths`
 and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
-`cwd`. Each array accepts at most 256 paths. Runner storage exclusions remove
-duplicates and descendants already covered by a parent; directory requests allow
+`cwd`. Optional `inspectionPaths` contains confined canonical absolute inspection
+roots; optional `excludePaths` contains literal workspace-relative subtrees.
+Both lists are normalized, copied and frozen, with at most 256 entries each.
+Omitting both retains whole-directory inspection and the existing policy receipt.
+The workspace capability validates scope before discovery, preserving required
+reads, outputs, controls and link dependencies. The same selection binds provider
+receipts and every pre-launch/post-retirement snapshot, including reconstruction;
+neither provider derives Git membership. Exclusions narrow inspection without
+widening native read/write permissions or storage placement.
+Each ordinary path array accepts at most 256 paths. Runner storage exclusions
+remove duplicates and descendants already covered by a parent; directory requests allow
 up to 1,539 exclusions for all six arrays plus workspace, task and state roots.
-Every declared root remains protected. Unknown fields, relative paths and
-directory `local-commit` requests are invalid. Execution-option validation
-remains separate: `probe` additionally
+Every declared read/output root remains protected. Unknown fields, noncanonical
+inspection/read/output roots and directory `local-commit` requests are invalid.
+Execution-option validation remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
 access for directory proofs. Unsupported adapters reject it before provider work.
 
@@ -3531,6 +3540,9 @@ or widening access to their parents; new descendants can be created inside an
 existing output directory. Mount identities come from a fresh filesystem-owned
 snapshot after storage allocation. Both launchers recheck canonical paths,
 device/inode identity, ordinary file types and single-link files before admission.
+When scoped capture omits the workspace root, its separately verified inspection
+binding supplies that read-only mount identity without capturing unselected
+content.
 Controls and external reads receive exact read-only mounts, including references
 otherwise hidden by private temporary/runtime filesystems.
 Incidental host write mounts are discarded. Provider-native Edit/Write are omitted
@@ -3937,9 +3949,10 @@ attests a trusted validation command. A provider descriptor may register one
 unique resource identity and recovery hook. The runner dispatches retirement
 cleanup through this hook without provider branches or changes to Codex.
 Live directory cleanup and recovery add current filesystem-discovered controls
-to the cleanup exclusions, even when frozen input files are missing. An
-allocation newly referenced by a control pointer remains retained until that
-overlap is resolved.
+to the cleanup exclusions using the same inspection selection and subtree
+exclusions, even when frozen input files are missing. Cleanup never falls back
+to an unrestricted workspace traversal. An allocation newly referenced by a
+control pointer remains retained until that overlap is resolved.
 
 Cleanup verifies the host, canonical private root, owner, permissions, and child
 identity, pins the root descriptor, removes only the recorded child, syncs the

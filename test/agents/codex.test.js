@@ -2725,6 +2725,26 @@ async function directoryWorkspace(
   };
 }
 
+async function scopedDirectoryWorkspace(t) {
+  const directory = await directoryWorkspace(t);
+  const selected = join(directory.cwd, "src");
+  const excluded = join(selected, "cache");
+  const unselected = join(directory.cwd, "unselected");
+  for (const tree of [excluded, unselected]) {
+    await mkdir(tree, { recursive: true });
+    // Either control discovery or content capture would reject this tree.
+    await writeFile(join(tree, ".git"), "invalid\n");
+    await symlink("missing", join(tree, "dangling"));
+  }
+  const selectedFile = join(selected, "source.md");
+  await writeFile(selectedFile, "Selected source\n");
+  Object.assign(directory.workspacePolicy, {
+    inspectionPaths: [selected],
+    excludePaths: ["src/cache"],
+  });
+  return { ...directory, selectedFile, excluded, unselected };
+}
+
 test("rejects pattern-bearing directory permission paths before native access", async (t) => {
   for (const options of [
     { sourceName: "reference[1].md", access: "read-only" },
@@ -2862,8 +2882,50 @@ test("preserves directory policy receipts across authorized output, artifact and
   );
 });
 
-test("uses exact directory output permissions across reconstruction and retires each attempt", async (t) => {
-  const directory = await directoryWorkspace(t);
+test("binds directory receipts to the inspected selection without visiting opaque trees", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
+  const fixture = createFixture({ version: "0.164.0" });
+  const options = {
+    access: "read-only",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  const before = await fixture.adapter.probe(options);
+  assert.equal(before.declaredWorkspace, true);
+  await writeFile(join(directory.excluded, "changed.md"), "Opaque change\n");
+  assert.deepEqual(
+    (await fixture.adapter.probe(options)).policyReceipt,
+    before.policyReceipt,
+  );
+  for (const scope of [
+    { inspectionPaths: [directory.input] },
+    { excludePaths: ["src/cache", "unselected"] },
+    { inspectionPaths: undefined, excludePaths: ["src/cache", "unselected"] },
+  ]) {
+    const changed = await fixture.adapter.probe({
+      ...options,
+      workspacePolicy: { ...directory.workspacePolicy, ...scope },
+    });
+    assert.notEqual(
+      changed.policyReceipt.fingerprint,
+      before.policyReceipt.fingerprint,
+    );
+  }
+  await assert.rejects(
+    fixture.adapter.probe({
+      ...options,
+      workspacePolicy: {
+        ...directory.workspacePolicy,
+        inspectionPaths: undefined,
+        excludePaths: undefined,
+      },
+    }),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(fixture.processes.length, 0);
+});
+
+test("uses exact scoped directory output permissions across reconstruction and retires each attempt", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
   const observations = [];
   const fixture = createFixture({
     version: "0.164.0",
@@ -2872,6 +2934,8 @@ test("uses exact directory output permissions across reconstruction and retires 
     async handle({ message }) {
       if (message.method === "thread/resume") {
         directory.workspacePolicy.outputPaths.push(directory.cwd);
+        directory.workspacePolicy.inspectionPaths[0] = directory.cwd;
+        directory.workspacePolicy.excludePaths.length = 0;
         return { error: { code: -32000, message: "unavailable" } };
       }
       if (message.method === "turn/start") {
@@ -3022,11 +3086,12 @@ test("rejects protected directory mutations and reported writes outside declared
     "input",
     "configuration",
     "control",
+    "selectedFile",
     "read-only-output",
     "reported-move",
   ]) {
     await t.test(target, async (t) => {
-      const directory = await directoryWorkspace(t);
+      const directory = await scopedDirectoryWorkspace(t);
       const access =
         target === "read-only-output" ? "read-only" : "workspace-write";
       const fixture = createFixture({
@@ -3041,7 +3106,11 @@ test("rejects protected directory mutations and reported writes outside declared
               : target === "read-only-output"
                 ? join(directory.output, "changed")
                 : directory[target];
-          if (target !== "reported-move")
+          if (target === "selectedFile") {
+            const replacement = join(directory.output, "replacement.md");
+            await writeFile(replacement, await readFile(path));
+            await rename(replacement, path);
+          } else if (target !== "reported-move")
             await writeFile(path, "Unauthorized change\n");
           return {
             result: { turn: { id: "mutation" } },
@@ -3184,6 +3253,19 @@ test("validates directory declarations before activity", async (t) => {
     { ...directory.workspacePolicy, kind: "unknown" },
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
     { ...directory.workspacePolicy, outputPaths: null },
+    { ...directory.workspacePolicy, inspectionPaths: null },
+    { ...directory.workspacePolicy, inspectionPaths: ["relative"] },
+    { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: Array(257).fill(directory.cwd),
+    },
+    { ...directory.workspacePolicy, excludePaths: null },
+    { ...directory.workspacePolicy, excludePaths: [directory.output] },
+    { ...directory.workspacePolicy, excludePaths: ["../outside"] },
+    { ...directory.workspacePolicy, excludePaths: ["file://cache"] },
+    { ...directory.workspacePolicy, excludePaths: ["."] },
+    { ...directory.workspacePolicy, excludePaths: Array(257).fill("cache") },
     {
       ...directory.workspacePolicy,
       workspacePath: join(directory.cwd, "other"),
@@ -3234,6 +3316,9 @@ test("validates directory declarations before activity", async (t) => {
     { ...directory.workspacePolicy, outputPaths: [directory.input] },
     { ...directory.workspacePolicy, outputPaths: [directory.source] },
     { ...directory.workspacePolicy, stateRoot: directory.output },
+    { ...directory.workspacePolicy, excludePaths: ["input.md"] },
+    { ...directory.workspacePolicy, excludePaths: ["results"] },
+    { ...directory.workspacePolicy, excludePaths: [".codex"] },
   ])
     await assert.rejects(
       fixture.adapter.run(

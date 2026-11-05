@@ -382,6 +382,15 @@ missing controls and existing user bookkeeping without reading native provider
 storage. This is model-free regression coverage, not live-provider acceptance;
 version/help output does not prove native read-only behavior.
 
+Scoped public-adapter fixtures use malformed control pointers and dangling links
+inside excluded and unselected trees to reject unrestricted preparation or
+verification. They bind receipts to inspection roots and exclusions, preserve
+frozen scope through reconstruction despite caller mutation, reject selected
+source/control drift and protected exclusions, and exercise Claude cleanup with
+missing inputs under the same scope. Scoped mount preparation uses the verified
+workspace binding even when capture omits that root. Omitted-scope fixtures retain
+the existing native initialization and whole-directory contracts.
+
 Fast `test/runner-directory.test.js` owns descriptor-selected Git-independent
 lifecycle composition: access-specific probes, frozen policy/configuration,
 task-input rejection before content reads or provider probes,

@@ -118,7 +118,12 @@ survive reconstruction and participate in drift checks. Cancellation interrupts
 costly inspection without source writes; bounded progress reveals no source
 names or content. Omitted selection preserves whole-directory behavior. This is
 an inspection capability, separate from provider permissions and pipeline scope
-settings; see the same filesystem contract for its exact declarations.
+settings. Both directory adapters freeze and bind the same selection through
+capability receipts, launch, retired-attempt verification and reconstruction.
+Claude storage cleanup rediscovers controls within that selection without
+expanding traversal or accepting changed source evidence. See the filesystem
+and [provider contracts](PROVIDER_MODEL.md#selection-and-capabilities) for the
+exact declarations and native mappings.
 
 The runner can bind a descriptor-selected directory lifecycle without Git.
 Workspace kind, permissions, exact local input/criterion paths, protected-content

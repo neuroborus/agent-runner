@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Directory adapters retain frozen filesystem inspection scopes.** Optional
+  inspection roots and literal exclusions pass through the strict shared request
+  and probe contract into both providers' existing directory policies. Receipts,
+  preparation, retired-attempt guards, reconstruction and Claude storage cleanup
+  retain the same selection without traversing opaque descendants. Claude uses
+  the separately verified workspace identity when scoped capture omits its root.
+  Outputs and protected mounts retain their existing authority; exclusions grant
+  no native permissions or storage placement. Omission preserves whole-directory
+  behavior and saved receipts, including private native initialization. Git
+  membership and pipeline scope settings remain separately owned.
+
 - **Filesystem inspection can freeze a confined selection before traversal.**
   Optional inspection roots and literal subtree exclusions govern both control
   discovery and capture. Excluded trees stay opaque; routing ancestors, explicit
