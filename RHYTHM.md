@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Claude native initialization owns a separate startup directory.**
+  Native turns launch inside the existing journaled allocation so cwd-relative
+  atomic staging occurs outside source and control trees before tools start.
+  The workspace is explicitly declared, file tools use absolute workspace paths,
+  and both command projections retain its original cwd and confined authority.
+  Startup self-mounts and incidental staging write mounts grant no command writes.
+  Native profiles and session selection keep their existing storage; retirement
+  and recovery still require the same process and allocation ownership proof.
+  Policy receipt revisions reject prior projection authority. Controlled launch
+  regressions establish model-free effects without attributing the historical
+  drift or claiming live-provider acceptance.
+
 - **Specialized reviews follow contract and effect flows under existing roles.**
   `contract-review` traces accepted/rejected structured values through the owning
   schema, instructions, semantics, persistence, diagnostics, and supported recovery.

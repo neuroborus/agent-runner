@@ -3829,13 +3829,29 @@ Missing `.bashrc`, `.gitconfig`, `.mcp.json`, editor directories, and `.claude`
 tooling paths must never be materialized inside a writable project bind. No project file is
 ignored, filtered from a fingerprint, or cleaned by an agent.
 
+Native turns start in a mode-0700 `native` directory within their journaled
+adapter allocation, rather than in the task workspace. The public CLI's atomic
+staging initialization can create `.claude/.cc-writes` there before any sandboxed
+tool starts; a command-only projection cannot contain that earlier effect.
+`--add-dir` declares the real workspace, and fixed system instructions require
+absolute workspace paths for file tools and reading the applicable workspace
+instructions. Native profiles, authentication and session storage stay in their
+existing locations; continuation and forks still select the exact native session
+ID. Native startup and workspace roots both receive read-only command-preparation
+reservations. Projections discard self-mounts of owned startup content and
+incidental provider write mounts, including the selected configuration directory's
+`.cc-writes`. Commands retain the real workspace cwd and the original exact
+workspace, output, input and control mounts. No source placeholder, control
+filter, additional writable mount or source cleanup is introduced. Both isolation
+probes exercise separate native/workspace cwd projection.
+
 Commands receive an empty, read-only HOME/config projection with private
 namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
 filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v3` and
-`claude-command-boundary-v9`. Old receipts cannot authorize the new policy.
+projection launcher too; the contract revisions are `claude-isolation-v4` and
+`claude-command-boundary-v10`. Old receipts cannot authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`

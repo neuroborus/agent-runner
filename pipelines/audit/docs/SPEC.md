@@ -42,6 +42,9 @@ through a confined Runner effect. The descriptor declares task-owned
 artifacts. Long-lived snapshots exclude those paths; task/context and source
 content remain protected, while explicit transcript hashes reject edits outside
 an authorized window. Per-turn provider enforcement remains read-only.
+Claude native initialization uses adapter-owned startup storage before tool
+isolation, preserving ordinary-directory sources and their complete snapshot;
+see the [provider lifecycle](../../../docs/product/PROVIDER_MODEL.md).
 
 Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
 The creation acknowledgement records a verified new child at this pipeline's

@@ -358,6 +358,13 @@ the operator-owned post-install Claude acceptance below remains separate.
 Retiring completed and failed turns retain Claude allocations when changed
 control pointers reference storage or cannot be inspected, then permit the same
 owner to clean up after restoring controls without replaying the turn.
+Controlled 2.1.317-style initialization runs through the adapter's actual launch
+options before the tool launcher, proving unchanged ordinary-directory sources,
+controls and selected inputs, private mode-0700 atomic staging, separate command
+cwd, continuation and retained allocations pending process retirement. It covers
+missing controls and existing user bookkeeping without reading native provider
+storage. This is model-free regression coverage, not live-provider acceptance;
+version/help output does not prove native read-only behavior.
 
 Fast `test/runner-directory.test.js` owns descriptor-selected Git-independent
 lifecycle composition: access-specific probes, frozen policy/configuration,

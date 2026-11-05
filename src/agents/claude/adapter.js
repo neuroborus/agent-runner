@@ -93,6 +93,7 @@ const MINIMUM_CONTEXT_SIZE = 100_000n;
 const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const REQUIRED_HELP_FLAGS = Object.freeze([
+  "--add-dir",
   "--append-system-prompt",
   "--autocompact",
   "--fork-session",
@@ -659,12 +660,13 @@ function cliSettings(
   gitDirectories,
   credentialEnvironmentNames,
   isolationPolicy,
+  providerCwd,
 ) {
   // Keep Claude's mount preparation read-only so it neither creates nor
   // registers absent project paths for cleanup. The authenticated launcher,
   // selected through managed bwrapPath or PATH, replaces that reservation with
   // the exact runner-authorized workspace access and omitted protections.
-  const deniedWritePaths = [request.cwd, ...gitDirectories];
+  const deniedWritePaths = [request.cwd, providerCwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
     autoCompactEnabled: true,
@@ -720,6 +722,7 @@ function commandArguments(
   session,
   isolationPolicy,
   commandLauncherPath,
+  providerCwd,
 ) {
   const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
@@ -738,14 +741,21 @@ function commandArguments(
       gitDirectories,
       credentialEnvironmentNames,
       isolationPolicy,
+      providerCwd,
     ),
+    "--add-dir",
+    request.cwd,
     "--append-system-prompt",
-    request.workspacePolicy === undefined
-      ? SYSTEM_INSTRUCTIONS
-      : "Follow the workspace instructions and declared directory policy. " +
-        "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
-        "configuration, infrastructure, artifacts and controls are read-only. " +
-        "Never stage, commit, mutate Git state, perform remote writes or request permission approval.",
+    `The task workspace is ${JSON.stringify(request.cwd)}. ` +
+      "Native startup uses a separate private directory. Use absolute workspace paths " +
+      "for file tools; sandboxed Bash starts in the task workspace. Read its applicable " +
+      "workspace instructions before working. " +
+      (request.workspacePolicy === undefined
+        ? SYSTEM_INSTRUCTIONS
+        : "Follow the workspace instructions and declared directory policy. " +
+          "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
+          "configuration, infrastructure, artifacts and controls are read-only. " +
+          "Never stage, commit, mutate Git state, perform remote writes or request permission approval."),
     "--permission-mode",
     accessConfiguration.permissionMode,
     "--tools",
@@ -1368,8 +1378,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v9"
-              : "claude-isolation-v3",
+              ? "claude-command-boundary-v10"
+              : "claude-isolation-v4",
             policies: resolvedPolicies,
             version: version.text,
           }),
@@ -1597,6 +1607,7 @@ export function createClaudeAdapter(options = {}) {
       request.isolationPolicy ?? isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
+    const providerCwd = join(storage.directory, "native");
     const observations = createClaudeObservations(
       request.onObservation,
       attempt,
@@ -1664,11 +1675,16 @@ export function createClaudeAdapter(options = {}) {
       let commandLauncher;
       try {
         await mkdir(join(storage.directory, "tmp"), { mode: 0o700 });
+        // Native sandbox initialization precedes sandboxed tools and creates
+        // cwd-relative .claude/.cc-writes even for read-only work. Never start
+        // that initialization in a project, input, or control tree.
+        await mkdir(providerCwd, { mode: 0o700 });
         commandLauncher = await createClaudeCommandLauncher({
           access: request.access,
           architecture,
           bubblewrapBinary: BUBBLEWRAP_BINARY,
           cwd: request.cwd,
+          providerCwd,
           directory: storage.directory,
           environment: baseEnvironment,
           gitDirectories,
@@ -1687,10 +1703,12 @@ export function createClaudeAdapter(options = {}) {
         selectedSession,
         isolationPolicy,
         commandLauncher?.path,
+        providerCwd,
       );
       const turnEnvironment = commandLauncher.environment({
         ...baseEnvironment,
         TMPDIR: join(storage.directory, "tmp"),
+        PWD: providerCwd,
       });
       let processResult;
       try {
@@ -1700,7 +1718,7 @@ export function createClaudeAdapter(options = {}) {
             ? executeOwnedProcess
             : execute
         )(claudeBinary, argumentsList, {
-          cwd: request.cwd,
+          cwd: providerCwd,
           encoding: "utf8",
           env: turnEnvironment,
           input: turnPrompt(request, recovery),

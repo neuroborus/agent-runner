@@ -32,6 +32,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
+import { createWorkspaceService } from "../../src/workspace/index.js";
 import { largeFinalizationResult } from "../support/index.js";
 
 import {
@@ -72,6 +73,7 @@ const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
 const CLAUDE_LOG_PATH = join(homedir(), ".npm/_logs");
 const executeFile = promisify(executeFileCallback);
 const HELP = [
+  "--add-dir",
   "--append-system-prompt",
   "--autocompact",
   "--fork-session",
@@ -1828,6 +1830,236 @@ test("projects native and fallback directory commands onto declared outputs only
   }
 });
 
+test("isolates native initialization before directory commands and retains it until retirement", async (t) => {
+  for (const native of [true, false]) {
+    const directory = await directoryWorkspace(t);
+    if (native) await rm(directory.control, { recursive: true });
+    else {
+      await mkdir(join(directory.control, ".cc-writes"), { mode: 0o700 });
+      await writeFile(
+        join(directory.control, ".cc-writes", "keep"),
+        "User data.\n",
+      );
+    }
+    const workspace = createWorkspaceService();
+    const { kind: _kind, ...declarations } = directory.workspacePolicy;
+    const inspection = await workspace.inspect(declarations);
+    const before = await workspace.snapshot({ inspection });
+    const fake = await createFakeBubblewrap(t);
+    const providerHome = join(directory.root, "provider-home");
+    const profile = join(providerHome, "profile");
+    await mkdir(profile, { recursive: true });
+    let resource;
+    let allocation;
+    let interrupted = false;
+    let launchError;
+    const providerDirectories = [];
+    const records = [];
+    t.after(async () => {
+      if (resource)
+        await recoverClaudeStorage({
+          resource,
+          storageForbiddenPaths: [directory.cwd],
+          workspacePolicy: directory.workspacePolicy,
+        });
+    });
+    const fixture = createFixture({
+      version: "2.1.317",
+      nativeSandbox: native ? true : "nested-denied",
+      env: {
+        ...process.env,
+        HOME: providerHome,
+        CLAUDE_CONFIG_DIR: profile,
+        AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
+        AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+        PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      async handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        try {
+          assert.equal(resource.phase, "allocated");
+          allocation = join(resource.root.path, resource.id);
+          providerDirectories.push(call.options.cwd);
+          // Model only the public CLI's cwd-relative atomic staging setup.
+          // It runs in the actual adapter launch options, before any tool
+          // launcher, and collects neither provider output nor model work.
+          await executeFile(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `
+            import { mkdirSync } from "node:fs";
+            import { join } from "node:path";
+            mkdirSync(join(process.cwd(), ".claude"), { recursive: true });
+            mkdirSync(join(process.cwd(), ".claude", ".cc-writes"), { mode: 0o700 });
+            mkdirSync(join(process.env.CLAUDE_CONFIG_DIR, ".cc-writes"), { recursive: true, mode: 0o700 });
+          `,
+            ],
+            { cwd: call.options.cwd, env: call.options.env },
+          );
+          assert.equal(
+            (await stat(join(call.options.cwd, ".claude", ".cc-writes"))).mode &
+              0o777,
+            0o700,
+          );
+          workspace.assertUnchanged({
+            before,
+            after: await workspace.snapshot({ inspection }),
+          });
+          assert.equal(call.options.cwd, join(allocation, "native"));
+          assert.equal(call.options.env.HOME, providerHome);
+          assert.equal(call.options.env.CLAUDE_CONFIG_DIR, profile);
+          assert.equal(option(call.argumentsList, "--add-dir"), directory.cwd);
+          assert.ok(
+            option(call.argumentsList, "--append-system-prompt").includes(
+              JSON.stringify(directory.cwd),
+            ),
+          );
+          const settings = JSON.parse(option(call.argumentsList, "--settings"));
+          assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
+          for (const path of [
+            directory.cwd,
+            call.options.cwd,
+            directory.input,
+            directory.source,
+          ])
+            assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
+          const args = directoryCommandArguments(
+            directory,
+            "read-only",
+            native,
+          );
+          if (native) {
+            const mask = args.indexOf("/dev/null") - 1;
+            args.splice(mask, 3);
+          }
+          args.splice(
+            args.indexOf("--ro-bind", args.indexOf("--unshare-net")) + 3,
+            0,
+            "--bind",
+            call.options.cwd,
+            call.options.cwd,
+            "--ro-bind",
+            call.options.cwd,
+            call.options.cwd,
+          );
+          const staging = join(call.options.cwd, ".claude", ".cc-writes");
+          for (const path of [staging, join(profile, ".cc-writes")])
+            args.splice(args.indexOf("--dev"), 0, "--bind", path, path);
+          args.splice(args.indexOf("--"), 0, "--chdir", call.options.cwd);
+          await executeFile(call.commandLauncherPath, args, {
+            env: call.options.env,
+          });
+          const mounts = JSON.parse(
+            (await readFile(fake.logPath, "utf8")).trim().split("\n").at(-1),
+          );
+          assert.equal(option(mounts, "--chdir"), directory.cwd);
+          assert.ok(
+            includesSequence(mounts, [
+              "--ro-bind",
+              directory.cwd,
+              directory.cwd,
+            ]),
+          );
+          assert.ok(!mounts.includes(call.options.cwd));
+          assert.equal(mounts.includes("--bind"), false);
+          // A startup path redirected into source cannot be discarded as
+          // owned bookkeeping; refuse it before invoking bubblewrap.
+          const held = `${staging}-held`;
+          await rename(staging, held);
+          await symlink(directory.cwd, staging);
+          try {
+            await assert.rejects(
+              executeFile(call.commandLauncherPath, args, {
+                env: call.options.env,
+              }),
+              { code: 125 },
+            );
+          } finally {
+            await rm(staging);
+            await rename(held, staging);
+          }
+          if (interrupted) {
+            await call.options.onProcess(4242, {});
+            throw Object.assign(new Error("retirement unavailable"), {
+              code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            });
+          }
+        } catch (cause) {
+          launchError = cause;
+          throw cause;
+        }
+      },
+    });
+    const run = (session) =>
+      fixture.adapter
+        .run(
+          request({
+            cwd: directory.cwd,
+            workspacePolicy: directory.workspacePolicy,
+            readPaths: [directory.input],
+            onProcess: async () => {},
+            onResource: async (value) => {
+              resource = value;
+              records.push(value?.phase ?? "cleaned");
+            },
+            ...(session === undefined ? {} : { session }),
+          }),
+        )
+        .catch((cause) => {
+          throw launchError ?? cause;
+        });
+    await run();
+    assert.equal(resource, null);
+    await assert.rejects(access(allocation), { code: "ENOENT" });
+    interrupted = true;
+    await assert.rejects(run({ id: CHILD_SESSION, mode: "continue" }), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    assert.equal(
+      option(turnCalls(fixture)[1].argumentsList, "--resume"),
+      CHILD_SESSION,
+    );
+    assert.notEqual(providerDirectories[0], providerDirectories[1]);
+    assert.equal(resource.phase, "allocated");
+    assert.equal(
+      (
+        await stat(join(providerDirectories[1], ".claude", ".cc-writes"))
+      ).isDirectory(),
+      true,
+    );
+    workspace.assertUnchanged({
+      before,
+      after: await workspace.snapshot({ inspection }),
+    });
+    // Runner recovery follows independent process-retirement proof. The
+    // adapter keeps the existing ownership journal and exact allocation.
+    await recoverClaudeStorage({
+      resource,
+      storageForbiddenPaths: [directory.cwd],
+      workspacePolicy: directory.workspacePolicy,
+      onResource: async (value) => {
+        resource = value;
+      },
+    });
+    assert.equal(resource, null);
+    await assert.rejects(access(allocation), { code: "ENOENT" });
+    assert.deepEqual(records, [
+      "allocating",
+      "allocated",
+      "cleaned",
+      "allocating",
+      "allocated",
+    ]);
+    workspace.assertUnchanged({
+      before,
+      after: await workspace.snapshot({ inspection }),
+    });
+  }
+});
+
 test("rejects unsafe directory outputs during storage allocation and launcher admission", async (t) => {
   for (const nativeSandbox of [true, "nested-denied"]) {
     for (const stage of ["allocation", "admission"]) {
@@ -3113,7 +3345,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v3",
+      "claude-isolation-v4",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -3450,7 +3682,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v9",
+      "claude-command-boundary-v10",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -3875,7 +4107,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v9",
+        "claude-command-boundary-v10",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -6068,10 +6300,32 @@ test("expanded pipeline inventory schemas preserve strict Claude preflight and s
         schema,
       );
       const settings = JSON.parse(option(turn.argumentsList, "--settings"));
-      assert.deepEqual(
-        settings,
-        JSON.parse(option(turnCalls(baseline)[0].argumentsList, "--settings")),
+      const baselineTurn = turnCalls(baseline)[0];
+      const baselineSettings = JSON.parse(
+        option(baselineTurn.argumentsList, "--settings"),
       );
+      for (const [candidate, policy] of [
+        [turn, settings],
+        [baselineTurn, baselineSettings],
+      ]) {
+        assert.equal(
+          candidate.options.cwd,
+          join(dirname(dirname(candidate.commandLauncherPath)), "native"),
+        );
+        assert.equal(
+          policy.sandbox.filesystem.denyWrite.filter(
+            (path) => path === candidate.options.cwd,
+          ).length,
+          1,
+        );
+      }
+      // Each launch owns a different startup cwd. Compare the full policy
+      // after binding that one verified reservation to the current launch.
+      baselineSettings.sandbox.filesystem.denyWrite =
+        baselineSettings.sandbox.filesystem.denyWrite.map((path) =>
+          path === baselineTurn.options.cwd ? turn.options.cwd : path,
+        );
+      assert.deepEqual(settings, baselineSettings);
       assert.equal(settings.sandbox.enabled, true);
       assert.equal(settings.sandbox.failIfUnavailable, true);
       assert.equal(settings.sandbox.allowUnsandboxedCommands, false);

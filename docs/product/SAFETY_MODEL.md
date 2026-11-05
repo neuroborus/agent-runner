@@ -675,7 +675,9 @@ raw error text, provider output or transcripts. Identical-key retries retain
 the existing readiness, settlement and ownership checks.
 
 Claude sandbox scaffolding is adapter-owned content outside project and task
-trees, including tool HOME/config projections and provider temporary storage.
+trees, including native startup cwd, tool HOME/config projections and provider
+temporary storage. Native atomic staging initializes in that owned cwd before
+command isolation; the real workspace stays separately declared and protected.
 Absent optional project masks cannot become host-visible mount-point files.
 Existing project masks and runner-owned workspace, Git, network, and process
 restrictions remain enforced. The repository view during execution is the same
