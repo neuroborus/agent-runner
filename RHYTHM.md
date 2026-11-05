@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Specialized reviews follow contract and effect flows under existing roles.**
+  `contract-review` traces accepted/rejected structured values through the owning
+  schema, instructions, semantics, persistence, diagnostics, and supported recovery.
+  `effect-review` follows actual initialization, preparation, invocation, observation,
+  interruption, recovery, and cleanup effects against their ownership evidence.
+  Structure/finalization routes select these procedures only for the changed
+  boundaries; they add no pipeline role, runtime behavior, or action authority.
+  Skill authoring reuses `subagent-quality-loop` for separate executor/reviewer
+  orchestration and an exact-version complete zero-finding pass, retaining every
+  domain validation and permission gate. The shared loop handles requests in any
+  language; tracked instructions remain English and UI YAML remains local-only.
+
 - **Skill maintenance preserves complete gates through bounded references.**
   The canonical skill-authoring procedure requires instruction files of at most
   100 physical lines, local validation, and separate author/fixer and independent

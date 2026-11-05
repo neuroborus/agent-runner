@@ -40,8 +40,8 @@ update only the owners affected by the current change:
 - `docs/ARCHITECTURE.md`, owning `docs/product/` documents, and affected
   `pipelines/*/docs/SPEC.md`: gate ordering, recovery, correction accounting,
   source-session isolation, and commit/handoff authority remain consistent.
-- For changed role results, compare schemas, prompts, semantic validators, and
-  public pause/error details together. Constraints must be discoverable and
+- For changed role or public contracts, apply [contract-review](../../contract-review/SKILL.md)
+  across schemas, prompts, semantic validators, and public pause/error details. Constraints must be discoverable and
   failures actionable without exposing rejected payloads.
 - `docs/README.md`: map links and ownership cover the current documents;
   `RHYTHM.md` records meaningful implemented decisions and their rationale.
@@ -77,6 +77,7 @@ validation-infrastructure inventory; classify paths by their actual ownership.
 
 - For changed read-only backends, inspect initialization and incidental writes as
   well as tool permissions; source/control drift remains meaningful evidence.
+  Use [effect-review](../../effect-review/SKILL.md) when effects or lifecycle ownership change.
 - Check workspace and scope selection before expensive traversal, retaining all
   supported Git and ordinary-directory consumers and the owning preparation visibility/cancellation contract.
 - For changed concurrent observations, require proof of benign extension before

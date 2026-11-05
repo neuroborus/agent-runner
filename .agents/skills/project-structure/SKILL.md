@@ -53,6 +53,13 @@ or changing a capability, package, pipeline, source, test, or documentation owne
 - Distinguish a proved concurrent journal extension from corruption at its owning
   boundary; observation and retries must retain the original byte proof and effect authority.
 
+## Targeted Reviews
+
+For changed structured role/public contracts, use [contract-review](../contract-review/SKILL.md).
+For changed effects or lifecycle ownership, use [effect-review](../effect-review/SKILL.md).
+Apply the relevant procedure within the existing role and gate; these routes do
+not authorize another reviewer, pipeline role, or operational action.
+
 ## Review Questions
 
 - Does this file have one clear owner in the map above?

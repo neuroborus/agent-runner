@@ -67,12 +67,20 @@ PY
 
 ## Independent reviewer and fixer loop
 
-- The orchestrator assigns two distinct agents per skill: an author/fixer and an independent reviewer. It manages handoffs and may reuse those agents across iterations.
-- If assigned either role already, perform only that role; do not recursively spawn another pair. The orchestrator arranges any missing counterpart.
-- Give the reviewer the user intent, applicable constraints, baseline for updates, and final saved skill tree. The reviewer must read those files independently and verify every gate above, rather than relying on the author's summary or validation claims.
-- The reviewer returns actionable findings with file locations and required corrections, or an explicit clean result covering the complete skill.
-- The author/fixer resolves all findings within authorized scope, saves the changes, reruns validation, and returns the complete result to the independent reviewer.
-- Repeat until the reviewer reports zero unresolved findings on the final saved version. Any later edit requires revalidation and another independent review.
-- If independent review is unavailable, unauthorized, or blocked, report the blocker and unfinished state clearly; never substitute self-review or claim a clean result.
+- Read and apply [subagent-quality-loop](../subagent-quality-loop/SKILL.md) as the
+  mandatory orchestration and zero-finding acceptance procedure for this authoring work.
+- The author/fixer is the executor; a distinct independent reviewer must inspect every
+  skill. The parent arranges any missing counterpart. Already-assigned agents perform
+  only their role and never recursively create another pair.
+- Give the reviewer the user intent, applicable constraints, baseline for updates, and
+  complete final saved skill trees. The reviewer independently verifies every authoring
+  gate above, including line limits, required reading routes, examples, metadata and
+  permission preservation; the author's claims are not proof.
+- The fixer saves corrections and reruns affected validation plus the complete final
+  inventory and line check before each full review handoff. Any later edit requires
+  revalidation and another complete independent pass.
+- Follow the shared loop for all findings, withdrawals, blockers and the final
+  exact-version zero-finding pass. Unavailable independent review leaves the work
+  unfinished; self-review cannot replace it.
 
 Report the resulting location, file counts and line-check outcome, validation performed, and final independent review status. Distinguish completed work from any remaining blocker.
