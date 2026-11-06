@@ -63,6 +63,17 @@ Private `paths.js`, `scope.js`, `controls.js` and `snapshot.js` own confinement,
 inspection selection, filesystem control discovery and guarded capture;
 `traversal.js` owns cancellation/progress checkpoints and `service.js` composes
 inspection and mutation guards.
+
+Private `proof.js` projects complete whole-directory snapshots into bounded
+exact-path evidence plus hashes of the complete immutable remainder and link
+resolutions. `snapshotProof` derives missing leaves only from complete captured
+coverage and retains file/link ancestors as blockers. It refuses selected or
+excluded snapshots as absence evidence. `assertSnapshotProof` permits only its
+caller's exact journaled effect paths to differ, while preserving the remainder,
+scope and link proof. Deferred new temporaries can be removed from the current
+remainder only if the original hash proves their absence. These methods grant
+no traversal, write or publication authority and leave capture unchanged.
+
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
 capability. Authoring explicitly selects Git for commit plans or the directory
@@ -578,6 +589,20 @@ instructions/checks, selected roots, resource
 identities and live configuration exclusions. Its explicit reservation/result
 agent transitions stop at `PROPOSAL_ACCEPTED`; its lifecycle then dispatches only
 Runner-owned setup effects.
+
+Init state version 2 uses version-2 inspections with compact complete scope
+proofs and bounded role-facing setup destinations, documents, ancestors and
+control markers. Proposal paths need explicit coverage; omitted evidence never
+means absent. Publication and same-run repair baselines retain exact relevant
+entries plus complete remainder/link hashes, avoiding source-sized durable
+arrays. Guards and native turns still capture all original source/control
+content, and terminal confirmation binds the complete resulting snapshot.
+The identity migration preserves real version-1 records, original hash and
+comparison algorithms, pending effects, receipts, approvals and finite budgets;
+reinspection uses the saved version. Unsupported setup-evidence capacity fails
+before partial inspection can grant role or publication authority. Shared state
+collection limits and directory/Git permission boundaries remain unchanged.
+
 The separate `publishIntegratedInit` / `publishExternalInit` effects require those
 approvals, unchanged setup bindings and the existing exclusive leases. The clarification capability
 verifies the frozen transcript before baseline recording and throughout publication.

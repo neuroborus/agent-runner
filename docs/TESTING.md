@@ -670,6 +670,18 @@ The proposal suite also keeps external finalization references limited to the
 target's finalization skills, without invoking unrelated inventoried skills.
 That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
 
+Fast `test/workspace/setup-proof.test.js` constructs complete snapshots beyond
+10,000 entries to prove compact persistence, exact publication allowances,
+deferred-temporary absence, missing-coverage rejection and source/input/control/
+link drift protection. `pipelines/init/test/inspection-proof.test.js` owns bounded
+role projection in both placements, beyond-cap source and selected-input drift,
+explicit destination evidence, additive reinspection, and authentic version-1
+hash/approval migration without renewed accounting. These pure fixtures create
+no source files or provider turns. Proof-version changes require the ordinary
+gate, both init publication slow suites, registered init lifecycle, orchestration,
+state persistence/journal compatibility and release-pack coverage; the focused
+fixtures replace none of those gates.
+
 `pipelines/init/test/integrated-publication.slow.test.js` owns real-Git ignore
 semantics and durable multi-resource publication through the public workspace
 capability: absent resources, preserved skills/settings and negations, custom
@@ -693,7 +705,13 @@ before publication intents or writes and rechecks them during recovery.
 It verifies subsequent configuration/finalization selection and
 unchanged Git and ordinary-directory targets, with no ignore inspection or
 provider activity. Run it when changing external init publication or its confined
-resource policy. Both publication suites belong to the complete slow tier;
+resource policy. Both publication suites belong to the complete slow tier.
+The external suite also injects complete large-source evidence around real
+publication effects, proving bounded durable baselines and rejection of changes
+beyond the former inspection cap before effects. Lost-root-receipt recovery
+covers both compact records and real version-1 bindings through migration,
+preserving identities, accepted approvals and accounting.
+
 `test/runner-init.slow.test.js` owns registered lifecycle composition: both
 placements crossed with all three modes, proven unused source-fork recovery
 without repeating possible effects, guidance-last publication, distinct

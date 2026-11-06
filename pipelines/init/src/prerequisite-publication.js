@@ -105,6 +105,15 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       directories.add(path);
     }
   }
+  const proofPaths = [
+    ...new Set([
+      ...directories,
+      guide.path,
+      ...resources.flatMap(({ path, kind }) =>
+        kind === "artifacts" ? [path] : [path, temporaryPath(path)],
+      ),
+    ]),
+  ].sort();
   function validate(record) {
     exact(record, [
       "schemaVersion",
@@ -116,7 +125,13 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       "prepared",
     ]);
     assertInit(
-      record.schemaVersion === 1 &&
+      record.schemaVersion === state.inspection.schemaVersion &&
+        (record.schemaVersion === 1
+          ? record.baseline.schemaVersion === 1
+          : record.baseline.schemaVersion === 2 &&
+            same(record.baseline.paths, proofPaths) &&
+            same(record.baseline.ignorePaths, []) &&
+            record.baseline.rootPath === null) &&
         record.binding === binding &&
         record.inspection.workspacePath === targetPath &&
         record.inspection.stateRoot === stateRoot &&
@@ -213,13 +228,21 @@ async function publishPrerequisites(state, runtime, publication, placement) {
     }
     if (current.prepared)
       for (const path of runtime.guidancePaths ?? []) allowed.add(path);
-    const unchanged = (snapshot) =>
-      snapshot.entries.filter(({ path }) => !allowed.has(path));
-    assertInit(
-      same(unchanged(current.baseline), unchanged(after)) &&
-        same(current.baseline.linkResolutions, after.linkResolutions),
-      "Setup inputs or workspace content changed outside reviewed publication.",
-    );
+    if (current.schemaVersion === 2)
+      workspace.assertSnapshotProof({
+        before: current.baseline,
+        after,
+        allowedPaths: [...allowed],
+      });
+    else {
+      const unchanged = (snapshot) =>
+        snapshot.entries.filter(({ path }) => !allowed.has(path));
+      assertInit(
+        same(unchanged(current.baseline), unchanged(after)) &&
+          same(current.baseline.linkResolutions, after.linkResolutions),
+        "Setup inputs or workspace content changed outside reviewed publication.",
+      );
+    }
     for (const receipt of current.receipts) {
       const observed = await workspace.inspectInfrastructure({
         projectPath,
@@ -265,6 +288,11 @@ async function publishPrerequisites(state, runtime, publication, placement) {
         (path) => path !== targetPath,
       ),
     });
+    assertInit(
+      inspection.bindings.length <= 10_000 &&
+        inspection.controlPaths.length <= 10_000,
+      "Init publication scope evidence exceeds its supported capacity.",
+    );
     const baseline = await workspace.snapshot({ inspection });
     assertInit(
       same(await runtime.inspectSetup(), state.inspection),
@@ -272,10 +300,13 @@ async function publishPrerequisites(state, runtime, publication, placement) {
     );
     await verifyClarifications();
     current = {
-      schemaVersion: 1,
+      schemaVersion: state.inspection.schemaVersion,
       binding,
       inspection,
-      baseline,
+      baseline:
+        state.inspection.schemaVersion === 1
+          ? baseline
+          : workspace.snapshotProof({ snapshot: baseline, paths: proofPaths }),
       pending: null,
       receipts: [],
       prepared: false,

@@ -41,6 +41,26 @@ authorized edit windows. Task and clarification artifacts must be external to
 the target, so initial setup requires no ignored target directory. Existing
 repository-local artifact protections remain unchanged.
 
+New inspections use schema version 2. Complete workspace capture still visits
+and protects every source/control path, including sources beyond 10,000 entries.
+Workspace-owned compact proofs bind full ordered content/identity evidence and
+link resolutions; scope bindings additionally retain real ancestor and control
+bindings. Only bounded setup documents, exact candidate destinations, their
+relevant ancestors and bare-control markers appear in role-facing `entries`.
+An explicit `kind: "missing"` entry proves absence from complete traversal;
+omitted paths and file/link ancestors cannot prove absence. A proposal lacking
+that exact destination evidence rejects before acceptance. Document groups retain
+their 256-file bounds, candidates their 32-entry bound, and setup collections
+their 10,000-entry bound; compact records are limited to two MiB. Unsupported
+evidence capacity rejects completely before role work or publication authority.
+
+Init descriptor state version 2 preserves version-1 inspections unchanged,
+including their original full-entry hashes, approvals, reservations, publication
+records, accepted receipts and consumed accounting. Reinspection follows the
+saved inspection version. Migration creates no missing evidence or allowance;
+legacy limits remain applicable to legacy bindings. No shared collection limit,
+workspace scope or provider permission changes.
+
 Placement is separate from review mode. The descriptor reserves CLI
 `--placement integrated|external` and MCP `placement`, separately from `mode`. Missing placement reuses one unambiguous established target-bound
 candidate. With no candidate, it selects integrated. Explicit configuration and
@@ -229,6 +249,20 @@ has a verified receipt; a pending ignore intent reconciles first under the same
 baseline and identity guards.
 Ambiguous directory allocations remain preserved for recovery, never adopted.
 Completed prerequisite receipts are verification-only on rerun.
+
+Version-2 publication baselines retain exact prior entries for reviewed files,
+required directories, stable publication temporaries and deferred guidance,
+plus a compact complete hash of the immutable remainder and all link resolutions.
+Every guard recaptures the complete original scopes. Only pending intents and
+verified receipts permit their exact paths to differ; a guidance-action temporary
+outside the retained inventory must have been absent in the original remainder.
+Existing bytes cannot disappear into a new allowance. Receipts still verify
+published identities and contents independently. Same-run repair `setupBaseline`
+uses the same compact proof with exact procedure evidence; only the shared
+clarification transcript is excluded under its existing service authorization.
+Terminal confirmation continues binding the complete resulting snapshot.
+Version-1 publication and repair baselines retain their original comparison and
+terminal-fingerprint algorithms, including pending-effect recovery.
 
 The order is ignore protection, artifact preparation, finalization, then destination
 configuration. Guidance is excluded from publication and remains deferred.

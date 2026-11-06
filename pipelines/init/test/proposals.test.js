@@ -1081,26 +1081,54 @@ test("inspection delegates confined reads, hashes actual inputs and detects conf
     }),
     inspectConfigurationPath: () => {},
     workspace: {
+      ...createWorkspaceService(),
       inspectPath: async ({ path }) => ({ path, exists: false, ancestors: [] }),
       inspect: async (request) => {
         calls.push(request);
+        const files = new Set([
+          ...request.inputPaths,
+          ...request.configurationPaths,
+        ]);
+        const directories = new Set([
+          request.workspacePath,
+          request.taskPath,
+          "/work/setup",
+        ]);
         return {
           bindings: [
             ...new Set([
               request.workspacePath,
               request.taskPath,
+              ...request.inputPaths,
               ...request.configurationPaths,
               ...request.infrastructurePaths,
               "/work/project/metadata",
             ]),
-          ].map((path) => ({ path, exists: false, ancestors: [] })),
+          ].map((path) => {
+            const kind = files.has(path)
+              ? "file"
+              : directories.has(path)
+                ? "directory"
+                : "missing";
+            return { path, kind, exists: kind !== "missing", ancestors: [] };
+          }),
           controlPaths: ["/work/project/metadata"],
         };
       },
       snapshot: async ({ inspection }) => ({
+        schemaVersion: 1,
+        workspacePath: options.projectPath,
+        outputPaths: [],
         entries: inspection.bindings
-          .filter((binding) => !binding.exists)
-          .map(({ path }) => ({ path, kind: "missing", hash: null })),
+          .map(({ path, kind }) => ({
+            path,
+            kind,
+            hash:
+              kind === "file"
+                ? createHash("sha256").update(path).digest("hex")
+                : null,
+          }))
+          .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
         linkResolutions: [],
       }),
       assertUnchanged: ({ before, after }) => assert.deepEqual(before, after),
@@ -1256,6 +1284,7 @@ test("inspection ignores an unusable unselected default sibling", async () => {
       }),
       inspectConfigurationPath: () => {},
       workspace: {
+        ...createWorkspaceService(),
         inspectPath: async () => {
           throw Object.assign(
             new Error("Unselected sibling is a symbolic link."),
@@ -1276,7 +1305,17 @@ test("inspection ignores an unusable unselected default sibling", async () => {
             ].map((path) => ({ path })),
           };
         },
-        snapshot: async () => ({ entries: [], linkResolutions: [] }),
+        snapshot: async () => ({
+          schemaVersion: 1,
+          workspacePath: options.projectPath,
+          outputPaths: [],
+          entries: [
+            options.projectPath,
+            options.taskPath,
+            ...(existing ? [existing.rootPath] : []),
+          ].map((path) => ({ path, kind: "directory", hash: null })),
+          linkResolutions: [],
+        }),
         assertUnchanged: ({ before, after }) => assert.deepEqual(before, after),
       },
     };
@@ -1311,6 +1350,7 @@ test("additive inspection retains prior destinations and rejects input or ancest
   let ancestorIdentity = "original";
   const capabilities = {
     workspace: {
+      ...createWorkspaceService(),
       inspectPath: async ({ path }) => ({
         path,
         exists: false,
@@ -1330,6 +1370,9 @@ test("additive inspection retains prior destinations and rejects input or ancest
         })),
       }),
       snapshot: async ({ inspection }) => ({
+        schemaVersion: 1,
+        workspacePath: options.projectPath,
+        outputPaths: [],
         entries: [
           {
             path: "/state/task/task.md",

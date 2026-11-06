@@ -18,6 +18,7 @@ import { CONTROL_NAMES, discoverControls } from "./controls.js";
 import { exclusions, inspectScope } from "./scope.js";
 import { traversalCheckpoints } from "./traversal.js";
 import { capture, fingerprints, readTextFile } from "./snapshot.js";
+import { snapshotProof, assertSnapshotProof } from "./proof.js";
 import { reportArtifact } from "./artifact.js";
 import {
   inspectInfrastructure,
@@ -502,6 +503,8 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     exclusionPath,
     snapshot,
     snapshotInputs,
+    snapshotProof: (request) => freeze(snapshotProof(request)),
+    assertSnapshotProof,
     assertUnchanged,
     inspectInfrastructure: (request) =>
       boundary(() => inspectInfrastructure(fs, request)),

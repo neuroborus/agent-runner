@@ -14,6 +14,7 @@ import {
   integratedIgnorePaths,
   externalFinalizationContent,
   externalFinalizationPath,
+  initPipeline,
 } from "@agent-runner/init";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import {
@@ -403,6 +404,17 @@ test("init completes both placements in all modes, projects selectors and repeat
           JSON.stringify(result.run.pause),
         );
         const state = result.run.pipelineState;
+        assert.equal(
+          result.run.pipelineStateVersion,
+          initPipeline.stateVersion,
+        );
+        assert.equal(state.inspection.schemaVersion, 2);
+        assert.equal(state.publication.baseline.schemaVersion, 2);
+        assert.deepEqual(
+          (await f.runStore.loadRun(result.run.runId)).pipelineState
+            .publication,
+          state.publication,
+        );
         assert.equal(state.completion.placement, placement);
         assert.equal(state.terminal.status, "CLEAN");
         assert.equal(
@@ -818,6 +830,14 @@ test("terminal findings repair created procedures through renewed gates without 
       const saved = (await f.runner.status(run.runId)).run;
       assert.equal(saved.pipelineState.publication, null);
       assert.ok(saved.pipelineState.setupBaseline);
+      assert.equal(saved.pipelineState.setupBaseline.snapshot.schemaVersion, 2);
+      assert.ok(
+        saved.pipelineState.setupBaseline.snapshot.entries.some(
+          ({ path, kind }) =>
+            path === saved.pipelineState.createdFinalizationPath &&
+            kind === "file",
+        ),
+      );
       const result = await f.runner.resume({ runId: run.runId });
       assert.equal(result.run.pipelineState.workflowState, "DONE");
       assert.equal(result.run.pipelineState.revisionRounds, 1);

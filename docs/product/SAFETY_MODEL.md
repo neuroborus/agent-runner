@@ -195,6 +195,16 @@ the held leases. Completion requires distinct read-only confirmation of the
 complete unchanged prepared snapshot. Recovery verifies exact original intents,
 identities and receipts; it cannot redirect writes or adopt intervening edits.
 
+Large init targets retain complete source/control traversal and unchanged-source
+proof. Bounded setup evidence is separate from that proof: omitted destinations
+grant no writes, and publication exemptions require exact journaled paths and
+independently verified effects. Compact baselines preserve the complete immutable
+remainder, file identities, links and selected inputs; unsupported evidence
+capacity cannot produce partial authorization. Legacy records retain their
+original bindings and consumed allowances. The
+[init specification](../../pipelines/init/docs/SPEC.md#inspection-and-placement)
+owns the proof versions and evidence limits.
+
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.

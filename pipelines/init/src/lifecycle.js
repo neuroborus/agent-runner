@@ -100,10 +100,13 @@ export async function inspectInitWorkspace(run, setup) {
     ...value,
     entries: value.entries.filter(({ path }) => path !== clarificationPath),
   });
-  setup.workspace.assertUnchanged({
-    before: protectedSnapshot(snapshot),
-    after: protectedSnapshot(after),
-  });
+  if (snapshot.schemaVersion === 2)
+    setup.workspace.assertSnapshotProof({ before: snapshot, after });
+  else
+    setup.workspace.assertUnchanged({
+      before: protectedSnapshot(snapshot),
+      after: protectedSnapshot(after),
+    });
   return { inspection, snapshot: after };
 }
 
@@ -132,6 +135,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       {
         ...(await runtime.setup.discover(state())),
         previousInspection,
+        schemaVersion: state().inspection?.schemaVersion ?? 2,
       },
       runtime.setup,
     );
@@ -777,7 +781,17 @@ export async function runInit({ run, runtime, operatorStop = false }) {
           guidanceIntent: null,
           guidanceReceipt: null,
           terminal: null,
-          setupBaseline: prepared,
+          setupBaseline:
+            state().inspection.schemaVersion === 1
+              ? prepared
+              : {
+                  inspection: prepared.inspection,
+                  snapshot: runtime.setup.workspace.snapshotProof({
+                    snapshot: prepared.snapshot,
+                    paths: [procedure.path],
+                    ignorePaths: [transcript.transcriptPath],
+                  }),
+                },
           primaryApproval: null,
           reviewApproval: null,
           proposal: null,

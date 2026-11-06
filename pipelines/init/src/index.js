@@ -37,8 +37,12 @@ const ROLES = Object.freeze(["planner", "reviewer"]);
 const LAZY_ROLES = Object.freeze(["planner"]);
 export const initPipeline = Object.freeze({
   id: "init",
-  stateVersion: 1,
-  migrations: Object.freeze({}),
+  stateVersion: 2,
+  // Existing evidence and its binding algorithm remain authentic. Reinspection
+  // follows the saved inspection version; migration grants no new allowance.
+  migrations: Object.freeze({
+    1: ({ pipelineState }) => structuredClone(pipelineState),
+  }),
   setup: true,
   inspectWorkspace: inspectInitWorkspace,
   projections: initProjections,

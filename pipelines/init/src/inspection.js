@@ -28,10 +28,15 @@ export async function inspectInitSetup(
     candidatePaths = [],
     documents,
     previousInspection = null,
+    schemaVersion = previousInspection?.schemaVersion ?? 2,
   },
   { workspace, loadProjectConfiguration, inspectConfigurationPath },
 ) {
   exact(documents, GROUPS);
+  assertInit(
+    [1, 2].includes(schemaVersion),
+    "Unsupported init inspection version.",
+  );
   assertInit(
     Array.isArray(configurationPaths) && Array.isArray(candidatePaths),
     "Init configuration inventories must be arrays.",
@@ -61,6 +66,11 @@ export async function inspectInitSetup(
       ]),
     );
   }
+  assertInit(
+    GROUPS.every((group) => new Set(documents[group]).size <= 256) &&
+      new Set(candidatePaths).size <= 32,
+    "Init setup document evidence exceeds its supported capacity.",
+  );
   assertInit(
     [
       projectPath,
@@ -146,6 +156,11 @@ export async function inspectInitSetup(
     configurationPaths,
     infrastructurePaths: roots.filter((root) => root !== projectPath),
   });
+  assertInit(
+    inspection.bindings.length <= 10_000 &&
+      inspection.controlPaths.length <= 10_000,
+    "Init setup scope evidence exceeds its supported capacity.",
+  );
   if (missingExternalRoot !== null) {
     const binding = inspection.bindings.find(
       (binding) => binding.path === missingExternalRoot.path,
@@ -170,6 +185,10 @@ export async function inspectInitSetup(
   }
   const after = await workspace.snapshot({ inspection });
   workspace.assertUnchanged({ before, after });
+  assertInit(
+    isDeepStrictEqual(before.linkResolutions, after.linkResolutions),
+    "Init link resolution changed during inspection.",
+  );
   // A snapshot of an enclosing task tree omits absent children.
   if (missingExternalRoot !== null)
     assertInit(
@@ -194,6 +213,21 @@ export async function inspectInitSetup(
   const entries = after.entries.filter(
     ({ path }) => path !== join(taskPath, "clarifications.md"),
   );
+  const protectedSnapshot = { ...after, entries };
+  const proof =
+    schemaVersion === 1
+      ? null
+      : workspace.snapshotProof({
+          snapshot: protectedSnapshot,
+          paths: setupEvidencePaths({
+            projectPath,
+            artifactRoot,
+            roots,
+            candidates,
+            documents,
+            controlPaths: inspection.controlPaths,
+          }),
+        });
   const scopeBindings = [
     ...new Map(
       inspection.bindings.map((binding) => [
@@ -202,12 +236,21 @@ export async function inspectInitSetup(
           path: binding.path,
           hash: digest({
             binding,
-            entries: entries.filter((entry) =>
-              within(binding.path, entry.path),
-            ),
-            linkResolutions: after.linkResolutions.filter((link) =>
-              within(binding.path, link.path),
-            ),
+            ...(schemaVersion === 1
+              ? {
+                  entries: entries.filter((entry) =>
+                    within(binding.path, entry.path),
+                  ),
+                  linkResolutions: after.linkResolutions.filter((link) =>
+                    within(binding.path, link.path),
+                  ),
+                }
+              : {
+                  proof: workspace.snapshotProof({
+                    snapshot: protectedSnapshot,
+                    rootPath: binding.path,
+                  }),
+                }),
             controls: inspection.controlPaths.filter((path) =>
               within(binding.path, path),
             ),
@@ -217,7 +260,7 @@ export async function inspectInitSetup(
     ).values(),
   ].sort((a, b) => a.path.localeCompare(b.path));
   const result = {
-    schemaVersion: 1,
+    schemaVersion,
     projectPath,
     taskPath,
     artifactRoot,
@@ -228,19 +271,90 @@ export async function inspectInitSetup(
     documents: evidence,
     controlPaths: [...inspection.controlPaths],
     roots: roots.sort(),
-    entries: entries.map(({ path, kind, hash }) => ({ path, kind, hash })),
+    entries: (proof?.entries ?? entries).map(({ path, kind, hash }) => ({
+      path,
+      kind,
+      hash,
+    })),
     scopeBindings,
     // Bind missing paths, real ancestors, controls and file identities, not just bytes.
-    snapshotHash: digest({
-      inspection,
-      entries,
-      linkResolutions: after.linkResolutions,
-    }),
+    snapshotHash:
+      schemaVersion === 1
+        ? digest({
+            inspection,
+            entries,
+            linkResolutions: after.linkResolutions,
+          })
+        : digest({ inspection, proof }),
   };
   assertInspection(result);
   if (previousInspection !== null)
     assertInspectionExtension(previousInspection, result);
   return result;
+}
+
+// Only these exact setup resources can become destinations. Their real
+// ancestors and bare-control markers remain evidence; source descendants live
+// in complete scope hashes rather than role requests or durable arrays.
+function setupEvidencePaths({
+  projectPath,
+  artifactRoot,
+  roots,
+  candidates,
+  documents,
+  controlPaths,
+}) {
+  const paths = [
+    ...roots,
+    ...GROUPS.flatMap((group) => documents[group]),
+    ...controlPaths.flatMap((path) => [
+      path,
+      ...["HEAD", "objects", "refs"].map((name) => join(path, name)),
+    ]),
+  ];
+  for (const root of roots) {
+    const bound = candidates.filter(({ rootPath }) => rootPath === root);
+    const artifacts = bound.length
+      ? bound.map(({ artifactPath }) => artifactPath)
+      : [resolve(root, artifactRoot)];
+    paths.push(
+      ...artifacts,
+      ...artifacts.map((path) => join(path, "agent-runner", "rules.md")),
+      ...(bound.length
+        ? bound.map(({ configurationPath }) => configurationPath)
+        : [
+            join(
+              root,
+              ...(root === projectPath ? [artifactRoot] : []),
+              "agent-runner.json",
+            ),
+          ]),
+      ...bound.flatMap(({ finalizationPath }) =>
+        finalizationPath ? [finalizationPath] : [],
+      ),
+    );
+    if (root === projectPath) {
+      paths.push(join(root, ".gitignore"));
+      const skillRoots = [
+        ...[".agents", ".claude"].map((name) =>
+          join(root, name, "skills", "finalization"),
+        ),
+        ...documents.skills
+          .filter(
+            (path) =>
+              within(root, path) && path.endsWith("/finalization/SKILL.md"),
+          )
+          .map(dirname),
+      ];
+      paths.push(
+        ...skillRoots.flatMap((path) => [
+          join(path, "SKILL.md"),
+          join(path, "RUNNER.md"),
+        ]),
+      );
+    } else paths.push(join(root, "finalization", "SKILL.md"));
+  }
+  return paths;
 }
 
 export function defaultExternalRoot(projectPath) {

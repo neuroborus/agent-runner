@@ -50,9 +50,13 @@ export async function assertExternalPolicy(state, runtime) {
     !within(projectPath, rootPath) &&
       !within(rootPath, projectPath) &&
       (protectionHash !== null ||
-        !state.inspection.entries.some(
-          ({ path, kind }) => path === rootPath && kind !== "missing",
-        )),
+        (state.inspection.schemaVersion === 1
+          ? !state.inspection.entries.some(
+              ({ path, kind }) => path === rootPath && kind !== "missing",
+            )
+          : state.inspection.entries.some(
+              ({ path, kind }) => path === rootPath && kind === "missing",
+            ))),
     "External setup must reuse a target-bound root or prepare an absent destination.",
   );
   const finalizationPath = externalFinalizationPath(state);

@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-06
 
+- **Init bounds setup evidence independently of complete source proof.** New
+  inspections project exact setup destinations, documents, ancestors and control
+  markers while workspace-owned hashes retain every source's content, identity
+  and link evidence. Publication and repair baselines retain exact effect-path
+  entries plus the complete immutable remainder. Omission never proves absence;
+  only journaled intents and verified receipts permit corresponding differences.
+  Init state 2 preserves authentic legacy hashes, approvals, pending effects,
+  receipts and consumed budgets. Large ordinary-directory and Git targets keep
+  existing write authority and shared collection limits.
+
 - **Guidance reads work before local setup exists.** The guidance selector
   distinguishes verified absence from publication permission. CLI/MCP and
   identity-bearing reads return complete common guidance and absent-local
