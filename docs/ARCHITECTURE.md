@@ -1728,16 +1728,20 @@ contains canonical project/local/configuration paths, complete `commonContent`
 and `localContent`, `combinedContent`, and `localHash`. Rendering separates the
 documents and states that local additions cannot weaken common safety or
 product contracts. Missing local content is an empty string with a null hash;
-an existing document, including an empty one, has a SHA-256 hash. Reading
-creates neither local artifacts nor external state.
+an existing document, including an empty one, has a SHA-256 hash. A positively
+verified absent, untracked local guide needs no ignore rule for reads, including
+before init in an unconfigured Git checkout. The existing selectors and resolved
+metadata remain unchanged; absence never triggers discovery of another placement.
+Reading creates neither local artifacts nor external state.
 
 Both documents have a 64 KiB UTF-8 byte limit. Reads and replacements reject
 invalid encoding, unsafe control characters, and recognizable credential or
 provider-transcript formats without echoing or partially redacting content.
 Operators remain responsible for excluding sensitive material that cannot be
-recognized deterministically. Integrated paths in a Git worktree must be ignored
-and untracked. External paths use exact target-bound confinement without target
-Git inspection or writes. All paths must be disjoint from project configuration
+recognized deterministically. Existing integrated guides, edit/update destinations
+and temporary files in a Git worktree must be ignored and untracked. External paths
+use exact target-bound confinement without target Git inspection or writes.
+All paths must be disjoint from project configuration
 and protected control paths. The workspace capability's `inspectControls` reuses
 control discovery along the exact target/destination ancestry, including Git
 pointers, shared metadata and canonical ancestor provider alias targets containing
@@ -1750,7 +1754,13 @@ metadata dependencies, including nested Git pointers, without traversing unrelat
 project content. Metadata reached only through state ancestors also protects
 selected destinations; this query grants no snapshot reads. Missing
 destinations receive the same safety inspection. Symlinks, hard links,
-non-regular files, and unsafe ancestors fail closed.
+non-regular files, and unsafe ancestors fail closed. The private selection boundary
+allows the read-only ignore exception only when both workspace and Git inspections
+prove absence; tracked paths reject even when missing from the worktree. Reads,
+including init's identity-bearing read, repeat selection and verify pinned
+directories after the document read. Any returned existing content requires
+strict ignore validation even if it disappears before reinspection. Edit/update
+selection and every publication recheck retain strict destination validation.
 
 The public `update` method accepts the same selectors plus complete
 `localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the

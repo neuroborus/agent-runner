@@ -747,7 +747,10 @@ enclosing worktree's exclusion key.
 Explicit selection never merges competing placements or initializes infrastructure.
 Clear boundaries state that local additions may
 specialize project operation but cannot weaken common safety or product
-contracts. Missing local content is valid and reading never creates it.
+contracts. Before init, an absent, untracked local guide needs no ignore rule for
+CLI/MCP reads. The result retains complete common guidance, empty local content,
+a null local hash and the resolved metadata. Reading creates no files,
+directories, bindings, ignore rules, editor session or state.
 
 Local guidance is a complete, bounded, non-sensitive Markdown document. Whole
 replacement uses an expected content hash, an idempotency key, atomic
@@ -757,9 +760,10 @@ same destination. Stale concurrent edits fail;
 completed retries return their original receipt even after subsequent edits or
 configuration changes. Incomplete publication retains its selected paths,
 configuration and directory identities across restart; substitution or drift
-requires reconciliation, never automatic redirection. Integrated resources in
-Git remain ignored and untracked; external resources require the exact target
-binding and confinement, with no target or Git-control writes.
+requires reconciliation, never automatic redirection. Existing integrated guides,
+edit/update destinations and temporary files in Git remain ignored and untracked;
+external resources require the exact target binding and confinement, with no
+target or Git-control writes.
 Empty content means no additions. The common guide is never replaced.
 
 CLI operators use `agent-run guidance --project <directory>` to read both documents

@@ -120,9 +120,11 @@ export function createGuidanceService({
       stateRoot: runStore.rootPath,
     });
 
-  async function inspect(input) {
+  async function inspect(input, { allowAbsent = false } = {}) {
     assertInput(input, SELECTORS);
-    const resolved = await selection(input, input.projectPath);
+    const resolved = await selection(input, input.projectPath, {
+      allowAbsent,
+    });
     const { projectPath } = resolved;
     const common = await readDocument(COMMON_PATH);
     if (common.hash === null)
@@ -136,7 +138,11 @@ export function createGuidanceService({
     );
     try {
       const local = await directory.read();
-      await assertSelection(input, resolved);
+      // Only an absent read may skip ignore validation. If content appeared
+      // during selection, require ignore validation even if it disappears again.
+      await assertSelection(input, resolved, {
+        allowAbsent: allowAbsent && local.hash === null,
+      });
       await directory.verify();
       return {
         resolved,
@@ -157,7 +163,9 @@ export function createGuidanceService({
   }
 
   async function read(input) {
-    return guarded(async () => (await inspect(input)).guidance);
+    return guarded(
+      async () => (await inspect(input, { allowAbsent: true })).guidance,
+    );
   }
 
   async function withPublicationLease(context, operation) {
@@ -555,7 +563,9 @@ export function createGuidanceService({
     update: (input) => replace(input),
     readWithIdentity: (input) =>
       guarded(async () => {
-        const { guidance, localIdentity } = await inspect(input);
+        const { guidance, localIdentity } = await inspect(input, {
+          allowAbsent: true,
+        });
         return { ...guidance, localIdentity };
       }),
     updateUnderLease: (input, assertLease, expectedIdentity) => {

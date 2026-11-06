@@ -321,7 +321,11 @@ configuration/ancestor identities. Pointer-resolved Git metadata, including
 nested control dependencies and state-ancestor pointers, and canonical ancestor
 provider alias targets cannot become external publication destinations.
 Existing guidance content, editor and publication suites retain integrated ignore,
-byte-limit and inode-provenance coverage. The content-and-safety suite also owns
+byte-limit and inode-provenance coverage. The content-and-safety suite owns absent
+bootstrap reads without ignore rules, strict edit/update rejection, deleted tracked
+guidance and appearance/disappearance during read reinspection. MCP guidance
+coverage compares CLI/MCP bootstrap reads with complete unchanged source/control
+snapshots and no local or state creation. The content-and-safety suite also owns
 integrated guidance beside an internal provider-control directory alias in Git
 and ordinary directories, protected rejection after retargeting that alias to the
 destination, and the controls diagnostic for an escaping alias. Publication tests also cover legacy

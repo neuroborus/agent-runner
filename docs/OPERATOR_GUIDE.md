@@ -900,13 +900,13 @@ prompts or active runs. See [guidance ownership](product/OPERATOR_MODEL.md#proje
 
 Keep local additions short, non-sensitive, and operator-authored. Exclude
 secrets, credentials, raw provider output, transcripts, and chain-of-thought.
-Reads do not create missing files or directories. Unsafe, linked, overlapping,
-malformed, or oversized targets are rejected. Integrated guidance and temporary
-files in Git must already be ignored and untracked. External resources use exact
-target-bound confinement without target or Git-control writes.
-Each document is bounded to 64 KiB of valid UTF-8 with safe text characters.
-Recognizable credential and transcript formats are rejected; this is not a
-guarantee that arbitrary prose is free of secrets.
+Reads create no files, directories or state. An absent, untracked local guide
+needs no ignore rule for CLI/MCP reads before init. Existing integrated Git
+guides, edit/update destinations and temporaries must be ignored and untracked.
+Unsafe paths fail closed; external resources stay target-bound without target
+or Git-control writes. Documents allow at most 64 KiB of safe UTF-8.
+Recognizable credentials/transcripts are rejected; operators still own content
+safety. See [guidance safety](product/SAFETY_MODEL.md).
 
 Replace local additions as a whole document, consolidating obsolete lessons.
 Empty content means no additions; missing files have null hashes, existing empty

@@ -1417,7 +1417,10 @@ Guidance supports ordinary directories without Git. Git selectors use the
 worktree target, including explicit configurations selected from subdirectories.
 An explicit configuration bound to the supplied directory retains that scope
 and shares the enclosing worktree's exclusion lease when present.
-Integrated Git destinations must already be ignored and untracked. Explicit
+An absent, untracked local guide can be read before init without an ignore rule;
+the result includes the complete common guide, empty local content, a null local
+hash and the resolved paths. Existing integrated Git guides, edit/update
+destinations and temporary files must already be ignored and untracked. Explicit
 external selection reads and updates only the bound infrastructure; it creates
 no target files, ignore rules, pointers or Git-control changes and never merges
 local additions from another placement. Reads create neither files nor state.
@@ -1857,7 +1860,8 @@ Call `guidance_read` once before first managing a run for each project, using
 `projectPath` and optional `projectConfigurationPath`. It returns the complete
 `commonContent`, `localContent`, and `combinedContent`, plus the resolved paths
 and `localHash` needed for editing. The startup reminder remains present when
-issue reporting is disabled.
+issue reporting is disabled. This read also works before init when the local
+guide is absent and untracked, without creating setup or requiring an ignore rule.
 
 After execution releases ownership, use `guidance_update` to replace the entire
 local Markdown with a stable project operating lesson. Supply the same project

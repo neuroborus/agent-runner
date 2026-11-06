@@ -16,12 +16,14 @@ import test from "node:test";
 
 import { createGitService } from "../../src/git/index.js";
 import { GuidanceError, MAX_GUIDANCE_BYTES } from "../../src/guidance/index.js";
+import { createWorkspaceService } from "../../src/workspace/index.js";
 import { executeFile, fixture } from "./support/index.js";
 
 const hash = (content) => createHash("sha256").update(content).digest("hex");
 
 test("missing guidance reads compose the installed guide without creating local or state paths", async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { ignored: false });
+  await unlink(join(f.projectPath, ".gitignore"));
   const before = await readdir(f.projectPath);
   const result = await f.service.read({ projectPath: f.projectPath });
   assert.equal(result.localContent, "");
@@ -41,6 +43,10 @@ test("missing guidance reads compose the installed guide without creating local 
     /cannot weaken common safety rules or product contracts/u,
   );
   assert.match(result.combinedContent, /No project-local additions/u);
+  assert.deepEqual(
+    await f.service.readWithIdentity({ projectPath: f.projectPath }),
+    { ...result, localIdentity: null },
+  );
   assert.deepEqual(await readdir(f.projectPath), before);
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
 });
@@ -102,8 +108,20 @@ test("current runner, discovered project, and explicit project configuration res
   assert.equal(result.projectConfigurationPath, custom);
 });
 
-test("reading and writing reject non-ignored and tracked targets even before creation", async (t) => {
+test("existing reads and all writes reject non-ignored or tracked guidance, including deleted tracked files", async (t) => {
   const f = await fixture(t, { ignored: false });
+  const service = f.createService({
+    launchEditor: () => assert.fail("unsafe guidance must not open an editor"),
+  });
+  await assert.rejects(service.edit({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(f.service.update(f.request("Lesson.")), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
+  await mkdir(dirname(f.localPath), { recursive: true });
+  await writeFile(f.localPath, "Existing lesson.");
   await assert.rejects(f.service.read({ projectPath: f.projectPath }), {
     code: "ERR_GUIDANCE_NOT_IGNORED",
   });
@@ -112,8 +130,6 @@ test("reading and writing reject non-ignored and tracked targets even before cre
   });
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
   await writeFile(join(f.projectPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
-  await mkdir(dirname(f.localPath), { recursive: true });
-  await writeFile(f.localPath, "Tracked lesson.");
   await executeFile(
     "git",
     ["add", "--force", "LOCAL_ARTIFACTS/agent-runner/rules.md"],
@@ -125,6 +141,46 @@ test("reading and writing reject non-ignored and tracked targets even before cre
   await assert.rejects(f.service.update(f.request("Replacement.")), {
     code: "ERR_GUIDANCE_NOT_IGNORED",
   });
+  await unlink(f.localPath);
+  await assert.rejects(f.service.read({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(f.service.update(f.request("Replacement.")), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+});
+
+test("an absent selection cannot return unignored content that appears during reading and disappears before reinspection", async (t) => {
+  const f = await fixture(t, { ignored: false });
+  const git = createGitService();
+  const workspace = createWorkspaceService();
+  let inspections = 0;
+  const service = f.createService({
+    git: {
+      ...git,
+      async inspectPath(input) {
+        const result = await git.inspectPath(input);
+        if (input.path === f.localPath && ++inspections === 1) {
+          await mkdir(dirname(f.localPath), { recursive: true });
+          await writeFile(f.localPath, "Unignored lesson.");
+        }
+        return result;
+      },
+    },
+    workspace: {
+      ...workspace,
+      async inspectPath(input) {
+        if (input.path === f.localPath && inspections === 1)
+          await unlink(f.localPath);
+        return workspace.inspectPath(input);
+      },
+    },
+  });
+  await assert.rejects(service.read({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  assert.equal(inspections, 2);
+  await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
 });
 
 test("linked, non-regular, escaping, and protected targets fail closed", async (t) => {

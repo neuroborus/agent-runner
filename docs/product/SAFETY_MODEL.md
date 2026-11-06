@@ -515,16 +515,22 @@ cancellation is terminal. Neither outcome authorizes replaying an effect,
 restoring contaminated content, or adopting replacement configuration.
 
 Local operating guidance uses the same new-run configuration and workspace safety
-boundaries. Integrated target and temporary files in Git must be ignored and
-untracked; external files stay confined to the explicitly selected target-bound
-infrastructure without target writes. Ordinary directories need no Git.
+boundaries. Read-only selection may inspect positively verified absent, untracked
+local guidance without an ignore rule. Existing integrated guides, edit/update
+destinations and temporary files in Git must be ignored and untracked; tracked
+paths reject even when missing from the worktree. External files stay confined to
+the explicitly selected target-bound infrastructure without target writes.
+Ordinary directories need no Git.
 All destinations stay separate from configuration, state and protected control paths. Linked, unsafe,
 non-regular, malformed, or oversized documents fail closed, including unsafe
 absent destinations. An internal provider-control directory alias, such as
 `.claude` linked to `.agents`, is accepted and its resolved target protected;
 unsupported control aliases fail with a control diagnostic rather than blaming
-the destination. Reading does not create files. Both common and local
-documents are bounded; document bodies never enter action metadata or errors.
+the destination. Repeated read selection and pinned directory checks retain
+absence and ancestor protection; the read exception grants no publication authority.
+Reading creates no files, directories, bindings, editor sessions or state.
+Both common and local documents are bounded; document bodies never enter action
+metadata or errors.
 
 Guidance replacement holds the canonical-worktree lease and, for external
 destinations outside that scope, the infrastructure-root lease. These exclude

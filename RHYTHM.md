@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-06
 
+- **Guidance reads work before local setup exists.** The guidance selector
+  distinguishes verified absence from publication permission. CLI/MCP and
+  identity-bearing reads return complete common guidance and absent-local
+  metadata without an ignore rule or setup effects. Existing guides and all
+  edit/update and temporary destinations retain strict safety checks; tracked
+  deletions, unsafe controls and ancestor substitutions still reject. Existing
+  selectors suffice, so bootstrap adds no public setting or inferred placement.
+
 - **Audit source selection is explicit and frozen before capture.** Directory
   scope remains the default and prunes literal exclusions before discovery,
   hashing and provider preparation. Explicit Git scope reuses complete Git-owned
