@@ -354,9 +354,12 @@ export async function reconcileOperatorStop({
   await publish(activity, current);
 
   onRecoveryStage("checkpoint-continuation");
-  const simulated = reconciliationRuntime(runtime, current);
+  const simulated =
+    current.workspacePreparation == null
+      ? reconciliationRuntime(runtime, current)
+      : null;
   let workspaceFailure = null;
-  if (runtime.workspace?.kind === "directory") {
+  if (simulated !== null && runtime.workspace?.kind === "directory") {
     try {
       await runtime.workspace.snapshot();
     } catch (cause) {
@@ -367,24 +370,26 @@ export async function reconcileOperatorStop({
   // Directory turns have no Git effects to reconcile. Retain their checkpoint
   // and the drift blocker after retirement, without accepting changed inputs.
   let reconciled =
-    workspaceFailure === null
-      ? await pipeline.workflow.run({
-          action: null,
-          operatorStop: true,
-          operatorStopPreEffectRejection: preEffectRejection,
-          run: current,
-          settings: current.pipelineState.settings,
-          runtime: simulated.runtime,
-        })
-      : {
-          ...current,
-          pipelineState: {
-            ...current.pipelineState,
-            workflowState: "WAITING_FOR_USER",
-          },
-          pause: { reason: "workspace_changed", code: "ERR_WORKSPACE_DRIFT" },
-          activeTurn: null,
-        };
+    current.workspacePreparation != null
+      ? current
+      : workspaceFailure === null
+        ? await pipeline.workflow.run({
+            action: null,
+            operatorStop: true,
+            operatorStopPreEffectRejection: preEffectRejection,
+            run: current,
+            settings: current.pipelineState.settings,
+            runtime: simulated.runtime,
+          })
+        : {
+            ...current,
+            pipelineState: {
+              ...current.pipelineState,
+              workflowState: "WAITING_FOR_USER",
+            },
+            pause: { reason: "workspace_changed", code: "ERR_WORKSPACE_DRIFT" },
+            activeTurn: null,
+          };
   reconciled ??= simulated.current();
   let outcomeActivity;
   const completed = await runStore.settleCheckpoint(
@@ -403,7 +408,13 @@ export async function reconcileOperatorStop({
         configurationFailure,
       );
       outcomeActivity = settlement.activity;
-      return { ...settlement, settlement: simulated.settlement() };
+      return {
+        ...settlement,
+        settlement: simulated?.settlement() ?? {
+          kind: "quiescent",
+          commit: null,
+        },
+      };
     },
     { validate: pipeline.workflow.validateRun },
   );

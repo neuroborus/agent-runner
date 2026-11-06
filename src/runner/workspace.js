@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { spawnOwnedProcess } from "../agents/index.js";
-import { deepFreeze } from "../state/index.js";
+import { deepFreeze, MAX_WORKSPACE_PREPARATION_BYTES } from "../state/index.js";
 import { WorkspaceSafetyError } from "../workspace/index.js";
 import { RunnerError, rejectUnknownFields } from "./input.js";
 
@@ -100,13 +100,15 @@ export async function workspaceSelection(pipeline, input, workspace) {
     })) ?? pipeline.workspace;
   rejectUnknownFields(
     selection,
-    new Set(["kind", "lease", ...PATH_FIELDS]),
+    new Set(["kind", "lease", "preparation", ...PATH_FIELDS]),
     "pipeline.workspace",
   );
   if (
     !["git", "directory"].includes(selection.kind) ||
     !["none", "exclusive"].includes(selection.lease) ||
-    (selection.kind === "directory" && selection.lease !== "exclusive")
+    (selection.kind === "directory" && selection.lease !== "exclusive") ||
+    (selection.preparation !== undefined &&
+      (selection.preparation !== "deferred" || selection.kind !== "directory"))
   ) {
     throw new RunnerError("Pipeline workspace requirements are invalid.", {
       code: "ERR_INVALID_PIPELINE",
@@ -177,6 +179,115 @@ async function assertAbsentInputs(paths, taskPath, workspace) {
         code: "ERR_WORKSPACE_DRIFT",
       });
   }
+}
+
+// Admission freezes exact inputs and declarations, without discovering controls
+// or traversing sources. State verifies their bytes and routing identities.
+export async function declareWorkspacePreparation({
+  selection,
+  projectPath,
+  taskPath,
+  taskInputs,
+  configuration,
+  stateRoot,
+  workspace,
+}) {
+  const inputs = [];
+  for (const definition of Object.values(taskInputs)) {
+    const path = join(taskPath, definition.filename);
+    const content = await workspace.readFile({
+      path,
+      projectPath: taskPath,
+      optional: definition.optional,
+      maxBytes: MAX_WORKSPACE_PREPARATION_BYTES,
+    });
+    inputs.push({
+      path,
+      contentHash:
+        content === null
+          ? null
+          : createHash("sha256").update(content).digest("hex"),
+    });
+  }
+  if (configuration != null)
+    inputs.push({
+      path: configuration.path,
+      contentHash: configuration.protection.contentHash,
+    });
+  const declarations = Object.fromEntries(
+    PATH_FIELDS.map((name) => [name, [...(selection[name] ?? [])]]),
+  );
+  declarations.inputPaths.push(
+    ...inputs
+      .filter(
+        ({ contentHash, path }) =>
+          contentHash !== null && path !== configuration?.path,
+      )
+      .map(({ path }) => path),
+  );
+  if (configuration != null)
+    declarations.configurationPaths.push(configuration.path);
+  for (const name of PATH_FIELDS) {
+    const paths = [
+      ...new Set(declarations[name].map((path) => resolve(projectPath, path))),
+    ].sort();
+    declarations[name] = paths.filter(
+      (path) =>
+        !paths.some((parent) => parent !== path && within(parent, path)),
+    );
+  }
+  assertArtifactSeparation(declarations.artifactPaths, [
+    ...declarations.inputPaths,
+    ...declarations.sourcePaths,
+    ...declarations.configurationPaths,
+    ...declarations.infrastructurePaths,
+  ]);
+  return {
+    leasePath: await workspace.exclusionPath({ workspacePath: projectPath }),
+    policy: {
+      kind: "directory",
+      workspacePath: projectPath,
+      taskPath,
+      stateRoot: resolve(stateRoot),
+      ...declarations,
+    },
+    inputs,
+  };
+}
+
+export async function captureWorkspacePreparation(pending, workspace, signal) {
+  const { kind: _kind, ...declarations } = pending.policy;
+  const inspection = await workspace.inspect(declarations, { signal });
+  assertArtifactSeparation(inspection.artifactPaths, [
+    ...inspection.inputPaths,
+    ...inspection.sourcePaths,
+    ...inspection.configurationPaths,
+    ...inspection.infrastructurePaths,
+    ...inspection.controlPaths,
+  ]);
+  const snapshot = await workspace.snapshot({ inspection, signal });
+  if (
+    (await workspace.exclusionPath({
+      workspacePath: inspection.workspacePath,
+    })) !== pending.leasePath
+  )
+    throw new RunnerError("Workspace exclusion key changed during capture.", {
+      code: "ERR_WORKSPACE_DRIFT",
+    });
+  return deepFreeze({
+    schemaVersion: 1,
+    kind: "directory",
+    lease: "exclusive",
+    leasePath: pending.leasePath,
+    policy: pending.policy,
+    ancestorBindings: ancestorBindings(inspection),
+    absentInputPaths: pending.inputs
+      .filter(({ contentHash }) => contentHash === null)
+      .map(({ path }) => path),
+    bindingFingerprint: bindingFingerprint(inspection),
+    protectedFingerprint: protectedFingerprint(inspection, snapshot),
+    retrievalPermissions: [],
+  });
 }
 
 export async function bindWorkspace({

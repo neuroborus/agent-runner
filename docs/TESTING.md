@@ -33,6 +33,16 @@ also retain state persistence/operator-stop, affected orchestration and legacy
 migration slow coverage and release-pack validation; these focused fixtures do
 not replace those gates or prove pipeline activation.
 
+Fast `test/runner-preparation.test.js` owns deferred audit activation through
+real state and workspace services: bounded creation/boundary validation,
+CLI identity before held traversal, cancellation without provider work,
+pause/resume and interrupted capture from frozen inputs, substitution rejection,
+detached readiness before capture and lost-receipt recovery after disconnect,
+and canonical/overlapping lease contention. Controlled events propagate early
+outcomes and always release/settle held operations; there are no sleeps or live
+providers. Existing orchestration, CLI/MCP workflow/control, state/operator-stop
+and effect-recovery slow suites retain their cross-capability coverage.
+
 `npm run check` runs formatting verification, the fast test tier, and CLI help.
 Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.

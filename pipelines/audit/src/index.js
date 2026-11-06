@@ -71,11 +71,16 @@ export const auditPipeline = Object.freeze({
     auditor: Object.freeze(["read-only"]),
     reviewer: Object.freeze(["read-only"]),
   }),
-  workspace: Object.freeze({ kind: "directory", lease: "exclusive" }),
+  workspace: Object.freeze({
+    kind: "directory",
+    lease: "exclusive",
+    preparation: "deferred",
+  }),
   resolveWorkspace: ({ taskPath }) =>
     Object.freeze({
       kind: "directory",
       lease: "exclusive",
+      preparation: "deferred",
       artifactPaths: Object.freeze([
         join(taskPath, "clarifications.md"),
         ...reportPaths(taskPath),

@@ -2164,6 +2164,13 @@ independent default/recommendation. Auditor and finding Reviewer always remain
 read-only. Combined uses distinct discovery and finding-review cycles; see the
 [specification](pipelines/audit/docs/SPEC.md).
 
+Audit publishes its run ID before recursive preparation. CLI activity shows
+status, pause and cancel commands immediately; MCP `run_start` acknowledges
+owned detached preparation while capture continues. Status exposes pending
+`workspacePreparation` in `CLARIFY`. Pause/cancel can interrupt capture before
+provider work; resume uses the frozen inputs/configuration under the same
+canonical exclusion. Client wait cancellation leaves detached work running.
+
 Runner publishes `<task-dir>/audit.md` as work progresses. Only rechecked findings
 appear confirmed; pending candidates and hypotheses remain explicitly unverified.
 Completion requires the selected clean-discovery gate, no pending batch and

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-06
+
+- **Audit preparation is supervised before recursive capture.** The audit
+  descriptor selects deferred preparation. Bounded admission freezes exact
+  inputs/configuration and publishes the run identity before source/control
+  traversal. Capture holds execution then canonical workspace ownership and
+  propagates stops without accepting partial fingerprints. MCP acknowledges
+  correlated detached readiness before capture, preserving receipt recovery and
+  client-independent execution. CLI/status expose pending preparation and its
+  controls. Pause/resume and ownerless recovery retain frozen declarations;
+  cancellation preserves evidence without capture, roles, report or Git effects.
+  Legacy bindings and other pipelines keep their existing lifecycle.
+
 ## 2026-11-05
 
 - **Workspace admission is durable before recursive capture.** Common state

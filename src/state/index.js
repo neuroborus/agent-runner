@@ -15,6 +15,7 @@ export { projectOperatorStop } from "./stop-projection.js";
 export { projectObservations, observationActivity } from "./observations.js";
 export {
   deepFreeze,
+  MAX_WORKSPACE_PREPARATION_BYTES,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,

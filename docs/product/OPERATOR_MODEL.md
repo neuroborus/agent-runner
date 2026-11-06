@@ -384,6 +384,16 @@ decisions; it never exposes rejected output or renews a budget. The
 [audit specification](../../pipelines/audit/docs/SPEC.md#structured-report)
 owns diagnostic and compatibility details.
 
+Audit admission publishes a durable identifier before recursive preparation.
+CLI creation activity includes status, pause and cancel commands; MCP start
+acknowledges exclusively owned detached preparation without waiting for capture.
+Status exposes pending `workspacePreparation` while the workflow stays in
+`CLARIFY`. Pause/cancel can stop capture before any provider turn. Resume reuses
+frozen inputs/configuration and reacquires the canonical exclusion owner;
+cancellation retains that evidence and remains terminal. Status/activity/waits
+cannot drive preparation, and a disconnected wait cannot stop detached work.
+See the [audit lifecycle](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
+
 ## Durable state and local artifacts
 
 Run state lives under the user's OS state directory, outside both the target

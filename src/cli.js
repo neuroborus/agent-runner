@@ -261,6 +261,11 @@ function writeActivity(stdout, activity) {
   stdout.write(
     `[${activity.actor}/${activity.phase}] ${activity.message}${runReference}\n`,
   );
+  if (runReference && activity.workspacePreparation != null)
+    stdout.write(
+      `Workspace preparation pending. Observe with: agent-run status --run ${activity.runId}\n` +
+        `Pause with: agent-run pause --run ${activity.runId}; cancel with: agent-run cancel --run ${activity.runId}\n`,
+    );
 }
 
 function refinementProgressLines(progress) {
@@ -340,6 +345,8 @@ function runSummary({ directoryPath, run }) {
     `Mode: ${state.settings?.mode ?? pipeline.settings.mode.defaultValue}`,
     `State: ${state.workflowState}`,
   ];
+  if (run.workspacePreparation != null)
+    lines.push("Workspace preparation: pending");
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
   }

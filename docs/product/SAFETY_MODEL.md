@@ -115,8 +115,13 @@ capture under the execution and canonical exclusion leases may publish complete
 bindings; changed inputs, substituted roots, stale revisions and cancellation
 cannot accept a partial result. Legacy absence preserves completed preparation
 without inventing inspection evidence. The
-[state contract](../ARCHITECTURE.md#external-run-state) owns this foundation;
-pipeline activation is separate from its availability.
+[state contract](../ARCHITECTURE.md#external-run-state) owns this foundation.
+Audit selects deferred preparation: its durable identity is visible before
+capture, and both execution and canonical workspace ownership precede recursive
+reads. Cancellation propagates through traversal; stop settlement preserves an
+uncaptured record without inspecting or adopting partial content. Detached start
+readiness acknowledges this supervision boundary and grants no provider or report
+authority. Other pipelines retain their existing lifecycle.
 
 The directory-workspace inspection foundation protects unrelated content and
 explicit inputs, references, configuration, artifacts, infrastructure and

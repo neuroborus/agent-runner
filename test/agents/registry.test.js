@@ -490,6 +490,7 @@ test("runner construction, attribution, probing, and source sessions use the reg
   });
 
   for (const pipeline of listPipelines()) {
+    const probesBefore = adapter.probes.length;
     const { run } = await runner.create({
       pipelineId: pipeline.id,
       projectPath,
@@ -506,8 +507,14 @@ test("runner construction, attribution, probing, and source sessions use the reg
       new Set(Object.values(run.roles).map(({ backend }) => backend)),
       new Set(["fake"]),
     );
+    const deferred = pipeline.workspace?.preparation === "deferred";
+    if (deferred) {
+      assert.ok(run.workspacePreparation);
+      assert.equal(run.workspace, null);
+      assert.equal(adapter.probes.length, probesBefore);
+    }
     for (const [role, receipt] of Object.entries(run.providerPolicies)) {
-      if (role === "arbiter") {
+      if (role === "arbiter" || deferred) {
         assert.equal(receipt, null);
       } else {
         assert.equal(receipt.schemaVersion, 1);

@@ -2221,8 +2221,32 @@ process custody and does not prevent lease release after stop settlement.
 Legacy absence normalizes to null and preserves completed historical preparation,
 existing workspace bindings and all pipeline evidence during ordinary leased
 migration; it never schedules a new capture. The detached token is `1:25`, with
-matching package compatibility metadata. This is the state foundation; pipeline
-selection of deferred preparation remains separately owned.
+matching package compatibility metadata.
+
+Audit selects `preparation: "deferred"` in its directory workspace descriptor.
+Runner and MCP boundary validation perform only canonical routing, configuration
+and exact-input inspection before admission. They do not call recursive workspace
+inspection. Runner creates the pending record with null provider receipts, then
+publishes creation activity and the durable run ID. `create` returns that admitted
+run; `run` and detached `resume` acquire execution ownership before the frozen
+canonical exclusion lease and capture controls/content with a stop-monitor signal.
+Directory audits share enclosing-worktree and overlapping-directory exclusion
+with other workflows. No admission or partial capture grants Git authority.
+
+An ordinary detached audit dispatch journals readiness under those leases before
+capture. MCP can publish its receipt while preparation is held, and exact-key
+recovery uses that readiness even after disconnect or lost receipt publication.
+Readiness acknowledges supervised preparation, not provider capability, source
+acceptance or completion. Status exposes nullable `workspacePreparation` with
+`status: "pending"`; CLI creation activity prints the identifier and supervision
+commands. Reads and waits remain observational. Stops during capture cancel
+traversal and settle only after owned work retires; an uncaptured workspace is
+never recursively inspected to settle a stop. Pause and cancellation preserve the
+pending record. A resumed pause and ownerless recovery reuse its declarations
+and exact input evidence without resolving configuration or selecting sources
+again. Only complete capture publishes a binding; capability validation precedes
+native role work. Other pipelines and legacy completed audit bindings retain
+their existing lifecycle.
 
 Common envelope version 24 adds a nullable immutable `workspace` binding. New
 runner-created runs save their selected kind, lease policy and canonical key;

@@ -32,6 +32,28 @@ capped at 20 and frozen at creation). The separate
 `maxFindingRecheckPasses` setting has the same default and finite cap.
 The lifecycle imports no root capability or other pipeline.
 
+The descriptor selects deferred workspace preparation. Admission resolves and
+freezes configuration, roles, task/context evidence and canonical exclusion
+before recursive control discovery or capture. Runner publishes the durable run
+ID while the workflow remains in `CLARIFY` with `workspacePreparation` pending;
+there is no accepted workspace binding or provider authority yet. Execution owns
+the run lease before the canonical workspace lease and captures from those frozen
+declarations with traversal cancellation. Only verified complete publication
+clears preparation. Required directory capabilities are validated before native
+role work. Other pipelines retain their existing preparation lifecycle.
+
+CLI creation activity identifies the pending run and its status/pause/cancel
+commands. MCP `run_start` returns after correlated detached readiness under both
+leases, without waiting for capture. Status exposes nullable
+`workspacePreparation: {status: "pending"}` separately from process custody.
+Observation and wait cancellation cannot start or stop capture. Pause/cancel
+settlement retires owned work and preserves the frozen pending record without
+capturing sources, invoking roles or publishing a report. A pause resumes the
+same frozen preparation; cancellation is terminal. Interrupted capture is
+discarded, and ownerless resume reacquires exclusion before recapture. Exact-key
+receipt recovery never launches a second owner. Legacy completed preparation
+and workspace bindings do not schedule capture.
+
 `runAuditDiscovery` consumes existing injected runner workspace, clarification,
 adapter, session-lineage and state-transition capabilities. The runner owns
 confinement, ignored repository-local artifacts, external atomic/journaled state,
