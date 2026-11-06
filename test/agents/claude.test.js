@@ -1582,7 +1582,12 @@ test("binds directory receipts to the inspected selection without visiting opaqu
   assert.equal(turnCalls(fixture).length, 0);
   const files = {
     ...directory.workspacePolicy,
-    inspectionPaths: [directory.selectedFile],
+    inspectionPaths: [
+      ...Array.from({ length: 256 }, (_, index) =>
+        join(directory.cwd, `missing-${index}.md`),
+      ),
+      directory.selectedFile,
+    ],
   };
   const loose = await fixture.adapter.probe({
     ...options,
@@ -1595,6 +1600,15 @@ test("binds directory receipts to the inspected selection without visiting opaqu
   assert.notEqual(
     strict.policyReceipt.fingerprint,
     loose.policyReceipt.fingerprint,
+  );
+  await rm(directory.selectedFile);
+  await mkdir(directory.selectedFile);
+  await assert.rejects(
+    fixture.adapter.probe({
+      ...options,
+      workspacePolicy: { ...files, inspectionFilesOnly: true },
+    }),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
   );
 });
 
@@ -2566,6 +2580,10 @@ test("fails closed on invalid directory declarations and unsupported isolation",
   for (const policy of [
     { ...directory.workspacePolicy, extra: true },
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+    {
+      ...directory.workspacePolicy,
+      sourcePaths: Array(257).fill(directory.cwd),
+    },
     { ...directory.workspacePolicy, inspectionPaths: null },
     { ...directory.workspacePolicy, inspectionFilesOnly: true },
     {
@@ -2577,7 +2595,7 @@ test("fails closed on invalid directory declarations and unsupported isolation",
     { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
     {
       ...directory.workspacePolicy,
-      inspectionPaths: Array(257).fill(directory.cwd),
+      inspectionPaths: Array(10_001).fill(directory.cwd),
     },
     { ...directory.workspacePolicy, excludePaths: null },
     { ...directory.workspacePolicy, excludePaths: [directory.output] },

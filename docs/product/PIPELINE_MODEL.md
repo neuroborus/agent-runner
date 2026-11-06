@@ -75,7 +75,13 @@ repository must not overlap writable changes.
 ## Audit
 
 Audit inspects the agreed Git or ordinary workspace read-only and produces
-`audit.md`. It starts with bounded clarification of scope, references, exclusions
+`audit.md`. Source selection defaults to the whole directory, including ignored
+content, with optional literal confined exclusions pruned before traversal.
+Explicit Git scope selects complete tracked and non-ignored untracked sources
+without gaining Git effects. Configuration freezes before preparation; Git
+membership freezes before capture and is rechecked on reconstruction. Changed
+selection requires a new run; clarification cannot expand it. Legacy whole-directory
+bindings and consumed budgets remain unchanged. It starts with bounded clarification of scope, references, exclusions
 and criteria. References grant no retrieval or write authority. Every new or
 materially revised finding batch requires distinct verification in every mode;
 accepting findings never cleans discovery. Discovery and recheck budgets are

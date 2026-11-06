@@ -83,7 +83,14 @@ function renderHypothesis(hypothesis) {
 /** Render audit.md bytes only. The caller owns review gates and publication. */
 export function renderAuditReport(
   value,
-  { status, pending = [], exclusions = [], references = [] } = {},
+  {
+    status,
+    pending = [],
+    exclusions = [],
+    references = [],
+    sourceScope,
+    excludePaths = [],
+  } = {},
 ) {
   const report = normalizeAuditReport(value);
   const candidates = normalizeAuditReport({
@@ -104,6 +111,14 @@ export function renderAuditReport(
         ? "No confirmed findings."
         : `${count} confirmed finding${count === 1 ? "" : "s"}.`,
       "## Scope",
+      ...(sourceScope === undefined
+        ? []
+        : [
+            `**Frozen source scope:** ${sourceScope === "git" ? "Git-selected working-tree sources" : "Directory"}`,
+            ...(excludePaths.length === 0
+              ? []
+              : ["**Literal excluded paths**", bullets(excludePaths)]),
+          ]),
       bullets(report.scope),
       ...(exclusions.length === 0
         ? []

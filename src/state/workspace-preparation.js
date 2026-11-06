@@ -11,6 +11,7 @@ import {
   normalizeDirectoryPolicy,
   normalizeRunState,
   normalizeWorkspacePreparation,
+  RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
   workspacePreparationInputFingerprint,
 } from "./validation.js";
@@ -106,7 +107,14 @@ async function readInput(input) {
 export async function createWorkspacePreparation(request, run, stateRoot) {
   if (request == null) return null;
   if (
-    !exact(request, "inputs,leasePath,policy") ||
+    !exact(
+      request,
+      `inputs,leasePath,policy${Object.hasOwn(request, "sourceSelection") ? ",sourceSelection" : ""}`,
+    ) ||
+    (request.sourceSelection !== undefined &&
+      (!exact(request.sourceSelection, "fingerprint,kind") ||
+        request.sourceSelection.kind !== "git" ||
+        request.sourceSelection.fingerprint !== null)) ||
     Buffer.byteLength(JSON.stringify(request)) >
       MAX_WORKSPACE_PREPARATION_BYTES ||
     !Array.isArray(request.inputs) ||
@@ -163,8 +171,14 @@ export async function createWorkspacePreparation(request, run, stateRoot) {
     rootBindings,
     inputs,
     inputFingerprint: workspacePreparationInputFingerprint(run),
+    ...(request.sourceSelection === undefined
+      ? {}
+      : { sourceSelection: request.sourceSelection }),
   };
-  normalizeWorkspacePreparation(value, { ...run, schemaVersion: 25 });
+  normalizeWorkspacePreparation(value, {
+    ...run,
+    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+  });
   await verifyWorkspacePreparation(value);
   return value;
 }
@@ -203,7 +217,7 @@ export function createWorkspacePreparationService({
 }) {
   async function capture(
     lease,
-    { worktreeLease, expectedRevision, signal, capture: inspect },
+    { worktreeLease, expectedRevision, signal, select, capture: inspect },
   ) {
     if (
       typeof inspect !== "function" ||
@@ -244,11 +258,55 @@ export function createWorkspacePreparationService({
               signal?.throwIfAborted();
               return snapshot;
             }
-            const initial = await runLeases.runExclusive(
+            let initial = await runLeases.runExclusive(
               lease,
               async ({ record, runDirectory }) =>
                 inspectCurrent(record, runDirectory),
             );
+            if (
+              initial.state.workspacePreparation.sourceSelection
+                ?.fingerprint === null
+            ) {
+              if (typeof select !== "function") invalid();
+              const selected = await select(
+                deepFreeze(structuredClone(initial.state.workspacePreparation)),
+                { signal },
+              );
+              initial = await runLeases.runExclusive(
+                lease,
+                async ({ record, runDirectory }) => {
+                  const snapshot = await inspectCurrent(record, runDirectory);
+                  const next = normalizeRunState(
+                    {
+                      ...snapshot.state,
+                      workspacePreparation: {
+                        ...snapshot.state.workspacePreparation,
+                        ...selected,
+                      },
+                      revision: snapshot.state.revision + 1,
+                      updatedAt: timestamp(snapshot.state.updatedAt),
+                    },
+                    record.runId,
+                  );
+                  if (
+                    !isSelectedPreparation(
+                      snapshot.state.workspacePreparation,
+                      next.workspacePreparation,
+                    )
+                  )
+                    invalid();
+                  await journal.appendTransition(runDirectory, next, snapshot, {
+                    actor: "runner",
+                    phase: "workspace-preparation",
+                    kind: "selected",
+                    message:
+                      "Frozen source membership selected before capture.",
+                  });
+                  expectedRevision = next.revision;
+                  return { ...snapshot, state: next };
+                },
+              );
+            }
             const workspace = await inspect(
               deepFreeze(structuredClone(initial.state.workspacePreparation)),
               { signal },
@@ -263,6 +321,10 @@ export function createWorkspacePreparationService({
                   workspace?.kind !== "directory" ||
                   workspace.leasePath !== pending.leasePath ||
                   !isDeepStrictEqual(workspace.policy, pending.policy) ||
+                  !isDeepStrictEqual(
+                    workspace.sourceSelection,
+                    pending.sourceSelection,
+                  ) ||
                   !isDeepStrictEqual(
                     workspace.absentInputPaths,
                     absentInputPaths(pending),
@@ -296,6 +358,23 @@ export function createWorkspacePreparationService({
   return Object.freeze({ capture });
 }
 
+function isSelectedPreparation(before, after) {
+  if (
+    before?.sourceSelection?.fingerprint !== null ||
+    after?.sourceSelection?.kind !== "git" ||
+    !sha(after.sourceSelection.fingerprint) ||
+    !Array.isArray(after.policy?.inspectionPaths) ||
+    after.policy.inspectionFilesOnly !== true
+  )
+    return false;
+  const { inspectionPaths, inspectionFilesOnly, ...policy } = after.policy;
+  return isDeepStrictEqual(before, {
+    ...after,
+    policy,
+    sourceSelection: before.sourceSelection,
+  });
+}
+
 export function assertWorkspacePreparationContinuity(
   previous,
   current,
@@ -313,19 +392,29 @@ export function assertWorkspacePreparationContinuity(
     updatedAt,
     ...state
   }) => state;
-  if (
-    before == null ||
-    after !== null ||
-    current.workspace?.kind !== "directory" ||
-    current.workspace.leasePath !== before.leasePath ||
-    !isDeepStrictEqual(current.workspace.policy, before.policy) ||
-    !isDeepStrictEqual(
+  const selected =
+    activity?.kind === "selected" &&
+    current.workspace === null &&
+    isSelectedPreparation(before, after);
+  const captured =
+    activity?.kind === "captured" &&
+    after === null &&
+    current.workspace?.kind === "directory" &&
+    current.workspace.leasePath === before?.leasePath &&
+    isDeepStrictEqual(current.workspace.policy, before?.policy) &&
+    isDeepStrictEqual(
+      current.workspace.sourceSelection,
+      before?.sourceSelection,
+    ) &&
+    isDeepStrictEqual(
       current.workspace.absentInputPaths,
       absentInputPaths(before),
-    ) ||
+    );
+  if (
+    before == null ||
+    (!selected && !captured) ||
     activity?.actor !== "runner" ||
     activity.phase !== "workspace-preparation" ||
-    activity.kind !== "captured" ||
     previous.pause !== null ||
     previous.pipelineState.workflowState !== "CLARIFY" ||
     (previous.stopRequest != null &&

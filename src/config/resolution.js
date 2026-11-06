@@ -60,7 +60,13 @@ function normalizeSettingOverrides(pipeline, input) {
   );
 }
 
-function pipelineSettings(pipeline, configuration, project, overrides) {
+function pipelineSettings(
+  pipeline,
+  configuration,
+  project,
+  overrides,
+  { validateRelationships = true } = {},
+) {
   const { roles: _roles, ...runnerSettings } =
     configuration.pipelines[pipeline.id];
   const { roles: _projectRoles, ...projectSettings } =
@@ -70,11 +76,13 @@ function pipelineSettings(pipeline, configuration, project, overrides) {
     ...projectSettings,
     ...normalizeSettingOverrides(pipeline, overrides),
   });
-  assertPipelineSettings(pipeline, settings, `pipelines.${pipeline.id}`);
+  if (validateRelationships)
+    assertPipelineSettings(pipeline, settings, `pipelines.${pipeline.id}`);
   return settings;
 }
 
 // Workspace discovery needs settings before project roles can be resolved.
+// Values remain strict; relationships wait for the project overlay and overrides.
 export function resolvePipelineSettings(
   pipelineId,
   configuration,
@@ -91,6 +99,7 @@ export function resolvePipelineSettings(
     normalizeConfiguration(configuration, providers),
     null,
     settingOverrides,
+    { validateRelationships: false },
   );
 }
 

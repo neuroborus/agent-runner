@@ -68,6 +68,8 @@ export function publicationContent(state) {
     pending,
     exclusions: state.inputs.exclusions,
     references: state.inputs.references,
+    sourceScope: state.settings.sourceScope,
+    excludePaths: state.settings.excludePaths ?? [],
   });
   assertAudit(
     Buffer.byteLength(content) <= MAX_REPORT_BYTES,
@@ -81,6 +83,16 @@ export function publicationContent(state) {
         report,
         pending,
         inputs: state.inputsFingerprint,
+        ...(state.settings.sourceScope === undefined
+          ? {}
+          : {
+              sourceSelection: {
+                sourceScope: state.settings.sourceScope,
+                excludePaths: state.settings.excludePaths,
+                fingerprint:
+                  state.repositoryBaseline.sourceSelection?.fingerprint ?? null,
+              },
+            }),
       }),
       contentHash: createHash("sha256").update(content).digest("hex"),
       complete,

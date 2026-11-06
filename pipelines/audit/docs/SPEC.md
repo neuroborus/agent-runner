@@ -32,6 +32,39 @@ capped at 20 and frozen at creation). The separate
 `maxFindingRecheckPasses` setting has the same default and finite cap.
 The lifecycle imports no root capability or other pipeline.
 
+The descriptor also owns `sourceScope` (`directory`, the default, or `git`) and
+`excludePaths` (default `[]`). CLI `--source-scope` and repeatable `--exclude-path`,
+and MCP `sourceScope`/`excludePaths`, use ordinary configuration precedence and
+freeze before preparation. Discovery validates individual values; the combined
+scope/exclusion constraint uses the effective project overlay and overrides
+before admission, rather than a provisional runner/override combination.
+Exclusions are distinct literal workspace-relative
+paths (at most 256, each at most 4,096 characters), without absolute paths,
+empty/dot/dot-dot components or control characters; there is no glob interpretation. They require
+directory scope. Whole-directory capture includes ignored content; excluded
+leaves and descendants stay opaque during control discovery, hashing and provider
+preparation. Required inputs, configuration, task/artifact paths, controls and link
+dependencies cannot overlap exclusions. Exclusions grant no access or storage authority.
+
+Explicit Git scope resolves the worktree root only after configuration selects
+it, while retaining the directory lifecycle, canonical exclusion and read-only
+permissions. Runner uses the Git-owned complete source selector: unchanged and
+ignored tracked files, dirty/deleted tracked paths and non-ignored untracked
+sources. It journals the membership/provenance fingerprint and file-only
+inspection declarations (up to 10,000 roots through both provider normalizers)
+before capture, rechecks them around capture and on
+reconstruction, and rejects drift without adopting new membership. Selection and
+source bytes bind snapshots, provider preparation/receipts, all role context,
+finding verification and report publication. Providers receive filesystem
+declarations, never Git interpretation or effects. Ordinary-directory audits
+require no Git invocation.
+
+Clarification can narrow semantic coverage but cannot expand that frozen source
+boundary or remove its exclusions; a changed selection requires a new run.
+CLI status displays source scope/exclusions; MCP `auditSource` also exposes the
+nullable Git selection fingerprint. New reports show the frozen source scope
+and literal exclusions separately from semantic scope and exclusions.
+
 The descriptor selects deferred workspace preparation. Admission resolves and
 freezes configuration, roles, task/context evidence and canonical exclusion
 before recursive control discovery or capture. Runner publishes the durable run
@@ -90,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 6 retains the workspace baseline, frozen declarations and their
+State version 7 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -424,6 +457,14 @@ history entry. No feedback can create acceptance, cleanliness, freshness or an
 allowance: ordinary reservation, session, correction and finite-budget rules still
 apply. Clarification feedback consumes no question round. Legacy invalid results
 without diagnostics retain their original supported resume behavior.
+
+The version-6 migration to version 7 preserves frozen settings and all saved
+bindings, baselines, modes, findings, receipts, rejection history and both finite
+budgets byte-for-byte. Missing source settings retain whole-directory semantics
+and historical report bytes; migration creates neither inspection evidence nor
+a new capture. Pending legacy preparation retains its original input fingerprint.
+New runs persist the resolved source settings. Common envelope version 26 owns
+the optional durable Git selection; older envelopes cannot carry it.
 
 The descriptor projects fixed corrective guidance and bounded evidence strings
 with the checkpoint, finite diagnostic code, schema field and constraint through

@@ -293,7 +293,12 @@ export async function runAuditDiscovery({
     });
     const feedback = state().correctionFeedback;
     const correcting = feedback?.phase === phase;
-    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}${correcting ? `\n\n${CORRECTION_INSTRUCTIONS}` : ""}\n\n${JSON.stringify({ ...evidence, ...(correcting ? { correctionFeedback: feedback } : {}) })}`;
+    const sourceSelection = {
+      sourceScope: state().settings.sourceScope ?? "directory",
+      excludePaths: state().settings.excludePaths ?? [],
+      fingerprint: current.workspace?.sourceSelection?.fingerprint ?? null,
+    };
+    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}${correcting ? `\n\n${CORRECTION_INSTRUCTIONS}` : ""}\n\n${JSON.stringify({ ...evidence, sourceSelection, ...(correcting ? { correctionFeedback: feedback } : {}) })}`;
     const configuration = current.roles[role];
     let response;
     let agentError;

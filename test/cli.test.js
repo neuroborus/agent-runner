@@ -168,6 +168,64 @@ function fakeRunner(overrides = {}) {
   };
 }
 
+test("audit CLI maps source scope and repeated literal exclusions through descriptor settings", async () => {
+  let request;
+  const stderr = createSink();
+  const runner = fakeRunner({
+    async run(input) {
+      request = input;
+      return commandResult({ pipelineId: "audit" });
+    },
+  });
+  assert.equal(
+    await main(
+      [
+        "run",
+        "audit",
+        "--project",
+        "/workspace",
+        "--task",
+        "/task",
+        "--source-scope",
+        "directory",
+        "--exclude-path",
+        "generated",
+        "--exclude-path",
+        "cache",
+      ],
+      { runner, stdout: createSink().stream, stderr: stderr.stream },
+    ),
+    0,
+    stderr.read(),
+  );
+  assert.deepEqual(request.settingOverrides, {
+    sourceScope: "directory",
+    excludePaths: ["generated", "cache"],
+  });
+  for (const options of [
+    ["--source-scope", "other"],
+    ["--exclude-path", "../outside"],
+  ]) {
+    request = null;
+    assert.equal(
+      await main(
+        [
+          "run",
+          "audit",
+          "--project",
+          "/workspace",
+          "--task",
+          "/task",
+          ...options,
+        ],
+        { runner, stdout: createSink().stream, stderr: stderr.stream },
+      ),
+      1,
+    );
+    assert.equal(request, null);
+  }
+});
+
 test("status renders the derived refinement artifact, thresholds and verified original/replacement progress", async () => {
   const result = commandResult();
   Object.assign(result.run.pipelineState, {

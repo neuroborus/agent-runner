@@ -59,15 +59,14 @@ See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
 [execution](../pipelines/plan-execution/docs/SPEC.md), and
 [polishing](../pipelines/polishing/docs/SPEC.md) specifications.
 
-Audit verifies every new or materially revised finding batch before further
-discovery in every mode. Combined retains each Auditor or correcting finding
-Reviewer until its own series is clean, then requires a later fresh owner's
-clean first pass. Discovery cleanliness and finding acceptance remain separate.
-Runner alone publishes the report; complete publication requires the selected
-discovery gate, no pending batch and unchanged bindings. Both run-wide pass
-budgets remain capped at 20 across resume. Pending candidates and hypotheses
-stay unverified; zero or Critical findings may accompany success. Findings
-grant no fixes, Git effects, retrieval or automatic issues. See the
+Audit defaults to whole-directory sources. Use `--source-scope git` for complete
+Git-selected sources, or repeat `--exclude-path` for opaque literal subtrees in
+directory scope. MCP uses `sourceScope` and `excludePaths`. Selection freezes
+before visible, cancellable preparation; changed selection requires a new run.
+Every material finding batch requires verification before discovery continues.
+Discovery cleanliness and finding acceptance remain separate; both run-wide
+budgets stay capped at 20. Runner alone publishes the report. Findings grant no
+fixes, Git effects, retrieval or automatic issues. See the
 [audit specification](../pipelines/audit/docs/SPEC.md).
 
 New eligible commit-plan runs can assess oversized unfinished work and accept

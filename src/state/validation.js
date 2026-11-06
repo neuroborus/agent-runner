@@ -18,7 +18,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 25;
+export const RUN_STATE_SCHEMA_VERSION = 26;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -58,6 +58,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   22,
   23,
   24,
+  25,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -1503,6 +1504,7 @@ function normalizeWorkspace(value, run) {
     "ancestorBindings",
     "absentInputPaths",
     "retrievalPermissions",
+    ...(Object.hasOwn(value, "sourceSelection") ? ["sourceSelection"] : []),
   ]);
   rejectUnknownFields(value, fields, "run.workspace");
   const canonical = (path) =>
@@ -1553,6 +1555,7 @@ function normalizeWorkspace(value, run) {
     fail("run.workspace is invalid.");
   if (value.kind === "git") {
     if (
+      Object.hasOwn(value, "sourceSelection") ||
       value.leasePath !== run.projectPath ||
       value.policy !== null ||
       value.bindingFingerprint !== null ||
@@ -1563,6 +1566,7 @@ function normalizeWorkspace(value, run) {
       fail("Git workspace binding is invalid.");
   } else {
     normalizeDirectoryPolicy(value.policy, run);
+    normalizeSourceSelection(value.sourceSelection, value.policy, run);
     if (
       value.lease !== "exclusive" ||
       [value.bindingFingerprint, value.protectedFingerprint].some(
@@ -1572,6 +1576,27 @@ function normalizeWorkspace(value, run) {
       fail("Directory workspace binding is invalid.");
   }
   return structuredClone(value);
+}
+
+function normalizeSourceSelection(value, policy, run, pending = false) {
+  if (value === undefined) return;
+  if (
+    run.schemaVersion < 26 ||
+    !isRecord(value) ||
+    Object.keys(value).sort().join() !== "fingerprint,kind" ||
+    value.kind !== "git" ||
+    (value.fingerprint === null
+      ? !pending ||
+        ["inspectionPaths", "inspectionFilesOnly", "excludePaths"].some(
+          (name) => Object.hasOwn(policy, name),
+        )
+      : typeof value.fingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(value.fingerprint) ||
+        !Array.isArray(policy.inspectionPaths) ||
+        policy.inspectionFilesOnly !== true ||
+        (policy.excludePaths?.length ?? 0) !== 0)
+  )
+    fail("Frozen Git source selection is invalid.");
 }
 
 // Pausing changes only the workflow state, never the admitted configuration,
@@ -1626,7 +1651,7 @@ export function normalizeWorkspacePreparation(value, run) {
   if (
     !exact(
       value,
-      "inputFingerprint,inputs,leasePath,policy,rootBindings,schemaVersion",
+      `inputFingerprint,inputs,leasePath,policy,rootBindings,schemaVersion${Object.hasOwn(value ?? {}, "sourceSelection") ? ",sourceSelection" : ""}`,
     ) ||
     run.schemaVersion < 25 ||
     value.schemaVersion !== 1 ||
@@ -1674,6 +1699,7 @@ export function normalizeWorkspacePreparation(value, run) {
   )
     invalid();
   normalizeDirectoryPolicy(value.policy, run);
+  normalizeSourceSelection(value.sourceSelection, value.policy, run, true);
   const configuration = run.projectConfigurationProtection;
   const roots = new Set(value.rootBindings.map(({ path }) => path));
   if (

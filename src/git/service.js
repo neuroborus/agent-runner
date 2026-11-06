@@ -165,8 +165,8 @@ export function createGitService(options = {}) {
   }
   const runGit = createGitCommandRunner({ env, gitBinary });
 
-  async function currentHead(repositoryPath) {
-    const result = await runGit(
+  async function currentHead(repositoryPath, execute = runGit) {
+    const result = await execute(
       repositoryPath,
       ["rev-parse", "--verify", "HEAD"],
       { allowedExitCodes: [0, 128] },
@@ -210,11 +210,15 @@ export function createGitService(options = {}) {
 
   async function selectSources(options) {
     assertOptions(options, "Source-selection options");
-    const { projectPath, expectedSelectionFingerprint } = options;
+    const { projectPath, expectedSelectionFingerprint, signal } = options;
     if (
       Object.keys(options).some(
-        (key) => !["projectPath", "expectedSelectionFingerprint"].includes(key),
+        (key) =>
+          !["projectPath", "expectedSelectionFingerprint", "signal"].includes(
+            key,
+          ),
       ) ||
+      (signal !== undefined && !(signal instanceof AbortSignal)) ||
       (expectedSelectionFingerprint !== undefined &&
         (typeof expectedSelectionFingerprint !== "string" ||
           !SHA256_PATTERN.test(expectedSelectionFingerprint)))
@@ -223,9 +227,21 @@ export function createGitService(options = {}) {
         code: "ERR_INVALID_GIT_OPTIONS",
       });
     }
-    const repositoryPath = await resolveRepository(runGit, projectPath);
+    const execute = (path, args, options) =>
+      runGit(path, args, { ...options, signal });
+    let repositoryPath;
+    try {
+      repositoryPath = await resolveRepository(execute, projectPath);
+    } finally {
+      signal?.throwIfAborted();
+    }
     return selectSourcesAtRoot(
-      { currentHead, indexFingerprint, runGit },
+      {
+        currentHead: (path) => currentHead(path, execute),
+        indexFingerprint: (path) => indexFingerprint(path, execute),
+        runGit: execute,
+        signal,
+      },
       repositoryPath,
       expectedSelectionFingerprint,
     );
@@ -262,11 +278,11 @@ export function createGitService(options = {}) {
     return Object.freeze({ all, excluding: hash.digest("hex") });
   }
 
-  async function indexFingerprint(repositoryPath) {
-    const [entries, flags, cachedChanges] = await Promise.all([
-      runGit(repositoryPath, ["ls-files", "--stage", "--resolve-undo", "-z"]),
-      runGit(repositoryPath, ["ls-files", "-v", "-z"]),
-      runGit(repositoryPath, [
+  async function indexFingerprint(repositoryPath, execute = runGit) {
+    const results = await Promise.allSettled([
+      execute(repositoryPath, ["ls-files", "--stage", "--resolve-undo", "-z"]),
+      execute(repositoryPath, ["ls-files", "-v", "-z"]),
+      execute(repositoryPath, [
         "diff",
         "--cached",
         "--raw",
@@ -279,6 +295,9 @@ export function createGitService(options = {}) {
         "-z",
       ]),
     ]);
+    for (const result of results)
+      if (result.status === "rejected") throw result.reason;
+    const [entries, flags, cachedChanges] = results.map(({ value }) => value);
     return createHash("sha256")
       .update(entries.stdout)
       .update("\0")

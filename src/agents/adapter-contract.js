@@ -49,6 +49,8 @@ const WORKSPACE_POLICY_PATHS = Object.freeze([
   "infrastructurePaths",
 ]);
 const MAX_WORKSPACE_PATHS = 256;
+// File selections match persisted directory policy capacity, not permission roots.
+const MAX_INSPECTION_PATHS = 10_000;
 const MAX_DIRECTORY_STORAGE_PATHS =
   3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
@@ -818,7 +820,9 @@ export function createAdapterContract({
     for (const name of ["inspectionPaths", "excludePaths"]) {
       if (value[name] === undefined) continue;
       const entries = value[name];
-      if (!Array.isArray(entries) || entries.length > MAX_WORKSPACE_PATHS)
+      const limit =
+        name === "inspectionPaths" ? MAX_INSPECTION_PATHS : MAX_WORKSPACE_PATHS;
+      if (!Array.isArray(entries) || entries.length > limit)
         throw optionsError("Declared inspection scope is invalid.");
       const paths = Array.from(entries, (entry) => {
         assertString(entry, "Declared inspection path");

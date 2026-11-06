@@ -202,7 +202,7 @@ Directory lifecycle protected fingerprints exempt only declared outputs and
 artifacts. A task root coinciding with or containing the workspace never exempts
 other project content; runner-owned task artifacts must be declared explicitly.
 
-`git.selectSources({projectPath, expectedSelectionFingerprint?})` resolves an
+`git.selectSources({projectPath, expectedSelectionFingerprint?, signal?})` resolves an
 existing worktree and enumerates complete current sources independently of the
 changed-path snapshot. `trackedPaths` is the sorted union of the literal HEAD
 tree and index entries, retaining staged-deletion names and ignored tracked
@@ -235,7 +235,9 @@ inspection roots. Submodule traversal is unsupported by this selector; existing
 Git snapshot and measurement gitlink behavior is unchanged. Selection neither
 initializes Git nor writes source, index, refs, remotes or identity, and grants
 no provider, staging or commit authority. Ordinary-directory consumers remain
-Git-independent. Pipeline activation and scope settings are separately owned.
+Git-independent. Cancellation interrupts path classification and Git commands;
+selection waits for child closure, including all concurrent index reads.
+Audit activates this selector through its descriptor-owned source settings.
 
 `readFile({path, projectPath, optional, maxBytes})` confines text input reads to a real
 regular file beneath the supplied root, reusing descriptor-anchored snapshot
@@ -756,7 +758,17 @@ feedback retains only those constraints and exact checkpoint bindings for suppor
 resume; it grants no acceptance or additional retry allowance. The audit
 specification owns the exact contract.
 Its descriptor selects read-only
-directory inspection and an exclusive canonical workspace lease. The discovery
+directory inspection and an exclusive canonical workspace lease. It freezes
+`sourceScope` (`directory` by default, or explicit `git`) and literal `excludePaths`
+(directory only) before preparation. Git scope resolves the worktree root without
+gaining Git effects. Runner journals membership before capture and verifies it
+around capture and reconstruction. Directory scope prunes exclusions before
+traversal and never invokes Git. Filesystem declarations bind provider receipts;
+Runner additionally binds Git provenance into snapshot fingerprints and role
+context. Report/finding bindings consume that same snapshot. New report bytes
+and report fingerprints also bind frozen source settings. Audit state version 7
+preserves legacy missing settings as whole-directory scope without altering
+evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
 transition capabilities; it grants no new root authority. Frozen scope,
 references, exclusions, criteria and snapshot/report bindings precede discovery.
@@ -1405,7 +1417,10 @@ lists.
 
 Descriptors may additionally validate relationships among resolved settings;
 configuration applies this hook to complete root settings and merged project
-settings before role resolution. Execution uses it to reject unsafe multiplication
+settings before role resolution. Preliminary workspace discovery validates each
+override value but defers relationships until the project overlay and overrides
+are merged; a provisional combination cannot reject a valid effective selection.
+Execution uses it to reject unsafe multiplication
 of its positive-safe-integer `preferredCommitLineLimit` (900) and
 `commitSizeAssessmentMultiplier` (3), including when its strict boolean
 `automaticCommitSplitting` (default `true`) disables assessment. All three
@@ -2208,7 +2223,8 @@ identities and cancellation, then journals one `workspace-preparation/captured`
 transition atomically binding the completed workspace and clearing the pending
 record. The resulting policy, exclusion key and absent inputs must match the
 admission, including the exact absent-input list during journal replay.
-Journal replay permits no other replacement or removal. Interrupted
+Journal replay permits no other replacement or removal except the bounded
+source-selection transition described below. Interrupted
 capture publishes no partial fingerprints; recovery recaptures from frozen
 declarations. An interrupted complete publication uses ordinary journal recovery
 without repeating capture. Stale revisions, substituted inputs/roots, uncertain
@@ -2220,8 +2236,21 @@ Pause and cancellation preserve the record. A quiescent pending record is not
 process custody and does not prevent lease release after stop settlement.
 Legacy absence normalizes to null and preserves completed historical preparation,
 existing workspace bindings and all pipeline evidence during ordinary leased
-migration; it never schedules a new capture. The detached token is `1:25`, with
-matching package compatibility metadata.
+migration; it never schedules a new capture.
+
+Common envelope version 26 adds optional `sourceSelection: {kind: "git",
+fingerprint}` to pending and completed directory bindings. Only new Git-scoped
+preparation starts with a null fingerprint and no inspection roots. Under both
+owners, `captureWorkspacePreparation` obtains the Git-owned selection outside
+the short mutation boundary, rechecks frozen inputs/revision/owners, then journals
+`workspace-preparation/selected` before capture. This transition may add only the
+confined file-only inspection declarations and non-null membership fingerprint;
+all other admission evidence remains identical. Capture and journal replay must
+preserve that exact selection. Interrupted selection publication recovers once;
+later capture/reconstruction verifies existing membership rather than reselecting.
+Partial capture supplies no authority. Version-25 preparation and completed
+bindings remain unchanged on migration. The detached token is `1:26`, with
+matching package metadata and audit version 7 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration
@@ -3585,7 +3614,9 @@ and `stateRoot`, optional `taskPath`, and the workspace service's six path array
 and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
 `cwd`. Optional `inspectionPaths` contains confined canonical absolute inspection
 roots; optional `excludePaths` contains literal workspace-relative subtrees.
-Both lists are normalized, copied and frozen, with at most 256 entries each.
+Both lists are normalized, copied and frozen. Inspection roots accept up to
+10,000 entries, matching the persisted directory policy; exclusions retain their
+256-entry limit. The file-only constraint applies to every selected root.
 Optional boolean `inspectionFilesOnly` requires explicit inspection roots and
 preserves their file/link/missing restriction through both providers' workspace
 checks, receipts and reconstruction without granting new native permissions.
@@ -3596,7 +3627,9 @@ receipts and every pre-launch/post-retirement snapshot, including reconstruction
 neither provider derives Git membership. Exclusions narrow inspection without
 widening native read/write permissions or storage placement.
 Each ordinary path array accepts at most 256 paths. Runner storage exclusions
-remove duplicates and descendants already covered by a parent; directory requests allow
+contain only canonical absolute protection roots, removing duplicates and
+descendants already covered by a parent. Relative inspection exclusions are
+covered by the workspace root and never become storage declarations. Directory requests allow
 up to 1,539 exclusions for all six arrays plus workspace, task and state roots.
 Every declared read/output root remains protected. Unknown fields, noncanonical
 inspection/read/output roots and directory `local-commit` requests are invalid.
@@ -5210,7 +5243,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 25 (`1:25`); legacy runs require an explicit leased migration publishing
+version 26 (`1:26`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.
@@ -5409,6 +5442,9 @@ that directory and its relative declarations; the enclosing repository supplies
 only its canonical exclusion key. Commit selection canonicalizes the workspace
 and retains the exact selected configuration file. The configuration boundary
 resolves preliminary settings without requiring project-supplied role backends.
+It validates individual values without applying relationships to an incomplete
+runner/override combination; effective settings are validated after the project
+overlay and overrides are merged, before binding, capture or provider work.
 Artifact binding checks the final merged declarations for overlap with inputs,
 sources and configuration; preliminary discovery cannot reject declarations
 superseded by project overrides. Directory bindings also protect inputs,

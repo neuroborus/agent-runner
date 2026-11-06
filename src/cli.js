@@ -212,6 +212,8 @@ Options:
                            combined adds primary convergence before independent review
                            and is available for all registered pipelines;
                            audit uses separate discovery and finding recheck cycles
+      --source-scope       Audit sources: directory (default) or git
+      --exclude-path       Literal directory-scope subtree to exclude; repeatable
       --placement          Init placement: integrated or external; separate from mode
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
@@ -347,6 +349,11 @@ function runSummary({ directoryPath, run }) {
   ];
   if (run.workspacePreparation != null)
     lines.push("Workspace preparation: pending");
+  if (status.auditSource) {
+    lines.push(`Audit source scope: ${status.auditSource.sourceScope}`);
+    for (const path of status.auditSource.excludePaths)
+      lines.push(`Excluded path: ${path}`);
+  }
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
   }

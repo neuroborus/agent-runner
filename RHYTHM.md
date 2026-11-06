@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-06
 
+- **Audit source selection is explicit and frozen before capture.** Directory
+  scope remains the default and prunes literal exclusions before discovery,
+  hashing and provider preparation. Explicit Git scope reuses complete Git-owned
+  membership while retaining directory permissions and canonical exclusion.
+  Common state 26 journals membership before capture, rechecks it on recovery
+  and rejects drift rather than adopting a new source set. CLI/MCP settings,
+  provider declarations, role context, snapshots and reports share that selection.
+  Clarification cannot expand it. Audit state 7 preserves legacy whole-directory
+  settings, bindings, report bytes, receipts, histories and finite budgets.
+  No selection grants Git effects, repairs, retrieval or automatic issues.
+
 - **Audit preparation is supervised before recursive capture.** The audit
   descriptor selects deferred preparation. Bounded admission freezes exact
   inputs/configuration and publishes the run identity before source/control

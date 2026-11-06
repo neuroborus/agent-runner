@@ -206,6 +206,19 @@ function createRunStartSchema(providers) {
       taskPath: z.string().min(1),
       proactiveClarification: z.boolean().default(false),
       mode: pipelineMode.optional(),
+      sourceScope: z
+        .enum(["directory", "git"])
+        .optional()
+        .describe(
+          "Audit source selection, frozen before capture. Directory is the default; git selects complete tracked and non-ignored untracked sources without Git effects.",
+        ),
+      excludePaths: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional()
+        .describe(
+          "Audit-only literal confined subtrees, pruned before traversal. Requires directory source scope; cannot overlap required inputs or controls.",
+        ),
       placement: z
         .enum(["integrated", "external"])
         .optional()
@@ -413,6 +426,8 @@ function runnerStartInput(input) {
     contextSize,
     effort,
     mode,
+    sourceScope,
+    excludePaths,
     placement,
     planKind,
     criteriaPath,
@@ -431,6 +446,8 @@ function runnerStartInput(input) {
     settingOverrides: Object.fromEntries(
       Object.entries({
         mode,
+        sourceScope,
+        excludePaths,
         placement,
         planKind,
         criteriaPath,
@@ -549,6 +566,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     clarificationPath: clarification.path,
     planPath: status.planPath,
     ...(status.auditReport ? { auditReport: status.auditReport } : {}),
+    ...(status.auditSource ? { auditSource: status.auditSource } : {}),
     ...(status.setup ? { setup: status.setup } : {}),
     refinementProgress: status.refinementProgress ?? null,
     pendingInput: pendingInput(run),
@@ -986,8 +1004,15 @@ export function createMcpControlPlane(options = {}) {
         boundary = await runner.validateBoundary(
           runnerStartInput(input),
           run.workspacePreparation != null
-            ? { kind: "directory", preparation: "deferred" }
-            : (run.workspace ?? { kind: "git" }),
+            ? {
+                kind: "directory",
+                preparation: "deferred",
+                sourceScope: run.pipelineState.settings?.sourceScope,
+              }
+            : {
+                ...(run.workspace ?? { kind: "git" }),
+                sourceScope: run.pipelineState.settings?.sourceScope,
+              },
         );
       } catch (cause) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
@@ -1012,6 +1037,8 @@ export function createMcpControlPlane(options = {}) {
           input.proactiveClarification ||
         (input.mode !== undefined && resolvedMode(run) !== input.mode) ||
         [
+          "sourceScope",
+          "excludePaths",
           "placement",
           "planKind",
           "criteriaPath",

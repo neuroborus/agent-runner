@@ -147,6 +147,13 @@ export const auditProjections = Object.freeze({
       stagnationDirection: null,
       finalizedFingerprint: null,
       reviewedFingerprint: null,
+      auditSource: Object.freeze({
+        sourceScope: state.settings.sourceScope ?? "directory",
+        excludePaths: Object.freeze([...(state.settings.excludePaths ?? [])]),
+        selectionFingerprint:
+          (run.workspacePreparation ?? run.workspace)?.sourceSelection
+            ?.fingerprint ?? null,
+      }),
       auditReport: Object.freeze({
         path: join(run.taskPath, REPORT_FILENAME),
         status:

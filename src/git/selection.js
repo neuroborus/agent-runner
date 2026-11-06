@@ -104,16 +104,18 @@ async function membership(
   };
 }
 
-async function sourceKinds(projectPath, paths, tracked) {
+async function sourceKinds(projectPath, paths, tracked, signal) {
   const kinds = new Map();
   const ancestors = new Map();
   for (const path of paths) {
+    signal?.throwIfAborted();
     let parent = projectPath;
     let missing = false;
     const parts = path.split("/");
     // Check real routing ancestors before touching a leaf. Leaf symlinks are
     // selected as links; their targets remain the workspace capture's concern.
     for (const part of parts.slice(0, -1)) {
+      signal?.throwIfAborted();
       parent = join(parent, part);
       if (!ancestors.has(parent)) {
         try {
@@ -158,10 +160,20 @@ export async function selectSourcesAtRoot(
     const before = await membership(context, projectPath);
     const paths = [...before.trackedPaths, ...before.untrackedPaths].sort();
     const tracked = new Set(before.trackedPaths);
-    const kinds = await sourceKinds(projectPath, paths, tracked);
+    const kinds = await sourceKinds(
+      projectPath,
+      paths,
+      tracked,
+      context.signal,
+    );
     const after = await membership(context, projectPath);
     if (JSON.stringify(before) !== JSON.stringify(after)) throw changed();
-    const currentKinds = await sourceKinds(projectPath, paths, tracked);
+    const currentKinds = await sourceKinds(
+      projectPath,
+      paths,
+      tracked,
+      context.signal,
+    );
     if (paths.some((path) => kinds.get(path) !== currentKinds.get(path)))
       throw changed();
     const selection = {
@@ -186,6 +198,7 @@ export async function selectSourcesAtRoot(
     }
     return Object.freeze({ ...selection, selectionFingerprint });
   } catch (cause) {
+    if (context.signal?.aborted) throw context.signal.reason;
     if (cause instanceof GitSafetyError) throw cause;
     throw new GitSafetyError("Cannot safely select Git workspace sources.", {
       cause,

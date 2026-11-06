@@ -60,6 +60,7 @@ import {
   directorySafety,
   inspectBoundWorkspace,
   publishOutputDirectory,
+  selectWorkspacePreparation,
   workspaceSelection,
 } from "./workspace.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
@@ -456,6 +457,7 @@ export function createRunner(options = {}) {
       run.projectConfigurationProtection?.infrastructureRoot,
     ].filter((path) => typeof path === "string");
     if (run.workspace?.policy == null) return base;
+    // Relative inspection exclusions are already protected by the workspace root.
     const roots = [
       ...new Set(
         [
@@ -463,7 +465,12 @@ export function createRunner(options = {}) {
           ...Object.values(run.workspace.policy).flatMap((value) =>
             Array.isArray(value) ? value : [],
           ),
-        ].filter((path) => typeof path === "string"),
+        ].filter(
+          (path) =>
+            typeof path === "string" &&
+            isAbsolute(path) &&
+            resolve(path) === path,
+        ),
       ),
     ];
     return roots.filter(
@@ -578,7 +585,7 @@ export function createRunner(options = {}) {
           ? directorySafety(run.workspace, workspace, async () =>
               inspectPipelineWorkspace(await runStore.loadRun(run.runId)),
             )
-          : directorySafety(run.workspace, workspace)
+          : directorySafety(run.workspace, workspace, undefined, git)
         : git;
     const authentication = createAuthenticationPolicy({ providers });
     const outputExhaustion = createDispositionPolicy({
@@ -677,7 +684,7 @@ export function createRunner(options = {}) {
                   );
                 await monitor.check();
                 await guardProjectConfiguration(latest);
-                await inspectBoundWorkspace(latest.workspace, workspace);
+                await inspectBoundWorkspace(latest.workspace, workspace, git);
                 const selection = {
                   ...latest.workspace.policy,
                   kind: "directory",
@@ -711,7 +718,7 @@ export function createRunner(options = {}) {
                   (role, proof) =>
                     assertSetupProviderAuthority(latest, role, proof),
                 );
-                await inspectBoundWorkspace(latest.workspace, workspace);
+                await inspectBoundWorkspace(latest.workspace, workspace, git);
                 run = await runStore.bindWorkspaceReads(lease, {
                   workspace: rebound,
                   providerPolicies,
@@ -1441,8 +1448,10 @@ export function createRunner(options = {}) {
             worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
             expectedRevision: run.revision,
             signal,
+            select: (pending) =>
+              selectWorkspacePreparation(pending, git, signal),
             capture: (pending) =>
-              captureWorkspacePreparation(pending, workspace, signal),
+              captureWorkspacePreparation(pending, workspace, signal, git),
           }),
         );
         await publish(
@@ -1915,7 +1924,8 @@ export function createRunner(options = {}) {
         projectConfigurationPath: configurationPath,
       };
     }
-    if (selection.kind === "directory") return boundary;
+    if (selection.kind === "directory" && selection.sourceScope !== "git")
+      return boundary;
     if (
       localPath !== "" &&
       !isAbsolute(localPath) &&
@@ -2018,7 +2028,10 @@ export function createRunner(options = {}) {
           );
     if (selection.kind === "directory") {
       const boundary = await runStore.validateStateBoundary({
-        projectPath,
+        projectPath:
+          selection.sourceScope === "git"
+            ? await git.resolveProject(projectPath)
+            : projectPath,
         taskPath,
       });
       if (selection.preparation !== "deferred")
@@ -2115,7 +2128,7 @@ export function createRunner(options = {}) {
           loadConfiguration,
         }),
       );
-    return inspectBoundWorkspace(run.workspace, workspace);
+    return inspectBoundWorkspace(run.workspace, workspace, git);
   }
 
   function assertSetupProviderAuthority(run, role, proof) {

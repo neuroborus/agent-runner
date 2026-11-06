@@ -27,9 +27,9 @@
     "schemaVersion": 1,
     "configurationVersion": 1,
     "runnerVersion": 1,
-    "runStateVersion": 25,
+    "runStateVersion": 26,
     "pipelines": {
-      "audit": 6,
+      "audit": 7,
       "init": 1,
       "plan-authoring": 7,
       "plan-execution": 39,

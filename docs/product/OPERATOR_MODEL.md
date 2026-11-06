@@ -372,6 +372,14 @@ ownerless applicable stop may be recovered by exact-revision, action-free
 pause/cancel key unnecessary without replaying its acceptance receipt.
 
 Audit is available through `run audit` and MCP `run_start`. Pipeline discovery
+exposes `sourceScope` (`directory` by default or explicit `git`) and `excludePaths`.
+CLI uses `--source-scope` and repeatable `--exclude-path`; MCP uses the setting
+names. Exclusions require directory scope, stay literal and confined, and cannot
+hide required inputs, configuration, artifacts, controls or link dependencies.
+Scope settings freeze before preparation and Git membership before capture.
+Changed selection requires a new run. Status exposes `auditSource`; new reports
+show the frozen source scope and literal exclusions. Legacy reports and bindings
+remain unchanged. Pipeline discovery
 exposes its Auditor/Reviewer roles, independent default/recommendation and finite
 20-pass discovery/recheck settings. Status includes `auditReport` publication
 path/status/hash, finding counts and consumed pass totals. Pending candidates

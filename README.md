@@ -851,6 +851,8 @@ Pipeline settings use these defaults:
 | `init`           | `placement`                      |        `null` |
 | `init`           | `maxRevisionRounds`              |          `20` |
 | `audit`          | `mode`                           | `independent` |
+| `audit`          | `sourceScope`                    |   `directory` |
+| `audit`          | `excludePaths`                   |          `[]` |
 | `audit`          | `maxDiscoveryPasses`             |          `20` |
 | `audit`          | `maxFindingRecheckPasses`        |          `20` |
 | `polishing`      | `trustedChecks`                  |          `[]` |
@@ -2163,6 +2165,26 @@ limited. It supports Git and ordinary directories, all three modes, and an
 independent default/recommendation. Auditor and finding Reviewer always remain
 read-only. Combined uses distinct discovery and finding-review cycles; see the
 [specification](pipelines/audit/docs/SPEC.md).
+
+Audit defaults to whole-directory inspection, including ignored content. Select
+complete Git working-tree sources explicitly, or prune literal directory subtrees:
+
+```bash
+agent-run run audit --project /workspace/project --task /workspace/task --source-scope git
+agent-run run audit --project /workspace/project --task /workspace/task --exclude-path generated --exclude-path cache
+```
+
+MCP `run_start` accepts matching `sourceScope` and `excludePaths` fields. Git scope
+includes unchanged and ignored tracked files, dirty/deleted tracked paths and
+non-ignored untracked sources; it retains read-only directory permissions and
+grants no Git effects. Exclusions require directory scope and are confined literal
+paths, without glob expansion. They are pruned before discovery, hashing and
+provider preparation and cannot overlap required inputs, configuration, artifacts,
+controls or link dependencies. Settings and membership freeze before capture;
+clarification cannot expand them. Changed selection or membership requires a new
+run. CLI status and MCP `auditSource` expose the selection; new reports include
+the frozen scope and literal exclusions. Legacy runs retain whole-directory
+bindings, historical reports and consumed budgets.
 
 Audit publishes its run ID before recursive preparation. CLI activity shows
 status, pause and cancel commands immediately; MCP `run_start` acknowledges

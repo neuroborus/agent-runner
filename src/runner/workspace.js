@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import { spawnOwnedProcess } from "../agents/index.js";
 import { deepFreeze, MAX_WORKSPACE_PREPARATION_BYTES } from "../state/index.js";
@@ -100,7 +101,14 @@ export async function workspaceSelection(pipeline, input, workspace) {
     })) ?? pipeline.workspace;
   rejectUnknownFields(
     selection,
-    new Set(["kind", "lease", "preparation", ...PATH_FIELDS]),
+    new Set([
+      "kind",
+      "lease",
+      "preparation",
+      "sourceScope",
+      "excludePaths",
+      ...PATH_FIELDS,
+    ]),
     "pipeline.workspace",
   );
   if (
@@ -108,7 +116,13 @@ export async function workspaceSelection(pipeline, input, workspace) {
     !["none", "exclusive"].includes(selection.lease) ||
     (selection.kind === "directory" && selection.lease !== "exclusive") ||
     (selection.preparation !== undefined &&
-      (selection.preparation !== "deferred" || selection.kind !== "directory"))
+      (selection.preparation !== "deferred" ||
+        selection.kind !== "directory")) ||
+    (selection.sourceScope !== undefined &&
+      (selection.kind !== "directory" ||
+        !["directory", "git"].includes(selection.sourceScope))) ||
+    (selection.excludePaths !== undefined &&
+      !Array.isArray(selection.excludePaths))
   ) {
     throw new RunnerError("Pipeline workspace requirements are invalid.", {
       code: "ERR_INVALID_PIPELINE",
@@ -250,12 +264,83 @@ export async function declareWorkspacePreparation({
       taskPath,
       stateRoot: resolve(stateRoot),
       ...declarations,
+      ...(selection.excludePaths?.length
+        ? { excludePaths: [...selection.excludePaths] }
+        : {}),
     },
     inputs,
+    ...(selection.sourceScope === "git"
+      ? { sourceSelection: { kind: "git", fingerprint: null } }
+      : {}),
   };
 }
 
-export async function captureWorkspacePreparation(pending, workspace, signal) {
+// Git owns membership/provenance. The state service journals this result before
+// filesystem capture; reconstruction may verify it, never select a replacement.
+export async function selectWorkspacePreparation(pending, git, signal) {
+  let selected;
+  try {
+    selected = await git.selectSources({
+      projectPath: pending.policy.workspacePath,
+      signal,
+    });
+  } catch (cause) {
+    signal?.throwIfAborted();
+    throw new RunnerError("Git source selection is unavailable or unsafe.", {
+      cause,
+      code: "ERR_WORKSPACE_SOURCE_SELECTION",
+    });
+  }
+  if (selected.projectPath !== pending.policy.workspacePath)
+    throw new RunnerError("Git source root changed before capture.", {
+      code: "ERR_WORKSPACE_DRIFT",
+    });
+  return {
+    policy: { ...pending.policy, ...selected.inspection },
+    sourceSelection: {
+      kind: "git",
+      fingerprint: selected.selectionFingerprint,
+    },
+  };
+}
+
+async function assertSourceSelection(binding, git, signal) {
+  if (binding.sourceSelection == null) return;
+  let selected;
+  try {
+    selected = await git.selectSources({
+      projectPath: binding.policy.workspacePath,
+      expectedSelectionFingerprint: binding.sourceSelection.fingerprint,
+      signal,
+    });
+  } catch (cause) {
+    signal?.throwIfAborted();
+    throw new RunnerError(
+      "Frozen Git source selection changed or is unavailable.",
+      { cause, code: "ERR_WORKSPACE_DRIFT" },
+    );
+  }
+  if (
+    selected.projectPath !== binding.policy.workspacePath ||
+    selected.inspection.inspectionFilesOnly !== true ||
+    !isDeepStrictEqual(
+      selected.inspection.inspectionPaths,
+      binding.policy.inspectionPaths,
+    ) ||
+    binding.policy.inspectionFilesOnly !== true
+  )
+    throw new RunnerError("Frozen Git source selection changed.", {
+      code: "ERR_WORKSPACE_DRIFT",
+    });
+}
+
+export async function captureWorkspacePreparation(
+  pending,
+  workspace,
+  signal,
+  git,
+) {
+  await assertSourceSelection(pending, git, signal);
   const { kind: _kind, ...declarations } = pending.policy;
   const inspection = await workspace.inspect(declarations, { signal });
   assertArtifactSeparation(inspection.artifactPaths, [
@@ -266,6 +351,7 @@ export async function captureWorkspacePreparation(pending, workspace, signal) {
     ...inspection.controlPaths,
   ]);
   const snapshot = await workspace.snapshot({ inspection, signal });
+  await assertSourceSelection(pending, git, signal);
   if (
     (await workspace.exclusionPath({
       workspacePath: inspection.workspacePath,
@@ -287,6 +373,9 @@ export async function captureWorkspacePreparation(pending, workspace, signal) {
     bindingFingerprint: bindingFingerprint(inspection),
     protectedFingerprint: protectedFingerprint(inspection, snapshot),
     retrievalPermissions: [],
+    ...(pending.sourceSelection === undefined
+      ? {}
+      : { sourceSelection: pending.sourceSelection }),
   });
 }
 
@@ -350,6 +439,8 @@ export async function bindWorkspace({
   const declarations = Object.fromEntries(
     PATH_FIELDS.map((name) => [name, selection[name] ?? []]),
   );
+  if (selection.excludePaths?.length)
+    declarations.excludePaths = [...selection.excludePaths];
   declarations.inputPaths = [
     ...declarations.inputPaths,
     ...Object.values(inputs)
@@ -379,6 +470,9 @@ export async function bindWorkspace({
     taskPath,
     stateRoot: inspection.stateRoot,
     ...Object.fromEntries(PATH_FIELDS.map((name) => [name, inspection[name]])),
+    ...(declarations.excludePaths === undefined
+      ? {}
+      : { excludePaths: declarations.excludePaths }),
   };
   return deepFreeze({
     schemaVersion: 1,
@@ -397,10 +491,12 @@ export async function bindWorkspace({
   });
 }
 
-export async function inspectBoundWorkspace(binding, workspace) {
+export async function inspectBoundWorkspace(binding, workspace, git) {
+  await assertSourceSelection(binding, git);
   const { kind: _kind, ...declarations } = binding.policy;
   const inspection = await workspace.inspect(declarations);
   const snapshot = await workspace.snapshot({ inspection });
+  await assertSourceSelection(binding, git);
   await assertAbsentInputs(
     binding.absentInputPaths,
     inspection.taskPath,
@@ -424,7 +520,24 @@ export async function inspectBoundWorkspace(binding, workspace) {
       code: "ERR_WORKSPACE_DRIFT",
     });
   }
-  return { inspection, snapshot };
+  return {
+    inspection,
+    snapshot:
+      binding.sourceSelection === undefined
+        ? snapshot
+        : deepFreeze({
+            ...snapshot,
+            sourceSelection: binding.sourceSelection,
+            contentFingerprint: hash({
+              sourceSelection: binding.sourceSelection,
+              content: snapshot.contentFingerprint,
+            }),
+            identityFingerprint: hash({
+              sourceSelection: binding.sourceSelection,
+              identity: snapshot.identityFingerprint,
+            }),
+          }),
+  };
 }
 
 // Recovery coordinators consume the same snapshot/guard interface in either
@@ -432,7 +545,8 @@ export async function inspectBoundWorkspace(binding, workspace) {
 export function directorySafety(
   binding,
   workspace,
-  inspect = () => inspectBoundWorkspace(binding, workspace),
+  inspect = () => inspectBoundWorkspace(binding, workspace, git),
+  git,
 ) {
   function inspectedSnapshot(snapshot, allowedPaths) {
     if (
@@ -466,15 +580,27 @@ export function directorySafety(
     },
     inspectPath: (request) => workspace.inspectPath(request),
     async reportArtifact(request, options) {
-      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      const { inspection } = await inspectBoundWorkspace(
+        binding,
+        workspace,
+        git,
+      );
       return workspace.reportArtifact({ inspection, ...request }, options);
     },
     async inspectOutputDirectory(path) {
-      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      const { inspection } = await inspectBoundWorkspace(
+        binding,
+        workspace,
+        git,
+      );
       return workspace.inspectOutputDirectory({ inspection, path });
     },
     async prepareOutputDirectory(intent, options = {}) {
-      const { inspection } = await inspectBoundWorkspace(binding, workspace);
+      const { inspection } = await inspectBoundWorkspace(
+        binding,
+        workspace,
+        git,
+      );
       return workspace.prepareOutputDirectory({
         inspection,
         intent,

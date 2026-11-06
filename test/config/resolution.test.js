@@ -11,6 +11,51 @@ import {
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
 
+test("audit source settings resolve at existing precedence and reject unsafe or incompatible exclusions", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        audit: { sourceScope: "directory", excludePaths: ["generated"] },
+      },
+    }),
+  );
+  const project = parseProjectConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: { audit: { excludePaths: ["cache"] } },
+    }),
+    configuration,
+  );
+  const resolve = (overrides = {}) =>
+    resolvePipelineConfiguration(
+      "audit",
+      configuration,
+      {},
+      {},
+      null,
+      project,
+      overrides,
+    );
+  assert.deepEqual(resolve().settings.excludePaths, ["cache"]);
+  const selected = resolve({ sourceScope: "git", excludePaths: [] });
+  assert.equal(selected.settings.sourceScope, "git");
+  assert.deepEqual(selected.settings.excludePaths, []);
+  assert.ok(Object.isFrozen(selected.settings.excludePaths));
+  for (const overrides of [
+    { sourceScope: "git" },
+    { sourceScope: "other" },
+    { excludePaths: ["../outside"] },
+    { excludePaths: ["/outside"] },
+    { excludePaths: ["."] },
+    { excludePaths: ["cache/../source"] },
+    { excludePaths: ["cache", "cache"] },
+    { excludePaths: ["cache\nsource"] },
+  ])
+    assert.throws(() => resolve(overrides), ConfigurationError);
+});
+
 test("availability policy resolves a strict common ceiling before freezing", () => {
   const runner = parseRunnerConfiguration(
     JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),

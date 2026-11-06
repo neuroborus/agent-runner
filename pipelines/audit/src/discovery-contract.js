@@ -15,6 +15,7 @@ import {
 } from "./constraints.js";
 import { auditDiagnostic, diagnosticIssues } from "./diagnostics.js";
 import { normalizeAuditReport, normalizeFinding, texts } from "./findings.js";
+import { assertSourceSettings } from "./source-scope.js";
 
 export const MAX_DISCOVERY_PASSES = 20;
 export const MAX_FINDING_RECHECK_PASSES = 20;
@@ -275,11 +276,24 @@ export function createAuditState({
   );
   const resolved = {
     mode: "independent",
+    sourceScope: "directory",
+    excludePaths: [],
     maxDiscoveryPasses: MAX_DISCOVERY_PASSES,
     maxFindingRecheckPasses: MAX_FINDING_RECHECK_PASSES,
     ...settings,
   };
-  exact(resolved, ["mode", "maxDiscoveryPasses", "maxFindingRecheckPasses"]);
+  exact(resolved, [
+    "mode",
+    "sourceScope",
+    "excludePaths",
+    "maxDiscoveryPasses",
+    "maxFindingRecheckPasses",
+  ]);
+  try {
+    assertSourceSettings(resolved);
+  } catch {
+    assertAudit(false, "Audit source selection settings are invalid.");
+  }
   assertAudit(
     AUDIT_MODES.includes(resolved.mode) &&
       validDiscoveryBudget(resolved.maxDiscoveryPasses) &&
@@ -321,6 +335,26 @@ export function assertDiscoveryRun(run) {
   const state = run.pipelineState;
   exact(state, Object.keys(createAuditState()));
   createAuditState({ settings: state.settings });
+  const binding = run.workspacePreparation ?? run.workspace;
+  if (binding?.kind === "directory" || run.workspacePreparation != null) {
+    assertAudit(
+      (binding.sourceSelection?.kind ?? "directory") ===
+        (state.settings.sourceScope ?? "directory") &&
+        same(
+          binding.policy.excludePaths ?? [],
+          state.settings.excludePaths ?? [],
+        ),
+      "Audit source selection must match its frozen settings.",
+    );
+    if (
+      state.repositoryBaseline !== null &&
+      binding.sourceSelection !== undefined
+    )
+      assertAudit(
+        same(state.repositoryBaseline.sourceSelection, binding.sourceSelection),
+        "Audit snapshot must retain its frozen source selection.",
+      );
+  }
   assertAudit(
     STAGES.includes(state.workflowState) &&
       Array.isArray(state.history) &&

@@ -147,7 +147,12 @@ survive reconstruction and participate in drift checks. Cancellation interrupts
 costly inspection without source writes; bounded progress reveals no source
 names or content. Omitted selection preserves whole-directory behavior. This is
 an inspection capability, separate from provider permissions and pipeline scope
-settings. Both directory adapters freeze and bind the same selection through
+settings. Audit now owns those settings: directory scope is the default, literal
+exclusions require that scope, and explicit Git scope retains directory permissions.
+Its membership/provenance is journaled before capture and rechecked around capture
+and reconstruction without adopting drift. Clarification cannot expand frozen
+selection; changed selection requires a new run. Legacy scopes and both finite
+budgets retain their evidence. Both directory adapters freeze and bind the same selection through
 capability receipts, launch, retired-attempt verification and reconstruction.
 Claude storage cleanup rediscovers controls within that selection without
 expanding traversal or accepting changed source evidence. See the filesystem

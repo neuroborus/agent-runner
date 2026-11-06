@@ -55,6 +55,14 @@ it without inspecting excluded descendants. Required inputs and controls remain
 protected; exclusions grant no additional native access, outputs or storage
 placement. Omission preserves existing whole-directory behavior and receipts.
 Providers consume these filesystem declarations without selecting Git sources.
+Inspection roots support the persisted 10,000-path capacity; ordinary read/output
+arrays and literal exclusions retain their 256-path bounds. Runner storage
+protection contains canonical absolute roots; relative exclusions remain covered
+by the workspace root rather than entering provider storage options.
+Audit's frozen directory exclusions or Git-selected file-only roots reach both
+adapters through this same policy. Membership/provenance checks remain Runner-
+and Git-owned; preparation and receipts retain the filesystem scope without
+visiting opaque descendants or gaining Git effects.
 
 Execution and polishing may supply `readPaths` containing one exact selected
 finalization Markdown file. Adapters reject directories and malformed declarations

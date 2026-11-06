@@ -150,6 +150,7 @@ function normalizeEvent(value, runId, lineNumber) {
         22,
         23,
         24,
+        25,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {

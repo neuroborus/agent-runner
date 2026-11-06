@@ -33,6 +33,11 @@ also retain state persistence/operator-stop, affected orchestration and legacy
 migration slow coverage and release-pack validation; these focused fixtures do
 not replace those gates or prove pipeline activation.
 
+The same state suite owns one-time Git membership publication before capture,
+malformed-selection rejection, lost publication recovery without reselection and
+journal substitution rejection. The optional selection uses common envelope 26;
+compatibility changes also require the release-pack slow check.
+
 Fast `test/runner-preparation.test.js` owns deferred audit activation through
 real state and workspace services: bounded creation/boundary validation,
 CLI identity before held traversal, cancellation without provider work,
@@ -42,6 +47,28 @@ and canonical/overlapping lease contention. Controlled events propagate early
 outcomes and always release/settle held operations; there are no sleeps or live
 providers. Existing orchestration, CLI/MCP workflow/control, state/operator-stop
 and effect-recovery slow suites retain their cross-capability coverage.
+
+That preparation suite also covers explicit Git selection through held capture,
+pause and cold resume, complete unchanged/ignored-tracked/dirty/deleted/untracked
+membership, scoped provider requests, unchanged Git state and later membership
+drift rejection. Ordinary-directory completion proves opaque exclusions, frozen
+public/report context and deliberate directory-origin issue capture. A version-25,
+audit-version-6 pending fixture resumes without changing settings or budgets.
+Audit publication coverage separately preserves completed legacy report bytes,
+acceptance receipts and histories. Existing workspace/provider suites retain
+control/input/link confinement, corruption and read-only effect denial. CLI,
+configuration and MCP tests cover field mapping, precedence and strict settings.
+Admission coverage includes a project scope override that makes CLI exclusions
+valid despite a different runner default, while invalid final combinations and
+individual paths still reject before traversal or probing. The directory
+completion case passes Runner's request through both real adapters' normalization
+and filesystem preparation, using a controlled CLI-capability failure before any
+provider invocation; relative exclusions never enter storage protection. Both
+provider suites cross 256 inspection roots through scoped receipt preparation and
+reject a directory substituted for the final file-only root, retaining the 10,000
+inspection-root bound and the 256-path bounds on other declarations.
+The final integrated change requires the complete slow gate; these focused cases
+do not attest unrun slow or opt-in live-provider acceptance.
 
 `npm run check` runs formatting verification, the fast test tier, and CLI help.
 Its development budget is approximately 60 seconds. The fast tier retains

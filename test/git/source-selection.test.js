@@ -482,3 +482,37 @@ test("supports unborn worktrees and rejects membership publication races", async
     syncBuiltinESMExports();
   }
 });
+
+test("source classification propagates traversal cancellation without accepting partial membership", async (t) => {
+  const f = await fixture(t);
+  const abort = new AbortController();
+  const reason = new Error("Selection canceled.");
+  const native = filesystem.lstat;
+  const mocked = t.mock.method(filesystem, "lstat", async (path, options) => {
+    const stat = await native(path, options);
+    if (path === join(f.projectPath, "unchanged.txt")) abort.abort(reason);
+    return stat;
+  });
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(
+      f.service.selectSources({
+        projectPath: f.projectPath,
+        signal: abort.signal,
+      }),
+      (cause) => cause === reason,
+    );
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+  }
+  const stopped = new AbortController();
+  stopped.abort(reason);
+  await assert.rejects(
+    f.service.selectSources({
+      projectPath: f.projectPath,
+      signal: stopped.signal,
+    }),
+    (cause) => cause === reason,
+  );
+});

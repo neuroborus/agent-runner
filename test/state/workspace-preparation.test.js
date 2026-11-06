@@ -16,7 +16,10 @@ import {
   loadProjectConfiguration,
   parseRunnerConfiguration,
 } from "../../src/config/index.js";
-import { bindWorkspace } from "../../src/runner/workspace.js";
+import {
+  bindWorkspace,
+  captureWorkspacePreparation,
+} from "../../src/runner/workspace.js";
 import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
@@ -32,6 +35,7 @@ async function fixture(
     onTransitionBoundary = () => {},
     configuration = false,
     contextFilename = "context.md",
+    gitSelection = false,
   } = {},
 ) {
   const root = await mkdtemp(
@@ -67,6 +71,9 @@ async function fixture(
       },
       { path: join(taskPath, contextFilename), contentHash: null },
     ],
+    ...(gitSelection
+      ? { sourceSelection: { kind: "git", fingerprint: null } }
+      : {}),
   };
   let projectConfigurationProtection = null;
   if (configuration) {
@@ -427,6 +434,110 @@ test("journal recovery finishes an interrupted complete publication exactly once
     ).length,
     1,
   );
+});
+
+test("source selection is journaled once before capture and survives interrupted publication without reselection", async (t) => {
+  let interrupt = false;
+  const f = await fixture(t, {
+    gitSelection: true,
+    onTransitionBoundary(point) {
+      if (interrupt && point === "event-appended") {
+        interrupt = false;
+        throw new Error("Interrupted selection publication.");
+      }
+    },
+  });
+  const selection = {
+    policy: {
+      ...f.admission.policy,
+      inspectionPaths: [join(f.projectPath, "source.txt")],
+      inspectionFilesOnly: true,
+    },
+    sourceSelection: { kind: "git", fingerprint: hash("membership") },
+  };
+  for (const selected of [
+    { ...selection, policy: { ...selection.policy, inputPaths: [] } },
+    { ...selection, sourceSelection: { kind: "git", fingerprint: null } },
+  ])
+    await assert.rejects(
+      f.prepare({
+        select: async () => selected,
+        capture: () => assert.fail("Malformed selection must not capture."),
+      }),
+    );
+  assert.deepEqual(
+    await f.store.loadRun(f.created.state.runId),
+    f.created.state,
+  );
+  interrupt = true;
+  await assert.rejects(
+    f.prepare({
+      select: async () => selection,
+      capture: () => assert.fail("Interrupted selection must not capture."),
+    }),
+    /Interrupted selection publication/u,
+  );
+  const replacement = await f.replaceOwner();
+  const recovered = await replacement.store.recoverRun(replacement.lease);
+  assert.equal(recovered.workspace, null);
+  assert.deepEqual(
+    recovered.workspacePreparation.sourceSelection,
+    selection.sourceSelection,
+  );
+  const completed = await replacement.store.captureWorkspacePreparation(
+    replacement.lease,
+    {
+      worktreeLease: replacement.worktreeLease,
+      expectedRevision: recovered.revision,
+      select: () =>
+        assert.fail("Reconstruction must not replace frozen membership."),
+      capture: (pending) =>
+        captureWorkspacePreparation(
+          pending,
+          createWorkspaceService(),
+          undefined,
+          {
+            selectSources: async ({ expectedSelectionFingerprint }) => {
+              assert.equal(
+                expectedSelectionFingerprint,
+                selection.sourceSelection.fingerprint,
+              );
+              return {
+                projectPath: f.projectPath,
+                inspection: {
+                  inspectionPaths: selection.policy.inspectionPaths,
+                  inspectionFilesOnly: true,
+                },
+              };
+            },
+          },
+        ),
+    },
+  );
+  assert.deepEqual(
+    completed.workspace.sourceSelection,
+    selection.sourceSelection,
+  );
+  const history = (await replacement.store.loadRunHistory(completed.runId))
+    .events;
+  assert.deepEqual(
+    history.map(({ activity }) => activity.kind),
+    ["created", "selected", "captured"],
+  );
+  const corrupted = structuredClone(history);
+  corrupted[1].state.workspacePreparation.sourceSelection.fingerprint =
+    hash("replacement");
+  await writeFile(
+    join(f.created.directoryPath, "events.jsonl"),
+    corrupted.map((event) => JSON.stringify(event)).join("\n") + "\n",
+  );
+  await writeFile(
+    join(f.created.directoryPath, "state.json"),
+    JSON.stringify(completed),
+  );
+  await assert.rejects(createRunStore(f.options).loadRun(completed.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
 });
 
 test("stale captures and a replaced execution owner cannot publish", async (t) => {
