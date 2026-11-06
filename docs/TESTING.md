@@ -323,8 +323,14 @@ provider alias targets cannot become external publication destinations.
 Existing guidance content, editor and publication suites retain integrated ignore,
 byte-limit and inode-provenance coverage. The content-and-safety suite owns absent
 bootstrap reads without ignore rules, strict edit/update rejection, deleted tracked
-guidance and appearance/disappearance during read reinspection. MCP guidance
-coverage compares CLI/MCP bootstrap reads with complete unchanged source/control
+guidance and appearance/disappearance during read reinspection. It also covers
+finite read-failure classification across guidance normalization, with unknown
+corruption, recovery and mutation failures retaining their existing handling.
+Native document/directory-open and returned pinned-directory verification failures
+exercise the actual guidance helpers, including transient rejection, vanished
+resources and unknown I/O codes. Descriptor-close failures retain unclassified
+cleanup handling.
+MCP guidance coverage compares CLI/MCP bootstrap reads with complete unchanged source/control
 snapshots and no local or state creation. The content-and-safety suite also owns
 integrated guidance beside an internal provider-control directory alias in Git
 and ordinary directories, protected rejection after retargeting that alias to the
@@ -333,6 +339,12 @@ worktree-relative receipt recovery from Git subdirectories, including incomplete
 published intents. Current external actions reject changed selector identities
 rather than adopting legacy resolution. MCP guidance tests cover the same
 selection through its thin transport.
+
+Fast configuration loading and clarification lifecycle coverage own the existing
+bounded-file guards' finite constraint metadata while retaining their error
+codes. These read-contract fixtures establish no init pause/resume behavior or
+live-provider acceptance. Guidance integration changes also require the
+registered init slow suite; runtime-resource changes retain release-pack coverage.
 
 Fast `test/runner-configuration.test.js` covers relative external selectors in
 polishing and external project commit selections overriding runner custom

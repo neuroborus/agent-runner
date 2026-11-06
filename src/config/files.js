@@ -97,6 +97,20 @@ async function confinedAncestors(projectPath, path) {
   );
 }
 
+function assertConfigurationFile(metadata) {
+  const constraint =
+    !metadata.isFile() || metadata.nlink !== 1n
+      ? "isolated_regular_file"
+      : metadata.size > BigInt(MAX_CONFIGURATION_BYTES)
+        ? "file_size"
+        : null;
+  if (constraint !== null)
+    throw new ConfigurationError(
+      "Project configuration must be a bounded, unlinked regular file.",
+      { code: "ERR_PROJECT_CONFIGURATION_READ", constraint },
+    );
+}
+
 export async function readConfinedConfiguration(
   path,
   projectPath,
@@ -108,28 +122,10 @@ export async function readConfinedConfiguration(
       lstat(path, { bigint: true }),
       confinedAncestors(projectPath, path),
     ]);
-    if (
-      !pathBefore.isFile() ||
-      pathBefore.nlink !== 1n ||
-      pathBefore.size > BigInt(MAX_CONFIGURATION_BYTES)
-    ) {
-      throw new ConfigurationError(
-        "Project configuration must be a bounded, unlinked regular file.",
-        { code: "ERR_PROJECT_CONFIGURATION_READ" },
-      );
-    }
+    assertConfigurationFile(pathBefore);
     handle = await open(path, constants.O_RDONLY | NO_FOLLOW | NONBLOCK);
     const before = await handle.stat({ bigint: true });
-    if (
-      !before.isFile() ||
-      before.nlink !== 1n ||
-      before.size > BigInt(MAX_CONFIGURATION_BYTES)
-    ) {
-      throw new ConfigurationError(
-        "Project configuration must be a bounded, unlinked regular file.",
-        { code: "ERR_PROJECT_CONFIGURATION_READ" },
-      );
-    }
+    assertConfigurationFile(before);
     if (
       pathBefore.dev !== before.dev ||
       pathBefore.ino !== before.ino ||
@@ -160,7 +156,7 @@ export async function readConfinedConfiguration(
     if (source.length > MAX_CONFIGURATION_BYTES) {
       throw new ConfigurationError(
         "Project configuration must be a bounded regular file.",
-        { code: "ERR_PROJECT_CONFIGURATION_READ" },
+        { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "file_size" },
       );
     }
     const [after, pathAfter, canonicalPath, ancestorsAfter] = await Promise.all(

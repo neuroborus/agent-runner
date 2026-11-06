@@ -1315,6 +1315,13 @@ read, so replacing an empty target also invalidates the binding. The state
 boundary strictly validates both versions; legacy records are preserved without
 rediscovery, inferred bindings or new execution authority.
 
+The confined configuration reader retains `ERR_PROJECT_CONFIGURATION_READ`
+and adds optional finite `constraint` metadata: `file_size` for the existing
+1 MiB limit, or `isolated_regular_file` for its regular-file and single-link
+guard. Other read, decoding, confinement and identity failures retain their
+existing handling without inferred constraints. Metadata grants no retry,
+inspection acceptance or effect authority.
+
 The V1 shape is:
 
 ```json
@@ -1786,6 +1793,19 @@ including init's identity-bearing read, repeat selection and verify pinned
 directories after the document read. Any returned existing content requires
 strict ignore validation even if it disappears before reinspection. Edit/update
 selection and every publication recheck retain strict destination validation.
+
+The `read` and `readWithIdentity` entry points preserve trusted inspection
+categories through guidance error normalization with optional finite
+`readFailure` metadata: `inspection_unavailable`, `workspace_changed`,
+`unsafe_path` or `evidence_capacity`. Existing normalized error codes remain
+unchanged. Only recognized workspace/configuration errors and direct native
+read causes under the selection/file-helper control/path wrapper are classified;
+returned pinned-directory verification retains private read provenance without
+changing normalized codes. Descriptor cleanup and storage/recovery cause chains
+are not classified or searched. Unknown native codes and corruption remain
+unclassified. Edit/update and publication errors gain no read
+classification. This metadata changes neither init lifecycle nor pause/resume
+policy and grants no continuation or effect authority.
 
 The public `update` method accepts the same selectors plus complete
 `localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the
@@ -5384,6 +5404,12 @@ its public `index.js`: creating the `clarifications.md` artifact, invoking
 Pipelines own the artifact location, prompt, round limit, transition out of
 `CLARIFY`, and safe re-entry after an exceptional product decision. This is a
 bounded preparation protocol, not a general chat or dialogue engine.
+
+The transcript reader retains its existing error codes and 1 MiB limit. Its
+size and regular-file/single-link guards add optional `constraint` metadata of
+`file_size` or `isolated_regular_file`, respectively. Other path, read, decoding
+and write failures retain their existing handling; these tags grant no edit,
+retry or continuation authority.
 
 Before the first clarification turn, the runner creates the Markdown artifact
 when missing and otherwise preserves its existing transcript. Keep the format

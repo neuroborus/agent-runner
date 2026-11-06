@@ -282,7 +282,10 @@ test(
           JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
         ),
       }),
-      (error) => error.code === "ERR_PROJECT_CONFIGURATION_READ",
+      {
+        code: "ERR_PROJECT_CONFIGURATION_READ",
+        constraint: "isolated_regular_file",
+      },
     );
   },
 );
@@ -338,3 +341,27 @@ test(
     }
   },
 );
+
+test("oversized configuration retains the bounded read constraint", async (t) => {
+  const projectPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-config-size-"),
+  );
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  const configurationPath = join(projectPath, PROJECT_CONFIG_FILENAME);
+  await writeFile(configurationPath, Buffer.alloc(1024 * 1024 + 1));
+
+  await assert.rejects(
+    loadProjectConfiguration({
+      configurationPath,
+      inspectPath: async () => ({
+        exists: true,
+        path: configurationPath,
+        relativePath: PROJECT_CONFIG_FILENAME,
+      }),
+      projectPath,
+      workspaceKind: "directory",
+      runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+    }),
+    { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "file_size" },
+  );
+});

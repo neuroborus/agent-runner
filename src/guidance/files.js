@@ -26,6 +26,22 @@ const READ_FLAGS =
   (constants.O_NONBLOCK ?? 0);
 const DIRECTORY_FLAGS = READ_FLAGS | (constants.O_DIRECTORY ?? 0);
 
+export class DirectoryVerificationError extends Error {
+  constructor(cause) {
+    super("Cannot verify the pinned guidance directory.", { cause });
+    this.name = "DirectoryVerificationError";
+  }
+}
+
+async function directoryRealpath(path) {
+  try {
+    return await realpath(path);
+  } catch (cause) {
+    // Preserve read provenance without tagging descriptor cleanup failures.
+    throw new DirectoryVerificationError(cause);
+  }
+}
+
 async function metadata(path) {
   try {
     return await lstat(path, { bigint: true });
@@ -164,7 +180,7 @@ export async function openLocalDirectory(
         current.dev.toString() !== ancestor.device ||
         current.ino.toString() !== ancestor.inode ||
         current.mode.toString() !== ancestor.mode ||
-        (await realpath(ancestor.path)) !== ancestor.path
+        (await directoryRealpath(ancestor.path)) !== ancestor.path
       )
         throw unsafePath();
     }
@@ -176,7 +192,7 @@ export async function openLocalDirectory(
         current.ino !== directory.stat.ino
       )
         throw unsafePath();
-      if ((await realpath(directory.path)) !== directory.path)
+      if ((await directoryRealpath(directory.path)) !== directory.path)
         throw unsafePath();
     }
     if (missingPath !== null && (await metadata(missingPath)) !== null)

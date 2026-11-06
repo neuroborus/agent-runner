@@ -30,10 +30,14 @@ const MAX_TRANSCRIPT_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
 export class ClarificationError extends Error {
-  constructor(message, { cause, code = "ERR_INVALID_CLARIFICATION" } = {}) {
+  constructor(
+    message,
+    { cause, code = "ERR_INVALID_CLARIFICATION", constraint } = {},
+  ) {
     super(message, { cause });
     this.name = "ClarificationError";
     this.code = code;
+    if (constraint !== undefined) this.constraint = constraint;
   }
 }
 
@@ -242,19 +246,23 @@ export async function readTranscript(location) {
       constants.O_RDONLY | NO_FOLLOW,
     );
     const metadata = await handle.stat();
-    if (
-      !metadata.isFile() ||
-      metadata.nlink !== 1 ||
-      metadata.size > MAX_TRANSCRIPT_BYTES
-    ) {
+    if (!metadata.isFile() || metadata.nlink !== 1) {
       throw new ClarificationError(
         `Clarification transcript must be an isolated file no larger than ${MAX_TRANSCRIPT_BYTES} bytes.`,
+        { constraint: "isolated_regular_file" },
+      );
+    }
+    if (metadata.size > MAX_TRANSCRIPT_BYTES) {
+      throw new ClarificationError(
+        `Clarification transcript must be an isolated file no larger than ${MAX_TRANSCRIPT_BYTES} bytes.`,
+        { constraint: "file_size" },
       );
     }
     const content = await handle.readFile();
     if (content.byteLength > MAX_TRANSCRIPT_BYTES) {
       throw new ClarificationError(
         `Clarification transcript must not exceed ${MAX_TRANSCRIPT_BYTES} bytes.`,
+        { constraint: "file_size" },
       );
     }
     let source;

@@ -940,7 +940,11 @@ test("validates structured input and transcript size", async (t) => {
   await writeFile(transcriptPath, Buffer.alloc(1024 * 1024 + 1));
   await assert.rejects(
     service.inspectTranscript({ artifactRoot, transcriptPath }),
-    ClarificationError,
+    {
+      name: "ClarificationError",
+      code: "ERR_INVALID_CLARIFICATION",
+      constraint: "file_size",
+    },
   );
 });
 

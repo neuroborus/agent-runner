@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-06
 
+- **Read boundaries retain trusted inspection constraints.** Configuration and
+  clarification readers keep their existing size/isolation guards and error
+  codes while attaching finite constraint metadata. Guidance read and
+  identity-bearing read normalization preserve recognized inspection categories,
+  including direct native document/directory read and pinned-directory verification
+  rejection, without classifying descriptor cleanup or searching storage/recovery
+  cause chains. Unknown failures remain unclassified;
+  edit/update and publication errors gain no read classification. This metadata
+  changes no init lifecycle, resume policy, ownership or effect authority.
+
 - **Init bounds setup evidence independently of complete source proof.** New
   inspections project exact setup destinations, documents, ancestors and control
   markers while workspace-owned hashes retain every source's content, identity
