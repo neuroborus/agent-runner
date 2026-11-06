@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { assertInactivityContinuity } from "./inactivity.js";
 import { assertObservationContinuity } from "./observations.js";
 import { assertPreservationContinuity } from "./preservation-contract.js";
+import { assertWorkspacePreparationContinuity } from "./workspace-preparation.js";
 import { assertAvailabilityContinuity } from "./availability.js";
 import {
   observeJournalDirectory,
@@ -77,6 +78,7 @@ const TRANSITION_STATE_FIELDS = [
   "executionProcess",
   "executionResource",
   "preparation",
+  "workspacePreparation",
   "preservationRecords",
   "stopRequest",
   "pipelineState",
@@ -147,6 +149,7 @@ function normalizeEvent(value, runId, lineNumber) {
         21,
         22,
         23,
+        24,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -243,6 +246,19 @@ function assertEventContinuity(
     });
   }
   assertPreparationContinuity(previousState, state, event.activity);
+  let workspaceCaptured;
+  try {
+    workspaceCaptured = assertWorkspacePreparationContinuity(
+      previousState,
+      state,
+      event.activity,
+    );
+  } catch (cause) {
+    throw new RunStoreError("Workspace preparation history is inconsistent.", {
+      cause,
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  }
   const previousChildren = previousState.sessionLineage.children;
   const children = state.sessionLineage.children;
   const readRebinding = isWorkspaceReadRebinding(
@@ -252,7 +268,7 @@ function assertEventContinuity(
   );
   const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
     (field) =>
-      !(field === "workspace" && readRebinding) &&
+      !(field === "workspace" && (readRebinding || workspaceCaptured)) &&
       !isDeepStrictEqual(state[field], previousState[field]),
   );
   const versionChanged = VERSION_STATE_FIELDS.some(

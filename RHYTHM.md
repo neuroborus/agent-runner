@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-05
 
+- **Workspace admission is durable before recursive capture.** Common state
+  version 25 can freeze pending filesystem declarations, exact input evidence,
+  canonical directory identities and resolved configuration without publishing
+  a workspace binding. Capture retains the execution owner and canonical
+  exclusion lease while allowing stop publication; only a complete verified
+  result at the unchanged checkpoint clears admission. Interrupted capture is
+  discarded and reconstructed from the frozen selection, while interrupted
+  complete publication uses ordinary journal recovery. Pause/cancellation retain
+  admission and grant no provider, report or effect authority. This record is
+  separate from trusted-command process custody. Legacy absence preserves
+  completed preparation and existing evidence; deferred pipeline activation
+  remains separate.
+
 - **Git source membership is separate from changed-content fingerprints.**
   A read-only selector freezes literal HEAD/index sources, including unchanged,
   ignored tracked and index-hidden files, plus non-ignored untracked sources.

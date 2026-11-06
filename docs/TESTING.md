@@ -20,6 +20,19 @@ resume read-only and keep their consumed accounting.
 
 ## Ordinary gate
 
+Fast `test/state/workspace-preparation.test.js` owns bounded pending admission,
+frozen declarations/inputs/identities, complete binding publication, interrupted
+capture and write-ahead recovery, replacement ownership, stale capture rejection,
+and concurrent pause/cancel settlement. Cold recovery rejects discarded
+absent-input evidence and missing parent bindings for absent nested inputs;
+replacement of a retained input parent blocks recapture. It uses isolated ordinary directories,
+controlled callbacks and process identities with real journal/lease publication;
+no providers, sleeps or host process census. Legacy version-24 migration retains
+completed bindings without manufacturing preparation. Common-envelope changes
+also retain state persistence/operator-stop, affected orchestration and legacy
+migration slow coverage and release-pack validation; these focused fixtures do
+not replace those gates or prove pipeline activation.
+
 `npm run check` runs formatting verification, the fast test tier, and CLI help.
 Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.

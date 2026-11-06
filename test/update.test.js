@@ -36,7 +36,7 @@ const compatibility = {
   schemaVersion: 1,
   configurationVersion: 1,
   runnerVersion: 1,
-  runStateVersion: 24,
+  runStateVersion: RUNTIME_COMPATIBILITY.runStateVersion,
   pipelines: { sample: 2 },
 };
 const metadata = (version) => ({

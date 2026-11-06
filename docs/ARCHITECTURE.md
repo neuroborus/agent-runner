@@ -237,10 +237,12 @@ initializes Git nor writes source, index, refs, remotes or identity, and grants
 no provider, staging or commit authority. Ordinary-directory consumers remain
 Git-independent. Pipeline activation and scope settings are separately owned.
 
-`readFile({path, projectPath, optional})` confines text input reads to a real
+`readFile({path, projectPath, optional, maxBytes})` confines text input reads to a real
 regular file beneath the supplied root, reusing descriptor-anchored snapshot
 reads with no-follow, nonblocking opens and read-race checks. Only an absent
 optional file returns null; aliases and special files fail before content reads.
+Optional `maxBytes` bounds the descriptor-anchored read, including growth races;
+omission retains the existing safe-integer maximum.
 
 `measureChanges({projectPath, baseHead, expectedContentFingerprint})` measures
 the final worktree against the caller-verified immutable step-start commit
@@ -2175,6 +2177,52 @@ processes first, then performs the pipeline's ordinary interrupted-turn Git/inpu
 reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
+
+Common envelope version 25 adds nullable `workspacePreparation`, separate from
+trusted-command `preparation` process custody. The state capability accepts this
+only at run creation, before recursive workspace inspection. State validation
+owns its pure normalization and input fingerprinting; filesystem admission and
+capture consume those definitions. Its version-1 record freezes the directory
+policy (including any filesystem inspection roots,
+file-only constraint and literal exclusions), canonical exclusion lease path,
+real workspace/task/state/lease directory identities and routing ancestors,
+and bounded exact admission-input hashes and file identities. Missing optional
+task inputs remain explicit. Every admitted input requires its real parent
+directory binding and complete routing ancestry, including absent inputs.
+Resolved roles, input hashes, counters, source
+lineage, configuration protection and pipeline settings/checkpoints are bound by
+an admission fingerprint. The record is bounded to 1 MiB, 256 exact UTF-8 text
+inputs of at most 1 MiB each, and 4,096 routing bindings. The root caller must
+list every input consumed during admission; a selected configuration's exact
+protected hash is mandatory. Exact input reads reuse the workspace capability's
+bounded, descriptor-anchored reader. Admission performs no recursive source or control
+discovery and grants no workspace/provider/publication or Git authority.
+
+`captureWorkspacePreparation` requires the current execution lease, exact
+revision and canonical workspace lease. It verifies frozen directories and exact
+inputs, then asks the root caller to produce a fresh, fully verified workspace
+binding from those declarations. The callback runs outside the short state
+mutation boundary, while retaining workspace exclusion, so operator stops remain
+publishable. Publication rechecks the owner, revision, inputs, directory
+identities and cancellation, then journals one `workspace-preparation/captured`
+transition atomically binding the completed workspace and clearing the pending
+record. The resulting policy, exclusion key and absent inputs must match the
+admission, including the exact absent-input list during journal replay.
+Journal replay permits no other replacement or removal. Interrupted
+capture publishes no partial fingerprints; recovery recaptures from frozen
+declarations. An interrupted complete publication uses ordinary journal recovery
+without repeating capture. Stale revisions, substituted inputs/roots, uncertain
+ownership and canceled runs cannot publish.
+
+Pending preparation permits only activity, pauses, stop settlement and restoration
+of the admission checkpoint; workflow/provider/effect work remains blocked.
+Pause and cancellation preserve the record. A quiescent pending record is not
+process custody and does not prevent lease release after stop settlement.
+Legacy absence normalizes to null and preserves completed historical preparation,
+existing workspace bindings and all pipeline evidence during ordinary leased
+migration; it never schedules a new capture. The detached token is `1:25`, with
+matching package compatibility metadata. This is the state foundation; pipeline
+selection of deferred preparation remains separately owned.
 
 Common envelope version 24 adds a nullable immutable `workspace` binding. New
 runner-created runs save their selected kind, lease policy and canonical key;
@@ -5138,7 +5186,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 24 (`1:24`); legacy runs require an explicit leased migration publishing
+version 25 (`1:25`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.

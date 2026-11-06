@@ -52,6 +52,8 @@ export function assertStopProgress(previous, next, resolver) {
 }
 
 export function runRetainsOwnership(state) {
+  // Pending workspace admission owns no process or effects. Active capture
+  // holds the canonical workspace lease; quiescent admission survives release.
   return (
     stopIsPending(state) ||
     state.preparation != null ||
@@ -60,7 +62,11 @@ export function runRetainsOwnership(state) {
   );
 }
 
-export function assertRunCanAdvance(state, resolver, { childRole } = {}) {
+export function assertRunCanAdvance(
+  state,
+  resolver,
+  { childRole, allowWorkspacePreparation = false } = {},
+) {
   if (stopBlocksExecution(state, resolver)) {
     throw new RunStoreError(
       "Operator stop must be reconciled before further work.",
@@ -80,6 +86,14 @@ export function assertRunCanAdvance(state, resolver, { childRole } = {}) {
       "Owned execution must stop before advancing its checkpoint.",
       {
         code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      },
+    );
+  }
+  if (state.workspacePreparation != null && !allowWorkspacePreparation) {
+    throw new RunStoreError(
+      "Workspace capture must finish before workflow or provider work.",
+      {
+        code: "ERR_WORKSPACE_PREPARATION_PENDING",
       },
     );
   }

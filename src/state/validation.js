@@ -18,7 +18,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 24;
+export const RUN_STATE_SCHEMA_VERSION = 25;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -57,6 +57,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   21,
   22,
   23,
+  24,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -76,6 +77,7 @@ const STATE_FIELDS = new Set([
   "taskPath",
   "projectConfigurationProtection",
   "workspace",
+  "workspacePreparation",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -160,6 +162,7 @@ const FILE_IDENTITY_FIELDS = new Set([
 const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
 // Pipeline results can be retained in several inventories and gate records.
 const MAX_STATE_BYTES = 32 * 1024 * 1024;
+export const MAX_WORKSPACE_PREPARATION_BYTES = 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
 const MAX_OBJECT_KEYS = 1_000;
@@ -1412,6 +1415,80 @@ export function normalizeExecutionResource(
   return structuredClone(value);
 }
 
+export function normalizeDirectoryPolicy(policy, run) {
+  const paths = [
+    "inputPaths",
+    "sourcePaths",
+    "outputPaths",
+    "configurationPaths",
+    "artifactPaths",
+    "infrastructurePaths",
+  ];
+  const optional = ["inspectionPaths", "inspectionFilesOnly", "excludePaths"];
+  const canonical = (path) =>
+    typeof path === "string" &&
+    isAbsolute(path) &&
+    resolve(path) === path &&
+    path !== sep &&
+    !/[\0\r\n]/u.test(path);
+  assertRecord(policy, "workspace policy");
+  rejectUnknownFields(
+    policy,
+    new Set([
+      "kind",
+      "workspacePath",
+      "taskPath",
+      "stateRoot",
+      ...paths,
+      ...optional,
+    ]),
+    "workspace policy",
+  );
+  if (
+    (run.schemaVersion < 25 &&
+      optional.some((name) => Object.hasOwn(policy, name))) ||
+    policy.kind !== "directory" ||
+    policy.workspacePath !== run.projectPath ||
+    policy.taskPath !== run.taskPath ||
+    !canonical(policy.stateRoot) ||
+    paths.some(
+      (name) =>
+        !Array.isArray(policy[name]) ||
+        policy[name].length > 256 ||
+        policy[name].some((path) => !canonical(path)) ||
+        new Set(policy[name]).size !== policy[name].length,
+    ) ||
+    (Object.hasOwn(policy, "inspectionPaths") &&
+      (!Array.isArray(policy.inspectionPaths) ||
+        policy.inspectionPaths.length > 10_000 ||
+        policy.inspectionPaths.some(
+          (path) =>
+            !canonical(path) ||
+            (path !== run.projectPath &&
+              !path.startsWith(`${run.projectPath}${sep}`)),
+        ) ||
+        new Set(policy.inspectionPaths).size !==
+          policy.inspectionPaths.length)) ||
+    (Object.hasOwn(policy, "inspectionFilesOnly") &&
+      (typeof policy.inspectionFilesOnly !== "boolean" ||
+        !Object.hasOwn(policy, "inspectionPaths"))) ||
+    (Object.hasOwn(policy, "excludePaths") &&
+      (!Array.isArray(policy.excludePaths) ||
+        policy.excludePaths.length > 256 ||
+        policy.excludePaths.some(
+          (path) =>
+            typeof path !== "string" ||
+            path.length === 0 ||
+            isAbsolute(path) ||
+            path.split(sep).some((part) => ["", ".", ".."].includes(part)) ||
+            /[\0\r\n]/u.test(path),
+        ) ||
+        new Set(policy.excludePaths).size !== policy.excludePaths.length))
+  )
+    fail("Directory workspace policy is invalid.");
+  return structuredClone(policy);
+}
+
 function normalizeWorkspace(value, run) {
   if (value == null) return null; // Legacy runs retain Git semantics, never new authority.
   assertRecord(value, "run.workspace");
@@ -1485,41 +1562,150 @@ function normalizeWorkspace(value, run) {
     )
       fail("Git workspace binding is invalid.");
   } else {
-    const paths = [
-      "inputPaths",
-      "sourcePaths",
-      "outputPaths",
-      "configurationPaths",
-      "artifactPaths",
-      "infrastructurePaths",
-    ];
-    const policy = value.policy;
-    assertRecord(policy, "run.workspace.policy");
-    rejectUnknownFields(
-      policy,
-      new Set(["kind", "workspacePath", "taskPath", "stateRoot", ...paths]),
-      "run.workspace.policy",
-    );
+    normalizeDirectoryPolicy(value.policy, run);
     if (
-      Object.keys(policy).length !== paths.length + 4 ||
       value.lease !== "exclusive" ||
-      policy.kind !== "directory" ||
-      policy.workspacePath !== run.projectPath ||
-      policy.taskPath !== run.taskPath ||
-      !canonical(policy.stateRoot) ||
-      paths.some(
-        (name) =>
-          !Array.isArray(policy[name]) ||
-          policy[name].length > 256 ||
-          policy[name].some((path) => !canonical(path)) ||
-          new Set(policy[name]).size !== policy[name].length,
-      ) ||
       [value.bindingFingerprint, value.protectedFingerprint].some(
         (entry) => typeof entry !== "string" || !/^[a-f0-9]{64}$/u.test(entry),
       )
     )
       fail("Directory workspace binding is invalid.");
   }
+  return structuredClone(value);
+}
+
+// Pausing changes only the workflow state, never the admitted configuration,
+// inputs, counters, sessions or settings used to reconstruct capture.
+export function workspacePreparationInputFingerprint(run) {
+  const { workflowState, ...pipelineState } = run.pipelineState;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        roles: run.roles,
+        hashes: run.hashes,
+        counters: run.counters,
+        protection: run.projectConfigurationProtection,
+        sessionLineage: run.sessionLineage,
+        pipelineState,
+      }),
+    )
+    .digest("hex");
+}
+
+export function normalizeWorkspacePreparation(value, run) {
+  if (value === null || (value === undefined && run.schemaVersion < 25))
+    return null;
+  const canonical = (path) =>
+    typeof path === "string" &&
+    path.length <= 4096 &&
+    isAbsolute(path) &&
+    resolve(path) === path &&
+    !/[\0\r\n]/u.test(path);
+  const exact = (value, keys) =>
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).sort().join() === keys;
+  const sha = (value) =>
+    typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+  const validIdentity = (value, file = false) =>
+    exact(
+      value,
+      file
+        ? "changedNs,device,inode,mode,modifiedNs,size"
+        : "device,inode,mode",
+    ) &&
+    Object.values(value).every(
+      (part) => typeof part === "string" && /^\d{1,32}$/u.test(part),
+    );
+  const invalid = () =>
+    fail(
+      "Frozen workspace preparation is invalid or changed.",
+      "ERR_WORKSPACE_PREPARATION_CHANGED",
+    );
+  if (
+    !exact(
+      value,
+      "inputFingerprint,inputs,leasePath,policy,rootBindings,schemaVersion",
+    ) ||
+    run.schemaVersion < 25 ||
+    value.schemaVersion !== 1 ||
+    run.workspace != null ||
+    run.activeTurn != null ||
+    run.preparation != null ||
+    run.executionProcess != null ||
+    run.executionResource != null ||
+    run.observations != null ||
+    run.inactivityRecovery != null ||
+    run.availabilityRetry != null ||
+    run.preservationRecords?.length > 0 ||
+    Object.values(run.providerPolicies ?? {}).some(
+      (receipt) => receipt !== null,
+    ) ||
+    run.sessionLineage.children.length !== 0 ||
+    !["CLARIFY", "WAITING_FOR_USER", "CANCELED"].includes(
+      run.pipelineState.workflowState,
+    ) ||
+    !canonical(value.leasePath) ||
+    (value.leasePath !== run.projectPath &&
+      !run.projectPath.startsWith(`${value.leasePath}${sep}`)) ||
+    !Array.isArray(value.rootBindings) ||
+    value.rootBindings.length > 4096 ||
+    value.rootBindings.some(
+      (entry, index) =>
+        !exact(entry, "device,inode,mode,path") ||
+        !canonical(entry.path) ||
+        !validIdentity((({ path, ...rest }) => rest)(entry)) ||
+        (index > 0 && value.rootBindings[index - 1].path >= entry.path),
+    ) ||
+    !Array.isArray(value.inputs) ||
+    value.inputs.length > 256 ||
+    value.inputs.some(
+      (entry, index) =>
+        !exact(entry, "contentHash,identity,path") ||
+        !canonical(entry.path) ||
+        (entry.contentHash === null
+          ? entry.identity !== null
+          : !sha(entry.contentHash) || !validIdentity(entry.identity, true)) ||
+        (index > 0 && value.inputs[index - 1].path >= entry.path),
+    ) ||
+    value.inputFingerprint !== workspacePreparationInputFingerprint(run) ||
+    Buffer.byteLength(JSON.stringify(value)) > MAX_WORKSPACE_PREPARATION_BYTES
+  )
+    invalid();
+  normalizeDirectoryPolicy(value.policy, run);
+  const configuration = run.projectConfigurationProtection;
+  const roots = new Set(value.rootBindings.map(({ path }) => path));
+  if (
+    value.inputs.some(
+      ({ path, contentHash }) =>
+        !(
+          path.startsWith(`${run.taskPath}${sep}`) ||
+          (contentHash !== null &&
+            [
+              ...value.policy.inputPaths,
+              ...value.policy.configurationPaths,
+            ].includes(path))
+        ),
+    ) ||
+    (configuration != null &&
+      !value.inputs.some(
+        ({ path, contentHash }) =>
+          path === configuration.path &&
+          contentHash === configuration.contentHash,
+      )) ||
+    value.rootBindings.some(
+      ({ path }) => path !== sep && !roots.has(dirname(path)),
+    ) ||
+    [
+      run.projectPath,
+      run.taskPath,
+      value.policy.stateRoot,
+      value.leasePath,
+      ...value.inputs.map(({ path }) => dirname(path)),
+    ].some((path) => !roots.has(path))
+  )
+    invalid();
   return structuredClone(value);
 }
 
@@ -1594,6 +1780,10 @@ export function normalizeRunState(value, expectedRunId) {
     projectPath: value.projectPath,
     taskPath: value.taskPath,
     workspace: normalizeWorkspace(value.workspace, value),
+    workspacePreparation: normalizeWorkspacePreparation(
+      value.workspacePreparation,
+      value,
+    ),
     projectConfigurationProtection: normalizeProjectConfigurationProtection(
       value.projectConfigurationProtection,
       value,

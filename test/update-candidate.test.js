@@ -10,7 +10,7 @@ import {
   inspectOwnedSessionProcesses,
   readProcessNamespace,
 } from "../src/agents/index.js";
-import { createRunStore } from "../src/state/index.js";
+import { createRunStore, RUNTIME_COMPATIBILITY } from "../src/state/index.js";
 import {
   createRuntimeAdmission,
   prepareRuntime,
@@ -121,7 +121,7 @@ async function fixture(
       schemaVersion: 1,
       configurationVersion: 1,
       runnerVersion: 1,
-      runStateVersion: 24,
+      runStateVersion: RUNTIME_COMPATIBILITY.runStateVersion,
       pipelines: { sample: 2 },
     },
   });
@@ -824,9 +824,16 @@ test("concurrent apply requests cannot duplicate installation and blocked intent
     idempotencyKey: "concurrent-first",
     version: "1.1.0",
   });
-  let second;
+  let second, firstResult;
   try {
-    await entered.promise;
+    await Promise.race([
+      entered.promise,
+      first.then((result) =>
+        assert.fail(
+          `First apply completed before entering installation: ${result.status}.`,
+        ),
+      ),
+    ]);
     second = await f.updater.apply({
       idempotencyKey: "concurrent-second",
       version: "1.1.0",
@@ -839,8 +846,9 @@ test("concurrent apply requests cannot duplicate installation and blocked intent
     );
   } finally {
     leave.resolve();
+    firstResult = await first;
   }
-  assert.equal((await first).status, "active");
+  assert.equal(firstResult.status, "active");
   assert.equal(
     (
       await f.updater.apply({

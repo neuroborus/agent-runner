@@ -55,6 +55,10 @@ import { createPreservationStore } from "./preservation.js";
 import { createRecoveryFailureStore } from "./recovery-failures.js";
 import { createStopService } from "./stops.js";
 import {
+  createWorkspacePreparation,
+  createWorkspacePreparationService,
+} from "./workspace-preparation.js";
+import {
   assertRunCanAdvance,
   assertStopProgress,
   assertRunCanReleaseOwnership,
@@ -97,6 +101,7 @@ const CREATE_RUN_FIELDS = new Set([
   "taskPath",
   "projectConfigurationProtection",
   "workspace",
+  "workspacePreparation",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -626,6 +631,9 @@ export function createRunStore({
       });
     }
     rejectUnknownFields(input, CREATE_RUN_FIELDS, "runInput");
+    const workspacePreparation = structuredClone(
+      input.workspacePreparation ?? null,
+    );
 
     const [projectPath, taskPath, potentialStateRoot] = await Promise.all([
       canonicalDirectory(input.projectPath, "Project path"),
@@ -687,7 +695,7 @@ export function createRunStore({
           });
         }
       }
-      const state = normalizeRunState(
+      let state = normalizeRunState(
         {
           schemaVersion: RUN_STATE_SCHEMA_VERSION,
           revision: 1,
@@ -698,6 +706,7 @@ export function createRunStore({
           projectPath,
           taskPath,
           workspace: input.workspace ?? null,
+          workspacePreparation: null,
           projectConfigurationProtection:
             input.projectConfigurationProtection === undefined
               ? null
@@ -748,6 +757,17 @@ export function createRunStore({
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
           updatedAt: createdAt,
+        },
+        runId,
+      );
+      state = normalizeRunState(
+        {
+          ...state,
+          workspacePreparation: await createWorkspacePreparation(
+            workspacePreparation,
+            state,
+            rootPath,
+          ),
         },
         runId,
       );
@@ -1471,7 +1491,9 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        allowWorkspacePreparation: true,
+      });
       if (
         expectedRevision !== undefined &&
         snapshot.state.revision !== expectedRevision
@@ -2119,6 +2141,15 @@ export function createRunStore({
       prefix: ".custody-",
     }),
   });
+  const workspacePreparation = createWorkspacePreparationService({
+    runLeases,
+    worktreeLeases,
+    getWorktreeLeaseDirectory,
+    loadSnapshot,
+    journal,
+    timestamp,
+    resolveStopBoundary,
+  });
   const stops = createStopService({
     preparation,
     resolveStopBoundary,
@@ -2282,6 +2313,7 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    captureWorkspacePreparation: workspacePreparation.capture,
     capturePreservation: preservation.capture,
     restorePreservation: preservation.restore,
     reconcilePreservation: preservation.reconcile,

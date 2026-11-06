@@ -107,6 +107,17 @@ commits retain separate ownership.
 
 ## Inputs, artifacts, and state
 
+The state capability can retain pending workspace preparation before recursive
+inspection. Frozen declarations, exact admission-input evidence and canonical
+directory identities survive interruption and stop settlement. Partial capture
+grants no provider, report, approval or effect authority. Only a fresh verified
+capture under the execution and canonical exclusion leases may publish complete
+bindings; changed inputs, substituted roots, stale revisions and cancellation
+cannot accept a partial result. Legacy absence preserves completed preparation
+without inventing inspection evidence. The
+[state contract](../ARCHITECTURE.md#external-run-state) owns this foundation;
+pipeline activation is separate from its availability.
+
 The directory-workspace inspection foundation protects unrelated content and
 explicit inputs, references, configuration, artifacts, infrastructure and
 filesystem-discovered Git/provider controls. Only declared confined outputs may

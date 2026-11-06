@@ -279,12 +279,21 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     });
   }
 
-  async function readFile({ path, projectPath, optional = false }) {
+  async function readFile({
+    path,
+    projectPath,
+    optional = false,
+    maxBytes = Number.MAX_SAFE_INTEGER,
+  }) {
     return boundary(async () => {
+      assertSafe(
+        Number.isSafeInteger(maxBytes) && maxBytes >= 0,
+        "Input read limit must be a non-negative safe integer.",
+      );
       const binding = await inspectLocalPath({ path, projectPath });
       if (!binding.exists && optional) return null;
       assertSafe(binding.kind === "file", "Input must be a regular file.");
-      return readTextFile(fs, binding.path);
+      return readTextFile(fs, binding.path, maxBytes);
     });
   }
 
