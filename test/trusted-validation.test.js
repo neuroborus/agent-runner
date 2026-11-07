@@ -601,7 +601,7 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
     process.execPath,
     ["--input-type=module", "--eval", source],
   );
-  const service = trustedService(git);
+  const service = trustedService(git, { monotonicNow: () => 0n });
 
   const result = await service.execute({
     bindings: await bindings(git, projectPath, trusted),
@@ -615,6 +615,7 @@ test("executes an exact persisted vector with bounded redacted evidence", async 
   assert.equal(result.commandIdentity, trusted.commands[0].identity);
   assert.deepEqual(result.evidence, [
     "Runner-trusted command service-check exited with code 0.",
+    "Runner-measured attempt elapsed time: 0.000 ms (executor invoked).",
   ]);
   assert.deepEqual(validateTrustedValidationSnapshot(trusted), trusted);
 });
@@ -987,6 +988,7 @@ test("rejects a changed trusted launcher before executing its command", async (t
   const service = createTrustedValidationService({
     git,
     resolveLauncher: () => "/runner-owned/bwrap",
+    monotonicNow: () => 0n,
     verifyLauncher(path) {
       if (verified) {
         throw Object.assign(new Error("Launcher changed."), {
@@ -1012,6 +1014,7 @@ test("rejects a changed trusted launcher before executing its command", async (t
   assert.equal(result.status, "BLOCKED");
   assert.deepEqual(result.evidence, [
     "Runner-trusted command launcher-check could not start in the required isolated executor.",
+    "Runner-measured attempt elapsed time: 0.000 ms (blocked before executor invocation).",
   ]);
 });
 
@@ -1061,6 +1064,7 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
   );
   const service = createTrustedValidationService({
     git,
+    monotonicNow: () => 0n,
     sandboxCommand() {
       return {
         command: {
@@ -1082,6 +1086,7 @@ test("distinguishes isolation setup denial from command failure", async (t) => {
   assert.equal(blocked.status, "BLOCKED");
   assert.deepEqual(blocked.evidence, [
     "Runner-trusted command isolation-probe could not start in the required isolated executor.",
+    "Runner-measured attempt elapsed time: 0.000 ms (executor invoked).",
   ]);
 });
 

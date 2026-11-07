@@ -111,9 +111,12 @@ For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fiel
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return only the candidate decision and actionable findings using the provided schema.`;
 
+const TRUSTED_TIMING_INSTRUCTIONS = `Runner-trusted elapsed evidence measures the admitted attempt including preparation, retirement, cleanup and safety checks, not child runtime alone. Use only the persisted Runner measurement; unavailable legacy/controller timing stays unknown. Never measure a reserved command yourself, invent historical timing or rerun solely for missing telemetry.`;
+
 export const REVIEW_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
 
 Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence, not candidate review or generic commit preparation.
+${TRUSTED_TIMING_INSTRUCTIONS}
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
 Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
 Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
@@ -148,6 +151,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const CLEAN_CONFIRM_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
 
 Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
+${TRUSTED_TIMING_INSTRUCTIONS}
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
 Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
 Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
@@ -180,6 +184,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
 const FINALIZATION_RESULT_INSTRUCTIONS = `Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+${TRUSTED_TIMING_INSTRUCTIONS}
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
 For PASS, provide summary; set issues, options, and evidence to []; set reason, question, and whyBlocked to "".

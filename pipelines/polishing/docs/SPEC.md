@@ -818,6 +818,17 @@ stdout/stderr. A full repository check may pass on the host while trusted
 isolation fails closed with only a generic exit code; the timeout is not a
 diagnostics or containment workaround.
 
+The shared service appends Runner-monotonic elapsed milliseconds for the admitted
+attempt, including preparation, verified retirement, cleanup and safety checks;
+see the [shared execution interval](../../../docs/ARCHITECTURE.md). Timing marks
+pre-invocation blockage separately from executor invocation, which alone cannot
+attest payload admission. Availability probes and uncertain/unsafe attempts
+produce no completed-check timing evidence. Existing check evidence lists carry
+the receipt unchanged through persistence and terminal confirmation. Legacy or
+older-controller receipts remain timing-unknown without migration; roles keep
+reserved placeholders `NOT_RUN`, never estimate Runner timing and never rerun
+solely for absent telemetry.
+
 `BLOCKED` is reserved for required validation that cannot execute because of an
 external environment constraint. It carries bounded reason and evidence,
 pauses as `environment_blocked`, and resumes at `FINALIZE`; an executable check

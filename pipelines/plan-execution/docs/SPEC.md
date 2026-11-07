@@ -3104,6 +3104,18 @@ discarded output. A full repository check can pass on the host while trusted
 isolation fails closed with only a generic exit code; timeout configuration is
 not a diagnostics or containment remedy.
 
+Runner receipts append monotonic elapsed milliseconds for the admitted attempt,
+including preparation, invocation, verified retirement, cleanup and safety checks;
+see the [shared execution interval](../../../docs/ARCHITECTURE.md). The evidence
+distinguishes pre-invocation blockage from an invoked executor, without asserting
+payload admission. Availability preparation is never check evidence. Cancellation,
+uncertain ownership/cleanup and safety failures publish no completed receipt.
+The existing check evidence list retains timing through persistence/reload and
+the terminal confirmation's exact validation tuple. No schema migration is
+needed; authentic unmeasured receipts remain valid with timing unknown. Worker
+placeholders stay `NOT_RUN`; finalization and terminal roles never estimate
+Runner duration or rerun solely for missing legacy/controller telemetry.
+
 Before either the passing or failing finalization transition is attempted, one
 pipeline-owned deterministic contract constructs and validates the exact
 persisted evidence record from the normalized Worker result and bounded

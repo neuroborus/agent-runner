@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Trusted-check timing belongs to the Runner execution boundary.** Existing
+  bounded receipts now carry monotonic elapsed milliseconds from admitted
+  preparation through verified retirement, cleanup and safety checks, alongside
+  the unchanged outcome and bindings. They distinguish pre-invocation blockage
+  from executor invocation; availability probes and uncertain attempts cannot
+  manufacture executed-check evidence. Both coding pipelines persist the text
+  and bind terminal confirmation to it without a schema migration. Historical
+  receipts retain unknown timing, and the 60-second fast-gate target stays
+  advisory. Injected clocks prove boundaries without sleeps or command streams.
+
 - **Full-scan activity certification retains its original byte proof.** A scan
   racing with append or rotation keeps bounded consumed-byte capture bindings
   independently of optional checkpoint retention. Canonical validation proves

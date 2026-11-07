@@ -463,6 +463,11 @@ function boundedEvidence(command, result) {
       `Runner-trusted command ${command.alias} timed out without retaining process output.`,
     ]);
   }
+  if (result.signal !== null) {
+    return Object.freeze([
+      `Runner-trusted command ${command.alias} terminated by a signal.`,
+    ]);
+  }
   return Object.freeze([
     `Runner-trusted command ${command.alias} exited with code ${result.exitCode}.`,
   ]);
@@ -484,6 +489,7 @@ export function createTrustedValidationService(options = {}) {
   const runCommand = options.runCommand ?? runExactCommand;
   const resolveLauncher = options.resolveLauncher ?? resolveTrustedBubblewrap;
   const verifyLauncher = options.verifyLauncher ?? verifyTrustedBubblewrap;
+  const monotonicNow = options.monotonicNow ?? process.hrtime.bigint;
   const terminationGraceMs = options.terminationGraceMs ?? 1_000;
   if (
     !isRecord(environment) ||
@@ -492,6 +498,7 @@ export function createTrustedValidationService(options = {}) {
     typeof runCommand !== "function" ||
     typeof resolveLauncher !== "function" ||
     typeof verifyLauncher !== "function" ||
+    typeof monotonicNow !== "function" ||
     !Number.isSafeInteger(terminationGraceMs) ||
     terminationGraceMs < 1 ||
     Object.hasOwn(options, "timeoutMs")
@@ -767,6 +774,10 @@ export function createTrustedValidationService(options = {}) {
       }
     };
     let failure;
+    let executorInvoked = false;
+    // Availability probes never produce check evidence. An admitted execution
+    // includes effectful preparation through retirement, cleanup and safety.
+    const startedAt = preparationOnly ? null : monotonicNow();
     try {
       if (needsStorage(command.capabilities))
         forbiddenPaths.push(
@@ -899,6 +910,7 @@ export function createTrustedValidationService(options = {}) {
             contentFingerprint: before.contentFingerprint,
           })
         : onProcess;
+      executorInvoked = true;
       result = await runCommand(execution.command, {
         cwd:
           command.capabilities?.sourceProjection === true
@@ -1063,6 +1075,7 @@ export function createTrustedValidationService(options = {}) {
         available: result.status === "PASS",
         reason: result.reason,
       });
+    const elapsedMs = Number(monotonicNow() - startedAt) / 1_000_000;
     return Object.freeze({
       status: result.status,
       commandIdentity: command.identity,
@@ -1072,7 +1085,10 @@ export function createTrustedValidationService(options = {}) {
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,
-      evidence: boundedEvidence(command, result),
+      evidence: Object.freeze([
+        ...boundedEvidence(command, result),
+        `Runner-measured attempt elapsed time: ${elapsedMs.toFixed(3)} ms (${executorInvoked ? "executor invoked" : "blocked before executor invocation"}).`,
+      ]),
       ...normalizedBindings,
     });
   }

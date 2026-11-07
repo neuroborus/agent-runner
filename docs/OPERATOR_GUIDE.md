@@ -312,11 +312,11 @@ prohibited. Cleanup follows verified process retirement. Uncertain cleanup
 retains ownership evidence and resumes before new work; interrupted contents
 are never reused.
 
-Increasing the deadline does not repair sandbox incompatibility or reveal
-discarded diagnostics. Trusted execution retains no command stdout or stderr;
-a check may pass on the host yet fail closed in isolation with only a generic
-exit code. Preserve that boundary and investigate the isolated environment
-rather than using the timeout as a containment or diagnostics workaround.
+Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
+stdout/stderr. Missing legacy/controller timing stays unknown; never invent it
+or rerun for telemetry. The 60-second fast-gate target is advisory.
+See [validation evidence](product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)
+for timing and isolation/diagnostic limits.
 
 For public downloads, declare `capabilities.artifacts` entries with canonical
 HTTPS `url` and verified SHA-256 `sha256`; see the

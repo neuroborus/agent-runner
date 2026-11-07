@@ -4971,6 +4971,26 @@ uncertainty preserve an `environment_blocked` FINALIZE checkpoint and never atte
 preserves the abort outcome after safe cleanup; uncertain retirement retains
 ownership and blocks settlement.
 
+Completed bounded receipts append a Runner-measured attempt elapsed-time
+sentence in milliseconds, rounded to three decimal places. The service's
+injectable clock defaults to `process.hrtime.bigint()` and is independent of
+executor deadline clocks. Measurement starts after admission and the bound
+workspace snapshot, immediately before effectful preparation; it includes
+allocation, acquisition, source projection, sandbox preparation, invocation,
+verified process retirement, resource cleanup and the final safety check.
+Preflight and capability-availability probes produce no check timing evidence.
+The sentence distinguishes blockage before executor invocation from an invoked
+executor attempt; invocation alone does not prove payload admission or success.
+The outcome sentence retains exit, signal, timeout or bounded blockage meaning.
+Cancellation, uncertain retirement/cleanup, invalid executor results and safety
+failures preserve their errors without publishing completed receipts. No command
+streams, provider text or wall-clock subtraction supply this measurement.
+Both coding pipelines retain the sentence in their existing evidence lists,
+including persistence, reload and the terminal confirmation's validation tuple;
+receipt/state shapes and command, content, configuration and infrastructure
+bindings are unchanged. Existing receipts without elapsed evidence remain valid
+with timing unknown, without migration or invented historical measurements.
+
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
 running the exact persisted executable/argument vector directly without a

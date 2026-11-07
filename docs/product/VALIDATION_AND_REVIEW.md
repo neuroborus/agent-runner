@@ -437,6 +437,19 @@ fix sandbox incompatibility or restore discarded stdout/stderr. A check may
 pass on the host yet fail closed in isolation with only a generic exit code;
 the timeout must not be presented as a diagnostics remedy.
 
+Trusted receipts include Runner-measured attempt elapsed time in milliseconds
+alongside the outcome. The [execution interval](../ARCHITECTURE.md) includes
+preparation, retirement, cleanup and safety checks, rather than child runtime
+alone. An invoked executor can still fail before payload admission; a timed
+blocked attempt never attests a passed check. Capability inspection provides no
+check measurement. Cancellation or uncertain cleanup produces no completed
+receipt. The existing evidence lists carry timing unchanged through persistence
+and terminal confirmation in execution and polishing. Legacy or older-controller
+receipts without timing remain timing-unknown; never ask an agent to measure a
+Runner-owned command, fabricate a duration or rerun only for absent telemetry.
+Report actual outcomes and available measurements against the advisory
+60-second ordinary-gate target; exceeding that target alone is not check failure.
+
 A producer-only test-location protocol is available to the repository harness
 through existing scratch requests; runtime allocation and consumption remain
 inactive. Its entire report is bounded to 4,096 UTF-8 bytes and four locations

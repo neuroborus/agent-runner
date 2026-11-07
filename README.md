@@ -1119,6 +1119,10 @@ process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
 
+Trusted receipts include Runner-measured elapsed attempts through preparation,
+retirement, cleanup and safety checks. Missing legacy/controller timing stays
+unknown; see [validation evidence](docs/product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints).
+
 A longer deadline changes only when an exact command times out. It cannot make
 an incompatible sandbox work or improve native diagnostics. Trusted execution
 deliberately retains no stdout or stderr, so a full repository check that passes

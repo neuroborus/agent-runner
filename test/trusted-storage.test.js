@@ -377,6 +377,70 @@ test("rechecks source ownership after sandbox preparation and before launch", as
   assert.deepEqual(await readdir(f.storageRoot), []);
 });
 
+test("Runner timing includes resource publication, verified retirement, cleanup and safety", async (t) => {
+  const f = await fixture(t, { scratch: true });
+  let now = 0n;
+  const readings = [];
+  const snapshot = f.git.snapshot;
+  const unchanged = f.git.assertUnchanged;
+  f.git.snapshot = async () => {
+    now += 100_000_000n;
+    return snapshot();
+  };
+  f.git.assertUnchanged = async () => {
+    assert.equal(
+      (await f.store.loadRun(f.state.runId)).executionResource,
+      null,
+    );
+    assert.deepEqual(await readdir(f.storageRoot), []);
+    now += 7_000_000n;
+    await unchanged();
+  };
+  const retired = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const service = f.service({
+    monotonicNow() {
+      readings.push(now);
+      return now;
+    },
+    async runCommand(_command, { onProcess }) {
+      await onProcess(process.pid);
+      now += 3_000_000n;
+      entered.resolve();
+      await retired.promise;
+      now += 5_000_000n;
+      await onProcess(null);
+      return passed;
+    },
+  });
+  let settled = false;
+  const execution = service
+    .execute({
+      ...f.request,
+      async onResource(record) {
+        await f.request.onResource(record);
+        now += record === null ? 11_000_000n : 2_000_000n;
+      },
+    })
+    .finally(() => {
+      settled = true;
+    });
+  try {
+    await Promise.race([entered.promise, execution]);
+    assert.equal(settled, false);
+    assert.equal(readings.length, 1);
+  } finally {
+    retired.resolve();
+    await execution;
+  }
+  const result = await execution;
+  assert.deepEqual(readings, [100_000_000n, 130_000_000n]);
+  assert.deepEqual(result.evidence, [
+    "Runner-trusted command build exited with code 0.",
+    "Runner-measured attempt elapsed time: 30.000 ms (executor invoked).",
+  ]);
+});
+
 for (const outcome of ["failure", "timeout", "abort", "mutation"]) {
   test(`cleans owned storage and checks repository after ${outcome}`, async (t) => {
     const f = await fixture(t);
@@ -491,7 +555,9 @@ for (const phase of ["allocation", "cleanup"]) {
   test(`retains storage ownership when ${phase} cannot be synchronized`, async (t) => {
     const f = await fixture(t);
     let commandRan = false;
+    let clockReads = 0;
     const service = f.service({
+      monotonicNow: () => BigInt(clockReads++),
       async runCommand() {
         commandRan = true;
         return passed;
@@ -527,6 +593,11 @@ for (const phase of ["allocation", "cleanup"]) {
       syncBuiltinESMExports();
     }
     assert.equal(commandRan, phase === "cleanup");
+    assert.equal(
+      clockReads,
+      1,
+      "uncertain cleanup cannot produce elapsed evidence",
+    );
     const saved = (await f.store.loadRun(f.state.runId)).executionResource;
     assert.equal(
       saved.phase,
@@ -734,7 +805,7 @@ assert.throws(() => fs.writeFileSync('/etc/agent-runner-write', 'forbidden'));`;
   const before = await git.snapshot({ projectPath: f.projectPath });
   // Keep the fixture's fixed native launcher: an enclosing sandbox can have a
   // writable root, which production host-path discovery correctly rejects.
-  const service = f.service({ git });
+  const service = f.service({ git, monotonicNow: () => 0n });
   const result = await service.execute({
     ...f.request,
     snapshot,
@@ -757,6 +828,7 @@ assert.throws(() => fs.writeFileSync('/etc/agent-runner-write', 'forbidden'));`;
     assert.equal(result.exitCode, null);
     assert.deepEqual(result.evidence, [
       "Runner-trusted command build could not start in the required isolated executor.",
+      "Runner-measured attempt elapsed time: 0.000 ms (executor invoked).",
     ]);
   }
   assert.equal(
