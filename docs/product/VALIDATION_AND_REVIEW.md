@@ -309,6 +309,15 @@ output pauses for explicit recovery. These limits prevent rejected provider
 output from becoming an unbounded hidden retry loop and do not consume the
 separate code-fix or semantic-evidence budgets.
 
+Finalization diagnostics identify the violated schema field and fixed constraint,
+using trusted list positions rather than rejected values or proposed identities.
+Independent violations form one bounded batch; invalid inventories do not create
+speculative downstream identity findings. Terminal CLI/MCP failure evidence
+retains the validated first diagnostic without granting retry authority. Missing
+provider field information and historical failures remain unknown. See the
+[execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
+for exact validation and correction rules.
+
 Two automatic semantic retries per execution step or polishing run are durable
 and separate from malformed-output and code-fix budgets. Pending retries survive
 interruption or provider unavailability without recounting. Scope drift clears feedback without

@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Finalization rejection retains the validator's known field.** Schema-field
+  and trusted-position diagnostics distinguish invalid identities, commands,
+  reserved placeholders, evidence and status consistency without retaining
+  rejected content. Independent violations share the existing bounded batch;
+  the unchanged two-attempt ledger rejects repeated or mixed violations and
+  survives interruption. CLI/MCP terminal evidence exposes the validated first
+  diagnostic without recovery authority. Unknown historical/provider fields
+  stay unknown; persisted shapes, allowances and strict acceptance remain intact.
+
 - **Trusted-check timing belongs to the Runner execution boundary.** Existing
   bounded receipts now carry monotonic elapsed milliseconds from admitted
   preparation through verified retirement, cleanup and safety checks, alongside

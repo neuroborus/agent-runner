@@ -643,7 +643,9 @@ null-action resume at the inspected revision. Do not ask a writable role to
 repeat the effect, edit state or infer a finding disposition. A validated
 `environment_blocked` result still requires resolving its stated blocker before
 resume. Candidate edits, input/configuration drift and read-only contamination
-retain their safety stops. All original review and effect gates remain required.
+retain their safety stops.
+All [review, correction and effect gates](product/VALIDATION_AND_REVIEW.md)
+remain required.
 
 New native sessions use `[<full Runner run UUID>] <bounded description>` on both
 providers. Codex names only a verified, durably acknowledged new child; Claude

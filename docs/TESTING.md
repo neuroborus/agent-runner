@@ -801,6 +801,14 @@ confirmation across reloads. It verifies full-catalog reservation, explicit
 candidate-only execution, unchanged later schedules and exact persisted executor
 identity; unselected placeholders and selected agent attestations remain invalid.
 The existing CLI workflow slow suite retains cross-capability execution coverage.
+Fast execution `finalization-diagnostics.test.js` covers field/constraint
+redaction, bounded independent batches, ordered check identity, reserved
+placeholders, distinct corrections across interrupted reconstruction, Runner
+replacement and terminal public evidence. Repeated, mixed and exhausted batches
+retain the finite ledger. Existing contract/custom fixtures retain strict stored
+evidence and empty-inventory compatibility. These focused fixtures do not replace
+the affected journal, CLI/MCP, orchestration, recovery, release-pack, separate
+package-install and complete slow gates for the integrated repair.
 The fast execution `step-policy.test.js` covers explicit plan-contract selection,
 criterion context, analysis without an artificial diff, directory-only inspection,
 absence of custom Git effects and explicit execution entry points. Its lightweight

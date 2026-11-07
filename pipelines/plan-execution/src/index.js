@@ -54,6 +54,7 @@ import {
   finalizationFeedbackFindings,
   findingFingerprint,
   isFinalizationPolicy,
+  isOutputDiagnostic,
   resolveActiveRoles,
   sha256,
 } from "./workflow-contract.js";
@@ -343,6 +344,17 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  if (
+    pause.reason === "internal_failure" &&
+    pause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+    isOutputDiagnostic(pause.diagnostic) &&
+    pause.diagnostic.role === "worker" &&
+    pause.diagnostic.phase === "finalization" &&
+    pause.diagnostic.contract === "finalization"
+  ) {
+    const { field, constraint } = pause.diagnostic;
+    return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
   if (pause.reason === "writable_output_invalid") {
     const phase = pause.resumeState;
     const diagnostic = writableResultDiagnostic(

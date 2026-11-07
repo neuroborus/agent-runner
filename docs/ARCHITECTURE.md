@@ -3414,6 +3414,16 @@ that content scope changes. Rejected commands, paths, values, provider text,
 and transcripts remain outside state and public activity, while interruption
 preserves the pending attempt without replaying or recounting it.
 
+Finalization normalizers attach fixed constraint identifiers to schema fields
+and trusted zero-based check/issue positions. Independent violations are collected
+within the existing 512-diagnostic bound; invalid inventories suppress dependent
+identity comparisons. Reserved checks require Worker `NOT_RUN` and Runner
+replacement before persisted acceptance. CLI and MCP share the pipeline pause
+projection, which exposes the validated first terminal finalization diagnostic
+through its existing evidence list without new recovery authority. Unknown
+provider fields retain the semantic fallback; no rejected values or exception
+prose enter diagnostic identities, and no state migration or allowance changes.
+
 Plan execution state version 9 makes user finding overrides unique by exact
 finding ID and reviewed content fingerprint and requires every finalization
 validation-infrastructure candidate to pass the same existing canonical-file

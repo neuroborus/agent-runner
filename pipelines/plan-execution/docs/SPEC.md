@@ -3300,6 +3300,20 @@ values, commands, paths, provider output, and transcripts are never persisted
 or published. This bounded ledger is independent of bootstrap and validation-
 migration correction ledgers.
 
+Finalization normalization identifies root/object and exact-field-set failures,
+closed status values, each inapplicable field, ordered check completeness and
+identity, exact commands, reserved `NOT_RUN` rules, bounded evidence, issues and
+status consistency at their owning validators. Paths use schema field names and
+zero-based trusted positions, never proposed IDs, commands, values or exception
+prose. Independent field/check violations share a batch capped at 512 diagnostics;
+invalid prerequisite inventories suppress dependent check comparisons. Worker
+`PASS` may contain reserved placeholders, which Runner replaces before persisted
+acceptance. Custom criterion failures retain their existing empty-inventory semantics.
+The same bounded first diagnostic appears in terminal CLI/MCP failure evidence;
+it grants no resume action. Provider failures lacking field information retain
+`result` / `semantic-contract`. Historical unknown fields stay unknown, and the
+existing ledger and persisted evidence shapes require no migration.
+
 Before any finalization candidate, including `BLOCKED`, is fingerprinted,
 trusted, or reviewed, inspect every validation-infrastructure entry through the
 root Git boundary. Each entry must exist as a regular file and its canonical
