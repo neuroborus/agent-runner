@@ -480,6 +480,7 @@ test("terminal recheck failures preserve a valid failed run without replaying ve
   const saved = await pendingRun();
   const cause = Object.assign(new Error("Synthetic provider safety failure"), {
     code: "ERR_AUDIT_SYNTHETIC_SAFETY",
+    diagnosticClass: "isolation_workspace_policy",
   });
   const f = fixture([cause], { saved });
   await assert.rejects(f.execute(), (error) => error === cause);
@@ -487,16 +488,23 @@ test("terminal recheck failures preserve a valid failed run without replaying ve
   assert.equal(failed.pipelineState.workflowState, "FAILED");
   assert.equal(failed.activeTurn, null);
   assert.equal(failed.pause.code, cause.code);
+  assert.equal(failed.pause.diagnosticClass, cause.diagnosticClass);
   assert.equal(failed.pipelineState.recheckHistory[0].outcome, "interrupted");
   assert.deepEqual(
     failed.pipelineState.pendingBatch,
     saved.pipelineState.pendingBatch,
   );
   assert.equal(failed.pipelineState.acceptedBatches.length, 0);
+  assert.deepEqual(failed.pipelineState.settings, saved.pipelineState.settings);
+  assert.deepEqual(failed.pipelineState.inputs, saved.pipelineState.inputs);
+  assert.deepEqual(failed.pipelineState.report, saved.pipelineState.report);
+  assert.deepEqual(failed.pipelineState.history, saved.pipelineState.history);
   assert.doesNotThrow(() => auditPipeline.workflow.validateRun(failed));
   const resumed = fixture([], { saved: failed });
-  assert.equal((await resumed.execute()).pipelineState.workflowState, "FAILED");
+  assert.deepEqual(await resumed.executePublic(), failed);
   assert.equal(resumed.calls.length, 0);
+  assert.equal(resumed.publications.length, 0);
+  assert.throws(() => auditPipeline.validateResumeAction(failed, null));
 });
 
 test("interruption consumes a recheck reservation and saved acceptance never replays", async () => {

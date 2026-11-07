@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Terminal audit failures retain bounded provider evidence.** Audit now saves
+  the registry-normalized optional diagnostic class alongside its terminal code
+  and publishes a safe failure activity. Shared CLI/MCP projections retain that
+  evidence after reconstruction; legacy absence remains unknown. Fixed guidance
+  describes only an established workspace-policy failure, never an inferred
+  environment cause. The diagnosis changes no frozen inputs, findings, receipts,
+  budgets or publication authority, and grants no same-run audit resumption.
+  Runner honors descriptor-declared nonresumable states after owned cleanup and
+  before any new provider probe or workflow invocation, preserving failed audits
+  even when the provider is unavailable on continuation.
+  Later configuration drift cannot replace the terminal disposition or diagnosis;
+  saved-state validation and owned cleanup remain required.
+
 - **Observation recertification preserves raced extension bytes.** Cold capture,
   canonical recertification and extension may each overlap owner publication.
   Observation alone retains a growing active segment as capture evidence,

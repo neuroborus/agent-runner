@@ -2217,6 +2217,9 @@ unchanged bindings. Both budgets are run-wide and capped at 20, including after
 interruption. Status exposes the report path/status/hash and finding/pass counts.
 Invalid role results expose bounded field diagnostics in CLI/MCP pause evidence;
 resume supplies structured correction feedback within the existing pass budgets.
+Terminal provider failures retain validated class evidence in status, wait and
+safe activity; they grant no same-run audit resumption. See the
+[audit failure contract](pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
 Zero or Critical findings can accompany success; findings create no automatic
 issues or repair permissions. Unavailable evidence remains visible. Report
 publication resumes without replaying accepted model work; unexpected report edits

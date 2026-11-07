@@ -587,6 +587,12 @@ provider session.
 
 Provider messages, responses, prompts, denied tool input, standard error,
 credentials, and process causes do not enter public activity or durable state.
+Audit retains only the already normalized optional `diagnosticClass` on terminal
+failure, validated by the common registry-backed pause contract. A finite class
+is bounded evidence, not proof of an underlying environment cause; a generic
+error code or missing legacy class supplies no diagnosis. The
+[audit specification](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle)
+owns its fixed operator guidance and nonresumable terminal disposition.
 Adding another backend is a source-controlled runtime decision, not dynamic
 plugin loading, and must preserve these shared semantics without adding
 provider branches to pipeline policy.

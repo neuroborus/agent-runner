@@ -64,8 +64,8 @@ export async function runAuditDiscovery({
     artifactRoot: run.taskPath,
     transcriptPath: join(run.taskPath, "clarifications.md"),
   };
-  const save = async (pipelineState, patch = {}) => {
-    current = await runtime.transition({ pipelineState, ...patch });
+  const save = async (pipelineState, patch = {}, options = {}) => {
+    current = await runtime.transition({ pipelineState, ...patch }, options);
     assertAuditRun(current);
   };
   const pause = async (
@@ -446,9 +446,28 @@ export async function runAuditDiscovery({
         };
       }
       await finishReserved("interrupted");
+      const code = safeCode(agentError);
+      const diagnosticClass = agentError.diagnosticClass;
       await save(
         { ...state(), workflowState: "FAILED" },
-        { pause: { reason: "internal_failure", code: safeCode(agentError) } },
+        {
+          pause: {
+            reason: "internal_failure",
+            code,
+            ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+          },
+        },
+        {
+          activity: {
+            actor: "runner",
+            phase: "audit",
+            kind: "failed",
+            message:
+              diagnosticClass === undefined
+                ? `Audit failed: ${code}.`
+                : `Audit failed: ${code} (${diagnosticClass}).`,
+          },
+        },
       );
       throw agentError;
     }

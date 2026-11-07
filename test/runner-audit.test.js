@@ -246,9 +246,100 @@ test("terminal provider isolation failures cannot be resumed as clean audit disc
   assert.equal(f.currentRun.pipelineState.workflowState, "FAILED");
   assert.equal(f.currentRun.activeTurn, null);
   assert.equal(f.currentRun.pause.code, "ERR_CODEX_MULTI_AGENT");
+  assert.equal(f.currentRun.pause.diagnosticClass, "operation_multi_agent");
+  assert.deepEqual(auditPipeline.projections.pause(f.currentRun).evidence, [
+    "Adapter diagnostic: operation_multi_agent.",
+  ]);
   assert.equal(f.currentRun.pipelineState.history[0].outcome, "interrupted");
   assert.equal((await f.execute()).pipelineState.workflowState, "FAILED");
   assert.equal(f.calls.length, 2);
+});
+
+test("audit retains only normalized terminal classes and rejects contradictory diagnostic state", async () => {
+  for (const [backend, AdapterError, diagnosticClass] of [
+    ["codex", CodexAdapterError, "isolation_feature"],
+    ["claude", ClaudeAdapterError, "isolation_workspace_policy"],
+    ["codex", CodexAdapterError, undefined],
+    ["codex", CodexAdapterError, "unknown_diagnostic"],
+  ]) {
+    const cause = normalizeAdapterFailure(
+      backend,
+      new AdapterError("PRIVATE_PROVIDER_MESSAGE", {
+        code: `ERR_${backend.toUpperCase()}_ISOLATION`,
+        diagnosticClass,
+        cause: new Error("PRIVATE_CAUSE"),
+      }),
+    );
+    const f = policyFixture([READY, cause]);
+    await assert.rejects(f.execute(), (error) => error === cause);
+    const failed = f.currentRun;
+    const expectedClass =
+      diagnosticClass === "unknown_diagnostic" ? undefined : diagnosticClass;
+    assert.equal(cause.diagnosticClass, expectedClass);
+    assert.equal(failed.pause.diagnosticClass, expectedClass);
+    assert.equal(
+      Object.hasOwn(failed.pause, "diagnosticClass"),
+      expectedClass !== undefined,
+    );
+    const projected = auditPipeline.projections.pause(failed);
+    assert.deepEqual(
+      projected.evidence,
+      expectedClass === undefined
+        ? []
+        : [`Adapter diagnostic: ${expectedClass}.`],
+    );
+    assert.deepEqual(projected.nextActions, []);
+    assert.equal(projected.resumeState, null);
+    if (expectedClass !== "isolation_workspace_policy")
+      assert.equal(projected.explanation, "Audit failed.");
+    assert.doesNotMatch(JSON.stringify({ failed, projected }), /PRIVATE_/u);
+    assert.doesNotThrow(() => auditPipeline.workflow.validateRun(failed));
+    for (const invalid of [null, 7, "unknown_diagnostic", "PRIVATE_VALUE\n"]) {
+      assert.throws(
+        () =>
+          normalizeTransitionPatch({
+            pause: { ...failed.pause, diagnosticClass: invalid },
+          }),
+        { code: "ERR_INVALID_RUN_STATE" },
+      );
+    }
+    if (expectedClass !== undefined) {
+      for (const patch of [
+        { reason: "backend_unavailable" },
+        { resumeState: "DISCOVER" },
+        { code: null },
+        { rawCause: "PRIVATE_CAUSE" },
+      ]) {
+        assert.throws(
+          () =>
+            auditPipeline.workflow.validateRun({
+              ...failed,
+              pause: { ...failed.pause, ...patch },
+            }),
+          { code: "ERR_INVALID_AUDIT_STATE" },
+        );
+      }
+      assert.throws(
+        () =>
+          auditPipeline.workflow.validateRun({
+            ...failed,
+            pipelineState: {
+              ...failed.pipelineState,
+              workflowState: "WAITING_FOR_USER",
+            },
+          }),
+        { code: "ERR_INVALID_AUDIT_STATE" },
+      );
+    }
+    const legacy = structuredClone(failed);
+    delete legacy.pause.diagnosticClass;
+    assert.doesNotThrow(() => auditPipeline.workflow.validateRun(legacy));
+    assert.deepEqual(auditPipeline.projections.pause(legacy).evidence, []);
+    assert.equal(
+      auditPipeline.projections.pause(legacy).explanation,
+      "Audit failed.",
+    );
+  }
 });
 
 test("normalized structured-output failures pause as invalid audit passes and resume", async (t) => {

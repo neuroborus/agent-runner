@@ -628,6 +628,14 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+Terminal audit provider failures retain validated class evidence consistently in
+CLI/MCP status and wait, with a safe failure activity. Legacy missing classes stay
+unknown. Guidance identifies only what the class proves; diagnosis grants no
+same-run resumption or report acceptance. Preserve the failed run and use a
+separately authorized new audit after resolving a supported blocker; the
+[audit contract](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle)
+owns the exact evidence and guidance.
+
 An eligible pre-effect transient launch failure adds the same strict
 `launchRecovery` value to CLI and MCP status: only its normalized failure class
 and launch checkpoint. An operator pause preserves that projection with the

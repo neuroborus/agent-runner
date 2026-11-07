@@ -170,6 +170,19 @@ export function assertAuditRun(run) {
     "Audit recheck history is required.",
   );
   assertDiscoveryRun(run);
+  if (Object.hasOwn(run.pause ?? {}, "diagnosticClass")) {
+    // The common run envelope owns registry membership; audit owns disposition.
+    exact(run.pause, ["reason", "code", "diagnosticClass"]);
+    assertAudit(
+      state.workflowState === "FAILED" &&
+        run.pause.reason === "internal_failure" &&
+        typeof run.pause.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/u.test(run.pause.code) &&
+        typeof run.pause.diagnosticClass === "string" &&
+        /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass),
+      "Audit terminal provider diagnostic is invalid.",
+    );
+  }
   assertCorrectionFeedback(run);
   assertPublication(run);
   assertAudit(

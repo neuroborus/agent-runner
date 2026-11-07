@@ -843,6 +843,14 @@ requires verified report publication before public completion. Logical turns est
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.
+Terminal audit failures retain the boundary-normalized optional `diagnosticClass`
+in the existing common pause contract, without a state-version change. The common
+envelope owns registry membership; audit owns strict terminal shape/disposition
+and fixed evidence/guidance. A same-transition safe failure activity survives the
+public publication wrapper. CLI/MCP status, activity and wait retain the diagnosis
+after reconstruction; absent legacy classes remain absent. Neither diagnosis nor
+terminal continuation permits another agent turn or report publication; see the
+[audit failure contract](../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
 Report/ledger updates must also fit the escaped Markdown publisher's 32-MiB bound
 before acceptance; overflow preserves the prior ledger and pauses resumably
 without an impossible publication intent or a renewed pass budget.
@@ -1638,6 +1646,14 @@ reconciliation or effect verification still requires the worktree lease.
 `resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
+An optional descriptor-owned `workflow.nonResumableStates` list prevents further
+preparation, provider probing or workflow invocation at those states. Runner
+returns only after ordinary owned-process, resource and observation retirement;
+pending operator stops retain their separate reconciliation path. Audit declares
+`FAILED`; other pipelines retain their existing recovery gates.
+Configuration-drift handling preserves a declared nonresumable disposition and
+its terminal evidence. Recovery still validates saved state and canonical ownership
+and retires owned work; retaining the failure accepts no changed configuration.
 
 Descriptors declare `workspace.kind` (`git` or `directory`) and `workspace.lease`
 (`none` or `exclusive`), alongside their existing role-access inventory. An

@@ -397,8 +397,20 @@ export function createRunner(options = {}) {
     });
   }
 
+  function isNonResumable(run) {
+    return (
+      getPipeline(run.pipelineId)?.workflow.nonResumableStates?.includes(
+        run.pipelineState.workflowState,
+      ) === true
+    );
+  }
+
   async function pauseForProjectConfiguration(run, lease) {
-    if (run.pause?.reason === "project_configuration_changed") return run;
+    if (
+      isNonResumable(run) ||
+      run.pause?.reason === "project_configuration_changed"
+    )
+      return run;
     const activity = {
       actor: "runner",
       phase: "configuration",
@@ -1394,6 +1406,7 @@ export function createRunner(options = {}) {
     }
     if (
       configurationFailure !== null &&
+      !isNonResumable(run) &&
       !stopPending(run) &&
       run.activeTurn === null &&
       run.preparation == null &&
@@ -1469,6 +1482,8 @@ export function createRunner(options = {}) {
     onRecoveryStage("state-recovery");
     if (run.observations?.attempts.at(-1).status === "active")
       run = await runStore.recoverRun(lease);
+    // Terminal pipeline states still retire owned work, but grant no new work.
+    if (isNonResumable(run)) return run;
     if (
       ["project_configuration_changed", "workspace_changed"].includes(
         run.pause?.reason,
@@ -2283,6 +2298,7 @@ export function createRunner(options = {}) {
       }
       if (
         configurationChanged &&
+        !isNonResumable(storedRun) &&
         !stopPending(storedRun) &&
         storedRun.activeTurn === null &&
         storedRun.preparation == null &&

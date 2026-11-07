@@ -303,6 +303,8 @@ before acceptance without reducing the two-MiB aggregate role allowance. No prov
 or Git process is needed for those policy tests.
 The same lightweight fixture verifies normalized feedback persistence and matching
 sanitized CLI/MCP pause evidence without a new storage or provider integration.
+Terminal provider fixtures retain registry-normalized classes, unknown/legacy
+absence and redaction, rejecting unsupported classes and contradictory pauses.
 Fast `pipelines/audit/test/publication.test.js` owns escaped report-size rejection
 before ledger acceptance and resumable retry, exact confirmed/pending
 projection, zero/Critical findings, all-mode completion, lost publication
@@ -311,6 +313,12 @@ Fast `test/runner-audit-publication.test.js` owns public Runner/CLI metadata and
 MCP report projection for Git and ordinary directories, plus actual
 confined artifact replacement, exact-byte and partial-write recovery without
 replaying accepted discovery, edits and temporary/alias substitution rejection.
+Its ordinary-directory terminal case reconstructs a failed audit from the real
+journal and checks matching CLI status, MCP status/wait and safe activity without
+replaying discovery or report publication on terminal continuation. Unexpected
+provider probes and agent turns are rejected after terminal failure.
+Changed and missing protected configuration preserve the exact terminal run,
+diagnosis and revision without provider or report-publication calls.
 The slow `test/mcp/control-plane.slow.test.js` suite owns actual audit MCP
 start/respond with optional and material clarification and persisted interactive
 CLI editor windows. These real journal/action/lease cases remain outside the fast gate.

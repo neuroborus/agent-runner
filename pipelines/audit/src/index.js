@@ -150,6 +150,7 @@ export const auditPipeline = Object.freeze({
   projections: auditProjections,
   validateResumeAction,
   workflow: Object.freeze({
+    nonResumableStates: Object.freeze(["FAILED"]),
     createState: createAuditState,
     run: runAudit,
     validateRun: assertAuditRun,

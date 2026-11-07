@@ -101,6 +101,13 @@ export const auditProjections = Object.freeze({
       ["invalid_discovery", "invalid_recheck"].includes(run.pause.reason) &&
       feedback != null &&
       CORRECTION_STATES[feedback.phase] === run.pause.resumeState;
+    const diagnosticClass =
+      run.pipelineState.workflowState === "FAILED" &&
+      run.pause.reason === "internal_failure" &&
+      typeof run.pause.diagnosticClass === "string" &&
+      /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass)
+        ? run.pause.diagnosticClass
+        : null;
     return Object.freeze({
       reason: known ? run.pause.reason : "unknown_pause",
       code:
@@ -109,8 +116,10 @@ export const auditProjections = Object.freeze({
           : null,
       explanation: correcting
         ? "Audit structured content was rejected. Resume requests a complete corrected result within the remaining pass budget."
-        : (EXPLANATIONS[run.pause.reason] ??
-          "No public diagnostic is available."),
+        : diagnosticClass === "isolation_workspace_policy"
+          ? "The provider could not enforce the declared workspace policy. Preserve this failed audit and resolve provider/workspace compatibility before a separately authorized new audit."
+          : (EXPLANATIONS[run.pause.reason] ??
+            "No public diagnostic is available."),
       evidence: Object.freeze(
         correcting
           ? feedback.diagnostics
@@ -119,7 +128,9 @@ export const auditProjections = Object.freeze({
                 const diagnostic = auditDiagnostic(entry.field, entry.code);
                 return `${CORRECTION_STATES[feedback.phase]}: [${diagnostic.code}] ${diagnosticIssues(diagnostic)[0]}`;
               })
-          : [],
+          : diagnosticClass === null
+            ? []
+            : [`Adapter diagnostic: ${diagnosticClass}.`],
       ),
       resumeState: resumable ? (run.pause.resumeState ?? null) : null,
       nextActions: Object.freeze(

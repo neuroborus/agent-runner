@@ -180,7 +180,28 @@ read-only reconciliation; discovery records an invalid pass before resuming at
 a new ordinal. Terminal provider safety failures propagate after reconciliation and
 persist `FAILED`, which cannot resume discovery or verification. A pending batch
 and its interrupted recheck remain valid preserved evidence in this terminal state.
-No native diagnostics are saved.
+The terminal `pause` retains exactly `reason: "internal_failure"`, its bounded
+code and optional `diagnosticClass` from the normalized agent boundary. The
+common run envelope validates class membership against the provider registry;
+audit validates the terminal disposition and rejects additional fields or a class
+on another pause/state. Legacy classless failures stay classless without migration
+or inferred causes. No native messages, causes or rejected output are saved.
+The same transition publishes a fixed `runner/audit/failed` activity containing
+only the code and optional class. CLI status and MCP status/wait expose that class
+as bounded pause evidence. Only `isolation_workspace_policy` establishes guidance
+to resolve provider/workspace compatibility before a separately authorized new
+audit; it identifies no particular path, setting or underlying environment cause.
+Other classes provide evidence without guessed corrective guidance, and a generic
+code alone establishes no class. Terminal projection offers no resume action.
+The descriptor declares `FAILED` in `workflow.nonResumableStates`. After required
+ownership reconciliation, Runner returns that terminal state before workspace
+preparation, provider capability probes or workflow invocation. Configuration
+recovery and continuation preserve its `FAILED` disposition and diagnostic evidence
+even if the protected configuration changed or disappeared;
+they neither replace it with a configuration pause nor accept the changed inputs.
+Observation, reconstruction and a terminal continuation perform no provider work,
+discovery, finding verification or report publication. Diagnosis grants no same-run audit
+resumption, budget renewal, acceptance, source changes or isolation bypass.
 The baseline uses the common `repositoryBaseline` binding so successful recovery
 can retire its evidence against the same unchanged workspace.
 

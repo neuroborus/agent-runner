@@ -12,8 +12,8 @@ export async function runAudit({ run, runtime, operatorStop = false }) {
   if (operatorStop) return runAuditDiscovery({ run, runtime, operatorStop });
   let current = run;
   const [path, temporaryPath] = reportPaths(run.taskPath);
-  const save = async (patch) => {
-    current = await runtime.transition(patch);
+  const save = async (patch, options) => {
+    current = await runtime.transition(patch, options);
     return current;
   };
   function requireBinding(
@@ -124,8 +124,8 @@ export async function runAudit({ run, runtime, operatorStop = false }) {
       run: current,
       runtime: {
         ...runtime,
-        transition: async (patch) => {
-          await save(patch);
+        transition: async (patch, options) => {
+          await save(patch, options);
           // Editor windows retain the last accepted projection without writes.
           const state = current.pipelineState;
           if (

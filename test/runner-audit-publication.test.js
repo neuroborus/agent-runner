@@ -17,6 +17,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { CodexAdapterError } from "../src/agents/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { main } from "../src/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
@@ -31,12 +32,13 @@ import {
 
 const execute = promisify(execFile);
 
-test("public audit publishes confined reports for Git and ordinary workspaces", async (t) => {
+test("public audit preserves confined reports and terminal provider diagnoses", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "audit-public-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const [git, mode] of [
+  for (const [git, mode, diagnosticClass] of [
     [false, "independent"],
     [true, "combined"],
+    [false, "lazy", "isolation_workspace_policy"],
   ]) {
     await t.test(`${git ? "Git" : "directory"}: ${mode}`, async () => {
       const projectPath = join(root, `${git}-${mode}`);
@@ -51,9 +53,16 @@ test("public audit publishes confined reports for Git and ordinary workspaces", 
         await execute("git", ["init", "--quiet", projectPath]);
         await writeFile(join(projectPath, ".gitignore"), "artifacts/\n");
       }
+      const projectConfigurationPath = join(projectPath, "project.json");
+      if (diagnosticClass)
+        await writeFile(projectConfigurationPath, '{"schemaVersion":1}\n');
       const calls = [];
+      const probes = [];
+      let rejectProviderCalls = false;
       const adapter = {
         async probe(request) {
+          probes.push(request);
+          assert.equal(rejectProviderCalls, false, "Unexpected provider probe");
           return {
             version: "fixture",
             readOnly: true,
@@ -72,7 +81,14 @@ test("public audit publishes confined reports for Git and ordinary workspaces", 
         },
         async run(request) {
           calls.push(request);
+          assert.equal(rejectProviderCalls, false, "Unexpected provider turn");
           assert.equal(request.access, "read-only");
+          if (diagnosticClass && calls.length === 2)
+            throw new CodexAdapterError("PRIVATE_PROVIDER_MESSAGE", {
+              code: "ERR_CODEX_ISOLATION",
+              diagnosticClass,
+              cause: new Error("PRIVATE_CAUSE"),
+            });
           const evidence = JSON.parse(request.prompt.split("\n").at(-1));
           return {
             structured:
@@ -103,21 +119,162 @@ test("public audit publishes confined reports for Git and ordinary workspaces", 
           };
         },
       };
-      const runStore = createRunStore({
-        stateRoot: join(root, `state-${git}-${mode}`),
-      });
-      const runner = createRunner({
-        adapters: { codex: adapter },
-        runStore,
-        loadConfiguration: async () =>
-          parseRunnerConfiguration(
-            JSON.stringify({
-              schemaVersion: 1,
-              defaultBackend: "codex",
-              pipelines: { audit: { mode } },
-            }),
+      const stateRoot = join(root, `state-${git}-${mode}`);
+      const runStore = createRunStore({ stateRoot });
+      const activities = [];
+      const publications = [];
+      const workspace = createWorkspaceService();
+      const createObserver = (store = runStore) =>
+        createRunner({
+          adapters: { codex: adapter },
+          runStore: store,
+          onActivity: (activity) => activities.push(activity),
+          workspace: {
+            ...workspace,
+            reportArtifact: (...args) => {
+              publications.push(args);
+              return workspace.reportArtifact(...args);
+            },
+          },
+          loadConfiguration: async () =>
+            parseRunnerConfiguration(
+              JSON.stringify({
+                schemaVersion: 1,
+                defaultBackend: "codex",
+                pipelines: { audit: { mode } },
+              }),
+            ),
+        });
+      const runner = createObserver();
+      if (diagnosticClass) {
+        await assert.rejects(
+          runner.run({
+            pipelineId: "audit",
+            projectPath,
+            taskPath,
+            projectConfigurationPath,
+          }),
+          { code: "ERR_CODEX_ISOLATION", diagnosticClass },
+        );
+        rejectProviderCalls = true;
+        const probeCount = probes.length;
+        const runId = activities[0].runId;
+        const observationStore = createRunStore({ stateRoot });
+        const reconstructed = createObserver(observationStore);
+        const failed = (await reconstructed.status(runId)).run;
+        assert.equal(failed.pipelineState.workflowState, "FAILED");
+        assert.equal(failed.pause.diagnosticClass, diagnosticClass);
+        assert.equal(failed.pipelineState.history[0].outcome, "interrupted");
+        const publicationCount = publications.length;
+        const control = createMcpControlPlane({
+          runner: reconstructed,
+          runStore: observationStore,
+        });
+        const status = await control.runStatus({ runId });
+        assert.deepEqual(status.pause.evidence, [
+          `Adapter diagnostic: ${diagnosticClass}.`,
+        ]);
+        assert.match(
+          status.pause.explanation,
+          /could not enforce the declared workspace policy/u,
+        );
+        assert.deepEqual(status.pause.nextActions, []);
+        assert.equal(status.pause.resumeState, null);
+        const notifications = [];
+        const waited = await control.runWait(
+          { runId, cursor: 0, timeoutMs: 0, progress: true },
+          {
+            progressToken: "audit-observer",
+            notify: (notification) => notifications.push(notification),
+          },
+        );
+        assert.equal(waited.status, "FAILED");
+        assert.equal(waited.timedOut, false);
+        assert.deepEqual(waited.pause, status.pause);
+        const page = await control.runActivity({
+          runId,
+          cursor: 0,
+          limit: 100,
+        });
+        const terminalActivity = page.activities.find(
+          ({ actor, phase, kind }) =>
+            actor === "runner" && phase === "audit" && kind === "failed",
+        );
+        assert.equal(
+          terminalActivity.message,
+          `Audit failed: ERR_CODEX_ISOLATION (${diagnosticClass}).`,
+        );
+        assert.ok(
+          activities.some(
+            ({ message }) => message === terminalActivity.message,
           ),
-      });
+        );
+        assert.ok(
+          notifications.some(({ params }) =>
+            params.message.includes(terminalActivity.message),
+          ),
+        );
+        let output = "";
+        assert.equal(
+          await main(["status", "--run", runId], {
+            runner: reconstructed,
+            stdout: {
+              write: (value) => {
+                output += value;
+              },
+            },
+            stderr: { write: (value) => assert.fail(value) },
+          }),
+          0,
+        );
+        assert.ok(output.includes(status.pause.explanation));
+        assert.ok(output.includes(status.pause.evidence[0]));
+        const resumed = await reconstructed.resume({ runId, action: null });
+        assert.deepEqual(resumed.run.pipelineState, failed.pipelineState);
+        assert.deepEqual(resumed.run.pause, failed.pause);
+        assert.equal(
+          failed.projectConfigurationProtection.path,
+          projectConfigurationPath,
+        );
+        for (const drift of ["changed", "missing"]) {
+          if (drift === "changed")
+            await writeFile(
+              projectConfigurationPath,
+              '{"schemaVersion":1,"defaultModel":"changed"}\n',
+            );
+          else await rm(projectConfigurationPath);
+          const continued = await reconstructed.resume({ runId, action: null });
+          assert.deepEqual(continued.run, failed);
+          assert.deepEqual(
+            (await control.runStatus({ runId })).pause,
+            status.pause,
+          );
+        }
+        assert.equal(calls.length, 2);
+        assert.equal(probes.length, probeCount);
+        assert.equal(publications.length, publicationCount);
+        assert.deepEqual(
+          (await reconstructed.status(runId)).run.pipelineState,
+          failed.pipelineState,
+        );
+        assert.doesNotMatch(
+          JSON.stringify({
+            failed,
+            status,
+            waited,
+            page,
+            notifications,
+            activities,
+            output,
+          }),
+          /PRIVATE_/u,
+        );
+        assert.equal(
+          await readFile(join(projectPath, "source.txt"), "utf8"),
+          "Original source\n",
+        );
+        return;
+      }
       const result = await runner.run({
         pipelineId: "audit",
         projectPath,
