@@ -369,13 +369,14 @@ Retain the run ID and each MCP mutation's original idempotency key. Retry
 uncertain mutations with identical arguments and key; a new key cannot recover
 the original receipt. Ownerless applicable-stop recovery is a separate
 `run_resume` mutation with a new key, not a recreated pause/cancel receipt.
-Use `run_wait` for event-driven waiting and cursor-based `run_activity` for
-deliberate inspection; never poll at a fixed cadence. Omitted
-`run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held
-waits return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners
-at continuation checkpoints, even between turns without records or revision
+Use `run_wait` for event-driven waits and cursor-based `run_activity` for
+inspection; never poll at a fixed cadence. Omitted
+`run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held waits
+return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners at
+continuation checkpoints, even between turns without records or revision
 changes. Use action-free `run_resume` below. Ownerless `idle` does not prove
-loss; terminal states and pending input still end waits.
+loss; terminal states and pending input end waits. See
+[observation safety](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
 
 Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
 and checkpoint. Compare byte measurements and token snapshots separately;

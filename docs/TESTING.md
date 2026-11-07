@@ -892,6 +892,21 @@ The state slow suite's bounded-heap journal case also covers overflowed
 projections, complete progress, old cursors and repeated transitions across
 segments.
 
+Full-scan certification cases retain consumed-byte capture evidence when a
+lease-owner publication follows the actual read, and when append or a small
+legal rotation follows decoding during semantic validation. Cold, evicted and
+oversized unretained checkpoints exercise public page/cursor pairing; a cold
+full-scan MCP wait reaches the real Runner status and activity consumers.
+Both certified and full-scan starts retain the three-drain exhaustion bound.
+Activity edits with restored mtime at equal and advanced endpoints,
+file/directory replacement, namespace gaps and changed file controls cannot be
+certified by a later valid scan. Recovery and append reject a captured endpoint
+superseded by publication without changing canonical bytes. These callback-controlled cases establish
+the repaired contract, not the unavailable historical stack. The affected
+state/operator-stop, Runner operator-stop, legacy confirmation/migration,
+MCP control-plane, CLI/MCP workflow, orchestration, effect-recovery and
+release-pack slow checks remain required at finalization.
+
 The fast state `recovery-failures.test.js` suite owns the public state boundary
 for pre-lease and pre-readiness diagnostic publication, interrupted publication,
 exact dispatch/child correlation, immutable retries, absent historical causes and

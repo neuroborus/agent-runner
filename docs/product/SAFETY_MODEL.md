@@ -300,7 +300,12 @@ handle/path observations establish unchanged history. Unrelated control-claim
 publication cannot substitute for or invalidate that proof through directory
 timestamps alone. Namespace, replacement, link, ownership and restored-mtime
 tamper checks remain mandatory. Certificates are independent of optional bounded
-checkpoint retention; absent cache evidence requires canonical validation.
+checkpoint retention. Full scans retain original consumed-byte capture bindings
+through concurrent publication. Those bindings require canonical validation of
+the original bytes, identities, namespace and endpoint before certification;
+a later valid history cannot replace them, even at an equal endpoint. Only
+proved advancement permits bounded observation continuation, without mutation
+or stop authority; unavailable proof remains strict rejection.
 Authorized tail repair proves the original prefix, namespace, directory and
 captured file observations before truncation, then the same prefix and exact
 repaired size through stable handle/path observations after syncing. Only that

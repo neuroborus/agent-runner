@@ -715,20 +715,21 @@ async function* readEvents(
   const directoryAfter = await observeJournalDirectory(runDirectory);
   stable = stable && sameJournalIdentity(directory, directoryAfter);
   if (proof && !stable) throw new CheckpointInvalid();
+  const capturedPrefix = bindings.every(Boolean)
+    ? deepFreeze({
+        runId,
+        firstRevision: 1,
+        lastRevision: previous.revision,
+        directory,
+        bindings,
+      })
+    : null;
   Object.assign(metadata, {
     fileObservations: stable ? deepFreeze(observations) : null,
+    capturedPrefix: stable ? null : capturedPrefix,
     // Certification belongs to this validated operation even when its snapshot
     // is too large for optional checkpoint retention.
-    certificate:
-      stable && bindings.every(Boolean)
-        ? deepFreeze({
-            runId,
-            firstRevision: 1,
-            lastRevision: previous.revision,
-            directory,
-            bindings,
-          })
-        : null,
+    certificate: stable ? capturedPrefix : null,
   });
 }
 
@@ -863,9 +864,9 @@ async function loadSnapshot(
   runId,
   resolveStopBoundary,
   checkpoint = null,
+  proof = checkpoint,
 ) {
   const storedState = await readStoredState(runDirectory, runId);
-  const proof = checkpoint;
   // A lagging snapshot outside the adjacent retained pair needs canonical
   // replay to prove its exact event. Retain its byte proof through that scan;
   // different valid history cannot replace an operation's original prefix.
@@ -878,6 +879,7 @@ async function loadSnapshot(
     checkpoint = null;
   const eventLog = { projection: createProjection(checkpoint?.projection) };
   let lastEvent = checkpoint?.lastEvent;
+  let proofMatched = proof === null || checkpoint !== null;
   let storedStateMatched =
     storedState === null ||
     [checkpoint?.previousEvent, lastEvent].some(
@@ -893,11 +895,14 @@ async function loadSnapshot(
     checkpoint,
     proof,
   )) {
+    if (event.revision === proof?.lastEvent.revision)
+      proofMatched = isDeepStrictEqual(event, proof.lastEvent);
     if (event.revision === storedState?.revision) {
       storedStateMatched = isDeepStrictEqual(storedState, event.state);
     }
     lastEvent = event;
   }
+  if (!proofMatched) throw new CheckpointInvalid();
   if (storedState !== null && storedState.revision > lastEvent.revision) {
     throw new RunStoreError("Run state is ahead of its write-ahead log.", {
       code: "ERR_INVALID_RUN_STATE",
@@ -1010,19 +1015,35 @@ export function createStateJournal({
 
   async function certifiedSnapshot(directory, snapshot) {
     if (snapshot.certificate !== null) return snapshot;
-    // One canonical scan may establish missing evidence. It must certify the
-    // same snapshot before streaming; cache retention is never a prerequisite.
-    const certified = await loadSnapshot(
-      directory,
-      snapshot.state.runId,
-      resolveStopBoundary,
-    );
+    // Missing stable observations do not erase the original consumed bytes.
+    // Canonical validation must prove that capture, not substitute a later
+    // self-consistent history (even one ending at the same state).
+    const proof = capturedProof(snapshot);
+    if (proof === null) throw changedProjection();
+    let certified;
+    try {
+      certified = await loadSnapshot(
+        directory,
+        snapshot.state.runId,
+        resolveStopBoundary,
+        null,
+        proof,
+      );
+    } catch (cause) {
+      if (cause instanceof CheckpointInvalid) throw changedProjection();
+      throw cause;
+    }
     if (
       certified.certificate === null ||
       !isDeepStrictEqual(certified.state, snapshot.state)
     )
       throw changedProjection();
     return certified;
+  }
+
+  function capturedProof(snapshot) {
+    const certificate = snapshot.certificate ?? snapshot.capturedPrefix;
+    return certificate ? { ...snapshot, certificate } : null;
   }
 
   async function verifyPrefix(directory, snapshot) {
@@ -1115,14 +1136,18 @@ export function createStateJournal({
   // Certifies a later publication only through the original byte proof, as
   // publication does. Changed prefix bytes, identities or namespace grant none.
   async function extendSnapshot(directory, snapshot) {
-    if (!snapshot.certificate) return null;
+    const proof = capturedProof(snapshot);
+    if (proof === null) return null;
     let extended;
     try {
       extended = await loadSnapshot(
         directory,
         snapshot.state.runId,
         resolveStopBoundary,
-        snapshot,
+        // An uncertified capture requires complete semantic validation; it
+        // cannot skip prior states like an already certified checkpoint.
+        snapshot.certificate ? snapshot : null,
+        proof,
       );
     } catch (cause) {
       // Only unavailable proof is classified; every other failure propagates.

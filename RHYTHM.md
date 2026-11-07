@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-07
+
+- **Full-scan activity certification retains its original byte proof.** A scan
+  racing with append or rotation keeps bounded consumed-byte capture bindings
+  independently of optional checkpoint retention. Canonical validation proves
+  those exact bytes, identities, ordered segment prefix and captured endpoint;
+  later self-consistent history cannot replace them. Proved advancement feeds
+  the existing two-continuation observation bound with coherent page cursors.
+  Publication and recovery retain their original endpoint requirements; reads
+  acquire no mutation or stop authority. Controlled regressions cover cold and
+  overflowed evidence, public paging and MCP waits without attributing the
+  unavailable historical failure stack.
+
 ## 2026-11-06
 
 - **Read boundaries retain trusted inspection constraints.** Configuration and

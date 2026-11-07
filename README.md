@@ -2004,6 +2004,8 @@ and a new idempotency key. Use `run_activity` for deliberate inspection and
 `run_wait` for long event-driven waits.
 
 Concurrent journal publication permits bounded, byte-proved activity rereads.
+Cold reads and optional-cache overflow retain the original consumed-byte proof
+through append or rotation; later valid history alone cannot certify it.
 If publication exhausts that bound, `run_activity` and `run_wait` return a
 structured tool error with `code: "ERR_RUN_OBSERVATION_BUSY"` and
 `retryable: true`. A later explicit observation is safe; the run is unchanged.

@@ -5196,7 +5196,7 @@ Each store instance may retain at most eight validated journal checkpoints with
 a combined 16 MiB serialized footprint (counting shared references conservatively).
 A checkpoint contains only the last two adjacent events, the current stop's
 continuity proof, segment bindings, snapshot metadata, and bounded public
-projection records. Each validated scan produces an operation-local prefix
+projection records. Each stable validated scan produces an operation-local prefix
 certificate independently of optional checkpoint admission. It binds the run,
 first and last revisions, directory identity, ordered contiguous segment names,
 and each segment's revision endpoints, file identity, and exact `[0, length)`
@@ -5208,8 +5208,14 @@ choosing/ready claims and derived/control publications may change directory
 timestamps or size without changing journal history. Full before/after file
 handle and path observations, including link count and change time, must remain
 stable across consumed-byte reading and semantic validation. Timestamps alone
-grant no reuse. Changed bytes, replacement, namespace races, or unavailable
-proof invalidate reuse conservatively without extra retry allowances.
+grant no reuse. A full scan retains bounded operation-local capture bindings
+for the exact complete bytes read even when append or rotation prevents these
+stable closing observations. Capture is not certification: one canonical scan
+must prove the original digests, file and directory identities, ordered segment
+prefix and captured endpoint event while validating the complete current history.
+A later self-consistent history or equal state endpoint cannot substitute for
+that proof. Changed bytes, replacement or unavailable proof invalidate reuse
+conservatively without extra retry allowances.
 Only appended records then need normalization and continuity validation. Every
 read still rereads and validates `state.json` and proves its exact event match;
 snapshots older than the retained adjacent pair require complete replay.
@@ -5256,11 +5262,22 @@ any authorization failure propagates. Changed bytes, rollback, substitution or
 unavailable proof never receive the retryable classification. The extension
 writes nothing, takes no lease and populates no checkpoint.
 
+When the first drain instead lacks certification because its full scan raced
+with publication, extension uses that scan's original capture bindings and
+endpoint. It repeats complete semantic validation rather than treating the
+capture as a reusable checkpoint. Only a certified strictly later revision
+enters the same continuation loop; certification adds no retry allowance.
+Canonical certification at an unchanged endpoint also requires the original
+capture proof. A returned page always pairs its activities and cursor with the
+same snapshot; certification never silently replaces it with newer activities.
+
 Progress publication uses retained records when they cover the complete run;
 overflow uses the same certified record stream with identical text. An
 operation-local certificate survives cache eviction or oversized checkpoint
-rejection. Missing bindings require one bounded canonical scan to certify the
-same snapshot before projection streaming; unavailable proof rejects publication.
+rejection. Missing certification requires one bounded canonical scan through
+the original capture to certify the same snapshot before projection streaming;
+missing capture evidence rejects publication. Publication and recovery cannot
+adopt a later endpoint through observation continuation.
 Certificates cover only complete consumed records, so partial tails stay
 uncached while their complete prefix can still serve a verified projection.
 Publication certifies the appended event before callbacks, then checks its

@@ -703,6 +703,35 @@ test("checkpoint byte overflow falls back to complete validation", async (t) => 
     next.revision,
     "unretained operation-local certificates prevent a second historical normalization",
   );
+  let published;
+  await publishDuringStreams(
+    t,
+    join(created.directoryPath, "events-000010.jsonl"),
+    [1],
+    async () => {
+      // Keep the capture oversized without another large event.
+      published = await store.transitionRun(
+        created.lease,
+        {
+          counters: { rounds: 2001 },
+          pipelineState: { workflowState: "IMPLEMENT" },
+        },
+        { activity: concurrentActivity },
+      );
+    },
+    { afterRead: true },
+  );
+  assert.equal(
+    (await store.readPublicActivity(latest.runId, { limit: 1 })).cursor,
+    1,
+  );
+  const tail = await store.readPublicActivity(latest.runId, {
+    afterRevision: next.revision,
+  });
+  assert.deepEqual(pageEntries(tail), [
+    { revision: published.revision, message: concurrentActivity.message },
+  ]);
+  assert.equal(tail.cursor, published.revision);
 });
 
 test("combined checkpoint bytes evict runs before the entry cap", async (t) => {
@@ -884,11 +913,18 @@ function pageEntries(page) {
 }
 
 // Publish through the lease owner once each selected stream has taken its
-// opening observation of the active segment, before it reads. Loading a
+// opening observation of the active segment, before it reads (or immediately
+// after the selected read captures its bytes when afterRead is set). Loading a
 // snapshot or an extension proof observes that segment twice, and each stream
 // observes it when opening and closing, so the three bounded drains open at
 // observations three, seven and eleven. Writer observations are excluded.
-async function publishDuringStreams(t, path, openings, publish) {
+async function publishDuringStreams(
+  t,
+  path,
+  openings,
+  publish,
+  { afterRead = false } = {},
+) {
   const metadata = await stat(path, { bigint: true });
   const handle = await open(path, "r");
   const prototype = Object.getPrototypeOf(handle);
@@ -910,16 +946,17 @@ async function publishDuringStreams(t, path, openings, publish) {
     return observation;
   });
   t.mock.method(prototype, "read", async function (...args) {
-    if (this === stream) {
-      stream = null;
-      publishing = true;
-      try {
-        await publish();
-      } finally {
-        publishing = false;
-      }
+    if (this !== stream) return nativeRead.apply(this, args);
+    // Claim the selected read before awaiting I/O.
+    stream = null;
+    const captured = afterRead ? await nativeRead.apply(this, args) : null;
+    publishing = true;
+    try {
+      await publish();
+    } finally {
+      publishing = false;
     }
-    return nativeRead.apply(this, args);
+    return captured ?? nativeRead.apply(this, args);
   });
   return prototype;
 }
@@ -932,7 +969,184 @@ function publishActivity(store, created, rounds) {
   );
 }
 
-for (const mode of ["new-warm", "held-cold", "new-evicted"]) {
+test("an unstable full scan retains its consumed prefix without granting mutation authority", async (t) => {
+  const { store, created } = await fixture(t);
+  const directory = created.directoryPath;
+  const { runId } = created.state;
+  const journal = createStateJournal({ onTransitionBoundary: async () => {} });
+  let published;
+  await publishDuringStreams(
+    t,
+    join(directory, "events.jsonl"),
+    [1],
+    async () => {
+      published = await publishActivity(store, created, 1);
+    },
+    { afterRead: true },
+  );
+  const capture = await journal.loadSnapshot(directory, runId);
+  assert.equal(capture.certificate, null);
+  assert.equal(capture.capturedPrefix.lastRevision, 1);
+  assert.deepEqual(capture.state, created.state);
+  const original = structuredClone(capture);
+  const decoded = eventDecodes(t);
+  const extended = await journal.extendSnapshot(directory, capture);
+  assert.deepEqual(decoded.normalized, [1, 2]);
+  assert.deepEqual(extended.state, published);
+  assert.ok(extended.certificate);
+  const canonical = await Promise.all(
+    ["events.jsonl", "state.json", "progress.md"].map((name) =>
+      readFile(join(directory, name), "utf8"),
+    ),
+  );
+  await assert.rejects(journal.recover(directory, capture), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+  await assert.rejects(
+    journal.appendTransition(directory, published, capture, concurrentActivity),
+    { code: "ERR_INVALID_EVENT_LOG" },
+  );
+  assert.deepEqual(capture, original);
+  assert.deepEqual(
+    await Promise.all(
+      ["events.jsonl", "state.json", "progress.md"].map((name) =>
+        readFile(join(directory, name), "utf8"),
+      ),
+    ),
+    canonical,
+  );
+});
+
+for (const mode of ["cold", "evicted"]) {
+  test(`full-scan activity certification proves concurrent append with ${mode} checkpoints`, async (t) => {
+    const { store, created, input, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    const observer = createRunStore({ stateRoot });
+    if (mode === "evicted") {
+      await observer.loadRun(runId);
+      for (let index = 0; index < 8; index += 1) {
+        const extra = await observer.createRun(input);
+        await extra.lease.release();
+      }
+    }
+    await publishDuringStreams(
+      t,
+      join(created.directoryPath, "events.jsonl"),
+      [1],
+      () => publishActivity(store, created, 1),
+      { afterRead: true },
+    );
+    const page = await observer.readPublicActivity(runId);
+    assert.deepEqual(pageEntries(page), [
+      { revision: 1, message: "Run created." },
+      { revision: 2, message: concurrentActivity.message },
+    ]);
+    assert.equal(page.cursor, 2);
+  });
+}
+
+for (const rotation of [false, true]) {
+  test(`full-scan semantic validation retains proof through ${rotation ? "rotation" : "append"}`, async (t) => {
+    const { created, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    const path = join(created.directoryPath, "events.jsonl");
+    const original = await readFile(path, "utf8");
+    const next = { ...created.state, revision: 2, counters: { rounds: 1 } };
+    let published = false;
+    eventDecodes(t, (event) => {
+      if (event.revision !== 1 || published) return;
+      published = true;
+      const source = `${JSON.stringify({
+        schemaVersion: next.schemaVersion,
+        revision: 2,
+        runId,
+        recordedAt: next.updatedAt,
+        state: next,
+        activity: concurrentActivity,
+      })}\n`;
+      // Small legal segments expose namespace rollover without a 64 MiB file.
+      writeFileSync(
+        rotation ? join(created.directoryPath, "events-000001.jsonl") : path,
+        rotation ? source : original + source,
+      );
+      writeFileSync(
+        join(created.directoryPath, "state.json"),
+        JSON.stringify(next),
+      );
+    });
+    const observer = createRunStore({ stateRoot });
+    const page = await observer.readPublicActivity(runId, { limit: 1 });
+    assert.equal(published, true);
+    assert.deepEqual(pageEntries(page), [
+      { revision: 1, message: "Run created." },
+    ]);
+    assert.equal(page.cursor, 1);
+    const tail = await observer.readPublicActivity(runId, { afterRevision: 1 });
+    assert.deepEqual(pageEntries(tail), [
+      { revision: 2, message: concurrentActivity.message },
+    ]);
+    assert.equal(tail.cursor, 2);
+  });
+}
+
+for (const change of [
+  "bytes",
+  "advanced-bytes",
+  "file",
+  "directory",
+  "namespace",
+  "control",
+]) {
+  test(`canonical certification cannot replace a full scan's ${change} proof`, async (t) => {
+    const { created, stateRoot } = await fixture(t);
+    const directory = created.directoryPath;
+    const path = join(directory, "events.jsonl");
+    const original = await readFile(path, "utf8");
+    const metadata = await stat(path);
+    let changed = false;
+    eventDecodes(t, () => {
+      if (changed) return;
+      changed = true;
+      if (["bytes", "advanced-bytes"].includes(change)) {
+        let source = original.replace("Run created.", "Run updated.");
+        if (change === "advanced-bytes") {
+          const next = { ...created.state, revision: 2 };
+          source += `${JSON.stringify({
+            schemaVersion: next.schemaVersion,
+            revision: 2,
+            runId: next.runId,
+            recordedAt: next.updatedAt,
+            state: next,
+            activity: concurrentActivity,
+          })}\n`;
+          writeFileSync(join(directory, "state.json"), JSON.stringify(next));
+        }
+        writeFileSync(path, source);
+        utimesSync(path, metadata.atime, metadata.mtime);
+      } else if (change === "file") {
+        copyFileSync(path, `${path}.replacement`);
+        renameSync(`${path}.replacement`, path);
+      } else if (change === "directory") {
+        const prior = `${directory}.prior`;
+        renameSync(directory, prior);
+        mkdirSync(directory);
+        for (const name of readdirSync(prior))
+          renameSync(join(prior, name), join(directory, name));
+      } else if (change === "namespace") {
+        writeFileSync(join(directory, "events-000002.jsonl"), original);
+      } else {
+        nativeFilesystem.chmodSync(path, 0o400);
+      }
+    });
+    await assert.rejects(
+      createRunStore({ stateRoot }).readPublicActivity(created.state.runId),
+      { code: "ERR_INVALID_EVENT_LOG" },
+    );
+    assert.equal(changed, true);
+  });
+}
+
+for (const mode of ["new-warm", "held-cold", "new-evicted", "full-scan"]) {
   test(`MCP waits retain their activity proof through a second concurrent publication: ${mode}`, async (t) => {
     const { store, created, input, stateRoot } = await fixture(t, {
       pipelineId: "plan-authoring",
@@ -964,7 +1178,8 @@ for (const mode of ["new-warm", "held-cold", "new-evicted"]) {
       ...observer,
       async readPublicActivity(...args) {
         if (held) await wakeCompleted.promise;
-        if (mode === "held-cold") pageStore = createRunStore({ stateRoot });
+        if (["held-cold", "full-scan"].includes(mode))
+          pageStore = createRunStore({ stateRoot });
         if (mode === "new-evicted") {
           for (let index = 0; index < 8; index += 1) {
             const extra = await observer.createRun(input);
@@ -974,7 +1189,7 @@ for (const mode of ["new-warm", "held-cold", "new-evicted"]) {
         await publishDuringStreams(
           t,
           join(created.directoryPath, "events.jsonl"),
-          [3, 7],
+          mode === "full-scan" ? [1, 7] : [3, 7],
           async () => {
             publications += 1;
             await store.transitionRun(
@@ -998,6 +1213,7 @@ for (const mode of ["new-warm", "held-cold", "new-evicted"]) {
             );
             canonical = await readCanonical();
           },
+          { afterRead: mode === "full-scan" },
         );
         const decoded = eventDecodes(t);
         const page = await pageStore.readPublicActivity(...args);
@@ -1130,29 +1346,33 @@ test("an overflow activity stream rereads once after a proven concurrent publica
   assert.equal(next.cursor, published.revision);
 });
 
-test("proved publication exhaustion returns a retryable observation outcome", async (t) => {
-  const { store, created } = await fixture(t);
-  const { runId } = created.state;
-  await store.loadRun(runId);
-  let rounds = 0;
-  await publishDuringStreams(
-    t,
-    join(created.directoryPath, "events.jsonl"),
-    [3, 7, 11],
-    async () => {
-      rounds += 1;
-      await publishActivity(store, created, rounds);
-    },
-  );
-  await assert.rejects(store.readPublicActivity(runId), (error) => {
-    assert.ok(error instanceof RunObservationBusyError);
-    assert.equal(error.code, "ERR_RUN_OBSERVATION_BUSY");
-    assert.equal(error.retryable, true);
-    return true;
+for (const cold of [false, true]) {
+  test(`proved publication exhaustion returns a retryable observation outcome after ${cold ? "full-scan" : "retained"} capture`, async (t) => {
+    const { store, created, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    await store.loadRun(runId);
+    let rounds = 0;
+    await publishDuringStreams(
+      t,
+      join(created.directoryPath, "events.jsonl"),
+      cold ? [1, 7, 11] : [3, 7, 11],
+      async () => {
+        rounds += 1;
+        await publishActivity(store, created, rounds);
+      },
+      { afterRead: cold },
+    );
+    const observer = cold ? createRunStore({ stateRoot }) : store;
+    await assert.rejects(observer.readPublicActivity(runId), (error) => {
+      assert.ok(error instanceof RunObservationBusyError);
+      assert.equal(error.code, "ERR_RUN_OBSERVATION_BUSY");
+      assert.equal(error.retryable, true);
+      return true;
+    });
+    assert.equal(rounds, 3, "each bounded drain observed a publication");
+    assert.equal((await observer.readPublicActivity(runId)).cursor, 4);
   });
-  assert.equal(rounds, 3, "each bounded drain observed a publication");
-  assert.equal((await store.readPublicActivity(runId)).cursor, 4);
-});
+}
 
 for (const interference of ["edited-prefix", "unavailable-proof"]) {
   test(`publication exhaustion cannot classify ${interference} as retryable`, async (t) => {

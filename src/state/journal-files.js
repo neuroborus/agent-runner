@@ -148,11 +148,21 @@ export async function readJournalSegment(
       before.links === 1 &&
       isDeepStrictEqual(before, after) &&
       isDeepStrictEqual(after, pathAfter);
+    const captured =
+      position === before.size &&
+      before.links === 1 &&
+      after.links === 1 &&
+      pathAfter.links === 1 &&
+      sameJournalIdentity(before, after) &&
+      sameJournalIdentity(after, pathAfter);
     if (prefix && !stable) return null;
     return {
       source: source.toString("utf8"),
       observation: stable ? after : null,
-      binding: stable
+      // Retain the bytes actually consumed even when append or rotation makes
+      // the closing observation unstable. This is capture evidence only; a
+      // later canonical scan must prove it before it becomes a certificate.
+      binding: captured
         ? {
             ...identity(before),
             length: sourceOffset + completeEnd,
