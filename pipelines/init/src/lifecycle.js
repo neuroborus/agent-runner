@@ -30,6 +30,7 @@ import {
   acceptInitResult,
   authorizeInitEdit,
   closeInitClarification,
+  failInitTurn,
   prepareInitTurn,
   requestInitDecision,
 } from "./workflow.js";
@@ -130,13 +131,13 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     artifactRoot: run.taskPath,
     transcriptPath: join(run.taskPath, "clarifications.md"),
   };
-  const save = async (pipelineState, patch = {}) => {
+  const save = async (pipelineState, patch = {}, options = {}) => {
     if (
       same(state(), pipelineState) &&
       Object.entries(patch).every(([key, value]) => same(current[key], value))
     )
       return current;
-    current = await runtime.transition({ pipelineState, ...patch });
+    current = await runtime.transition({ pipelineState, ...patch }, options);
     return current;
   };
   const inspect = async (
@@ -477,6 +478,10 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         );
         return null;
       }
+      if (cause.failureClass === "structured-output") {
+        await pause("invalid_result");
+        return null;
+      }
       if (
         runtime.inactivity?.eligible(cause) &&
         (await runtime.inactivity.retry({ repository: before }))
@@ -491,7 +496,23 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         });
         return turn(request);
       }
-      if (cause.recoverable !== true) throw cause;
+      if (cause.recoverable !== true) {
+        const diagnostic = runtime.terminalAdapterDiagnostic?.(cause);
+        if (diagnostic == null) throw cause;
+        await save(
+          failInitTurn(state(), request),
+          { pause: { reason: "internal_failure", ...diagnostic } },
+          {
+            activity: {
+              actor: "runner",
+              phase: "init",
+              kind: "failed",
+              message: `Init failed: ${diagnostic.code}${diagnostic.diagnosticClass === undefined ? "" : ` (${diagnostic.diagnosticClass})`}.`,
+            },
+          },
+        );
+        return null;
+      }
       await pause("provider_interrupted");
       return null;
     }

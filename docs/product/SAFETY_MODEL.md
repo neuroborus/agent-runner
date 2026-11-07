@@ -211,6 +211,14 @@ recovery. Unknown corruption, substituted controls and unavailable ownership
 remain fail-closed; only narrow transient inspection failures offer resume after
 restoring access/resources and reproving unchanged frozen inputs.
 
+Init terminal adapter diagnosis requires a real normalized boundary failure,
+unchanged workspace and retired physical work. Only the owned logical reservation
+is settled; counters, frozen bindings, approvals and publication records survive.
+Callback persistence/ownership failures, pending effects and cleanup uncertainty
+cannot become an acknowledged provider failure. Failed terminal confirmation
+preserves published resources without acceptance. The [init failure contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
+owns the bounded diagnosis and nonresumable follow-up.
+
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.

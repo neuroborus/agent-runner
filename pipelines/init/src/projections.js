@@ -42,6 +42,8 @@ const EXPLANATIONS = Object.freeze({
     "Frozen setup inputs or workspace controls changed; preserve the setup and start a new run.",
   project_configuration_changed:
     "The active run configuration changed; preserve the setup and start a new run.",
+  internal_failure:
+    "The provider turn failed. Preserve this failed init and any prepared resources; review the supported diagnosis and resolve established prerequisites before a separately authorized new init run. Missing failure classification remains unknown.",
 });
 export function validateResumeAction(run, action) {
   if (
@@ -98,10 +100,14 @@ export const initProjections = Object.freeze({
           : EXPLANATIONS[run.pause.reason]) ??
         "Init is paused at its saved setup checkpoint.",
       evidence:
-        run.pause.reason === "init_inspection_failed"
-          ? []
-          : (state.productDecision?.evidence ??
-            findings(state).map(({ summary }) => summary)),
+        run.pause.reason === "internal_failure"
+          ? run.pause.diagnosticClass === undefined
+            ? []
+            : [`Adapter diagnostic: ${run.pause.diagnosticClass}.`]
+          : run.pause.reason === "init_inspection_failed"
+            ? []
+            : (state.productDecision?.evidence ??
+              findings(state).map(({ summary }) => summary)),
       resumeState: resumable ? (run.pause.resumeState ?? null) : null,
       nextActions:
         run.pause.inputResponse !== undefined || !resumable

@@ -688,6 +688,17 @@ permit unchanged-input resume; other diagnoses require preservation and a fresh
 run. CLI and MCP status/wait consume the same pipeline projection. The extensible
 pause envelope needs no state/proof version change or historical evidence rewrite.
 See [inspection failures](../pipelines/init/docs/SPEC.md#inspection-failures).
+Init also settles actual boundary-normalized terminal adapter failures to the
+existing `FAILED` state after unchanged-workspace proof and turn/resource
+retirement. Its exact failure pause uses the common registry-validated optional
+class and bounded code, with a same-transition safe activity. Only the matching
+logical reservation is retired; failed confirmation retains published resources
+and pending confirmation evidence without completion. Runner callback errors
+cross adapter wrapping unchanged rather than becoming provider evidence.
+Descriptor-declared nonresumability prevents new provider work after cleanup.
+Foreground CLI and shared status/wait consume this saved outcome; observation
+needs no recovery or global wait workaround. Legacy missing evidence remains
+unknown. See [terminal provider failures](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
 Init supplies its verified per-turn workspace snapshot through runtime turn
 settlement for inactivity recovery, including after Runner publication. Pre-turn
 reconstruction exhaustion persists a resumable provider interruption at the
@@ -1649,8 +1660,8 @@ requiring a live native session. `status` remains lock-free.
 An optional descriptor-owned `workflow.nonResumableStates` list prevents further
 preparation, provider probing or workflow invocation at those states. Runner
 returns only after ordinary owned-process, resource and observation retirement;
-pending operator stops retain their separate reconciliation path. Audit declares
-`FAILED`; other pipelines retain their existing recovery gates.
+pending operator stops retain their separate reconciliation path. Audit and init
+declare `FAILED`; other pipelines retain their existing recovery gates.
 Configuration-drift handling preserves a declared nonresumable disposition and
 its terminal evidence. Recovery still validates saved state and canonical ownership
 and retires owned work; retaining the failure accepts no changed configuration.

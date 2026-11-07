@@ -2161,6 +2161,10 @@ transient inspection failures permit unchanged-input resume; other diagnoses
 require preserving work, correcting prerequisites and a fresh run. Start/resume
 receipts acknowledge admission/dispatch, not successful setup. See
 [inspection recovery](pipelines/init/docs/SPEC.md#inspection-failures).
+Terminal provider failures persist `FAILED` with bounded diagnosis before owner
+release. Foreground CLI exits unsuccessfully; status and held/new waits expose
+the same outcome. Preserve prepared resources and use separately authorized
+follow-up; see [init failures](pipelines/init/docs/SPEC.md#terminal-provider-failures).
 The managed guidance includes the exact selected finalization procedure.
 Interrupted reconstruction pauses resumably at its saved checkpoint and retains
 the consumed recovery allowance.

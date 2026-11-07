@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createClarificationService } from "../../../src/clarifications/index.js";
 import { createWorkspaceService } from "../../../src/workspace/index.js";
+import { failInitTurn } from "../src/workflow.js";
 import {
   acceptInitEdit,
   acceptInitQuestionAppend,
@@ -231,6 +232,87 @@ const findings = (state) => ({
   status: "FINDINGS",
   proposalHash: state.proposalHash,
   findings: ["Preserve the existing validation command."],
+});
+
+test("terminal failure retires only its matching reservation and preserves proposal accounting", () => {
+  const setup = inspection();
+  for (const mode of ["independent", "lazy", "combined"]) {
+    let state = createInitState({ settings: { mode } });
+    const turns = mode === "combined" ? 5 : mode === "lazy" ? 4 : 3;
+    for (let index = 0; index < turns; index++) {
+      const reserved = prepareInitTurn(state, setup, HASH);
+      for (const changed of [{ id: -1 }, { role: "other" }, { binding: OTHER }])
+        assert.throws(
+          () =>
+            failInitTurn(reserved.state, { ...reserved.request, ...changed }),
+          /reserved turn/u,
+        );
+      const failed = failInitTurn(reserved.state, reserved.request);
+      assertInitState(failed);
+      assert.deepEqual(failed, {
+        ...reserved.state,
+        workflowState: "FAILED",
+        pendingTurn: null,
+      });
+      state = acceptInitResult(reserved.state, {
+        turnId: reserved.request.id,
+        inspection: setup,
+        transcriptHash: HASH,
+        result: roleResult(
+          state.workflowState === "CLARIFY"
+            ? ready
+            : ["PROPOSE", "CHECK_AND_FIX"].includes(state.workflowState)
+              ? proposal(reserved.state)
+              : clean(state),
+        ),
+      });
+      if (state.workflowState === "CLARIFY")
+        state = closeInitClarification(state, {
+          inspection: setup,
+          clarificationHash: HASH,
+        });
+    }
+  }
+});
+
+test("terminal pause validation preserves legacy absence and rejects contradictory diagnosis", () => {
+  const state = { ...createInitState(), workflowState: "FAILED" };
+  const run = {
+    pipelineId: "init",
+    pipelineState: state,
+    pause: null,
+    activeTurn: null,
+  };
+  initPipeline.workflow.validateRun(run);
+  for (const diagnostic of [{}, { diagnosticClass: "turn_bad_request" }]) {
+    const failed = {
+      ...run,
+      pause: {
+        reason: "internal_failure",
+        code: "ERR_AGENT_FAILED",
+        ...diagnostic,
+      },
+    };
+    initPipeline.workflow.validateRun(failed);
+    assert.deepEqual(initPipeline.projections.pause(failed).nextActions, []);
+    for (const patch of [
+      { activeTurn: { role: "planner", phase: "clarify" } },
+      { executionResource: {} },
+      { executionProcess: {} },
+      { preparation: {} },
+      { pipelineState: { ...state, workflowState: "CLARIFY" } },
+      ...(Object.hasOwn(diagnostic, "diagnosticClass")
+        ? [{ pause: { ...failed.pause, reason: "provider_interrupted" } }]
+        : []),
+      { pause: { ...failed.pause, code: "private data" } },
+      { pause: { ...failed.pause, diagnosticClass: "private data" } },
+      { pause: { ...failed.pause, resumeState: "CLARIFY" } },
+      { pause: { ...failed.pause, raw: "private data" } },
+    ])
+      assert.throws(() =>
+        initPipeline.workflow.validateRun({ ...failed, ...patch }),
+      );
+  }
 });
 
 test("a proposal cannot select multiple finalization resources for guidance and repair", () => {

@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Init terminal adapter failures settle before owner release.** After verified
+  unchanged workspace and physical turn/resource retirement, init journals its
+  existing FAILED outcome, bounded registry diagnosis and safe activity, then
+  returns that unsuccessful result normally. Only the matching logical turn is
+  retired. Failed confirmation preserves prepared/published resources and pending
+  confirmation evidence without completion; forks, children, approvals and all
+  consumed accounting survive. Runner callback errors cannot be recast as
+  provider failures by native wrapping. CLI and shared MCP observations now
+  finish fresh/held waits from the published outcome. Terminal continuation grants
+  no new provider work, and legacy missing attribution remains unknown. Distinct
+  dispositions, safety stops, pending effects and failed persistence keep their
+  existing authority and precedence.
+
 - **Claude readiness refusals carry distinct constraints and preserve work.**
   The adapter checks the complete one-boolean-field shape before its value,
   separating deliberate decline from non-object, missing/nonboolean readiness,

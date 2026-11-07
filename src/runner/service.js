@@ -7,6 +7,7 @@ import {
   inspectOwnedSessionProcesses,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
+  terminalAdapterDiagnostic,
   terminateOwnedProcess,
 } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
@@ -723,6 +724,8 @@ export function createRunner(options = {}) {
     }
     return Object.freeze({
       authentication,
+      terminalAdapterDiagnostic: (cause) =>
+        terminalAdapterDiagnostic(cause, providers),
       ...(pipeline.setup
         ? {
             setup: createSetupRuntime({

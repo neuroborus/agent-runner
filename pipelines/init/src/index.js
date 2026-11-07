@@ -136,6 +136,7 @@ export const initPipeline = Object.freeze({
   runOptions: Object.freeze(["project", "task", "mode", "placement", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   workflow: Object.freeze({
+    nonResumableStates: Object.freeze(["FAILED"]),
     createState: createInitState,
     run: runInit,
     validateRun: assertInitRun,

@@ -468,7 +468,7 @@ that owner through supported actions or await normal release/identity-proved
 reclamation; never edit or bypass leases. See
 [operator stops](ARCHITECTURE.md#state-owned-operator-stop-protocol).
 
-Init: [inspection recovery](../pipelines/init/docs/SPEC.md#inspection-failures).
+Init: [failure and recovery contracts](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
 
 Structured role results allow exactly 2 MiB of serialized UTF-8 JSON. Semantic
 field and inventory limits still apply. This is byte headroom, not a token

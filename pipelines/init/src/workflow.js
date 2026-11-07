@@ -903,6 +903,39 @@ export function assertInitRun(run) {
       "Init cancellation requires a reconciled operator request.",
     );
   }
+  if (
+    run.pause?.reason === "internal_failure" ||
+    Object.hasOwn(run.pause ?? {}, "diagnosticClass")
+  ) {
+    const diagnostic = Object.hasOwn(run.pause, "diagnosticClass");
+    // Registry membership is validated by the common run envelope.
+    exact(run.pause, [
+      "reason",
+      "code",
+      ...(diagnostic ? ["diagnosticClass"] : []),
+    ]);
+    assertInit(
+      run.pipelineState.workflowState === "FAILED" &&
+        run.pause.reason === "internal_failure" &&
+        typeof run.pause.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/u.test(run.pause.code) &&
+        (!diagnostic ||
+          (typeof run.pause.diagnosticClass === "string" &&
+            /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass))) &&
+        run.pipelineState.pendingTurn === null &&
+        run.pipelineState.pendingEdit === null &&
+        run.pipelineState.completion === null &&
+        run.pipelineState.terminal?.status !== "CLEAN" &&
+        run.activeTurn === null &&
+        run.preparation == null &&
+        run.executionProcess == null &&
+        run.executionResource == null &&
+        run.pipelineState.publication?.pending == null &&
+        (run.pipelineState.guidanceIntent === null ||
+          run.pipelineState.guidanceReceipt !== null),
+      "Init terminal provider failure requires settled read-only work.",
+    );
+  }
   if (run.pause?.reason === "init_inspection_failed") {
     assertInspectionFailure(run.pause, run.pipelineState);
     assertInit(
@@ -939,4 +972,23 @@ export function assertInitRun(run) {
       ? state.pendingTurn.phase
       : state.workflowState;
   assertInitState({ ...state, workflowState: phase });
+}
+
+export function failInitTurn(state, request) {
+  assertInitState(state);
+  assertInit(
+    request.phase === "CONFIRM"
+      ? state.workflowState === "PROPOSAL_ACCEPTED" &&
+          state.pendingTurn === null &&
+          state.terminal?.status === "PENDING" &&
+          request.role ===
+            (state.settings.mode === "lazy" ? "planner" : "reviewer")
+      : state.pendingTurn !== null &&
+          state.pendingTurn.id === request.id &&
+          state.pendingTurn.phase === request.phase &&
+          state.pendingTurn.role === request.role &&
+          state.pendingTurn.binding === request.binding,
+    "Init failure does not own the reserved turn.",
+  );
+  return { ...state, workflowState: "FAILED", pendingTurn: null };
 }

@@ -387,6 +387,15 @@ current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
 
+Init persists an otherwise unhandled normalized terminal adapter failure before
+execution ownership releases, using only a bounded code and optional registered
+class. Registry interpretation stays at the agent boundary. Read-only Runner callback
+errors retain their original identity through native wrapping or swallowing;
+they provide no terminal provider evidence. Distinct dispositions and safety
+failures keep precedence. The [init contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
+owns settlement, preserved evidence and nonresumable guidance; missing historical
+classification is never reconstructed from native text or ownerless state.
+
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 They may also carry an internal synchronous progress observer receiving only a

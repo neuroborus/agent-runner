@@ -23,6 +23,7 @@ import {
 } from "../src/config/index.js";
 import {
   AgentBoundaryError,
+  CodexAdapterError,
   normalizeFailureRecord,
 } from "../src/agents/index.js";
 import {
@@ -50,9 +51,13 @@ async function fixture(
     boundary = async () => {},
     beforeRun = async () => false,
     inactivityTimers,
+    availabilityClock,
+    availabilityWait,
     beforeFile = async () => {},
     afterFile = async () => {},
     beforeFinish = async () => {},
+    beforeTransition = async () => {},
+    beforeChild = async () => {},
     beforeInfrastructureRelease = async () => {},
     afterGuideReceipt = async () => {},
     beforeProof = () => {},
@@ -368,6 +373,14 @@ async function fixture(
   const infrastructureLeases = new WeakMap();
   const runStore = {
     ...store,
+    async recordChildSession(...args) {
+      await beforeChild();
+      return store.recordChildSession(...args);
+    },
+    async transitionRun(lease, patch, options) {
+      await beforeTransition(patch, options);
+      return store.transitionRun(lease, patch, options);
+    },
     async acquireWorktreeLease(path, runId) {
       const lease = await store.acquireWorktreeLease(path, runId);
       await afterWorktreeLease({ path, runId });
@@ -418,6 +431,8 @@ async function fixture(
     onActivity,
     adapters: { codex: adapter },
     inactivityTimers,
+    availabilityClock,
+    availabilityWait,
     clarifications: { ...clarificationService, ...clarificationHooks },
     loadConfiguration: async () =>
       parseRunnerConfiguration(
@@ -575,6 +590,393 @@ test("init completes both placements in all modes, projects selectors and repeat
     }
 });
 
+test("init publishes terminal adapter failures with exact retained bindings and no retry authority", async (t) => {
+  for (const [placement, mode, phase, unknown, repaired] of [
+    ["external", "independent", "clarify"],
+    ["integrated", "lazy", "propose", true],
+    ["external", "combined", "check-and-fix"],
+    ["external", "lazy", "clean-confirm"],
+    ["external", "independent", "review"],
+    ["external", "combined", "propose", false, true],
+    ["integrated", "independent", "confirm"],
+  ]) {
+    await t.test(`${placement}/${mode}/${phase}`, async (t) => {
+      let before;
+      let probeBlocked = false;
+      const f = await fixture(t, placement, mode, {
+        terminalFinding: repaired,
+        probeVersion() {
+          assert.equal(
+            probeBlocked,
+            false,
+            "Terminal runs cannot probe a provider.",
+          );
+          return "fixture";
+        },
+        async beforeRun(request) {
+          const current = await f.runStore.loadRun(runId);
+          if (
+            current.activeTurn.phase !== phase ||
+            (repaired && current.pipelineState.createdFinalizationPath === null)
+          )
+            return false;
+          if (phase === "clean-confirm") {
+            assert.equal(await request.onFreshSession(), true);
+            assert.equal(await request.onFreshSession(), false);
+          }
+          await request.onSessionCreated("failed-child");
+          before = await f.runStore.loadRun(runId);
+          throw unknown
+            ? Object.assign(new Error("Private provider content"), {
+                code: "private rejected code",
+                diagnosticClass: "private_unregistered_class",
+                payload: "Private provider content",
+              })
+            : new CodexAdapterError("Private provider content", {
+                code: "ERR_CODEX_TURN_FAILED",
+                diagnosticClass: "turn_bad_request",
+              });
+        },
+      });
+      const { run } = await f.runner.create({
+        pipelineId: "init",
+        projectPath: f.projectPath,
+        taskPath: f.taskPath,
+        sourceSession: { backend: "codex", id: "source-session" },
+      });
+      const runId = run.runId;
+      const result = await f.runner.resume({ runId });
+      const saved = await createRunStore({
+        stateRoot: join(f.root, "state"),
+      }).loadRun(runId);
+      initPipeline.workflow.validateRun(saved);
+      assert.deepEqual(saved.pipelineState, {
+        ...before.pipelineState,
+        workflowState: "FAILED",
+        pendingTurn: null,
+      });
+      assert.deepEqual(saved.sessionLineage, before.sessionLineage);
+      assert.deepEqual(saved.inactivityRecovery, before.inactivityRecovery);
+      assert.equal(saved.pipelineState.revisionRounds, repaired ? 1 : 0);
+      assert.deepEqual(saved.pipelineState, result.run.pipelineState);
+      assert.equal(saved.activeTurn, null);
+      assert.equal(saved.executionProcess, null);
+      assert.equal(saved.executionResource, null);
+      assert.equal(saved.preparation, null);
+      assert.equal(await f.runStore.runLeaseOwnerIsLive(runId), false);
+      assert.equal(
+        await f.runStore.worktreeLeaseOwner(saved.workspace.leasePath, runId),
+        null,
+      );
+      assert.equal(saved.pipelineState.completion, null);
+      if (phase === "confirm") {
+        assert.equal(saved.pipelineState.publication.prepared, true);
+        assert.equal(saved.pipelineState.terminal.status, "PENDING");
+        const guide = saved.pipelineState.guidanceIntent;
+        assert.equal(
+          hash(await fs.readFile(guide.path, "utf8")),
+          guide.localContentHash,
+        );
+      } else assert.equal(saved.pipelineState.publication, null);
+      if (repaired) assert.ok(saved.pipelineState.setupBaseline);
+      const control = createMcpControlPlane({
+        runner: f.runner,
+        runStore: f.runStore,
+      });
+      const status = await control.runStatus({ runId });
+      const waited = await control.runWait({
+        runId,
+        cursor: saved.revision,
+        timeoutMs: 0,
+      });
+      assert.equal(status.status, "FAILED");
+      assert.equal(waited.timedOut, false);
+      assert.deepEqual(waited.pause, status.pause);
+      assert.deepEqual(status.pause.nextActions, []);
+      assert.equal(status.pause.resumeState, null);
+      assert.deepEqual(
+        status.pause.evidence,
+        unknown ? [] : ["Adapter diagnostic: turn_bad_request."],
+      );
+      const activity = await control.runActivity({
+        runId,
+        cursor: before.revision,
+        limit: 100,
+      });
+      assert.ok(activity.activities.some(({ kind }) => kind === "failed"));
+      assert.doesNotMatch(
+        JSON.stringify([saved, status, waited, activity]),
+        /Private provider content|private_unregistered_class|private rejected code/u,
+      );
+      assert.equal((await f.runStore.loadRun(runId)).revision, saved.revision);
+      const calls = f.calls.length;
+      probeBlocked = true;
+      assert.deepEqual(
+        (await f.runner.resume({ runId })).run.pipelineState,
+        saved.pipelineState,
+      );
+      assert.equal(f.calls.length, calls);
+      // Reload validation owns registry membership and rejects misplaced fields.
+      const lease = await f.runStore.acquireRunLease(runId);
+      try {
+        await assert.rejects(
+          f.runStore.transitionRun(lease, {
+            pause: { ...saved.pause, diagnosticClass: "unregistered_class" },
+          }),
+          /diagnosticClass/u,
+        );
+      } finally {
+        await lease.release();
+      }
+    });
+  }
+});
+
+test("foreground failure and already-held MCP wait observe the same durable init diagnosis", async (t) => {
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const waiting = Promise.withResolvers();
+  let runId;
+  const f = await fixture(t, "external", "independent", {
+    onActivity(activity) {
+      if (activity.kind === "created") runId = activity.runId;
+    },
+    async beforeRun() {
+      entered.resolve();
+      await release.promise;
+      throw new CodexAdapterError("Private provider content", {
+        code: "ERR_CODEX_TURN_FAILED",
+        diagnosticClass: "turn_bad_request",
+      });
+    },
+  });
+  let output = "";
+  const foreground = main(
+    ["run", "init", "--project", f.projectPath, "--task", f.taskPath],
+    {
+      runner: f.runner,
+      stdout: {
+        write(text) {
+          output += text;
+        },
+      },
+      stderr: { write: assert.fail },
+    },
+  );
+  const abort = new AbortController();
+  let held;
+  try {
+    await Promise.race([
+      entered.promise,
+      foreground.then(() => assert.fail("Provider was not invoked.")),
+    ]);
+    assert.ok(runId);
+    const run = await f.runStore.loadRun(runId);
+    const control = createMcpControlPlane({
+      runner: f.runner,
+      runStore: {
+        ...f.runStore,
+        waitForRunChange(...args) {
+          waiting.resolve();
+          return f.runStore.waitForRunChange(...args);
+        },
+      },
+      launchRun: assert.fail,
+    });
+    held = control.runWait(
+      { runId, cursor: run.revision, timeoutMs: 60_000 },
+      { signal: abort.signal },
+    );
+    await Promise.race([
+      waiting.promise,
+      held.then(() => assert.fail("Wait ended before provider failure.")),
+    ]);
+    release.resolve();
+    assert.equal(await foreground, 1);
+    const status = await control.runStatus({ runId });
+    const observed = await held;
+    const fresh = await control.runWait({
+      runId,
+      cursor: status.revision,
+      timeoutMs: 0,
+    });
+    for (const value of [observed, fresh]) {
+      assert.equal(value.status, "FAILED");
+      assert.equal(value.timedOut, false);
+      assert.deepEqual(value.pause, status.pause);
+    }
+    assert.ok(output.includes(status.pause.explanation));
+    assert.match(output, /ERR_CODEX_TURN_FAILED/u);
+    assert.match(output, /Adapter diagnostic: turn_bad_request/u);
+    assert.doesNotMatch(output, /Private provider content/u);
+    assert.equal(await f.runStore.runLeaseOwnerIsLive(runId), false);
+  } finally {
+    release.resolve();
+    abort.abort();
+    await Promise.allSettled([foreground, held]);
+  }
+});
+
+test("init keeps output, authentication and structured-result dispositions ahead of terminal failure", async (t) => {
+  for (const reason of [
+    "output_exhausted",
+    "authentication_required",
+    "invalid_result",
+  ])
+    await t.test(reason, async (t) => {
+      let rejected = false;
+      const f = await fixture(t, "external", "lazy", {
+        beforeRun() {
+          if (rejected) return false;
+          rejected = true;
+          if (reason === "invalid_result")
+            throw new CodexAdapterError("Private provider content", {
+              code: "ERR_CODEX_STRUCTURED_OUTPUT",
+              failureClass: "structured-output",
+            });
+          throw new AgentBoundaryError(
+            {},
+            normalizeFailureRecord({
+              failureClass: "adapter_failure",
+              checkpoint: "turn",
+              outcome: "rejected",
+              effect: "none",
+              retry: "terminal",
+              disposition: reason,
+            }),
+          );
+        },
+      });
+      const paused = (
+        await f.start({
+          sourceSession: { backend: "codex", id: "source-session" },
+        })
+      ).run;
+      assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(paused.pause.reason, reason);
+      assert.equal(paused.pipelineState.publication, null);
+      assert.equal(paused.pipelineState.sequence, 1);
+      assert.equal(paused.pipelineState.revisionRounds, 0);
+      assert.equal(
+        paused.pipelineState.sourceForks.length,
+        reason === "invalid_result" ? 1 : 0,
+      );
+      assert.equal(
+        (await f.runner.resume({ runId: paused.runId })).run.pipelineState
+          .workflowState,
+        "DONE",
+      );
+    });
+});
+
+test("init never acknowledges terminal settlement when retirement or persistence fails", async (t) => {
+  for (const failure of [
+    "callback",
+    "retirement",
+    "persistence",
+    "publication",
+  ])
+    await t.test(failure, async (t) => {
+      const privateFailure = new Error("Owned operation failed");
+      const f = await fixture(t, "external", "independent", {
+        async beforeRun(request) {
+          if (failure === "callback") {
+            try {
+              await request.onSessionCreated("failed-child");
+            } catch {
+              throw new CodexAdapterError("Private wrapped callback failure");
+            }
+          }
+          throw new CodexAdapterError("Private provider content", {
+            code: "ERR_CODEX_TURN_FAILED",
+            diagnosticClass: "turn_bad_request",
+          });
+        },
+        beforeFinish() {
+          if (failure === "retirement") throw privateFailure;
+        },
+        beforeTransition(patch) {
+          if (
+            failure === "persistence" &&
+            patch.pipelineState?.workflowState === "FAILED"
+          )
+            throw privateFailure;
+        },
+        beforeChild() {
+          if (failure === "callback") throw privateFailure;
+        },
+        onActivity(activity) {
+          if (failure === "publication" && activity.kind === "failed")
+            throw privateFailure;
+        },
+      });
+      const { run } = await f.runner.create({
+        pipelineId: "init",
+        projectPath: f.projectPath,
+        taskPath: f.taskPath,
+      });
+      await assert.rejects(
+        f.runner.resume({ runId: run.runId }),
+        (error) => error === privateFailure,
+      );
+      const saved = await f.runStore.loadRun(run.runId);
+      assert.equal(
+        saved.pipelineState.workflowState,
+        failure === "publication" ? "FAILED" : "CLARIFY",
+      );
+      assert.equal(
+        saved.pause?.reason ?? null,
+        failure === "publication" ? "internal_failure" : null,
+      );
+      if (failure !== "publication")
+        assert.equal(saved.pipelineState.pendingTurn.phase, "CLARIFY");
+    });
+});
+
+test("terminal refusal after availability backoff preserves accounting without another retry", async (t) => {
+  let now = Date.now();
+  let attempts = 0;
+  let waits = 0;
+  const f = await fixture(t, "external", "lazy", {
+    availabilityClock: () => now,
+    availabilityWait: async (duration) => {
+      now += duration;
+      waits++;
+    },
+    beforeRun() {
+      attempts++;
+      throw new CodexAdapterError(
+        "Private provider content",
+        attempts === 1
+          ? {
+              code: "ERR_CODEX_TURN_FAILED",
+              diagnosticClass: "turn_server_overloaded",
+              availabilityReason: "temporarily_overloaded",
+              recoverable: true,
+            }
+          : {
+              code: "ERR_CODEX_TURN_FAILED",
+              diagnosticClass: "turn_bad_request",
+            },
+      );
+    },
+  });
+  const run = (
+    await f.start({
+      sourceSession: { backend: "codex", id: "source-session" },
+    })
+  ).run;
+  assert.equal(run.pipelineState.workflowState, "FAILED");
+  assert.equal(run.pause.reason, "internal_failure");
+  assert.equal(run.pause.diagnosticClass, "turn_bad_request");
+  assert.equal(run.pipelineState.sourceForks.length, 1);
+  assert.equal(run.pipelineState.sequence, 1);
+  assert.equal(run.availabilityRetry.attempt, 1);
+  assert.equal(attempts, 2);
+  assert.equal(waits, 1);
+  assert.deepEqual(initPipeline.projections.pause(run).nextActions, []);
+});
+
 function inactivityClock() {
   let fire;
   return {
@@ -654,8 +1056,19 @@ test("init persists reconstruction exhaustion after interruption and exposes a r
     await t.test(trigger, async (t) => {
       const timers = inactivityClock();
       let attempts = 0;
+      let retirementInterrupted = false;
       const f = await fixture(t, "external", "lazy", {
         inactivityTimers: timers,
+        beforeFinish(active) {
+          if (
+            active.phase === "propose" &&
+            attempts === 2 &&
+            !retirementInterrupted
+          ) {
+            retirementInterrupted = true;
+            throw new Error("Interrupted reconstructed retirement");
+          }
+        },
         async beforeRun(request) {
           if (!request.schema.properties.resources || attempts > 1)
             return false;
@@ -675,9 +1088,10 @@ test("init persists reconstruction exhaustion after interruption and exposes a r
         taskPath: f.taskPath,
         sourceSession: { backend: "codex", id: "source-session" },
       });
-      await assert.rejects(f.runner.resume({ runId: run.runId }), {
-        name: "AgentBoundaryError",
-      });
+      await assert.rejects(
+        f.runner.resume({ runId: run.runId }),
+        /Interrupted reconstructed retirement/u,
+      );
       const saved = (await f.runner.status(run.runId)).run;
       assert.equal(saved.pause, null);
       assert.equal(saved.inactivityRecovery.attempt, 2);
@@ -1047,8 +1461,8 @@ test("external setup retains failed infrastructure release for resume and stop s
 test("intervening prepared-file changes cannot be adopted during root resume", async (t) => {
   let interrupted = false;
   const f = await fixture(t, "external", "independent", {
-    boundary(phase) {
-      if (phase === "terminal" && !interrupted) {
+    beforeFinish(active) {
+      if (active.phase === "confirm" && !interrupted) {
         interrupted = true;
         throw new Error("Interrupted terminal confirmation");
       }
@@ -1059,9 +1473,10 @@ test("intervening prepared-file changes cannot be adopted during root resume", a
     projectPath: f.projectPath,
     taskPath: f.taskPath,
   });
-  await assert.rejects(f.runner.resume({ runId: run.runId }), {
-    name: "AgentBoundaryError",
-  });
+  await assert.rejects(
+    f.runner.resume({ runId: run.runId }),
+    /Interrupted terminal confirmation/u,
+  );
   const saved = (await f.runner.status(run.runId)).run;
   const path = saved.pipelineState.guidanceIntent.path;
   await fs.appendFile(path, "Intervening operator instructions.\n");

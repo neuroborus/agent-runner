@@ -769,6 +769,20 @@ covers both compact records and real version-1 bindings through migration,
 preserving identities, accepted approvals and accounting.
 
 `test/runner-init.slow.test.js` owns registered lifecycle composition: both
+placements' terminal provider failures, including early clarification/proposal,
+review/self-confirmation, repairs over prepared baselines and failed terminal
+confirmation retaining publication. Controlled failures cover exact reservation
+retirement, strict state reload, registry normalization/redaction, consumed
+fork/revision/reconstruction accounting, disposition precedence, failed retirement,
+callback persistence, outcome writes and activity publication. A foreground CLI
+case holds a real shared MCP wait through provider rejection and owner release;
+fresh/held waits and status share the durable unsuccessful diagnosis. These
+cases use model-free adapters and events without sleeps. Fast proposal tests own
+matching reservation/terminal shape policy and legacy absence; registry tests own
+boundary-only safe diagnosis. Fast session-naming coverage preserves Runner
+callback errors through wrapped/swallowed native failures. These focused cases
+do not attest unrun Runner-owned or live-provider checks.
+The registered lifecycle suite also covers both
 placements crossed with all three modes, proven unused source-fork recovery
 without repeating possible effects, guidance-last publication, distinct
 terminal confirmation, CLI/MCP setup projections, repeatable guidance,

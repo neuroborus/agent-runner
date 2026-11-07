@@ -8,6 +8,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  AgentBoundaryError,
   AVAILABILITY_REASONS,
   ClaudeAdapterError,
   createCapabilityProof,
@@ -21,6 +22,7 @@ import {
   normalizeFailureRecord,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
+  terminalAdapterDiagnostic,
 } from "../../src/agents/index.js";
 import {
   parseRunnerConfiguration,
@@ -32,6 +34,48 @@ import { createRunner, parseSourceSession } from "../../src/runner/index.js";
 import { createRunStore } from "../../src/state/index.js";
 
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
+
+test("terminal diagnosis requires a normalized boundary and registry evidence", () => {
+  const native = Object.assign(new Error("Private provider content"), {
+    code: "invalid private code",
+    diagnosticClass: "private_unregistered_class",
+  });
+  assert.equal(terminalAdapterDiagnostic(native), null);
+  const unknown = normalizeAdapterFailure("codex", native);
+  assert.deepEqual(terminalAdapterDiagnostic(unknown), {
+    code: "ERR_AGENT_FAILED",
+  });
+  const failure = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("Private provider content", {
+      code: "ERR_CLAUDE_ISOLATION",
+      diagnosticClass: "isolation_workspace_policy",
+    }),
+  );
+  failure.diagnosticClass = "private_unregistered_class";
+  assert.deepEqual(terminalAdapterDiagnostic(failure), {
+    code: "ERR_CLAUDE_ISOLATION",
+    diagnosticClass: "isolation_workspace_policy",
+  });
+  for (const details of [
+    { retry: "transient" },
+    { retry: "terminal", disposition: "authentication_required" },
+    { retry: "terminal", disposition: "output_exhausted" },
+  ]) {
+    const boundary = new AgentBoundaryError(
+      {},
+      normalizeFailureRecord({
+        failureClass: "adapter_failure",
+        checkpoint: "turn",
+        outcome: "rejected",
+        effect: "possible",
+        ...details,
+      }),
+    );
+    assert.equal(terminalAdapterDiagnostic(boundary), null);
+  }
+  assert.doesNotMatch(JSON.stringify(failure), /Private provider content/u);
+});
 
 function fakeProvider() {
   const adapterOptions = [];

@@ -401,6 +401,43 @@ Diagnosis adds fields only to the existing extensible pause envelope. Init state
 and proof versions remain unchanged; historical inspections, approvals, receipts,
 reservations and counters are not migrated or fabricated.
 
+## Terminal provider failures
+
+After unchanged-workspace verification and physical turn/resource retirement,
+an unhandled boundary-normalized terminal adapter failure persists `FAILED`
+before execution ownership is released. Only the matching reserved read-only
+turn is retired; `CONFIRM` has no proposal reservation. Sequence/revision counters,
+consumed source forks and reconstruction allowances, acknowledged children,
+frozen inputs, approvals and prepared/publication evidence remain unchanged.
+A failed terminal confirmation retains its `PENDING` fingerprint and published
+resources without a completion receipt. Pending or ambiguous publication effects
+and retained execution resources keep their existing strict reconciliation paths.
+
+The existing pause envelope carries `reason: "internal_failure"`, a bounded code
+and optional registry-normalized `diagnosticClass`. The common envelope validates
+class membership; init validates the exact terminal shape and settled ownership.
+Unknown classes stay absent. Historical ownerless checkpoints are never inferred
+to have failed, and authentic saved shapes require no state/proof version change.
+Native messages, payloads, prompts, sessions, profiles and credentials never enter
+the diagnosis. Read-only Runner callback failures retain their original error even when a
+native adapter wraps or swallows them; they are not provider failure evidence.
+
+Output exhaustion, authentication, structured-result correction, inactivity,
+availability, recoverable interruption and operator stops retain precedence.
+[Inspection failures](#inspection-failures), control drift, unrelated I/O,
+malformed state, uncertain cleanup and persistence failures retain their safety
+paths. Failed settlement or activity publication propagates without acknowledgement.
+
+Foreground CLI returns the durable failure, prints its fixed guidance and exits
+unsuccessfully. CLI/MCP status and fresh or already-held waits share the saved
+bounded diagnosis; terminal waits finish with `timedOut: false`. A safe `failed`
+activity is journaled with the outcome. Reads never acquire execution authority,
+repair state or retry a provider. `FAILED` is descriptor-declared nonresumable:
+owned cleanup may finish, but continuation performs no new provider work.
+Preserve the failed init and any prepared resources, review the supported
+diagnosis, and resolve established prerequisites before a separately authorized
+new init run. Missing historical attribution remains unknown.
+
 ## Public completion and recovery
 
 Use `agent-run run init --project <target> --task <external-task-dir>` or MCP

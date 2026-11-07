@@ -628,6 +628,14 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+Terminal init provider failures persist `FAILED` before owner release. Foreground
+CLI prints the saved diagnosis and exits unsuccessfully; shared status/activity
+and new or already-held waits expose the same bounded evidence and fixed guidance.
+Waits finish with `timedOut: false`. Prepared/published resources remain preserved;
+failed confirmation grants neither setup completion nor same-run retry. Observation
+does not recover or mutate the run, and legacy ownerless runs gain no fabricated
+failure. See [init failure handling](../../pipelines/init/docs/SPEC.md#terminal-provider-failures).
+
 Terminal audit provider failures retain validated class evidence consistently in
 CLI/MCP status and wait, with a safe failure activity. Legacy missing classes stay
 unknown. Guidance identifies only what the class proves; diagnosis grants no
