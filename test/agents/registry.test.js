@@ -9,6 +9,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import {
   AUTHENTICATION_REQUIRED_DISPOSITION,
   AVAILABILITY_REASONS,
+  ClaudeAdapterError,
   createCapabilityProof,
   createProviderRegistry,
   DEFAULT_CLIENT_ATTRIBUTION,
@@ -301,6 +302,58 @@ test("shared failure records strictly bound commit-executor proof", () => {
   ]) {
     assert.throws(() => normalizeFailureRecord(value), TypeError);
   }
+});
+
+test("registry retains only declared readiness diagnostics and validated effect proof", () => {
+  for (const diagnosticClass of [
+    "commit_readiness_declined",
+    "commit_readiness_not_object",
+    "commit_readiness_not_boolean",
+    "commit_readiness_extra_fields",
+  ]) {
+    assert.ok(
+      PROVIDER_REGISTRY.get("claude").failures.classes.has(diagnosticClass),
+    );
+    assert.ok(PROVIDER_REGISTRY.isDiagnosticClass(diagnosticClass));
+    const normalized = normalizeAdapterFailure(
+      "claude",
+      new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+        diagnosticClass,
+        code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+        effectStarted: false,
+        recoverable: true,
+        cause: new Error("PRIVATE_READINESS_CAUSE"),
+      }),
+    );
+    assert.equal(normalized.recoverable, false);
+    assert.equal(normalized.effectStarted, false);
+    assert.deepEqual(normalized.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "commit",
+      outcome: "rejected",
+      effect: "none",
+      retry: "terminal",
+      commitExecutor: "not_started",
+    });
+    assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_READINESS/u);
+  }
+  assert.equal(
+    PROVIDER_REGISTRY.isDiagnosticClass("commit_readiness_unknown"),
+    false,
+  );
+  const unknown = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+      diagnosticClass: "commit_readiness_unknown",
+      code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+      effectStarted: false,
+    }),
+  );
+  assert.equal(unknown.diagnosticClass, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(unknown),
+    /PRIVATE_READINESS|commit_readiness_unknown/u,
+  );
 });
 
 test("availability evidence is finite, redacted, and excludes uncertain commit effects", () => {

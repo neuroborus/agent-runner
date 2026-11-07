@@ -332,6 +332,31 @@ read-only `git var` subcommand to inspect the repository's existing author and
 committer identities; staging, commit, configuration, history, ref, and remote
 mutations remain outside that turn. Polishing never requests local commit.
 
+Claude's readiness schema requires exactly one boolean `ready` field. Only
+`{ "ready": true }` admits the constrained executor. Successful native output
+is checked for its complete shape before interpreting the value; refusals use
+fixed `ERR_CLAUDE_LOCAL_COMMIT_POLICY` diagnostics:
+
+| Diagnostic class                | Established constraint                     |
+| ------------------------------- | ------------------------------------------ |
+| `commit_readiness_declined`     | Exact `{ "ready": false }`; reason unknown |
+| `commit_readiness_not_object`   | Confirmation must be an object             |
+| `commit_readiness_not_boolean`  | An own boolean `ready` field is required   |
+| `commit_readiness_extra_fields` | Only the `ready` field is permitted        |
+
+Non-object and unsupported-field checks precede the boolean/value checks.
+Missing confirmation is not a deliberate decline. These terminal classes are
+registered by the adapter; native rejected fields, values and causes never
+cross the boundary. A coincident abort during result processing or cleanup
+preserves an already validated class without making the rejection recoverable.
+Every refusal retains validated
+`commitExecutor: "not_started"` proof and starts no commit executor. Execution's
+[commit recovery contract](../../pipelines/plan-execution/docs/SPEC.md#137-commit)
+preserves the reviewed candidate for separately authorized follow-up: COMMIT
+has no durable readiness-output correction checkpoint, so these classes grant
+no identical same-run retry. Legacy classless and other supported rejections
+retain their existing recovery rules.
+
 Model-free capability subprocesses for CLI, sandbox, commit-executor, and
 process-containment proofs each have a fixed 10-second deadline. Within that
 bound, a local-commit probe has a one-second network-denial observation

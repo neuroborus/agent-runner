@@ -144,6 +144,7 @@ import {
   assertSettings,
   createFinalizationGuidanceDecision,
   createFinalizationRecovery,
+  commitReadinessConstraint,
   finalizationFeedbackFindings,
   findingFingerprint,
   createPersistedFinalizationEvidence,
@@ -8637,6 +8638,8 @@ ${step.subject}`),
         currentRun.pause.reason === "commit_failed" &&
         (state().pendingCommit?.status === "consumed" ||
           (state().pendingCommit === null &&
+            commitReadinessConstraint(currentRun.pause.diagnosticClass) ===
+              null &&
             currentRun.pause.resumeState === "COMMIT"))
       ) {
         await transition(

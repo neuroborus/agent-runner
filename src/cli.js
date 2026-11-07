@@ -314,6 +314,9 @@ function pauseActionLine(runId, action) {
     if (action.requirement === "resolved-finalization-guidance") {
       return "  Repair the reported finalization guidance and start a fresh plan-execution run.";
     }
+    if (action.requirement === "resolved-commit-readiness") {
+      return "  Preserve the reviewed candidate and resolve readiness through separately authorized follow-up before starting a fresh run. This run cannot retry COMMIT.";
+    }
     return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {

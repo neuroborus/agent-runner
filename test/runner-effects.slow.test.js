@@ -16,7 +16,9 @@ import {
   createGitService,
   createMcpControlPlane,
   createRunStore,
+  main,
 } from "../src/index.js";
+import { ClaudeAdapterError } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
   createArbiterAdapter,
@@ -36,6 +38,124 @@ const SECOND_PLAN = `${PLAN}
 
 Refine the behavior.
 `;
+
+test("reconstructed readiness rejection preserves work and agrees across CLI and MCP", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const git = createGitService();
+  const before = await git.snapshot({ projectPath: fixture.projectPath });
+  const adapter = createExecutionAdapter();
+  const run = adapter.run.bind(adapter);
+  let readinessTurns = 0;
+  adapter.run = async (request) => {
+    if (request.access !== "local-commit") return run(request);
+    readinessTurns += 1;
+    throw new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+      code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+      diagnosticClass: "commit_readiness_extra_fields",
+      effectStarted: false,
+    });
+  };
+  let verifications = 0;
+  const runtimeGit = {
+    ...git,
+    async verifyCommit(authorization) {
+      if (++verifications === 1)
+        throw Object.assign(new Error("Verification interrupted."), {
+          code: "ERR_TEST_COMMIT_VERIFICATION",
+        });
+      return git.verifyCommit(authorization);
+    },
+  };
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const openRunner = () =>
+    runnerFor(
+      fixture,
+      { claude: adapter },
+      {
+        configuration: { schemaVersion: 1, defaultBackend: "claude" },
+        git: runtimeGit,
+        runStore: store,
+      },
+    );
+  const runner = openRunner();
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  const runId = created.runId;
+  const interrupted = (await runner.resume({ runId })).run;
+  assert.equal(interrupted.pause.code, "ERR_TEST_COMMIT_VERIFICATION");
+  assert.equal(interrupted.pipelineState.pendingCommit.status, "consumed");
+  const candidate = await git.snapshot({ projectPath: fixture.projectPath });
+  const paused = (await openRunner().resume({ runId })).run;
+  assert.equal(paused.pause.diagnosticClass, "commit_readiness_extra_fields");
+  assert.equal(paused.pipelineState.pendingCommit, null);
+  for (const field of ["finalizedFingerprint", "reviewedFingerprint"]) {
+    assert.equal(paused.pipelineState[field], interrupted.pipelineState[field]);
+  }
+  assert.deepEqual(paused.counters, interrupted.counters);
+  assert.equal(candidate.head, before.head);
+  assert.deepEqual(
+    await git.snapshot({ projectPath: fixture.projectPath }),
+    candidate,
+  );
+
+  const control = createMcpControlPlane({
+    runner: openRunner(),
+    runStore: store,
+  });
+  const status = await control.runStatus({ runId });
+  const waited = await control.runWait({ runId, cursor: 0, timeoutMs: 0 });
+  assert.deepEqual(waited.pause, status.pause);
+  assert.deepEqual(status.pause.nextActions, [
+    { type: "start-new-run", requirement: "resolved-commit-readiness" },
+  ]);
+  assert.equal(status.pause.resumeState, null);
+  let output = "";
+  assert.equal(
+    await main(["status", "--run", runId], {
+      runner: openRunner(),
+      stdout: {
+        write(chunk) {
+          output += chunk;
+        },
+      },
+      stderr: {
+        write(chunk) {
+          assert.fail(chunk);
+        },
+      },
+    }),
+    0,
+  );
+  assert.ok(output.includes(status.pause.explanation));
+  assert.match(output, /This run cannot retry COMMIT/u);
+  assert.doesNotMatch(
+    output,
+    /Retry with:|uncontaminated worktree|PRIVATE_READINESS/u,
+  );
+  const activity = await control.runActivity({ runId, cursor: 0, limit: 100 });
+  assert.ok(
+    activity.activities.some(
+      ({ kind, message }) =>
+        kind === "authorization-retired" &&
+        message.includes("commit_readiness_extra_fields"),
+    ),
+  );
+  const saved = JSON.stringify(await store.loadRunHistory(runId));
+  assert.doesNotMatch(saved, /PRIVATE_READINESS/u);
+  const turns = adapter.calls.length;
+  const probes = adapter.probes.length;
+  await assert.rejects(openRunner().resume({ runId }), {
+    code: "ERR_INAPPLICABLE_RESUME_ACTION",
+  });
+  assert.equal(adapter.calls.length, turns);
+  assert.equal(adapter.probes.length, probes);
+  assert.equal(readinessTurns, 1);
+  assert.equal(verifications, 2);
+  assert.equal((await store.loadRun(runId)).revision, paused.revision);
+});
 
 test("durable writable-result recovery preserves an accepted commit and candidate without replay", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");

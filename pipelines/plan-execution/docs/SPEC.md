@@ -1632,8 +1632,8 @@ with a read-only host filesystem, writable workspace and resolved Git
 directories, private temporary and runtime directories, and no network. The
 Runner-owned executor proof is independent from the native Claude turn proof,
 and `localCommit` requires both while native session and structured-output
-capabilities remain CLI-derived. The agent confirmation turn remains in `plan`
-mode; after confirmation the executor checks the expected HEAD, runs
+capabilities remain CLI-derived. The agent confirmation turn retains the
+read-only inspection policy; after confirmation the executor checks the expected HEAD, runs
 `git add -A`, rechecks HEAD, applies fixed
 unstaged-clean, staged-diff whitespace, and nonempty-diff hygiene, and creates
 one subject-only commit with the exact supplied message. It preserves Git hooks and configured
@@ -3815,11 +3815,21 @@ verification reports no commit. A non-recoverable policy rejection remains
 `commit_failed`; its bounded adapter diagnostic class, when present, is copied
 into that pause, named by the authorization-retired activity, and projected as
 `Adapter diagnostic: <class>.` without commands, paths, output, or native
-messages. A recoverable provider rejection remains
+messages. The provider-neutral [readiness refusal classes](../../../docs/product/PROVIDER_MODEL.md#isolation-and-effects)
+instead expose their fixed violated constraint, or deliberate decline with an
+unknown reason, plus bounded class evidence. After authorization retirement
+they retain `commit_failed` and the private `COMMIT` checkpoint but expose a
+null public resume state and `start-new-run` with requirement
+`resolved-commit-readiness`. Explicit same-run resume is rejected. Preserve the
+reviewed candidate for separately authorized follow-up; COMMIT has no durable
+readiness-output correction checkpoint. No rejected keys, values or native
+explanations enter persistence or public activity. A readiness rejection cannot
+be marked recoverable. Legacy classless refusals and other supported classes
+retain their existing recovery behavior. A recoverable provider rejection remains
 `backend_unavailable`. Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
-a fresh ID is issued only after the deadline. Other rejections retain their
+a fresh ID is issued only after the deadline. Other supported rejections retain their
 existing explicit resume at `COMMIT`. State version 24 accepts this proof;
 version 23 migrates unchanged and cannot invent missing evidence. If verification is interrupted, retain both the
 consumed authorization and its proof, then resume verification without invoking

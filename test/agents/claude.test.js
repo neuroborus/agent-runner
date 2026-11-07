@@ -48,6 +48,8 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
+import { planExecutionPipeline } from "../../pipelines/plan-execution/src/index.js";
+import { createFixture as createExecutionFixture } from "../../pipelines/plan-execution/test/support/index.js";
 
 import {
   BOOTSTRAP_SCHEMA as EXECUTION_BOOTSTRAP_SCHEMA,
@@ -6106,49 +6108,196 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(commitCall.options.env.SSH_AUTH_SOCK, undefined);
 });
 
-test("proves a rejected local-commit policy did not start the effect", async () => {
+test("classifies readiness refusals before admitting local commit effects", async () => {
+  for (const [structured, diagnosticClass, constraint] of [
+    [{ ready: false }, "commit_readiness_declined", /reason is unknown/u],
+    [undefined, "commit_readiness_not_object", /must be an object/u],
+    [[{ ready: true }], "commit_readiness_not_object", /must be an object/u],
+    [{}, "commit_readiness_not_boolean", /requires a boolean ready field/u],
+    [
+      { ready: "PRIVATE_READINESS_VALUE" },
+      "commit_readiness_not_boolean",
+      /requires a boolean ready field/u,
+    ],
+    [
+      { ready: true, PRIVATE_READINESS_FIELD: "PRIVATE_READINESS_VALUE" },
+      "commit_readiness_extra_fields",
+      /permits only the ready field/u,
+    ],
+    [
+      { ready: false, PRIVATE_READINESS_FIELD: true },
+      "commit_readiness_extra_fields",
+      /permits only the ready field/u,
+    ],
+  ]) {
+    let commitExecutions = 0;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          return {
+            stdout: JSON.stringify(
+              result({
+                structured,
+              }),
+            ),
+            stderr: "",
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          onCommitExecution() {
+            commitExecutions += 1;
+          },
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+        }),
+      ),
+      (error) => {
+        assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error));
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.diagnosticClass, diagnosticClass);
+        assert.match(error.message, constraint);
+        assert.equal(error.failure.effect, "none");
+        assert.equal(error.failure.commitExecutor, "not_started");
+        assert.equal(error.failure.retry, "terminal");
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.diagnosticClass, diagnosticClass);
+        assert.equal(normalized.effectStarted, false);
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        assert.equal(normalized.failureClass, undefined);
+        assert.equal(normalized.cause, undefined);
+        assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_READINESS/u);
+        assert.doesNotMatch(error.message, /PRIVATE_READINESS/u);
+        return true;
+      },
+    );
+    assert.equal(localCommitSandboxCalls(fixture).length, 1);
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(commitExecutions, 0);
+  }
+});
+
+test("retains readiness refusal through a cleanup abort and reconstructed verification", async (t) => {
+  const controller = new AbortController();
+  let resource;
+  let commitExecutions = 0;
+  let rejection;
   const fixture = createFixture({
     handle({ call }) {
       if (call.file === "claude" && call.argumentsList.includes("-p")) {
         return {
           stdout: JSON.stringify(
             result({
+              output: "PRIVATE_READINESS_OUTPUT",
               structured: { ready: false },
             }),
           ),
           stderr: "",
         };
       }
-      return undefined;
     },
   });
-
   await assert.rejects(
     fixture.adapter.run(
       request({
         access: "local-commit",
+        signal: controller.signal,
         authorizationId: "authorization-1",
         commit: {
           expectedHead: EXPECTED_HEAD,
           message: "feat(test): create commit",
         },
+        onCommitExecution() {
+          commitExecutions += 1;
+        },
+        onResource(value) {
+          resource = value;
+          // Retirement follows result validation, so the refusal already exists.
+          if (value === null)
+            controller.abort(new Error("PRIVATE_ABORT_REASON"));
+        },
       }),
     ),
     (error) => {
-      assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error));
-      assert.equal(error.effectStarted, false);
-      assert.equal(error.failure.effect, "none");
-      assert.equal(error.failure.commitExecutor, "not_started");
+      assert.equal(controller.signal.aborted, true);
+      assert.equal(error.code, "ERR_CLAUDE_LOCAL_COMMIT_POLICY");
+      rejection = normalizeAdapterFailure("claude", error);
+      assert.equal(rejection.diagnosticClass, "commit_readiness_declined");
+      assert.equal(rejection.recoverable, false);
+      assert.equal(rejection.effectStarted, false);
+      assert.equal(rejection.failure.commitExecutor, "not_started");
+      assert.equal(rejection.cause, undefined);
+      assert.doesNotMatch(JSON.stringify(rejection), /PRIVATE_/u);
       return true;
     },
   );
+  assert.equal(resource, null);
+  assert.equal(commitExecutions, 0);
+  assert.equal(turnCalls(fixture).length, 1);
   assert.equal(localCommitSandboxCalls(fixture).length, 1);
+
+  let interruptVerification = true;
+  const execution = await createExecutionFixture(t, {
+    onRoleRun(_role, turn) {
+      if (turn.access === "local-commit") throw rejection;
+    },
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Verification interrupted."), {
+          code: "ERR_TEST_COMMIT_VERIFICATION",
+        });
+      }
+    },
+  });
+  const interrupted = await execution.run();
+  const saved = structuredClone(interrupted.pipelineState);
+  assert.equal(saved.pendingCommit.status, "consumed");
+  assert.deepEqual(saved.pendingCommit.preEffectRejection, {
+    code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+    recoverable: false,
+    diagnosticClass: "commit_readiness_declined",
+  });
+  execution.persistPipelineState(saved);
+  const retired = await execution.run();
+  assert.equal(retired.pipelineState.pendingCommit, null);
+  assert.equal(retired.pause.diagnosticClass, "commit_readiness_declined");
+  assert.throws(
+    () => planExecutionPipeline.validateResumeAction(retired, null),
+    /separately authorized follow-up/u,
+  );
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(retired).nextActions,
+    [{ type: "start-new-run", requirement: "resolved-commit-readiness" }],
+  );
+  const calls = execution.calls.worker.length;
+  await execution.run();
+  assert.equal(execution.calls.worker.length, calls);
+  assert.equal(
+    execution.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+  assert.doesNotMatch(JSON.stringify(execution.transitions), /PRIVATE_/u);
 });
 
-test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+test("preserves unclassified abort reasons before local commit execution", async () => {
   for (const reason of [
     Object.freeze(new Error("Operator pause")),
     "Operator cancel",
+    Object.freeze({
+      diagnosticClass: "commit_readiness_declined",
+      nativeDetail: "PRIVATE_ABORT_REASON",
+    }),
   ]) {
     const fixture = createFixture();
     await assert.rejects(
@@ -6167,6 +6316,10 @@ test("preserves immutable and primitive abort reasons before local commit execut
         assert.ok(error instanceof ClaudeAdapterError);
         assert.equal(error.effectStarted, false);
         assert.equal(error.cause, reason);
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.diagnosticClass, undefined);
+        assert.equal(normalized.cause, undefined);
+        assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_/u);
         return true;
       },
     );

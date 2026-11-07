@@ -340,6 +340,7 @@ test("commit instructions preserve the one-shot local boundary", () => {
   assert.equal(
     COMMIT_INSTRUCTIONS,
     `Validate readiness for the authorized local commit using the exact supplied subject. The constrained executor alone stages the exact finalized and reviewed workspace with git add -A, performs fixed staged-diff hygiene, and creates the subject-only commit.
+Follow the adapter's readiness output contract exactly. If it requests a ready boolean, return only { "ready": true } when ready or { "ready": false } otherwise, with no other fields. A readiness refusal preserves the candidate for separately authorized follow-up; COMMIT has no durable readiness-output correction checkpoint.
 Do not stage changes yourself, modify project content, amend history, bypass hooks, change Git identity or configuration, create other refs, or perform any remote write.`,
   );
 });

@@ -899,6 +899,22 @@ function isAdapterDiagnosticClass(value) {
   );
 }
 
+// Provider-neutral constraints; native readiness interpretation stays in adapters.
+export function commitReadinessConstraint(diagnosticClass) {
+  switch (diagnosticClass) {
+    case "commit_readiness_declined":
+      return "Readiness was declined; the reason is unknown.";
+    case "commit_readiness_not_object":
+      return "Readiness confirmation must be an object.";
+    case "commit_readiness_not_boolean":
+      return "Readiness confirmation requires a boolean ready field.";
+    case "commit_readiness_extra_fields":
+      return "Readiness confirmation permits only the ready field.";
+    default:
+      return null;
+  }
+}
+
 function hasExactFields(value, fields) {
   return (
     Object.keys(value).length === fields.length &&
@@ -4290,6 +4306,9 @@ function normalizePendingCommit(value) {
       typeof value.preEffectRejection.recoverable !== "boolean" ||
       (hasDiagnosticClass &&
         !isAdapterDiagnosticClass(value.preEffectRejection.diagnosticClass)) ||
+      (commitReadinessConstraint(value.preEffectRejection.diagnosticClass) !==
+        null &&
+        value.preEffectRejection.recoverable) ||
       [
         hasAvailability,
         hasAuthentication,

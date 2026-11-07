@@ -3264,9 +3264,18 @@ isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
 that bounded proof on the consumed authorization before Git verification. After
 Git independently confirms that no commit was created, the pipeline retires the
-authorization before a later resume can issue a fresh ID. An absent marker or
-executor failure keeps the consumed authorization on the verification-only
+authorization before an eligible later resume can issue a fresh ID. An absent
+marker or executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
+Claude validates the exact boolean readiness shape before its value and emits
+only the finite provider-neutral [readiness diagnostics](product/PROVIDER_MODEL.md#isolation-and-effects).
+Execution carries the class through the consumed rejection and retired
+`commit_failed` pause. Classified readiness refusals preserve the reviewed
+candidate and offer separately authorized follow-up, with no same-run COMMIT
+retry or readiness-output correction. CLI and MCP share the fixed constraint,
+class evidence and null public resume state; legacy classless recovery remains
+unchanged. An interrupted verification still reconciles the consumed effect
+before applying that disposition, never reinvoking readiness or the executor.
 Polishing has no commit authorization and preserves the initial `HEAD`, refs,
 remotes, and Git identity through completion.
 

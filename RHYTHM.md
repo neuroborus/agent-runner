@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Claude readiness refusals carry distinct constraints and preserve work.**
+  The adapter checks the complete one-boolean-field shape before its value,
+  separating deliberate decline from non-object, missing/nonboolean readiness,
+  and unsupported fields. Only fixed registered classes cross the boundary;
+  rejected native data stays private. Execution journals the pre-effect proof
+  before unchanged Git verification retires authorization, including after
+  interruption. These classes offer separately authorized follow-up through
+  matching CLI/MCP guidance, since COMMIT has no durable readiness-output
+  correction checkpoint. They cannot trigger an identical blind retry. Legacy
+  classless and other supported recovery, reviewed candidate evidence and all
+  consumed allowances remain intact.
+
 - **Terminal audit failures retain bounded provider evidence.** Audit now saves
   the registry-normalized optional diagnostic class alongside its terminal code
   and publishes a safe failure activity. Shared CLI/MCP projections retain that

@@ -56,6 +56,10 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
+  "commit_readiness_declined",
+  "commit_readiness_extra_fields",
+  "commit_readiness_not_boolean",
+  "commit_readiness_not_object",
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
@@ -649,7 +653,10 @@ function turnPrompt(request, recovery) {
       "current workspace is ready for the authorized commit. Do not modify " +
       "files, stage changes, create a commit, or mutate Git state. The adapter " +
       "will perform the constrained commit after this turn. Return whether it " +
-      "is safe to proceed through the provided schema.";
+      'is safe to proceed as exactly { "ready": true } or { "ready": false }. ' +
+      "The ready field must be boolean; include no other fields. Return false " +
+      "if readiness cannot be confirmed. A refusal preserves the candidate " +
+      "for separately authorized follow-up; this checkpoint has no output correction.";
   }
   return prompt;
 }
@@ -1179,6 +1186,36 @@ function normalizeResult(payload, request, session) {
     });
   }
   validateRequestedModel(payload, request.model);
+  if (request.access === "local-commit") {
+    const readiness = payload.structured_output;
+    // Check the complete shape before interpreting a refusal or admitting effects.
+    const diagnosticClass = !isRecord(readiness)
+      ? "commit_readiness_not_object"
+      : Object.keys(readiness).some((field) => field !== "ready")
+        ? "commit_readiness_extra_fields"
+        : !Object.hasOwn(readiness, "ready") ||
+            typeof readiness.ready !== "boolean"
+          ? "commit_readiness_not_boolean"
+          : readiness.ready === false
+            ? "commit_readiness_declined"
+            : undefined;
+    if (diagnosticClass !== undefined) {
+      const messages = {
+        commit_readiness_not_object:
+          "Local commit readiness confirmation must be an object.",
+        commit_readiness_extra_fields:
+          "Local commit readiness confirmation permits only the ready field.",
+        commit_readiness_not_boolean:
+          "Local commit readiness confirmation requires a boolean ready field.",
+        commit_readiness_declined:
+          "Local commit readiness was declined; the reason is unknown.",
+      };
+      throw new ClaudeAdapterError(messages[diagnosticClass], {
+        code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+        diagnosticClass,
+      });
+    }
+  }
   let structured = null;
   if (schema !== undefined) {
     if (!isRecord(payload.structured_output)) {
@@ -1191,15 +1228,6 @@ function normalizeResult(payload, request, session) {
       );
     }
     structured = deepFreeze(payload.structured_output);
-  }
-  if (
-    request.access === "local-commit" &&
-    (structured.ready !== true || Object.keys(structured).length !== 1)
-  ) {
-    throw new ClaudeAdapterError(
-      "Claude did not confirm the authorized local commit.",
-      { code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY" },
-    );
   }
   return Object.freeze({
     output:
@@ -2050,6 +2078,10 @@ export function createClaudeAdapter(options = {}) {
             {
               cause,
               code: cause?.code ?? "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
+              diagnosticClass:
+                cause instanceof ClaudeAdapterError
+                  ? cause.diagnosticClass
+                  : undefined,
               effectStarted: false,
             },
           );
