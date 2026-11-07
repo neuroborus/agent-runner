@@ -9,6 +9,7 @@ import {
   sep,
 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { assertInitInspection } from "./inspection-failure.js";
 
 export class InitProposalError extends Error {
   constructor(message) {
@@ -303,7 +304,7 @@ export function assertInspectionExtension(before, after) {
       isDeepStrictEqual(value, current.get(key(value))),
     );
   };
-  assertInit(
+  assertInitInspection(
     [
       "schemaVersion",
       "projectPath",
@@ -331,7 +332,7 @@ export function assertInspectionExtension(before, after) {
       ) &&
       (before.snapshotHash === after.snapshotHash ||
         after.scopeBindings.length > before.scopeBindings.length),
-    "Previously inspected init inputs or destinations changed.",
+    "workspace_changed",
   );
 }
 

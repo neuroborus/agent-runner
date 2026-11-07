@@ -458,10 +458,11 @@ test("occupied defaults, wrong-target bindings and root races are rejected witho
   );
   const f = await fixture(t);
   await fs.mkdir(f.rootPath);
-  await assert.rejects(
-    publishExternalInit(f.state, f.runtime),
-    /bindings changed/u,
-  );
+  await assert.rejects(publishExternalInit(f.state, f.runtime), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
   assert.equal(f.saved, null);
   assert.deepEqual(await fs.readdir(f.rootPath), []);
   await f.assertTargetUnchanged();
@@ -570,7 +571,11 @@ test("lost sibling-root receipts retain legacy or compact proof and reconcile on
     await fs.mkdir(f.rootPath);
     await assert.rejects(
       publishExternalInit(f.state, f.runtime, prepared.publication),
-      /resource changed/u,
+      {
+        code: "ERR_INIT_INSPECTION",
+        phase: "publication-preparation",
+        constraint: "workspace_changed",
+      },
     );
     await f.assertTargetUnchanged();
   }
@@ -605,7 +610,9 @@ test("publication persists bounded complete-source proof and rejects drift beyon
   f.runtime.persist = persist;
   sourceEvidence.at(-1).hash = hash("changed");
   await assert.rejects(publishExternalInit(f.state, f.runtime, f.saved), {
-    code: "ERR_WORKSPACE_DRIFT",
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
   });
   assert.deepEqual(f.saved.receipts, []);
   await assert.rejects(fs.stat(f.rootPath), { code: "ENOENT" });

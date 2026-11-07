@@ -5,6 +5,10 @@ import { assertInitRun, createInitState, INIT_MODES } from "./workflow.js";
 import { defaultExternalRoot } from "./inspection.js";
 import { runInit, inspectInitWorkspace } from "./lifecycle.js";
 import { initProjections, validateResumeAction } from "./projections.js";
+import {
+  initInspectionFailure,
+  inspectInitOperation,
+} from "./inspection-failure.js";
 
 export { inspectInitSetup, selectInitPlacement } from "./inspection.js";
 export { InitProposalError } from "./proposal.js";
@@ -45,6 +49,24 @@ export const initPipeline = Object.freeze({
   }),
   setup: true,
   inspectWorkspace: inspectInitWorkspace,
+  inspectOperation: inspectInitOperation,
+  inspectionFailure(run, cause, phase) {
+    if (run.pause != null) {
+      // Inspection may diagnose a retry, never replace a blocker, a submitted
+      // answer receipt or the one-shot restoration of an operator checkpoint.
+      if (
+        run.pause.reason === "operator_paused" ||
+        run.pause.inputResponse !== undefined
+      )
+        return null;
+      try {
+        validateResumeAction(run, null);
+      } catch {
+        return null;
+      }
+    }
+    return initInspectionFailure(run, cause, phase);
+  },
   projections: initProjections,
   validateResumeAction,
   description:

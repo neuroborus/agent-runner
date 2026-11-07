@@ -488,13 +488,20 @@ export function createClarificationService(options = {}) {
 
   async function writeEditAnswers(authorization, answers, options = {}) {
     assertOptions(options, "Answer-write options");
+    const { inspectRead = (operation) => operation() } = options;
+    if (typeof inspectRead !== "function")
+      throw new ClarificationError(
+        "Answer-read inspection must be a function.",
+      );
     const normalized = normalizeAuthorization(authorization);
     const normalizedAnswers = normalizeAnswers(answers);
     const expectedHash = assertHash(options.expectedHash);
-    const snapshot = await inspectTranscript({
-      artifactRoot: normalized.artifactRoot,
-      transcriptPath: normalized.transcriptPath,
-    });
+    const snapshot = await inspectRead(() =>
+      inspectTranscript({
+        artifactRoot: normalized.artifactRoot,
+        transcriptPath: normalized.transcriptPath,
+      }),
+    );
     if (
       snapshot.artifactRoot !== normalized.artifactRoot ||
       snapshot.transcriptPath !== normalized.transcriptPath
@@ -516,7 +523,7 @@ export function createClarificationService(options = {}) {
         });
       }
       if (content !== snapshot.content) {
-        await replaceTranscript(snapshot, content);
+        await replaceTranscript(snapshot, content, { inspectRead });
       }
       return inspectTranscript(snapshot);
     }

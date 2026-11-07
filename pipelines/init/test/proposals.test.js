@@ -716,9 +716,10 @@ test("shared clarification appends and answer windows retain unanswered rounds a
     transcriptPath: join(taskPath, "clarifications.md"),
   };
   const initial = await service.ensureTranscript(location);
-  let state = createInitState();
+  let state = createInitState({ proactiveClarification: true });
   state.transcriptHash = initial.hash;
   state = turn(state, setup, ready);
+  assert.equal(state.proactiveClarificationComplete, false);
   const optional = await service.prepareEdit({
     ...location,
     expectedHash: state.transcriptHash,
@@ -726,6 +727,8 @@ test("shared clarification appends and answer windows retain unanswered rounds a
     action: "proactive-clarification",
     persistPendingEdit: (authorization) => {
       state = authorizeInitEdit(state, authorization);
+      assert.equal(state.proactiveClarificationComplete, true);
+      assert.equal(state.pendingEdit.id, authorization.id);
     },
   });
   await service.acceptEdit(optional, {
@@ -1253,7 +1256,7 @@ test("new external destinations retain absence and ancestor bindings through ins
           externalRoot,
         );
       } else {
-        await assert.rejects(result, { code: "ERR_INIT_PROPOSAL" });
+        await assert.rejects(result, { code: "ERR_INIT_INSPECTION" });
       }
     });
   }

@@ -449,6 +449,55 @@ export function createRunner(options = {}) {
     return next;
   }
 
+  async function pauseForInspectionFailure(
+    pipeline,
+    run,
+    lease,
+    cause,
+    phase = "recovery",
+  ) {
+    if (pipeline.inspectionFailure?.(run, cause, phase) == null) return null;
+    const activity = {
+      actor: "runner",
+      phase: "inspection",
+      kind: "blocked",
+      message:
+        "Complete init inspection failed; inspect the saved diagnosis before continuing.",
+    };
+    const settle = async () => {
+      const ownership = heldWorktreeLeases.get(run.runId);
+      if (ownership === undefined || ownership.projectPath !== leasePath(run))
+        throw new RunnerError(
+          "Inspection settlement requires canonical ownership.",
+          {
+            code: "ERR_INVALID_WORKTREE_LEASE",
+          },
+        );
+      await runStore.assertWorkspaceLease(
+        lease,
+        ownership.lease,
+        ownership.projectPath,
+      );
+      let settlementActivity;
+      const next = await runStore.settleCheckpoint(
+        lease,
+        (latest) => {
+          const patch = pipeline.inspectionFailure(latest, cause, phase);
+          if (patch == null) throw cause;
+          const settlement = stopSettlement(latest, patch, activity);
+          settlementActivity = settlement.activity;
+          return settlement;
+        },
+        { validate: pipeline.workflow.validateRun },
+      );
+      await publish(settlementActivity, next);
+      return next;
+    };
+    return heldWorktreeLeases.has(run.runId)
+      ? settle()
+      : withStopReconciliationLease(run, settle, lease);
+  }
+
   function storageForbiddenPaths(run) {
     const base = [
       run.projectPath,
@@ -579,6 +628,10 @@ export function createRunner(options = {}) {
     onConfigurationFailure = () => {},
   ) {
     let providerResponseRole = null;
+    const inspectOperation = (phase, operation) =>
+      pipeline.inspectOperation
+        ? pipeline.inspectOperation(phase, operation)
+        : operation();
     const safety =
       run.workspace?.kind === "directory"
         ? pipeline.setup
@@ -793,7 +846,11 @@ export function createRunner(options = {}) {
                   async run(request) {
                     await checkConfiguration();
                     const directory = run.workspace?.kind === "directory";
-                    const before = directory ? await safety.snapshot() : null;
+                    const before = directory
+                      ? await inspectOperation("preparation", () =>
+                          safety.snapshot(),
+                        )
+                      : null;
                     if (directory && request.access === "local-commit")
                       throw new RunnerError(
                         "Directory workflows cannot request Git effects.",
@@ -849,11 +906,13 @@ export function createRunner(options = {}) {
                         retired.executionProcess === null &&
                         retired.preparation == null
                       ) {
-                        const after = await safety.snapshot();
-                        workspace.assertUnchanged({
-                          before,
-                          after,
-                          allowOutputs: request.access === "workspace-write",
+                        await inspectOperation("post-turn", async () => {
+                          const after = await safety.snapshot();
+                          workspace.assertUnchanged({
+                            before,
+                            after,
+                            allowOutputs: request.access === "workspace-write",
+                          });
                         });
                       }
                     }
@@ -1505,6 +1564,13 @@ export function createRunner(options = {}) {
       try {
         await validatePersistedBoundary(run);
       } catch (cause) {
+        const diagnosed = await pauseForInspectionFailure(
+          pipeline,
+          run,
+          lease,
+          cause,
+        );
+        if (diagnosed !== null) return diagnosed;
         if (!cause?.code?.startsWith("ERR_WORKSPACE_")) throw cause;
         return pauseForWorkspaceDrift(run, lease);
       }
@@ -1528,7 +1594,18 @@ export function createRunner(options = {}) {
         run.workspace.policy,
         (role, proof) => assertSetupProviderAuthority(run, role, proof),
       );
-      await validatePersistedBoundary(run);
+      try {
+        await validatePersistedBoundary(run);
+      } catch (cause) {
+        const diagnosed = await pauseForInspectionFailure(
+          pipeline,
+          run,
+          lease,
+          cause,
+        );
+        if (diagnosed !== null) return diagnosed;
+        throw cause;
+      }
       if (!isDeepStrictEqual(providerPolicies, run.providerPolicies)) {
         if (run.activeTurn !== null)
           run = await runStore.finishAgentTurn(lease, run.activeTurn);
@@ -1590,6 +1667,7 @@ export function createRunner(options = {}) {
       publish,
     });
     let completed;
+    let inspectionFailure = null;
     try {
       await monitor.check();
       await publishPlanProgress(
@@ -1616,13 +1694,26 @@ export function createRunner(options = {}) {
     } catch (cause) {
       if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
         configurationFailure = cause;
-      } else if (!stopPending(await runStore.loadRun(run.runId))) {
-        throw cause;
+      } else {
+        const latest = await runStore.loadRun(run.runId);
+        if (pipeline.inspectionFailure?.(latest, cause, null) != null)
+          inspectionFailure = cause;
+        else if (!stopPending(latest)) throw cause;
       }
     } finally {
       await monitor.close();
     }
     const latest = await runStore.loadRun(run.runId);
+    if (inspectionFailure !== null) {
+      const diagnosed = await pauseForInspectionFailure(
+        pipeline,
+        latest,
+        lease,
+        inspectionFailure,
+      );
+      if (diagnosed === null) throw inspectionFailure;
+      return diagnosed;
+    }
     if (stopPending(latest)) {
       return reconcileOperatorStop({
         onRecoveryStage,
@@ -1810,7 +1901,12 @@ export function createRunner(options = {}) {
     }
   }
 
-  async function withWorktreeLease(run, operation, executionLease) {
+  async function withWorktreeLease(
+    run,
+    operation,
+    executionLease,
+    onInspectionFailure = (diagnosed) => diagnosed,
+  ) {
     if (!requiresLease(run)) {
       return operation();
     }
@@ -1827,8 +1923,29 @@ export function createRunner(options = {}) {
     return withHeldWorktreeLease(
       ownership,
       async () => {
-        if (run.workspace?.kind === "directory")
-          await validatePersistedBoundary(run, { frozenContent: false });
+        if (run.workspace?.kind === "directory") {
+          try {
+            await validatePersistedBoundary(run, { frozenContent: false });
+          } catch (cause) {
+            const pipeline = getPipeline(run.pipelineId);
+            if (executionLease === undefined || !pipeline?.inspectionFailure)
+              throw cause;
+            await runStore.assertWorkspaceLease(
+              executionLease,
+              ownership.lease,
+              ownership.projectPath,
+            );
+            const diagnosed = await pauseForInspectionFailure(
+              pipeline,
+              await runStore.loadRun(run.runId),
+              executionLease,
+              cause,
+              "preparation",
+            );
+            if (diagnosed === null) throw cause;
+            return onInspectionFailure(diagnosed);
+          }
+        }
         return operation();
       },
       executionLease,
@@ -2189,7 +2306,29 @@ export function createRunner(options = {}) {
     const prepared = pipelineForRun(storedRun, undefined, {
       allowMigration: true,
     });
-    await validatePersistedBoundary(storedRun, { frozenContent: false });
+    try {
+      await validatePersistedBoundary(storedRun, { frozenContent: false });
+    } catch (cause) {
+      if (
+        storedRun.pipelineStateVersion !== prepared.run.pipelineStateVersion ||
+        storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION
+      )
+        throw cause;
+      const diagnosed = await pauseForInspectionFailure(
+        prepared.pipeline,
+        storedRun,
+        lease,
+        cause,
+      );
+      if (diagnosed === null) throw cause;
+      return {
+        pipeline: prepared.pipeline,
+        run: diagnosed,
+        inspectionBlocked: true,
+        configurationBlocked: false,
+        configurationChanged: false,
+      };
+    }
     validatePreparedRun?.(prepared.run);
     const runtimeMigrationRequired =
       storedRun.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
@@ -2590,10 +2729,11 @@ export function createRunner(options = {}) {
       run: loaded,
       configurationBlocked,
       configurationChanged,
+      inspectionBlocked,
     } = await recoverCompatibleRun(lease, normalized.runId, {
       onRecoveryStage,
     });
-    if (configurationBlocked) return loaded;
+    if (configurationBlocked || inspectionBlocked) return loaded;
     let recovered = loaded;
     const safetyPaused = [
       "project_configuration_changed",
@@ -2721,7 +2861,18 @@ export function createRunner(options = {}) {
             },
           );
         }
-        await validatePersistedBoundary(recovered, { frozenContent: false });
+        try {
+          await validatePersistedBoundary(recovered, { frozenContent: false });
+        } catch (cause) {
+          const diagnosed = await pauseForInspectionFailure(
+            pipeline,
+            recovered,
+            lease,
+            cause,
+          );
+          if (diagnosed !== null) return diagnosed;
+          throw cause;
+        }
         return execute(
           pipeline,
           recovered,
@@ -2842,12 +2993,21 @@ export function createRunner(options = {}) {
     const lease = await runStore.acquireRunLease(normalized.runId);
     try {
       let answers;
-      const { run, configurationBlocked, configurationChanged } =
-        await recoverCompatibleRun(lease, normalized.runId, {
-          validatePreparedRun(preparedRun) {
-            answers = orderedInputAnswers(preparedRun, normalized);
-          },
-        });
+      const {
+        run,
+        configurationBlocked,
+        configurationChanged,
+        inspectionBlocked,
+      } = await recoverCompatibleRun(lease, normalized.runId, {
+        validatePreparedRun(preparedRun) {
+          answers = orderedInputAnswers(preparedRun, normalized);
+        },
+      });
+      if (inspectionBlocked)
+        throw new RunnerError(
+          "Init inspection failed; inspect the saved diagnosis before supplying input.",
+          { code: "ERR_INIT_INSPECTION" },
+        );
       if (configurationBlocked || configurationChanged) {
         throw new RunnerError(
           "The resolved project configuration changed during the run.",
@@ -2859,16 +3019,57 @@ export function createRunner(options = {}) {
           code: "ERR_STOP_RECONCILIATION_REQUIRED",
         });
       }
+      const pipeline = getPipeline(run.pipelineId);
       await withWorktreeLease(
         run,
         async () => {
-          if (run.workspace?.kind === "directory")
-            await validatePersistedBoundary(run);
-          const transcript = await clarifications.writeEditAnswers(
-            run.pipelineState.pendingEdit,
-            answers,
-            { expectedHash: normalized.responseHash },
-          );
+          if (run.workspace?.kind === "directory") {
+            try {
+              await validatePersistedBoundary(run);
+            } catch (cause) {
+              const diagnosed = await pauseForInspectionFailure(
+                pipeline,
+                run,
+                lease,
+                cause,
+                "preparation",
+              );
+              if (diagnosed === null) throw cause;
+              throw new RunnerError(
+                "Init inspection failed; inspect the saved diagnosis before supplying input.",
+                { code: "ERR_INIT_INSPECTION" },
+              );
+            }
+          }
+          let transcript;
+          try {
+            transcript = await clarifications.writeEditAnswers(
+              run.pipelineState.pendingEdit,
+              answers,
+              {
+                expectedHash: normalized.responseHash,
+                ...(pipeline.inspectOperation
+                  ? {
+                      inspectRead: (operation) =>
+                        pipeline.inspectOperation("preparation", operation),
+                    }
+                  : {}),
+              },
+            );
+          } catch (cause) {
+            const diagnosed = await pauseForInspectionFailure(
+              pipeline,
+              await runStore.loadRun(run.runId),
+              lease,
+              cause,
+              null,
+            );
+            if (diagnosed === null) throw cause;
+            throw new RunnerError(
+              "Init inspection failed; inspect the saved diagnosis before supplying input.",
+              { code: "ERR_INIT_INSPECTION" },
+            );
+          }
           const next = await runStore.transitionRun(
             lease,
             {
@@ -2901,6 +3102,12 @@ export function createRunner(options = {}) {
           return result(next);
         },
         lease,
+        (diagnosed) => {
+          throw new RunnerError(
+            "Workspace inspection failed; inspect the saved stop before supplying input.",
+            { code: diagnosed.pause?.code ?? "ERR_WORKSPACE_INSPECTION" },
+          );
+        },
       );
     } finally {
       await releaseRunLease(lease, normalized.runId);

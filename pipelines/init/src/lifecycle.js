@@ -3,6 +3,11 @@ import { isDeepStrictEqual as same } from "node:util";
 
 import { inspectInitSetup } from "./inspection.js";
 import {
+  assertInitInspection,
+  InitInspectionError,
+  inspectInitOperation,
+} from "./inspection-failure.js";
+import {
   publishIntegratedInit,
   publishExternalInit,
 } from "./prerequisite-publication.js";
@@ -37,6 +42,10 @@ const publisher = (state) =>
 // Read-only recovery proof: original baseline plus exact journaled publication
 // paths. Pending effects are reconciled by their publisher before another turn.
 export async function inspectInitWorkspace(run, setup) {
+  return inspectInitOperation("recovery", () => inspectWorkspace(run, setup));
+}
+
+async function inspectWorkspace(run, setup) {
   const state = run.pipelineState;
   if (state.publication !== null) {
     const result = await publisher(state)(
@@ -51,8 +60,9 @@ export async function inspectInitWorkspace(run, setup) {
               projectPath: run.taskPath,
               path: join(run.taskPath, "clarifications.md"),
             });
-            assertInit(
+            assertInitInspection(
               hashText(content) === state.clarificationHash,
+              "workspace_changed",
               "Frozen init clarification changed.",
             );
           },
@@ -67,14 +77,16 @@ export async function inspectInitWorkspace(run, setup) {
         projectPath: state.selection.rootPath,
         path: state.guidanceIntent.path,
       });
-      assertInit(
+      assertInitInspection(
         same(observed, state.guidanceReceipt.observed),
+        "workspace_changed",
         "Published guidance changed.",
       );
     }
     if (state.terminal !== null)
-      assertInit(
+      assertInitInspection(
         digest(inspected.snapshot) === state.terminal.fingerprint,
+        "workspace_changed",
         "Terminal setup snapshot changed.",
       );
     return inspected;
@@ -89,10 +101,11 @@ export async function inspectInitWorkspace(run, setup) {
       projectPath: run.taskPath,
       path: clarificationPath,
     });
-    assertInit(
+    assertInitInspection(
       [state.transcriptHash, state.transcriptAppendHash].includes(
         hashText(content),
       ),
+      "workspace_changed",
       "Init clarification changed outside its authorized window.",
     );
   }
@@ -130,14 +143,19 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     previousInspection = state().reinspectionRequired
       ? state().inspection
       : null,
+    phase = state().reinspectionRequired ? "reinspection" : "inspection",
   ) =>
-    inspectInitSetup(
-      {
-        ...(await runtime.setup.discover(state())),
-        previousInspection,
-        schemaVersion: state().inspection?.schemaVersion ?? 2,
-      },
-      runtime.setup,
+    inspectInitOperation(phase, async () =>
+      inspectInitSetup(
+        {
+          ...(await inspectInitOperation("discovery", () =>
+            runtime.setup.discover(state()),
+          )),
+          previousInspection,
+          schemaVersion: state().inspection?.schemaVersion ?? 2,
+        },
+        runtime.setup,
+      ),
     );
   const pause = async (reason, resumeState = state().workflowState) => {
     await save(
@@ -187,64 +205,70 @@ export async function runInit({ run, runtime, operatorStop = false }) {
   async function edit(action) {
     const decision = action === "product-decision";
     const suspendedState = decision ? "PROPOSE" : "CLARIFY";
-    const authorization = await runtime.clarifications.prepareEdit({
-      ...transcript,
-      expectedHash: state().transcriptHash,
-      action,
-      suspendedState,
-      persistPendingEdit: async (authorization) =>
-        save(authorizeInitEdit(state(), authorization), {
-          pause: {
-            reason: decision
-              ? "product_decision_required"
-              : action === "proactive-clarification"
-                ? "proactive_clarification"
-                : "clarification_required",
-            resumeState: suspendedState,
-            inputRequest: {
-              id: authorization.id,
-              kind: decision ? "product-decision" : "clarification",
-              artifactPath: authorization.transcriptPath,
-              rationale: decision
-                ? state().productDecision.whyBlocked
-                : "Resolve setup requirements before publication. For placement selection use an exact line: placement: integrated or placement: external; an explicit selector uses configurationPath: /absolute/path.",
-              questions: decision
-                ? [
-                    {
-                      id: "decision",
-                      question: state().productDecision.question,
-                      options: state().productDecision.options,
-                    },
-                  ]
-                : (state().pauseReason === "placement_conflict"
-                    ? [
-                        {
-                          question:
-                            "Select the infrastructure placement and exact configuration path from the inspected candidates.",
-                          whyItMatters:
-                            "Competing setups cannot be merged or selected implicitly.",
-                        },
-                      ]
-                    : state().questions
-                  ).map((entry, index) => ({
-                    id: `q${index + 1}`,
-                    question: entry.question,
-                    rationale: entry.whyItMatters,
-                    options: [],
-                  })),
+    const authorization = await inspectInitOperation("preparation", () =>
+      runtime.clarifications.prepareEdit({
+        ...transcript,
+        expectedHash: state().transcriptHash,
+        action,
+        suspendedState,
+        persistPendingEdit: async (authorization) =>
+          save(authorizeInitEdit(state(), authorization), {
+            pause: {
+              reason: decision
+                ? "product_decision_required"
+                : action === "proactive-clarification"
+                  ? "proactive_clarification"
+                  : "clarification_required",
+              resumeState: suspendedState,
+              inputRequest: {
+                id: authorization.id,
+                kind: decision ? "product-decision" : "clarification",
+                artifactPath: authorization.transcriptPath,
+                rationale: decision
+                  ? state().productDecision.whyBlocked
+                  : "Resolve setup requirements before publication. For placement selection use an exact line: placement: integrated or placement: external; an explicit selector uses configurationPath: /absolute/path.",
+                questions: decision
+                  ? [
+                      {
+                        id: "decision",
+                        question: state().productDecision.question,
+                        options: state().productDecision.options,
+                      },
+                    ]
+                  : (state().pauseReason === "placement_conflict"
+                      ? [
+                          {
+                            question:
+                              "Select the infrastructure placement and exact configuration path from the inspected candidates.",
+                            whyItMatters:
+                              "Competing setups cannot be merged or selected implicitly.",
+                          },
+                        ]
+                      : state().questions
+                    ).map((entry, index) => ({
+                      id: `q${index + 1}`,
+                      question: entry.question,
+                      rationale: entry.whyItMatters,
+                      options: [],
+                    })),
+              },
             },
-          },
-        }),
-    });
-    const result = await runtime.clarifications.openEditor(authorization, {
-      consumePendingEdit: consumeEdit,
-    });
+          }),
+      }),
+    );
+    const result = await inspectInitOperation("preparation", () =>
+      runtime.clarifications.openEditor(authorization, {
+        consumePendingEdit: consumeEdit,
+      }),
+    );
     return result.status !== "WAITING_FOR_USER" && state().pendingEdit === null;
   }
   if (state().pendingEdit !== null) {
-    await runtime.clarifications.acceptEdit(state().pendingEdit, {
-      consumePendingEdit: consumeEdit,
-    });
+    await inspectInitOperation("preparation", () =>
+      runtime.clarifications.acceptEdit(state().pendingEdit, {
+        consumePendingEdit: consumeEdit,
+      }),
+    );
     if (state().pendingEdit !== null) return current;
   } else if (state().workflowState === "WAITING_FOR_USER") {
     if (
@@ -260,6 +284,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
           "invalid_result",
           "authentication_required",
           "output_exhausted",
+          "init_inspection_failed",
         ].includes(current.pause?.reason)
       )
         return current;
@@ -269,21 +294,24 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       );
     }
   }
-  const initial = await runtime.clarifications.ensureTranscript(transcript);
-  if (state().transcriptHash === null)
+  const initial = await inspectInitOperation("preparation", () =>
+    runtime.clarifications.ensureTranscript(transcript),
+  );
+  if (state().transcriptHash === null) {
+    const inputs = await inspectInitOperation("preparation", () =>
+      runtime.readInputs({ taskPath: run.taskPath }),
+    );
     await save(
       { ...state(), transcriptHash: initial.hash },
       {
         hashes: {
-          task: (await runtime.readInputs({ taskPath: run.taskPath })).task
-            .hash,
-          context:
-            (await runtime.readInputs({ taskPath: run.taskPath })).context
-              ?.hash ?? null,
+          task: inputs.task.hash,
+          context: inputs.context?.hash ?? null,
           clarifications: initial.hash,
         },
       },
     );
+  }
   if (current.activeTurn !== null)
     current = await runtime.finishAgentTurn(current.activeTurn);
 
@@ -306,10 +334,15 @@ export async function runInit({ run, runtime, operatorStop = false }) {
 
   async function turn(request) {
     const role = request.role;
-    const before = await runtime.workspace.snapshot();
-    const inputs = await runtime.readInputs({ taskPath: run.taskPath });
-    const clarification =
-      await runtime.clarifications.inspectTranscript(transcript);
+    const before = await inspectInitOperation("preparation", () =>
+      runtime.workspace.snapshot(),
+    );
+    const inputs = await inspectInitOperation("preparation", () =>
+      runtime.readInputs({ taskPath: run.taskPath }),
+    );
+    const clarification = await inspectInitOperation("preparation", () =>
+      runtime.clarifications.inspectTranscript(transcript),
+    );
     const prompt = `${request.prompt}\n\n${JSON.stringify({
       task: inputs.task.content,
       context: inputs.context?.content ?? "",
@@ -338,7 +371,9 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         ].includes(cause.code)
       )
         throw cause;
-      await runtime.workspace.assertUnchanged(before);
+      await inspectInitOperation("post-turn", () =>
+        runtime.workspace.assertUnchanged(before),
+      );
       await pause("provider_interrupted");
       return null;
     }
@@ -407,11 +442,14 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       });
     } catch (cause) {
       if (
+        cause instanceof InitInspectionError ||
         cause.executionResourceRetained ||
         /^ERR_EXECUTION_/u.test(cause.code ?? "")
       )
         throw cause;
-      await runtime.workspace.assertUnchanged(before);
+      await inspectInitOperation("post-turn", () =>
+        runtime.workspace.assertUnchanged(before),
+      );
       current = await runtime.finishAgentTurn(active, { repository: before });
       const policy = runtime.outputExhaustion?.eligible(cause)
         ? runtime.outputExhaustion
@@ -457,7 +495,9 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       await pause("provider_interrupted");
       return null;
     }
-    await runtime.workspace.assertUnchanged(before);
+    await inspectInitOperation("post-turn", () =>
+      runtime.workspace.assertUnchanged(before),
+    );
     assertInit(
       typeof response.sessionId === "string" &&
         response.sessionId.length > 0 &&
@@ -493,11 +533,13 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     if (state().workflowState === "WAITING_FOR_USER") {
       if (state().productDecision !== null) {
         if (!state().productDecisionAppended) {
-          const appended = await runtime.clarifications.appendProductDecision({
-            ...appendOptions(),
-            number: state().productDecisions,
-            ...state().productDecision,
-          });
+          const appended = await inspectInitOperation("preparation", () =>
+            runtime.clarifications.appendProductDecision({
+              ...appendOptions(),
+              number: state().productDecisions,
+              ...state().productDecision,
+            }),
+          );
           await save(
             {
               ...state(),
@@ -540,11 +582,13 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       if (state().questionAppendPending) {
         const expectedHash = state().transcriptHash;
         const round = state().clarificationRounds;
-        const appended = await runtime.clarifications.appendQuestionRound({
-          ...appendOptions(),
-          round,
-          questions: state().questions,
-        });
+        const appended = await inspectInitOperation("preparation", () =>
+          runtime.clarifications.appendQuestionRound({
+            ...appendOptions(),
+            round,
+            questions: state().questions,
+          }),
+        );
         await save(
           acceptInitQuestionAppend(state(), {
             round,
@@ -567,7 +611,9 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     if (state().workflowState === "PROPOSAL_ACCEPTED") break;
     let inspection = await inspect();
     if (state().reinspectionRequired) {
-      current = await runtime.setup.extendReadScope(inspection.roots);
+      current = await inspectInitOperation("reinspection", () =>
+        runtime.setup.extendReadScope(inspection.roots),
+      );
       // Discover documents within the newly bound reads while retaining the
       // first inspection's exact resource and ancestor evidence.
       inspection = await inspect(inspection);
@@ -580,35 +626,36 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       await save({
         ...state(),
         inspection,
-        proactiveClarificationComplete: true,
       });
       if (!(await edit("proactive-clarification"))) return current;
       continue;
     }
-    const prepared = prepareInitTurn(
-      state(),
-      inspection,
-      state().transcriptHash,
+    const prepared = await inspectInitOperation("preparation", () =>
+      prepareInitTurn(state(), inspection, state().transcriptHash),
     );
     await save(prepared.state);
     const output = await turn(prepared.request);
     if (output === null) return current;
+    const afterInspection = await inspect(undefined, "post-turn");
+    const afterTranscript = await inspectInitOperation("post-turn", () =>
+      runtime.clarifications.inspectTranscript(transcript),
+    );
     try {
-      const next = acceptInitResult(state(), {
-        turnId: prepared.request.id,
-        inspection: await inspect(),
-        transcriptHash: (
-          await runtime.clarifications.inspectTranscript(transcript)
-        ).hash,
-        result: output,
-      });
+      const next = await inspectInitOperation("post-turn", () =>
+        acceptInitResult(state(), {
+          turnId: prepared.request.id,
+          inspection: afterInspection,
+          transcriptHash: afterTranscript.hash,
+          result: output,
+        }),
+      );
       if (next.proposal !== null) {
         runtime.setup.validateGuidance(initGuidanceContent(next));
         await (
           next.selection.placement === "external"
             ? assertExternalPolicy
             : assertIntegratedPolicy
-        )(next, runtime.setup);
+        )(next, runtime.setup, "post-turn");
       }
       await save(next, {
         pause:
@@ -633,15 +680,20 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       return pause("invalid_result");
     }
     if (state().workflowState === "CLARIFY" && state().clarificationReady) {
-      await runtime.clarifications.freezeTranscript({
-        ...transcript,
-        expectedHash: state().transcriptHash,
-      });
-      await save(
-        closeInitClarification(state(), {
-          inspection: await inspect(),
-          clarificationHash: state().transcriptHash,
+      await inspectInitOperation("preparation", () =>
+        runtime.clarifications.freezeTranscript({
+          ...transcript,
+          expectedHash: state().transcriptHash,
         }),
+      );
+      const closureInspection = await inspect(undefined, "preparation");
+      await save(
+        await inspectInitOperation("preparation", () =>
+          closeInitClarification(state(), {
+            inspection: closureInspection,
+            clarificationHash: state().transcriptHash,
+          }),
+        ),
       );
     }
   }
@@ -654,7 +706,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         ...runtime.setup,
         assertLease,
         clarifications: runtime.clarifications,
-        inspectSetup: inspect,
+        inspectSetup: () => inspect(undefined, "publication-preparation"),
         persist: (publication) => save({ ...state(), publication }),
         guidancePaths: await runtime.setup.guidancePaths(
           state().guidanceIntent,
@@ -675,23 +727,33 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         projectPath: run.projectPath,
         projectConfigurationPath: state().selection.configurationPath,
       };
-      const loaded = await runtime.setup.loadProjectConfiguration({
-        configurationPath: selected.projectConfigurationPath,
+      await inspectInitOperation("preparation", async () => {
+        const loaded = await runtime.setup.loadProjectConfiguration({
+          configurationPath: selected.projectConfigurationPath,
+        });
+        assertInitInspection(
+          loaded?.artifactPath === state().selection.artifactPath &&
+            loaded.infrastructure.rootPath === state().selection.rootPath,
+          "destination_unavailable",
+          "Prepared infrastructure is unavailable.",
+        );
       });
-      assertInit(
-        loaded?.artifactPath === state().selection.artifactPath &&
-          loaded.infrastructure.rootPath === state().selection.rootPath,
-        "Prepared infrastructure is unavailable.",
-      );
       const guide = state().proposal.resources.find(
         ({ kind }) => kind === "guidance",
       );
       if (state().guidanceIntent === null) {
-        const currentGuide = await runtime.setup.readGuidance(selected);
-        assertInit(
-          currentGuide.localPath === guide.path &&
-            currentGuide.localHash === guide.beforeHash,
-          "Guidance differs from the reviewed setup.",
+        const currentGuide = await inspectInitOperation(
+          "preparation",
+          async () => {
+            const observed = await runtime.setup.readGuidance(selected);
+            assertInitInspection(
+              observed.localPath === guide.path &&
+                observed.localHash === guide.beforeHash,
+              "workspace_changed",
+              "Guidance differs from the reviewed setup.",
+            );
+            return observed;
+          },
         );
         await inspectInitWorkspace(current, runtime.setup);
         await save({
@@ -786,11 +848,13 @@ export async function runInit({ run, runtime, operatorStop = false }) {
               ? prepared
               : {
                   inspection: prepared.inspection,
-                  snapshot: runtime.setup.workspace.snapshotProof({
-                    snapshot: prepared.snapshot,
-                    paths: [procedure.path],
-                    ignorePaths: [transcript.transcriptPath],
-                  }),
+                  snapshot: await inspectInitOperation("preparation", () =>
+                    runtime.setup.workspace.snapshotProof({
+                      snapshot: prepared.snapshot,
+                      paths: [procedure.path],
+                      ignorePaths: [transcript.transcriptPath],
+                    }),
+                  ),
                 },
           primaryApproval: null,
           reviewApproval: null,

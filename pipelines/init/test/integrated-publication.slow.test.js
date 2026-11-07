@@ -362,10 +362,11 @@ test("integrated publication creates ignored prerequisites, defers guidance and 
   const replacement = `${f.skill}.replacement`;
   await fs.writeFile(replacement, await fs.readFile(f.skill));
   await fs.rename(replacement, f.skill);
-  await assert.rejects(
-    publishIntegratedInit(f.state, f.runtime, again),
-    /resource changed/u,
-  );
+  await assert.rejects(publishIntegratedInit(f.state, f.runtime, again), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
 });
 
 test("bound original skills, negations and unrelated settings survive custom-root setup", async (t) => {
@@ -481,10 +482,11 @@ test("resumed pending publication rechecks effective ignoring before its effect"
     path === artifactPath
       ? { ignored: false, tracked: false }
       : inspectIgnored(path);
-  await assert.rejects(
-    publishIntegratedInit(f.state, f.runtime, f.saved),
-    /exclusions are not effective/u,
-  );
+  await assert.rejects(publishIntegratedInit(f.state, f.runtime, f.saved), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "unsafe_path",
+  });
   await assert.rejects(fs.stat(artifactPath), { code: "ENOENT" });
   assert.deepEqual(f.saved.pending, pending);
 });
@@ -537,10 +539,11 @@ test("artifact-directory substitution before its intent is not adopted", async (
       return workspace.inspectInfrastructure(request);
     },
   };
-  await assert.rejects(
-    publishIntegratedInit(f.state, f.runtime),
-    /Reviewed resource changed before publication/u,
-  );
+  await assert.rejects(publishIntegratedInit(f.state, f.runtime), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
   assert.equal(substituted, true);
   assert.equal(f.saved.pending, null);
   assert.ok(!f.saved.receipts.some((receipt) => receipt.path === path));
@@ -580,10 +583,11 @@ test("input drift and conflicting destination settings prevent any publication",
     join(f.projectPath, "AGENTS.md"),
     "Changed instructions.\n",
   );
-  await assert.rejects(
-    publishIntegratedInit(f.state, f.runtime),
-    /bindings changed/u,
-  );
+  await assert.rejects(publishIntegratedInit(f.state, f.runtime), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
   assert.equal(f.saved, null);
   const g = await fixture(t, {
     existing: true,
@@ -621,9 +625,9 @@ test("changed or missing frozen clarifications prevent publication without targe
     else await fs.writeFile(path, "Changed after approval.\n");
 
     await assert.rejects(publishIntegratedInit(f.state, f.runtime), {
-      code: missing
-        ? "ERR_CLARIFICATION_NOT_FOUND"
-        : "ERR_CLARIFICATIONS_CHANGED",
+      code: "ERR_INIT_INSPECTION",
+      phase: "publication-preparation",
+      constraint: "workspace_changed",
     });
     assert.equal(f.saved, null);
     workspace.assertUnchanged({
@@ -647,7 +651,9 @@ test("clarification drift during baseline preparation cannot be adopted", async 
     },
   };
   await assert.rejects(publishIntegratedInit(f.state, f.runtime), {
-    code: "ERR_CLARIFICATIONS_CHANGED",
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
   });
   assert.equal(f.saved, null);
   assert.deepEqual((await fs.readdir(f.projectPath)).sort(), [

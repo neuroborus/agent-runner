@@ -195,7 +195,13 @@ confirmation accepts the complete snapshot. Status reports created/reused/change
 resources and effective paths only after completion. Partial prerequisites are
 not a setup-completion receipt. Explicit migration retains the old setup and
 prepares the newly selected placement non-destructively. See the [init specification](../../pipelines/init/docs/SPEC.md).
-Setup pauses expose concrete blockers. Operator stops preserve reserved turns
+Setup pauses expose concrete blockers. Expected inspection rejection persists a
+bounded phase/constraint before ownership release, even before a provider attempt.
+CLI and MCP status/wait give the same supported next step: restore transient
+inspection access/resources without changing inputs and resume, or preserve work,
+correct prerequisites and start a fresh run. Admission/dispatch receipts alone
+never establish successful inspection or setup. See
+[inspection recovery](../../pipelines/init/docs/SPEC.md#inspection-failures). Operator stops preserve reserved turns
 and clarification windows; cancellation remains terminal. An exceptional
 material decision after clarification uses durable authorized input and renews
 the proposal gates while retaining the exact selected placement and paths.

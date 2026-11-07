@@ -359,11 +359,17 @@ export async function reconcileOperatorStop({
       ? reconciliationRuntime(runtime, current)
       : null;
   let workspaceFailure = null;
+  let inspectionFailure = null;
   if (simulated !== null && runtime.workspace?.kind === "directory") {
     try {
       await runtime.workspace.snapshot();
     } catch (cause) {
-      if (!cause?.code?.startsWith("ERR_WORKSPACE_")) throw cause;
+      inspectionFailure = pipeline.inspectionFailure?.(current, cause) ?? null;
+      if (
+        inspectionFailure === null &&
+        !cause?.code?.startsWith("ERR_WORKSPACE_")
+      )
+        throw cause;
       workspaceFailure = cause;
     }
   }
@@ -381,15 +387,20 @@ export async function reconcileOperatorStop({
             settings: current.pipelineState.settings,
             runtime: simulated.runtime,
           })
-        : {
-            ...current,
-            pipelineState: {
-              ...current.pipelineState,
-              workflowState: "WAITING_FOR_USER",
-            },
-            pause: { reason: "workspace_changed", code: "ERR_WORKSPACE_DRIFT" },
-            activeTurn: null,
-          };
+        : inspectionFailure !== null
+          ? { ...current, ...inspectionFailure }
+          : {
+              ...current,
+              pipelineState: {
+                ...current.pipelineState,
+                workflowState: "WAITING_FOR_USER",
+              },
+              pause: {
+                reason: "workspace_changed",
+                code: "ERR_WORKSPACE_DRIFT",
+              },
+              activeTurn: null,
+            };
   reconciled ??= simulated.current();
   let outcomeActivity;
   const completed = await runStore.settleCheckpoint(

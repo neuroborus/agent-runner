@@ -164,6 +164,23 @@ test("loads only ignored confined project configuration files", async (t) => {
   );
 });
 
+test("only explicit absent configurations carry trusted missing-file metadata", async () => {
+  const projectPath = join(tmpdir(), "agent-runner-absent-config");
+  const options = {
+    projectPath,
+    inspectPath: async ({ path }) => ({ path, exists: false }),
+    runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+  };
+  assert.equal(await loadProjectConfiguration(options), null);
+  await assert.rejects(
+    loadProjectConfiguration({
+      ...options,
+      configurationPath: "selected.json",
+    }),
+    { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "missing_file" },
+  );
+});
+
 test("guards project configuration content, identity, links, and ancestors", async (t) => {
   async function fixture(name) {
     const projectPath = await mkdtemp(

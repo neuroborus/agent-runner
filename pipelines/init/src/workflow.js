@@ -30,6 +30,10 @@ import {
 import { INIT_INSTRUCTIONS, PHASE_INSTRUCTIONS } from "./prompts.js";
 import { initGuidanceContent } from "./guidance.js";
 import {
+  assertInitInspection,
+  assertInspectionFailure,
+} from "./inspection-failure.js";
+import {
   CLARIFICATION_SCHEMA,
   PROPOSAL_SCHEMA,
   REVIEW_SCHEMA,
@@ -497,10 +501,11 @@ const turnBinding = (state) =>
 export function prepareInitTurn(state, inspection, transcriptHash) {
   assertInitState(state);
   assertInspection(inspection);
-  assertInit(
+  assertInitInspection(
     isHash(transcriptHash) &&
       (state.transcriptHash === null ||
         state.transcriptHash === transcriptHash),
+    "workspace_changed",
     "Init clarifications changed outside an authorized editor window.",
   );
   assertInit(
@@ -510,10 +515,10 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
   if (state.reinspectionRequired)
     assertInspectionExtension(state.inspection, inspection);
   else
-    assertInit(
+    assertInitInspection(
       state.inspection === null ||
         isDeepStrictEqual(state.inspection, inspection),
-      "Inspected init inputs or destinations changed.",
+      "workspace_changed",
     );
   selectInitPlacement(inspection, state.clarificationSelection);
   const next = structuredClone({
@@ -602,10 +607,10 @@ export function closeInitClarification(
     "Init clarification cannot close at this checkpoint.",
   );
   assertInspection(inspection);
-  assertInit(
+  assertInitInspection(
     state.inspection === null ||
       isDeepStrictEqual(state.inspection, inspection),
-    "Init setup changed during clarification.",
+    "workspace_changed",
   );
   const selected = selectInitPlacement(
     inspection,
@@ -673,6 +678,9 @@ export function authorizeInitEdit(state, authorization) {
     ...state,
     workflowState: "WAITING_FOR_USER",
     pendingEdit: structuredClone(authorization),
+    proactiveClarificationComplete:
+      state.proactiveClarificationComplete ||
+      authorization.action === "proactive-clarification",
   };
   assertInitState(next);
   return next;
@@ -734,11 +742,13 @@ export function acceptInitResult(
   { turnId, inspection, transcriptHash, result },
 ) {
   assertInitState(state);
-  assertInit(
-    state.pendingTurn !== null &&
-      state.pendingTurn.id === turnId &&
-      transcriptHash === state.transcriptHash &&
+  assertInitInspection(
+    transcriptHash === state.transcriptHash &&
       isDeepStrictEqual(state.inspection, inspection),
+    "workspace_changed",
+  );
+  assertInit(
+    state.pendingTurn !== null && state.pendingTurn.id === turnId,
     "Init turn is stale or changed read-only inputs.",
   );
   assertResultSize(result);
@@ -892,6 +902,30 @@ export function assertInitRun(run) {
       run.pipelineState.workflowState !== "CANCELED",
       "Init cancellation requires a reconciled operator request.",
     );
+  }
+  if (run.pause?.reason === "init_inspection_failed") {
+    assertInspectionFailure(run.pause, run.pipelineState);
+    assertInit(
+      run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+        run.pipelineState.pendingTurn === null &&
+        run.activeTurn === null &&
+        run.preparation == null &&
+        run.executionProcess == null &&
+        run.executionResource == null &&
+        run.pipelineState.publication?.pending == null &&
+        (run.pipelineState.guidanceIntent === null ||
+          run.pipelineState.guidanceReceipt !== null),
+      "Init inspection rejection requires a settled pause.",
+    );
+    if (
+      run.pipelineState.pendingEdit === null &&
+      run.pipelineState.productDecision === null &&
+      run.pipelineState.pauseReason !== "clarification_required"
+    )
+      assertInitState({
+        ...run.pipelineState,
+        workflowState: run.pause.resumeState,
+      });
   }
   // Root safety blockers may suspend a still-reserved read-only turn. Validate
   // its original binding without granting a continuation through that blocker.

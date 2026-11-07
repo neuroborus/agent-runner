@@ -203,7 +203,13 @@ remainder, file identities, links and selected inputs; unsupported evidence
 capacity cannot produce partial authorization. Legacy records retain their
 original bindings and consumed allowances. The
 [init specification](../../pipelines/init/docs/SPEC.md#inspection-and-placement)
-owns the proof versions and evidence limits.
+owns the proof versions and evidence limits. Expected inspection rejection
+settles to a durable, redacted diagnosis before execution ownership is released;
+complete accepted inspection remains mandatory for every turn and effect.
+Diagnoses grant no input edits, allowance renewal or bypass of pending-effect
+recovery. Unknown corruption, substituted controls and unavailable ownership
+remain fail-closed; only narrow transient inspection failures offer resume after
+restoring access/resources and reproving unchanged frozen inputs.
 
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same

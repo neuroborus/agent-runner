@@ -115,6 +115,7 @@ function readFailure(cause) {
   ) {
     if (origin.constraint === "file_size") return "evidence_capacity";
     if (origin.constraint === "isolated_regular_file") return "unsafe_path";
+    if (origin.constraint === "missing_file") return "workspace_changed";
   } else if (wrappedPath && origin instanceof Error) {
     native = origin;
   } else return null;

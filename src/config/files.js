@@ -363,7 +363,7 @@ export async function loadProjectConfiguration({
     }
     throw new ConfigurationError(
       `Project configuration does not exist at ${inspection.path}.`,
-      { code: "ERR_PROJECT_CONFIGURATION_READ" },
+      { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "missing_file" },
     );
   }
   if (workspaceKind === "git" && (inspection.tracked || !inspection.ignored)) {

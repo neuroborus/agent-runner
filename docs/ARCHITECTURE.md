@@ -644,12 +644,50 @@ and its resumable checkpoint without reserving filesystem effects.
 Init validates reconciled operator stops against their preserved checkpoints,
 including pending turns and editor windows. Shared clarification appends can
 journal their exact result hash before replacement and recognize those bytes
-on recovery. Exceptional post-closure decisions use the same durable answer
+on recovery. Expected append-read failures use the scoped inspection diagnosis;
+write failures retain the existing effect recovery. Proactive completion is
+persisted atomically with its pending editor authorization, so failed preparation
+retries that window before provider work instead of consuming it.
+Exceptional post-closure decisions use the same durable answer
 authorization, freeze a new clarification version and restart proposal gates
 without redirecting selected paths or renewing correction budgets. Prepared
 baselines continue protecting infrastructure and all other task content while
 the clarification capability owns its exact transcript. Public pauses retain
 bounded concrete setup findings and reason-specific explanations.
+Expected init inspection/preparation rejection uses the descriptor-owned
+`inspectionFailure` policy at lifecycle dispatch and narrow root recovery checks.
+Initial task/context hashing uses one scoped capture, and prepared configuration
+and guidance verification use the same policy after prerequisite receipts.
+Canonical validation immediately after workspace acquisition diagnoses recognized
+failure before dispatch, under verified execution and workspace ownership.
+Acquisition and unknown ownership errors still propagate. Input submission diagnoses
+complete source verification failures and rejects when inspection prevents writing
+answers, preserving receipt meaning. The clarification service's
+[pre-write read hook](#clarification-lifecycle) scopes answer inspection without
+classifying writes or post-write readback. Existing
+non-resumable pauses, exhausted checkpoints, operator-pause restoration and
+submitted-answer receipts cannot become inspection retries. Publication resource
+reads and repair-baseline capture use scoped preparation without wrapping their effects.
+Its `inspectOperation` hook also tags the runtime adapter's preparation and
+verification snapshots without wrapping provider invocation. Editor authorization
+preparation and authorized-close reads use the same policy. Configuration and
+clarification file guards retain their public error codes, adding finite `file_size` or
+`isolated_regular_file` constraint metadata for bounded rejection. Unrecognized
+read, decoding and identity-corruption failures gain no new classification or
+retry authority.
+Runner journals its `init_inspection_failed` pause through atomic checkpoint
+settlement under the execution and canonical workspace leases, acquiring the
+latter for pre-lease recovery when necessary. The same transition retires the
+read-only reservation and active observations and settles a concurrent operator
+stop around the original diagnosis. Tagged inspection failures bypass ordinary
+turn retirement, which cannot advance through a pending immediate stop.
+The pause retains only a finite phase/constraint and fixed public explanation;
+unknown corruption, retained ownership and pending/ambiguous effects propagate
+without generic retry authority. Only recognized transient inspection failures
+permit unchanged-input resume; other diagnoses require preservation and a fresh
+run. CLI and MCP status/wait consume the same pipeline projection. The extensible
+pause envelope needs no state/proof version change or historical evidence rewrite.
+See [inspection failures](../pipelines/init/docs/SPEC.md#inspection-failures).
 Init supplies its verified per-turn workspace snapshot through runtime turn
 settlement for inactivity recovery, including after Runner publication. Pre-turn
 reconstruction exhaustion persists a resumable provider interruption at the
@@ -1318,7 +1356,8 @@ rediscovery, inferred bindings or new execution authority.
 The confined configuration reader retains `ERR_PROJECT_CONFIGURATION_READ`
 and adds optional finite `constraint` metadata: `file_size` for the existing
 1 MiB limit, or `isolated_regular_file` for its regular-file and single-link
-guard. Other read, decoding, confinement and identity failures retain their
+guard. An explicitly selected integrated file proven absent has `missing_file`;
+implicit absent discovery still returns `null`. Other read, decoding, confinement and identity failures retain their
 existing handling without inferred constraints. Metadata grants no retry,
 inspection acceptance or effect authority.
 
@@ -1801,11 +1840,14 @@ categories through guidance error normalization with optional finite
 unchanged. Only recognized workspace/configuration errors and direct native
 read causes under the selection/file-helper control/path wrapper are classified;
 returned pinned-directory verification retains private read provenance without
-changing normalized codes. Descriptor cleanup and storage/recovery cause chains
+changing normalized codes. Init also consumes that finite `readFailure` metadata
+when verification normalizes to `ERR_GUIDANCE_STORAGE`; the storage code alone
+grants no classification. Descriptor cleanup and storage/recovery cause chains
 are not classified or searched. Unknown native codes and corruption remain
 unclassified. Edit/update and publication errors gain no read
-classification. This metadata changes neither init lifecycle nor pause/resume
-policy and grants no continuation or effect authority.
+classification. Init consumes this metadata only at scoped inspection boundaries,
+retaining pending-effect and ownership guards before any resume. Metadata alone
+grants no continuation or effect authority.
 
 The public `update` method accepts the same selectors plus complete
 `localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the
@@ -5457,6 +5499,12 @@ size and regular-file/single-link guards add optional `constraint` metadata of
 `file_size` or `isolated_regular_file`, respectively. Other path, read, decoding
 and write failures retain their existing handling; these tags grant no edit,
 retry or continuation authority.
+
+`writeEditAnswers` accepts an optional Runner-owned `inspectRead` callback. It
+wraps only the initial transcript inspection and the confined replacement
+recheck, before any write. Answer validation, replacement effects and post-write
+readback remain outside that callback. Callers without it retain the existing
+error and exact-hash replay behavior.
 
 Before the first clarification turn, the runner creates the Markdown artifact
 when missing and otherwise preserves its existing transcript. Keep the format

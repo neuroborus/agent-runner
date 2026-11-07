@@ -7,6 +7,39 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Init inspection rejection becomes an actionable durable stop.** Expected
+  discovery, inspection, preparation and recovery failures settle under the
+  execution lease before release, including failures before a provider attempt.
+  Atomic checkpoint settlement retires read-only reservations and observations
+  together with concurrent stops, retaining one-time inspection diagnoses.
+  Pipeline-owned finite phases/constraints keep native messages and rejected
+  data out of status. CLI/MCP status and wait agree; receipts remain admission
+  acknowledgements. Only transient inspection failures permit unchanged-input
+  resume. Other diagnoses require preservation, prerequisite correction and a
+  fresh run. Pending effects, exclusive ownership, frozen inputs and consumed
+  accounting retain their existing protections and versions. Scoped preparation
+  includes editor authorization and runtime adapter snapshots. Local bounded-file
+  readers retain their error codes and expose finite constraints, so expected
+  size/isolation rejection is diagnosed without classifying unknown corruption.
+  Clarification append reads share that diagnosis while exact append intents
+  and write-failure recovery remain intact. Proactive completion shares the
+  pending-authorization transition; failed preparation cannot consume its window.
+  Initial input hashes use one scoped capture; prepared configuration/guidance
+  reads and pre-dispatch canonical validation retain the same diagnosis. The
+  admission stop is recorded under both verified owners, and input submission
+  cannot acknowledge answers that validation prevented from being written.
+  Guidance read normalization retains finite trusted inspection categories under
+  its existing error codes, including direct native file/directory read failures,
+  so post-prerequisite inspection failures settle durably without changing
+  accepted receipts or granting effect recovery. This includes returned directory
+  verification under the storage code with trusted read metadata. Explicit
+  integrated configuration absence receives a finite missing-file constraint;
+  generic storage/configuration errors retain their fail-closed handling.
+  Answer submission scopes pre-write transcript reads separately from writes and
+  readback, retaining authorization without acknowledging rejected input. Existing
+  blockers, exhausted checkpoints, operator restoration and submitted receipts
+  retain their continuation restrictions through inspection recovery.
+
 - **Lifecycle fixtures propagate early operation outcomes.** MCP control-plane
   event waits and the Runner protected-configuration stop fixture race their
   owning operations and settle held work during teardown. Early completion or

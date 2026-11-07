@@ -340,26 +340,32 @@ export async function createTranscriptFile(location) {
   }
 }
 
-export async function replaceTranscript(location, content) {
+export async function replaceTranscript(
+  location,
+  content,
+  { inspectRead = (operation) => operation() } = {},
+) {
   if (Buffer.byteLength(content) > MAX_TRANSCRIPT_BYTES) {
     throw new ClarificationError(
       `Clarification transcript must not exceed ${MAX_TRANSCRIPT_BYTES} bytes.`,
     );
   }
-  const currentLocation = await resolveTranscriptPath(location);
-  if (
-    currentLocation.artifactRoot !== location.artifactRoot ||
-    currentLocation.transcriptPath !== location.transcriptPath
-  ) {
-    throw pathError("Clarification transcript path changed unexpectedly.");
-  }
-  const currentSnapshot = await readTranscript(currentLocation);
-  if (currentSnapshot.hash !== location.hash) {
-    throw new ClarificationError(
-      "Clarification transcript changed outside an authorized edit window.",
-      { code: "ERR_CLARIFICATIONS_CHANGED" },
-    );
-  }
+  await inspectRead(async () => {
+    const currentLocation = await resolveTranscriptPath(location);
+    if (
+      currentLocation.artifactRoot !== location.artifactRoot ||
+      currentLocation.transcriptPath !== location.transcriptPath
+    ) {
+      throw pathError("Clarification transcript path changed unexpectedly.");
+    }
+    const currentSnapshot = await readTranscript(currentLocation);
+    if (currentSnapshot.hash !== location.hash) {
+      throw new ClarificationError(
+        "Clarification transcript changed outside an authorized edit window.",
+        { code: "ERR_CLARIFICATIONS_CHANGED" },
+      );
+    }
+  });
 
   const temporaryPath = join(
     dirname(location.transcriptPath),

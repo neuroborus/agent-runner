@@ -1544,52 +1544,81 @@ test("checkpoint settlement reads the latest stop and publishes progress atomica
           }
         },
       });
+      await f.store.startAgentTurn(
+        f.lease,
+        { role: "worker", phase: "implement" },
+        {
+          activity: {
+            actor: "worker",
+            phase: "implement",
+            kind: "turn-started",
+            message: "Worker started.",
+          },
+        },
+      );
+      const observed = await f.store.startObservationAttempt(f.lease, {
+        role: "worker",
+        checkpoint: "implement",
+      });
+      const input = { ...f.input, expectedRevision: observed.revision };
       let receipt;
       if (kind !== null)
-        receipt = await f.store.requestOperatorStop({ ...f.input, kind });
+        receipt = await f.store.requestOperatorStop({ ...input, kind });
       const before = await f.store.loadRun(f.input.runId);
       interrupt = true;
       await assert.rejects(
-        f.store.settleCheckpoint(f.lease, (latest) => {
-          assert.equal(latest.revision, before.revision);
-          assert.equal(latest.stopRequest?.kind ?? null, kind);
-          const canceled = kind === "cancel_requested";
-          return {
-            patch: {
-              pipelineState: {
-                ...latest.pipelineState,
-                workflowState:
+        f.store.settleCheckpoint(
+          f.lease,
+          (latest) => {
+            assert.equal(latest.revision, before.revision);
+            assert.equal(latest.stopRequest?.kind ?? null, kind);
+            const canceled = kind === "cancel_requested";
+            return {
+              patch: {
+                pipelineState: {
+                  ...latest.pipelineState,
+                  workflowState:
+                    kind === null
+                      ? "DONE"
+                      : canceled
+                        ? "CANCELED"
+                        : "WAITING_FOR_USER",
+                  completedCommits: ["verified-sha"],
+                },
+                counters: { rounds: 7 },
+                pause:
                   kind === null
-                    ? "DONE"
-                    : canceled
-                      ? "CANCELED"
-                      : "WAITING_FOR_USER",
-                completedCommits: ["verified-sha"],
-              },
-              counters: { rounds: 7 },
-              pause:
-                kind === null
-                  ? null
-                  : {
-                      reason: canceled
-                        ? "operator_canceled"
-                        : "operator_paused",
-                      resumeAction: null,
-                      operatorResume: {
-                        workflowState: "DONE",
-                        pause: null,
-                        activeTurn: null,
+                    ? null
+                    : {
+                        reason: canceled
+                          ? "operator_canceled"
+                          : "operator_paused",
+                        resumeAction: null,
+                        operatorResume: {
+                          workflowState: "DONE",
+                          pause: null,
+                          activeTurn: null,
+                        },
                       },
-                    },
+              },
+              activity: {
+                actor: "runner",
+                phase: "commit",
+                kind: "settled",
+                message: "Verified progress settled.",
+              },
+            };
+          },
+          {
+            validate(next) {
+              assert.equal(next.activeTurn, null);
+              assert.equal(
+                next.observations.attempts.at(-1).status,
+                "interrupted",
+              );
             },
-            activity: {
-              actor: "runner",
-              phase: "commit",
-              kind: "settled",
-              message: "Verified progress settled.",
-            },
-          };
-        }),
+          },
+        ),
         /settlement interrupted/u,
       );
       const recovered = await f.store.recoverRun(f.lease);
@@ -1599,13 +1628,17 @@ test("checkpoint settlement reads the latest stop and publishes progress atomica
       ]);
       assert.equal(recovered.counters.rounds, 7);
       assert.equal(recovered.activeTurn, null);
+      assert.equal(
+        recovered.observations.attempts.at(-1).status,
+        "interrupted",
+      );
       if (kind !== null) {
         assert.equal(
           recovered.stopRequest.reconciledRevision,
           recovered.revision,
         );
         assert.deepEqual(
-          await f.store.requestOperatorStop({ ...f.input, kind }),
+          await f.store.requestOperatorStop({ ...input, kind }),
           receipt,
         );
       }

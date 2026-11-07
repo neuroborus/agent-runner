@@ -3,6 +3,10 @@ import { isDeepStrictEqual as same } from "node:util";
 
 import { assertInitState } from "./workflow.js";
 import {
+  assertInitInspection,
+  inspectInitOperation,
+} from "./inspection-failure.js";
+import {
   assertInit,
   digest,
   exact,
@@ -114,6 +118,11 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       ),
     ]),
   ].sort();
+  const inspectPreparation = (operation) =>
+    inspectInitOperation(
+      runtime.verifyOnly ? "recovery" : "publication-preparation",
+      operation,
+    );
   function validate(record) {
     exact(record, [
       "schemaVersion",
@@ -216,102 +225,123 @@ async function publishPrerequisites(state, runtime, publication, placement) {
     });
   }
   async function guard() {
-    await runtime.assertLease();
-    await verifyClarifications();
-    if (placement === "external") await assertExternalControls(state, runtime);
-    const after = await workspace.snapshot({ inspection: current.inspection });
-    const allowed = new Set(current.receipts.map(({ path }) => path));
-    if (current.pending !== null) {
-      allowed.add(current.pending.path);
-      if (current.pending.intent.temporaryPath)
-        allowed.add(current.pending.intent.temporaryPath);
-    }
-    if (current.prepared)
-      for (const path of runtime.guidancePaths ?? []) allowed.add(path);
-    if (current.schemaVersion === 2)
-      workspace.assertSnapshotProof({
-        before: current.baseline,
-        after,
-        allowedPaths: [...allowed],
+    return inspectPreparation(async () => {
+      await runtime.assertLease();
+      await verifyClarifications();
+      if (placement === "external")
+        await assertExternalControls(
+          state,
+          runtime,
+          runtime.verifyOnly ? "recovery" : "publication-preparation",
+        );
+      const after = await workspace.snapshot({
+        inspection: current.inspection,
       });
-    else {
-      const unchanged = (snapshot) =>
-        snapshot.entries.filter(({ path }) => !allowed.has(path));
-      assertInit(
-        same(unchanged(current.baseline), unchanged(after)) &&
-          same(current.baseline.linkResolutions, after.linkResolutions),
-        "Setup inputs or workspace content changed outside reviewed publication.",
-      );
-    }
-    for (const receipt of current.receipts) {
-      const observed = await workspace.inspectInfrastructure({
-        projectPath,
-        path: receipt.path,
-      });
-      assertInit(
-        same(observed, receipt.observed),
-        "A published infrastructure resource changed.",
-      );
-    }
+      const allowed = new Set(current.receipts.map(({ path }) => path));
+      if (current.pending !== null) {
+        allowed.add(current.pending.path);
+        if (current.pending.intent.temporaryPath)
+          allowed.add(current.pending.intent.temporaryPath);
+      }
+      if (current.prepared)
+        for (const path of runtime.guidancePaths ?? []) allowed.add(path);
+      if (current.schemaVersion === 2)
+        workspace.assertSnapshotProof({
+          before: current.baseline,
+          after,
+          allowedPaths: [...allowed],
+        });
+      else {
+        const unchanged = (snapshot) =>
+          snapshot.entries.filter(({ path }) => !allowed.has(path));
+        assertInitInspection(
+          same(unchanged(current.baseline), unchanged(after)) &&
+            same(current.baseline.linkResolutions, after.linkResolutions),
+          "workspace_changed",
+          "Setup inputs or workspace content changed outside reviewed publication.",
+        );
+      }
+      for (const receipt of current.receipts) {
+        const observed = await workspace.inspectInfrastructure({
+          projectPath,
+          path: receipt.path,
+        });
+        assertInitInspection(
+          same(observed, receipt.observed),
+          "workspace_changed",
+          "A published infrastructure resource changed.",
+        );
+      }
+    });
   }
   if (current === null) {
-    await runtime.assertLease();
-    await verifyClarifications();
-    assertInit(
-      same(await runtime.inspectSetup(), state.inspection),
-      "Reviewed setup bindings changed before publication.",
-    );
-    await (
-      placement === "integrated" ? assertIntegratedPolicy : assertExternalPolicy
-    )(state, runtime);
-    // These exact files may be atomically replaced by reviewed Runner effects.
-    // Tree snapshots, intents and receipts still bind their bytes and identities;
-    // separate immutable input bindings would reject the authorized replacement.
-    const replaceableDocuments = new Set([
-      guide.path,
-      ...resources
-        .filter((resource) => isFinalizationRepair(state, resource))
-        .map(({ path }) => path),
-    ]);
-    const inspection = await workspace.inspect({
-      workspacePath: targetPath,
-      stateRoot,
-      inputPaths: [
-        state.inspection.taskPath,
-        ...Object.values(state.inspection.documents)
-          .flat()
-          .map(({ path }) => path)
-          .filter((path) => !replaceableDocuments.has(path)),
-      ],
-      configurationPaths: state.inspection.configurationPaths,
-      infrastructurePaths: state.inspection.roots.filter(
-        (path) => path !== targetPath,
-      ),
+    await inspectInitOperation("publication-preparation", async () => {
+      await runtime.assertLease();
+      await verifyClarifications();
+      assertInitInspection(
+        same(await runtime.inspectSetup(), state.inspection),
+        "workspace_changed",
+        "Reviewed setup bindings changed before publication.",
+      );
+      await (
+        placement === "integrated"
+          ? assertIntegratedPolicy
+          : assertExternalPolicy
+      )(state, runtime);
+      // These exact files may be atomically replaced by reviewed Runner effects.
+      // Tree snapshots, intents and receipts still bind their bytes and identities;
+      // separate immutable input bindings would reject the authorized replacement.
+      const replaceableDocuments = new Set([
+        guide.path,
+        ...resources
+          .filter((resource) => isFinalizationRepair(state, resource))
+          .map(({ path }) => path),
+      ]);
+      const inspection = await workspace.inspect({
+        workspacePath: targetPath,
+        stateRoot,
+        inputPaths: [
+          state.inspection.taskPath,
+          ...Object.values(state.inspection.documents)
+            .flat()
+            .map(({ path }) => path)
+            .filter((path) => !replaceableDocuments.has(path)),
+        ],
+        configurationPaths: state.inspection.configurationPaths,
+        infrastructurePaths: state.inspection.roots.filter(
+          (path) => path !== targetPath,
+        ),
+      });
+      assertInitInspection(
+        inspection.bindings.length <= 10_000 &&
+          inspection.controlPaths.length <= 10_000,
+        "evidence_capacity",
+        "Init publication scope evidence exceeds its supported capacity.",
+      );
+      const baseline = await workspace.snapshot({ inspection });
+      assertInitInspection(
+        same(await runtime.inspectSetup(), state.inspection),
+        "workspace_changed",
+        "Reviewed setup changed during publication preparation.",
+      );
+      await verifyClarifications();
+      current = {
+        schemaVersion: state.inspection.schemaVersion,
+        binding,
+        inspection,
+        baseline:
+          state.inspection.schemaVersion === 1
+            ? baseline
+            : workspace.snapshotProof({
+                snapshot: baseline,
+                paths: proofPaths,
+              }),
+        pending: null,
+        receipts: [],
+        prepared: false,
+      };
+      await save({});
     });
-    assertInit(
-      inspection.bindings.length <= 10_000 &&
-        inspection.controlPaths.length <= 10_000,
-      "Init publication scope evidence exceeds its supported capacity.",
-    );
-    const baseline = await workspace.snapshot({ inspection });
-    assertInit(
-      same(await runtime.inspectSetup(), state.inspection),
-      "Reviewed setup changed during publication preparation.",
-    );
-    await verifyClarifications();
-    current = {
-      schemaVersion: state.inspection.schemaVersion,
-      binding,
-      inspection,
-      baseline:
-        state.inspection.schemaVersion === 1
-          ? baseline
-          : workspace.snapshotProof({ snapshot: baseline, paths: proofPaths }),
-      pending: null,
-      receipts: [],
-      prepared: false,
-    };
-    await save({});
   } else {
     validate(current);
   }
@@ -324,7 +354,9 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       await verifyIgnoring();
     return {
       inspection: current.inspection,
-      snapshot: await workspace.snapshot({ inspection: current.inspection }),
+      snapshot: await inspectPreparation(() =>
+        workspace.snapshot({ inspection: current.inspection }),
+      ),
     };
   }
   async function settle() {
@@ -403,22 +435,30 @@ async function publishPrerequisites(state, runtime, publication, placement) {
         "Publication directory escaped its target.",
       );
       if (
-        (await workspace.inspectInfrastructure({ projectPath, path })).binding
-          .exists
+        (
+          await inspectPreparation(() =>
+            workspace.inspectInfrastructure({ projectPath, path }),
+          )
+        ).binding.exists
       )
         break;
       directories.unshift(path);
     }
     for (const path of directories) {
       await guard();
-      const intent = await workspace.inspectInfrastructureDirectory({
-        projectPath,
-        stateRoot,
-        path,
-      });
-      assertInit(
-        !intent.before.exists,
-        "An unowned infrastructure directory appeared.",
+      const intent = await inspectPreparation(() =>
+        workspace.inspectInfrastructureDirectory({
+          projectPath,
+          stateRoot,
+          path,
+        }),
+      );
+      await inspectPreparation(() =>
+        assertInitInspection(
+          !intent.before.exists,
+          "workspace_changed",
+          "An unowned infrastructure directory appeared.",
+        ),
       );
       await save({
         pending: {
@@ -433,19 +473,21 @@ async function publishPrerequisites(state, runtime, publication, placement) {
       await settle();
     }
     if (current.receipts.some(({ path }) => path === resource.path)) continue;
-    const before = await workspace.inspectInfrastructure({
-      projectPath,
-      path: resource.path,
-    });
+    const before = await inspectPreparation(() =>
+      workspace.inspectInfrastructure({ projectPath, path: resource.path }),
+    );
     const original = current.baseline.entries.find(
       ({ path }) => path === resource.path,
     );
-    assertInit(
-      (resource.kind === "artifacts"
-        ? before.binding.kind === "directory"
-        : (before.file?.contentHash ?? null) === resource.beforeHash) &&
-        same(before.binding.identity, original?.identity ?? null),
-      "Reviewed resource changed before publication.",
+    await inspectPreparation(() =>
+      assertInitInspection(
+        (resource.kind === "artifacts"
+          ? before.binding.kind === "directory"
+          : (before.file?.contentHash ?? null) === resource.beforeHash) &&
+          same(before.binding.identity, original?.identity ?? null),
+        "workspace_changed",
+        "Reviewed resource changed before publication.",
+      ),
     );
     const intent = {
       path: resource.path,
@@ -468,13 +510,16 @@ async function publishPrerequisites(state, runtime, publication, placement) {
   }
   async function verifyIgnoring() {
     if (placement === "external") return;
-    for (const path of integratedIgnorePaths(state)) {
-      const evidence = await runtime.inspectIgnored(path);
-      assertInit(
-        evidence.ignored && !evidence.tracked,
-        "Integrated setup exclusions are not effective.",
-      );
-    }
+    await inspectPreparation(async () => {
+      for (const path of integratedIgnorePaths(state)) {
+        const evidence = await runtime.inspectIgnored(path);
+        assertInitInspection(
+          evidence.ignored && !evidence.tracked,
+          "unsafe_path",
+          "Integrated setup exclusions are not effective.",
+        );
+      }
+    });
   }
   await guard();
   await verifyIgnoring();

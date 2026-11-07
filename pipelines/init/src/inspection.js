@@ -1,6 +1,8 @@
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { assertInitInspection } from "./inspection-failure.js";
+
 import {
   assertInit,
   assertInspection,
@@ -66,10 +68,10 @@ export async function inspectInitSetup(
       ]),
     );
   }
-  assertInit(
+  assertInitInspection(
     GROUPS.every((group) => new Set(documents[group]).size <= 256) &&
       new Set(candidatePaths).size <= 32,
-    "Init setup document evidence exceeds its supported capacity.",
+    "evidence_capacity",
   );
   assertInit(
     [
@@ -102,9 +104,9 @@ export async function inspectInitSetup(
       configurationPath,
       inspectPath: inspectConfigurationPath,
     });
-    assertInit(
+    assertInitInspection(
       loaded !== null && loaded.protection.projectPath === projectPath,
-      "Init configuration belongs to another target.",
+      "destination_unavailable",
     );
     candidates.push({
       configurationPath: loaded.path,
@@ -156,18 +158,19 @@ export async function inspectInitSetup(
     configurationPaths,
     infrastructurePaths: roots.filter((root) => root !== projectPath),
   });
-  assertInit(
+  assertInitInspection(
     inspection.bindings.length <= 10_000 &&
       inspection.controlPaths.length <= 10_000,
-    "Init setup scope evidence exceeds its supported capacity.",
+    "evidence_capacity",
   );
   if (missingExternalRoot !== null) {
     const binding = inspection.bindings.find(
       (binding) => binding.path === missingExternalRoot.path,
     );
-    assertInit(
+    assertInitInspection(
       binding?.exists === false &&
         isDeepStrictEqual(binding.ancestors, missingExternalRoot.ancestors),
+      "workspace_changed",
       "Init destination or its ancestors changed during inspection.",
     );
   }
@@ -185,17 +188,18 @@ export async function inspectInitSetup(
   }
   const after = await workspace.snapshot({ inspection });
   workspace.assertUnchanged({ before, after });
-  assertInit(
+  assertInitInspection(
     isDeepStrictEqual(before.linkResolutions, after.linkResolutions),
-    "Init link resolution changed during inspection.",
+    "workspace_changed",
   );
   // A snapshot of an enclosing task tree omits absent children.
   if (missingExternalRoot !== null)
-    assertInit(
+    assertInitInspection(
       !after.entries.some(
         (entry) =>
           entry.path === missingExternalRoot.path && entry.kind !== "missing",
       ),
+      "destination_unavailable",
       "Init destination is occupied by unbound infrastructure.",
     );
   for (const candidate of candidates) {
@@ -204,8 +208,9 @@ export async function inspectInitSetup(
       configurationPath: candidate.configurationPath,
       inspectPath: inspectConfigurationPath,
     });
-    assertInit(
+    assertInitInspection(
       digest(loaded.protection) === candidate.protectionHash,
+      "workspace_changed",
       "Init destination configuration changed during inspection.",
     );
   }
@@ -287,6 +292,12 @@ export async function inspectInitSetup(
           })
         : digest({ inspection, proof }),
   };
+  assertInitInspection(
+    result.entries.length <= 10_000 &&
+      (schemaVersion === 1 ||
+        Buffer.byteLength(JSON.stringify(result)) <= 2 * 1024 * 1024),
+    "evidence_capacity",
+  );
   assertInspection(result);
   if (previousInspection !== null)
     assertInspectionExtension(previousInspection, result);
@@ -387,8 +398,9 @@ function matchingCandidates(
       (placement === null || candidate.placement === placement),
   );
   if (configurationPath !== null) {
-    assertInit(
+    assertInitInspection(
       matches.length === 1,
+      "destination_unavailable",
       "Explicit init selections disagree or are not inspected.",
     );
   }
@@ -411,8 +423,9 @@ export function selectInitPlacement(
     selected === "integrated"
       ? inspection.projectPath
       : defaultExternalRoot(inspection.projectPath);
-  assertInit(
+  assertInitInspection(
     inspection.roots.includes(rootPath),
+    "destination_unavailable",
     "Init destination is occupied by unbound infrastructure.",
   );
   return {

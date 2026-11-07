@@ -1,4 +1,5 @@
 import { join, relative } from "node:path";
+import { inspectInitOperation } from "./inspection-failure.js";
 
 import { assertInit, isFinalizationRepair, within } from "./proposal.js";
 import {
@@ -25,24 +26,34 @@ export function externalFinalizationContent(state, checks) {
 }
 
 // General workspace snapshots omit unrelated ancestor provider storage.
-export async function assertExternalControls(state, { workspace, stateRoot }) {
+export async function assertExternalControls(
+  state,
+  { workspace, stateRoot },
+  inspectionPhase = "publication-preparation",
+) {
   const paths = [
     state.selection.rootPath,
     ...state.proposal.resources.map(({ path }) => path),
   ];
-  const controls = await workspace.inspectControls({
-    workspacePath: state.inspection.projectPath,
-    paths,
-    stateRoot,
-  });
+  const controls = await inspectInitOperation(inspectionPhase, () =>
+    workspace.inspectControls({
+      workspacePath: state.inspection.projectPath,
+      paths,
+      stateRoot,
+    }),
+  );
   assertInit(
     !paths.some((path) => controls.some((control) => within(control, path))),
     "External setup cannot publish inside Git or provider controls.",
   );
 }
 
-export async function assertExternalPolicy(state, runtime) {
-  await assertExternalControls(state, runtime);
+export async function assertExternalPolicy(
+  state,
+  runtime,
+  inspectionPhase = "publication-preparation",
+) {
+  await assertExternalControls(state, runtime, inspectionPhase);
   const { rootPath, configurationPath, artifactPath, protectionHash } =
     state.selection;
   const projectPath = state.inspection.projectPath;
@@ -82,5 +93,10 @@ export async function assertExternalPolicy(state, runtime) {
         externalFinalizationContent(state, state.proposal.checks),
     "External finalization must preserve existing skills and derive its procedure from reviewed checks.",
   );
-  await assertInitConfiguration(state, runtime, finalizationPath);
+  await assertInitConfiguration(
+    state,
+    runtime,
+    finalizationPath,
+    inspectionPhase,
+  );
 }

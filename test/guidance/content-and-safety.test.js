@@ -797,6 +797,7 @@ test("guidance reads preserve bounded configuration constraints without classify
   for (const [constraint, classification] of [
     ["file_size", "evidence_capacity"],
     ["isolated_regular_file", "unsafe_path"],
+    ["missing_file", "workspace_changed"],
   ]) {
     fault = new ConfigurationError("Private rejected evidence", {
       code: "ERR_PROJECT_CONFIGURATION_READ",

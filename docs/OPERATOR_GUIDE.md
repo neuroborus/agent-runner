@@ -1,8 +1,7 @@
 # Agent Runner Operator Guide
 
-Use this procedure when supervising Agent Runner through the CLI or its local
-STDIO MCP server. The [product documents](README.md) own the current guarantees;
-the pipeline specifications own exact workflow and recovery contracts.
+Supervise CLI/STDIO MCP runs using this guide. See [product guarantees](README.md)
+and the pipeline specifications for exact workflow and recovery contracts.
 
 | Mode          | Quality | Speed | Token consumption | Meaning                                                         |
 | ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
@@ -88,12 +87,11 @@ An execution lease ending does not authorize interference with resumable work.
 
 ## 2. Prepare against the actual base
 
-Read the project's instructions, owning specifications, and relevant code.
-Verify that the intended base contains the files, symbols, and behavior named
-in the task. Recompute baselines, checksums, inventories, and acceptance
-assumptions against that base. Do not copy measurements from a previous task,
-another checkout, or a stale branch. Prefer explicit behavior and invariants
-to incidental counts; verify any required counts and path lists locally.
+Read project instructions, owning specifications and relevant code. Verify the
+task's files, symbols and behavior on the intended base. Recompute baselines,
+checksums, inventories and acceptance assumptions there; never copy stale
+measurements. Prefer behavior and invariants to incidental counts; verify required
+counts and path lists locally.
 
 Use pipeline discovery (`agent-run pipelines` or `pipelines_list`) to confirm
 inputs and settings. Reconcile the task, context, plan, and existing
@@ -475,6 +473,8 @@ recorded owner, distinct from an ownerless run awaiting stop settlement. Recover
 that owner through supported actions or await normal release/identity-proved
 reclamation; never edit or bypass leases. See
 [operator stops](ARCHITECTURE.md#state-owned-operator-stop-protocol).
+
+Init: [inspection recovery](../pipelines/init/docs/SPEC.md#inspection-failures).
 
 Structured role results allow exactly 2 MiB of serialized UTF-8 JSON. Semantic
 field and inventory limits still apply. This is byte headroom, not a token

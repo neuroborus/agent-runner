@@ -356,7 +356,8 @@ selection through its thin transport.
 
 Fast configuration loading and clarification lifecycle coverage own the existing
 bounded-file guards' finite constraint metadata while retaining their error
-codes. These read-contract fixtures establish no init pause/resume behavior or
+codes. Configuration coverage also distinguishes explicit missing-file metadata
+from valid implicit absence. These read-contract fixtures establish no init pause/resume behavior or
 live-provider acceptance. Guidance integration changes also require the
 registered init slow suite; runtime-resource changes retain release-pack coverage.
 
@@ -683,6 +684,10 @@ error and prove fresh lease acquisition. The existing protected-configuration
 stop race and stop/recovery assertions remain unchanged; these fixture corrections
 change no production lifecycle or inspection diagnosis.
 
+The state operator-stop suite's interrupted checkpoint matrix also verifies
+atomic retirement of active observations before publication, alongside the
+saved stop outcome and exact receipt replay.
+
 ## Finalization
 
 The fast `pipelines/init/test/proposals.test.js` suite owns the pure
@@ -705,6 +710,13 @@ It also accepts an absent sibling covered by an enclosing task-tree snapshot.
 The proposal suite also keeps external finalization references limited to the
 target's finalization skills, without invoking unrelated inventoried skills.
 That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
+
+Fast `pipelines/init/test/inspection-failure.test.js` owns finite inspection
+constraints, complete over-capacity document rejection, redaction, strict pause
+validation, trusted bounded-file constraint mapping and narrow transient recovery
+policy, without filesystem/provider work. Clarification lifecycle coverage checks
+the existing transcript-size guard's constraint; configuration loading coverage
+checks the regular-file guard while preserving its existing read-error code.
 
 Fast `test/workspace/setup-proof.test.js` constructs complete snapshots beyond
 10,000 entries to prove compact persistence, exact publication allowances,
@@ -762,7 +774,46 @@ intervening guidance edits, authorized pre-closure read-scope extension, and
 retired terminal-turn recovery with identity-sensitive provider receipts, frozen
 backend authority, and identical-byte guide substitution after a lost acknowledgement.
 It also owns stop settlement during reserved proposal turns and clarification
-windows, interrupted question/decision publication, structured decision answers
+windows, pre-provider inspection rejection with zero provider/publication effects,
+durable CLI/MCP status/wait diagnoses, start and exact-key ownerless resume receipt
+replay, stale/live-owner rejection, transient unchanged-input recovery, post-turn
+and additive reinspection rejection, and one-time inspection/stop races before
+and during a reserved turn, including canonical
+ownership acquisition after a recovery diagnosis. Further cases cover
+editor authorization, authorized close and runtime adapter preparation/verification
+rejection, initial oversized transcripts, and bounded/non-file configuration rejection during
+additive reinspection without accepting partial evidence or publishing resources.
+Append pre-read failures cover question and product-decision diagnosis and
+same-request resume without duplicate sections or renewed accounting; write-error
+interruption cases retain exact journaled replacement recovery. A fail-once
+proactive preparation case requires authorization and an unchanged close before
+provider work. The pure shared-clarification case checks that proactive completion
+and the pending authorization are recorded together.
+Initial task/context read failures retain an unstarted durable pause and verify
+single initial capture on unchanged-input resume. Prepared-configuration read
+rejection retains verified prerequisite receipts and resumes only guidance and
+terminal confirmation.
+Actual guidance-service control inspection and native directory-open failures
+after prerequisite publication also cross normalization into a durable diagnosis, preserving
+accepted receipts, selection and approvals before guidance/terminal recovery.
+Returned directory verification covers trusted `ERR_GUIDANCE_STORAGE` metadata
+through the same registered lifecycle. A selected integrated configuration
+disappearing between discovery and loading retains the prior inspection and
+produces a non-resumable diagnosis without provider or publication effects.
+Foreground admission coverage observes the diagnosis while both execution and
+workspace owners remain held, then checks release and
+resume; input-submission coverage rejects acknowledgement of unwritten answers
+after canonical validation, complete source-proof or clarification pre-read
+rejection.
+Shared clarification coverage separates initial/replacement reads from write and
+post-write readback failures, preserving bytes and exact answer replay. Blocked
+and exhausted init checkpoints retain their original diagnosis through failed
+recovery, reload and rejected resume; pure validation rejects an inspection
+pause over their state. Publication preparation read rejection retains approvals
+without reserving an effect.
+Proposal-policy source-read rejection remains distinct from invalid provider
+content; persistent inspection rejection during stop settlement retains diagnosis.
+It retains interrupted question/decision publication, structured decision answers
 with frozen selections and renewed gates, and concrete CLI/MCP blocker projections.
 Successful inactivity and provider-requested reconstruction cover both proposal
 and terminal confirmation; interrupted second attempts retain consumption and
@@ -777,7 +828,10 @@ It uses neutral directories,
 fake providers and a controlled directory publisher; the workspace tests retain
 native publication safety ownership. Run it for init lifecycle, setup lease or
 guidance integration changes, in addition to the affected prerequisite suites.
-Provider/native-platform acceptance remains opt-in.
+Provider/native-platform acceptance remains opt-in. Inspection-stop changes also
+affect CLI/MCP workflow and control-plane
+slow coverage, release packing and separate installed-package acceptance; the
+complete slow gate remains required for integrated acceptance.
 
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes

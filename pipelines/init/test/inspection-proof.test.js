@@ -267,8 +267,8 @@ test("legacy inspection bindings and accepted approvals migrate without new evid
     }),
     inspection,
   );
-  await assert.rejects(
-    fixture("external").inspect({ schemaVersion: 1 }),
-    /inspected destinations/u,
-  );
+  await assert.rejects(fixture("external").inspect({ schemaVersion: 1 }), {
+    code: "ERR_INIT_INSPECTION",
+    constraint: "evidence_capacity",
+  });
 });

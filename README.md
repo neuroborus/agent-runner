@@ -2154,6 +2154,13 @@ unchanged, needs no pointer/global registration, and references existing project
 skills without editing them. Explicit placement migration preserves the old
 setup. Reruns preserve useful guidance without duplicate setup metadata;
 interrupted effects reconcile their original identities before continuing.
+Expected init inspection failures persist an actionable pause before execution
+ownership is released, including rejection before any provider attempt. CLI and
+MCP status/wait report the same phase, constraint and supported recovery. Only
+transient inspection failures permit unchanged-input resume; other diagnoses
+require preserving work, correcting prerequisites and a fresh run. Start/resume
+receipts acknowledge admission/dispatch, not successful setup. See
+[inspection recovery](pipelines/init/docs/SPEC.md#inspection-failures).
 The managed guidance includes the exact selected finalization procedure.
 Interrupted reconstruction pauses resumably at its saved checkpoint and retains
 the consumed recovery allowance.
