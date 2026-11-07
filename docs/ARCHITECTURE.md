@@ -4856,8 +4856,12 @@ observations and exact prefix length, then rechecks the synced prefix and
 handle/path evidence; changed or completed tails retain ownership.
 Missing or conflicting authority stays reserved.
 An orphan custody log also rejects state and ownership reads after cold canonical
-rollback; a lock-free read first reloads to recognize concurrent reservation
-publication or settlement.
+rollback. State-owned authorization permits one caller-bounded reload to recognize
+concurrent reservation publication or settlement. Activity continuation anchors
+that reload to its already proved extended snapshot through `extendSnapshot`,
+retaining the original operation's consumed-prefix proof transitively. Unavailable
+advancement or proof retains the custody refusal; file presence or an unrelated
+append cannot establish authority. Observation never repairs or removes custody.
 Neither attachment nor admission proves that the probe ran, exited, or passed.
 Canonical replay enforces reservation, immutable authority, settlement and clearing
 in order; custody transitions cannot change workflow state or validation evidence.
@@ -5364,6 +5368,13 @@ capture becomes a reusable checkpoint, and the finite continuation limit remains
 unchanged. Only a certified snapshot with a strictly later revision, passing the
 same custody and state-root checks, permits another drain under the same cursor
 and limit rules.
+If fully published custody appears after extension capture, authorization may
+extend that same snapshot once more before reapplying its checks. This reload
+must prove all preceding bindings and validated history through its own endpoint;
+an unconstrained cold load cannot replace the original operation's proof.
+Concurrent settlement uses the same bound. If the reloaded snapshot still lacks
+preparation authority while custody is observed, authorization fails without
+another reload.
 A page permits two such continuations (three drains). Each extension uses the
 preceding operation-local certificate, preserving the original run identity and
 every original byte binding transitively; optional checkpoint replacement or

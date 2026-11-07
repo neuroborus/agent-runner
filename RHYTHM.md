@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Activity continuation reconciles newly published custody through its proof.**
+  State-owned authorization may reload once through the already extended journal
+  snapshot when a reservation appears after capture. The original operation's
+  certified bytes, identities and controls remain bound transitively, including
+  when settlement races the custody inspection. Unavailable extension proof,
+  orphan or rolled-back custody and unresolved custody after that reload
+  retain strict refusals. The existing two continuations and three drains remain
+  bounded, with proof and authorization before busy exhaustion. Shared activity
+  and wait consumers gain no mutation, lease, repair, effect or recovery authority.
+
 - **Init terminal adapter failures settle before owner release.** After verified
   unchanged workspace and physical turn/resource retirement, init journals its
   existing FAILED outcome, bounded registry diagnosis and safe activity, then

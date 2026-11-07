@@ -459,7 +459,12 @@ typed outcome without automatically retrying. Publication during canonical
 recertification or extension uses the same bound: a raced extension must first
 prove its complete validated byte capture under stable observations and the exact
 captured segment namespace. It may return an earlier consumed prefix while later
-publications remain available to a subsequent read. Corruption, rollback,
+publications remain available to a subsequent read. A preparation reservation
+published after continuation capture receives the same once-only authorization
+reload as initial capture, anchored to the already proved extension. Settlement
+may reconcile within that bound; unrelated advancement cannot authorize orphan
+custody. Reads preserve canonical and custody bytes and gain no execution or
+recovery authority. Corruption, rollback,
 substitution or uncertain proof still returns no page and grants no retryable
 classification. Publication
 callbacks cannot replace the original certificate with different history,

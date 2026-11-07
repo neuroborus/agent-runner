@@ -1015,6 +1015,18 @@ state and progress bytes unchanged. Original-prefix and newly consumed extension
 edits, file controls, hard links, namespace gaps and a newly sealed incomplete
 tail remain strict rejections. The real MCP activity/wait, Runner and cold CLI
 status consumers share these fixtures without sleeps, polling or providers.
+Custody-inspection hooks publish a complete reservation after a proved extension
+capture, comparing initial capture, warm reuse, cold settlement, eviction and an
+overflow page that must still drain its unread prefix. Exact pages and cursors
+remain paired; canonical journal, state, progress and custody bytes stay unchanged
+after owner publication. Repeated reservation/settlement preserves the three-drain
+bound, and another reservation at the once-only reload is refused. Distinct
+orphan and rolled-back custody survive unrelated advancement; edits to original
+or newly consumed bytes, changed controls and an unsafe hard link cannot obtain
+a replacement proof.
+Shared MCP activity and new/held waits consume the repaired schedule through real
+Runner/store calls, with exact progress consumption and a controlled client
+deadline rather than a fabricated terminal run.
 Activity edits with restored mtime at equal and advanced endpoints,
 file/directory replacement, namespace gaps and changed file controls cannot be
 certified by a later valid scan. Recovery and append reject a captured endpoint

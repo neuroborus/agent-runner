@@ -863,14 +863,16 @@ export function createRunStore({
       snapshot.state.preparation === null &&
       (await hasPreparationCustody(runDirectory))
     ) {
-      if (reload === null)
-        throw new RunStoreError(
-          "Unmerged preparation custody has no authority.",
-          { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
-        );
       // A lock-free read may precede reservation publication. Reload before
       // rejecting custody whose canonical authority was lost or rolled back.
-      return authorizeSnapshot(runDirectory, await reload());
+      if (reload !== null) {
+        const reloaded = await reload();
+        if (reloaded !== null) return authorizeSnapshot(runDirectory, reloaded);
+      }
+      throw new RunStoreError(
+        "Unmerged preparation custody has no authority.",
+        { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+      );
     }
     assertDisjointStateRoot(
       runDirectory,
@@ -2116,7 +2118,11 @@ export function createRunStore({
         // Error codes alone grant neither a retry nor a retryable outcome.
         const extended = await journal.extendSnapshot(runDirectory, source);
         if (extended === null) throw cause;
-        source = await authorizeSnapshot(runDirectory, extended);
+        // Custody published after this capture must retain the same proof on
+        // its once-only authorization reload, rather than starting a cold read.
+        source = await authorizeSnapshot(runDirectory, extended, () =>
+          journal.extendSnapshot(runDirectory, extended),
+        );
         if (retries === MAX_ACTIVITY_PUBLICATION_RETRIES)
           throw new RunObservationBusyError();
       }

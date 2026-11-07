@@ -35,6 +35,10 @@ import {
   createPlanAuthoringState,
   planAuthoringPipeline,
 } from "@agent-runner/plan-authoring";
+import {
+  createPlanExecutionState,
+  planExecutionPipeline,
+} from "@agent-runner/plan-execution";
 
 import {
   readProcessIdentity,
@@ -924,7 +928,7 @@ async function publishDuringStreams(
   path,
   openings,
   publish,
-  { afterRead = false } = {},
+  { afterRead = false, isPublishing = () => false } = {},
 ) {
   const metadata = await stat(path, { bigint: true });
   const handle = await open(path, "r");
@@ -939,6 +943,7 @@ async function publishDuringStreams(
     const observation = await nativeStat.apply(this, args);
     if (
       !publishing &&
+      !isPublishing() &&
       args[0]?.bigint &&
       observation.ino === metadata.ino &&
       openings.includes(++observations)
@@ -974,8 +979,9 @@ async function readCanonicalFiles(directory) {
   const names = (await readdir(directory))
     .filter(
       (name) =>
-        ["state.json", "progress.md"].includes(name) ||
-        /^events(?:-[0-9]+)?\.jsonl$/u.test(name),
+        ["state.json", "progress.md", ".preparation-custody.jsonl"].includes(
+          name,
+        ) || /^events(?:-[0-9]+)?\.jsonl$/u.test(name),
     )
     .sort();
   return Promise.all(
@@ -2515,6 +2521,469 @@ async function preparationFixture(t, options = {}) {
       idempotencyKey: `${kind}-${timing}`,
     });
   return f;
+}
+
+// Publish only after the observer captured its snapshot. Exclude the owner's
+// recursive inspections from both this schedule and the stream schedule.
+function publishDuringCustodyChecks(t, directory, checks, publish) {
+  const path = join(directory, ".preparation-custody.jsonl");
+  const nativeStat = filesystem.lstat;
+  let inspections = 0;
+  let publishing = false;
+  async function publishOwned(operation) {
+    const previous = publishing;
+    publishing = true;
+    try {
+      return await operation();
+    } finally {
+      publishing = previous;
+    }
+  }
+  t.mock.method(filesystem, "lstat", async (filePath, ...args) => {
+    const inspect = () => nativeStat(filePath, ...args);
+    if (filePath !== path || publishing) return inspect();
+    if (!checks.includes(++inspections)) return inspect();
+    return publishOwned(() => publish(inspections, inspect));
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return {
+    publish: publishOwned,
+    isPublishing: () => publishing,
+    get inspections() {
+      return inspections;
+    },
+  };
+}
+
+async function settleUnstartedPreparation(f, authority) {
+  await f.store.recordPreparationProcess(f.created.lease, authority, undefined);
+  await f.settle();
+}
+
+for (const mode of ["initial", "warm", "cold-settled", "evicted", "overflow"]) {
+  test(`activity reconciles published preparation custody: ${mode}`, async (t) => {
+    const f = await preparationFixture(t);
+    const { runId } = f.current;
+    const directory = f.created.directoryPath;
+    const overflow = mode === "overflow";
+    const seeded = overflow
+      ? await seedActivities(f, 1030, "Checkpoint recorded.", f.current)
+      : null;
+    const base = seeded?.latest ?? f.current;
+    const observer = createRunStore({ stateRoot: f.stateRoot });
+    if (["warm", "evicted", "overflow"].includes(mode))
+      await observer.loadRun(runId);
+    if (mode === "evicted") {
+      for (let index = 0; index < 8; index += 1) {
+        const extra = await observer.createRun(f.input);
+        await extra.lease.release();
+      }
+    }
+    const initial = mode === "initial";
+    const settled = mode === "cold-settled";
+    let authority;
+    let canonical;
+    const custody = publishDuringCustodyChecks(
+      t,
+      directory,
+      [initial ? 1 : 2],
+      async (unused, inspect) => {
+        authority = await f.reserve();
+        // Preserve the presence observation even when the owner settles before
+        // the observer's once-only reload, as a real concurrent lstat may do.
+        const observed = await inspect();
+        if (settled) await settleUnstartedPreparation(f, authority);
+        canonical = await readCanonicalFiles(directory);
+        return observed;
+      },
+    );
+    let publications = 0;
+    if (!initial)
+      await publishDuringStreams(
+        t,
+        join(directory, overflow ? "events-000010.jsonl" : "events.jsonl"),
+        [3],
+        async () => {
+          publications += 1;
+          await custody.publish(() => publishActivity(f.store, f.created, 1));
+        },
+        { isPublishing: custody.isPublishing },
+      );
+    try {
+      const expected = [
+        { revision: 1, message: "Run created." },
+        ...(seeded?.expected.map(({ revision, message }) => ({
+          revision,
+          message,
+        })) ?? []),
+        ...(!initial
+          ? [
+              {
+                revision: base.revision + 1,
+                message: concurrentActivity.message,
+              },
+            ]
+          : []),
+        {
+          revision: base.revision + (initial ? 1 : 2),
+          message: "Trusted preparation custody reserved.",
+        },
+        ...(settled
+          ? [
+              {
+                revision: base.revision + 3,
+                message: "Trusted preparation custody settled.",
+              },
+              {
+                revision: base.revision + 4,
+                message: "Trusted preparation custody cleared.",
+              },
+            ]
+          : []),
+      ];
+      const page = await observer.readPublicActivity(runId, {
+        limit: overflow ? 2 : 100,
+      });
+      assert.ok(authority, "the controlled custody publication ran");
+      assert.equal(publications, initial ? 0 : 1);
+      assert.deepEqual(
+        pageEntries(page),
+        overflow ? expected.slice(0, 2) : expected,
+      );
+      assert.equal(page.cursor, overflow ? 3 : expected.at(-1).revision);
+      const remaining = await observer.readPublicActivity(runId, {
+        afterRevision: overflow ? base.revision : page.cursor,
+      });
+      assert.deepEqual(
+        pageEntries(remaining),
+        overflow ? expected.slice(-2) : [],
+      );
+      assert.equal(remaining.cursor, expected.at(-1).revision);
+      assert.deepEqual(await readCanonicalFiles(directory), canonical);
+      assert.equal(
+        (await observer.loadRun(runId)).preparation?.id ?? null,
+        settled ? null : authority.id,
+      );
+    } finally {
+      if (authority && !settled) await settleUnstartedPreparation(f, authority);
+    }
+  });
+}
+
+for (const exhausted of [false, true]) {
+  test(`activity custody publication preserves the ${exhausted ? "three-drain" : "once-only reload"} bound`, async (t) => {
+    const f = await preparationFixture(t);
+    const directory = f.created.directoryPath;
+    let authority;
+    let canonical;
+    const custody = publishDuringCustodyChecks(
+      t,
+      directory,
+      exhausted ? [2, 4, 6] : [2, 3],
+      async (inspection, inspect) => {
+        authority = await f.reserve();
+        const observed = await inspect();
+        if (exhausted || inspection === 2) {
+          await settleUnstartedPreparation(f, authority);
+          authority = null;
+        }
+        canonical = await readCanonicalFiles(directory);
+        return observed;
+      },
+    );
+    let publications = 0;
+    // Each settled reservation adds one authorization extension (two handle
+    // observations) to the existing four observations between drain openings.
+    await publishDuringStreams(
+      t,
+      join(directory, "events.jsonl"),
+      exhausted ? [3, 9, 15] : [3],
+      async () => {
+        await custody.publish(() =>
+          publishActivity(f.store, f.created, ++publications),
+        );
+      },
+      { isPublishing: custody.isPublishing },
+    );
+    try {
+      const observer = createRunStore({ stateRoot: f.stateRoot });
+      await assert.rejects(
+        observer.readPublicActivity(f.current.runId),
+        (error) => {
+          if (exhausted) {
+            assert.ok(error instanceof RunObservationBusyError);
+            assert.equal(error.retryable, true);
+          } else {
+            assert.equal(error.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+          }
+          return true;
+        },
+      );
+      assert.equal(publications, exhausted ? 3 : 1);
+      assert.equal(custody.inspections, exhausted ? 7 : 3);
+      assert.deepEqual(await readCanonicalFiles(directory), canonical);
+      const page = await observer.readPublicActivity(f.current.runId);
+      assert.deepEqual(
+        page.activities.map(({ revision }) => revision),
+        exhausted
+          ? [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+          : [1, 3, 4, 5, 6, 7],
+      );
+      assert.equal(page.cursor, exhausted ? 14 : 7);
+    } finally {
+      if (authority) await settleUnstartedPreparation(f, authority);
+    }
+  });
+}
+
+for (const change of [
+  "orphan",
+  "rollback",
+  "original-bytes",
+  "extension-bytes",
+  "control",
+  "unavailable-proof",
+]) {
+  test(`activity custody reload refuses ${change} despite journal advancement`, async (t) => {
+    const f = await preparationFixture(t);
+    const directory = f.created.directoryPath;
+    const path = join(directory, "events.jsonl");
+    let authority;
+    let reserved;
+    let canonical;
+    const metadata = await stat(path);
+    const custody = publishDuringCustodyChecks(
+      t,
+      directory,
+      [2],
+      async (unused, inspect) => {
+        const base = await f.saved();
+        const before = await readCanonicalFiles(directory);
+        if (change === "orphan") {
+          const issued = await f.reserve();
+          const custodyPath = join(directory, ".preparation-custody.jsonl");
+          const orphan = await readFile(custodyPath, "utf8");
+          await settleUnstartedPreparation(f, issued);
+          const cleared = await f.saved();
+          await writeFile(custodyPath, orphan);
+          await seedActivities(f, 1, "Unrelated publication.", cleared);
+        } else {
+          authority = await f.reserve();
+          reserved = await readCanonicalFiles(directory);
+          if (change === "rollback") {
+            for (const [name, source] of before)
+              await writeFile(join(directory, name), source);
+            await seedActivities(f, 1, "Unrelated publication.", base);
+          } else if (change === "control") {
+            await filesystem.chmod(path, 0o400);
+          } else if (change === "unavailable-proof") {
+            await link(path, join(f.stateRoot, "linked-events"));
+          } else {
+            const source = await readFile(path, "utf8");
+            await writeFile(
+              path,
+              change === "original-bytes"
+                ? source.replace("Run created.", "Run updated.")
+                : source.replace(
+                    concurrentActivity.message,
+                    "Candidate changed.",
+                  ),
+            );
+            await utimes(path, metadata.atime, metadata.mtime);
+          }
+        }
+        canonical = await readCanonicalFiles(directory);
+        return inspect();
+      },
+    );
+    await publishDuringStreams(
+      t,
+      path,
+      [3],
+      () => custody.publish(() => publishActivity(f.store, f.created, 1)),
+      {
+        isPublishing: custody.isPublishing,
+      },
+    );
+    try {
+      await assert.rejects(
+        createRunStore({ stateRoot: f.stateRoot }).readPublicActivity(
+          f.current.runId,
+        ),
+        { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+      );
+      assert.equal(
+        custody.inspections,
+        ["orphan", "rollback"].includes(change) ? 3 : 2,
+      );
+      assert.deepEqual(await readCanonicalFiles(directory), canonical);
+    } finally {
+      if (authority) {
+        if (change === "unavailable-proof")
+          await rm(join(f.stateRoot, "linked-events"));
+        await filesystem.chmod(path, metadata.mode);
+        for (const [name, source] of reserved)
+          await writeFile(join(directory, name), source);
+        await settleUnstartedPreparation(f, authority);
+      }
+    }
+  });
+}
+
+for (const consumer of ["activity", "new-wait", "held-wait"]) {
+  test(`MCP ${consumer} consumes activity reconciled with published custody`, async (t) => {
+    const f = await preparationFixture(t, {
+      runInput: {
+        pipelineStateVersion: planExecutionPipeline.stateVersion,
+        roles: Object.fromEntries(
+          planExecutionPipeline.roles.map((role) => [
+            role,
+            { backend: "codex" },
+          ]),
+        ),
+        pipelineState: createPlanExecutionState(),
+      },
+    });
+    const { runId } = f.current;
+    const directory = f.created.directoryPath;
+    const observer = createRunStore({ stateRoot: f.stateRoot });
+    const held = consumer === "held-wait";
+    const wakeCompleted = Promise.withResolvers();
+    const watching = Promise.withResolvers();
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    let authority;
+    let canonical;
+    let armed = true;
+    const reader = {
+      ...observer,
+      async readPublicActivity(...args) {
+        if (held) await wakeCompleted.promise;
+        if (armed) {
+          armed = false;
+          const custody = publishDuringCustodyChecks(
+            t,
+            directory,
+            [2],
+            async (unused, inspect) => {
+              authority = await f.reserve();
+              canonical = await readCanonicalFiles(directory);
+              return inspect();
+            },
+          );
+          await publishDuringStreams(
+            t,
+            join(directory, "events.jsonl"),
+            [3],
+            () =>
+              custody.publish(() =>
+                f.store.transitionRun(
+                  f.created.lease,
+                  {},
+                  { activity: concurrentActivity },
+                ),
+              ),
+            { isPublishing: custody.isPublishing },
+          );
+        }
+        return observer.readPublicActivity(...args);
+      },
+    };
+    const control = createMcpControlPlane({
+      runner: createRunner({ runStore: reader }),
+      runStore: reader,
+    });
+    const abort = new AbortController();
+    let waiting;
+    const progress = [];
+    try {
+      if (consumer === "activity") {
+        const page = await control.runActivity({ runId, cursor: 0, limit: 2 });
+        assert.deepEqual(pageEntries(page), [
+          { revision: 1, message: "Run created." },
+          { revision: 3, message: concurrentActivity.message },
+        ]);
+        assert.equal(page.cursor, 3);
+        const remaining = await control.runActivity({
+          runId,
+          cursor: page.cursor,
+          limit: 2,
+        });
+        assert.deepEqual(pageEntries(remaining), [
+          { revision: 4, message: "Trusted preparation custody reserved." },
+        ]);
+        assert.equal(remaining.cursor, 4);
+      } else {
+        if (held) {
+          const watch = nativeFilesystem.watch;
+          t.mock.method(nativeFilesystem, "watch", (...args) => {
+            const watcher = watch(...args);
+            watching.resolve();
+            return watcher;
+          });
+          syncBuiltinESMExports();
+        }
+        const context = {
+          signal: abort.signal,
+          progressToken: "wait-progress",
+          notify: async ({ params }) => progress.push(params.progress),
+        };
+        waiting = control.runWait(
+          {
+            runId,
+            cursor: held ? 2 : 0,
+            timeoutMs: held ? 10_000 : 0,
+            progress: true,
+          },
+          context,
+        );
+        if (held) {
+          await Promise.race([watching.promise, waiting]);
+          await f.store.transitionRun(
+            f.created.lease,
+            {},
+            { activity: concurrentActivity },
+          );
+          // Expire only this client's wait after its controlled wake. The run
+          // remains nonterminal and the recorded execution owner stays live.
+          now += 10_000;
+          wakeCompleted.resolve();
+        }
+        const waited = await waiting;
+        assert.equal(waited.status, "CLARIFY");
+        assert.equal(waited.timedOut, true);
+        assert.equal(waited.revision, held ? 5 : 4);
+        assert.equal(waited.execution.leaseOwner, "live");
+        assert.deepEqual(progress, held ? [3, 4, 5] : [1, 3, 4]);
+        const consumed = await control.runWait(
+          { runId, cursor: waited.revision, timeoutMs: 0, progress: true },
+          context,
+        );
+        assert.equal(consumed.revision, waited.revision);
+        assert.deepEqual(progress, held ? [3, 4, 5] : [1, 3, 4]);
+      }
+      assert.ok(
+        authority,
+        "the public consumer reached custody reconciliation",
+      );
+      assert.deepEqual(await readCanonicalFiles(directory), canonical);
+      assert.equal(
+        (await observer.loadRun(runId)).preparation.id,
+        authority.id,
+      );
+    } finally {
+      wakeCompleted.resolve();
+      abort.abort();
+      await waiting?.catch(() => {});
+      if (authority) await settleUnstartedPreparation(f, authority);
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
 }
 
 test("preparation custody requires owner identity and namespace with optional historical proofs", async (t) => {
