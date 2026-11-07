@@ -50,6 +50,31 @@ const THIRD_RUN_ID = "33333333-3333-4333-8333-333333333333";
 const RESPONSE_HASH = "a".repeat(64);
 const executeFile = promisify(execFile);
 
+function expectEvent(event, operation) {
+  return Promise.race([
+    event,
+    operation.then(() => {
+      throw new Error("Operation completed before the expected event.");
+    }),
+  ]);
+}
+
+test("event waits propagate operations that settle before the expected event", async () => {
+  const event = deferred();
+  const failure = new Error("Operation rejected before the expected event.");
+  try {
+    await assert.rejects(expectEvent(event.promise, Promise.resolve()), {
+      message: "Operation completed before the expected event.",
+    });
+    await assert.rejects(
+      expectEvent(event.promise, Promise.reject(failure)),
+      (error) => error === failure,
+    );
+  } finally {
+    event.resolve();
+  }
+});
+
 test("detached IPC admission disconnects before execution and consumes its environment marker", async (t) => {
   const paths = await workspace(t, "agent-runner-dispatch-ipc-");
   const script = join(paths.taskPath, "child.mjs");
@@ -381,6 +406,7 @@ async function createStoredRun(
     pause = null,
     sourceSession = null,
     sourceProfile = null,
+    roles = {},
     state = {},
   } = {},
 ) {
@@ -390,7 +416,7 @@ async function createStoredRun(
     pipelineStateVersion: 1,
     projectPath,
     taskPath,
-    roles: {},
+    roles,
     counters: {},
     hashes: {},
     pause,
@@ -907,73 +933,95 @@ test("detached stop supervision follows transient ownership until settlement or 
       });
       const inspected = deferred();
       let lease;
+      let pending;
       let onExit;
       let finished = false;
-      const runner = storedRunner(store, paths);
-      const control = createMcpControlPlane({
-        runner: {
-          ...runner,
-          async status(runId) {
-            const current = await runner.status(runId);
-            if (lease) inspected.resolve();
-            return current;
+      try {
+        const runner = storedRunner(store, paths);
+        const control = createMcpControlPlane({
+          runner: {
+            ...runner,
+            async status(runId) {
+              const current = await runner.status(runId);
+              if (lease) inspected.resolve();
+              return current;
+            },
           },
-        },
-        runStore: store,
-        async launchRun(runId, action, options) {
-          assert.equal(action, null);
-          assert.equal(options.stopCheckpointRevision, initial.revision);
-          assert.equal(
-            options.expectedRuntimeCompatibility,
-            DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
-          );
-          lease = await store.acquireRunLease(runId);
-          onExit = options.onExit;
-        },
-      });
-      const pending = control.runCancel({
-        runId: initial.runId,
-        expectedRevision: initial.revision,
-        idempotencyKey: "transient-owner-stop",
-      });
-      pending.then(
-        () => {
-          finished = true;
-        },
-        () => {
-          finished = true;
-        },
-      );
-      await inspected.promise;
-      await new Promise(setImmediate);
-      assert.equal(finished, false, "A run lease is not stop settlement.");
-      assert.equal(
-        (await store.loadRun(initial.runId)).stopRequest.reconciledRevision,
-        null,
-      );
-      onExit(exitCode);
-      await assert.rejects(
-        pending,
-        (error) =>
-          error.code ===
+          runStore: store,
+          async launchRun(runId, action, options) {
+            assert.equal(action, null);
+            assert.equal(options.stopCheckpointRevision, initial.revision);
+            assert.equal(
+              options.expectedRuntimeCompatibility,
+              DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+            );
+            lease = await store.acquireRunLease(runId);
+            onExit = options.onExit;
+          },
+        });
+        pending = control.runCancel({
+          runId: initial.runId,
+          expectedRevision: initial.revision,
+          idempotencyKey: "transient-owner-stop",
+        });
+        pending.then(
+          () => {
+            finished = true;
+          },
+          () => {
+            finished = true;
+          },
+        );
+        await expectEvent(inspected.promise, pending);
+        await new Promise(setImmediate);
+        assert.equal(finished, false, "A run lease is not stop settlement.");
+        assert.equal(
+          (await store.loadRun(initial.runId)).stopRequest.reconciledRevision,
+          null,
+        );
+        onExit(exitCode);
+        await assert.rejects(
+          pending,
+          (error) =>
+            error.code ===
+              (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
+                ? "ERR_RUNTIME_VERSION_SKEW"
+                : "ERR_DETACHED_START_FAILED") &&
+            /before durable stop settlement/u.test(error.message) &&
             (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
-              ? "ERR_RUNTIME_VERSION_SKEW"
-              : "ERR_DETACHED_START_FAILED") &&
-          /before durable stop settlement/u.test(error.message) &&
-          (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
-            ? /restart the Agent Runner MCP server/iu.test(error.message)
-            : error.message.includes(`lease belongs to run ${older.runId}`)) &&
-          error.message.includes(`reconciliation for run ${initial.runId}`),
-      );
-      await settleStoredStop(store, initial.runId, lease);
-      await lease.release();
-      assert.equal(
-        (await store.loadRun(older.runId)).stopRequest.reconciledRevision,
-        null,
-      );
-      await settleStoredStop(store, older.runId, olderLease);
-      await worktree.release();
-      await olderLease.release();
+              ? /restart the Agent Runner MCP server/iu.test(error.message)
+              : error.message.includes(
+                  `lease belongs to run ${older.runId}`,
+                )) &&
+            error.message.includes(`reconciliation for run ${initial.runId}`),
+        );
+        await settleStoredStop(store, initial.runId, lease);
+        await lease.release();
+        assert.equal(
+          (await store.loadRun(older.runId)).stopRequest.reconciledRevision,
+          null,
+        );
+        await settleStoredStop(store, older.runId, olderLease);
+        await worktree.release();
+        await olderLease.release();
+      } finally {
+        if (!finished) onExit?.(exitCode);
+        await pending?.catch(() => {});
+        if (
+          lease &&
+          (await store.loadRun(initial.runId)).stopRequest
+            ?.reconciledRevision === null
+        )
+          await settleStoredStop(store, initial.runId, lease);
+        if (
+          (await store.loadRun(older.runId)).stopRequest?.reconciledRevision ===
+          null
+        )
+          await settleStoredStop(store, older.runId, olderLease);
+        await lease?.release();
+        await worktree.release();
+        await olderLease.release();
+      }
     });
   }
 });
@@ -1048,81 +1096,97 @@ test("action-free ownerless stop recovery uses a new exact-revision key and wait
       };
       const launched = deferred();
       let lease;
+      let recovering;
       let onExit;
-      let launches = 0;
       let finished = false;
-      const control = createMcpControlPlane({
-        runner: storedRunner(store, paths),
-        runStore: store,
-        async launchRun(runId, action, options) {
-          launches += 1;
-          assert.equal(action, null);
-          assert.equal(options.stopCheckpointRevision, initial.revision);
-          const intent = await store.readAction(identity);
-          assert.equal(intent.status, "intent");
-          assert.equal(intent.context.stopCheckpointRevision, initial.revision);
-          lease = await store.acquireRunLease(runId);
-          await store.recordStopActivity(lease, {
-            actor: "runner",
-            phase: "stop",
-            kind: "reconciling",
-            message: "Reconciling stop.",
-          });
-          onExit = options.onExit;
-          launched.resolve();
-        },
-      });
-      await assert.rejects(
-        control.runResume({
-          ...input,
-          idempotencyKey: "stale",
-          expectedRevision: initial.revision,
-        }),
-        /stale/u,
-      );
-      await assert.rejects(
-        control.runResume({
-          ...input,
-          idempotencyKey: "non-null",
-          action: { type: "extra-fix-rounds", amount: 1 },
-        }),
-        /action-free/u,
-      );
-      const recovering = control.runResume(input);
-      recovering.then(
-        () => {
-          finished = true;
-        },
-        () => {
-          finished = true;
-        },
-      );
-      await launched.promise;
-      await new Promise(setImmediate);
-      assert.equal(finished, false);
-      const active = await store.loadRun(initial.runId);
-      await assert.rejects(
-        control.runResume({
-          ...input,
-          expectedRevision: active.revision,
-          idempotencyKey: "competing-recovery",
-        }),
-        { code: "ERR_RUN_LEASED" },
-      );
-      const settled = await settleStoredStop(store, initial.runId, lease);
-      await lease.release();
-      onExit(0);
-      assert.deepEqual(await recovering, { runId: initial.runId });
-      assert.deepEqual(await control.runResume(input), {
-        runId: initial.runId,
-      });
-      assert.equal(launches, 1);
-      assert.equal((await store.readAction(identity)).status, "completed");
-      assert.equal(
-        settled.pipelineState.workflowState,
-        kind === "cancel_requested" ? "CANCELED" : "WAITING_FOR_USER",
-      );
-      assert.equal(settled.pause.operatorResume.workflowState, "CLARIFY");
+      let launches = 0;
+      try {
+        const control = createMcpControlPlane({
+          runner: storedRunner(store, paths),
+          runStore: store,
+          async launchRun(runId, action, options) {
+            launches += 1;
+            assert.equal(action, null);
+            assert.equal(options.stopCheckpointRevision, initial.revision);
+            const intent = await store.readAction(identity);
+            assert.equal(intent.status, "intent");
+            assert.equal(
+              intent.context.stopCheckpointRevision,
+              initial.revision,
+            );
+            lease = await store.acquireRunLease(runId);
+            await store.recordStopActivity(lease, {
+              actor: "runner",
+              phase: "stop",
+              kind: "reconciling",
+              message: "Reconciling stop.",
+            });
+            onExit = options.onExit;
+            launched.resolve();
+          },
+        });
+        await assert.rejects(
+          control.runResume({
+            ...input,
+            idempotencyKey: "stale",
+            expectedRevision: initial.revision,
+          }),
+          /stale/u,
+        );
+        await assert.rejects(
+          control.runResume({
+            ...input,
+            idempotencyKey: "non-null",
+            action: { type: "extra-fix-rounds", amount: 1 },
+          }),
+          /action-free/u,
+        );
+        recovering = control.runResume(input);
+        recovering.then(
+          () => {
+            finished = true;
+          },
+          () => {
+            finished = true;
+          },
+        );
+        await expectEvent(launched.promise, recovering);
+        await new Promise(setImmediate);
+        assert.equal(finished, false);
+        const active = await store.loadRun(initial.runId);
+        await assert.rejects(
+          control.runResume({
+            ...input,
+            expectedRevision: active.revision,
+            idempotencyKey: "competing-recovery",
+          }),
+          { code: "ERR_RUN_LEASED" },
+        );
+        const settled = await settleStoredStop(store, initial.runId, lease);
+        await lease.release();
+        onExit(0);
+        assert.deepEqual(await recovering, { runId: initial.runId });
+        assert.deepEqual(await control.runResume(input), {
+          runId: initial.runId,
+        });
+        assert.equal(launches, 1);
+        assert.equal((await store.readAction(identity)).status, "completed");
+        assert.equal(
+          settled.pipelineState.workflowState,
+          kind === "cancel_requested" ? "CANCELED" : "WAITING_FOR_USER",
+        );
+        assert.equal(settled.pause.operatorResume.workflowState, "CLARIFY");
+      } finally {
+        if (!finished) onExit?.(1);
+        await recovering?.catch(() => {});
+        if (
+          lease &&
+          (await store.loadRun(initial.runId)).stopRequest
+            ?.reconciledRevision === null
+        )
+          await settleStoredStop(store, initial.runId, lease);
+        await lease?.release();
+      }
     });
   }
 });
@@ -3064,8 +3128,19 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
   };
   const control = createMcpControlPlane({ runner, runStore: observedStore });
   const notifications = [];
+  const waitAbort = new AbortController();
+  const waiting = control.runWait(
+    { runId: RUN_ID, cursor: 0, timeoutMs: 1_000, progress: true },
+    {
+      progressToken: "progress-1",
+      signal: waitAbort.signal,
+      async notify(notification) {
+        notifications.push(notification);
+      },
+    },
+  );
   const transition = (async () => {
-    await waitStarted.promise;
+    await expectEvent(waitStarted.promise, waiting);
     const lease = await store.acquireRunLease(RUN_ID);
     try {
       const run = await store.recoverRun(lease);
@@ -3091,18 +3166,13 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
       await lease.release();
     }
   })();
-
-  const waited = await control.runWait(
-    { runId: RUN_ID, cursor: 0, timeoutMs: 1_000, progress: true },
-    {
-      progressToken: "progress-1",
-      signal: new AbortController().signal,
-      async notify(notification) {
-        notifications.push(notification);
-      },
-    },
-  );
-  await transition;
+  let waited;
+  try {
+    [waited] = await Promise.all([waiting, transition]);
+  } finally {
+    waitAbort.abort();
+    await Promise.allSettled([waiting, transition]);
+  }
   assert.equal(waited.status, "WAITING_FOR_USER");
   assert.equal(waited.mode, "independent");
   assert.equal(waited.timedOut, false);
@@ -3199,9 +3269,14 @@ test("waits by revision, emits public progress, and leaves timeouts read-only", 
     },
     { signal: abort.signal },
   );
-  await abortWaitStarted.promise;
-  abort.abort();
-  await assert.rejects(aborted, (error) => error.name === "AbortError");
+  try {
+    await expectEvent(abortWaitStarted.promise, aborted);
+    abort.abort();
+    await assert.rejects(aborted, (error) => error.name === "AbortError");
+  } finally {
+    abort.abort();
+    await aborted.catch(() => {});
+  }
   assert.equal((await store.loadRun(SECOND_RUN_ID)).revision, 1);
 });
 
@@ -3232,6 +3307,8 @@ test(
     assert.equal(checkpoint.preparation, null);
     const lease = await store.acquireRunLease(RUN_ID);
     const abort = new AbortController();
+    let waiting;
+    let onWait = () => {};
     try {
       const directory = await store.getRunDirectory(RUN_ID);
       const readCanonical = () =>
@@ -3241,7 +3318,6 @@ test(
           ),
         );
       const canonicalBytes = await readCanonical();
-      let onWait = () => {};
       const control = createMcpControlPlane({
         runner: storedRunner(store, paths),
         runStore: {
@@ -3275,8 +3351,8 @@ test(
         onWait = () => {
           onLivenessCheck = checked.resolve;
         };
-        const waiting = control.runWait(input, { signal: abort.signal });
-        await checked.promise;
+        waiting = control.runWait(input, { signal: abort.signal });
+        await expectEvent(checked.promise, waiting);
         // After the injected liveness read, inspection finishes through microtasks.
         await new Promise(setImmediate);
         onLivenessCheck = () => {};
@@ -3307,157 +3383,214 @@ test(
         assert.deepEqual(await readCanonical(), canonicalBytes);
       }
     } finally {
+      onLivenessCheck = () => {};
+      onWait = () => {};
       abort.abort();
+      await waiting?.catch(() => {});
       t.mock.timers.reset();
       await lease.release();
     }
   },
 );
 
-test("projects live and crashed provider activity through status and wait", async (t) => {
-  const paths = await workspace(t, "agent-runner-mcp-provider-activity-");
-  const ownerProcessId = 424_242;
-  let ownerIsAlive = true;
-  const store = createRunStore({
-    stateRoot: paths.stateRoot,
-    processId: ownerProcessId,
-    processIsAlive: (pid) => pid === ownerProcessId && ownerIsAlive,
-    processIdentity: (pid) => ({
-      bootId: "11111111-1111-4111-8111-111111111111",
-      startTicks: String(pid),
-    }),
-    ownerProbeIntervalMs: 10,
-  });
-  await createStoredRun(store, paths);
-  const lease = await store.acquireRunLease(RUN_ID);
-  const turn = { role: "planner", phase: "clarify" };
-  const started = await store.startAgentTurn(lease, turn, {
-    activity: {
-      actor: turn.role,
-      phase: turn.phase,
-      kind: "turn-started",
-      message: "planner clarify turn started.",
-    },
-  });
-  const registered = await store.recordExecutionProcess(lease, 4242, {
-    processIdentity: {
-      bootId: "11111111-1111-4111-8111-111111111111",
-      startTicks: "4242",
-    },
-    namespaceId: "pid:[4026533000]",
-    ancestryBaseline: [
-      {
+for (const failureAt of [null, "held wait", "replacement lease"]) {
+  const description =
+    failureAt === null
+      ? "projects live and crashed provider activity through status and wait"
+      : `provider activity teardown preserves a failure during ${failureAt}`;
+  test(description, async (t) => {
+    const paths = await workspace(t, "agent-runner-mcp-provider-activity-");
+    const ownerProcessId = 424_242;
+    let ownerIsAlive = true;
+    const store = createRunStore({
+      stateRoot: paths.stateRoot,
+      processId: ownerProcessId,
+      processIsAlive: (pid) => pid === ownerProcessId && ownerIsAlive,
+      processIdentity: (pid) => ({
         bootId: "11111111-1111-4111-8111-111111111111",
-        pid: 1,
-        startTicks: "1",
-      },
-    ],
-  });
-  assert.deepEqual(
-    registered.executionProcess.launchCutoff,
-    registered.executionProcess.processIdentity,
-  );
-  const control = createMcpControlPlane({
-    runner: storedRunner(store, paths),
-    runStore: store,
-  });
+        startTicks: String(pid),
+      }),
+      ownerProbeIntervalMs: 10,
+    });
+    await createStoredRun(store, paths, {
+      roles: { planner: { backend: "codex" } },
+    });
+    let heldLease = await store.acquireRunLease(RUN_ID);
+    const abort = new AbortController();
+    let heldWait;
+    const turn = { role: "planner", phase: "clarify" };
+    const failure = new Error("Injected provider activity failure.");
+    const operation = (async () => {
+      try {
+        const started = await store.startAgentTurn(heldLease, turn, {
+          activity: {
+            actor: turn.role,
+            phase: turn.phase,
+            kind: "turn-started",
+            message: "planner clarify turn started.",
+          },
+        });
+        await store.startObservationAttempt(heldLease, {
+          role: turn.role,
+          checkpoint: turn.phase,
+        });
+        const registered = await store.recordExecutionProcess(heldLease, 4242, {
+          processIdentity: {
+            bootId: "11111111-1111-4111-8111-111111111111",
+            startTicks: "4242",
+          },
+          namespaceId: "pid:[4026533000]",
+          ancestryBaseline: [
+            {
+              bootId: "11111111-1111-4111-8111-111111111111",
+              pid: 1,
+              startTicks: "1",
+            },
+          ],
+        });
+        assert.deepEqual(
+          registered.executionProcess.launchCutoff,
+          registered.executionProcess.processIdentity,
+        );
+        const control = createMcpControlPlane({
+          runner: storedRunner(store, paths),
+          runStore: store,
+        });
 
-  const liveStatus = await control.runStatus({ runId: RUN_ID });
-  assert.deepEqual(liveStatus.execution, {
-    state: "running",
-    leaseOwner: "live",
-    processRecord: "persisted",
-    role: "planner",
-    phase: "clarify",
-  });
-  assert.doesNotMatch(
-    JSON.stringify(liveStatus),
-    /ancestryBaseline|bootId|launchCutoff|startTicks/u,
-  );
-  const waiting = await control.runWait({
-    runId: RUN_ID,
-    cursor: started.revision,
-    timeoutMs: 10,
-    progress: false,
-  });
-  assert.equal(waiting.timedOut, true);
-  assert.deepEqual(waiting.execution, {
-    state: "running",
-    leaseOwner: "live",
-    processRecord: "persisted",
-    role: "planner",
-    phase: "clarify",
-  });
+        const liveStatus = await control.runStatus({ runId: RUN_ID });
+        assert.deepEqual(liveStatus.execution, {
+          state: "running",
+          leaseOwner: "live",
+          processRecord: "persisted",
+          role: "planner",
+          phase: "clarify",
+        });
+        assert.doesNotMatch(
+          JSON.stringify(liveStatus),
+          /ancestryBaseline|bootId|launchCutoff|startTicks/u,
+        );
+        const waiting = await control.runWait({
+          runId: RUN_ID,
+          cursor: started.revision,
+          timeoutMs: 10,
+          progress: false,
+        });
+        assert.equal(waiting.timedOut, true);
+        assert.deepEqual(waiting.execution, {
+          state: "running",
+          leaseOwner: "live",
+          processRecord: "persisted",
+          role: "planner",
+          phase: "clarify",
+        });
 
-  // An owner death changes no file; a held wait still observes it and
-  // returns without writing state, lease, or process records.
-  const leasePath = join(await store.getRunDirectory(RUN_ID), ".lease");
-  const leaseBytes = await readFile(leasePath);
-  const heldWaitStarted = Promise.withResolvers();
-  const heldControl = createMcpControlPlane({
-    runner: storedRunner(store, paths),
-    runStore: {
-      ...store,
-      async waitForRunChange(...argumentsList) {
-        heldWaitStarted.resolve();
-        return store.waitForRunChange(...argumentsList);
-      },
-    },
-  });
-  const heldWait = heldControl.runWait({
-    runId: RUN_ID,
-    cursor: started.revision,
-    timeoutMs: 30_000,
-    progress: false,
-  });
-  await heldWaitStarted.promise;
-  ownerIsAlive = false;
-  const lostOwnerWait = await heldWait;
-  assert.equal(lostOwnerWait.timedOut, false);
-  assert.equal(lostOwnerWait.revision, registered.revision);
-  assert.deepEqual(lostOwnerWait.execution, {
-    state: "interrupted",
-    leaseOwner: "dead",
-    processRecord: "persisted",
-    role: "planner",
-    phase: "clarify",
-  });
-  assert.deepEqual(await readFile(leasePath), leaseBytes);
-  const retained = await store.loadRun(RUN_ID);
-  assert.equal(retained.revision, registered.revision);
-  assert.deepEqual(retained.executionProcess, registered.executionProcess);
+        // An owner death changes no file; a held wait still observes it and
+        // returns without writing state, lease, or process records.
+        const leasePath = join(await store.getRunDirectory(RUN_ID), ".lease");
+        const leaseBytes = await readFile(leasePath);
+        const heldWaitStarted = Promise.withResolvers();
+        const heldControl = createMcpControlPlane({
+          runner: storedRunner(store, paths),
+          runStore: {
+            ...store,
+            async waitForRunChange(...argumentsList) {
+              heldWaitStarted.resolve();
+              return store.waitForRunChange(...argumentsList);
+            },
+          },
+        });
+        heldWait = heldControl.runWait(
+          {
+            runId: RUN_ID,
+            cursor: started.revision,
+            timeoutMs: 30_000,
+            progress: false,
+          },
+          { signal: abort.signal },
+        );
+        await expectEvent(heldWaitStarted.promise, heldWait);
+        if (failureAt === "held wait") throw failure;
+        ownerIsAlive = false;
+        const lostOwnerWait = await heldWait;
+        assert.equal(lostOwnerWait.timedOut, false);
+        assert.equal(lostOwnerWait.revision, registered.revision);
+        assert.deepEqual(lostOwnerWait.execution, {
+          state: "interrupted",
+          leaseOwner: "dead",
+          processRecord: "persisted",
+          role: "planner",
+          phase: "clarify",
+        });
+        assert.deepEqual(await readFile(leasePath), leaseBytes);
+        const retained = await store.loadRun(RUN_ID);
+        assert.equal(retained.revision, registered.revision);
+        assert.deepEqual(
+          retained.executionProcess,
+          registered.executionProcess,
+        );
 
-  assert.equal(await store.runIsLeased(RUN_ID), true);
-  assert.equal(await store.runLeaseOwnerIsLive(RUN_ID), false);
-  const leaseRecord = JSON.parse(await readFile(leasePath, "utf8"));
-  assert.equal(leaseRecord.pid, ownerProcessId);
-  const interruptedWait = await control.runWait({
-    runId: RUN_ID,
-    cursor: started.revision,
-    timeoutMs: 10,
-    progress: false,
-  });
-  assert.equal(interruptedWait.timedOut, false);
-  assert.deepEqual(interruptedWait.execution, {
-    state: "interrupted",
-    leaseOwner: "dead",
-    processRecord: "persisted",
-    role: "planner",
-    phase: "clarify",
-  });
+        assert.equal(await store.runIsLeased(RUN_ID), true);
+        assert.equal(await store.runLeaseOwnerIsLive(RUN_ID), false);
+        const leaseRecord = JSON.parse(await readFile(leasePath, "utf8"));
+        assert.equal(leaseRecord.pid, ownerProcessId);
+        const interruptedWait = await control.runWait({
+          runId: RUN_ID,
+          cursor: started.revision,
+          timeoutMs: 10,
+          progress: false,
+        });
+        assert.equal(interruptedWait.timedOut, false);
+        assert.deepEqual(interruptedWait.execution, {
+          state: "interrupted",
+          leaseOwner: "dead",
+          processRecord: "persisted",
+          role: "planner",
+          phase: "clarify",
+        });
 
-  await store.recordExecutionProcess(lease, null);
-  await lease.release();
-  ownerIsAlive = true;
-  const resumedLease = await store.acquireRunLease(RUN_ID);
-  await store.recoverRun(resumedLease);
-  await store.finishAgentTurn(resumedLease, turn);
-  await resumedLease.release();
-  assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
-    state: "idle",
-    leaseOwner: "none",
-    processRecord: "none",
-    role: null,
-    phase: null,
+        await store.recordExecutionProcess(heldLease, null);
+        await heldLease.release();
+        heldLease = null;
+        ownerIsAlive = true;
+        heldLease = await store.acquireRunLease(RUN_ID);
+        if (failureAt === "replacement lease") throw failure;
+        await store.recoverRun(heldLease);
+        await store.finishAgentTurn(heldLease, turn);
+        await heldLease.release();
+        heldLease = null;
+      } finally {
+        abort.abort();
+        await heldWait?.catch(() => {});
+        if (heldLease !== null) {
+          const retired = await store.recordExecutionProcess(heldLease, null);
+          if (retired.activeTurn !== null)
+            await store.finishAgentTurn(heldLease, turn);
+          await heldLease.release();
+          heldLease = null;
+        }
+      }
+    })();
+    if (failureAt === null) await operation;
+    else await assert.rejects(operation, (error) => error === failure);
+    const settled = await store.loadRun(RUN_ID);
+    assert.equal(settled.executionProcess, null);
+    assert.equal(settled.activeTurn, null);
+    assert.equal(settled.observations.attempts.length, 1);
+    assert.equal(settled.observations.attempts[0].status, "interrupted");
+    assert.equal(settled.observations.attempts[0].accounting, "incomplete");
+    assert.equal(await store.runIsLeased(RUN_ID), false);
+    const released = await store.acquireRunLease(RUN_ID);
+    await released.release();
+    const control = createMcpControlPlane({
+      runner: storedRunner(store, paths),
+      runStore: store,
+    });
+    assert.deepEqual((await control.runStatus({ runId: RUN_ID })).execution, {
+      state: "idle",
+      leaseOwner: "none",
+      processRecord: "none",
+      role: null,
+      phase: null,
+    });
   });
-});
+}

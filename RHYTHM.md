@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Lifecycle fixtures propagate early operation outcomes.** MCP control-plane
+  event waits and the Runner protected-configuration stop fixture race their
+  owning operations and settle held work during teardown. Early completion or
+  rejection now fails the fixture instead of leaving its event wait pending,
+  while production stop/recovery behavior and assertions remain unchanged.
+  Provider-activity cleanup retires synthetic process, observation and turn
+  ownership before releasing its current lease; injected failures cover both
+  original and replacement ownership without masking the original error.
+
 - **Finalization rejection retains the validator's known field.** Schema-field
   and trusted-position diagnostics distinguish invalid identities, commands,
   reserved placeholders, evidence and status consistency without retaining

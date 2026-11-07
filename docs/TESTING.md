@@ -673,6 +673,16 @@ test to this tier merely because it fails or has a slow fixture: first remove
 redundant setup and use lightweight effects for policy. Pure migration
 validation remains in the fast tier.
 
+MCP control-plane and Runner orchestration fixtures race expected events against
+their owning operations so early fulfillment or rejection propagates instead of
+leaving an event wait pending. Teardown settles held operations, callbacks and
+leases even after an assertion fails. Provider-activity teardown retires its
+synthetic process, observation and active turn under the currently held lease,
+including after replacement acquisition. Injected failures preserve the original
+error and prove fresh lease acquisition. The existing protected-configuration
+stop race and stop/recovery assertions remain unchanged; these fixture corrections
+change no production lifecycle or inspection diagnosis.
+
 ## Finalization
 
 The fast `pipelines/init/test/proposals.test.js` suite owns the pure

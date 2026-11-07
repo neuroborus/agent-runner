@@ -2164,6 +2164,7 @@ test("retains protected-configuration drift through stop reconciliation", async 
   await mkdir(configurationDirectory, { recursive: true });
   await writeFile(configurationPath, '{"schemaVersion":1}\n');
   const entered = Promise.withResolvers();
+  let releaseProvider;
   const store = createRunStore({ stateRoot: fixture.stateRoot });
   const runner = runnerFor(
     fixture,
@@ -2173,11 +2174,12 @@ test("retains protected-configuration drift through stop reconciliation", async 
         async run(request) {
           entered.resolve();
           return new Promise((resolve, reject) => {
-            request.signal.addEventListener(
-              "abort",
-              () => reject(request.signal.reason),
-              { once: true },
-            );
+            const onAbort = () => reject(request.signal.reason);
+            releaseProvider = () => {
+              request.signal.removeEventListener("abort", onAbort);
+              reject(new Error("Test provider retired."));
+            };
+            request.signal.addEventListener("abort", onAbort, { once: true });
           });
         },
       },
@@ -2192,29 +2194,42 @@ test("retains protected-configuration drift through stop reconciliation", async 
     roleOverrides: {},
     sourceSession: null,
   });
-  await entered.promise;
-  await writeFile(
-    configurationPath,
-    '{"schemaVersion":1,"artifactRoot":"changed"}\n',
-  );
-  const [runId] = await readdir(join(fixture.stateRoot, "runs"));
-  const current = (await runner.status(runId)).run;
-  await runner.requestOperatorStop({
-    runId: current.runId,
-    kind: "pause_requested",
-    expectedRevision: current.revision,
-    idempotencyKey: "configuration-stop",
-  });
+  try {
+    await Promise.race([
+      entered.promise,
+      active.then(() => {
+        throw new Error("Run completed before the expected provider turn.");
+      }),
+    ]);
+    await writeFile(
+      configurationPath,
+      '{"schemaVersion":1,"artifactRoot":"changed"}\n',
+    );
+    const [runId] = await readdir(join(fixture.stateRoot, "runs"));
+    const current = (await runner.status(runId)).run;
+    await runner.requestOperatorStop({
+      runId: current.runId,
+      kind: "pause_requested",
+      expectedRevision: current.revision,
+      idempotencyKey: "configuration-stop",
+    });
 
-  const stopped = (await active).run;
-  assert.equal(stopped.pause.reason, "operator_paused");
-  assert.deepEqual(stopped.pause.operatorResume.pause, {
-    reason: "project_configuration_changed",
-    code: "ERR_PROJECT_CONFIGURATION_CHANGED",
-  });
-  assert.equal(stopped.pause.operatorResume.workflowState, "WAITING_FOR_USER");
-  const resumed = await runner.resume({ runId: stopped.runId, action: null });
-  assert.equal(resumed.run.pause.reason, "project_configuration_changed");
+    const stopped = (await active).run;
+    assert.equal(stopped.pause.reason, "operator_paused");
+    assert.deepEqual(stopped.pause.operatorResume.pause, {
+      reason: "project_configuration_changed",
+      code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+    });
+    assert.equal(
+      stopped.pause.operatorResume.workflowState,
+      "WAITING_FOR_USER",
+    );
+    const resumed = await runner.resume({ runId: stopped.runId, action: null });
+    assert.equal(resumed.run.pause.reason, "project_configuration_changed");
+  } finally {
+    releaseProvider?.();
+    await active.catch(() => {});
+  }
 });
 
 test("never reads an Agent Runner configuration file in the target repository", async (t) => {
