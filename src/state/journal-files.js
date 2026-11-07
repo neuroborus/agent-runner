@@ -97,6 +97,7 @@ export async function readJournalSegment(
   limit,
   prefix = null,
   includePrefix = false,
+  captureAppend = false,
 ) {
   const handle = await openRegularFile(filePath, constants.O_RDONLY);
   try {
@@ -155,7 +156,20 @@ export async function readJournalSegment(
       pathAfter.links === 1 &&
       sameJournalIdentity(before, after) &&
       sameJournalIdentity(after, pathAfter);
-    if (prefix && !stable) return null;
+    // Observation alone may retain a growing active segment for a subsequent
+    // exact-prefix proof. This never certifies the raced read or authorizes a
+    // retry: the caller must verify every captured byte under stable observations.
+    if (
+      prefix &&
+      !stable &&
+      !(
+        captureAppend &&
+        captured &&
+        after.size > before.size &&
+        pathAfter.size >= after.size
+      )
+    )
+      return null;
     return {
       source: source.toString("utf8"),
       observation: stable ? after : null,

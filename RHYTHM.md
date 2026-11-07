@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-07
 
+- **Observation recertification preserves raced extension bytes.** Cold capture,
+  canonical recertification and extension may each overlap owner publication.
+  Observation alone retains a growing active segment as capture evidence,
+  validates its history through the original operation's byte proof, then drains
+  a stable verification of that exact consumed prefix and segment namespace.
+  Only this certificate permits continuation or the existing bounded busy outcome;
+  page contents and cursors stay at the same endpoint even when publication has
+  advanced further. Changed original or newly consumed bytes, controls, missing
+  proof and unvalidated rollover remain strict failures. Publication and recovery
+  retain their exact endpoints and acquire no observation retry allowance.
+
 - **Init inspection rejection becomes an actionable durable stop.** Expected
   discovery, inspection, preparation and recovery failures settle under the
   execution lease before release, including failures before a provider attempt.

@@ -5277,14 +5277,14 @@ digests over every certified byte prefix and compare them to the original bindin
 The scan re-lists the recognized journal namespace before certifying its result.
 Directory device/inode, mode, and ownership must remain stable; unrelated
 choosing/ready claims and derived/control publications may change directory
-timestamps or size without changing journal history. Full before/after file
-handle and path observations, including link count and change time, must remain
-stable across consumed-byte reading and semantic validation. Timestamps alone
+timestamps or size without changing journal history. Certification requires
+stable full before/after file handle and path observations, including link count
+and change time, while reading the byte prefix bound to semantic validation. Timestamps alone
 grant no reuse. A full scan retains bounded operation-local capture bindings
 for the exact complete bytes read even when append or rotation prevents these
-stable closing observations. Capture is not certification: one canonical scan
+stable closing observations. Capture is not certification: canonical validation
 must prove the original digests, file and directory identities, ordered segment
-prefix and captured endpoint event while validating the complete current history.
+prefix and captured endpoint event while validating the complete observed history.
 A later self-consistent history or equal state endpoint cannot substitute for
 that proof. Changed bytes, replacement or unavailable proof invalidate reuse
 conservatively without extra retry allowances.
@@ -5316,9 +5316,18 @@ an owner's append or rotation from an edit, so they stay unchanged. When a
 lock-free page's drain fails with `ERR_INVALID_EVENT_LOG`, the journal's
 `extendSnapshot` reloads through the original certificate as publication proof:
 every original binding's digest, identity, link count and stable observation,
-the recognized namespace, and continuity of the appended records. Only a
-certified snapshot with a strictly later revision, passing the same custody and
-state-root checks, permits another drain under the same cursor and limit rules.
+the recognized namespace, and continuity of the appended records. If append races
+this reload itself, observation alone may retain the complete consumed-byte
+capture under unchanged file identities and controls with a growing active
+segment. It must then drain a separate stable exact-prefix verification of all
+those bytes, binding the semantic validation to that same endpoint. This final
+verification requires the exact captured segment namespace; unvalidated rollover,
+including a newly sealed partial tail, cannot certify the raced scan. Changed
+bytes or unavailable or unstable final proof still fail strictly. No raced
+capture becomes a reusable checkpoint, and the finite continuation limit remains
+unchanged. Only a certified snapshot with a strictly later revision, passing the
+same custody and state-root checks, permits another drain under the same cursor
+and limit rules.
 A page permits two such continuations (three drains). Each extension uses the
 preceding operation-local certificate, preserving the original run identity and
 every original byte binding transitively; optional checkpoint replacement or
@@ -5339,6 +5348,10 @@ with publication, extension uses that scan's original capture bindings and
 endpoint. It repeats complete semantic validation rather than treating the
 capture as a reusable checkpoint. Only a certified strictly later revision
 enters the same continuation loop; certification adds no retry allowance.
+Append during cold capture, canonical recertification and extension can therefore
+continue through the same bound. The final stable byte proof may certify a
+consumed endpoint preceding the latest publication; its activities and cursor
+remain bound to that endpoint, with later activity available to a subsequent read.
 Canonical certification at an unchanged endpoint also requires the original
 capture proof. A returned page always pairs its activities and cursor with the
 same snapshot; certification never silently replaces it with newer activities.

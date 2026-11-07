@@ -2111,6 +2111,8 @@ export function createRunStore({
           throw cause;
         // Every continuation extends the preceding operation-local certificate,
         // retaining the original bytes and run identity even after cache eviction.
+        // A raced extension must finish its exact consumed-prefix certification
+        // before authorization, another drain, or the existing exhaustion bound.
         // Error codes alone grant neither a retry nor a retryable outcome.
         const extended = await journal.extendSnapshot(runDirectory, source);
         if (extended === null) throw cause;

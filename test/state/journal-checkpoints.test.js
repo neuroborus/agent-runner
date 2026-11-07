@@ -58,6 +58,7 @@ import {
 import { createStateJournal } from "../../src/state/journal.js";
 import { createRunner } from "../../src/runner/index.js";
 import { createMcpControlPlane } from "../../src/mcp/index.js";
+import { main } from "../../src/index.js";
 
 async function fixture(
   t,
@@ -969,6 +970,22 @@ function publishActivity(store, created, rounds) {
   );
 }
 
+async function readCanonicalFiles(directory) {
+  const names = (await readdir(directory))
+    .filter(
+      (name) =>
+        ["state.json", "progress.md"].includes(name) ||
+        /^events(?:-[0-9]+)?\.jsonl$/u.test(name),
+    )
+    .sort();
+  return Promise.all(
+    names.map(async (name) => [
+      name,
+      await readFile(join(directory, name), "utf8"),
+    ]),
+  );
+}
+
 test("an unstable full scan retains its consumed prefix without granting mutation authority", async (t) => {
   const { store, created } = await fixture(t);
   const directory = created.directoryPath;
@@ -1042,6 +1059,187 @@ for (const mode of ["cold", "evicted"]) {
       { revision: 2, message: concurrentActivity.message },
     ]);
     assert.equal(page.cursor, 2);
+  });
+}
+
+for (const mode of ["warm", "cold", "evicted", "overflow"]) {
+  test(`activity certifies its consumed prefix through capture, recertification and extension publication: ${mode}`, async (t) => {
+    const { store, created, input, stateRoot } = await fixture(t);
+    const { runId } = created.state;
+    const overflow = mode === "overflow";
+    const base = overflow
+      ? (await seedActivities({ created }, 1030, "Checkpoint recorded.")).latest
+      : created.state;
+    const observer = createRunStore({ stateRoot });
+    if (["warm", "evicted"].includes(mode)) await observer.loadRun(runId);
+    if (mode === "evicted") {
+      for (let index = 0; index < 8; index += 1) {
+        const extra = await observer.createRun(input);
+        await extra.lease.release();
+      }
+    }
+    const readCanonical = () => readCanonicalFiles(created.directoryPath);
+    let publications = 0;
+    let canonical;
+    await publishDuringStreams(
+      t,
+      join(
+        created.directoryPath,
+        overflow ? "events-000010.jsonl" : "events.jsonl",
+      ),
+      mode === "warm" ? [3, 5] : [1, 3, 5],
+      async () => {
+        await publishActivity(
+          store,
+          created,
+          (base.counters.rounds ?? 0) + ++publications,
+        );
+        canonical = await readCanonical();
+      },
+      { afterRead: true },
+    );
+    const page = await observer.readPublicActivity(runId, {
+      limit: overflow ? 2 : 100,
+    });
+    assert.equal(publications, mode === "warm" ? 2 : 3);
+    assert.deepEqual(
+      pageEntries(page),
+      overflow
+        ? [
+            { revision: 1, message: "Run created." },
+            { revision: 2, message: "Checkpoint recorded." },
+          ]
+        : [
+            { revision: 1, message: "Run created." },
+            { revision: 2, message: concurrentActivity.message },
+            { revision: 3, message: concurrentActivity.message },
+          ].slice(0, mode === "warm" ? 2 : 3),
+    );
+    // The certified endpoint precedes the last publication. Its cursor must
+    // match that prefix, rather than the newer canonical state or a lost page.
+    assert.equal(page.cursor, overflow || mode === "warm" ? 2 : 3);
+    assert.equal(
+      (
+        await observer.readPublicActivity(runId, {
+          afterRevision: base.revision,
+        })
+      ).cursor,
+      base.revision + publications,
+    );
+    assert.deepEqual(
+      await readCanonical(),
+      canonical,
+      "observation writes nothing",
+    );
+  });
+}
+
+test("publication during recertification and extension consumes the existing observation bound", async (t) => {
+  const { store, created, stateRoot } = await fixture(t);
+  let publications = 0;
+  let canonical;
+  await publishDuringStreams(
+    t,
+    join(created.directoryPath, "events.jsonl"),
+    [1, 3, 5, 9, 11, 15, 17],
+    async () => {
+      await publishActivity(store, created, ++publications);
+      canonical = await readCanonicalFiles(created.directoryPath);
+    },
+    { afterRead: true },
+  );
+  const observer = createRunStore({ stateRoot });
+  await assert.rejects(
+    observer.readPublicActivity(created.state.runId),
+    (error) => {
+      assert.ok(error instanceof RunObservationBusyError);
+      assert.equal(error.retryable, true);
+      return true;
+    },
+  );
+  assert.equal(publications, 7);
+  assert.deepEqual(await readCanonicalFiles(created.directoryPath), canonical);
+  assert.equal(
+    (await observer.readPublicActivity(created.state.runId)).cursor,
+    8,
+  );
+});
+
+for (const change of [
+  "original-bytes",
+  "extension-bytes",
+  "control",
+  "link",
+  "namespace",
+  "sealed-tail",
+]) {
+  test(`raced recertification cannot certify changed ${change}`, async (t) => {
+    const { store, created, stateRoot } = await fixture(t);
+    const path = join(created.directoryPath, "events.jsonl");
+    let publications = 0;
+    let editCapturedExtension = false;
+    eventDecodes(t, () => {
+      if (!editCapturedExtension) return;
+      editCapturedExtension = false;
+      // The extension has already consumed and hashed these bytes, including
+      // records beyond the original capture. Its final prefix proof must catch
+      // this change even though the initial capture's bytes remain unchanged.
+      const metadata = nativeFilesystem.statSync(path);
+      const source = nativeFilesystem.readFileSync(path, "utf8");
+      writeFileSync(
+        path,
+        source.replace(concurrentActivity.message, "Candidate changed."),
+      );
+      utimesSync(path, metadata.atime, metadata.mtime);
+    });
+    await publishDuringStreams(
+      t,
+      path,
+      [1, 3, 5],
+      async () => {
+        const published = await publishActivity(store, created, ++publications);
+        if (publications !== 3) return;
+        if (change === "extension-bytes") {
+          editCapturedExtension = true;
+        } else if (change === "original-bytes") {
+          const metadata = await stat(path);
+          const source = await readFile(path, "utf8");
+          await writeFile(path, source.replace("Run created.", "Run updated."));
+          await utimes(path, metadata.atime, metadata.mtime);
+        } else if (change === "control") {
+          await filesystem.chmod(path, 0o400);
+        } else if (change === "link") {
+          await link(path, join(stateRoot, "linked-events"));
+        } else if (change === "sealed-tail") {
+          await appendFile(path, '{"partial":');
+          const next = { ...published, revision: published.revision + 1 };
+          await writeFile(
+            join(created.directoryPath, "events-000001.jsonl"),
+            `${JSON.stringify({
+              schemaVersion: next.schemaVersion,
+              revision: next.revision,
+              runId: next.runId,
+              recordedAt: next.updatedAt,
+              state: next,
+              activity: concurrentActivity,
+            })}\n`,
+          );
+        } else {
+          await copyFile(
+            path,
+            join(created.directoryPath, "events-000002.jsonl"),
+          );
+        }
+      },
+      { afterRead: true },
+    );
+    await assert.rejects(
+      createRunStore({ stateRoot }).readPublicActivity(created.state.runId),
+      {
+        code: "ERR_INVALID_EVENT_LOG",
+      },
+    );
+    assert.equal(publications, 3);
   });
 }
 
@@ -1146,7 +1344,13 @@ for (const change of [
   });
 }
 
-for (const mode of ["new-warm", "held-cold", "new-evicted", "full-scan"]) {
+for (const mode of [
+  "new-warm",
+  "held-cold",
+  "new-evicted",
+  "full-scan",
+  "recertification",
+]) {
   test(`MCP waits retain their activity proof through a second concurrent publication: ${mode}`, async (t) => {
     const { store, created, input, stateRoot } = await fixture(t, {
       pipelineId: "plan-authoring",
@@ -1178,7 +1382,7 @@ for (const mode of ["new-warm", "held-cold", "new-evicted", "full-scan"]) {
       ...observer,
       async readPublicActivity(...args) {
         if (held) await wakeCompleted.promise;
-        if (["held-cold", "full-scan"].includes(mode))
+        if (["held-cold", "full-scan", "recertification"].includes(mode))
           pageStore = createRunStore({ stateRoot });
         if (mode === "new-evicted") {
           for (let index = 0; index < 8; index += 1) {
@@ -1186,38 +1390,46 @@ for (const mode of ["new-warm", "held-cold", "new-evicted", "full-scan"]) {
             await extra.lease.release();
           }
         }
-        await publishDuringStreams(
-          t,
-          join(created.directoryPath, "events.jsonl"),
-          mode === "full-scan" ? [1, 7] : [3, 7],
-          async () => {
-            publications += 1;
-            await store.transitionRun(
-              created.lease,
-              {
-                counters: { revisionRounds: publications + Number(held) },
-                ...(publications === 2
-                  ? {
-                      pause: {
-                        reason: "workspace_changed",
-                        code: "ERR_WORKSPACE_DRIFT",
-                      },
-                      pipelineState: {
-                        ...created.state.pipelineState,
-                        workflowState: "WAITING_FOR_USER",
-                      },
-                    }
-                  : {}),
-              },
-              { activity: concurrentActivity },
-            );
-            canonical = await readCanonical();
-          },
-          { afterRead: mode === "full-scan" },
-        );
-        const decoded = eventDecodes(t);
+        const recertification = mode === "recertification";
+        const firstPage = publications === 0;
+        if (firstPage)
+          await publishDuringStreams(
+            t,
+            join(created.directoryPath, "events.jsonl"),
+            recertification
+              ? [1, 3, 5]
+              : mode === "full-scan"
+                ? [1, 7]
+                : [3, 7],
+            async () => {
+              publications += 1;
+              await store.transitionRun(
+                created.lease,
+                {
+                  counters: { revisionRounds: publications + Number(held) },
+                  ...(publications === (recertification ? 3 : 2)
+                    ? {
+                        pause: {
+                          reason: "workspace_changed",
+                          code: "ERR_WORKSPACE_DRIFT",
+                        },
+                        pipelineState: {
+                          ...created.state.pipelineState,
+                          workflowState: "WAITING_FOR_USER",
+                        },
+                      }
+                    : {}),
+                },
+                { activity: concurrentActivity },
+              );
+              canonical = await readCanonical();
+            },
+            { afterRead: mode === "full-scan" || recertification },
+          );
+        const decoded = firstPage ? eventDecodes(t) : null;
         const page = await pageStore.readPublicActivity(...args);
-        assert.equal(decoded.normalized.includes(1), mode !== "new-warm");
+        if (decoded)
+          assert.equal(decoded.normalized.includes(1), mode !== "new-warm");
         return page;
       },
     };
@@ -1272,11 +1484,41 @@ for (const mode of ["new-warm", "held-cold", "new-evicted", "full-scan"]) {
       }
     }
     const waited = await waiting;
-    assert.equal(publications, 2);
+    const recertification = mode === "recertification";
+    assert.equal(publications, recertification ? 3 : 2);
     assert.equal(waited.status, "WAITING_FOR_USER");
     assert.equal(waited.timedOut, false);
-    assert.equal(waited.revision, held ? 4 : 3);
-    assert.deepEqual(progress, held ? [2, 3, 4] : [1, 2, 3]);
+    assert.equal(waited.revision, held || recertification ? 4 : 3);
+    assert.deepEqual(
+      progress,
+      held ? [2, 3, 4] : recertification ? [1, 2, 3, 4] : [1, 2, 3],
+    );
+    if (recertification) {
+      const activity = await control.runActivity({
+        runId,
+        cursor: 0,
+        limit: 100,
+      });
+      assert.deepEqual(
+        activity.activities.map(({ revision }) => revision),
+        [1, 2, 3, 4],
+      );
+      assert.equal(activity.cursor, waited.revision);
+      let output = "";
+      assert.equal(
+        await main(["status", "--run", runId], {
+          runner: createRunner({ runStore: createRunStore({ stateRoot }) }),
+          stdout: {
+            write: (chunk) => {
+              output += chunk;
+            },
+          },
+          stderr: { write: (chunk) => assert.fail(chunk) },
+        }),
+        0,
+      );
+      assert.match(output, /State: WAITING_FOR_USER/u);
+    }
     assert.deepEqual(
       await readCanonical(),
       canonical,

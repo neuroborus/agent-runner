@@ -984,6 +984,15 @@ legal rotation follows decoding during semantic validation. Cold, evicted and
 oversized unretained checkpoints exercise public page/cursor pairing; a cold
 full-scan MCP wait reaches the real Runner status and activity consumers.
 Both certified and full-scan starts retain the three-drain exhaustion bound.
+Additional controlled owner publications during capture, canonical recertification
+and extension exercise warm, cold, evicted and overflow pages. A separate stable
+consumed-prefix proof binds the raced extension's activities and cursor, even
+when canonical state is already later. Repeated raced extensions exhaust the
+existing bound only after that proof; observations leave all canonical journal,
+state and progress bytes unchanged. Original-prefix and newly consumed extension
+edits, file controls, hard links, namespace gaps and a newly sealed incomplete
+tail remain strict rejections. The real MCP activity/wait, Runner and cold CLI
+status consumers share these fixtures without sleeps, polling or providers.
 Activity edits with restored mtime at equal and advanced endpoints,
 file/directory replacement, namespace gaps and changed file controls cannot be
 certified by a later valid scan. Recovery and append reject a captured endpoint

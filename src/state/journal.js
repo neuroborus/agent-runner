@@ -565,6 +565,7 @@ async function* readEvents(
   metadata = {},
   checkpoint = null,
   proof = checkpoint,
+  captureAppend = false,
 ) {
   const directory = await observeJournalDirectory(runDirectory);
   const filenames = await readJournalFilenames(runDirectory);
@@ -600,6 +601,7 @@ async function* readEvents(
         MAX_EVENT_LOG_BYTES,
         prefix,
         checkpoint === null,
+        captureAppend && index === filenames.length - 1,
       );
     } catch (cause) {
       // A bound segment no longer safely openable, such as one gaining a hard
@@ -714,7 +716,7 @@ async function* readEvents(
   }
   const directoryAfter = await observeJournalDirectory(runDirectory);
   stable = stable && sameJournalIdentity(directory, directoryAfter);
-  if (proof && !stable) throw new CheckpointInvalid();
+  if (proof && !stable && !captureAppend) throw new CheckpointInvalid();
   const capturedPrefix = bindings.every(Boolean)
     ? deepFreeze({
         runId,
@@ -740,6 +742,7 @@ async function* streamSnapshotProjection(
   runDirectory,
   snapshot,
   project = true,
+  exactNamespace = false,
 ) {
   const invalid = () => {
     throw new RunStoreError("Run changed during projection streaming.", {
@@ -757,6 +760,7 @@ async function* streamSnapshotProjection(
     certificate.lastRevision !== snapshot.state.revision ||
     !sameJournalIdentity(directory, certificate.directory) ||
     bindings.length > filenames.length ||
+    (exactNamespace && bindings.length !== filenames.length) ||
     bindings.some((binding, index) => binding.filename !== filenames[index])
   )
     invalid();
@@ -865,6 +869,7 @@ async function loadSnapshot(
   resolveStopBoundary,
   checkpoint = null,
   proof = checkpoint,
+  captureAppend = false,
 ) {
   const storedState = await readStoredState(runDirectory, runId);
   // A lagging snapshot outside the adjacent retained pair needs canonical
@@ -894,6 +899,7 @@ async function loadSnapshot(
     eventLog,
     checkpoint,
     proof,
+    captureAppend,
   )) {
     if (event.revision === proof?.lastEvent.revision)
       proofMatched = isDeepStrictEqual(event, proof.lastEvent);
@@ -1046,11 +1052,12 @@ export function createStateJournal({
     return certificate ? { ...snapshot, certificate } : null;
   }
 
-  async function verifyPrefix(directory, snapshot) {
+  async function verifyPrefix(directory, snapshot, exactNamespace = false) {
     for await (const unused of streamSnapshotProjection(
       directory,
       snapshot,
       false,
+      exactNamespace,
     )) {
       void unused;
     }
@@ -1148,16 +1155,32 @@ export function createStateJournal({
         // cannot skip prior states like an already certified checkpoint.
         snapshot.certificate ? snapshot : null,
         proof,
+        true,
       );
     } catch (cause) {
       // Only unavailable proof is classified; every other failure propagates.
       if (cause instanceof CheckpointInvalid) return null;
       throw cause;
     }
-    return extended.certificate &&
-      extended.state.revision > snapshot.state.revision
-      ? extended
-      : null;
+    if (extended.state.revision <= snapshot.state.revision) return null;
+    if (extended.certificate === null) {
+      // An append during this scan can leave a validated capture rather than a
+      // certificate. Prove precisely those consumed bytes, not a replacement
+      // endpoint, before permitting continuation. The original prefix was
+      // matched by the scan; this proof therefore retains it transitively.
+      const captured = capturedProof(extended);
+      if (captured === null) return null;
+      // All captured segments must still describe the complete namespace; an
+      // unvalidated rollover (especially one sealing a partial tail) grants no
+      // recertification of this raced scan.
+      await verifyPrefix(directory, captured, true);
+      extended = {
+        ...extended,
+        certificate: captured.certificate,
+        capturedPrefix: null,
+      };
+    }
+    return extended;
   }
 
   async function writeProgress(directory, snapshot) {

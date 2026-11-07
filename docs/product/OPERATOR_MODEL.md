@@ -455,8 +455,13 @@ and extended by a later revision. This retains the original run identity and
 byte proof through both continuations. Further proved publication exhausting
 that bound returns `ERR_RUN_OBSERVATION_BUSY` with `retryable: true`; a later
 explicit observation is safe and the run continues unchanged. MCP projects that
-typed outcome without automatically retrying. Corruption, rollback, substitution or uncertain proof
-still returns no page and grants no retryable classification. Publication
+typed outcome without automatically retrying. Publication during canonical
+recertification or extension uses the same bound: a raced extension must first
+prove its complete validated byte capture under stable observations and the exact
+captured segment namespace. It may return an earlier consumed prefix while later
+publications remain available to a subsequent read. Corruption, rollback,
+substitution or uncertain proof still returns no page and grants no retryable
+classification. Publication
 callbacks cannot replace the original certificate with different history,
 including through snapshot rollback or nested reads. Full-scan certification
 uses the same continuation bound and pairs each page's cursor with its snapshot;
