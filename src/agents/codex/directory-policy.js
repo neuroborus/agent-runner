@@ -3,10 +3,57 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { createWorkspaceService } from "../../workspace/index.js";
-import { deepFreeze } from "../adapter-contract.js";
+import { deepFreeze, isRecord } from "../adapter-contract.js";
 
 const PROFILE = "agent_runner_directory";
 const CONTRACT = "codex-declared-directory-v1";
+
+// config/read may serialize these optional permission-profile settings as null.
+// Normalize only these unset defaults, never access rules or inherited policy.
+const PROFILE_NULL_DEFAULTS = Object.freeze([
+  "description",
+  "extends",
+  "workspace_roots",
+]);
+const FILESYSTEM_NULL_DEFAULTS = Object.freeze(["glob_scan_max_depth"]);
+const NETWORK_NULL_DEFAULTS = Object.freeze([
+  "proxy_url",
+  "enable_socks5",
+  "socks_url",
+  "enable_socks5_udp",
+  "allow_upstream_proxy",
+  "dangerously_allow_non_loopback_proxy",
+  "dangerously_allow_all_unix_sockets",
+  "mode",
+  "domains",
+  "unix_sockets",
+  "allow_local_binding",
+  "mitm",
+]);
+
+function withoutNullDefaults(value, fields) {
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([key, setting]) => setting !== null || !fields.includes(key),
+    ),
+  );
+}
+
+function matchesDeclaredProfile(actual, expected) {
+  if (!isRecord(actual)) return false;
+  return isDeepStrictEqual(
+    {
+      ...withoutNullDefaults(actual, PROFILE_NULL_DEFAULTS),
+      filesystem: withoutNullDefaults(
+        actual.filesystem,
+        FILESYSTEM_NULL_DEFAULTS,
+      ),
+      network: withoutNullDefaults(actual.network, NETWORK_NULL_DEFAULTS),
+    },
+    expected,
+  );
+}
 
 function assertLiteralPermissionPaths(paths, AdapterError) {
   // Native filesystem keys interpret glob syntax, including backslash escapes.
@@ -181,7 +228,7 @@ export function assertDirectoryConfiguration(
   if (
     permissions !== undefined &&
     (config?.default_permissions !== PROFILE ||
-      !isDeepStrictEqual(
+      !matchesDeclaredProfile(
         config?.permissions?.[PROFILE],
         permissions.permissions[PROFILE],
       ))

@@ -2745,6 +2745,32 @@ async function scopedDirectoryWorkspace(t) {
   return { ...directory, selectedFile, excluded, unselected };
 }
 
+function withDirectoryDefaults(configuration) {
+  const effective = structuredClone(configuration);
+  const profile = effective.permissions.agent_runner_directory;
+  Object.assign(profile, {
+    description: null,
+    extends: null,
+    workspace_roots: null,
+  });
+  profile.filesystem.glob_scan_max_depth = null;
+  Object.assign(profile.network, {
+    proxy_url: null,
+    enable_socks5: null,
+    socks_url: null,
+    enable_socks5_udp: null,
+    allow_upstream_proxy: null,
+    dangerously_allow_non_loopback_proxy: null,
+    dangerously_allow_all_unix_sockets: null,
+    mode: null,
+    domains: null,
+    unix_sockets: null,
+    allow_local_binding: null,
+    mitm: null,
+  });
+  return effective;
+}
+
 test("rejects pattern-bearing directory permission paths before native access", async (t) => {
   for (const options of [
     { sourceName: "reference[1].md", access: "read-only" },
@@ -2958,9 +2984,9 @@ test("uses exact scoped directory output permissions across reconstruction and r
   const directory = await scopedDirectoryWorkspace(t);
   const observations = [];
   const fixture = createFixture({
-    version: "0.164.0",
+    version: "0.167.0",
     directoryPermissions: (storage) =>
-      directory.permissions("workspace-write", storage),
+      withDirectoryDefaults(directory.permissions("workspace-write", storage)),
     async handle({ message }) {
       if (message.method === "thread/resume") {
         directory.workspacePolicy.outputPaths.push(directory.cwd);
@@ -3125,9 +3151,9 @@ test("rejects protected directory mutations and reported writes outside declared
       const access =
         target === "read-only-output" ? "read-only" : "workspace-write";
       const fixture = createFixture({
-        version: "0.164.0",
+        version: "0.167.0",
         directoryPermissions: (storage) =>
-          directory.permissions(access, storage),
+          withDirectoryDefaults(directory.permissions(access, storage)),
         async handle({ message }) {
           if (message.method !== "turn/start") return;
           const path =
@@ -3185,39 +3211,204 @@ test("rejects protected directory mutations and reported writes outside declared
   }
 });
 
-test("fails closed on directory permission substitution before thread selection", async (t) => {
+test("accepts supported null directory defaults before selecting a fresh thread", async (t) => {
   const directory = await directoryWorkspace(t);
   const fixture = createFixture({
-    version: "0.164.0",
-    directoryPermissions() {
-      const expected = directory.permissions("read-only");
-      expected.permissions.agent_runner_directory.filesystem[directory.cwd] =
-        "write";
-      return expected;
-    },
+    version: "0.167.0",
+    directoryPermissions: () =>
+      withDirectoryDefaults(directory.permissions("read-only")),
   });
-  await assert.rejects(
-    fixture.adapter.run(
-      request({
-        cwd: directory.cwd,
-        workspacePolicy: directory.workspacePolicy,
-      }),
-    ),
-    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+  const result = await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      workspacePolicy: directory.workspacePolicy,
+    }),
+  );
+  assert.equal(result.output, "done");
+  const process = fixture.processes[0];
+  const selection = process.messages.find(
+    ({ method }) => method === "thread/start",
+  );
+  assert.deepEqual(selection.params.config, directory.permissions("read-only"));
+  assert.equal(selection.params.permissions, "agent_runner_directory");
+  assert.equal(selection.params.cwd, directory.cwd);
+  assert.equal(
+    process.messages.find(({ method }) => method === "turn/start").params
+      .permissions,
+    "agent_runner_directory",
   );
   assert.ok(
-    !fixture.processes[0].messages.some(
-      ({ method }) => method.startsWith("thread/") || method === "turn/start",
+    process.argumentsList.includes(
+      'default_permissions="agent_runner_directory"',
     ),
   );
+  const native = process.argumentsList.find((argument) =>
+    argument.startsWith("permissions.agent_runner_directory="),
+  );
+  assert.ok(native.includes('":root"="read"'));
+  assert.ok(native.includes('":workspace_roots"={"."="read"}'));
+  assert.ok(native.endsWith(",network={enabled=false}}"));
+  assert.equal(fixture.workspaceStorages.length, 0);
+});
+
+test("fails closed on directory permission substitution before thread selection", async (t) => {
+  const directory = await directoryWorkspace(t);
+  for (const [name, substitute] of [
+    [
+      "extra write",
+      (profile) => {
+        profile.filesystem[directory.cwd] = "write";
+      },
+    ],
+    [
+      "missing protected read",
+      (profile) => {
+        delete profile.filesystem[directory.source];
+      },
+    ],
+    [
+      "null protected read",
+      (profile) => {
+        profile.filesystem[directory.input] = null;
+      },
+    ],
+    [
+      "workspace grant",
+      (profile) => {
+        profile.filesystem[":workspace_roots"]["."] = "write";
+      },
+    ],
+    [
+      "nested unknown default",
+      (profile) => {
+        profile.filesystem[":workspace_roots"].unknown = null;
+      },
+    ],
+    [
+      "network enabled",
+      (profile) => {
+        profile.network.enabled = true;
+      },
+    ],
+    [
+      "network unset",
+      (profile) => {
+        delete profile.network.enabled;
+      },
+    ],
+    [
+      "inheritance",
+      (profile) => {
+        profile.extends = "parent";
+      },
+    ],
+    [
+      "description override",
+      (profile) => {
+        profile.description = "Alternate policy";
+      },
+    ],
+    [
+      "workspace roots override",
+      (profile) => {
+        profile.workspace_roots = [];
+      },
+    ],
+    [
+      "scan depth override",
+      (profile) => {
+        profile.filesystem.glob_scan_max_depth = 1;
+      },
+    ],
+    [
+      "network defaults override",
+      (profile) => {
+        profile.network.allow_local_binding = false;
+      },
+    ],
+    [
+      "network domains override",
+      (profile) => {
+        profile.network.domains = [];
+      },
+    ],
+    [
+      "unknown profile default",
+      (profile) => {
+        profile.unknown = null;
+      },
+    ],
+    [
+      "unknown filesystem default",
+      (profile) => {
+        profile.filesystem.unknown = null;
+      },
+    ],
+    [
+      "unknown network default",
+      (profile) => {
+        profile.network.unknown = null;
+      },
+    ],
+    [
+      "missing filesystem",
+      (profile) => {
+        delete profile.filesystem;
+      },
+    ],
+    [
+      "null network",
+      (profile) => {
+        profile.network = null;
+      },
+    ],
+    [
+      "wrong selected profile",
+      (_profile, config) => {
+        config.default_permissions = ":workspace";
+      },
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        version: "0.167.0",
+        directoryPermissions() {
+          const config = withDirectoryDefaults(
+            directory.permissions("read-only"),
+          );
+          substitute(config.permissions.agent_runner_directory, config);
+          return config;
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            workspacePolicy: directory.workspacePolicy,
+          }),
+        ),
+        hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.ok(
+        !fixture.processes[0].messages.some(
+          ({ method }) =>
+            method.startsWith("thread/") || method === "turn/start",
+        ),
+      );
+    });
+  }
 });
 
 test("reasserts directory analysis permissions on fresh, continued and forked sessions", async (t) => {
   const directory = await directoryWorkspace(t);
   for (const mode of [undefined, "continue", "fork"]) {
     const fixture = createFixture({
-      version: "0.164.0",
-      directoryPermissions: () => directory.permissions("read-only"),
+      version: mode === undefined ? "0.164.0" : "0.167.0",
+      directoryPermissions() {
+        const config = directory.permissions("read-only");
+        return mode === undefined ? config : withDirectoryDefaults(config);
+      },
     });
     await fixture.adapter.run(
       request({
@@ -3245,34 +3436,52 @@ test("reasserts directory analysis permissions on fresh, continued and forked se
     );
     assert.equal(fixture.workspaceStorages.length, 0);
   }
-  const wrong = createFixture({
-    version: "0.164.0",
-    directoryPermissions: () => directory.permissions("read-only"),
-    handle({ message }) {
-      if (message.method === "thread/resume")
-        return {
-          result: {
-            thread: { id: "source-thread" },
-            cwd: directory.cwd,
-            activePermissionProfile: { id: ":workspace" },
-          },
-        };
+  for (const substitution of [
+    { activePermissionProfile: { id: ":workspace" } },
+    {
+      activePermissionProfile: {
+        id: "agent_runner_directory",
+        extends: "parent",
+      },
     },
-  });
-  await assert.rejects(
-    wrong.adapter.run(
-      request({
-        cwd: directory.cwd,
-        workspacePolicy: directory.workspacePolicy,
-        session: { mode: "continue", id: "source-thread" },
-      }),
-    ),
-    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
-  );
-  assert.equal(wrong.processes.length, 1);
-  assert.ok(
-    !wrong.processes[0].messages.some(({ method }) => method === "turn/start"),
-  );
+    { cwd: directory.output },
+  ]) {
+    const wrong = createFixture({
+      version: "0.167.0",
+      directoryPermissions: () =>
+        withDirectoryDefaults(directory.permissions("read-only")),
+      handle({ message }) {
+        if (message.method === "thread/resume")
+          return {
+            result: {
+              thread: { id: "source-thread" },
+              cwd: directory.cwd,
+              activePermissionProfile: {
+                id: "agent_runner_directory",
+                extends: null,
+              },
+              ...substitution,
+            },
+          };
+      },
+    });
+    await assert.rejects(
+      wrong.adapter.run(
+        request({
+          cwd: directory.cwd,
+          workspacePolicy: directory.workspacePolicy,
+          session: { mode: "continue", id: "source-thread" },
+        }),
+      ),
+      hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+    );
+    assert.equal(wrong.processes.length, 1);
+    assert.ok(
+      !wrong.processes[0].messages.some(
+        ({ method }) => method === "turn/start",
+      ),
+    );
+  }
 });
 
 test("validates directory declarations before activity", async (t) => {

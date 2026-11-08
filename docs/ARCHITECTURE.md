@@ -3800,7 +3800,20 @@ read-only, grants writes only to
 declared outputs and the existing owner-only private command storage, and pins
 inputs, sources, configuration, task, artifacts, infrastructure and discovered
 controls read-only. Network remains denied. Effective configuration must match
-before thread selection. Native permission paths containing glob metacharacters
+before thread selection. The declared-profile comparison treats omission and
+`null` as equivalent only for profile `description`, `extends` and
+`workspace_roots`, filesystem `glob_scan_max_depth`, and network `proxy_url`,
+`enable_socks5`, `socks_url`, `enable_socks5_udp`, `allow_upstream_proxy`,
+`dangerously_allow_non_loopback_proxy`, `dangerously_allow_all_unix_sockets`,
+`mode`, `domains`, `unix_sockets`, `allow_local_binding` and `mitm`. These are
+unset optional settings in Codex's public configuration representation, including
+0.167.0 `config/read`; no inheritance or workspace-root override is applied.
+Unknown fields and non-null overrides reject, while filesystem access rules and
+`network.enabled: false` must match exactly. Legacy omitted-default profiles
+remain supported. This comparison changes neither the requested profile nor
+Git-backed permissions. Model-free fixtures establish representation compatibility,
+not historical failure attribution or successful live audit acceptance.
+Native permission paths containing glob metacharacters
 (`*`, `?`, `[`, `]`, `{`, `}` or `\`) are rejected before capability approval or
 launch, preserving literal declarations instead of granting pattern-based access.
 Directory requests omit legacy thread/turn sandbox

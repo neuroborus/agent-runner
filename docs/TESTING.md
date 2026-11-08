@@ -450,8 +450,11 @@ consumers land. Fast `test/agents/codex.test.js` owns the public adapter's
 directory request/probe contract, access-specific receipts without Git or commit
 preparation, native output-only permissions, protected-write rejection, effective
 policy substitution, literal-path rejection for glob syntax, reconstruction,
-observations and attempt retirement. It uses ordinary temporary directories and
-model-free transport fixtures; live
+observations and attempt retirement. Codex 0.167.0-style `config/read` fixtures
+carry explicit nullable permission defaults through launch, selection,
+continuation, fork and reconstruction, retaining legacy omitted defaults and
+rejecting unknown fields, non-null overrides, inheritance, changed grants and
+scope. It uses ordinary temporary directories and model-free transport fixtures; live
 provider/platform acceptance remains separate. Fast `test/agents/claude.test.js`
 also owns Git-free directory proofs, access-specific immutable receipts, native
 and fallback output-only command projection, protected external read mounts,
