@@ -322,6 +322,27 @@ compatibility metadata changes require the complete `npm run test:slow` release
 gate after `npm run check`, including existing orchestration, CLI/MCP, state,
 release-pack and installation coverage. Selected Runner-trusted commands remain
 reserved for the dedicated finalization boundary.
+
+Slow `test/runner-audit-recovery.slow.test.js` owns actual cold journal reloads
+across exhaustion retirement, pause clearing before launch and acknowledged-child
+response loss. Combined directory coverage imports exercised version-7 evidence
+through the store creation boundary and proves migration preserves pending
+revisions, rejected/hypothesis dispositions, receipts, correction feedback,
+report bytes, original reservations and finite budgets. Missing or incomplete
+decisions add no confirmation; only the complete selected gate accepts current
+versions. Lazy Git-scope coverage composes availability and controlled inactivity
+with repeated exhaustion without another source fork or inactive-role work.
+Independent coverage retains finding-Reviewer separation and matching redacted
+CLI status and MCP status/wait explanations, null-action recovery and inert
+completion. Separate failure/cancellation cases retain terminal dispositions
+after exhaustion without new provider work or report publication on cold resume.
+Provider responses, clocks and interruption boundaries are injected;
+these tests use no live provider, sleeps or canonical-journal edits.
+Run `npm run test:slow -- test/runner-audit-recovery.slow.test.js` when changing
+audit recovery, migration, native selection or their public projections. The
+complete slow release gate includes it automatically; it replaces no existing
+or separately selected Runner-trusted check.
+
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
 same-Auditor batch convergence, correcting Reviewer continuity/additions and
@@ -708,6 +729,7 @@ bounded runner and per-file timing output.
 | `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order                             | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring            |
 | `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content                             | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume            |
 | `test/runner-effects.slow.test.js`                                        | Commit effects settle exactly once across interruption, verification, and deferred checkpoints                                      | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, or consumed-effect recovery                           |
+| `test/runner-audit-recovery.slow.test.js`                                 | Cold audit reconstruction preserves exact pending verification, provenance and budgets across native replacement and migration      | Audit output recovery, persisted migration, native selection, availability/inactivity composition or public recovery projections                   |
 | `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                   | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency                      |
 | `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                             | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases             |
 | `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                   | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events            |
