@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { initCorrectiveFeedback } from "./rejection.js";
 import {
   assertInspectionFailure,
   inspectionFailureExplanation,
@@ -86,15 +87,23 @@ export const initProjections = Object.freeze({
       resumable = true;
     } catch {}
     const state = run.pipelineState;
+    const feedback =
+      run.pause.reason === "invalid_result"
+        ? initCorrectiveFeedback(state)
+        : null;
     return {
       reason: run.pause.reason,
-      code: /^[A-Z0-9_]{1,64}$/u.test(run.pause.code ?? "")
-        ? run.pause.code
-        : null,
+      code:
+        feedback?.code ??
+        (/^[A-Z0-9_]{1,64}$/u.test(run.pause.code ?? "")
+          ? run.pause.code
+          : null),
+      ...(feedback === null ? {} : { correctiveFeedback: feedback }),
       ...(run.pause.reason === "init_inspection_failed"
         ? { inspectionFailure: { ...assertInspectionFailure(run.pause) } }
         : {}),
       explanation:
+        feedback?.explanation ??
         (run.pause.reason === "init_inspection_failed"
           ? inspectionFailureExplanation(run.pause)
           : EXPLANATIONS[run.pause.reason]) ??

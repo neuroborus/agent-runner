@@ -12,14 +12,15 @@ import { isDeepStrictEqual } from "node:util";
 import { assertInitInspection } from "./inspection-failure.js";
 
 export class InitProposalError extends Error {
-  constructor(message) {
+  constructor(message, constraint = "result_shape") {
     super(message);
     this.name = "InitProposalError";
     this.code = "ERR_INIT_PROPOSAL";
+    this.constraint = constraint;
   }
 }
-export function assertInit(condition, message) {
-  if (!condition) throw new InitProposalError(message);
+export function assertInit(condition, message, constraint) {
+  if (!condition) throw new InitProposalError(message, constraint);
 }
 export function exact(value, fields) {
   assertInit(
@@ -354,6 +355,7 @@ export function assertOutsideBareGitMetadata(inspection, path) {
         ),
     ),
     "Init cannot publish inside bare Git metadata.",
+    "resource_destination",
   );
 }
 
@@ -383,6 +385,7 @@ export function normalizeProposal(value, state) {
       value.resources.length > 0 &&
       value.resources.length <= 64,
     "Init proposal needs a bounded resource inventory.",
+    "resource_destination",
   );
   const paths = [];
   for (const resource of value.resources) {
@@ -406,14 +409,17 @@ export function normalizeProposal(value, state) {
         typeof resource.content === "string" &&
         resource.content.length <= 100_000,
       "Init resource is invalid or escapes selected infrastructure.",
+      "resource_destination",
     );
     assertInit(
       (resource.action === "create") === (resource.beforeHash === null),
       "Init resource action must bind its inspected prior content.",
+      "resource_prior_hash",
     );
     assertInit(
       !paths.includes(resource.path),
       "Init proposal resources overlap.",
+      "resource_destination",
     );
     paths.push(resource.path);
     const observed = state.inspection.entries.find(
@@ -422,6 +428,7 @@ export function normalizeProposal(value, state) {
     assertInit(
       state.inspection.schemaVersion === 1 || observed !== undefined,
       "Init resource lacks explicit inspected destination evidence.",
+      "resource_destination",
     );
     assertInit(
       !state.inspection.entries.some(
@@ -429,6 +436,7 @@ export function normalizeProposal(value, state) {
           entry.kind === "symlink" && within(entry.path, resource.path),
       ),
       "Init cannot publish through a symbolic link.",
+      "resource_destination",
     );
     assertInit(
       !state.inspection.entries.some(
@@ -438,6 +446,7 @@ export function normalizeProposal(value, state) {
           within(entry.path, resource.path),
       ),
       "Init resource has a file ancestor.",
+      "resource_destination",
     );
     assertInit(
       resource.kind === "artifacts"
@@ -446,6 +455,7 @@ export function normalizeProposal(value, state) {
             (!observed || ["missing", "directory"].includes(observed.kind))
         : !observed || ["missing", "file"].includes(observed.kind),
       "Init artifacts must remain a directory and file resources cannot replace a directory.",
+      "resource_destination",
     );
     const beforeHash =
       !observed || observed.kind === "missing"
@@ -456,38 +466,45 @@ export function normalizeProposal(value, state) {
     assertInit(
       resource.beforeHash === beforeHash,
       "Init resource prior content differs from inspection.",
+      "resource_prior_hash",
     );
     if (resource.action === "reuse" && observed?.kind === "file")
       assertInit(
         hashText(resource.content) === beforeHash,
         "Init reused content must remain unchanged.",
+        "resource_prior_hash",
       );
     if (resource.kind === "configuration")
       assertInit(
         resource.path === state.selection.configurationPath,
         "Init configuration destination changed.",
+        "resource_destination",
       );
     if (resource.kind === "artifacts")
       assertInit(
         resource.path === state.selection.artifactPath,
         "Init artifact destination changed.",
+        "resource_destination",
       );
     if (resource.kind === "guidance")
       assertInit(
         resource.path ===
           join(state.selection.artifactPath, "agent-runner", "rules.md"),
         "Init guidance destination changed.",
+        "resource_destination",
       );
     if (resource.kind === "finalization")
       assertInit(
         resource.path.endsWith(".md"),
         "Init finalization must be a Markdown procedure.",
+        "resource_destination",
       );
     if (resource.kind === "ignore")
       assertInit(
         state.selection.placement === "integrated" &&
           resource.path === join(state.selection.rootPath, ".gitignore"),
         "Only integrated init can propose the target ignore file.",
+        "resource_destination",
       );
     if (resource.action !== "reuse") {
       assertOutsideBareGitMetadata(state.inspection, resource.path);
@@ -500,6 +517,7 @@ export function normalizeProposal(value, state) {
             within(dirname(path), resource.path),
         ),
         "Init cannot publish into a nested Git worktree with a different exclusion key.",
+        "resource_destination",
       );
       const skillRoots = [".agents", ".claude"].map((name) =>
         join(state.selection.rootPath, name),
@@ -523,12 +541,14 @@ export function normalizeProposal(value, state) {
               !(finalizationSkill && skillRoots.includes(path)),
           ),
         "Init cannot write Git or provider controls outside the finalization skill.",
+        "resource_destination",
       );
       assertInit(
         !state.inspection.configurationPaths.some(
           (path) => within(path, resource.path) || within(resource.path, path),
         ),
         "Init cannot write configuration resolved for this run.",
+        "resource_destination",
       );
       assertInit(
         !state.inspection.documents.skills.some(
@@ -537,6 +557,7 @@ export function normalizeProposal(value, state) {
             !(path === resource.path && isFinalizationRepair(state, resource)),
         ),
         "Init must preserve existing skills.",
+        "resource_destination",
       );
       assertInit(
         ![
@@ -549,6 +570,7 @@ export function normalizeProposal(value, state) {
           (path) => within(path, resource.path) || within(resource.path, path),
         ),
         "Init cannot write its protected setup inputs.",
+        "resource_destination",
       );
     }
   }
@@ -563,6 +585,7 @@ export function normalizeProposal(value, state) {
           resource.content === "" &&
           resource.action !== "replace",
         "Only an artifact directory may contain other proposed resources.",
+        "resource_destination",
       );
   }
   assertInit(
@@ -572,6 +595,7 @@ export function normalizeProposal(value, state) {
         1,
     ),
     "Init proposal requires exactly one configuration, artifacts, finalization and guidance resource.",
+    "resource_destination",
   );
   return structuredClone(value);
 }

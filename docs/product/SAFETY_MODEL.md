@@ -219,6 +219,14 @@ cannot become an acknowledged provider failure. Failed terminal confirmation
 preserves published resources without acceptance. The [init failure contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
 owns the bounded diagnosis and nonresumable follow-up.
 
+Init semantic feedback comes only from actual validators, never exception text,
+rejected fields or matching callback error codes. It retains finite diagnosis and
+checkpoint bindings while preserving the last valid proposal and all consumed
+allowances. Correction grants no writes or effect authority; drift, ownership and
+pending-effect reconciliation keep precedence. The
+[semantic rejection contract](../../pipelines/init/docs/SPEC.md#semantic-result-rejection)
+owns the finite constraints, migration and feedback clearing rules.
+
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
 confined read and pin content, file identity, and real ancestor directories.

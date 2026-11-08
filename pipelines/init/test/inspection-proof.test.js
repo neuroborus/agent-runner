@@ -250,6 +250,7 @@ test("legacy inspection bindings and accepted approvals migrate without new evid
     findings: [],
   });
   state = { ...state, revisionRounds: 3, sourceForks: [HASH] };
+  delete state.correctiveFeedback;
   const run = {
     pipelineId: "init",
     pipelineStateVersion: 1,
@@ -259,7 +260,10 @@ test("legacy inspection bindings and accepted approvals migrate without new evid
   const original = structuredClone(run);
   const migrated = preparePipelineMigration(run, initPipeline);
   assert.equal(migrated.pipelineStateVersion, initPipeline.stateVersion);
-  assert.deepEqual(migrated.pipelineState, original.pipelineState);
+  assert.deepEqual(migrated.pipelineState, {
+    ...original.pipelineState,
+    correctiveFeedback: null,
+  });
   assert.deepEqual(run, original);
   assert.deepEqual(
     await f.inspect({

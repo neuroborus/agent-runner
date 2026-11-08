@@ -47,6 +47,14 @@ declaration before provider work. Custom authoring uses read-only directory
 turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
+Codex verifies the selected directory profile before choosing a thread. Its
+effective configuration may omit supported unset defaults or return them as
+`null`; only the explicit [architecture allowlist](../ARCHITECTURE.md#agent-context-recovery)
+receives that equivalence. Unknown settings, non-null overrides and inheritance
+reject. Exact filesystem grants, protected reads, scope and denied network remain
+required. Model-free compatibility fixtures do not establish a successful live
+audit or the cause of an earlier refusal.
+
 Directory policies may carry frozen filesystem inspection roots, literal subtree
 exclusions and a file-only root constraint that rejects directory replacements
 before traversal. Capability receipts bind that selection, and preparation,

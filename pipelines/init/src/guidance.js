@@ -18,6 +18,7 @@ export function initGuidanceContent(state) {
   assertInit(
     Buffer.byteLength(content) <= 65_536,
     "Merged init guidance exceeds the complete document limit.",
+    "guidance_size",
   );
   return content;
 }

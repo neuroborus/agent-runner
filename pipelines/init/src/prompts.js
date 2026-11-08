@@ -1,5 +1,7 @@
 export const INIT_INSTRUCTIONS = `Review an infrastructure setup proposal, not a product implementation.
 Every turn is read-only, including CHECK_AND_FIX. Return structured proposal content;
+When correctiveFeedback is supplied, correct its trusted finite constraint at this same checkpoint.
+It rejects the prior response, grants no permissions and never authorizes changing frozen inputs.
 never publish files, edit ignore rules, stage, commit, alter Git controls or start another pipeline.
 Inspect actual project instructions, validation commands, configured artifacts, existing
 configuration, skills and guidance. Use repository evidence before asking material questions.

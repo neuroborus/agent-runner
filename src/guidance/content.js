@@ -1,6 +1,17 @@
 import { createHash } from "node:crypto";
 
 export const MAX_GUIDANCE_BYTES = 64 * 1024;
+const contentRejections = new WeakMap();
+// Matching codes or public error construction do not establish content provenance.
+export const guidanceContentRejection = (cause) =>
+  contentRejections.get(cause) ?? null;
+
+function invalidContent(message, constraint) {
+  const error = new GuidanceError(message);
+  error.constraint = constraint;
+  contentRejections.set(error, Object.freeze({ code: error.code, constraint }));
+  return error;
+}
 
 export class GuidanceError extends Error {
   constructor(message, { cause, code = "ERR_INVALID_GUIDANCE" } = {}) {
@@ -39,8 +50,9 @@ export function validateContent(value) {
     typeof value !== "string" ||
     Buffer.byteLength(value) > MAX_GUIDANCE_BYTES
   ) {
-    throw new GuidanceError(
+    throw invalidContent(
       "Guidance must be a Markdown document of at most 64 KiB.",
+      "guidance_size",
     );
   }
   if (
@@ -51,8 +63,9 @@ export function validateContent(value) {
       value,
     )
   ) {
-    throw new GuidanceError(
+    throw invalidContent(
       "Guidance must contain valid UTF-8 without unsafe control characters.",
+      "guidance_encoding",
     );
   }
   // Reject recognizable credential and transcript formats without echoing or
@@ -68,8 +81,9 @@ export function validateContent(value) {
       value,
     )
   ) {
-    throw new GuidanceError(
+    throw invalidContent(
       "Guidance must contain non-sensitive operator-authored Markdown, without credentials, provider output, transcripts, or chain-of-thought.",
+      "guidance_content",
     );
   }
   return value;

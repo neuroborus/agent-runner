@@ -165,6 +165,7 @@ export async function assertIntegratedPolicy(
         )
         .every(({ path }) => path === finalizationPath),
     "Integrated finalization must preserve existing skills and derive its procedure from reviewed checks.",
+    "finalization_procedure",
   );
   await assertInitConfiguration(
     state,
@@ -182,6 +183,7 @@ export async function assertIntegratedPolicy(
     assertInit(
       within(projectPath, path),
       "Integrated ignore path escaped its target.",
+      "resource_destination",
     );
     const evidence = await inspectInitOperation(inspectionPhase, () =>
       runtime.inspectIgnored(path),
@@ -189,6 +191,7 @@ export async function assertIntegratedPolicy(
     assertInit(
       !evidence.tracked,
       "Integrated infrastructure must be untracked.",
+      "resource_destination",
     );
     if (!evidence.ignored && !needed.some((parent) => within(parent, path)))
       needed.push(path);
@@ -202,6 +205,7 @@ export async function assertIntegratedPolicy(
       ? ignore.content === expected
       : needed.length === 0 && ignoreDocument !== null,
     "Integrated ignore changes must append only necessary nonduplicate exclusions.",
+    "ignore_policy",
   );
 }
 
@@ -245,5 +249,6 @@ export async function assertInitConfiguration(
           relative(rootPath, finalizationPath),
       ),
     "Setup must preserve unrelated settings and explicitly select its finalization procedure.",
+    "configuration_policy",
   );
 }

@@ -58,6 +58,16 @@ const ROLE_FIELDS = new Set([
   "profile",
 ]);
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
+const projectRejections = new WeakMap();
+// Recognize only errors emitted while validating proposed project content.
+export const projectConfigurationRejection = (cause) =>
+  projectRejections.get(cause) ?? null;
+
+function rejectProjectContent(cause, constraint = "configuration_shape") {
+  cause.constraint = constraint;
+  projectRejections.set(cause, Object.freeze({ code: cause.code, constraint }));
+  return cause;
+}
 
 export class ConfigurationError extends Error {
   constructor(
@@ -554,7 +564,10 @@ export function normalizeProjectConfiguration(
   if (input.schemaVersion !== CONFIG_SCHEMA_VERSION) {
     throw new ConfigurationError(
       `Unsupported projectConfiguration.schemaVersion: ${String(input.schemaVersion)}.`,
-      { code: "ERR_UNSUPPORTED_CONFIGURATION_VERSION" },
+      {
+        code: "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
+        constraint: "configuration_version",
+      },
     );
   }
   if (input.artifactRoot !== undefined) {
@@ -720,8 +733,8 @@ export function parseProjectConfiguration(
   providers = PROVIDER_REGISTRY,
 ) {
   if (typeof source !== "string") {
-    throw new ConfigurationError(
-      "Project configuration source must be a string.",
+    throw rejectProjectContent(
+      new ConfigurationError("Project configuration source must be a string."),
     );
   }
 
@@ -729,15 +742,30 @@ export function parseProjectConfiguration(
   try {
     parsed = JSON.parse(source);
   } catch (cause) {
-    throw new ConfigurationError(
-      "Project configuration must contain valid JSON.",
-      { cause },
+    throw rejectProjectContent(
+      new ConfigurationError("Project configuration must contain valid JSON.", {
+        cause,
+      }),
     );
   }
-
-  return normalizeProjectConfiguration(
-    parsed,
-    normalizeConfiguration(runnerConfiguration, providers),
-    providers,
-  );
+  // Runner configuration is a prerequisite, not rejected proposal content.
+  const runner = normalizeConfiguration(runnerConfiguration, providers);
+  try {
+    return normalizeProjectConfiguration(parsed, runner, providers);
+  } catch (cause) {
+    if (
+      !(cause instanceof ConfigurationError) ||
+      ![
+        "ERR_INVALID_CONFIGURATION",
+        "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
+      ].includes(cause.code)
+    )
+      throw cause;
+    throw rejectProjectContent(
+      cause,
+      cause.code === "ERR_UNSUPPORTED_CONFIGURATION_VERSION"
+        ? "configuration_version"
+        : "configuration_shape",
+    );
+  }
 }

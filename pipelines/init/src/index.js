@@ -41,11 +41,18 @@ const ROLES = Object.freeze(["planner", "reviewer"]);
 const LAZY_ROLES = Object.freeze(["planner"]);
 export const initPipeline = Object.freeze({
   id: "init",
-  stateVersion: 2,
+  stateVersion: 3,
   // Existing evidence and its binding algorithm remain authentic. Reinspection
   // follows the saved inspection version; migration grants no new allowance.
   migrations: Object.freeze({
     1: ({ pipelineState }) => structuredClone(pipelineState),
+    2: ({ pipelineState }) => {
+      assertInit(
+        !Object.hasOwn(pipelineState, "correctiveFeedback"),
+        "Legacy init cannot contain corrective feedback.",
+      );
+      return { ...structuredClone(pipelineState), correctiveFeedback: null };
+    },
   }),
   setup: true,
   inspectWorkspace: inspectInitWorkspace,

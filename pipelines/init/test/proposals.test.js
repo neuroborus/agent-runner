@@ -2,12 +2,30 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 
 import { createClarificationService } from "../../../src/clarifications/index.js";
 import { createWorkspaceService } from "../../../src/workspace/index.js";
-import { failInitTurn } from "../src/workflow.js";
+import { preparePipelineMigration } from "../../../src/runner/index.js";
+import { failInitTurn, rejectInitResult } from "../src/workflow.js";
+import {
+  initCorrectiveFeedback,
+  initResultRejection,
+} from "../src/rejection.js";
+import { assertExternalPolicy } from "../src/external-policy.js";
+import {
+  assertInitConfiguration,
+  assertIntegratedPolicy,
+} from "../src/integrated-policy.js";
+import {
+  parseProjectConfiguration,
+  projectConfigurationRejection,
+} from "../../../src/config/index.js";
+import {
+  guidanceContentRejection,
+  validateGuidanceContent,
+} from "../../../src/guidance/index.js";
 import {
   acceptInitEdit,
   acceptInitQuestionAppend,
@@ -234,6 +252,301 @@ const findings = (state) => ({
   findings: ["Preserve the existing validation command."],
 });
 
+test("semantic rejection uses actual validator constraints and retains only finite diagnosis", async () => {
+  const setup = inspection([candidate()]);
+  const state = start("combined", setup);
+  const reserved = prepareInitTurn(state, setup, HASH);
+  const capabilities = {
+    resultRejection: (cause) =>
+      guidanceContentRejection(cause) ?? projectConfigurationRejection(cause),
+  };
+  const check = async (operation, constraint, code = "ERR_INIT_PROPOSAL") => {
+    let failure;
+    try {
+      await operation();
+    } catch (cause) {
+      failure = cause;
+    }
+    assert.ok(failure);
+    const diagnosis = initResultRejection(failure, capabilities);
+    assert.deepEqual(diagnosis, { code, constraint });
+    assert.equal(JSON.stringify(diagnosis).includes("private-marker"), false);
+  };
+  for (const [constraint, mutate] of [
+    [
+      "result_shape",
+      (result) => {
+        result["private-marker"] = "rejected";
+      },
+    ],
+    [
+      "resource_destination",
+      (result) => {
+        result.resources[0].path = "/work/private-marker";
+      },
+    ],
+    [
+      "resource_prior_hash",
+      (result) => {
+        Object.assign(result.resources[0], {
+          action: "replace",
+          beforeHash: OTHER,
+        });
+      },
+    ],
+    [
+      "guidance_size",
+      (result) => {
+        result.resources[3].content = "é".repeat(32_768);
+      },
+    ],
+  ]) {
+    const result = roleResult(proposal(state));
+    mutate(result);
+    await check(
+      () =>
+        acceptInitResult(reserved.state, {
+          turnId: reserved.request.id,
+          inspection: setup,
+          transcriptHash: HASH,
+          result,
+        }),
+      constraint,
+    );
+    assert.equal(reserved.state.proposal, null);
+  }
+  for (const [source, constraint, code] of [
+    ["{private-marker", "configuration_shape", "ERR_INVALID_CONFIGURATION"],
+    [
+      '{"schemaVersion":1,"private-marker":true}',
+      "configuration_shape",
+      "ERR_INVALID_CONFIGURATION",
+    ],
+    [
+      '{"schemaVersion":2}',
+      "configuration_version",
+      "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
+    ],
+  ])
+    await check(
+      () => parseProjectConfiguration(source, { schemaVersion: 1 }),
+      constraint,
+      code,
+    );
+  for (const [source, constraint] of [
+    ["x".repeat(65_537), "guidance_size"],
+    ["private-marker\u0000", "guidance_encoding"],
+    ["<analysis>private-marker</analysis>", "guidance_content"],
+  ])
+    await check(
+      () => validateGuidanceContent(source),
+      constraint,
+      "ERR_INVALID_GUIDANCE",
+    );
+  const proposed = turn(state, setup, proposal);
+  const runtime = {
+    stateRoot: "/state/store",
+    workspace: { inspectControls: async () => [], readFile: async () => null },
+    validateConfiguration: (source) =>
+      parseProjectConfiguration(source, { schemaVersion: 1 }),
+  };
+  await check(
+    () => assertExternalPolicy(proposed, runtime),
+    "finalization_procedure",
+  );
+  await check(
+    () =>
+      assertInitConfiguration(
+        proposed,
+        runtime,
+        "/work/setup/finalization/SKILL.md",
+      ),
+    "configuration_policy",
+  );
+  const integratedSetup = inspection();
+  const integrated = start("combined", integratedSetup);
+  const draft = proposal(integrated);
+  const finalizationPath = integratedFinalizationPath(integrated, draft.checks);
+  draft.resources[2].path = finalizationPath;
+  draft.resources[2].content = integratedFinalizationContent(
+    integrated,
+    draft.checks,
+  );
+  draft.resources[0].content = JSON.stringify({
+    schemaVersion: 1,
+    artifactRoot: "artifacts",
+    infrastructure: {
+      schemaVersion: 1,
+      placement: "integrated",
+      projectPath: integratedSetup.projectPath,
+      rootPath: integrated.selection.rootPath,
+    },
+    pipelines: Object.fromEntries(
+      ["plan-execution", "polishing"].map((id) => [
+        id,
+        {
+          finalization: relative(
+            integrated.selection.rootPath,
+            finalizationPath,
+          ),
+        },
+      ]),
+    ),
+  });
+  draft.resources.push({
+    path: "/work/project/.gitignore",
+    kind: "ignore",
+    action: "create",
+    beforeHash: null,
+    content: "/private-marker\n",
+  });
+  await check(
+    () =>
+      assertIntegratedPolicy(turn(integrated, integratedSetup, draft), {
+        ...runtime,
+        inspectIgnored: async () => ({ ignored: false, tracked: false }),
+      }),
+    "ignore_policy",
+  );
+  for (const code of [
+    "ERR_INIT_PROPOSAL",
+    "ERR_INVALID_GUIDANCE",
+    "ERR_INVALID_CONFIGURATION",
+  ])
+    assert.equal(
+      initResultRejection(
+        Object.assign(new Error("private-marker"), {
+          code,
+          constraint: "result_shape",
+          cause: new Error("private-marker"),
+        }),
+        capabilities,
+      ),
+      null,
+    );
+});
+
+test("corrective feedback retains the rejected reservation and cannot cross bindings or phases", () => {
+  const setup = inspection();
+  let state = turn(start("combined", setup), setup, proposal);
+  state = { ...state, revisionRounds: 2, sourceForks: [HASH] };
+  const reserved = prepareInitTurn(state, setup, HASH);
+  const rejection = {
+    code: "ERR_INIT_PROPOSAL",
+    constraint: "resource_prior_hash",
+  };
+  const paused = rejectInitResult(reserved.state, reserved.request, rejection);
+  assert.deepEqual(
+    { ...paused, correctiveFeedback: null },
+    {
+      ...reserved.state,
+      workflowState: "WAITING_FOR_USER",
+      pendingTurn: null,
+      correctiveFeedback: null,
+    },
+  );
+  assert.deepEqual(
+    paused.correctiveFeedback.reservation,
+    reserved.state.pendingTurn,
+  );
+  assert.equal(paused.correctiveFeedback.constraint, rejection.constraint);
+  const run = {
+    pipelineId: "init",
+    pipelineState: paused,
+    pause: { reason: "invalid_result", resumeState: "CHECK_AND_FIX" },
+  };
+  initPipeline.workflow.validateRun(run);
+  const feedback = initPipeline.projections.pause(run).correctiveFeedback;
+  assert.deepEqual(feedback, initCorrectiveFeedback(paused));
+  const resumed = {
+    ...structuredClone(paused),
+    workflowState: "CHECK_AND_FIX",
+  };
+  const retry = prepareInitTurn(resumed, setup, HASH);
+  assert.deepEqual(retry.request.correctiveFeedback, feedback);
+  assert.ok(retry.request.prompt.includes(JSON.stringify(feedback)));
+  assert.equal(retry.state.sequence, paused.sequence + 1);
+  for (const mutate of [
+    (s) => {
+      s.settings.mode = "independent";
+    },
+    (s) => {
+      s.settings.maxRevisionRounds--;
+    },
+    (s) => {
+      s.inspection.snapshotHash = OTHER;
+    },
+    (s) => {
+      s.transcriptHash = s.clarificationHash = OTHER;
+    },
+    (s) => {
+      s.correctiveFeedback.reservation.role = "reviewer";
+    },
+    (s) => {
+      s.correctiveFeedback.reservation.id = s.sequence + 1;
+    },
+    (s) => {
+      s.correctiveFeedback.reservation.binding = OTHER;
+    },
+    (s) => {
+      s.correctiveFeedback.constraint = "private-marker";
+    },
+    (s) => {
+      s.correctiveFeedback.code = "ERR_UNKNOWN";
+    },
+    (s) => {
+      s.correctiveFeedback.raw = "private-marker";
+    },
+    (s) => {
+      s.workflowState = "REVIEW";
+    },
+  ]) {
+    const changed = structuredClone(paused);
+    mutate(changed);
+    assert.throws(() => assertInitState(changed));
+  }
+  for (const reason of ["invalid_result", "provider_interrupted"])
+    assert.throws(() =>
+      initPipeline.workflow.validateRun({
+        ...run,
+        pause: { reason, resumeState: "REVIEW" },
+      }),
+    );
+  const accepted = turn(resumed, setup, proposal);
+  assert.equal(accepted.correctiveFeedback, null);
+  assert.equal(accepted.revisionRounds, 2);
+  assert.deepEqual(accepted.sourceForks, [HASH]);
+  const decision = turn(resumed, setup, {
+    status: "PRODUCT_DECISION_REQUIRED",
+    question: "Which acceptance requirement applies?",
+    whyBlocked: "The agreed acceptance criteria conflict.",
+    options: [],
+    evidence: ["Two supplied requirements disagree."],
+    summary: "",
+    checks: [],
+    resources: [],
+  });
+  assert.equal(decision.correctiveFeedback, null);
+  for (const reason of ["workspace_changed", "project_configuration_changed"])
+    assert.equal(
+      initPipeline.projections.pause({ ...run, pause: { reason } })
+        .correctiveFeedback,
+      undefined,
+    );
+  const replaced = rejectInitResult(retry.state, retry.request, {
+    ...rejection,
+    constraint: "result_shape",
+  });
+  assert.equal(replaced.correctiveFeedback.reservation.id, retry.request.id);
+  assert.throws(() =>
+    rejectInitResult(
+      { ...reserved.state, publication: { pending: {} } },
+      reserved.request,
+      rejection,
+    ),
+  );
+});
+
 test("terminal failure retires only its matching reservation and preserves proposal accounting", () => {
   const setup = inspection();
   for (const mode of ["independent", "lazy", "combined"]) {
@@ -313,6 +626,39 @@ test("terminal pause validation preserves legacy absence and rejects contradicto
         initPipeline.workflow.validateRun({ ...failed, ...patch }),
       );
   }
+});
+
+test("version-2 init migration preserves pending editor authorization and consumed accounting", () => {
+  const setup = inspection();
+  const state = turn(
+    createInitState({ settings: { mode: "lazy" } }),
+    setup,
+    ready,
+  );
+  const authorized = authorizeInitEdit(state, {
+    schemaVersion: 1,
+    id: "edit-1",
+    artifactRoot: setup.taskPath,
+    transcriptPath: `${setup.taskPath}/clarifications.md`,
+    suspendedState: "CLARIFY",
+    action: "proactive-clarification",
+    preEditorHash: HASH,
+  });
+  delete authorized.correctiveFeedback;
+  const legacy = {
+    pipelineId: "init",
+    pipelineStateVersion: 2,
+    pipelineState: authorized,
+    pause: null,
+  };
+  const original = structuredClone(legacy);
+  const migrated = preparePipelineMigration(legacy, initPipeline);
+  assert.deepEqual(migrated.pipelineState, {
+    ...authorized,
+    correctiveFeedback: null,
+  });
+  assert.deepEqual(legacy, original);
+  assert.equal(migrated.pipelineStateVersion, 3);
 });
 
 test("a proposal cannot select multiple finalization resources for guidance and repair", () => {

@@ -4,6 +4,7 @@ export {
   ConfigurationError,
   DEFAULT_ARTIFACT_ROOT,
   parseProjectConfiguration,
+  projectConfigurationRejection,
   parseRunnerConfiguration,
   PROJECT_CONFIG_FILENAME,
 } from "./parsing.js";

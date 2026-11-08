@@ -54,11 +54,13 @@ their 256-file bounds, candidates their 32-entry bound, and setup collections
 their 10,000-entry bound; compact records are limited to two MiB. Unsupported
 evidence capacity rejects completely before role work or publication authority.
 
-Init descriptor state version 2 preserves version-1 inspections unchanged,
-including their original full-entry hashes, approvals, reservations, publication
+Init descriptor state version 3 preserves version-1 and version-2 inspections unchanged,
+including their original hashes, approvals, reservations, publication
 records, accepted receipts and consumed accounting. Reinspection follows the
 saved inspection version. Migration creates no missing evidence or allowance;
-legacy limits remain applicable to legacy bindings. No shared collection limit,
+legacy limits remain applicable to legacy bindings. The explicit 2-to-3 migration
+initializes only nullable `correctiveFeedback` to null and invents no diagnosis;
+version 1 still passes through its identity migration. No shared collection limit,
 workspace scope or provider permission changes.
 
 Placement is separate from review mode. The descriptor reserves CLI
@@ -189,6 +191,44 @@ clarification hash. Findings clear dependent approvals and return to Planner;
 combined revisions restart primary convergence. No arbitration is introduced.
 Revision accounting is bounded, persisted and never renewed by reload. Exhaustion
 pauses. Proposal acceptance grants no publication, staging or commit authority.
+
+## Semantic result rejection
+
+Only actual result validators establish a trusted finite constraint. Init owns
+`result_shape`, `resource_destination`, `resource_prior_hash`, `guidance_size`,
+`finalization_procedure`, `configuration_policy` and `ignore_policy`.
+The guidance capability additionally owns `guidance_encoding` and
+`guidance_content`; its size guard also uses `guidance_size`. The project
+configuration parser owns `configuration_shape` and `configuration_version`.
+Original codes remain `ERR_INIT_PROPOSAL`, `ERR_INVALID_GUIDANCE`,
+`ERR_INVALID_CONFIGURATION` or `ERR_UNSUPPORTED_CONFIGURATION_VERSION` as
+established by that validator. Capability-owned recognition retains error identity;
+matching an arbitrary error code, message, cause or provider field is insufficient.
+
+After fresh unchanged-source/control/transcript verification and physical turn
+retirement, Runner atomically persists the resumable `invalid_result` pause,
+safe activity and init-owned `correctiveFeedback`. It retains only the finite
+code/constraint, original reservation `{ id, role, phase, binding }` and settings hash.
+Bindings cover settings, inspection, selection, clarification/transcript, proposal,
+findings and consumed revision/question counts; `CONFIRM` additionally binds
+the published snapshot fingerprint. Rejected contents, keys, values, paths,
+messages and native data never enter diagnosis. The previous valid proposal and
+unaffected approvals survive; no rejected resource is accepted or published.
+
+Supported same-checkpoint resume and reconstruction receive the same code,
+constraint and fixed corrective explanation through the role request. CLI/MCP
+status, fresh/held waits and safe journaled activity agree with that explanation.
+Another rejection replaces feedback; successful acceptance or a product decision
+clears it. Invalid/stale bindings and phase transfers reject. Sequence, mode,
+budgets, fork/reconstruction consumption and effect authority are never renewed.
+Adapter structured-output rejection without semantic evidence remains generic
+and clears previous diagnosis. Legacy absence stays unknown.
+
+Persistence and Runner callback errors remain outside result-validation handling,
+even when their codes collide. Ownership/isolation, source/configuration drift,
+inspection, product decisions, terminal-provider failure and pending effects
+retain their existing precedence. Diagnosis grants only the existing checkpoint's
+correction opportunity and cannot bypass publication reconciliation.
 
 ## Integrated prerequisite publication
 
@@ -397,8 +437,8 @@ ordinary turn retirement cannot precede that settlement. Start/resume
 receipts acknowledge admission/dispatch only; use status/wait for the diagnosed
 outcome. Exact-key replay does not dispatch another owner.
 
-Diagnosis adds fields only to the existing extensible pause envelope. Init state
-and proof versions remain unchanged; historical inspections, approvals, receipts,
+Inspection diagnosis adds fields only to the existing extensible pause envelope.
+It changes no proof versions; historical inspections, approvals, receipts,
 reservations and counters are not migrated or fabricated.
 
 ## Terminal provider failures

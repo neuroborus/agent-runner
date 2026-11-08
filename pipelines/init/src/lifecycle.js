@@ -24,6 +24,7 @@ import { INIT_INSTRUCTIONS } from "./prompts.js";
 import { initGuidanceContent } from "./guidance.js";
 import { assertIntegratedPolicy } from "./integrated-policy.js";
 import { assertExternalPolicy } from "./external-policy.js";
+import { initCorrectiveFeedback, initResultRejection } from "./rejection.js";
 import {
   acceptInitEdit,
   acceptInitQuestionAppend,
@@ -31,7 +32,9 @@ import {
   authorizeInitEdit,
   closeInitClarification,
   failInitTurn,
+  initConfirmationReservation,
   prepareInitTurn,
+  rejectInitResult,
   requestInitDecision,
 } from "./workflow.js";
 
@@ -39,6 +42,7 @@ const publisher = (state) =>
   state.selection.placement === "external"
     ? publishExternalInit
     : publishIntegratedInit;
+const PAUSED_TURN = Symbol("paused init turn");
 
 // Read-only recovery proof: original baseline plus exact journaled publication
 // paths. Pending effects are reconciled by their publisher before another turn.
@@ -158,10 +162,49 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         runtime.setup,
       ),
     );
-  const pause = async (reason, resumeState = state().workflowState) => {
+  const pause = async (
+    reason,
+    resumeState = state().workflowState,
+    suspended = state(),
+  ) => {
     await save(
-      { ...state(), workflowState: "WAITING_FOR_USER", pendingTurn: null },
+      { ...suspended, workflowState: "WAITING_FOR_USER", pendingTurn: null },
       { pause: { reason, resumeState } },
+    );
+    return current;
+  };
+  const reject = async (request, cause) => {
+    const rejection = initResultRejection(cause, runtime.setup);
+    if (rejection === null) throw cause;
+    // Content diagnosis cannot replace fresh source/control/transcript proof.
+    if (request.phase === "CONFIRM")
+      await inspectInitWorkspace(current, runtime.setup);
+    else {
+      const inspected = await inspect(undefined, "post-turn");
+      const transcriptState = await inspectInitOperation("post-turn", () =>
+        runtime.clarifications.inspectTranscript(transcript),
+      );
+      assertInitInspection(
+        same(inspected, state().inspection) &&
+          transcriptState.hash === state().transcriptHash,
+        "workspace_changed",
+      );
+    }
+    const next = rejectInitResult(state(), request, rejection);
+    const feedback = initCorrectiveFeedback(next);
+    await save(
+      next,
+      {
+        pause: { reason: "invalid_result", resumeState: state().workflowState },
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "init",
+          kind: "paused",
+          message: feedback.explanation,
+        },
+      },
     );
     return current;
   };
@@ -376,7 +419,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         runtime.workspace.assertUnchanged(before),
       );
       await pause("provider_interrupted");
-      return null;
+      return PAUSED_TURN;
     }
     const lazy = state().settings.mode === "lazy";
     const key = digest(lazy ? "init:primary" : `init:${role}:${request.phase}`);
@@ -476,11 +519,14 @@ export async function runInit({ run, runtime, operatorStop = false }) {
             ? "output_exhausted"
             : "authentication_required",
         );
-        return null;
+        return PAUSED_TURN;
       }
       if (cause.failureClass === "structured-output") {
-        await pause("invalid_result");
-        return null;
+        await pause("invalid_result", state().workflowState, {
+          ...state(),
+          correctiveFeedback: null,
+        });
+        return PAUSED_TURN;
       }
       if (
         runtime.inactivity?.eligible(cause) &&
@@ -511,10 +557,10 @@ export async function runInit({ run, runtime, operatorStop = false }) {
             },
           },
         );
-        return null;
+        return PAUSED_TURN;
       }
       await pause("provider_interrupted");
-      return null;
+      return PAUSED_TURN;
     }
     await inspectInitOperation("post-turn", () =>
       runtime.workspace.assertUnchanged(before),
@@ -542,7 +588,6 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         contextKey: key,
       });
     current = await runtime.finishAgentTurn(active, { repository: before });
-    assertResultSize(response.structured);
     return response.structured;
   }
 
@@ -656,13 +701,14 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     );
     await save(prepared.state);
     const output = await turn(prepared.request);
-    if (output === null) return current;
+    if (output === PAUSED_TURN) return current;
     const afterInspection = await inspect(undefined, "post-turn");
     const afterTranscript = await inspectInitOperation("post-turn", () =>
       runtime.clarifications.inspectTranscript(transcript),
     );
+    let next;
     try {
-      const next = await inspectInitOperation("post-turn", () =>
+      next = await inspectInitOperation("post-turn", () =>
         acceptInitResult(state(), {
           turnId: prepared.request.id,
           inspection: afterInspection,
@@ -678,28 +724,20 @@ export async function runInit({ run, runtime, operatorStop = false }) {
             : assertIntegratedPolicy
         )(next, runtime.setup, "post-turn");
       }
-      await save(next, {
-        pause:
-          next.workflowState === "WAITING_FOR_USER"
-            ? {
-                reason: next.pauseReason,
-                resumeState:
-                  next.productDecision === null ? "CLARIFY" : "PROPOSE",
-              }
-            : null,
-      });
     } catch (cause) {
-      if (
-        ![
-          "ERR_INIT_PROPOSAL",
-          "ERR_INVALID_GUIDANCE",
-          "ERR_INVALID_CONFIGURATION",
-          "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
-        ].includes(cause.code)
-      )
-        throw cause;
-      return pause("invalid_result");
+      return reject(prepared.request, cause);
     }
+    // Persistence/callback failures are never semantic result evidence.
+    await save(next, {
+      pause:
+        next.workflowState === "WAITING_FOR_USER"
+          ? {
+              reason: next.pauseReason,
+              resumeState:
+                next.productDecision === null ? "CLARIFY" : "PROPOSE",
+            }
+          : null,
+    });
     if (state().workflowState === "CLARIFY" && state().clarificationReady) {
       await inspectInitOperation("preparation", () =>
         runtime.clarifications.freezeTranscript({
@@ -817,14 +855,16 @@ export async function runInit({ run, runtime, operatorStop = false }) {
             status: "PENDING",
           },
         });
-      let output = await turn({
-        phase: "CONFIRM",
-        role: state().settings.mode === "lazy" ? "planner" : "reviewer",
+      const request = {
+        ...initConfirmationReservation(state()),
+        correctiveFeedback: initCorrectiveFeedback(state()),
         schema: REVIEW_SCHEMA,
-        prompt: `${INIT_INSTRUCTIONS}\nDistinct terminal confirmation: inspect the complete published infrastructure, selected configuration, finalization, merged local guidance, checks and working directory. Return CLEAN only for this exact proposal and prepared fingerprint. Findings require renewed proposal gates.\n${JSON.stringify({ proposal: state().proposal, proposalHash: state().proposalHash, fingerprint: state().terminal.fingerprint, selection: state().selection })}`,
-      });
-      if (output === null) return current;
+        prompt: `${INIT_INSTRUCTIONS}\nDistinct terminal confirmation: inspect the complete published infrastructure, selected configuration, finalization, merged local guidance, checks and working directory. Return CLEAN only for this exact proposal and prepared fingerprint. Findings require renewed proposal gates.\n${JSON.stringify({ proposal: state().proposal, proposalHash: state().proposalHash, fingerprint: state().terminal.fingerprint, selection: state().selection, correctiveFeedback: initCorrectiveFeedback(state()) })}`,
+      };
+      let output = await turn(request);
+      if (output === PAUSED_TURN) return current;
       try {
+        assertResultSize(output);
         output = normalizeInitRoleResult(output);
         if (output.status !== "PRODUCT_DECISION_REQUIRED") {
           texts(output.findings);
@@ -837,8 +877,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
           );
         }
       } catch (cause) {
-        if (cause.code !== "ERR_INIT_PROPOSAL") throw cause;
-        return pause("invalid_result", "PROPOSAL_ACCEPTED");
+        return reject(request, cause);
       }
       await inspectInitWorkspace(current, runtime.setup);
       if (["FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(output.status)) {
@@ -848,6 +887,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         ) {
           await save({
             ...state(),
+            correctiveFeedback: null,
             findings: output.findings,
             pauseReason: "revision_limit",
           });
@@ -859,6 +899,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         );
         const next = {
           ...state(),
+          correctiveFeedback: null,
           inspection,
           publication: null,
           guidanceIntent: null,
@@ -926,6 +967,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
         {
           ...state(),
           workflowState: "DONE",
+          correctiveFeedback: null,
           terminal: { ...state().terminal, status: "CLEAN" },
           completion: {
             placement: state().selection.placement,

@@ -545,18 +545,18 @@ test("lost sibling-root receipts retain legacy or compact proof and reconcile on
     assert.equal(f.saved.pending.path, f.rootPath);
     const before = await fs.stat(f.rootPath);
     f.runtime.persist = persist;
-    const recovered =
-      schemaVersion === 1
-        ? preparePipelineMigration(
-            {
-              pipelineId: "init",
-              pipelineStateVersion: 1,
-              pipelineState: { ...f.state, publication: f.saved },
-              pause: null,
-            },
-            initPipeline,
-          ).pipelineState
-        : { ...f.state, publication: f.saved };
+    const legacy = { ...f.state, publication: f.saved };
+    delete legacy.correctiveFeedback;
+    const recovered = preparePipelineMigration(
+      {
+        pipelineId: "init",
+        pipelineStateVersion: schemaVersion,
+        pipelineState: legacy,
+        pause: null,
+      },
+      initPipeline,
+    ).pipelineState;
+    assert.equal(recovered.correctiveFeedback, null);
     assert.deepEqual(recovered.publication, f.saved);
     assert.equal(recovered.reviewApproval, f.state.reviewApproval);
     assert.equal(recovered.revisionRounds, f.state.revisionRounds);

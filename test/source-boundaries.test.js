@@ -316,6 +316,7 @@ test("operator guidance stays outside pipeline roles and run reconstruction", as
       "GuidanceError",
       "MAX_GUIDANCE_BYTES",
       "createGuidanceService",
+      "guidanceContentRejection",
       "validateGuidanceContent",
     ].sort(),
   );

@@ -45,6 +45,7 @@ export async function assertExternalControls(
   assertInit(
     !paths.some((path) => controls.some((control) => within(control, path))),
     "External setup cannot publish inside Git or provider controls.",
+    "resource_destination",
   );
 }
 
@@ -69,6 +70,7 @@ export async function assertExternalPolicy(
               ({ path, kind }) => path === rootPath && kind === "missing",
             ))),
     "External setup must reuse a target-bound root or prepare an absent destination.",
+    "resource_destination",
   );
   const finalizationPath = externalFinalizationPath(state);
   const paths = {
@@ -81,6 +83,7 @@ export async function assertExternalPolicy(
     state.proposal.resources.length === Object.keys(paths).length &&
       state.proposal.resources.every(({ kind, path }) => paths[kind] === path),
     "External publication permits only selected infrastructure prerequisites and deferred guidance.",
+    "resource_destination",
   );
   const procedure = state.proposal.resources.find(
     ({ kind }) => kind === "finalization",
@@ -92,6 +95,7 @@ export async function assertExternalPolicy(
       procedure.content ===
         externalFinalizationContent(state, state.proposal.checks),
     "External finalization must preserve existing skills and derive its procedure from reviewed checks.",
+    "finalization_procedure",
   );
   await assertInitConfiguration(
     state,
