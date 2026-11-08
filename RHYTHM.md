@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-08
 
+- **Init preserves trusted semantic rejection feedback at its producing checkpoint.**
+  Actual validators supply finite constraints and original codes so a rejected
+  response can be corrected without retaining its private contents or guessing
+  from error text. Init state version 3 initializes legacy feedback to null;
+  inspections, approvals, pending effects and consumed accounting stay authentic.
+  Atomic invalid-result publication preserves the previous valid proposal and
+  binds feedback to the original role/phase and frozen inputs, including the
+  terminal published fingerprint. CLI/MCP observations, safe activity and resumed
+  or reconstructed role requests share fixed corrective guidance. Acceptance and
+  product decisions clear it; persistence/callback failures, safety blockers and
+  pending-effect reconciliation cannot be reclassified into semantic correction.
+
 - **Codex directory proof accepts only supported unset permission defaults.**
   Effective profile comparison recognizes omission and `null` for an explicit
   set of public profile, filesystem scan-depth and network settings. This admits

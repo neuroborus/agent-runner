@@ -12,11 +12,13 @@ import { isDeepStrictEqual } from "node:util";
 import {
   loadProjectConfiguration,
   parseProjectConfiguration,
+  projectConfigurationRejection,
 } from "../config/index.js";
 import {
   createGuidanceService,
   GuidanceError,
   validateGuidanceContent,
+  guidanceContentRejection,
 } from "../guidance/index.js";
 
 // Root composition only. Pipelines receive confined services, never Git effects.
@@ -94,6 +96,8 @@ export function createSetupRuntime({
     inspectIgnored,
     extendReadScope,
     validateGuidance: validateGuidanceContent,
+    resultRejection: (cause) =>
+      guidanceContentRejection(cause) ?? projectConfigurationRejection(cause),
     validateConfiguration: async (source) =>
       parseProjectConfiguration(
         source,

@@ -209,6 +209,14 @@ Interrupted reconstruction exposes a resumable provider pause without renewing
 its consumed allowance. The managed local guide records the exact selected
 finalization procedure and replaces its metadata without losing local instructions.
 
+Semantic init rejection retains a finite validator-owned constraint and original
+code with fixed corrective guidance. CLI/MCP status, fresh/held waits, safe activity
+and the matching resumed/reconstructed role request agree. The rejected proposal
+remains unpublished and the prior valid proposal survives. Feedback cannot move
+to another phase or input binding and clears on acceptance or a product decision;
+legacy absence invents no history. Existing safety blockers and pending effects
+remain authoritative. See [semantic rejection](../../pipelines/init/docs/SPEC.md#semantic-result-rejection).
+
 Only runner-root configuration accepts `clientAttribution`, an exact
 `{ name, title }` provider-visible identity. It defaults to
 `agent_runner` / `Agent Runner`; project configuration, CLI, MCP, pipelines,

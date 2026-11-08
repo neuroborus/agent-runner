@@ -629,6 +629,12 @@ placement independently of review mode. Planner proposals and every review or
 confirmation turn are read-only; Runner publishes the reviewed resources.
 Proposal acceptance alone does not mean infrastructure is available.
 
+Rejected semantic results expose a finite constraint, original code and fixed
+corrective guidance. Same-checkpoint resume/reconstruction receives matching
+feedback; rejected resources remain unpublished and the last valid proposal is
+preserved. Acceptance or a product decision clears feedback without renewing
+budgets. See [init semantic rejection](pipelines/init/docs/SPEC.md#semantic-result-rejection).
+
 ```mermaid
 flowchart TD
     Q["CLARIFY: freeze target and placement"] --> P["Planner proposal"]
@@ -2161,6 +2167,9 @@ transient inspection failures permit unchanged-input resume; other diagnoses
 require preserving work, correcting prerequisites and a fresh run. Start/resume
 receipts acknowledge admission/dispatch, not successful setup. See
 [inspection recovery](pipelines/init/docs/SPEC.md#inspection-failures).
+Semantic result rejection exposes matching finite corrective feedback in status,
+waits and the resumed role request; see
+[semantic rejection](pipelines/init/docs/SPEC.md#semantic-result-rejection).
 Terminal provider failures persist `FAILED` with bounded diagnosis before owner
 release. Foreground CLI exits unsuccessfully; status and held/new waits expose
 the same outcome. Preserve prepared resources and use separately authorized

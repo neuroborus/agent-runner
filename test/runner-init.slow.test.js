@@ -15,6 +15,7 @@ import {
   integratedIgnorePaths,
   externalFinalizationContent,
   externalFinalizationPath,
+  InitProposalError,
   initPipeline,
 } from "@agent-runner/init";
 import {
@@ -732,7 +733,7 @@ test("init publishes terminal adapter failures with exact retained bindings and 
   }
 });
 
-test("foreground failure and already-held MCP wait observe the same durable init diagnosis", async (t) => {
+async function observeInitDiagnosis(t, semantic) {
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
   const waiting = Promise.withResolvers();
@@ -744,10 +745,14 @@ test("foreground failure and already-held MCP wait observe the same durable init
     async beforeRun() {
       entered.resolve();
       await release.promise;
+      if (semantic) return false;
       throw new CodexAdapterError("Private provider content", {
         code: "ERR_CODEX_TURN_FAILED",
         diagnosticClass: "turn_bad_request",
       });
+    },
+    transformResult(result) {
+      return semantic ? null : result;
     },
   });
   let output = "";
@@ -792,7 +797,7 @@ test("foreground failure and already-held MCP wait observe the same durable init
       held.then(() => assert.fail("Wait ended before provider failure.")),
     ]);
     release.resolve();
-    assert.equal(await foreground, 1);
+    assert.equal(await foreground, semantic ? 2 : 1);
     const status = await control.runStatus({ runId });
     const observed = await held;
     const fresh = await control.runWait({
@@ -801,13 +806,18 @@ test("foreground failure and already-held MCP wait observe the same durable init
       timeoutMs: 0,
     });
     for (const value of [observed, fresh]) {
-      assert.equal(value.status, "FAILED");
+      assert.equal(value.status, semantic ? "WAITING_FOR_USER" : "FAILED");
       assert.equal(value.timedOut, false);
       assert.deepEqual(value.pause, status.pause);
     }
     assert.ok(output.includes(status.pause.explanation));
-    assert.match(output, /ERR_CODEX_TURN_FAILED/u);
-    assert.match(output, /Adapter diagnostic: turn_bad_request/u);
+    if (semantic) {
+      assert.equal(status.pause.correctiveFeedback.constraint, "result_shape");
+      assert.equal(status.pause.code, "ERR_INIT_PROPOSAL");
+    } else {
+      assert.match(output, /ERR_CODEX_TURN_FAILED/u);
+      assert.match(output, /Adapter diagnostic: turn_bad_request/u);
+    }
     assert.doesNotMatch(output, /Private provider content/u);
     assert.equal(await f.runStore.runLeaseOwnerIsLive(runId), false);
   } finally {
@@ -815,6 +825,13 @@ test("foreground failure and already-held MCP wait observe the same durable init
     abort.abort();
     await Promise.allSettled([foreground, held]);
   }
+}
+
+test("foreground failure and already-held MCP wait observe the same durable init diagnosis", async (t) => {
+  for (const semantic of [false, true])
+    await t.test(semantic ? "semantic" : "provider", (t) =>
+      observeInitDiagnosis(t, semantic),
+    );
 });
 
 test("init keeps output, authentication and structured-result dispositions ahead of terminal failure", async (t) => {
@@ -854,6 +871,7 @@ test("init keeps output, authentication and structured-result dispositions ahead
       ).run;
       assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
       assert.equal(paused.pause.reason, reason);
+      assert.equal(paused.pipelineState.correctiveFeedback, null);
       assert.equal(paused.pipelineState.publication, null);
       assert.equal(paused.pipelineState.sequence, 1);
       assert.equal(paused.pipelineState.revisionRounds, 0);
@@ -877,7 +895,10 @@ test("init never acknowledges terminal settlement when retirement or persistence
     "publication",
   ])
     await t.test(failure, async (t) => {
-      const privateFailure = new Error("Owned operation failed");
+      const privateFailure = Object.assign(
+        new Error("Owned operation failed"),
+        { code: "ERR_INIT_PROPOSAL" },
+      );
       const f = await fixture(t, "external", "independent", {
         async beforeRun(request) {
           if (failure === "callback") {
@@ -1212,15 +1233,65 @@ test("external setup reuses its held enclosing-worktree exclusion without changi
   });
 });
 
-test("invalid setup content pauses before publication and remains correctable on resume", async (t) => {
-  for (const [placement, kind, content, proposalNumber] of [
-    ["external", "guidance", "Unsafe control: \u0000\n", 1],
-    ["external", "configuration", "{", 1],
-    ["integrated", "finalization", "Omit the reviewed checks.\n", 2],
+test("invalid setup content retains corrective diagnosis before publication and on resume", async (t) => {
+  for (const [placement, kind, content, proposalNumber, constraint, code] of [
+    [
+      "external",
+      "guidance",
+      "Unsafe control: \u0000\n",
+      1,
+      "guidance_encoding",
+      "ERR_INVALID_GUIDANCE",
+    ],
+    [
+      "external",
+      "configuration",
+      "{",
+      1,
+      "configuration_shape",
+      "ERR_INVALID_CONFIGURATION",
+    ],
+    [
+      "external",
+      "configuration",
+      '{"schemaVersion":2}',
+      1,
+      "configuration_version",
+      "ERR_UNSUPPORTED_CONFIGURATION_VERSION",
+    ],
+    [
+      "integrated",
+      "finalization",
+      "Omit the reviewed checks.\n",
+      2,
+      "finalization_procedure",
+      "ERR_INIT_PROPOSAL",
+    ],
   ])
     await t.test(`${placement}/${kind}`, async (t) => {
       let proposals = 0;
+      let reconstructed = false;
+      let feedbackRequests = 0;
+      let expectedFeedback;
       const f = await fixture(t, placement, "combined", {
+        async beforeRun(request) {
+          if (
+            !expectedFeedback ||
+            !request.prompt.includes('"correctiveFeedback":{')
+          )
+            return false;
+          feedbackRequests++;
+          assert.ok(request.prompt.includes(JSON.stringify(expectedFeedback)));
+          assert.ok(
+            request.recoveryPrompt.includes(JSON.stringify(expectedFeedback)),
+          );
+          if (proposalNumber === 2 && !reconstructed) {
+            reconstructed = true;
+            assert.equal(await request.onFreshSession(), true);
+            return true;
+          }
+          return false;
+        },
         transformResult(result) {
           if (result.status === "PROPOSAL" && ++proposals === proposalNumber) {
             result.resources.find(
@@ -1247,10 +1318,150 @@ test("invalid setup content pauses before publication and remains correctable on
           content,
         );
       assert.equal(paused.run.pipelineState.publication, null);
+      const saved = await createRunStore({
+        stateRoot: f.runStore.rootPath,
+      }).loadRun(paused.run.runId);
+      assert.deepEqual(
+        saved.pipelineState.correctiveFeedback,
+        paused.run.pipelineState.correctiveFeedback,
+      );
+      const feedback = saved.pipelineState.correctiveFeedback;
+      assert.equal(feedback.constraint, constraint);
+      assert.equal(feedback.code, code);
+      assert.equal(feedback.reservation.phase, saved.pause.resumeState);
+      assert.equal(feedback.reservation.id, saved.pipelineState.sequence);
+      const control = createMcpControlPlane({
+        runner: f.runner,
+        runStore: f.runStore,
+      });
+      const status = await control.runStatus({ runId: saved.runId });
+      expectedFeedback = status.pause.correctiveFeedback;
+      assert.equal(status.pause.code, code);
+      assert.equal(expectedFeedback.constraint, constraint);
+      const waited = await control.runWait({
+        runId: saved.runId,
+        cursor: status.revision,
+        timeoutMs: 0,
+      });
+      assert.deepEqual(waited.pause, status.pause);
+      const activity = (await f.runStore.readPublicActivity(saved.runId))
+        .activities;
+      assert.ok(
+        activity.some(
+          ({ message }) => message === expectedFeedback.explanation,
+        ),
+      );
+      let output = "";
+      await main(["status", "--run", saved.runId], {
+        runner: f.runner,
+        stdout: {
+          write: (text) => {
+            output += text;
+          },
+        },
+        stderr: { write: assert.fail },
+      });
+      assert.ok(output.includes(expectedFeedback.explanation));
       assert.deepEqual(await fs.readdir(f.projectPath), original);
       const result = await f.runner.resume({ runId: paused.run.runId });
       assert.equal(result.run.pipelineState.workflowState, "DONE");
       assert.equal(result.run.pipelineState.revisionRounds, 0);
+      assert.equal(result.run.pipelineState.correctiveFeedback, null);
+      assert.ok(feedbackRequests > 0);
+      assert.equal(reconstructed, proposalNumber === 2);
+      assert.deepEqual(
+        result.run.pipelineState.settings,
+        saved.pipelineState.settings,
+      );
+    });
+});
+
+test("terminal semantic rejection retains published proof and binds feedback to that fingerprint", async (t) => {
+  let rejected = false;
+  let expected;
+  const f = await fixture(t, "external", "lazy", {
+    beforeRun(request) {
+      if (
+        expected &&
+        request.prompt.includes("Distinct terminal confirmation:")
+      )
+        assert.ok(request.prompt.includes(JSON.stringify(expected)));
+      return false;
+    },
+    transformResult(result, request) {
+      if (
+        !rejected &&
+        request.prompt.includes("Distinct terminal confirmation:")
+      ) {
+        rejected = true;
+        result.proposalHash = "b".repeat(64);
+      }
+      return result;
+    },
+  });
+  const paused = (await f.start()).run;
+  assert.equal(paused.pause.reason, "invalid_result");
+  assert.equal(paused.pause.resumeState, "PROPOSAL_ACCEPTED");
+  assert.equal(
+    paused.pipelineState.correctiveFeedback.reservation.phase,
+    "CONFIRM",
+  );
+  assert.equal(paused.pipelineState.terminal.status, "PENDING");
+  const changed = structuredClone(paused);
+  changed.pipelineState.terminal.fingerprint = "b".repeat(64);
+  assert.throws(
+    () => initPipeline.workflow.validateRun(changed),
+    /corrective feedback/u,
+  );
+  expected = initPipeline.projections.pause(paused).correctiveFeedback;
+  const result = (await f.runner.resume({ runId: paused.runId })).run;
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.correctiveFeedback, null);
+  for (const key of [
+    "publication",
+    "guidanceIntent",
+    "guidanceReceipt",
+    "sequence",
+    "revisionRounds",
+    "sourceForks",
+  ])
+    assert.deepEqual(result.pipelineState[key], paused.pipelineState[key]);
+});
+
+test("result acceptance and diagnosis persistence cannot forge semantic failures by code collision", async (t) => {
+  for (const rejecting of [false, true])
+    await t.test(String(rejecting), async (t) => {
+      const failure = new InitProposalError("Private callback failure");
+      const f = await fixture(t, "external", "combined", {
+        transformResult(result) {
+          if (rejecting && result.status === "PROPOSAL")
+            result.resources[0].beforeHash = "b".repeat(64);
+          return result;
+        },
+        beforeTransition(patch) {
+          if (
+            rejecting
+              ? patch.pause?.reason === "invalid_result"
+              : patch.pipelineState?.workflowState === "CHECK_AND_FIX"
+          )
+            throw failure;
+        },
+      });
+      const { run } = await f.runner.create({
+        pipelineId: "init",
+        projectPath: f.projectPath,
+        taskPath: f.taskPath,
+      });
+      await assert.rejects(
+        f.runner.resume({ runId: run.runId }),
+        (cause) => cause === failure,
+      );
+      const saved = await f.runStore.loadRun(run.runId);
+      assert.equal(saved.pipelineState.workflowState, "PROPOSE");
+      assert.equal(saved.pipelineState.pendingTurn.phase, "PROPOSE");
+      assert.equal(saved.pipelineState.correctiveFeedback, null);
+      assert.equal(saved.pipelineState.proposal, null);
+      assert.equal(saved.pause, null);
     });
 });
 
@@ -1338,7 +1549,10 @@ test("root resume reconciles pending ignore publication before requiring its exc
     beforeFile({ intent }) {
       if (!interrupted && intent.path.endsWith("/.gitignore")) {
         interrupted = true;
-        throw new Error("Interrupted before ignore publication");
+        throw Object.assign(
+          new Error("Interrupted before ignore publication"),
+          { code: "ERR_INIT_PROPOSAL" },
+        );
       }
     },
   });
@@ -1356,6 +1570,8 @@ test("root resume reconciles pending ignore publication before requiring its exc
     saved.pipelineState.publication.pending.path,
     join(f.projectPath, ".gitignore"),
   );
+  assert.equal(saved.pipelineState.correctiveFeedback, null);
+  assert.notEqual(saved.pause?.reason, "invalid_result");
   await assert.rejects(fs.readFile(join(f.projectPath, ".gitignore")), {
     code: "ENOENT",
   });
@@ -2202,6 +2418,10 @@ test("post-turn and additive reinspection failures cannot approve or publish set
     await t.test(phase, async (t) => {
       let rejectProof = false;
       const f = await fixture(t, "external", "independent", {
+        transformResult(result) {
+          result["private-marker"] = "Rejected response";
+          return result;
+        },
         beforeProof() {
           if (rejectProof) throw capacityFailure();
         },

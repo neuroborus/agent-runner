@@ -590,7 +590,7 @@ identities and live configuration exclusions. Its explicit reservation/result
 agent transitions stop at `PROPOSAL_ACCEPTED`; its lifecycle then dispatches only
 Runner-owned setup effects.
 
-Init state version 2 uses version-2 inspections with compact complete scope
+Init state version 3 uses version-2 inspections with compact complete scope
 proofs and bounded role-facing setup destinations, documents, ancestors and
 control markers. Proposal paths need explicit coverage; omitted evidence never
 means absent. Publication and same-run repair baselines retain exact relevant
@@ -602,6 +602,20 @@ comparison algorithms, pending effects, receipts, approvals and finite budgets;
 reinspection uses the saved version. Unsupported setup-evidence capacity fails
 before partial inspection can grant role or publication authority. Shared state
 collection limits and directory/Git permission boundaries remain unchanged.
+
+The explicit init 2-to-3 migration initializes nullable `correctiveFeedback`
+without inventing legacy diagnosis or changing inspection/publication proofs.
+Actual proposal, guidance and project-configuration validators supply finite
+trusted constraints and original codes. Root composition supplies capability-owned
+error recognition without importing pipeline policy. Before acceptance, init
+separates validation from persistence and atomically journals sanitized rejection,
+its `invalid_result` pause and safe activity. Feedback binds the original role/phase
+reservation and frozen inputs/proposal; terminal feedback also binds the published
+fingerprint. Same-checkpoint resume/reconstruction and CLI/MCP status/wait share
+fixed corrective text. Acceptance and product decisions clear it. Prior accepted
+proposals, approvals, modes and consumed allowances survive rejection; callbacks,
+drift, inspection failures and pending effects retain precedence. See
+[semantic rejection](../pipelines/init/docs/SPEC.md#semantic-result-rejection).
 
 The separate `publishIntegratedInit` / `publishExternalInit` effects require those
 approvals, unchanged setup bindings and the existing exclusive leases. The clarification capability

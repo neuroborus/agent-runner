@@ -29,6 +29,7 @@ import {
 } from "./proposal.js";
 import { INIT_INSTRUCTIONS, PHASE_INSTRUCTIONS } from "./prompts.js";
 import { initGuidanceContent } from "./guidance.js";
+import { initCorrectiveFeedback, isInitRejection } from "./rejection.js";
 import {
   assertInitInspection,
   assertInspectionFailure,
@@ -121,6 +122,7 @@ export function createInitState({
     findings: [],
     questions: [],
     pendingTurn: null,
+    correctiveFeedback: null,
     sequence: 0,
     pauseReason: null,
   };
@@ -478,6 +480,47 @@ export function assertInitState(state) {
       "Init pending turn binding changed.",
     );
   }
+  if (state.correctiveFeedback !== null) {
+    const feedback = state.correctiveFeedback;
+    exact(feedback, ["code", "constraint", "reservation", "settingsHash"]);
+    const reservation = feedback.reservation;
+    exact(reservation, ["id", "phase", "role", "binding"]);
+    assertInit(
+      isInitRejection(feedback) &&
+        feedback.settingsHash === digest(state.settings) &&
+        [
+          "CLARIFY",
+          "PROPOSE",
+          "CHECK_AND_FIX",
+          "CLEAN_CONFIRM",
+          "REVIEW",
+          "CONFIRM",
+        ].includes(reservation.phase) &&
+        Number.isSafeInteger(reservation.id) &&
+        reservation.id > 0 &&
+        reservation.id <= state.sequence &&
+        reservation.role ===
+          (reservation.phase === "CONFIRM"
+            ? state.settings.mode === "lazy"
+              ? "planner"
+              : "reviewer"
+            : reservation.phase === "REVIEW"
+              ? "reviewer"
+              : "planner") &&
+        reservation.binding === turnBinding(state, reservation.phase) &&
+        (state.workflowState === "WAITING_FOR_USER" ||
+          state.workflowState ===
+            (reservation.phase === "CONFIRM"
+              ? "PROPOSAL_ACCEPTED"
+              : reservation.phase)) &&
+        (reservation.phase !== "CONFIRM" ||
+          state.terminal?.status === "PENDING") &&
+        state.pauseReason === null &&
+        state.pendingEdit === null &&
+        state.productDecision === null,
+      "Init corrective feedback belongs to another checkpoint or input binding.",
+    );
+  }
 }
 
 const approvalHash = (state) =>
@@ -487,15 +530,62 @@ const approvalHash = (state) =>
     clarificationHash: state.clarificationHash,
     proposalHash: state.proposalHash,
   });
-const turnBinding = (state) =>
+const turnBinding = (state, phase = state.workflowState) =>
   digest({
     binding: approvalHash(state),
-    phase: state.workflowState,
+    phase,
     findings: state.findings,
     revisions: state.revisionRounds,
     questions: state.clarificationRounds,
     transcriptHash: state.transcriptHash,
+    ...(phase === "CONFIRM"
+      ? { fingerprint: state.terminal?.fingerprint }
+      : {}),
   });
+
+export function initConfirmationReservation(state) {
+  return {
+    id: state.sequence,
+    phase: "CONFIRM",
+    role: state.settings.mode === "lazy" ? "planner" : "reviewer",
+    binding: turnBinding(state, "CONFIRM"),
+  };
+}
+
+// Retire only this logical result; retain prior proposal/approvals and all
+// consumed accounting. The lifecycle persists this with its invalid-result pause.
+export function rejectInitResult(state, request, rejection) {
+  assertInitState(state);
+  const reservation =
+    request.phase === "CONFIRM"
+      ? initConfirmationReservation(state)
+      : state.pendingTurn;
+  assertInit(
+    reservation !== null &&
+      isDeepStrictEqual(reservation, {
+        id: request.id,
+        phase: request.phase,
+        role: request.role,
+        binding: request.binding,
+      }) &&
+      isInitRejection(rejection) &&
+      state.publication?.pending == null &&
+      (state.guidanceIntent === null || state.guidanceReceipt !== null),
+    "Init rejection does not own the reserved checkpoint.",
+  );
+  const next = {
+    ...state,
+    workflowState: "WAITING_FOR_USER",
+    pendingTurn: null,
+    correctiveFeedback: {
+      ...rejection,
+      reservation: structuredClone(reservation),
+      settingsHash: digest(state.settings),
+    },
+  };
+  assertInitState(next);
+  return next;
+}
 
 // The caller persists the returned reservation before invoking its adapter.
 export function prepareInitTurn(state, inspection, transcriptHash) {
@@ -540,6 +630,7 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
     state: next,
     request: {
       ...next.pendingTurn,
+      correctiveFeedback: initCorrectiveFeedback(next),
       access: "read-only",
       schema:
         next.workflowState === "CLARIFY"
@@ -550,6 +641,7 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
       prompt: `${INIT_INSTRUCTIONS}\n\n${PHASE_INSTRUCTIONS[next.workflowState]}\n\n${JSON.stringify(
         {
           inspection,
+          correctiveFeedback: initCorrectiveFeedback(next),
           mode: next.settings.mode,
           selectionInput: next.clarificationSelection,
           selection: next.selection,
@@ -752,7 +844,11 @@ export function acceptInitResult(
     "Init turn is stale or changed read-only inputs.",
   );
   assertResultSize(result);
-  let next = structuredClone({ ...state, pendingTurn: null });
+  let next = structuredClone({
+    ...state,
+    pendingTurn: null,
+    correctiveFeedback: null,
+  });
   if (state.workflowState === "CLARIFY") {
     exact(result, ["status", "questions", "reason"]);
     questions(result.questions);
@@ -851,6 +947,7 @@ export function requestInitDecision(state, decision) {
     workflowState: "WAITING_FOR_USER",
     pauseReason: "product_decision_required",
     pendingTurn: null,
+    correctiveFeedback: null,
     proposal: null,
     proposalHash: null,
     primaryApproval: null,
@@ -963,6 +1060,20 @@ export function assertInitRun(run) {
   // Root safety blockers may suspend a still-reserved read-only turn. Validate
   // its original binding without granting a continuation through that blocker.
   const state = run.pipelineState;
+  if (
+    state.correctiveFeedback !== null &&
+    state.workflowState === "WAITING_FOR_USER" &&
+    !["workspace_changed", "project_configuration_changed"].includes(
+      run.pause?.reason,
+    )
+  )
+    assertInit(
+      run.pause?.resumeState ===
+        (state.correctiveFeedback.reservation.phase === "CONFIRM"
+          ? "PROPOSAL_ACCEPTED"
+          : state.correctiveFeedback.reservation.phase),
+      "Init rejection resume checkpoint changed.",
+    );
   const phase =
     state.workflowState === "WAITING_FOR_USER" &&
     state.pendingTurn !== null &&
@@ -990,5 +1101,10 @@ export function failInitTurn(state, request) {
           state.pendingTurn.binding === request.binding,
     "Init failure does not own the reserved turn.",
   );
-  return { ...state, workflowState: "FAILED", pendingTurn: null };
+  return {
+    ...state,
+    workflowState: "FAILED",
+    pendingTurn: null,
+    correctiveFeedback: null,
+  };
 }

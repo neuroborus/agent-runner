@@ -30,7 +30,7 @@
     "runStateVersion": 26,
     "pipelines": {
       "audit": 7,
-      "init": 2,
+      "init": 3,
       "plan-authoring": 7,
       "plan-execution": 39,
       "polishing": 19

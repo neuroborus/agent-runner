@@ -722,6 +722,12 @@ The proposal suite also keeps external finalization references limited to the
 target's finalization skills, without invoking unrelated inventoried skills.
 That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
 
+It also owns actual finite semantic-validator categories, diagnosis redaction,
+original reservation/input binding checks, replacement/clearing of corrective
+feedback, callback-code nonrecognition and null-initializing legacy migration,
+including pending editor authorization. Configuration/guidance recognition uses
+their public boundaries; no rejected payload enters the finite diagnosis.
+
 Fast `pipelines/init/test/inspection-failure.test.js` owns finite inspection
 constraints, complete over-capacity document rejection, redaction, strict pause
 validation, trusted bounded-file constraint mapping and narrow transient recovery
@@ -791,6 +797,9 @@ without repeating possible effects, guidance-last publication, distinct
 terminal confirmation, CLI/MCP setup projections, repeatable guidance,
 resumable rejection of unsafe guidance, malformed configuration and invalid
 placement-specific procedures before publication,
+persisted semantic feedback across resume/reconstruction with matching CLI/MCP
+status, fresh/held waits, activity and role requests, callback/persistence code
+collisions, and terminal-feedback fingerprint binding with preserved publication,
 renewed proposal gates and actual procedure repairs after terminal findings,
 atomic replacement of existing local guidance, pending ignore publication,
 enclosing-worktree lease reuse, failed infrastructure-lease release across
