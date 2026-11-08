@@ -375,6 +375,20 @@ function isSelectedPreparation(before, after) {
   });
 }
 
+/** Rebind only the admitted state hash at an explicit leased pipeline migration. */
+export function migrateWorkspacePreparation(previous, current, activity) {
+  if (previous.workspacePreparation === null) return current;
+  const migrated = {
+    ...current,
+    workspacePreparation: {
+      ...previous.workspacePreparation,
+      inputFingerprint: workspacePreparationInputFingerprint(current),
+    },
+  };
+  assertWorkspacePreparationContinuity(previous, migrated, activity);
+  return migrated;
+}
+
 export function assertWorkspacePreparationContinuity(
   previous,
   current,
@@ -392,6 +406,32 @@ export function assertWorkspacePreparationContinuity(
     updatedAt,
     ...state
   }) => state;
+  const migrationBinding = ({
+    schemaVersion,
+    runtimeCompatibility,
+    pipelineStateVersion,
+    pipelineState,
+    ...run
+  }) => ({ ...stationary(run), workflowState: pipelineState.workflowState });
+  if (
+    before !== null &&
+    after !== null &&
+    previous.workspace === null &&
+    current.workspace === null &&
+    activity?.actor === "runner" &&
+    activity.phase === "runtime" &&
+    activity.kind === "migrated" &&
+    current.pipelineStateVersion > previous.pipelineStateVersion &&
+    before.inputFingerprint ===
+      workspacePreparationInputFingerprint(previous) &&
+    after.inputFingerprint === workspacePreparationInputFingerprint(current) &&
+    isDeepStrictEqual(before, {
+      ...after,
+      inputFingerprint: before.inputFingerprint,
+    }) &&
+    isDeepStrictEqual(migrationBinding(previous), migrationBinding(current))
+  )
+    return false;
   const selected =
     activity?.kind === "selected" &&
     current.workspace === null &&

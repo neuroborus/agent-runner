@@ -123,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 7 retains the workspace baseline, frozen declarations and their
+State version 8 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -174,8 +174,9 @@ the existing durable backoff, while inactivity retains its shared reconstruction
 allowance; both recover the same reserved pass without renewing its budget.
 Authentication and output exhaustion persist their distinct operator pauses
 atomically with turn retirement. A possibly created source child is never forked
-again at that checkpoint; only validated no-effect evidence restores an unused
-fork. Provider-neutral structured-output failures pause as invalid output after
+again at that checkpoint. Authentication can restore an unused fork only from
+validated no-effect evidence; exhaustion reconstructs without another source fork.
+Provider-neutral structured-output failures pause as invalid output after
 read-only reconciliation; discovery records an invalid pass before resuming at
 a new ordinal. Terminal provider safety failures propagate after reconciliation and
 persist `FAILED`, which cannot resume discovery or verification. A pending batch
@@ -276,6 +277,53 @@ completion, finding acceptance or permission to publish. The lifecycle returns
 at that checkpoint without a redundant unchanged-response turn. The separate
 finding gate and public mode-specific completion/publication consume
 these bindings without changing historical outcomes or renewing either budget.
+
+## Explicit output-exhaustion reconstruction
+
+Recognized output exhaustion still pauses for an explicit null-action resume;
+there is no automatic replay or partial-output acceptance. Audit atomically saves
+nullable `outputRecovery` with that pause and active-turn retirement. Its closed
+record contains `phase` (`clarify`, `discovery`, `recheck`), `number` (question round
+or reserved pass ordinal), `contextKey` and `retiredChildren` (a prefix length in
+the existing append-only common child lineage). Native IDs stay only in common
+lineage. Validation binds the intent to the exact current phase, logical context,
+reservation and pause role/checkpoint. It grants no new inspection or write authority.
+
+Resume preserves the intent before clearing the pause or launching work. It
+excludes the retired prefix from session selection and result acceptance and
+starts fresh native context without a source fork. A subsequently acknowledged
+replacement can continue after response loss; every recovery request carries
+complete frozen inputs, current ledger/batch versions and dispositions, accepted
+receipt references, discovery/recheck histories and correction feedback. Compact
+output-pressure guidance requests targeted reads and concise usable batches,
+while complete rechecks must still decide every exact entry. Old receipts cannot
+approve pending revisions; hypotheses and rejected dispositions stay distinct.
+
+Recovery retains the same original running reservation through interruption,
+availability backoff and the existing inactivity allowance. Repeated exhaustion
+advances the retired prefix and pauses again for explicit retry. Native replacement
+never closes a logical cycle, resets clean-first eligibility, renews either budget,
+reforks a source or changes mode/model/effort. Ordinary invalid/incomplete outcomes
+retain their existing accounting. If an invalid identity arrived before any
+replacement acknowledgement, retirement survives rejection and binds the next
+ordinary correction reservation so a retired child cannot become selectable again.
+Accepted or rejected results otherwise settle recovery atomically with their
+durable outcome. Safety/input drift takes precedence; terminal dispositions stay inert.
+
+The leased version-7 migration to version 8 initializes intent only for a genuine
+legacy `WAITING_FOR_USER` output-exhaustion pause with a matching role/checkpoint
+and unsettled reservation (or clarification round). Inconsistent legacy evidence
+fails migration. Absence elsewhere becomes null without inventing failed turns,
+freshness or allowances. Settings, bindings, histories, accepted receipts, pending
+versions/dispositions and publication bytes remain unchanged. CLI/MCP expose the
+same redacted explanation of explicit fresh-context reconstruction. Common-envelope
+shape and generic adapter output-exhaustion normalization remain unchanged.
+
+For an uncaptured legacy admission, the root leased migration rebinds only the
+preparation's state fingerprint after validating the original binding. Frozen
+declarations, source selection, input evidence, roles and budgets stay identical;
+both representations remain journaled. Adding the nullable recovery default
+cannot authorize capture or change the agreed scope.
 
 ## Combined discovery cycles
 

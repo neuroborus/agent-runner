@@ -652,17 +652,20 @@ Naming grants no turn, source-fork, commit or handoff replay. Model-free fixture
 and flag/schema inspection prove no live-provider or additional platform acceptance.
 Publication stays disabled pending identity, approval and public-verification gates.
 
-Model-free CLI, sandbox, commit-executor and process-containment probes have a fixed
-10-second deadline. Within it, local-commit probes have a one-second network-denial observation
+Model-free CLI, sandbox, commit-executor and containment probes have a 10-second
+deadline. Local-commit probes have a one-second network-denial observation
 deadline; silent sockets fail isolation proof. Codex's pre-effect local-commit
 Git metadata lookup uses a 60-second bound; Claude's pre-effect local-commit
-Git metadata lookup retains the 10-second bound. These preparation deadlines
-do not cap the authorized commit effect after it begins. Codex MCP configuration
-discovery gets at most two attempts with a 30-second subprocess deadline apiece,
-without retry delay. Ordinary non-commit context exhaustion permits at most one
+Git metadata lookup retains the 10-second bound.
+Preparation deadlines do not cap the authorized commit effect.
+Codex MCP configuration discovery allows two attempts with a 30-second subprocess
+deadline each and no retry delay. Non-commit context exhaustion permits at most one
 in-session compaction retry with a usable session. Outside source forks, persistent
-pressure and other ordinary recoverable provider work get one fresh reconstruction
-before pausing. See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
+pressure and recoverable work permit one fresh reconstruction before pausing.
+See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
+
+Explicit resume after audit output exhaustion reconstructs the same checkpoint
+in fresh native context; see [audit recovery](../pipelines/audit/docs/SPEC.md).
 
 Classified Claude readiness refusals preserve the reviewed candidate. Exact
 `ready: false` establishes only a decline with unknown reason; malformed

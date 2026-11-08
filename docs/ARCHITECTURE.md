@@ -854,7 +854,7 @@ around capture and reconstruction. Directory scope prunes exclusions before
 traversal and never invokes Git. Filesystem declarations bind provider receipts;
 Runner additionally binds Git provenance into snapshot fingerprints and role
 context. Report/finding bindings consume that same snapshot. New report bytes
-and report fingerprints also bind frozen source settings. Audit state version 7
+and report fingerprints also bind frozen source settings. Audit state version 8
 preserves legacy missing settings as whole-directory scope without altering
 evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
@@ -919,6 +919,20 @@ checkpoint receives canonical diagnostics with fixed correction instructions;
 validation replaces or clears feedback without changing session or budget rules.
 The descriptor exposes the same bounded constraint evidence through CLI/MCP pause
 projections, excluding native messages and rejected content.
+Audit state version 8 adds private nullable output-recovery intent: phase,
+round/pass ordinal, logical context and a retired prefix length in common child
+lineage. Exhaustion saves it atomically with the operator pause before native
+replacement. Explicit resume reconstructs that checkpoint without reforking a
+source; acknowledged replacements can continue after response loss, while retired
+children cannot supply results. Histories, exact finding/batch versions,
+dispositions, receipt references and correction feedback reconstruct the request;
+concise output guidance changes no verification gate or finite budget. The intent
+survives pause clearing, cold interruption and classified availability/inactivity
+recovery until its durable outcome settles it. Repeated exhaustion advances
+retirement and pauses again. The leased version-7 migration creates intent only
+for a genuine matching legacy exhaustion pause; unrelated absence becomes null.
+No native ID is duplicated and no common-envelope change is required. See the
+[audit recovery contract](../pipelines/audit/docs/SPEC.md#explicit-output-exhaustion-reconstruction).
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies
@@ -2366,7 +2380,7 @@ transition atomically binding the completed workspace and clearing the pending
 record. The resulting policy, exclusion key and absent inputs must match the
 admission, including the exact absent-input list during journal replay.
 Journal replay permits no other replacement or removal except the bounded
-source-selection transition described below. Interrupted
+source-selection and migration transitions described below. Interrupted
 capture publishes no partial fingerprints; recovery recaptures from frozen
 declarations. An interrupted complete publication uses ordinary journal recovery
 without repeating capture. Stale revisions, substituted inputs/roots, uncertain
@@ -2380,6 +2394,15 @@ Legacy absence normalizes to null and preserves completed historical preparation
 existing workspace bindings and all pipeline evidence during ordinary leased
 migration; it never schedules a new capture.
 
+An explicit leased pipeline-version migration may rebind only the pending
+preparation's `inputFingerprint` to the validated migrated state representation.
+The original admission hash must still match its original state. Journal replay
+requires increasing pipeline version and `runner/runtime/migrated` activity,
+unchanged workflow state, and identical policy, source selection, root identities,
+input bytes/identities, roles, hashes, counters and lineage. Both complete states
+remain in history. This grants no capture, provider work, new inputs or changed
+scope; ordinary transitions still reject any admitted-state drift.
+
 Common envelope version 26 adds optional `sourceSelection: {kind: "git",
 fingerprint}` to pending and completed directory bindings. Only new Git-scoped
 preparation starts with a null fingerprint and no inspection roots. Under both
@@ -2392,7 +2415,7 @@ preserve that exact selection. Interrupted selection publication recovers once;
 later capture/reconstruction verifies existing membership rather than reselecting.
 Partial capture supplies no authority. Version-25 preparation and completed
 bindings remain unchanged on migration. The detached token is `1:26`, with
-matching package metadata and audit version 7 compatibility.
+matching package metadata and audit version 8 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration

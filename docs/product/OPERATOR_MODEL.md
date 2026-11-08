@@ -277,6 +277,14 @@ not-started proof and unchanged Git verification. Public recovery distinguishes
 proven inactivity from generic reconstruction with `expiryProven`; legacy
 reconstruction markers prove no timeout and grant no new allowance.
 
+For audit, the offered null-action resume reconstructs the exact suspended
+checkpoint in fresh native context with concise output guidance. A durable
+retirement boundary excludes exhausted children, while an acknowledged
+replacement may continue after response loss. Frozen inputs, pending exact
+versions/dispositions, accepted receipts, logical histories and both consumed
+budgets survive. Reconstruction alone never confirms a candidate or approves a
+material revision; the complete selected finding-verification gate still applies.
+
 The separate `authentication_required` disposition never enters that retry
 policy. After repository reconciliation, every pipeline pauses durably at its
 exact logical checkpoint with the fixed `ERR_AUTHENTICATION_REQUIRED` code.

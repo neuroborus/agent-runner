@@ -1630,6 +1630,14 @@ alone establishes neither a numeric output ceiling nor context utilization.
 See the [provider model](docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
 for the recognition and safety boundaries.
 
+For audit, explicit resume reconstructs the same suspended checkpoint in fresh
+native context, retiring the exhausted child without another source fork.
+Acknowledged replacements can continue after response loss. Frozen scope,
+accepted receipts, pending versions and dispositions, correction feedback and
+both finite budgets survive; replacement cannot establish clean coverage or
+confirm findings. Discovery may finish one coherent usable batch, and each exact
+batch still requires the complete selected verification gate before more discovery.
+
 Execution bootstrap separates repository discovery from bounded contiguous
 applicability units. Restart preserves accepted work; only unfinished units may
 subdivide on recognized output exhaustion, without renewing correction budgets.

@@ -322,6 +322,7 @@ export function createAuditState({
     recheckHistory: [],
     acceptedBatches: [],
     correctionFeedback: null,
+    outputRecovery: null,
     publication: { pending: null, published: null, temporary: null },
   };
 }

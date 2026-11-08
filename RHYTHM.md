@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-08
 
+- **Audit reconstructs output-exhausted checkpoints on explicit resume.**
+  Audit state version 8 journals a retirement boundary in common child lineage
+  with the exhaustion pause. Fresh native context receives frozen inputs and
+  durable finding/decision history with concise output guidance; acknowledged
+  replacements survive response loss. Logical ownership, clean-first provenance,
+  exact pending versions/dispositions and both run-wide budgets remain intact.
+  Replacement creates no acceptance, retry episode or source-fork opportunity.
+  Legacy matching exhaustion pauses migrate through the leased boundary without
+  altering accepted receipts or publication bytes; unrelated states gain no work.
+  Pending admission rebinds only its state fingerprint during leased migration,
+  preserving frozen declarations and journaled provenance before capture.
+
 - **Audit can finish a usable finding batch before exhaustive discovery.**
   Discovery instructions distinguish a coherent finding-producing `COMPLETE`
   pass from full-scope clean inspection and unusable `INCOMPLETE` work. Targeted

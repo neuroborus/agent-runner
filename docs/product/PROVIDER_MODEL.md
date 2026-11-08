@@ -565,6 +565,12 @@ retains accepted progress and bounded role/checkpoint evidence, never partial
 provider output. Explicit operator retry preserves source-fork isolation and
 correction accounting. A consumed commit remains verification-only unless
 validated not-started proof and Git verification retire its unused authorization.
+Audit owns a stricter resumed-turn policy: explicit resume retires exhausted
+children and reconstructs the same logical checkpoint in fresh native context,
+without another source fork. It can continue an acknowledged replacement after
+response loss. Durable histories retain ownership and clean-first provenance;
+replacement grants no finding acceptance or renewed allowance. This audit policy
+does not change adapter normalization, automatic-replay policy or provider limits.
 
 Codex also refines native `other` failures when bounded, validated HTTP status
 and structured error-envelope evidence identify a non-transient client error.

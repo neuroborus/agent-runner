@@ -38,6 +38,14 @@ malformed-selection rejection, lost publication recovery without reselection and
 journal substitution rejection. The optional selection uses common envelope 26;
 compatibility changes also require the release-pack slow check.
 
+The state preparation suite also owns leased pipeline-migration rebinding of
+the admission state fingerprint across cold reload. It preserves all source,
+input, policy, role and accounting declarations and rejects attempted changes,
+including workflow advancement or rebinding without increasing the version.
+The Runner preparation suite's legacy pending-audit case exercises the actual
+audit-version-8 nullable-default migration before capture. These focused cases
+retain the complete slow release gate for persisted/lifecycle changes.
+
 Fast `test/runner-preparation.test.js` owns deferred audit activation through
 real state and workspace services: bounded creation/boundary validation,
 CLI identity before held traversal, cancellation without provider work,
@@ -52,8 +60,11 @@ That preparation suite also covers explicit Git selection through held capture,
 pause and cold resume, complete unchanged/ignored-tracked/dirty/deleted/untracked
 membership, scoped provider requests, unchanged Git state and later membership
 drift rejection. Ordinary-directory completion proves opaque exclusions, frozen
-public/report context and deliberate directory-origin issue capture. A version-25,
-audit-version-6 pending fixture resumes without changing settings or budgets.
+public/report context and deliberate directory-origin issue capture. Its issue
+control-discovery fixture declares an ordinary origin independently of the
+temporary parent's controls; the issue-reporting suite retains real enclosing-Git
+discovery and rejection coverage. A version-25, audit-version-6 pending fixture
+resumes without changing settings or budgets.
 Audit publication coverage separately preserves completed legacy report bytes,
 acceptance receipts and histories. Existing workspace/provider suites retain
 control/input/link confinement, corruption and read-only effect denial. CLI,
@@ -299,6 +310,18 @@ regressions belong to the ordinary gate; they add no slow-suite requirement.
 Recheck feedback coverage preserves pending dispositions and prior rejection
 history across lazy/independent resume and the version-5 migration; combined
 coverage keeps an invalid Reviewer's original clean-first accounting.
+Fast `pipelines/audit/test/output-recovery.test.js` owns audit retirement intent,
+fresh native selection after explicit exhaustion resume, serialized reload before
+launch, acknowledged replacement continuity, retired-identity rejection, exact
+pending verification and old-version invalidation, and version-7 migration
+acceptance/rejection without changing report bytes or dispositions. Its injected
+fixtures exercise the complete combined finding gate; missing and incomplete
+decisions never add confirmed results. These policy fixtures do not attest real
+journal interruptions or live-provider behavior. Persisted audit recovery and
+compatibility metadata changes require the complete `npm run test:slow` release
+gate after `npm run check`, including existing orchestration, CLI/MCP, state,
+release-pack and installation coverage. Selected Runner-trusted commands remain
+reserved for the dedicated finalization boundary.
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
 same-Auditor batch convergence, correcting Reviewer continuity/additions and

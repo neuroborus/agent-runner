@@ -639,6 +639,20 @@ test("excluded directory trees stay opaque through audit completion and delibera
         resolveProject: () =>
           assert.fail("Directory issue capture must not invoke Git."),
       },
+      // Model the declared ordinary issue origin independently of temporary
+      // storage's enclosing controls. Issue tests own real origin discovery.
+      workspace: {
+        ...createWorkspaceService(),
+        exclusionPath: async ({ workspacePath }) => {
+          assert.equal(workspacePath, f.projectPath);
+          return workspacePath;
+        },
+        inspectControls: async ({ workspacePath, paths }) => {
+          assert.equal(workspacePath, f.projectPath);
+          assert.deepEqual(paths, []);
+          return [];
+        },
+      },
     },
   });
   const status = await control.runStatus({ runId: result.run.runId });
@@ -858,6 +872,7 @@ test("legacy pending audit resumes whole-directory capture without changing froz
     legacy.runtimeCompatibility.runStateVersion =
       25;
   legacy.pipelineStateVersion = 6;
+  delete legacy.pipelineState.outputRecovery;
   delete legacy.pipelineState.settings.sourceScope;
   delete legacy.pipelineState.settings.excludePaths;
   legacy.workspacePreparation.inputFingerprint =
@@ -877,6 +892,7 @@ test("legacy pending audit resumes whole-directory capture without changing froz
       .resume({ runId: run.runId })
   ).run;
   assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.pipelineState.outputRecovery, null);
   assert.deepEqual(
     resumed.pipelineState.settings,
     legacy.pipelineState.settings,

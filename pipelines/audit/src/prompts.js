@@ -68,3 +68,10 @@ export const CORRECTION_INSTRUCTIONS = `The supplied correctionFeedback identifi
 Correct those fields using the schema and audit instructions, then return the complete structured result for the current request.
 Copy bindings from the current request exactly. Preserve frozen scope, established IDs and supported prior decisions; do not invent findings, cleanliness or approval to satisfy validation.
 This retry retains the existing session policy and consumed pass budgets. It grants no new access, questions after clarification, or other authority.`;
+
+export const OUTPUT_RECOVERY_INSTRUCTIONS = `Resume the exact suspended logical checkpoint after response output exhaustion, using the supplied frozen inputs and durable evidence.
+Native replacement does not start a new discovery/recheck cycle or reset a first-pass opportunity. Preserve IDs, exact versions, uncertainty, rejections, pending dispositions and correction feedback.
+Accumulated ledger entries are proposals, not confirmed findings. Only exact current versions with mode-required accepted-batch receipts are confirmed; an old receipt cannot approve a pending revision.
+Use targeted reads and concise evidence. Discovery may return one coherent usable finding batch; no-finding clean discovery still requires full agreed-scope inspection.
+Recheck must decide every exact batch entry. Missing, invalid or incomplete decisions grant no acceptance. Do not echo accumulated findings or produce a full report.
+Output exhaustion grants no partial-result acceptance, additional source fork, retry allowance, budget renewal or change to the selected mode.`;
