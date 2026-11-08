@@ -427,7 +427,7 @@ test("help describes the required commands", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /--effort/u);
   assert.match(stdout.read(), /--<role>-effort/u);
-  assert.match(stdout.read(), /current\|low\|medium\|high\|xhigh/u);
+  assert.match(stdout.read(), /current\|low\|medium\|high\|xhigh\|max/u);
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
   assert.match(stdout.read(), /agent-run pause --run/);
@@ -1680,7 +1680,7 @@ test("pipelines lists the statically registered pipelines", async () => {
 
 test("CLI effort flags follow pipeline roles and shared precedence", async () => {
   for (const pipeline of listPipelines()) {
-    for (const effort of ["current", "low", "medium", "high", "xhigh"]) {
+    for (const effort of ["current", "low", "medium", "high", "xhigh", "max"]) {
       const stdout = createSink();
       let request;
       const code = await main(
@@ -1739,7 +1739,7 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
     "--reviewer-effort",
     "--arbiter-effort",
   ]) {
-    for (const effort of ["", "max", "HIGH", " high", "gpt-5.6-sol xhigh"]) {
+    for (const effort of ["", "ultra", "HIGH", " high", "gpt-5.6-sol xhigh"]) {
       const stderr = createSink();
       const code = await main(
         [
@@ -1767,7 +1767,7 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
       assert.equal(code, 1);
       assert.match(
         stderr.read(),
-        /must be current, low, medium, high, or xhigh/u,
+        /must be current, low, medium, high, xhigh, or max/u,
       );
     }
   }

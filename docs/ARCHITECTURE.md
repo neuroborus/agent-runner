@@ -1508,7 +1508,7 @@ auto-compaction token window. These controls are not treated as otherwise
 equivalent.
 
 Both configuration layers accept `defaultEffort` and role `effort` using only
-`current|low|medium|high|xhigh`. Vocabulary validation includes inactive roles;
+`current|low|medium|high|xhigh|max`. Vocabulary validation includes inactive roles;
 provider capability validation applies only to resolved active roles. Effort
 remains separate from model IDs, and native translation belongs to adapters.
 An explicit `current` at any precedence level retains the effective provider
@@ -4021,12 +4021,13 @@ work budgets.
 
 The shared adapter contract accepts optional `effort` in execution options and
 turn requests, validated by each registered provider through that contract.
-Its closed vocabulary is `current|low|medium|high|xhigh`; omission and `current`
+Its closed vocabulary is `current|low|medium|high|xhigh|max`; omission and `current`
 normalize to no override. Model identifiers cannot contain whitespace, so a
 combined model-and-effort string is rejected before provider activity.
 Native translation stays within the providers: Codex supplies
 `model_reasoning_effort` at process launch and `effort` on every `turn/start`;
-Claude supplies `--effort`, translating portable `xhigh` to native `max`.
+Claude supplies `--effort`, passing explicit `max` unchanged and retaining the
+legacy translation of portable `xhigh` to native `max`.
 The supported Codex App Server baseline includes effort control. Claude's
 model-free help probe must advertise the requested native tier. These checks
 apply only to explicit selections and do not add requirements to `current`.

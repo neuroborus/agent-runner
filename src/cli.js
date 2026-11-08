@@ -222,7 +222,7 @@ Options:
       --profile            Set the run-wide trusted profile alias
       --project-config     Select integrated or target-bound external configuration
       --model              Set the run-wide backend-native model
-      --effort             Set run-wide effort: current|low|medium|high|xhigh
+      --effort             Set run-wide effort: current|low|medium|high|xhigh|max
                            current retains the provider default
       --context-size       Set the run-wide decimal token context size
       --<role>             Override a role backend
@@ -570,10 +570,10 @@ function issueUpdateInput(values, idempotencyKey) {
 function effortSelection(value, option) {
   if (
     value !== undefined &&
-    !["current", "low", "medium", "high", "xhigh"].includes(value)
+    !["current", "low", "medium", "high", "xhigh", "max"].includes(value)
   ) {
     throw new Error(
-      `--${option} must be current, low, medium, high, or xhigh.`,
+      `--${option} must be current, low, medium, high, xhigh, or max.`,
     );
   }
   return value;

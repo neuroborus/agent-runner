@@ -227,7 +227,7 @@ role-specific CLI/MCP values win over run-wide and runner values, with
 `current` omitting the native override. Worker and Reviewer may use any
 Codex/Claude combination; Arbiter supports either backend.
 
-Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+Effort accepts only `current|low|medium|high|xhigh|max`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
 CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP

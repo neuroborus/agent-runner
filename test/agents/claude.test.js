@@ -3213,7 +3213,7 @@ function turnCalls(fixture) {
 const EFFORT_HELP = `${HELP}\n--effort <level> Effort level (low, medium, high, max)`;
 
 test("maps portable Claude effort across sessions and commit readiness", async () => {
-  for (const effort of ["low", "medium", "high", "xhigh"]) {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
     for (const mode of [undefined, "continue", "fork"]) {
       const fixture = createFixture({ help: EFFORT_HELP });
       await fixture.adapter.run(
@@ -3233,7 +3233,7 @@ test("maps portable Claude effort across sessions and commit readiness", async (
   const fixture = createFixture({ help: EFFORT_HELP });
   await fixture.adapter.run(
     request({
-      effort: "xhigh",
+      effort: "max",
       access: "local-commit",
       authorizationId: "effort-commit",
       commit: {
@@ -3252,14 +3252,16 @@ test("requires Claude effort support only for explicit selections", async () => 
   ]) {
     const fixture = createFixture({ help });
     await fixture.adapter.run(request({ effort: "current" }));
-    await assert.rejects(
-      fixture.adapter.probe({ effort: "xhigh" }),
-      hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
-    );
-    await assert.rejects(
-      fixture.adapter.run(request({ effort: "xhigh" })),
-      hasCode("ERR_UNSUPPORTED_EFFORT"),
-    );
+    for (const effort of ["xhigh", "max"]) {
+      await assert.rejects(
+        fixture.adapter.probe({ effort }),
+        hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
+      );
+      await assert.rejects(
+        fixture.adapter.run(request({ effort })),
+        hasCode("ERR_UNSUPPORTED_EFFORT"),
+      );
+    }
     assert.equal(turnCalls(fixture).length, 1);
     assert.equal(
       option(turnCalls(fixture)[0].argumentsList, "--effort"),

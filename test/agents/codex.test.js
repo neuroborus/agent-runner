@@ -1365,7 +1365,7 @@ test("redacts Codex retirement observer errors without replacing provider failur
 });
 
 test("maps portable Codex effort across sessions and commit readiness", async () => {
-  for (const effort of ["low", "medium", "high", "xhigh"]) {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
     for (const mode of [undefined, "continue", "fork"]) {
       const fixture = createFixture();
       await fixture.adapter.run(
@@ -1401,7 +1401,7 @@ test("maps portable Codex effort across sessions and commit readiness", async ()
   });
   await fixture.adapter.run(
     request({
-      effort: "xhigh",
+      effort: "max",
       access: "local-commit",
       authorizationId: "effort-commit",
       commit: {
@@ -1413,7 +1413,7 @@ test("maps portable Codex effort across sessions and commit readiness", async ()
   assert.equal(
     fixture.processes[0].messages.find(({ method }) => method === "turn/start")
       .params.effort,
-    "xhigh",
+    "max",
   );
 });
 
@@ -1443,7 +1443,7 @@ test("validates explicit Codex effort capabilities without model work", async ()
       },
     });
     await assert.rejects(
-      fixture.adapter.run(request({ model, effort: "xhigh" })),
+      fixture.adapter.run(request({ model, effort: "max" })),
       hasCode("ERR_UNSUPPORTED_EFFORT"),
     );
     assert.equal(fixture.processes.length, 1);

@@ -842,7 +842,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
       configuration: {
         ...RUNNER_CONFIGURATION,
         clientAttribution,
-        defaultEffort: "xhigh",
+        defaultEffort: "max",
         pipelines: { "plan-authoring": { preferredCommitLineLimit: 650 } },
       },
     },
@@ -872,7 +872,7 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     profile: "current",
     model: "planner-model",
     contextSize: "current",
-    effort: "xhigh",
+    effort: "max",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
     planKind: "commit",
@@ -929,8 +929,8 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     completed.run.clientAttributionFingerprint,
     paused.run.clientAttributionFingerprint,
   );
-  assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
-  assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
+  assert.ok(adapter.calls.every(({ effort }) => effort === "max"));
+  assert.ok(adapter.probes.every(({ effort }) => effort === "max"));
   assert.deepEqual(completed.run.pipelineState.settings, {
     planKind: "commit",
     criteriaPath: null,

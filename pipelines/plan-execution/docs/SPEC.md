@@ -519,7 +519,7 @@ omits the corresponding native override and uses the effective source-session,
 process, profile, or backend default. Do not hard-code model names into
 workflow logic.
 
-Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+Effort accepts only `current|low|medium|high|xhigh|max`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
 CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
@@ -1159,7 +1159,7 @@ A request should contain only runner-level concepts such as:
   onProgress, // optional synchronous observer of internal normalized progress
   onFreshSession, // optional awaited reservation of the single fresh allowance
   onCommitExecution, // optional awaited boundary after readiness, before effects
-  effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
+  effort: "current" | "low" | "medium" | "high" | "xhigh" | "max", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   sessionNaming: { runId, project, pipeline, role }, // Runner-owned display data
@@ -1192,7 +1192,8 @@ progress without changing availability backoff or exposing native events publicl
 
 Adapter effort is independent of the model identifier. Missing effort or
 `current` omits the native override. Codex uses its reasoning-effort control;
-Claude maps `xhigh` to its advertised native `max` tier through `--effort`.
+Claude passes explicit `max` unchanged and maps legacy `xhigh` to its
+advertised native `max` tier through `--effort`.
 Explicit selections require native support, preserve every session/recovery
 and commit-readiness path, and use discoverable model capabilities before a
 turn. Unsupported selections and provider-only effort/model rejections return

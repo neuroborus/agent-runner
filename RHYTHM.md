@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-11-08
 
+- **Maximum effort can be selected explicitly.** Configuration, CLI/MCP,
+  adapter requests and saved role validation accept `max` without translating
+  its stored value. Providers still require the advertised tier and reject
+  unsupported selections without downgrading. Claude keeps its legacy
+  `xhigh`-to-`max` mapping; existing selections, frozen runs and accounting
+  remain unchanged. The tracked example uses `fable` with explicit `max`.
+
 - **Init preserves trusted semantic rejection feedback at its producing checkpoint.**
   Actual validators supply finite constraints and original codes so a rejected
   response can be corrected without retaining its private contents or guessing

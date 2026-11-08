@@ -799,7 +799,7 @@ Every role accepts string `profile`, `model`, `contextSize`, and `effort`
 selections.
 Root and safe ignored project configuration accept `defaultEffort`, with role
 `effort` values taking precedence within each layer. Portable effort values are
-`current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
+`current`, `low`, `medium`, `high`, `xhigh`, and `max`; `current` retains the provider
 default. Use `--effort` or MCP `run_start.effort` for a run-wide override, and
 `--<role>-effort` or `roleOverrides.<role>.effort` for a role override. Only
 active roles persist the resolved selection, and resume reuses it without
@@ -820,8 +820,12 @@ runtime plugin or configuration surface.
 | Claude  | Omit `--model` and use the effective Claude configuration/account default | Omit `CLAUDE_CONFIG_DIR` and inherit the current process configuration |
 
 The `current` selection delegates changing native model IDs to each backend.
-The tracked [example](.agent-runner.example.json) makes these native defaults
-explicit and shows `claude-primary` and `claude-secondary` aliases.
+The tracked [example](.agent-runner.example.json) selects Claude `opus` with
+`high` effort for Planner/Worker roles, Codex `gpt-6.1-sol` with `xhigh`
+effort for every Reviewer and Arbiter, and Claude `fable` with `max` effort
+for Auditor.
+It also shows `claude-primary` and `claude-secondary` profile aliases alongside
+the native defaults.
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
 
 Pipeline settings use these defaults:
@@ -1481,7 +1485,7 @@ Role-specific values use derived flags such as `--worker-profile`,
 `--reviewer-model`, `--planner-context-size`, or `--worker-effort`; role-specific
 values win. Use a trusted alias, backend-native model ID, decimal token string,
 or portable effort value respectively. Effort accepts only
-`current|low|medium|high|xhigh`; select it separately from the model ID:
+`current|low|medium|high|xhigh|max`; select it separately from the model ID:
 
 ```bash
 agent-run run polishing \

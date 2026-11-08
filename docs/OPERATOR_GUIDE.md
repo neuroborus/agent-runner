@@ -172,8 +172,8 @@ and is absent from public projections and prompts. Project files and CLI/MCP
 cannot override it. Resume retains the fingerprinted selection; legacy runs
 use the generic default. See [client attribution](product/PROVIDER_MODEL.md#client-attribution).
 
-Select effort separately from model: `current`, `low`, `medium`, `high`, or
-`xhigh`. Use configuration `defaultEffort`/role `effort`, CLI `--effort`/
+Select effort separately from model: `current`, `low`, `medium`, `high`,
+`xhigh`, or `max`. Use configuration `defaultEffort`/role `effort`, CLI `--effort`/
 `--<role>-effort`, or MCP `run_start.effort`/`roleOverrides.<role>.effort`.
 Precedence is role override, run override, project role/default, runner
 role/default, then `current` (the provider default). Unsupported selections fail

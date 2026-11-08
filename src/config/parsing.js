@@ -57,7 +57,14 @@ const ROLE_FIELDS = new Set([
   "model",
   "profile",
 ]);
-const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
+const EFFORT_VALUES = new Set([
+  "current",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 const projectRejections = new WeakMap();
 // Recognize only errors emitted while validating proposed project content.
 export const projectConfigurationRejection = (cause) =>
@@ -118,7 +125,7 @@ export function assertSelection(value, path) {
 function assertEffort(value, path) {
   if (!EFFORT_VALUES.has(value)) {
     throw new ConfigurationError(
-      `${path} must be current, low, medium, high, or xhigh.`,
+      `${path} must be current, low, medium, high, xhigh, or max.`,
     );
   }
 }

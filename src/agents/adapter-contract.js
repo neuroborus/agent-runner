@@ -53,7 +53,14 @@ const MAX_WORKSPACE_PATHS = 256;
 const MAX_INSPECTION_PATHS = 10_000;
 const MAX_DIRECTORY_STORAGE_PATHS =
   3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
-const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
+const EFFORT_VALUES = new Set([
+  "current",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
 export const ADAPTER_FAILURE_CLASS = "adapter_failure";
 export const LAUNCH_CHECKPOINTS = Object.freeze([
@@ -730,7 +737,7 @@ export function createAdapterContract({
     assertFields(value, EXECUTION_FIELDS, `${backendName} execution options`);
     if (value.effort !== undefined && !EFFORT_VALUES.has(value.effort)) {
       throw optionsError(
-        "Effort must be current, low, medium, high, or xhigh.",
+        "Effort must be current, low, medium, high, xhigh, or max.",
       );
     }
     if (typeof value.model === "string" && /\s/u.test(value.model)) {

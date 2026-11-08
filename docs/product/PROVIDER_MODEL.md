@@ -95,14 +95,15 @@ capability flags and access requirements retain their original frozen fingerprin
 before another agent turn; other pipelines retain their frozen receipt contracts.
 
 Adapter execution options and turn requests also accept the portable effort
-values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
+values `current`, `low`, `medium`, `high`, `xhigh`, and `max`. Effort is separate from
 the model identifier; identifiers containing whitespace, including combined
 model-and-effort strings, are invalid. Missing effort and `current` omit the
 native override and preserve the provider's effective default.
 
 Codex maps explicit effort to its reasoning-effort configuration and turn
-control. Claude uses `--effort`, mapping `xhigh` to native `max` only when the
-installed CLI advertises that tier. Explicit selections require native support;
+control. Claude uses `--effort`, passing explicit `max` unchanged and mapping
+legacy `xhigh` to native `max` only when the installed CLI advertises that tier.
+Explicit selections require native support;
 `current` adds no capability requirement. Codex checks discoverable model
 reasoning tiers before starting a turn, including the effective model of a
 continued or forked session. Model-specific support that cannot be discovered

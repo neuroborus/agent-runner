@@ -48,8 +48,18 @@
       "placement": null,
       "maxRevisionRounds": 20,
       "roles": {
-        "planner": {},
-        "reviewer": {}
+        "planner": {
+          "backend": "claude",
+          "profile": "current",
+          "model": "opus",
+          "effort": "high"
+        },
+        "reviewer": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        }
       }
     },
     "audit": {
@@ -57,8 +67,18 @@
       "maxDiscoveryPasses": 20,
       "maxFindingRecheckPasses": 20,
       "roles": {
-        "auditor": {},
-        "reviewer": {}
+        "auditor": {
+          "backend": "claude",
+          "profile": "current",
+          "model": "fable",
+          "effort": "max"
+        },
+        "reviewer": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        }
       }
     },
     "plan-authoring": {
@@ -67,13 +87,24 @@
       "preferredCommitLineLimit": 900,
       "stagnationWindowRounds": 3,
       "roles": {
-        "planner": {},
-        "reviewer": {
+        "planner": {
           "backend": "claude",
-          "profile": "claude-primary",
-          "model": "sonnet"
+          "profile": "current",
+          "model": "opus",
+          "effort": "high"
         },
-        "arbiter": {}
+        "reviewer": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        },
+        "arbiter": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        }
       }
     },
     "plan-execution": {
@@ -88,15 +119,24 @@
       "stagnationWindowRounds": 3,
       "trustedChecks": ["repository-check"],
       "roles": {
-        "worker": {},
-        "reviewer": {
+        "worker": {
           "backend": "claude",
-          "profile": "claude-primary",
-          "model": "current",
-          "contextSize": "current",
-          "effort": "current"
+          "profile": "current",
+          "model": "opus",
+          "effort": "high"
         },
-        "arbiter": {}
+        "reviewer": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        },
+        "arbiter": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        }
       }
     },
     "polishing": {
@@ -108,15 +148,24 @@
       "stagnationWindowRounds": 3,
       "trustedChecks": ["repository-check"],
       "roles": {
-        "worker": {},
-        "reviewer": {
+        "worker": {
           "backend": "claude",
-          "profile": "claude-primary",
-          "model": "current",
-          "contextSize": "current",
-          "effort": "current"
+          "profile": "current",
+          "model": "opus",
+          "effort": "high"
         },
-        "arbiter": {}
+        "reviewer": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        },
+        "arbiter": {
+          "backend": "codex",
+          "profile": "current",
+          "model": "gpt-6.1-sol",
+          "effort": "xhigh"
+        }
       }
     }
   }

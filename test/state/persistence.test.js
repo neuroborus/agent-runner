@@ -65,7 +65,7 @@ function runInput(projectPath, taskPath) {
   };
 }
 
-async function createFixture(t, { taskInsideProject = false } = {}) {
+async function createFixture(t, { taskInsideProject = false, effort } = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-state-"));
   const projectPath = join(workspace, "project");
   const taskPath = taskInsideProject
@@ -79,7 +79,9 @@ async function createFixture(t, { taskInsideProject = false } = {}) {
   t.after(() => rm(workspace, { recursive: true, force: true }));
 
   const store = createRunStore({ stateRoot });
-  const created = await store.createRun(runInput(projectPath, taskPath));
+  const input = runInput(projectPath, taskPath);
+  if (effort !== undefined) input.roles.worker.effort = effort;
+  const created = await store.createRun(input);
   t.after(() => created.lease.release().catch(() => {}));
   return { created, projectPath, stateRoot, store, taskPath, workspace };
 }
@@ -882,6 +884,20 @@ test("migrates version-7 active role effort without rewriting journal history", 
   }
 });
 
+test("persists explicit max effort across cold journal reads", async (t) => {
+  const { created, stateRoot, store } = await createFixture(t, {
+    effort: "max",
+  });
+  await store.transitionRun(created.lease, { counters: { fixRounds: 1 } });
+  await created.lease.release();
+  const loaded = await createRunStore({ stateRoot }).loadRun(
+    created.state.runId,
+  );
+  assert.equal(loaded.roles.worker.effort, "max");
+  assert.deepEqual(loaded.roles, created.state.roles);
+  assert.equal(loaded.counters.fixRounds, 1);
+});
+
 test("current persisted role effort is required and cannot change across events", async (t) => {
   const { created, store } = await createFixture(t);
   await created.lease.release();
@@ -889,7 +905,7 @@ test("current persisted role effort is required and cannot change across events"
   const eventsPath = join(created.directoryPath, "events.jsonl");
   const initial = JSON.parse(await readFile(statePath, "utf8"));
   const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
-  for (const effort of [undefined, null, "max", "HIGH", 1]) {
+  for (const effort of [undefined, null, "ultra", "HIGH", 1]) {
     const invalid = structuredClone(initial);
     if (effort === undefined) delete invalid.roles.worker.effort;
     else invalid.roles.worker.effort = effort;

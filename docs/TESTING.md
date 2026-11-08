@@ -75,6 +75,13 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Effort coverage in `test/config/effort.test.js`, `test/agents/effort.test.js`,
+the provider suites, CLI/MCP tests and pipeline workflow fixtures includes
+explicit `max`, unsupported native-tier refusal and unchanged legacy `xhigh`
+translation. State persistence covers cold journal reads, and
+`test/runner-orchestration.slow.test.js` covers resume with frozen `max`
+instead of reloading changed configuration. These cases use no live providers.
+
 Fast `test/trusted-timing.test.js` uses an injected monotonic clock and executor
 to distinguish outcomes, pre-invocation blockage, preparation-only availability,
 rejected admission and incomplete/unsafe attempts without sleeps or wall-clock

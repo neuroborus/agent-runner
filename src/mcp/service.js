@@ -154,7 +154,7 @@ function createRunStartSchema(providers) {
       ? z.never()
       : z.enum(providers.sourceSessionIds);
   const effort = z
-    .enum(["current", "low", "medium", "high", "xhigh"])
+    .enum(["current", "low", "medium", "high", "xhigh", "max"])
     .describe(
       "Portable effort, separate from model. current retains the effective provider default. Role overrides win over run-wide, project, and runner selections; resume preserves saved effort.",
     );
@@ -1564,7 +1564,7 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. Audit acknowledges owned detached workspace preparation before recursive capture; status exposes pending workspacePreparation and ordinary pause/cancel controls apply. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined is available for all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
+        "Start a durable pipeline. Audit acknowledges owned detached workspace preparation before recursive capture; status exposes pending workspacePreparation and ordinary pause/cancel controls apply. Set effort separately from model using current|low|medium|high|xhigh|max; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined is available for all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },

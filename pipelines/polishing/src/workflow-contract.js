@@ -4797,7 +4797,7 @@ export function assertRun(run) {
         (typeof run.roles[role].model !== "string" ||
           run.roles[role].model.length === 0)) ||
       (run.roles[role].effort !== undefined &&
-        !["current", "low", "medium", "high", "xhigh"].includes(
+        !["current", "low", "medium", "high", "xhigh", "max"].includes(
           run.roles[role].effort,
         )) ||
       ["profile", "contextSize"].some(

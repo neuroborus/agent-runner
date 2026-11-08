@@ -290,7 +290,7 @@ child. Commit readiness still requires pre-effect proof and Git verification
 before a consumed authorization is replaced.
 
 Both configuration layers accept portable `defaultEffort` and role `effort`
-values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
+values: `current`, `low`, `medium`, `high`, `xhigh`, and `max`. Effort stays separate
 from model selection and follows shared execution-preference precedence through
 CLI/MCP overrides. CLI `--effort` and MCP `run_start.effort` select run-wide
 effort; `--<role>-effort` and `roleOverrides.<role>.effort` win for one role.
