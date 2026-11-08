@@ -196,6 +196,94 @@ test("lazy rechecks continue the discovering Auditor and acceptance alone cannot
   );
 });
 
+test("successive coherent batches block discovery until every exact entry is verified", async () => {
+  const saved = await pendingRun();
+  const candidates = [
+    finding({ id: "other-count", causeId: "other-parser" }),
+    finding({ id: "unchecked-size", causeId: "size-parser" }),
+  ];
+  const f = fixture(
+    [
+      (request) => {
+        assert.equal(f.run().pipelineState.history.length, 1);
+        assert.equal(f.run().pipelineState.workflowState, "VERIFY_FINDINGS");
+        assert.equal(f.run().pipelineState.acceptedBatches.length, 0);
+        return recheck(request);
+      },
+      (request) => {
+        const state = f.run().pipelineState;
+        assert.equal(state.acceptedBatches.length, 1);
+        assert.equal(state.pendingBatch, null);
+        const evidence = JSON.parse(request.prompt.split("\n").at(-1));
+        assert.deepEqual(evidence.accumulatedFindings, [
+          { ...finding(), version: 1 },
+        ]);
+        return complete({ candidates });
+      },
+      (request) => {
+        assert.equal(f.run().pipelineState.history.length, 2);
+        assert.equal(f.run().pipelineState.workflowState, "VERIFY_FINDINGS");
+        return recheck(request, { decisions: [decision(candidates[0].id)] });
+      },
+    ],
+    { saved },
+  );
+  const waiting = await f.execute();
+  const state = waiting.pipelineState;
+  assert.equal(waiting.pause.reason, "invalid_recheck");
+  assert.deepEqual(state.correctionFeedback.diagnostics, [
+    { field: "recheck.decisions", code: "candidate-mismatch" },
+  ]);
+  assert.deepEqual(
+    state.pendingBatch.entries,
+    candidates.map((finding) => ({ finding, version: 1, sourcePass: 2 })),
+  );
+  assert.equal(state.acceptedBatches.length, 1);
+  assert.deepEqual(
+    state.acceptedBatches[0].batch.entries,
+    saved.pipelineState.pendingBatch.entries,
+  );
+  assert.deepEqual(
+    state.recheckHistory.map(({ outcome }) => outcome),
+    ["clean", "invalid"],
+  );
+  const projected = auditPipeline.projections.status(waiting).auditReport;
+  assert.equal(projected.confirmedFindings, 1);
+  assert.equal(projected.pendingCandidates, 2);
+
+  const verified = fixture([recheck], {
+    saved: JSON.parse(JSON.stringify(waiting)),
+  });
+  verified.stopAt("DISCOVER");
+  await assert.rejects(verified.execute(), /gate response loss/u);
+  const accepted = verified.run();
+  assert.equal(accepted.pipelineState.acceptedBatches.length, 2);
+  assert.deepEqual(
+    accepted.pipelineState.acceptedBatches[1].batch.entries,
+    state.pendingBatch.entries,
+  );
+  assert.equal(accepted.pipelineState.pendingBatch, null);
+  assert.deepEqual(
+    accepted.pipelineState.history.map(({ outcome }) => outcome),
+    ["findings", "findings"],
+  );
+  assert.equal(
+    auditPipeline.projections.status(accepted).auditReport.confirmedFindings,
+    3,
+  );
+  const discovery = fixture([complete()], { saved: accepted });
+  const result = await discovery.execute();
+  assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.deepEqual(
+    result.pipelineState.acceptedBatches,
+    accepted.pipelineState.acceptedBatches,
+  );
+  assert.deepEqual(
+    result.pipelineState.history.map(({ outcome }) => outcome),
+    ["findings", "findings", "clean"],
+  );
+});
+
 test("review additions and later reversals require verification and retain rejected decisions", async () => {
   const added = finding({ id: "other-count", causeId: "other-parser" });
   const reject = decision("negative-count", {

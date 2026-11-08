@@ -86,7 +86,10 @@ and correction accounting.
 Audit's batch gate is separate from coding-pipeline candidate review.
 Every new or materially revised batch requires a distinct read-only recheck of
 relevance, evidence, examples, impact, classification, overlap and optional
-recommendations. Lazy retains the discovering Auditor; independent requires a
+recommendations. A usable discovery batch need not exhaust the agreed scope,
+but verification must decide every exact entry before more discovery. Concise
+evidence cannot omit a decision, and incomplete work adds no accepted evidence.
+Lazy retains the discovering Auditor; independent requires a
 fresh finding Reviewer after each substantive correction. Combined first
 converges with the discovering Auditor, then requires a fresh Reviewer's clean
 first pass. A correcting Reviewer stays through its own series until clean,

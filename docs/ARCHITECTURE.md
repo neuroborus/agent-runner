@@ -864,7 +864,11 @@ Lazy retains one logical Auditor, while independent creates a fresh Auditor per
 pass. A write-ahead pass history preserves the frozen run-wide budget capped at 20,
 including interrupted reservations. New/revised candidates block discovery at
 pending verification; clean discovery is separate from finding acceptance and
-requires verified report publication before public completion. Logical turns establish existing inactivity/availability checkpoints
+requires verified report publication before public completion. A finding-producing
+complete pass may finish one coherent batch before full-scope inspection, with
+verification before the next discovery pass. A no-finding clean result still
+requires complete agreed-scope inspection; incomplete work adopts no candidate
+or report update. Logical turns establish existing inactivity/availability checkpoints
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.

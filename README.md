@@ -570,8 +570,17 @@ flowchart TD
     W --> Z["DONE: reviewed report; sources unchanged"]
 ```
 
-Clean discovery means no new candidates or substantive report corrections, not an
-empty report. Independent uses a fresh Auditor each pass and needs no redundant
+A finding-producing `COMPLETE` pass can finish one coherent, usable batch while
+later passes continue scope inspection. Use concise supported evidence and
+targeted reads; candidates contain only new findings or material revisions,
+without repeating the accumulated report. Existing result and collection limits
+apply without a finding quota or additional batch cap. Every material batch
+blocks further discovery until verified.
+`INCOMPLETE` work supplies no adopted candidates or report changes.
+
+Clean discovery requires complete agreed-scope inspection with no candidates or
+substantive report corrections; the accumulated report may contain findings.
+Independent uses a fresh Auditor each pass and needs no redundant
 unchanged-response turn after clean discovery. Combined always replaces the
 initial Auditor after its series becomes clean. A fresh successor that finds
 anything finishes its own lazy series before replacement; its later clean pass

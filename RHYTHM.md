@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-08
 
+- **Audit can finish a usable finding batch before exhaustive discovery.**
+  Discovery instructions distinguish a coherent finding-producing `COMPLETE`
+  pass from full-scope clean inspection and unusable `INCOMPLETE` work. Targeted
+  reads and concise evidence avoid repeated accumulated reports without quotas,
+  new batch limits or provider controls. Every material batch still blocks
+  discovery until its exact versions and dispositions pass the selected
+  verification gate; batch acceptance never creates clean discovery. Incomplete
+  candidates and report changes supply no accepted evidence.
+
 - **Maximum effort can be selected explicitly.** Configuration, CLI/MCP,
   adapter requests and saved role validation accept `max` without translating
   its stored value. Providers still require the advertised tier and reject

@@ -282,6 +282,8 @@ role-result limit, complete frozen inputs/findings in fresh discovery prompts an
 propagation of unsettled execution ownership.
 Discovery also covers persisted clarification/discovery correction feedback,
 replacement, checkpoint confinement and rejection of unsafe diagnostics.
+Its incomplete-work regression retains an already accepted batch, report,
+limitations and uncertainty across reload without adopting proposed revisions.
 Fast `pipelines/audit/test/verification.test.js` owns all five finding dispositions,
 fresh independent versus continuing lazy rechecks, review additions, retained
 rejections, version invalidation, stale/malformed/incomplete output, interrupted
@@ -289,6 +291,11 @@ reservations, exact acceptance recovery, Auditor-only legacy migration/resume
 without fabricated approval or role expansion, and run-wide recheck exhaustion.
 It shares injected effect-free fixtures with discovery through the pipeline's
 test support index.
+The coherent-batch fixture proves successive discovery batches each block more
+discovery until verified, a complete recheck cannot omit one entry from a
+multi-entry batch, and acceptance cannot establish clean discovery. Public
+confirmed counts remain tied to exact accepted receipts. These effect-free
+regressions belong to the ordinary gate; they add no slow-suite requirement.
 Recheck feedback coverage preserves pending dispositions and prior rejection
 history across lazy/independent resume and the version-5 migration; combined
 coverage keeps an invalid Reviewer's original clean-first accounting.

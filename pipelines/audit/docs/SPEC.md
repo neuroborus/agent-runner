@@ -214,13 +214,29 @@ Exhaustion remains durably paused in
 `WAITING_FOR_USER` with `discovery_limit_reached`; inspection/resume preserves
 that checkpoint without additional provider work or allowance.
 
-A complete pass proposes structured `candidates`, complete `limitations` and
-`hypotheses`, plus substantive `reportCorrections`, bound to the exact snapshot.
-A clean pass has no candidates, no substantive correction and unchanged report
-content. New report content requires another pass even if corrections were
-omitted. Malformed, interrupted, incomplete or stale-snapshot output never
-supplies clean evidence. Partial results are not adopted. Source or frozen-input
-drift rejects the result and remains blocking.
+A finding-producing `COMPLETE` pass may finish one coherent, usable batch before
+the entire agreed scope is inspected. Later passes continue discovery after that
+batch passes its mode-required verification. `COMPLETE` describes the usable pass
+result, not exhaustive discovery, finding acceptance or audit completion. The
+existing result and collection constraints apply without an additional numeric
+batch bound, quota or configuration setting.
+
+Use targeted source reads and concise supported evidence and examples while
+retaining the required rationale and exact bindings. Propose only new findings
+or material revisions under existing finding/cause IDs; do not echo accumulated
+findings or generate the entire report in every response. Each complete pass
+returns structured `candidates`, complete current `limitations` and explicitly
+unverified `hypotheses`, plus substantive `reportCorrections`. Retain prior
+limitations and hypotheses unless substantively corrected. All content remains
+bound to the supplied exact snapshot.
+
+A no-finding clean result still requires complete agreed-scope inspection, no
+candidates, no substantive correction and unchanged report content. New report
+content requires another pass even if corrections were omitted. Use `INCOMPLETE`
+for unfinished, unusable pass work, rather than merely because later passes must
+continue scope inspection. Its candidates and report changes are not adopted.
+Malformed, interrupted, incomplete or stale-snapshot output never supplies clean
+evidence. Source or frozen-input drift rejects the result and remains blocking.
 
 Role schemas share the audit-owned ID, text-length and collection constraints,
 required nonempty collections, catalog values and closed records. Instructions
@@ -296,7 +312,8 @@ inputs, compact accumulated findings and prior decisions, including rejected
 claims. Responses echo the exact snapshot, report and batch fingerprints;
 stale responses cannot approve a later version.
 
-A complete recheck decides every current batch entry exactly once. Each closed
+A complete recheck decides every current batch entry exactly once; concise
+evidence never permits omitting a decision. Each closed
 decision contains `id`, `kind`, nonempty supported `rationale`, `finding`,
 `targetId` and `hypothesis`. Unused payloads must be null:
 
