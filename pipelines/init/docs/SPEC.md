@@ -41,6 +41,26 @@ authorized edit windows. Task and clarification artifacts must be external to
 the target, so initial setup requires no ignored target directory. Existing
 repository-local artifact protections remain unchanged.
 
+New inspections use schema version 2. Complete workspace capture still visits
+and protects every source/control path, including sources beyond 10,000 entries.
+Workspace-owned compact proofs bind full ordered content/identity evidence and
+link resolutions; scope bindings additionally retain real ancestor and control
+bindings. Only bounded setup documents, exact candidate destinations, their
+relevant ancestors and bare-control markers appear in role-facing `entries`.
+An explicit `kind: "missing"` entry proves absence from complete traversal;
+omitted paths and file/link ancestors cannot prove absence. A proposal lacking
+that exact destination evidence rejects before acceptance. Document groups retain
+their 256-file bounds, candidates their 32-entry bound, and setup collections
+their 10,000-entry bound; compact records are limited to two MiB. Unsupported
+evidence capacity rejects completely before role work or publication authority.
+
+Init descriptor state version 2 preserves version-1 inspections unchanged,
+including their original full-entry hashes, approvals, reservations, publication
+records, accepted receipts and consumed accounting. Reinspection follows the
+saved inspection version. Migration creates no missing evidence or allowance;
+legacy limits remain applicable to legacy bindings. No shared collection limit,
+workspace scope or provider permission changes.
+
 Placement is separate from review mode. The descriptor reserves CLI
 `--placement integrated|external` and MCP `placement`, separately from `mode`. Missing placement reuses one unambiguous established target-bound
 candidate. With no candidate, it selects integrated. Explicit configuration and
@@ -99,7 +119,11 @@ After the shared clarification service appends the exact questions,
 `acceptInitQuestionAppend` records its resulting hash against the reserved round,
 previous hash and transcript path. The receipt is consumed before authorizing
 an answer window and cannot be reused.
-`authorizeInitEdit` is the clarification service's persist-before-open callback;
+`authorizeInitEdit` is the clarification service's persist-before-open callback.
+For proactive clarification it records `proactiveClarificationComplete` together
+with the pending authorization in one transition. Preparation failure leaves the
+proactive request incomplete, so unchanged-input resume retries authorization
+before provider work. A persisted authorization still requires its one-shot close.
 `acceptInitEdit` consumes the matching one-shot authorization, including an empty
 or unchanged editor close, without spending another round. Material answers use
 the shared `clarification-answers` action. An unchanged answer window leaves the
@@ -230,6 +254,20 @@ baseline and identity guards.
 Ambiguous directory allocations remain preserved for recovery, never adopted.
 Completed prerequisite receipts are verification-only on rerun.
 
+Version-2 publication baselines retain exact prior entries for reviewed files,
+required directories, stable publication temporaries and deferred guidance,
+plus a compact complete hash of the immutable remainder and all link resolutions.
+Every guard recaptures the complete original scopes. Only pending intents and
+verified receipts permit their exact paths to differ; a guidance-action temporary
+outside the retained inventory must have been absent in the original remainder.
+Existing bytes cannot disappear into a new allowance. Receipts still verify
+published identities and contents independently. Same-run repair `setupBaseline`
+uses the same compact proof with exact procedure evidence; only the shared
+clarification transcript is excluded under its existing service authorization.
+Terminal confirmation continues binding the complete resulting snapshot.
+Version-1 publication and repair baselines retain their original comparison and
+terminal-fingerprint algorithms, including pending-effect recovery.
+
 The order is ignore protection, artifact preparation, finalization, then destination
 configuration. Guidance is excluded from publication and remains deferred.
 The `prepared` marker means only these prerequisites have verified receipts;
@@ -280,6 +318,125 @@ preserved and rejected. Configuration selects `finalization/SKILL.md` explicitly
 for execution and polishing and resolves relative resources from the bound root.
 Unrelated settings survive. Guidance remains proposed but unpublished until its
 guidance-last gate; neither a selector nor `prepared` is setup completion.
+
+## Inspection failures
+
+Expected discovery, initial/additive inspection, turn preparation, post-turn
+verification and publication preparation failures settle through the leased
+lifecycle boundary before execution ownership is released. The same init-owned
+policy covers root recovery verification before lifecycle dispatch. No provider
+turn, approval or publication may proceed without complete accepted inspection.
+An inspection rejection is not invalid provider output.
+Editor authorization, clarification append reads, authorized-close reads and the
+runtime adapter's before/after workspace snapshots use the same scoped inspection
+policy. Append intents and receipt replay retain their exact hash bindings;
+write failures are not converted into inspection retries. Provider invocation
+and effect failures retain their separate handling.
+Initial task/context hashes come from one scoped input capture. Prepared
+configuration and prior-guidance verification remain scoped reads before a
+guidance intent is reserved. Publication resource inspection and repair-baseline
+capture use the same policy before reserving their effects. Input submission
+diagnoses complete source verification and pre-write clarification read rejection
+before writing answers, preserving its pending authorization. The clarification
+service scopes its initial read and replacement recheck separately from writes
+and post-write readback; failed or ambiguous writes retain exact recovery.
+Proposal-policy source reads are scoped separately from validation of proposed
+content, so read rejection cannot become an invalid provider-result pause.
+Pre-dispatch canonical validation also settles
+recognized rejection through this policy while both execution and workspace
+ownership are verified and held. Acquisition and unknown ownership failures
+remain fail-closed; rejected input submission cannot acknowledge an unwritten answer.
+
+The durable `init_inspection_failed` pause uses code `ERR_INIT_INSPECTION` and
+`inspectionFailure: { phase, constraint }`. Phases are `discovery`, `inspection`,
+`reinspection`, `preparation`, `post-turn`, `publication-preparation` and `recovery`.
+Constraints are `evidence_capacity`, `destination_unavailable`,
+`configuration_invalid`, `workspace_changed`, `unsafe_path` and
+`inspection_unavailable`. These finite values and fixed explanations exclude
+native messages, rejected values, paths and private data. CLI and MCP status/wait
+share the diagnosis and supported next action, including after reload.
+Clarification/configuration file readers preserve their existing error codes and
+attach only trusted `file_size` or `isolated_regular_file` constraints for their
+size and regular-file/isolation guards. Init maps these to `evidence_capacity`
+or `unsafe_path`. Explicit integrated configuration absence carries `missing_file`
+and maps to non-resumable `workspace_changed`; implicit absence remains valid
+discovery. No message parsing or blanket classification of generic read
+errors is permitted. Unrecognized constraints and corruption remain fail-closed.
+Guidance read normalization preserves these trusted inspection categories as
+finite `readFailure` metadata under its original error code, including recognized
+native I/O failures wrapped by guidance's own file/directory readers. Scoped init
+reads accept only the recognized guidance/configuration read codes and categories;
+this includes returned directory verification normalized as `ERR_GUIDANCE_STORAGE`
+with trusted finite read metadata, never the storage code or nested causes alone.
+Publication/recovery errors and unverified pending effects gain no retry authority.
+
+Capacity, invalid configuration, changed evidence and unsafe/unavailable
+destinations require preserving work, correcting prerequisites outside the run,
+and starting a fresh init run. Only recognized transient inspection-access or
+resource failures permit action-free resume: restore access/resources without
+changing frozen inputs. Resume rechecks complete original bindings before any
+new turn. No correction reopens clarification, resets accounting, changes frozen
+selection or grants publication authority. A rejected reservation is retired
+without accepting its result; sequence and consumed budgets remain unchanged.
+An existing non-resumable blocker or exhausted checkpoint is never replaced by
+a transient inspection pause. Recovery retains its original diagnosis and
+continuation restrictions; reload rejects an inspection pause over blocked or
+exhausted pipeline state. Operator-pause restoration and submitted-answer receipts
+also retain their original checkpoints rather than becoming inspection retries.
+
+Unknown errors/corruption and unavailable ownership propagate fail-closed.
+Pending prerequisite or unacknowledged guidance effects retain their existing
+exact recovery protocol; inspection diagnosis never turns failed or ambiguous
+effects into generic retry authority. A concurrent operator stop settles ownership
+and preserves the diagnosed pause in its suspended checkpoint; recovery acquires
+canonical ownership before settlement when it is not already held. Repeated
+recognized inspection rejection during settlement retains a diagnosed stop
+without accepting partial evidence. Diagnosis, read-only reservation retirement
+and any concurrent stop settle in one state-owned atomic checkpoint transition;
+ordinary turn retirement cannot precede that settlement. Start/resume
+receipts acknowledge admission/dispatch only; use status/wait for the diagnosed
+outcome. Exact-key replay does not dispatch another owner.
+
+Diagnosis adds fields only to the existing extensible pause envelope. Init state
+and proof versions remain unchanged; historical inspections, approvals, receipts,
+reservations and counters are not migrated or fabricated.
+
+## Terminal provider failures
+
+After unchanged-workspace verification and physical turn/resource retirement,
+an unhandled boundary-normalized terminal adapter failure persists `FAILED`
+before execution ownership is released. Only the matching reserved read-only
+turn is retired; `CONFIRM` has no proposal reservation. Sequence/revision counters,
+consumed source forks and reconstruction allowances, acknowledged children,
+frozen inputs, approvals and prepared/publication evidence remain unchanged.
+A failed terminal confirmation retains its `PENDING` fingerprint and published
+resources without a completion receipt. Pending or ambiguous publication effects
+and retained execution resources keep their existing strict reconciliation paths.
+
+The existing pause envelope carries `reason: "internal_failure"`, a bounded code
+and optional registry-normalized `diagnosticClass`. The common envelope validates
+class membership; init validates the exact terminal shape and settled ownership.
+Unknown classes stay absent. Historical ownerless checkpoints are never inferred
+to have failed, and authentic saved shapes require no state/proof version change.
+Native messages, payloads, prompts, sessions, profiles and credentials never enter
+the diagnosis. Read-only Runner callback failures retain their original error even when a
+native adapter wraps or swallows them; they are not provider failure evidence.
+
+Output exhaustion, authentication, structured-result correction, inactivity,
+availability, recoverable interruption and operator stops retain precedence.
+[Inspection failures](#inspection-failures), control drift, unrelated I/O,
+malformed state, uncertain cleanup and persistence failures retain their safety
+paths. Failed settlement or activity publication propagates without acknowledgement.
+
+Foreground CLI returns the durable failure, prints its fixed guidance and exits
+unsuccessfully. CLI/MCP status and fresh or already-held waits share the saved
+bounded diagnosis; terminal waits finish with `timedOut: false`. A safe `failed`
+activity is journaled with the outcome. Reads never acquire execution authority,
+repair state or retry a provider. `FAILED` is descriptor-declared nonresumable:
+owned cleanup may finish, but continuation performs no new provider work.
+Preserve the failed init and any prepared resources, review the supported
+diagnosis, and resolve established prerequisites before a separately authorized
+new init run. Missing historical attribution remains unknown.
 
 ## Public completion and recovery
 

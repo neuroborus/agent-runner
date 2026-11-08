@@ -14,6 +14,7 @@ import {
   parseProjectConfiguration,
 } from "../../../src/config/index.js";
 import { createWorkspaceService } from "../../../src/workspace/index.js";
+import { preparePipelineMigration } from "../../../src/runner/index.js";
 import {
   acceptInitResult,
   closeInitClarification,
@@ -21,6 +22,7 @@ import {
   externalFinalizationContent,
   externalFinalizationPath,
   inspectInitSetup,
+  initPipeline,
   prepareInitTurn,
   publishExternalInit,
 } from "../src/index.js";
@@ -62,6 +64,8 @@ async function fixture(
     occupied = false,
     wrongTarget = false,
     changeProposal = () => {},
+    schemaVersion = 2,
+    sourceEvidence = [],
   } = {},
 ) {
   const root = parent ?? (await fs.mkdtemp(join(tmpdir(), "init-external-")));
@@ -147,7 +151,25 @@ async function fixture(
     }
     await fs.writeFile(configurationPath, JSON.stringify(original));
   } else if (occupied) await fs.mkdir(rootPath);
-  const workspace = createWorkspaceService();
+  const actualWorkspace = createWorkspaceService();
+  // Complete constructed capture evidence keeps large-source regression cost
+  // independent of filesystem file count. Actual setup effects stay real.
+  const workspace = {
+    ...actualWorkspace,
+    async snapshot(request) {
+      const captured = await actualWorkspace.snapshot(request);
+      return {
+        ...captured,
+        entries: [
+          ...captured.entries,
+          ...sourceEvidence.map((entry) => ({
+            ...entry,
+            path: join(projectPath, entry.path),
+          })),
+        ].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+      };
+    },
+  };
   const clarifications = createClarificationService({ interactive: false });
   const transcript = {
     artifactRoot: taskPath,
@@ -173,6 +195,7 @@ async function fixture(
         stateRoot,
         artifactRoot,
         placement: "external",
+        schemaVersion,
         configurationPath: selected ? configurationPath : null,
         candidatePaths: selected ? [configurationPath] : [],
         documents: {
@@ -435,10 +458,11 @@ test("occupied defaults, wrong-target bindings and root races are rejected witho
   );
   const f = await fixture(t);
   await fs.mkdir(f.rootPath);
-  await assert.rejects(
-    publishExternalInit(f.state, f.runtime),
-    /bindings changed/u,
-  );
+  await assert.rejects(publishExternalInit(f.state, f.runtime), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
   assert.equal(f.saved, null);
   assert.deepEqual(await fs.readdir(f.rootPath), []);
   await f.assertTargetUnchanged();
@@ -505,30 +529,97 @@ test("external publication rechecks ancestor provider alias targets on recovery"
   await f.assertTargetUnchanged();
 });
 
-test("lost sibling-root receipts reconcile only the recorded allocation identity", async (t) => {
-  const f = await fixture(t);
+test("lost sibling-root receipts retain legacy or compact proof and reconcile only the recorded identity", async (t) => {
+  for (const schemaVersion of [1, 2]) {
+    const f = await fixture(t, { schemaVersion });
+    const persist = f.runtime.persist;
+    f.runtime.persist = async (value) => {
+      if (value.receipts.some(({ path }) => path === f.rootPath))
+        throw new Error("Interrupted root receipt");
+      await persist(value);
+    };
+    await assert.rejects(
+      publishExternalInit(f.state, f.runtime),
+      /Interrupted root receipt/u,
+    );
+    assert.equal(f.saved.pending.path, f.rootPath);
+    const before = await fs.stat(f.rootPath);
+    f.runtime.persist = persist;
+    const recovered =
+      schemaVersion === 1
+        ? preparePipelineMigration(
+            {
+              pipelineId: "init",
+              pipelineStateVersion: 1,
+              pipelineState: { ...f.state, publication: f.saved },
+              pause: null,
+            },
+            initPipeline,
+          ).pipelineState
+        : { ...f.state, publication: f.saved };
+    assert.deepEqual(recovered.publication, f.saved);
+    assert.equal(recovered.reviewApproval, f.state.reviewApproval);
+    assert.equal(recovered.revisionRounds, f.state.revisionRounds);
+    const prepared = await publishExternalInit(
+      recovered,
+      f.runtime,
+      recovered.publication,
+    );
+    assert.equal((await fs.stat(f.rootPath)).ino, before.ino);
+    const replacement = join(f.root, "replacement");
+    await fs.rename(f.rootPath, replacement);
+    await fs.mkdir(f.rootPath);
+    await assert.rejects(
+      publishExternalInit(f.state, f.runtime, prepared.publication),
+      {
+        code: "ERR_INIT_INSPECTION",
+        phase: "publication-preparation",
+        constraint: "workspace_changed",
+      },
+    );
+    await f.assertTargetUnchanged();
+  }
+});
+
+test("publication persists bounded complete-source proof and rejects drift beyond the old inspection cap", async (t) => {
+  const sourceEvidence = Array.from({ length: 10_010 }, (_, index) => ({
+    path: `source-${String(index).padStart(5, "0")}`,
+    kind: "file",
+    hash: hash("original"),
+    mode: 0o644,
+    size: 8,
+    identity: { device: "1", inode: String(index + 1), mode: "33188" },
+  }));
+  const f = await fixture(t, { sourceEvidence });
   const persist = f.runtime.persist;
   f.runtime.persist = async (value) => {
-    if (value.receipts.some(({ path }) => path === f.rootPath))
-      throw new Error("Interrupted root receipt");
     await persist(value);
+    if (value.pending === null && value.receipts.length === 0)
+      throw new Error("Interrupted after complete baseline");
   };
   await assert.rejects(
     publishExternalInit(f.state, f.runtime),
-    /Interrupted root receipt/u,
+    /Interrupted after complete baseline/u,
   );
-  assert.equal(f.saved.pending.path, f.rootPath);
-  const before = await fs.stat(f.rootPath);
+  assert.equal(f.saved.schemaVersion, 2);
+  assert.equal(f.saved.baseline.schemaVersion, 2);
+  assert.ok(f.saved.baseline.entries.length < 30);
+  assert.ok(JSON.stringify(f.saved).length < 32_000);
+  assert.ok(!JSON.stringify(f.saved).includes("source-10009"));
+  await assert.rejects(fs.stat(f.rootPath), { code: "ENOENT" });
   f.runtime.persist = persist;
+  sourceEvidence.at(-1).hash = hash("changed");
+  await assert.rejects(publishExternalInit(f.state, f.runtime, f.saved), {
+    code: "ERR_INIT_INSPECTION",
+    phase: "publication-preparation",
+    constraint: "workspace_changed",
+  });
+  assert.deepEqual(f.saved.receipts, []);
+  await assert.rejects(fs.stat(f.rootPath), { code: "ENOENT" });
+  sourceEvidence.at(-1).hash = hash("original");
   const prepared = await publishExternalInit(f.state, f.runtime, f.saved);
-  assert.equal((await fs.stat(f.rootPath)).ino, before.ino);
-  const replacement = join(f.root, "replacement");
-  await fs.rename(f.rootPath, replacement);
-  await fs.mkdir(f.rootPath);
-  await assert.rejects(
-    publishExternalInit(f.state, f.runtime, prepared.publication),
-    /resource changed/u,
-  );
+  assert.equal(prepared.publication.prepared, true);
+  assert.ok(prepared.publication.baseline.entries.length < 30);
   await f.assertTargetUnchanged();
 });
 

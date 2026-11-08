@@ -36,6 +36,7 @@ import {
   UPDATE_FIELDS,
 } from "./contract.js";
 import {
+  DirectoryVerificationError,
   openLocalDirectory,
   readDocument,
   sameFile,
@@ -49,6 +50,8 @@ import {
 const COMMON_PATH = fileURLToPath(
   new URL("../../docs/OPERATOR_GUIDE.md", import.meta.url),
 );
+const RETRYABLE_READ_IO = ["EACCES", "EPERM", "EMFILE", "ENFILE", "ENOMEM"];
+
 function stale() {
   return new GuidanceError(
     "Local guidance changed. Read the complete current guide before replacing it.",
@@ -68,22 +71,68 @@ function assertSnapshot(document, before) {
     throw stale();
 }
 
-async function guarded(operation) {
+function normalizeFailure(cause) {
+  if (cause instanceof GuidanceError) return cause;
+  if (cause instanceof EditorError)
+    return new GuidanceError(cause.message, { cause, code: cause.code });
+  if (cause instanceof WorkspaceSafetyError) return unsafePath(cause);
+  const known =
+    cause instanceof ConfigurationError ||
+    cause instanceof GitSafetyError ||
+    cause instanceof RunStoreError;
+  return new GuidanceError("Guidance operation could not complete safely.", {
+    cause,
+    code: known ? cause.code : "ERR_GUIDANCE_STORAGE",
+  });
+}
+
+function readFailure(cause) {
+  // Selection and file helpers own this control/path wrapper. Do not search
+  // recovery/storage causes for a transient error that might permit retry.
+  const wrappedPath =
+    cause instanceof GuidanceError && cause.code === "ERR_UNSAFE_GUIDANCE_PATH";
+  const origin = wrappedPath ? cause.cause : cause;
+  let native = origin?.cause;
+  if (origin instanceof DirectoryVerificationError) {
+    native = origin.cause;
+  } else if (origin instanceof WorkspaceSafetyError) {
+    switch (origin.code) {
+      case "ERR_WORKSPACE_PATH":
+        return "unsafe_path";
+      case "ERR_WORKSPACE_DRIFT":
+      case "ERR_WORKSPACE_SNAPSHOT_RACE":
+        return "workspace_changed";
+      case "ERR_WORKSPACE_PROOF_CAPACITY":
+        return "evidence_capacity";
+      case "ERR_WORKSPACE_INSPECTION":
+        break;
+      default:
+        return null;
+    }
+  } else if (
+    origin instanceof ConfigurationError &&
+    origin.code === "ERR_PROJECT_CONFIGURATION_READ"
+  ) {
+    if (origin.constraint === "file_size") return "evidence_capacity";
+    if (origin.constraint === "isolated_regular_file") return "unsafe_path";
+    if (origin.constraint === "missing_file") return "workspace_changed";
+  } else if (wrappedPath && origin instanceof Error) {
+    native = origin;
+  } else return null;
+  if (native?.code === "ENOENT") return "workspace_changed";
+  return RETRYABLE_READ_IO.includes(native?.code)
+    ? "inspection_unavailable"
+    : null;
+}
+
+async function guarded(operation, { readOnly = false } = {}) {
   try {
     return await operation();
   } catch (cause) {
-    if (cause instanceof GuidanceError) throw cause;
-    if (cause instanceof EditorError)
-      throw new GuidanceError(cause.message, { cause, code: cause.code });
-    if (cause instanceof WorkspaceSafetyError) throw unsafePath(cause);
-    const known =
-      cause instanceof ConfigurationError ||
-      cause instanceof GitSafetyError ||
-      cause instanceof RunStoreError;
-    throw new GuidanceError("Guidance operation could not complete safely.", {
-      cause,
-      code: known ? cause.code : "ERR_GUIDANCE_STORAGE",
-    });
+    const failure = normalizeFailure(cause);
+    const classification = readOnly ? readFailure(cause) : null;
+    if (classification !== null) failure.readFailure = classification;
+    throw failure;
   }
 }
 
@@ -120,9 +169,11 @@ export function createGuidanceService({
       stateRoot: runStore.rootPath,
     });
 
-  async function inspect(input) {
+  async function inspect(input, { allowAbsent = false } = {}) {
     assertInput(input, SELECTORS);
-    const resolved = await selection(input, input.projectPath);
+    const resolved = await selection(input, input.projectPath, {
+      allowAbsent,
+    });
     const { projectPath } = resolved;
     const common = await readDocument(COMMON_PATH);
     if (common.hash === null)
@@ -136,7 +187,11 @@ export function createGuidanceService({
     );
     try {
       const local = await directory.read();
-      await assertSelection(input, resolved);
+      // Only an absent read may skip ignore validation. If content appeared
+      // during selection, require ignore validation even if it disappears again.
+      await assertSelection(input, resolved, {
+        allowAbsent: allowAbsent && local.hash === null,
+      });
       await directory.verify();
       return {
         resolved,
@@ -157,7 +212,10 @@ export function createGuidanceService({
   }
 
   async function read(input) {
-    return guarded(async () => (await inspect(input)).guidance);
+    return guarded(
+      async () => (await inspect(input, { allowAbsent: true })).guidance,
+      { readOnly: true },
+    );
   }
 
   async function withPublicationLease(context, operation) {
@@ -554,10 +612,15 @@ export function createGuidanceService({
     edit,
     update: (input) => replace(input),
     readWithIdentity: (input) =>
-      guarded(async () => {
-        const { guidance, localIdentity } = await inspect(input);
-        return { ...guidance, localIdentity };
-      }),
+      guarded(
+        async () => {
+          const { guidance, localIdentity } = await inspect(input, {
+            allowAbsent: true,
+          });
+          return { ...guidance, localIdentity };
+        },
+        { readOnly: true },
+      ),
     updateUnderLease: (input, assertLease, expectedIdentity) => {
       if (typeof assertLease !== "function")
         throw new GuidanceError("A held publication lease is required.");

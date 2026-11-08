@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { auditPipeline } from "../src/index.js";
+import { publicationContent } from "../src/publication-contract.js";
 import {
   READY,
   complete,
@@ -276,5 +277,41 @@ test("legacy audit clarification defaults preserve completed discovery and rejec
   migrated.proactiveClarificationComplete = false;
   assert.throws(() =>
     auditPipeline.workflow.validateRun({ ...legacy, pipelineState: migrated }),
+  );
+});
+
+test("legacy source-scope migration preserves complete report bytes, receipts and consumed discovery/recheck budgets", async () => {
+  const f = fixture([
+    READY,
+    complete({ candidates: [finding()] }),
+    recheck,
+    complete(),
+  ]);
+  delete f.run().pipelineState.settings.sourceScope;
+  delete f.run().pipelineState.settings.excludePaths;
+  const completed = await f.executePublic();
+  const legacy = structuredClone(completed);
+  const before = publicationContent(legacy.pipelineState);
+  const migrated = auditPipeline.migrations[6](legacy);
+  assert.deepEqual(migrated, legacy.pipelineState);
+  assert.deepEqual(publicationContent(migrated), before);
+  assert.doesNotThrow(() =>
+    auditPipeline.workflow.validateRun({ ...legacy, pipelineState: migrated }),
+  );
+  const calls = f.calls.length;
+  const publications = f.publications.length;
+  f.run().pipelineState = migrated;
+  const result = await f.executePublic();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(f.calls.length, calls);
+  assert.equal(f.publications.length, publications);
+  assert.deepEqual(
+    result.pipelineState.acceptedBatches,
+    legacy.pipelineState.acceptedBatches,
+  );
+  assert.deepEqual(result.pipelineState.history, legacy.pipelineState.history);
+  assert.deepEqual(
+    result.pipelineState.recheckHistory,
+    legacy.pipelineState.recheckHistory,
   );
 });

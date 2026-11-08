@@ -131,9 +131,26 @@ export function createSetupRuntime({
         infrastructurePaths: getRun().workspace.policy.infrastructurePaths,
       });
       const snapshot = await workspace.snapshot({ inspection });
-      const files = snapshot.entries
-        .filter(({ kind }) => kind === "file")
-        .map(({ path }) => path);
+      // Complete capture protects sources; discovery projects only setup files.
+      // The init owner rejects an unsupported evidence inventory in full.
+      const documents = {
+        instructions: [],
+        checks: [],
+        skills: [],
+        guidance: [],
+      };
+      for (const { path, kind } of snapshot.entries) {
+        if (kind !== "file") continue;
+        const name = basename(path);
+        if (["AGENTS.md", "CLAUDE.md"].includes(name))
+          documents.instructions.push(path);
+        if (["package.json", "Makefile", "justfile"].includes(name))
+          documents.checks.push(path);
+        if (path.endsWith("/skills/finalization/SKILL.md"))
+          documents.skills.push(path);
+        if (path.endsWith("/agent-runner/rules.md"))
+          documents.guidance.push(path);
+      }
       return {
         projectPath,
         taskPath: run.taskPath,
@@ -143,20 +160,7 @@ export function createSetupRuntime({
         configurationPath: state.clarificationSelection.configurationPath,
         configurationPaths: run.workspace.policy.configurationPaths,
         candidatePaths: candidates,
-        documents: {
-          instructions: files.filter((path) =>
-            ["AGENTS.md", "CLAUDE.md"].includes(basename(path)),
-          ),
-          checks: files.filter((path) =>
-            ["package.json", "Makefile", "justfile"].includes(basename(path)),
-          ),
-          skills: files.filter((path) =>
-            path.endsWith("/skills/finalization/SKILL.md"),
-          ),
-          guidance: files.filter((path) =>
-            path.endsWith("/agent-runner/rules.md"),
-          ),
-        },
+        documents,
       };
     },
     async guidancePaths(intent) {

@@ -109,6 +109,7 @@ const CLAUDE_CONTROL_ENTRIES = [...FILES, ...DIRECTORIES]
 export function projectionSource({
   access,
   cwd,
+  providerCwd,
   home,
   proof,
   injectHome = true,
@@ -122,6 +123,7 @@ function projectArguments(args) {
   const fs = require("node:fs");
   const path = require("node:path");
   const cwd = ${JSON.stringify(cwd)};
+  const providerCwd = ${JSON.stringify(providerCwd ?? cwd)};
   const writable = ${JSON.stringify(access === "workspace-write")};
   const directory = ${JSON.stringify(directoryPolicy ?? null)};
   const incidentalWrites = ${JSON.stringify(claudeWritablePaths)};
@@ -337,6 +339,7 @@ function projectArguments(args) {
       if (directory !== null && ${JSON.stringify(injectHome)} && !preparationReserved) throw new Error("missing directory preparation proof");
       const normalized = writable && directory === null ? normalizeWorkspace(projected) : projected;
       if (${JSON.stringify(injectHome)}) normalized.push(...${JSON.stringify(toolHomeArguments(home, proof))});
+      if (${JSON.stringify(injectHome)} && providerCwd !== cwd) normalized.push("--chdir", cwd);
       normalized.push("--", ...args.slice(i));
       return normalized;
     }
@@ -347,6 +350,14 @@ function projectArguments(args) {
     let destination;
     if (["--bind", "--ro-bind"].includes(operation)) {
       if (values.some((value) => !path.isAbsolute(value) || path.resolve(value) !== value)) throw new Error("invalid mount path");
+      // Native startup owns a different cwd. It is not a workspace grant and
+      // must not become command-visible writable storage. The real workspace
+      // still requires its own exact reservation and access checks below.
+      if (providerCwd !== cwd && values[0] === values[1] && contains(providerCwd, values[0])) {
+        if (!contains(providerCwd, canonical(values[0]))) throw new Error("native startup path changed");
+        continue;
+      }
+      if (providerCwd !== cwd && operation === "--bind" && values[0] === values[1] && incidentalWrites.includes(values[1])) continue;
       if (values[0] === cwd && values[1] === cwd) {
         if (operation === "--bind") workspaceGranted = true;
         if (operation === "--ro-bind" && (writable || directory !== null)) {
@@ -375,6 +386,10 @@ function projectArguments(args) {
         if (values[0] !== values[1] || !directory.writablePaths.some((name) => contains(name, destination)) || directory.protectedPaths.some((name) => contains(name, destination))) throw new Error("undeclared write mount");
       }
       destination = values[1];
+    } else if (operation === "--chdir" && providerCwd !== cwd) {
+      if (values[0] !== providerCwd && values[0] !== cwd) throw new Error("unsupported command cwd");
+      // The native projection or restricted-host launcher supplies the cwd.
+      continue;
     } else if (["--dir", "--tmpfs", "--dev", "--proc"].includes(operation)) {
       destination = values[0];
       if (!path.isAbsolute(destination) || path.resolve(destination) !== destination) throw new Error("invalid mount path");
@@ -397,6 +412,7 @@ function projectArguments(args) {
 export function nativeLauncherSource({
   bubblewrapBinary,
   cwd,
+  providerCwd,
   home,
   proof,
   tokenName,
@@ -411,7 +427,7 @@ export function nativeLauncherSource({
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
 if (process.env[${JSON.stringify(tokenName)}] !== ${JSON.stringify(token)}) process.exit(125);
-${projectionSource({ access, cwd, home, proof, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory })}
+${projectionSource({ access, cwd, providerCwd, home, proof, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory })}
 try {
   const args = projectArguments(process.argv.slice(2));
   const env = { ...process.env };

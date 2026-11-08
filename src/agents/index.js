@@ -59,6 +59,30 @@ export function isAdapterDiagnosticClass(value, providers = PROVIDER_REGISTRY) {
   return providers.isDiagnosticClass(value);
 }
 
+// Only an actual normalized turn failure can supply a durable diagnosis.
+export function terminalAdapterDiagnostic(
+  cause,
+  providers = PROVIDER_REGISTRY,
+) {
+  if (!(cause instanceof AgentBoundaryError)) return null;
+  const failure = normalizeFailureRecord(cause.failure, [
+    ...new Set(
+      providers.list().flatMap(({ failures }) => [...failures.classes]),
+    ),
+  ]);
+  if (failure.retry !== "terminal" || failure.disposition !== undefined)
+    return null;
+  return {
+    code:
+      typeof cause.code === "string" && ERROR_CODE_PATTERN.test(cause.code)
+        ? cause.code
+        : "ERR_AGENT_FAILED",
+    ...(failure.failureClass === ADAPTER_FAILURE_CLASS
+      ? {}
+      : { diagnosticClass: failure.failureClass }),
+  };
+}
+
 export {
   CLAUDE_BACKEND_ID,
   CLAUDE_FAILURE_CLASSES,

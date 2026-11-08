@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { STOP_TIMINGS } from "./stop-contract.js";
+import { interruptObservations } from "./observations.js";
 import {
   resolveCommitBoundary,
   assertRunCanAdvance,
@@ -340,6 +341,7 @@ export function createStopService({
         ...current,
         ...patch,
         activeTurn: null,
+        observations: interruptObservations(current.observations),
         stopRequest: pending
           ? {
               ...current.stopRequest,

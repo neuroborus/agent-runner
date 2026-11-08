@@ -58,7 +58,11 @@ export function createGuidanceSelection({
     };
   }
 
-  async function inspectDestination(selection, path) {
+  async function inspectDestination(
+    selection,
+    path,
+    { allowAbsent = false } = {},
+  ) {
     if (
       !isWithin(selection.basePath, path) ||
       path.split(sep).some((part) => CONTROLS.includes(part))
@@ -88,7 +92,12 @@ export function createGuidanceSelection({
         projectPath: selection.leasePath,
         path,
       });
-      if (safety.path !== path || safety.tracked || !safety.ignored) {
+      const isAbsent = inspection.exists === false && safety.exists === false;
+      if (
+        safety.path !== path ||
+        safety.tracked ||
+        (!safety.ignored && !(allowAbsent && isAbsent))
+      ) {
         throw new GuidanceError(
           "Local guidance and its temporary files must be ignored, untracked, and confined.",
           { code: "ERR_GUIDANCE_NOT_IGNORED" },
@@ -98,7 +107,7 @@ export function createGuidanceSelection({
     return inspection;
   }
 
-  async function selection(input, projectPath) {
+  async function selection(input, projectPath, options) {
     let resolved = await target(projectPath);
     const configuration = await loadConfiguration();
     async function loadSelected(selected) {
@@ -179,7 +188,7 @@ export function createGuidanceSelection({
         JSON.stringify({ configuration, projectConfiguration }),
       ),
     };
-    const inspection = await inspectDestination(selected, localPath);
+    const inspection = await inspectDestination(selected, localPath, options);
     const directory = await openLocalDirectory(basePath, localPath, {
       ancestors: inspection.ancestors,
     });
@@ -199,8 +208,8 @@ export function createGuidanceSelection({
     };
   }
 
-  async function assertSelection(input, context) {
-    const current = await selection(input, context.projectPath);
+  async function assertSelection(input, context, options) {
+    const current = await selection(input, context.projectPath, options);
     const binding = context.binding;
     if (
       current.localPath !== context.localPath ||

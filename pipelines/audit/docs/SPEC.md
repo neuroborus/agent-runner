@@ -32,6 +32,61 @@ capped at 20 and frozen at creation). The separate
 `maxFindingRecheckPasses` setting has the same default and finite cap.
 The lifecycle imports no root capability or other pipeline.
 
+The descriptor also owns `sourceScope` (`directory`, the default, or `git`) and
+`excludePaths` (default `[]`). CLI `--source-scope` and repeatable `--exclude-path`,
+and MCP `sourceScope`/`excludePaths`, use ordinary configuration precedence and
+freeze before preparation. Discovery validates individual values; the combined
+scope/exclusion constraint uses the effective project overlay and overrides
+before admission, rather than a provisional runner/override combination.
+Exclusions are distinct literal workspace-relative
+paths (at most 256, each at most 4,096 characters), without absolute paths,
+empty/dot/dot-dot components or control characters; there is no glob interpretation. They require
+directory scope. Whole-directory capture includes ignored content; excluded
+leaves and descendants stay opaque during control discovery, hashing and provider
+preparation. Required inputs, configuration, task/artifact paths, controls and link
+dependencies cannot overlap exclusions. Exclusions grant no access or storage authority.
+
+Explicit Git scope resolves the worktree root only after configuration selects
+it, while retaining the directory lifecycle, canonical exclusion and read-only
+permissions. Runner uses the Git-owned complete source selector: unchanged and
+ignored tracked files, dirty/deleted tracked paths and non-ignored untracked
+sources. It journals the membership/provenance fingerprint and file-only
+inspection declarations (up to 10,000 roots through both provider normalizers)
+before capture, rechecks them around capture and on
+reconstruction, and rejects drift without adopting new membership. Selection and
+source bytes bind snapshots, provider preparation/receipts, all role context,
+finding verification and report publication. Providers receive filesystem
+declarations, never Git interpretation or effects. Ordinary-directory audits
+require no Git invocation.
+
+Clarification can narrow semantic coverage but cannot expand that frozen source
+boundary or remove its exclusions; a changed selection requires a new run.
+CLI status displays source scope/exclusions; MCP `auditSource` also exposes the
+nullable Git selection fingerprint. New reports show the frozen source scope
+and literal exclusions separately from semantic scope and exclusions.
+
+The descriptor selects deferred workspace preparation. Admission resolves and
+freezes configuration, roles, task/context evidence and canonical exclusion
+before recursive control discovery or capture. Runner publishes the durable run
+ID while the workflow remains in `CLARIFY` with `workspacePreparation` pending;
+there is no accepted workspace binding or provider authority yet. Execution owns
+the run lease before the canonical workspace lease and captures from those frozen
+declarations with traversal cancellation. Only verified complete publication
+clears preparation. Required directory capabilities are validated before native
+role work. Other pipelines retain their existing preparation lifecycle.
+
+CLI creation activity identifies the pending run and its status/pause/cancel
+commands. MCP `run_start` returns after correlated detached readiness under both
+leases, without waiting for capture. Status exposes nullable
+`workspacePreparation: {status: "pending"}` separately from process custody.
+Observation and wait cancellation cannot start or stop capture. Pause/cancel
+settlement retires owned work and preserves the frozen pending record without
+capturing sources, invoking roles or publishing a report. A pause resumes the
+same frozen preparation; cancellation is terminal. Interrupted capture is
+discarded, and ownerless resume reacquires exclusion before recapture. Exact-key
+receipt recovery never launches a second owner. Legacy completed preparation
+and workspace bindings do not schedule capture.
+
 `runAuditDiscovery` consumes existing injected runner workspace, clarification,
 adapter, session-lineage and state-transition capabilities. The runner owns
 confinement, ignored repository-local artifacts, external atomic/journaled state,
@@ -42,6 +97,9 @@ through a confined Runner effect. The descriptor declares task-owned
 artifacts. Long-lived snapshots exclude those paths; task/context and source
 content remain protected, while explicit transcript hashes reject edits outside
 an authorized window. Per-turn provider enforcement remains read-only.
+Claude native initialization uses adapter-owned startup storage before tool
+isolation, preserving ordinary-directory sources and their complete snapshot;
+see the [provider lifecycle](../../../docs/product/PROVIDER_MODEL.md).
 
 Active role turns carry the Runner-owned [session naming context](../../../docs/product/PROVIDER_MODEL.md#sessions-and-context).
 The creation acknowledgement records a verified new child at this pipeline's
@@ -65,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 5 retains the workspace baseline, frozen declarations and their
+State version 7 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -122,7 +180,28 @@ read-only reconciliation; discovery records an invalid pass before resuming at
 a new ordinal. Terminal provider safety failures propagate after reconciliation and
 persist `FAILED`, which cannot resume discovery or verification. A pending batch
 and its interrupted recheck remain valid preserved evidence in this terminal state.
-No native diagnostics are saved.
+The terminal `pause` retains exactly `reason: "internal_failure"`, its bounded
+code and optional `diagnosticClass` from the normalized agent boundary. The
+common run envelope validates class membership against the provider registry;
+audit validates the terminal disposition and rejects additional fields or a class
+on another pause/state. Legacy classless failures stay classless without migration
+or inferred causes. No native messages, causes or rejected output are saved.
+The same transition publishes a fixed `runner/audit/failed` activity containing
+only the code and optional class. CLI status and MCP status/wait expose that class
+as bounded pause evidence. Only `isolation_workspace_policy` establishes guidance
+to resolve provider/workspace compatibility before a separately authorized new
+audit; it identifies no particular path, setting or underlying environment cause.
+Other classes provide evidence without guessed corrective guidance, and a generic
+code alone establishes no class. Terminal projection offers no resume action.
+The descriptor declares `FAILED` in `workflow.nonResumableStates`. After required
+ownership reconciliation, Runner returns that terminal state before workspace
+preparation, provider capability probes or workflow invocation. Configuration
+recovery and continuation preserve its `FAILED` disposition and diagnostic evidence
+even if the protected configuration changed or disappeared;
+they neither replace it with a configuration pause nor accept the changed inputs.
+Observation, reconstruction and a terminal continuation perform no provider work,
+discovery, finding verification or report publication. Diagnosis grants no same-run audit
+resumption, budget renewal, acceptance, source changes or isolation bypass.
 The baseline uses the common `repositoryBaseline` binding so successful recovery
 can retire its evidence against the same unchanged workspace.
 
@@ -142,6 +221,14 @@ content. New report content requires another pass even if corrections were
 omitted. Malformed, interrupted, incomplete or stale-snapshot output never
 supplies clean evidence. Partial results are not adopted. Source or frozen-input
 drift rejects the result and remains blocking.
+
+Role schemas share the audit-owned ID, text-length and collection constraints,
+required nonempty collections, catalog values and closed records. Instructions
+also require normalized text-list uniqueness, report-local ID/cause uniqueness,
+single-line titles/locations and exact-copy snapshot/report/batch fingerprints.
+Discovery must copy the supplied snapshot fingerprint, never recompute it.
+Portable schemas cannot express all cross-field or normalization rules;
+deterministic normalization remains authoritative.
 
 Clarification, discovery and recheck role results share the two-MiB serialized UTF-8
 limit, independently of the enclosing store's 100,000-character string and
@@ -362,7 +449,49 @@ checks merely to manufacture an example.
 `normalizeAuditReport` validates and returns a detached, deeply frozen content
 copy. Invalid input throws `AuditReportValidationError` with code
 `ERR_INVALID_AUDIT_REPORT` and a path-based `issues` list without raw input
-values. It grants no durable state or publication authority.
+values. Recognized semantic role failures retain the existing `AuditWorkflowError`
+and `ERR_INVALID_AUDIT_STATE` identity. Both expose immutable `diagnostics` with
+one fail-fast `{field, code}` entry. Codes and explanatory issue text come from
+the finite audit-owned vocabulary in `src/diagnostics.js`; fields resolve only
+through the owning schemas (`report`, `clarification`, `discovery`, `recheck`),
+with numeric indices from 0 through 9999 and at most 256 field characters.
+Unknown locations/codes fall back to `result`/`invalid-result`; unknown keys,
+rejected values, native messages and causes are never copied. Size/serialization
+failures use the `result` location.
+
+Invalid clarification, discovery and finding-recheck results pause at their owning
+checkpoint. State version 6 adds nullable `correctionFeedback`; the version-5
+migration initializes it to null without changing saved evidence, roles, frozen
+inputs, histories, receipts or budgets. A rejection atomically records the invalid
+pass outcome (when reserved), pause and feedback. Feedback contains only the phase,
+rejected round/pass number, logical context key, exact snapshot/report/batch
+bindings and the bounded canonical diagnostics above. Structured-output or other
+invalid results without recognized semantic details use `result`/`invalid-result`;
+native error text and rejected output are never retained.
+
+Resume supplies feedback only to the matching clarification, discovery or recheck
+request, alongside fixed instructions to return a complete corrected result using
+the current request's bindings. A further rejection replaces feedback; successful
+validation clears it, including for an incomplete result. Persisted validation
+rejects stale bindings, unsupported diagnostics or feedback without its invalid
+history entry. No feedback can create acceptance, cleanliness, freshness or an
+allowance: ordinary reservation, session, correction and finite-budget rules still
+apply. Clarification feedback consumes no question round. Legacy invalid results
+without diagnostics retain their original supported resume behavior.
+
+The version-6 migration to version 7 preserves frozen settings and all saved
+bindings, baselines, modes, findings, receipts, rejection history and both finite
+budgets byte-for-byte. Missing source settings retain whole-directory semantics
+and historical report bytes; migration creates neither inspection evidence nor
+a new capture. Pending legacy preparation retains its original input fingerprint.
+New runs persist the resolved source settings. Common envelope version 26 owns
+the optional durable Git selection; older envelopes cannot carry it.
+
+The descriptor projects fixed corrective guidance and bounded evidence strings
+with the checkpoint, finite diagnostic code, schema field and constraint through
+the existing CLI/MCP `pause` surface. Its null resume action requests another role
+result within the remaining budget; it cannot edit frozen input or open a general
+chat channel. These diagnostics carry no finding acceptance or publication authority.
 
 ## Rendering
 

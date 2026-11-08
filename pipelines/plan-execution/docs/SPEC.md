@@ -1632,8 +1632,8 @@ with a read-only host filesystem, writable workspace and resolved Git
 directories, private temporary and runtime directories, and no network. The
 Runner-owned executor proof is independent from the native Claude turn proof,
 and `localCommit` requires both while native session and structured-output
-capabilities remain CLI-derived. The agent confirmation turn remains in `plan`
-mode; after confirmation the executor checks the expected HEAD, runs
+capabilities remain CLI-derived. The agent confirmation turn retains the
+read-only inspection policy; after confirmation the executor checks the expected HEAD, runs
 `git add -A`, rechecks HEAD, applies fixed
 unstaged-clean, staged-diff whitespace, and nonempty-diff hygiene, and creates
 one subject-only commit with the exact supplied message. It preserves Git hooks and configured
@@ -2221,6 +2221,13 @@ contiguous local check IDs. A confirmed
 confirming evidence fingerprint. It does not rewrite original role assignments
 or another step's schedule. Verified advancement clears the amendment and prior
 gates before selecting the next persisted inventory.
+
+A justified amendment may add an exact operator-selected command originally
+assigned to another step. Selection reserves that command from agent execution;
+it does not make every selected command applicable. The resulting candidate
+inventory, rather than the original applicability alone, selects which frozen
+commands the runner executes. The amendment still requires the existing distinct,
+fingerprint-bound terminal confirmation before becoming active authority.
 
 State version 27 replaces the expanded schedule representation. Its leased
 version-26 migration verifies the old schedule against accepted role assignments
@@ -3041,15 +3048,21 @@ external host results and user attestations do not satisfy the gate.
 Every selected runner-trusted command must appear in each role's complete
 bootstrap catalog with its actual applicability; selection alone does not
 make it applicable to every step. Capability preparation uses the complete
-catalog and both active roles' reports without executing checks. Finalization
-reserves and executes only selected commands in the active step's inventory.
-Every active runner-trusted command must appear exactly once in that inventory
-using its persisted exact command text. The Worker does not execute it and
-returns `NOT_RUN` only for that selected entry. After the Worker turn completes
-and repository changes are reconciled, the root runs the exact persisted
-executable/argument vector directly without a shell and replaces the
-placeholder with bounded runner evidence. It retains no process stdout or
-stderr and accepts no configuration-supplied environment values. The Linux
+catalog and both active roles' reports without executing checks. Normal,
+correction and reconstruction finalization prompts reserve the complete selected
+catalog, including commands assigned to later steps. Terminal confirmation also
+receives that reservation list. Every established active runner-trusted command
+must remain exactly once in the candidate inventory using its persisted exact
+command text. A justified current-step amendment may add another selected
+command without changing the frozen role inventories or later schedules; future
+requirements are not added automatically. The Worker returns `NOT_RUN` for every
+selected candidate entry, including newly proposed checks. An agent attestation
+for a selected command, or `NOT_RUN` for an unselected command, is invalid.
+After the Worker turn completes and repository changes are reconciled, the root
+runs the exact persisted executable/argument vector only for selected commands
+explicitly present in the resulting candidate inventory, directly without a
+shell, and replaces the placeholder with bounded runner evidence. It retains no
+process stdout or stderr and accepts no configuration-supplied environment values. The Linux
 executor requires bubblewrap. Before agent work, the root resolves it only from
 fixed system locations to a canonical absolute executable whose file and
 ancestor directories are not writable by the runner identity. Project-relative
@@ -3080,12 +3093,28 @@ blocked, skipped, changed, substituted, non-allowlisted, unmatched, or
 fingerprint-drifting commands fail closed. Agent and runner results form one
 ordered evidence tuple bound to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. The executor runs
-outside agent turns and does not grant an agent loopback, Docker, database,
-network, host temporary-directory, or another host-service capability.
+with the original frozen capabilities and bindings. Persisted selected-check
+evidence requires executor `runner` and the exact frozen command identity;
+unselected entries require agent evidence and gain no runner authority.
+Execution remains outside agent turns and does not grant an agent loopback,
+Docker, database, network, host temporary-directory, or another host-service
+capability.
 Increasing the deadline cannot repair sandbox incompatibility or recover the
 discarded output. A full repository check can pass on the host while trusted
 isolation fails closed with only a generic exit code; timeout configuration is
 not a diagnostics or containment remedy.
+
+Runner receipts append monotonic elapsed milliseconds for the admitted attempt,
+including preparation, invocation, verified retirement, cleanup and safety checks;
+see the [shared execution interval](../../../docs/ARCHITECTURE.md). The evidence
+distinguishes pre-invocation blockage from an invoked executor, without asserting
+payload admission. Availability preparation is never check evidence. Cancellation,
+uncertain ownership/cleanup and safety failures publish no completed receipt.
+The existing check evidence list retains timing through persistence/reload and
+the terminal confirmation's exact validation tuple. No schema migration is
+needed; authentic unmeasured receipts remain valid with timing unknown. Worker
+placeholders stay `NOT_RUN`; finalization and terminal roles never estimate
+Runner duration or rerun solely for missing legacy/controller telemetry.
 
 Before either the passing or failing finalization transition is attempted, one
 pipeline-owned deterministic contract constructs and validates the exact
@@ -3270,6 +3299,20 @@ fingerprint, trusted-validation, review, and commit paths unchanged. Rejected
 values, commands, paths, provider output, and transcripts are never persisted
 or published. This bounded ledger is independent of bootstrap and validation-
 migration correction ledgers.
+
+Finalization normalization identifies root/object and exact-field-set failures,
+closed status values, each inapplicable field, ordered check completeness and
+identity, exact commands, reserved `NOT_RUN` rules, bounded evidence, issues and
+status consistency at their owning validators. Paths use schema field names and
+zero-based trusted positions, never proposed IDs, commands, values or exception
+prose. Independent field/check violations share a batch capped at 512 diagnostics;
+invalid prerequisite inventories suppress dependent check comparisons. Worker
+`PASS` may contain reserved placeholders, which Runner replaces before persisted
+acceptance. Custom criterion failures retain their existing empty-inventory semantics.
+The same bounded first diagnostic appears in terminal CLI/MCP failure evidence;
+it grants no resume action. Provider failures lacking field information retain
+`result` / `semantic-contract`. Historical unknown fields stay unknown, and the
+existing ledger and persisted evidence shapes require no migration.
 
 Before any finalization candidate, including `BLOCKED`, is fingerprinted,
 trusted, or reviewed, inspect every validation-infrastructure entry through the
@@ -3772,11 +3815,21 @@ verification reports no commit. A non-recoverable policy rejection remains
 `commit_failed`; its bounded adapter diagnostic class, when present, is copied
 into that pause, named by the authorization-retired activity, and projected as
 `Adapter diagnostic: <class>.` without commands, paths, output, or native
-messages. A recoverable provider rejection remains
+messages. The provider-neutral [readiness refusal classes](../../../docs/product/PROVIDER_MODEL.md#isolation-and-effects)
+instead expose their fixed violated constraint, or deliberate decline with an
+unknown reason, plus bounded class evidence. After authorization retirement
+they retain `commit_failed` and the private `COMMIT` checkpoint but expose a
+null public resume state and `start-new-run` with requirement
+`resolved-commit-readiness`. Explicit same-run resume is rejected. Preserve the
+reviewed candidate for separately authorized follow-up; COMMIT has no durable
+readiness-output correction checkpoint. No rejected keys, values or native
+explanations enter persistence or public activity. A readiness rejection cannot
+be marked recoverable. Legacy classless refusals and other supported classes
+retain their existing recovery behavior. A recoverable provider rejection remains
 `backend_unavailable`. Explicit availability additionally persists a bounded
 `availability: { reason, commitExecutor: "not_started" }` proof. After unchanged
 Git verification, retire that authorization and schedule backoff atomically;
-a fresh ID is issued only after the deadline. Other rejections retain their
+a fresh ID is issued only after the deadline. Other supported rejections retain their
 existing explicit resume at `COMMIT`. State version 24 accepts this proof;
 version 23 migrates unchanged and cannot invent missing evidence. If verification is interrupted, retain both the
 consumed authorization and its proof, then resume verification without invoking

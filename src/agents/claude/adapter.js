@@ -56,6 +56,10 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
+  "commit_readiness_declined",
+  "commit_readiness_extra_fields",
+  "commit_readiness_not_boolean",
+  "commit_readiness_not_object",
   "configuration_unavailable",
   "continuation_session_unavailable",
   "context_exhausted",
@@ -93,6 +97,7 @@ const MINIMUM_CONTEXT_SIZE = 100_000n;
 const MAXIMUM_CONTEXT_SIZE = 1_000_000n;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 const REQUIRED_HELP_FLAGS = Object.freeze([
+  "--add-dir",
   "--append-system-prompt",
   "--autocompact",
   "--fork-session",
@@ -648,7 +653,10 @@ function turnPrompt(request, recovery) {
       "current workspace is ready for the authorized commit. Do not modify " +
       "files, stage changes, create a commit, or mutate Git state. The adapter " +
       "will perform the constrained commit after this turn. Return whether it " +
-      "is safe to proceed through the provided schema.";
+      'is safe to proceed as exactly { "ready": true } or { "ready": false }. ' +
+      "The ready field must be boolean; include no other fields. Return false " +
+      "if readiness cannot be confirmed. A refusal preserves the candidate " +
+      "for separately authorized follow-up; this checkpoint has no output correction.";
   }
   return prompt;
 }
@@ -659,12 +667,13 @@ function cliSettings(
   gitDirectories,
   credentialEnvironmentNames,
   isolationPolicy,
+  providerCwd,
 ) {
   // Keep Claude's mount preparation read-only so it neither creates nor
   // registers absent project paths for cleanup. The authenticated launcher,
   // selected through managed bwrapPath or PATH, replaces that reservation with
   // the exact runner-authorized workspace access and omitted protections.
-  const deniedWritePaths = [request.cwd, ...gitDirectories];
+  const deniedWritePaths = [request.cwd, providerCwd, ...gitDirectories];
   return JSON.stringify({
     attribution: { commit: "", pr: "", sessionUrl: false },
     autoCompactEnabled: true,
@@ -720,6 +729,7 @@ function commandArguments(
   session,
   isolationPolicy,
   commandLauncherPath,
+  providerCwd,
 ) {
   const accessConfiguration = accessConfigurationFor(request);
   const argumentsList = [
@@ -738,14 +748,21 @@ function commandArguments(
       gitDirectories,
       credentialEnvironmentNames,
       isolationPolicy,
+      providerCwd,
     ),
+    "--add-dir",
+    request.cwd,
     "--append-system-prompt",
-    request.workspacePolicy === undefined
-      ? SYSTEM_INSTRUCTIONS
-      : "Follow the workspace instructions and declared directory policy. " +
-        "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
-        "configuration, infrastructure, artifacts and controls are read-only. " +
-        "Never stage, commit, mutate Git state, perform remote writes or request permission approval.",
+    `The task workspace is ${JSON.stringify(request.cwd)}. ` +
+      "Native startup uses a separate private directory. Use absolute workspace paths " +
+      "for file tools; sandboxed Bash starts in the task workspace. Read its applicable " +
+      "workspace instructions before working. " +
+      (request.workspacePolicy === undefined
+        ? SYSTEM_INSTRUCTIONS
+        : "Follow the workspace instructions and declared directory policy. " +
+          "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
+          "configuration, infrastructure, artifacts and controls are read-only. " +
+          "Never stage, commit, mutate Git state, perform remote writes or request permission approval."),
     "--permission-mode",
     accessConfiguration.permissionMode,
     "--tools",
@@ -1169,6 +1186,36 @@ function normalizeResult(payload, request, session) {
     });
   }
   validateRequestedModel(payload, request.model);
+  if (request.access === "local-commit") {
+    const readiness = payload.structured_output;
+    // Check the complete shape before interpreting a refusal or admitting effects.
+    const diagnosticClass = !isRecord(readiness)
+      ? "commit_readiness_not_object"
+      : Object.keys(readiness).some((field) => field !== "ready")
+        ? "commit_readiness_extra_fields"
+        : !Object.hasOwn(readiness, "ready") ||
+            typeof readiness.ready !== "boolean"
+          ? "commit_readiness_not_boolean"
+          : readiness.ready === false
+            ? "commit_readiness_declined"
+            : undefined;
+    if (diagnosticClass !== undefined) {
+      const messages = {
+        commit_readiness_not_object:
+          "Local commit readiness confirmation must be an object.",
+        commit_readiness_extra_fields:
+          "Local commit readiness confirmation permits only the ready field.",
+        commit_readiness_not_boolean:
+          "Local commit readiness confirmation requires a boolean ready field.",
+        commit_readiness_declined:
+          "Local commit readiness was declined; the reason is unknown.",
+      };
+      throw new ClaudeAdapterError(messages[diagnosticClass], {
+        code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+        diagnosticClass,
+      });
+    }
+  }
   let structured = null;
   if (schema !== undefined) {
     if (!isRecord(payload.structured_output)) {
@@ -1181,15 +1228,6 @@ function normalizeResult(payload, request, session) {
       );
     }
     structured = deepFreeze(payload.structured_output);
-  }
-  if (
-    request.access === "local-commit" &&
-    (structured.ready !== true || Object.keys(structured).length !== 1)
-  ) {
-    throw new ClaudeAdapterError(
-      "Claude did not confirm the authorized local commit.",
-      { code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY" },
-    );
   }
   return Object.freeze({
     output:
@@ -1368,8 +1406,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v9"
-              : "claude-isolation-v3",
+              ? "claude-command-boundary-v10"
+              : "claude-isolation-v4",
             policies: resolvedPolicies,
             version: version.text,
           }),
@@ -1597,6 +1635,7 @@ export function createClaudeAdapter(options = {}) {
       request.isolationPolicy ?? isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
+    const providerCwd = join(storage.directory, "native");
     const observations = createClaudeObservations(
       request.onObservation,
       attempt,
@@ -1664,11 +1703,16 @@ export function createClaudeAdapter(options = {}) {
       let commandLauncher;
       try {
         await mkdir(join(storage.directory, "tmp"), { mode: 0o700 });
+        // Native sandbox initialization precedes sandboxed tools and creates
+        // cwd-relative .claude/.cc-writes even for read-only work. Never start
+        // that initialization in a project, input, or control tree.
+        await mkdir(providerCwd, { mode: 0o700 });
         commandLauncher = await createClaudeCommandLauncher({
           access: request.access,
           architecture,
           bubblewrapBinary: BUBBLEWRAP_BINARY,
           cwd: request.cwd,
+          providerCwd,
           directory: storage.directory,
           environment: baseEnvironment,
           gitDirectories,
@@ -1687,10 +1731,12 @@ export function createClaudeAdapter(options = {}) {
         selectedSession,
         isolationPolicy,
         commandLauncher?.path,
+        providerCwd,
       );
       const turnEnvironment = commandLauncher.environment({
         ...baseEnvironment,
         TMPDIR: join(storage.directory, "tmp"),
+        PWD: providerCwd,
       });
       let processResult;
       try {
@@ -1700,7 +1746,7 @@ export function createClaudeAdapter(options = {}) {
             ? executeOwnedProcess
             : execute
         )(claudeBinary, argumentsList, {
-          cwd: request.cwd,
+          cwd: providerCwd,
           encoding: "utf8",
           env: turnEnvironment,
           input: turnPrompt(request, recovery),
@@ -2032,6 +2078,10 @@ export function createClaudeAdapter(options = {}) {
             {
               cause,
               code: cause?.code ?? "ERR_CLAUDE_LOCAL_COMMIT_INTERRUPTED",
+              diagnosticClass:
+                cause instanceof ClaudeAdapterError
+                  ? cause.diagnosticClass
+                  : undefined,
               effectStarted: false,
             },
           );

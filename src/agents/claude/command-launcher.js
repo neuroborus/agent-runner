@@ -180,6 +180,10 @@ async function claudeIncidentalWritablePaths(environment) {
     "/private/tmp/claude",
     join(homeDirectory, ".npm/_logs"),
     join(homeDirectory, ".claude/debug"),
+    join(
+      environment.CLAUDE_CONFIG_DIR ?? join(homeDirectory, ".claude"),
+      ".cc-writes",
+    ),
   ];
   const paths = new Set(candidates.map((path) => resolve(path)));
   for (const path of candidates) {
@@ -248,6 +252,7 @@ function launcherSource({
   privateTemporaryRoot,
   claudeWritablePaths,
   cwd,
+  providerCwd,
   filter,
   filesystemArguments,
   finalArguments,
@@ -310,7 +315,7 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-${projectionSource({ access, cwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp") })}
+${projectionSource({ access, cwd, providerCwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp") })}
 let sourceArguments;
 try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
 const validatedArguments = [];
@@ -794,6 +799,7 @@ export async function createClaudeCommandLauncher({
   architecture = process.arch,
   bubblewrapBinary,
   cwd,
+  providerCwd,
   environment,
   gitDirectories,
   unsetEnvironmentNames,
@@ -906,6 +912,7 @@ export async function createClaudeCommandLauncher({
           ? nativeLauncherSource({
               bubblewrapBinary: resolvedBubblewrapBinary,
               cwd,
+              providerCwd,
               home,
               proof,
               tokenName: CLAUDE_COMMAND_LAUNCHER_TOKEN,
@@ -926,6 +933,7 @@ export async function createClaudeCommandLauncher({
               privateTemporaryRoot: directory ?? temporaryRoot,
               claudeWritablePaths,
               cwd,
+              providerCwd,
               filter,
               filesystemArguments,
               finalArguments,

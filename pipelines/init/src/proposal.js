@@ -9,6 +9,7 @@ import {
   sep,
 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { assertInitInspection } from "./inspection-failure.js";
 
 export class InitProposalError extends Error {
   constructor(message) {
@@ -170,7 +171,7 @@ export function assertInspection(value) {
     "snapshotHash",
   ]);
   assertInit(
-    value.schemaVersion === 1 &&
+    [1, 2].includes(value.schemaVersion) &&
       isHash(value.snapshotHash) &&
       isPath(value.projectPath) &&
       isPath(value.taskPath) &&
@@ -184,6 +185,7 @@ export function assertInspection(value) {
   );
   assertInit(
     Array.isArray(value.roots) &&
+      value.roots.length <= 10_000 &&
       value.roots.every(isPath) &&
       value.roots.includes(value.projectPath) &&
       Array.isArray(value.entries) &&
@@ -206,8 +208,10 @@ export function assertInspection(value) {
   }
   assertInit(
     Array.isArray(value.configurationPaths) &&
+      value.configurationPaths.length <= 10_000 &&
       value.configurationPaths.every(isPath) &&
       Array.isArray(value.controlPaths) &&
+      value.controlPaths.length <= 10_000 &&
       value.controlPaths.every(isPath) &&
       Array.isArray(value.candidates) &&
       value.candidates.length <= 32,
@@ -263,7 +267,7 @@ export function assertInspection(value) {
     }
   }
   assertInit(
-    Array.isArray(value.scopeBindings),
+    Array.isArray(value.scopeBindings) && value.scopeBindings.length <= 10_000,
     "Init scope bindings are invalid.",
   );
   const scopes = new Set();
@@ -284,6 +288,12 @@ export function assertInspection(value) {
     ].every((path) => [...scopes].some((scope) => within(scope, path))),
     "Init inspection omits a protected scope binding.",
   );
+  if (value.schemaVersion === 2)
+    assertInit(
+      Buffer.byteLength(JSON.stringify(value)) <= 2 * 1024 * 1024 &&
+        value.roots.every((path) => seen.has(path)),
+      "Init setup evidence exceeds capacity or omits a destination root.",
+    );
 }
 
 // Selection edits may add inspected scopes, never replace prior evidence.
@@ -294,7 +304,7 @@ export function assertInspectionExtension(before, after) {
       isDeepStrictEqual(value, current.get(key(value))),
     );
   };
-  assertInit(
+  assertInitInspection(
     [
       "schemaVersion",
       "projectPath",
@@ -322,7 +332,7 @@ export function assertInspectionExtension(before, after) {
       ) &&
       (before.snapshotHash === after.snapshotHash ||
         after.scopeBindings.length > before.scopeBindings.length),
-    "Previously inspected init inputs or destinations changed.",
+    "workspace_changed",
   );
 }
 
@@ -408,6 +418,10 @@ export function normalizeProposal(value, state) {
     paths.push(resource.path);
     const observed = state.inspection.entries.find(
       (entry) => entry.path === resource.path,
+    );
+    assertInit(
+      state.inspection.schemaVersion === 1 || observed !== undefined,
+      "Init resource lacks explicit inspected destination evidence.",
     );
     assertInit(
       !state.inspection.entries.some(

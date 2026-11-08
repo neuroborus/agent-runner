@@ -899,6 +899,22 @@ function isAdapterDiagnosticClass(value) {
   );
 }
 
+// Provider-neutral constraints; native readiness interpretation stays in adapters.
+export function commitReadinessConstraint(diagnosticClass) {
+  switch (diagnosticClass) {
+    case "commit_readiness_declined":
+      return "Readiness was declined; the reason is unknown.";
+    case "commit_readiness_not_object":
+      return "Readiness confirmation must be an object.";
+    case "commit_readiness_not_boolean":
+      return "Readiness confirmation requires a boolean ready field.";
+    case "commit_readiness_extra_fields":
+      return "Readiness confirmation permits only the ready field.";
+    default:
+      return null;
+  }
+}
+
 function hasExactFields(value, fields) {
   return (
     Object.keys(value).length === fields.length &&
@@ -1590,14 +1606,23 @@ function normalizeOptionalEvidence(value, name, code = INVALID_OUTPUT_CODE) {
   });
 }
 
-function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
-  const path = normalizeText(value, name, MAX_TEXT_LENGTH, code);
+function normalizeRelativePath(
+  value,
+  name,
+  code = INVALID_OUTPUT_CODE,
+  diagnostic,
+) {
+  const path = normalizeText(value, name, MAX_TEXT_LENGTH, code, diagnostic);
   if (
     isAbsolute(path) ||
     path === "." ||
     path.split(/[\\/]/u).some((part) => part === "..")
   ) {
-    throw workflowError(`${name} must be repository-relative.`, code);
+    throw workflowError(
+      `${name} must be repository-relative.`,
+      code,
+      diagnostic,
+    );
   }
   return path;
 }
@@ -1974,47 +1999,90 @@ function normalizeCheckResults(
   { trustedCommands = new Set() } = {},
 ) {
   if (!Array.isArray(value) || value.length !== requiredChecks.length) {
-    throw workflowError("Finalization check evidence is incomplete.", code);
+    throw workflowError(
+      "Finalization check evidence is incomplete.",
+      code,
+      outputConstraint("checks", "complete-ordered-check-results"),
+    );
   }
-  return Object.freeze(
-    value.map((result, index) => {
-      const required = requiredChecks[index];
-      if (
-        !isRecord(result) ||
-        result.checkId !== required.id ||
-        !["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status) ||
-        (trustedCommands.has(required.command)
-          ? result.status !== "NOT_RUN"
-          : result.status === "NOT_RUN")
-      ) {
-        throw workflowError(
-          "Finalization check evidence was substituted.",
-          code,
-        );
-      }
-      const command = normalizeExactCommand(
-        result.command,
-        `finalization check ${result.checkId} command`,
-        code,
+  const diagnostics = [];
+  const inspect = (normalize) => {
+    try {
+      return normalize();
+    } catch (cause) {
+      if (cause?.code !== code || cause.diagnostic === undefined) throw cause;
+      diagnostics.push(cause.diagnostic);
+      return undefined;
+    }
+  };
+  const checks = value.map((result, index) => {
+    const required = requiredChecks[index];
+    const field = `checks[${index}]`;
+    if (
+      !isRecord(result) ||
+      !hasExactFields(result, ["checkId", "command", "status", "evidence"])
+    ) {
+      diagnostics.push(outputConstraint(field, "exact-field-set"));
+      return undefined;
+    }
+    if (result.checkId !== required.id)
+      diagnostics.push(
+        outputConstraint(`${field}.checkId`, "required-check-id-in-order"),
       );
-      if (command !== required.command) {
-        throw workflowError(
-          "Finalization check evidence was substituted.",
-          code,
-        );
-      }
-      return Object.freeze({
-        checkId: result.checkId,
-        command,
-        status: result.status,
-        evidence: normalizeTextList(
-          result.evidence,
-          `finalization check ${result.checkId} evidence`,
-          { code },
+    if (!["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status))
+      diagnostics.push(
+        outputConstraint(`${field}.status`, "check-result-status"),
+      );
+    else if (
+      trustedCommands.has(required.command)
+        ? result.status !== "NOT_RUN"
+        : result.status === "NOT_RUN"
+    )
+      diagnostics.push(
+        outputConstraint(
+          `${field}.status`,
+          trustedCommands.has(required.command)
+            ? "runner-trusted-not-run"
+            : "agent-executed-check-status",
         ),
-      });
-    }),
-  );
+      );
+    const command = inspect(() =>
+      normalizeExactCommand(
+        result.command,
+        "finalization check command",
+        code,
+        outputConstraint(
+          `${field}.command`,
+          "exact-single-line-command-up-to-4000-characters",
+        ),
+      ),
+    );
+    if (command !== undefined && command !== required.command)
+      diagnostics.push(
+        outputConstraint(`${field}.command`, "required-check-command"),
+      );
+    return Object.freeze({
+      checkId: result.checkId,
+      command,
+      status: result.status,
+      evidence: inspect(() =>
+        normalizeTextList(result.evidence, "finalization check evidence", {
+          code,
+          diagnosticField: `${field}.evidence`,
+        }),
+      ),
+    });
+  });
+  if (diagnostics.length !== 0)
+    throw new PlanExecutionWorkflowError(
+      "Finalization check evidence was substituted or has invalid check evidence.",
+      {
+        code,
+        diagnostic: diagnostics[0],
+        diagnostics: diagnostics.slice(0, MAX_VALIDATION_ITEMS),
+      },
+    );
+  return Object.freeze(checks);
 }
 
 function normalizeReviewFinding(value, code = INVALID_OUTPUT_CODE) {
@@ -2066,37 +2134,68 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
     throw workflowError(
       "Finalization issues have an invalid number of items.",
       code,
+      outputConstraint("issues", "array-up-to-32-items"),
     );
   }
   const issues = Object.freeze(
-    value.map((issue) => {
-      if (!isRecord(issue) || !FINALIZATION_ISSUE_ID_PATTERN.test(issue.id)) {
-        throw workflowError("Finalization issue has an invalid ID.", code);
+    value.map((issue, index) => {
+      const field = `issues[${index}]`;
+      if (
+        !isRecord(issue) ||
+        !hasExactFields(issue, ["id", "command", "problem", "evidence"])
+      ) {
+        throw workflowError(
+          "Finalization issue has an invalid field set.",
+          code,
+          outputConstraint(field, "exact-field-set"),
+        );
+      }
+      if (
+        typeof issue.id !== "string" ||
+        !FINALIZATION_ISSUE_ID_PATTERN.test(issue.id)
+      ) {
+        throw workflowError(
+          "Finalization issue has an invalid ID.",
+          code,
+          outputConstraint(`${field}.id`, "finalization-issue-id"),
+        );
       }
       return Object.freeze({
         id: issue.id,
         command: normalizeText(
           issue.command,
-          `finalization issue ${issue.id} command`,
+          "finalization issue command",
           MAX_TEXT_LENGTH,
           code,
+          outputConstraint(
+            `${field}.command`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
         problem: normalizeText(
           issue.problem,
-          `finalization issue ${issue.id} problem`,
+          "finalization issue problem",
           MAX_TEXT_LENGTH,
           code,
+          outputConstraint(
+            `${field}.problem`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
         evidence: normalizeTextList(
           issue.evidence,
-          `finalization issue ${issue.id} evidence`,
-          { code },
+          "finalization issue evidence",
+          { code, diagnosticField: `${field}.evidence` },
         ),
       });
     }),
   );
   if (new Set(issues.map(({ id }) => id)).size !== issues.length) {
-    throw workflowError("Finalization issue IDs must be unique.", code);
+    throw workflowError(
+      "Finalization issue IDs must be unique.",
+      code,
+      outputConstraint("issues", "unique-ids"),
+    );
   }
   return issues;
 }
@@ -2307,18 +2406,40 @@ export function normalizeFinalizationResult(
   payload,
   { trustedCommands = [], allowEmpty = false } = {},
 ) {
-  const statuses = [
-    "PASS",
-    "FAIL",
-    "SKILL_MISSING",
-    "SKILL_INVALID",
-    "BLOCKED",
-    "PRODUCT_DECISION_REQUIRED",
-  ];
-  if (!isRecord(payload) || !statuses.includes(payload.status)) {
-    throw outputError("Worker returned an invalid finalization result.");
-  }
+  if (!isRecord(payload))
+    throw outputError(
+      "Worker returned an invalid finalization result.",
+      outputConstraint("result", "object"),
+    );
   assertStructuredResultSize(payload);
+  assertExactOutputFields(payload, [
+    "status",
+    "skillPath",
+    "summary",
+    "issues",
+    "requiredChecks",
+    "validationInfrastructure",
+    "checks",
+    "reason",
+    "question",
+    "options",
+    "whyBlocked",
+    "evidence",
+  ]);
+  if (
+    ![
+      "PASS",
+      "FAIL",
+      "SKILL_MISSING",
+      "SKILL_INVALID",
+      "BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
+  )
+    throw outputError(
+      "Worker returned an invalid finalization status.",
+      outputConstraint("status", "finalization-status"),
+    );
   const trustedCommandSet = new Set(trustedCommands);
   if (
     trustedCommandSet.size !== trustedCommands.length ||
@@ -2326,160 +2447,194 @@ export function normalizeFinalizationResult(
   ) {
     throw workflowError("Trusted finalization commands are invalid.");
   }
-  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (
-      payload.skillPath !== "" ||
-      payload.summary !== "" ||
-      !emptyArray(payload.issues) ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure) ||
-      !emptyArray(payload.checks) ||
-      payload.reason !== ""
-    ) {
-      throw outputError("Product decision contains inapplicable fields.");
+  const diagnostics = [];
+  let rejectionMessage;
+  const inspect = (normalize) => {
+    try {
+      return normalize();
+    } catch (cause) {
+      if (cause?.code !== INVALID_OUTPUT_CODE || cause.diagnostic === undefined)
+        throw cause;
+      rejectionMessage ??= cause.message;
+      diagnostics.push(
+        ...(cause.diagnostics ?? [cause.diagnostic]).slice(
+          0,
+          Math.max(0, MAX_VALIDATION_ITEMS - diagnostics.length),
+        ),
+      );
+      return undefined;
     }
-    return Object.freeze({
+  };
+  const emptyFields = (textFields, arrayFields) => {
+    for (const field of textFields)
+      if (payload[field] !== "")
+        diagnostics.push(outputConstraint(field, "empty-string"));
+    for (const field of arrayFields)
+      if (!emptyArray(payload[field]))
+        diagnostics.push(outputConstraint(field, "empty-array"));
+  };
+  const complete = (result) => {
+    if (diagnostics.length !== 0)
+      throw outputErrorBatch(
+        rejectionMessage ?? "Finalization status does not match its issues.",
+        diagnostics.slice(0, MAX_VALIDATION_ITEMS),
+      );
+    return Object.freeze(result);
+  };
+  if (payload.status === "PRODUCT_DECISION_REQUIRED") {
+    emptyFields(
+      ["skillPath", "summary", "reason"],
+      ["issues", "requiredChecks", "validationInfrastructure", "checks"],
+    );
+    return complete({
       status: payload.status,
-      decision: normalizeProductDecision(payload),
+      decision: inspect(() => normalizeProductDecision(payload)),
     });
   }
-  if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(payload.status)) {
-    if (
-      payload.summary !== "" ||
-      !emptyArray(payload.issues) ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError(
-        "Unavailable finalization contains inapplicable fields.",
+  const unavailable = ["SKILL_MISSING", "SKILL_INVALID"].includes(
+    payload.status,
+  );
+  const blocked = payload.status === "BLOCKED";
+  // Retain every unsafe inventory command before filling the bounded batch
+  // with independent result-field violations.
+  const requiredChecks = unavailable
+    ? undefined
+    : inspect(() =>
+        normalizePhaseSafeRequiredChecks(
+          payload.requiredChecks,
+          INVALID_OUTPUT_CODE,
+          { collectDiagnostics: true, allowEmpty },
+        ),
       );
-    }
-    if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
-      throw outputError("Finalization skill path is inapplicable.");
-    }
-    const requiredChecks = normalizePhaseSafeRequiredChecks(
-      payload.requiredChecks,
-      INVALID_OUTPUT_CODE,
-      {
-        allowEmpty: allowEmpty || payload.status !== "BLOCKED",
-        collectDiagnostics: true,
-      },
-    );
-    const validationInfrastructure = normalizeValidationInfrastructure(
+  if (unavailable || blocked) {
+    emptyFields(["summary", "question", "whyBlocked"], ["issues", "options"]);
+    if (unavailable)
+      emptyFields([], ["requiredChecks", "validationInfrastructure", "checks"]);
+    if (payload.status === "SKILL_INVALID" && payload.skillPath === "")
+      diagnostics.push(
+        outputConstraint("skillPath", "selected-finalization-guidance"),
+      );
+  } else {
+    emptyFields(["reason", "question", "whyBlocked"], ["options", "evidence"]);
+  }
+  const skillPath =
+    payload.skillPath === ""
+      ? null
+      : inspect(() =>
+          normalizeRelativePath(
+            payload.skillPath,
+            "finalization skill path",
+            INVALID_OUTPUT_CODE,
+            outputConstraint(
+              "skillPath",
+              "repository-relative-path-up-to-4000-characters",
+            ),
+          ),
+        );
+  const reason =
+    unavailable || blocked
+      ? inspect(() =>
+          normalizeText(
+            payload.reason,
+            "finalization blocker",
+            MAX_TEXT_LENGTH,
+            INVALID_OUTPUT_CODE,
+            outputConstraint(
+              "reason",
+              "nonempty-plain-text-up-to-4000-characters",
+            ),
+          ),
+        )
+      : undefined;
+  const evidence =
+    unavailable || blocked
+      ? inspect(() =>
+          normalizeTextList(payload.evidence, "finalization blocker evidence", {
+            code: INVALID_OUTPUT_CODE,
+            diagnosticField: "evidence",
+            allowEmpty: unavailable,
+          }),
+        )
+      : undefined;
+  if (unavailable)
+    return complete({
+      status: payload.status,
+      skillPath,
+      reason,
+      evidence,
+      requiredChecks: Object.freeze([]),
+      validationInfrastructure: Object.freeze([]),
+      checks: Object.freeze([]),
+    });
+
+  const issues = blocked
+    ? []
+    : inspect(() => normalizeFinalizationIssues(payload.issues));
+  const validationInfrastructure = inspect(() =>
+    normalizeValidationInfrastructure(
       payload.validationInfrastructure,
       INVALID_OUTPUT_CODE,
-    );
-    const checks =
-      payload.status === "BLOCKED"
-        ? normalizeCheckResults(
+    ),
+  );
+  // Check identities and statuses depend on a valid ordered inventory.
+  const checks =
+    requiredChecks === undefined
+      ? undefined
+      : inspect(() =>
+          normalizeCheckResults(
             payload.checks,
             requiredChecks,
             INVALID_OUTPUT_CODE,
             { trustedCommands: trustedCommandSet },
-          )
-        : emptyArray(payload.checks)
-          ? Object.freeze([])
-          : (() => {
-              throw outputError(
-                "Unavailable finalization contains check evidence.",
-              );
-            })();
-    if (
-      payload.status !== "BLOCKED" &&
-      (requiredChecks.length !== 0 || validationInfrastructure.length !== 0)
-    ) {
-      throw outputError(
-        "Unavailable finalization contains validation inventory.",
-      );
-    }
-    if (
-      payload.status === "BLOCKED" &&
+          ),
+        );
+  if (
+    issues !== undefined &&
+    ((payload.status === "PASS" && issues.length !== 0) ||
+      (payload.status === "FAIL" && issues.length === 0))
+  )
+    diagnostics.push(outputConstraint("issues", "finalization-status-issues"));
+  if (
+    checks !== undefined &&
+    ((blocked &&
       (!checks.some(({ status }) => status === "BLOCKED") ||
-        checks.some(({ status }) => status === "FAIL"))
-    ) {
-      throw outputError("Blocked finalization has invalid check evidence.");
-    }
-    const evidence =
-      payload.status === "BLOCKED"
-        ? normalizeTextList(payload.evidence, "finalization blocker evidence", {
-            code: INVALID_OUTPUT_CODE,
-          })
-        : normalizeOptionalEvidence(
-            payload.evidence,
-            "finalization blocker evidence",
-          );
-    return Object.freeze({
+        checks.some(({ status }) => status === "FAIL"))) ||
+      (payload.status === "PASS" &&
+        checks.some(
+          ({ command, status }) =>
+            status !== "PASS" &&
+            !(trustedCommandSet.has(command) && status === "NOT_RUN"),
+        )) ||
+      (payload.status === "FAIL" &&
+        (checks.some(({ status }) => status === "BLOCKED") ||
+          (!allowEmpty && !checks.some(({ status }) => status === "FAIL")))))
+  ) {
+    if (blocked)
+      rejectionMessage ??= "Blocked finalization has invalid check evidence.";
+    diagnostics.push(outputConstraint("checks", "finalization-status-checks"));
+  }
+  if (blocked)
+    return complete({
       status: payload.status,
-      skillPath:
-        payload.skillPath === ""
-          ? null
-          : normalizeRelativePath(
-              payload.skillPath,
-              "finalization skill path",
-              INVALID_OUTPUT_CODE,
-            ),
-      reason: normalizeText(
-        payload.reason,
-        "finalization blocker",
-        MAX_TEXT_LENGTH,
-        INVALID_OUTPUT_CODE,
-      ),
+      skillPath,
+      reason,
       evidence,
       requiredChecks,
       validationInfrastructure,
       checks,
     });
-  }
-  if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Finalization result contains inapplicable fields.");
-  }
-  const issues = normalizeFinalizationIssues(payload.issues);
-  const requiredChecks = normalizePhaseSafeRequiredChecks(
-    payload.requiredChecks,
-    INVALID_OUTPUT_CODE,
-    { collectDiagnostics: true, allowEmpty },
-  );
-  const validationInfrastructure = normalizeValidationInfrastructure(
-    payload.validationInfrastructure,
-    INVALID_OUTPUT_CODE,
-  );
-  const checks = normalizeCheckResults(
-    payload.checks,
-    requiredChecks,
-    INVALID_OUTPUT_CODE,
-    { trustedCommands: trustedCommandSet },
-  );
-  if (
-    (payload.status === "PASS" && issues.length !== 0) ||
-    (payload.status === "FAIL" && issues.length === 0) ||
-    (payload.status === "PASS" &&
-      checks.some(
-        ({ command, status }) =>
-          status !== "PASS" &&
-          !(trustedCommandSet.has(command) && status === "NOT_RUN"),
-      )) ||
-    (payload.status === "FAIL" &&
-      (checks.some(({ status }) => status === "BLOCKED") ||
-        (!allowEmpty && !checks.some(({ status }) => status === "FAIL"))))
-  ) {
-    throw outputError("Finalization status does not match its issues.");
-  }
-  return Object.freeze({
-    status: payload.status,
-    skillPath:
-      payload.skillPath === ""
-        ? null
-        : normalizeRelativePath(
-            payload.skillPath,
-            "finalization skill path",
-            INVALID_OUTPUT_CODE,
-          ),
-    summary: normalizeSummary(
+  const summary = inspect(() =>
+    normalizeSummary(
       payload.summary,
       "finalization summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
+  );
+  return complete({
+    status: payload.status,
+    skillPath,
+    summary,
     issues,
     requiredChecks,
     validationInfrastructure,
@@ -4151,6 +4306,9 @@ function normalizePendingCommit(value) {
       typeof value.preEffectRejection.recoverable !== "boolean" ||
       (hasDiagnosticClass &&
         !isAdapterDiagnosticClass(value.preEffectRejection.diagnosticClass)) ||
+      (commitReadinessConstraint(value.preEffectRejection.diagnosticClass) !==
+        null &&
+        value.preEffectRejection.recoverable) ||
       [
         hasAvailability,
         hasAuthentication,

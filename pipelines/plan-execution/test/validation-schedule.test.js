@@ -1,19 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createTrustedValidationSnapshot } from "../../../src/trusted-validation/index.js";
+
 import { REPOSITORY_DISCOVERY_SCHEMA } from "../src/bootstrap-unit-schemas.js";
 import {
   migratePlanExecutionStateV22,
   migratePlanExecutionStateV26,
 } from "../src/index.js";
-import { CHECK_AND_FIX_SCHEMA, FINALIZATION_SCHEMA } from "../src/schemas.js";
+import {
+  CANDIDATE_REVIEW_SCHEMA,
+  CHECK_AND_FIX_SCHEMA,
+  FINALIZATION_SCHEMA,
+  REVIEW_SCHEMA,
+} from "../src/schemas.js";
 import {
   normalizeBootstrapResult,
+  normalizeFinalizationResult,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
   deriveValidationSchedule,
   scheduledChecks,
+  validationEvidenceFingerprint,
 } from "../src/validation-schedule.js";
 import {
   bootstrapReady,
@@ -117,7 +126,7 @@ function discovery(role, independent, trustedValidation) {
   };
 }
 
-function finalized(commands) {
+function finalized(commands, trustedCommands = [slow]) {
   return {
     ...finalizationPassed(),
     requiredChecks: commands.map((command, index) => ({
@@ -127,9 +136,9 @@ function finalized(commands) {
     checks: commands.map((command, index) => ({
       checkId: `C${index + 1}`,
       command,
-      status: command === slow ? "NOT_RUN" : "PASS",
+      status: trustedCommands.includes(command) ? "NOT_RUN" : "PASS",
       evidence: [
-        command === slow
+        trustedCommands.includes(command)
           ? "Reserved for the runner."
           : "Injected check passed.",
       ],
@@ -190,11 +199,20 @@ for (const mode of ["independent", "lazy", "combined"]) {
         );
         assert.deepEqual(tuple.requiredChecks, state.requiredChecks);
         assert.equal(tuple.step, state.currentStep);
-        if (state.currentStep === 1) {
-          const reservations = request.prompt.split(
-            "Runner-trusted validation commands selected before agent work:",
-          )[1];
-          assert.equal(reservations, undefined);
+        for (const prompt of [request.prompt, request.recoveryPrompt]) {
+          const reservations = JSON.parse(
+            /Runner-trusted validation commands selected before agent work:\n(\[[\s\S]*?\n\])/u.exec(
+              prompt,
+            )[1],
+          );
+          assert.deepEqual(
+            reservations,
+            trustedValidation.commands.map(({ alias, command, identity }) => ({
+              alias,
+              command,
+              identity,
+            })),
+          );
         }
       },
       onTrustedValidation(request) {
@@ -484,6 +502,268 @@ test("confirmed inventory amendments do not change the next persisted step", asy
       { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
     );
   }
+});
+
+test("terminal rejection admits a selected future check only in the amended step inventory", async (t) => {
+  const future = "npm run test:future";
+  const trustedValidation = createTrustedValidationSnapshot(
+    {
+      "service-check": {
+        command: slow,
+        executable: "npm",
+        arguments: ["run", "test:service"],
+        capabilities: { sourceProjection: true },
+      },
+      "future-check": {
+        command: future,
+        executable: "npm",
+        arguments: ["run", "test:future"],
+      },
+    },
+    ["service-check", "future-check"],
+  );
+  const bootstrap = (role) => ({
+    ...discovery(role, false, trustedValidation),
+    requiredChecks: [
+      check("C1", fast, [1, 2]),
+      check("C2", slow, [2]),
+      check("C3", future, [2]),
+    ],
+  });
+  const rejection = {
+    ...reviewFindings("R1"),
+    findings: [
+      {
+        ...reviewFindings("R1").findings[0],
+        file: "package.json",
+        problem:
+          "The current metadata change requires the selected service check.",
+        reason: "Its original applicability covers only the next step.",
+        suggestedAction:
+          "Add the selected check to this step's finalization inventory without editing content.",
+      },
+    ],
+    validationChange: "REJECTED",
+    finalizationFindingIds: ["R1"],
+    validationEvidence: [
+      "The current step has incomplete validation evidence.",
+    ],
+  };
+  const attested = finalized([fast, slow]);
+  attested.checks[1].status = "PASS";
+  const executions = [];
+  const finalizations = [];
+  const settings = { trustedChecks: ["service-check", "future-check"] };
+  const stop = Object.assign(new Error("reload amendment checkpoint"), {
+    code: "ERR_RUN_REVISION_CHANGED",
+  });
+  let checkpoint = 0;
+  let candidate;
+  const fixture = await createFixture(t, {
+    plan,
+    trustedValidation,
+    worker: [
+      clarificationReady(),
+      bootstrap("Worker"),
+      reconciliationResolved(),
+    ],
+    reviewer: [bootstrap("Reviewer")],
+    workWorker: [
+      implementationCompleted(),
+      finalized([fast]),
+      attested,
+      finalized([fast, slow]),
+      implementationCompleted(),
+      finalized([fast, slow, future], [slow, future]),
+    ],
+    workReviewer: [
+      reviewApproved(),
+      terminalConfirmation(rejection),
+      terminalConfirmation(reviewApproved("ACCEPTED")),
+    ],
+    onRoleRun(_role, request) {
+      if ([FINALIZATION_SCHEMA, REVIEW_SCHEMA].includes(request.schema)) {
+        for (const prompt of [request.prompt, request.recoveryPrompt]) {
+          for (const command of [slow, future])
+            assert.ok(prompt.includes(JSON.stringify(command)));
+        }
+      }
+      if (request.schema === FINALIZATION_SCHEMA) {
+        finalizations.push(request);
+        candidate ??= structuredClone(
+          fixture.currentRun.pipelineState.candidateReviewResult,
+        );
+        if ([2, 3].includes(finalizations.length))
+          assert.match(request.prompt, /requires the selected service check/u);
+        if (finalizations.length === 3) {
+          assert.equal(request.access, "read-only");
+          assert.deepEqual(executions, []);
+        }
+      }
+    },
+    onTrustedValidation(request) {
+      const state = fixture.currentRun.pipelineState;
+      const selected = trustedValidation.commands.find(
+        ({ identity }) => identity === request.commandIdentity,
+      );
+      assert.ok(selected);
+      assert.equal(fixture.currentRun.activeTurn, null);
+      assert.deepEqual(request.snapshot, trustedValidation);
+      assert.equal(
+        request.bindings.contentFingerprint,
+        state.repositoryBaseline.contentFingerprint,
+      );
+      if (selected.capabilities.sourceProjection === true)
+        assert.equal(request.sourceHead, state.repositoryBaseline.head);
+      executions.push([state.currentStep, selected.command]);
+      return {
+        status: "PASS",
+        commandIdentity: request.commandIdentity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["The controlled runner check passed."],
+        ...request.bindings,
+      };
+    },
+    onTransition(run) {
+      const state = run.pipelineState;
+      if (
+        (checkpoint === 0 &&
+          state.workflowState === "FINALIZE" &&
+          state.finalizationRecovery.required) ||
+        (checkpoint === 1 &&
+          state.workflowState === "COMMIT" &&
+          state.validationAmendment !== null) ||
+        (checkpoint === 2 &&
+          state.currentStep === 2 &&
+          state.workflowState === "IMPLEMENT")
+      ) {
+        checkpoint += 1;
+        throw stop;
+      }
+    },
+  });
+  await assert.rejects(fixture.run(settings), (error) => error === stop);
+  const rejected = structuredClone(fixture.currentRun.pipelineState);
+  assert.equal(rejected.finalizationResult, null);
+  assert.deepEqual(rejected.candidateReviewResult, candidate);
+  assert.deepEqual(
+    rejected.requiredChecks.map(({ command }) => command),
+    [fast],
+  );
+  assert.deepEqual(executions, []);
+  const schedule = structuredClone(rejected.validationSchedule);
+  fixture.persistPipelineState(JSON.parse(JSON.stringify(rejected)));
+
+  await assert.rejects(fixture.run(), (error) => error === stop);
+  const accepted = structuredClone(fixture.currentRun.pipelineState);
+  assert.equal(accepted.validationAmendment.step, 1);
+  assert.equal(accepted.reviewResult.validationChange, "ACCEPTED");
+  assert.deepEqual(
+    accepted.finalizationResult.checks.map(
+      ({ command, executor, commandIdentity }) => [
+        command,
+        executor,
+        commandIdentity,
+      ],
+    ),
+    [
+      [fast, "agent", null],
+      [slow, "runner", trustedValidation.commands[0].identity],
+    ],
+  );
+  assert.deepEqual(
+    accepted.requiredChecks.map(({ command }) => command),
+    [fast, slow],
+  );
+  assert.deepEqual(accepted.candidateReviewResult, candidate);
+  assert.deepEqual(accepted.validationSchedule, schedule);
+  assert.deepEqual(accepted.workerValidation, rejected.workerValidation);
+  assert.deepEqual(accepted.reviewerValidation, rejected.reviewerValidation);
+  assert.deepEqual(
+    fixture.currentRun.counters,
+    fixture.transitions.find(
+      ({ options }) => options.activity?.kind === "evidence-rejected",
+    ).patch.counters,
+  );
+  assert.deepEqual(executions, [[1, slow]]);
+  assert.equal(accepted.finalizationCorrections.length, 1);
+  assert.equal(accepted.finalizationRecovery.attempts, 1);
+  assert.equal(
+    accepted.reviewResult.validationTupleFingerprint,
+    validationEvidenceFingerprint(accepted.finalizationResult),
+  );
+  fixture.persistPipelineState(JSON.parse(JSON.stringify(accepted)));
+
+  await assert.rejects(fixture.run(), (error) => error === stop);
+  const next = fixture.currentRun.pipelineState;
+  assert.equal(next.validationAmendment, null);
+  assert.equal(next.finalizationResult, null);
+  assert.deepEqual(next.requiredChecks, scheduledChecks(accepted, 2));
+  assert.deepEqual(next.validationSchedule, schedule);
+  assert.deepEqual(executions, [[1, slow]]);
+  fixture.persistPipelineState(JSON.parse(JSON.stringify(next)));
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(executions, [
+    [1, slow],
+    [2, slow],
+    [2, future],
+  ]);
+  assert.equal(
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
+      .length,
+    3,
+  );
+
+  for (const corrupt of [
+    (checks) => {
+      checks[1].commandIdentity = trustedValidation.commands[1].identity;
+    },
+    (checks) => {
+      Object.assign(checks[1], {
+        executor: "agent",
+        commandIdentity: null,
+        exitCode: null,
+      });
+    },
+    (checks) => {
+      Object.assign(checks[0], {
+        executor: "runner",
+        commandIdentity: trustedValidation.commands[0].identity,
+        exitCode: 0,
+      });
+    },
+  ]) {
+    const invalid = structuredClone(accepted);
+    corrupt(invalid.finalizationResult.checks);
+    const fingerprint = validationEvidenceFingerprint(
+      invalid.finalizationResult,
+    );
+    invalid.reviewResult.validationTupleFingerprint = fingerprint;
+    invalid.validationAmendment.confirmationFingerprint = fingerprint;
+    assert.throws(
+      () => normalizePipelineState(invalid),
+      /trusted finalization evidence is inconsistent/u,
+    );
+  }
+});
+
+test("new unselected checks cannot claim NOT_RUN under another command's selection", () => {
+  assert.throws(
+    () =>
+      normalizeFinalizationResult(finalized([fast, slow]), {
+        trustedCommands: [reviewerOnly],
+      }),
+    /check evidence was substituted/u,
+  );
 });
 
 test("consumed legacy commit verifies before scoped discovery for the following step", async (t) => {

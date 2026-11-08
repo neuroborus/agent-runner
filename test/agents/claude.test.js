@@ -32,6 +32,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
+import { createWorkspaceService } from "../../src/workspace/index.js";
 import { largeFinalizationResult } from "../support/index.js";
 
 import {
@@ -47,6 +48,8 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
+import { planExecutionPipeline } from "../../pipelines/plan-execution/src/index.js";
+import { createFixture as createExecutionFixture } from "../../pipelines/plan-execution/test/support/index.js";
 
 import {
   BOOTSTRAP_SCHEMA as EXECUTION_BOOTSTRAP_SCHEMA,
@@ -72,6 +75,7 @@ const COMMAND_LAUNCHER_TOKEN = "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
 const CLAUDE_LOG_PATH = join(homedir(), ".npm/_logs");
 const executeFile = promisify(executeFileCallback);
 const HELP = [
+  "--add-dir",
   "--append-system-prompt",
   "--autocompact",
   "--fork-session",
@@ -1421,6 +1425,26 @@ async function directoryWorkspace(t) {
   };
 }
 
+async function scopedDirectoryWorkspace(t) {
+  const directory = await directoryWorkspace(t);
+  const selected = join(directory.cwd, "src");
+  const excluded = join(selected, "cache");
+  const unselected = join(directory.cwd, "unselected");
+  for (const tree of [excluded, unselected]) {
+    await mkdir(tree, { recursive: true });
+    // Either control discovery or content capture would reject this tree.
+    await writeFile(join(tree, ".git"), "invalid\n");
+    await symlink("missing", join(tree, "dangling"));
+  }
+  const selectedFile = join(selected, "source.md");
+  await writeFile(selectedFile, "Selected source\n");
+  Object.assign(directory.workspacePolicy, {
+    inspectionPaths: [selected],
+    excludePaths: ["src/cache"],
+  });
+  return { ...directory, selectedFile, excluded, unselected };
+}
+
 function directoryCommandArguments(directory, access, native) {
   return [
     "--new-session",
@@ -1516,6 +1540,78 @@ test("proves directory access without Git or commit preparation and binds each r
     assert.equal((await fixture.adapter.probe()).localCommit, true);
     assert.ok(fixture.calls.some(isProbeRepositorySetup));
   }
+});
+
+test("binds directory receipts to the inspected selection without visiting opaque trees", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
+  const fixture = createFixture();
+  const options = {
+    access: "read-only",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  const before = await fixture.adapter.probe(options);
+  assert.equal(before.declaredWorkspace, true);
+  await writeFile(join(directory.excluded, "changed.md"), "Opaque change\n");
+  assert.deepEqual(
+    (await fixture.adapter.probe(options)).policyReceipt,
+    before.policyReceipt,
+  );
+  for (const scope of [
+    { inspectionPaths: [directory.input] },
+    { excludePaths: ["src/cache", "unselected"] },
+    { inspectionPaths: undefined, excludePaths: ["src/cache", "unselected"] },
+  ]) {
+    const changed = await fixture.adapter.probe({
+      ...options,
+      workspacePolicy: { ...directory.workspacePolicy, ...scope },
+    });
+    assert.notEqual(
+      changed.policyReceipt.fingerprint,
+      before.policyReceipt.fingerprint,
+    );
+  }
+  await assert.rejects(
+    fixture.adapter.probe({
+      ...options,
+      workspacePolicy: {
+        ...directory.workspacePolicy,
+        inspectionPaths: undefined,
+        excludePaths: undefined,
+      },
+    }),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(turnCalls(fixture).length, 0);
+  const files = {
+    ...directory.workspacePolicy,
+    inspectionPaths: [
+      ...Array.from({ length: 256 }, (_, index) =>
+        join(directory.cwd, `missing-${index}.md`),
+      ),
+      directory.selectedFile,
+    ],
+  };
+  const loose = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: files,
+  });
+  const strict = await fixture.adapter.probe({
+    ...options,
+    workspacePolicy: { ...files, inspectionFilesOnly: true },
+  });
+  assert.notEqual(
+    strict.policyReceipt.fingerprint,
+    loose.policyReceipt.fingerprint,
+  );
+  await rm(directory.selectedFile);
+  await mkdir(directory.selectedFile);
+  await assert.rejects(
+    fixture.adapter.probe({
+      ...options,
+      workspacePolicy: { ...files, inspectionFilesOnly: true },
+    }),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+  );
 });
 
 test("executes the fallback directory probe with a file reference inside private temporary storage", async (t) => {
@@ -1828,6 +1924,238 @@ test("projects native and fallback directory commands onto declared outputs only
   }
 });
 
+test("isolates native initialization before directory commands and retains it until retirement", async (t) => {
+  for (const native of [true, false]) {
+    const directory = native
+      ? await scopedDirectoryWorkspace(t)
+      : await directoryWorkspace(t);
+    if (native) await rm(directory.control, { recursive: true });
+    else {
+      await mkdir(join(directory.control, ".cc-writes"), { mode: 0o700 });
+      await writeFile(
+        join(directory.control, ".cc-writes", "keep"),
+        "User data.\n",
+      );
+    }
+    const workspace = createWorkspaceService();
+    const { kind: _kind, ...declarations } = directory.workspacePolicy;
+    const inspection = await workspace.inspect(declarations);
+    const before = await workspace.snapshot({ inspection });
+    const fake = await createFakeBubblewrap(t);
+    const providerHome = join(directory.root, "provider-home");
+    const profile = join(providerHome, "profile");
+    await mkdir(profile, { recursive: true });
+    let resource;
+    let allocation;
+    let interrupted = false;
+    let launchError;
+    const providerDirectories = [];
+    const records = [];
+    t.after(async () => {
+      if (resource)
+        await recoverClaudeStorage({
+          resource,
+          storageForbiddenPaths: [directory.cwd],
+          workspacePolicy: directory.workspacePolicy,
+        });
+    });
+    const fixture = createFixture({
+      version: "2.1.317",
+      nativeSandbox: native ? true : "nested-denied",
+      env: {
+        ...process.env,
+        HOME: providerHome,
+        CLAUDE_CONFIG_DIR: profile,
+        AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
+        AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+        PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+      async handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        try {
+          assert.equal(resource.phase, "allocated");
+          allocation = join(resource.root.path, resource.id);
+          providerDirectories.push(call.options.cwd);
+          // Model only the public CLI's cwd-relative atomic staging setup.
+          // It runs in the actual adapter launch options, before any tool
+          // launcher, and collects neither provider output nor model work.
+          await executeFile(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `
+            import { mkdirSync } from "node:fs";
+            import { join } from "node:path";
+            mkdirSync(join(process.cwd(), ".claude"), { recursive: true });
+            mkdirSync(join(process.cwd(), ".claude", ".cc-writes"), { mode: 0o700 });
+            mkdirSync(join(process.env.CLAUDE_CONFIG_DIR, ".cc-writes"), { recursive: true, mode: 0o700 });
+          `,
+            ],
+            { cwd: call.options.cwd, env: call.options.env },
+          );
+          assert.equal(
+            (await stat(join(call.options.cwd, ".claude", ".cc-writes"))).mode &
+              0o777,
+            0o700,
+          );
+          workspace.assertUnchanged({
+            before,
+            after: await workspace.snapshot({ inspection }),
+          });
+          assert.equal(call.options.cwd, join(allocation, "native"));
+          assert.equal(call.options.env.HOME, providerHome);
+          assert.equal(call.options.env.CLAUDE_CONFIG_DIR, profile);
+          assert.equal(option(call.argumentsList, "--add-dir"), directory.cwd);
+          assert.ok(
+            option(call.argumentsList, "--append-system-prompt").includes(
+              JSON.stringify(directory.cwd),
+            ),
+          );
+          const settings = JSON.parse(option(call.argumentsList, "--settings"));
+          assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
+          for (const path of [
+            directory.cwd,
+            call.options.cwd,
+            directory.input,
+            directory.source,
+          ])
+            assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
+          const args = directoryCommandArguments(
+            directory,
+            "read-only",
+            native,
+          );
+          if (native) {
+            const mask = args.indexOf("/dev/null") - 1;
+            args.splice(mask, 3);
+          }
+          args.splice(
+            args.indexOf("--ro-bind", args.indexOf("--unshare-net")) + 3,
+            0,
+            "--bind",
+            call.options.cwd,
+            call.options.cwd,
+            "--ro-bind",
+            call.options.cwd,
+            call.options.cwd,
+          );
+          const staging = join(call.options.cwd, ".claude", ".cc-writes");
+          for (const path of [staging, join(profile, ".cc-writes")])
+            args.splice(args.indexOf("--dev"), 0, "--bind", path, path);
+          args.splice(args.indexOf("--"), 0, "--chdir", call.options.cwd);
+          await executeFile(call.commandLauncherPath, args, {
+            env: call.options.env,
+          });
+          const mounts = JSON.parse(
+            (await readFile(fake.logPath, "utf8")).trim().split("\n").at(-1),
+          );
+          assert.equal(option(mounts, "--chdir"), directory.cwd);
+          assert.ok(
+            includesSequence(mounts, [
+              "--ro-bind",
+              directory.cwd,
+              directory.cwd,
+            ]),
+          );
+          assert.ok(!mounts.includes(call.options.cwd));
+          assert.equal(mounts.includes("--bind"), false);
+          // A startup path redirected into source cannot be discarded as
+          // owned bookkeeping; refuse it before invoking bubblewrap.
+          const held = `${staging}-held`;
+          await rename(staging, held);
+          await symlink(directory.cwd, staging);
+          try {
+            await assert.rejects(
+              executeFile(call.commandLauncherPath, args, {
+                env: call.options.env,
+              }),
+              { code: 125 },
+            );
+          } finally {
+            await rm(staging);
+            await rename(held, staging);
+          }
+          if (interrupted) {
+            await call.options.onProcess(4242, {});
+            throw Object.assign(new Error("retirement unavailable"), {
+              code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            });
+          }
+        } catch (cause) {
+          launchError = cause;
+          throw cause;
+        }
+      },
+    });
+    const run = (session) =>
+      fixture.adapter
+        .run(
+          request({
+            cwd: directory.cwd,
+            workspacePolicy: directory.workspacePolicy,
+            readPaths: [directory.input],
+            onProcess: async () => {},
+            onResource: async (value) => {
+              resource = value;
+              records.push(value?.phase ?? "cleaned");
+            },
+            ...(session === undefined ? {} : { session }),
+          }),
+        )
+        .catch((cause) => {
+          throw launchError ?? cause;
+        });
+    await run();
+    assert.equal(resource, null);
+    await assert.rejects(access(allocation), { code: "ENOENT" });
+    interrupted = true;
+    await assert.rejects(run({ id: CHILD_SESSION, mode: "continue" }), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    assert.equal(
+      option(turnCalls(fixture)[1].argumentsList, "--resume"),
+      CHILD_SESSION,
+    );
+    assert.notEqual(providerDirectories[0], providerDirectories[1]);
+    assert.equal(resource.phase, "allocated");
+    assert.equal(
+      (
+        await stat(join(providerDirectories[1], ".claude", ".cc-writes"))
+      ).isDirectory(),
+      true,
+    );
+    workspace.assertUnchanged({
+      before,
+      after: await workspace.snapshot({ inspection }),
+    });
+    // Runner recovery follows independent process-retirement proof. The
+    // adapter keeps the existing ownership journal and exact allocation.
+    await recoverClaudeStorage({
+      resource,
+      storageForbiddenPaths: [directory.cwd],
+      workspacePolicy: directory.workspacePolicy,
+      onResource: async (value) => {
+        resource = value;
+      },
+    });
+    assert.equal(resource, null);
+    await assert.rejects(access(allocation), { code: "ENOENT" });
+    assert.deepEqual(records, [
+      "allocating",
+      "allocated",
+      "cleaned",
+      "allocating",
+      "allocated",
+    ]);
+    workspace.assertUnchanged({
+      before,
+      after: await workspace.snapshot({ inspection }),
+    });
+  }
+});
+
 test("rejects unsafe directory outputs during storage allocation and launcher admission", async (t) => {
   for (const nativeSandbox of [true, "nested-denied"]) {
     for (const stage of ["allocation", "admission"]) {
@@ -1948,8 +2276,14 @@ test("accepts missing nested directory artifact and state exclusions without cre
 });
 
 test("rejects directory drift after failed attempts before reconstruction", async (t) => {
-  for (const target of ["input", "source", "control", "output"]) {
-    const directory = await directoryWorkspace(t);
+  for (const target of [
+    "input",
+    "source",
+    "control",
+    "selectedFile",
+    "output",
+  ]) {
+    const directory = await scopedDirectoryWorkspace(t);
     let fresh = 0;
     const observations = [];
     const fixture = createFixture({
@@ -1962,7 +2296,11 @@ test("rejects directory drift after failed attempts before reconstruction", asyn
             : target === "output"
               ? join(directory.output, "result.md")
               : directory[target];
-        await writeFile(path, "Unexpected change.\n");
+        if (target === "selectedFile") {
+          const replacement = join(directory.output, "replacement.md");
+          await writeFile(replacement, await readFile(path));
+          await rename(replacement, path);
+        } else await writeFile(path, "Unexpected change.\n");
         throw processFailure(
           undefined,
           `No conversation found with session ID: ${SOURCE_SESSION}`,
@@ -2018,7 +2356,7 @@ test("retains retiring directory turns when current controls reference storage o
           });
         }
       });
-      directory = await directoryWorkspace(t);
+      directory = await scopedDirectoryWorkspace(t);
       const metadata = join(directory.root, "metadata");
       pointer = join(directory.cwd, ".git");
       await mkdir(metadata);
@@ -2143,8 +2481,8 @@ test("retains directory storage and forbids reconstruction without process retir
   assert.ok((await stat(turnCalls(fixture)[0].commandLauncherPath)).isFile());
 });
 
-test("reconstructs directory output turns under the same policy without Git", async (t) => {
-  const directory = await directoryWorkspace(t);
+test("reconstructs scoped directory output turns under the same frozen policy without Git", async (t) => {
+  const directory = await scopedDirectoryWorkspace(t);
   let fresh = 0;
   let attempts = 0;
   const fixture = createFixture({
@@ -2153,6 +2491,8 @@ test("reconstructs directory output turns under the same policy without Git", as
       if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
       if (++attempts === 1) {
         await writeFile(join(directory.output, "partial.md"), "Preserved.\n");
+        directory.workspacePolicy.inspectionPaths[0] = directory.cwd;
+        directory.workspacePolicy.excludePaths.length = 0;
         throw processFailure(
           undefined,
           `No conversation found with session ID: ${SOURCE_SESSION}`,
@@ -2242,6 +2582,29 @@ test("fails closed on invalid directory declarations and unsupported isolation",
   for (const policy of [
     { ...directory.workspacePolicy, extra: true },
     { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+    {
+      ...directory.workspacePolicy,
+      sourcePaths: Array(257).fill(directory.cwd),
+    },
+    { ...directory.workspacePolicy, inspectionPaths: null },
+    { ...directory.workspacePolicy, inspectionFilesOnly: true },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: [],
+      inspectionFilesOnly: "true",
+    },
+    { ...directory.workspacePolicy, inspectionPaths: ["relative"] },
+    { ...directory.workspacePolicy, inspectionPaths: [directory.source] },
+    {
+      ...directory.workspacePolicy,
+      inspectionPaths: Array(10_001).fill(directory.cwd),
+    },
+    { ...directory.workspacePolicy, excludePaths: null },
+    { ...directory.workspacePolicy, excludePaths: [directory.output] },
+    { ...directory.workspacePolicy, excludePaths: ["../outside"] },
+    { ...directory.workspacePolicy, excludePaths: ["file://cache"] },
+    { ...directory.workspacePolicy, excludePaths: ["."] },
+    { ...directory.workspacePolicy, excludePaths: Array(257).fill("cache") },
   ])
     await assert.rejects(
       fixture.adapter.run(
@@ -2267,6 +2630,9 @@ test("fails closed on invalid directory declarations and unsupported isolation",
   for (const policy of [
     { ...directory.workspacePolicy, outputPaths: [directory.input] },
     { ...directory.workspacePolicy, stateRoot: directory.output },
+    { ...directory.workspacePolicy, excludePaths: ["input.md"] },
+    { ...directory.workspacePolicy, excludePaths: ["out"] },
+    { ...directory.workspacePolicy, excludePaths: [".claude"] },
     {
       ...directory.workspacePolicy,
       outputPaths: [join(directory.cwd, "absent")],
@@ -3113,7 +3479,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v3",
+      "claude-isolation-v4",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -3450,7 +3816,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v9",
+      "claude-command-boundary-v10",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -3875,7 +4241,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v9",
+        "claude-command-boundary-v10",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -5742,49 +6108,196 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(commitCall.options.env.SSH_AUTH_SOCK, undefined);
 });
 
-test("proves a rejected local-commit policy did not start the effect", async () => {
+test("classifies readiness refusals before admitting local commit effects", async () => {
+  for (const [structured, diagnosticClass, constraint] of [
+    [{ ready: false }, "commit_readiness_declined", /reason is unknown/u],
+    [undefined, "commit_readiness_not_object", /must be an object/u],
+    [[{ ready: true }], "commit_readiness_not_object", /must be an object/u],
+    [{}, "commit_readiness_not_boolean", /requires a boolean ready field/u],
+    [
+      { ready: "PRIVATE_READINESS_VALUE" },
+      "commit_readiness_not_boolean",
+      /requires a boolean ready field/u,
+    ],
+    [
+      { ready: true, PRIVATE_READINESS_FIELD: "PRIVATE_READINESS_VALUE" },
+      "commit_readiness_extra_fields",
+      /permits only the ready field/u,
+    ],
+    [
+      { ready: false, PRIVATE_READINESS_FIELD: true },
+      "commit_readiness_extra_fields",
+      /permits only the ready field/u,
+    ],
+  ]) {
+    let commitExecutions = 0;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file === "claude" && call.argumentsList.includes("-p")) {
+          return {
+            stdout: JSON.stringify(
+              result({
+                structured,
+              }),
+            ),
+            stderr: "",
+          };
+        }
+        return undefined;
+      },
+    });
+
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          onCommitExecution() {
+            commitExecutions += 1;
+          },
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+        }),
+      ),
+      (error) => {
+        assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error));
+        assert.equal(error.effectStarted, false);
+        assert.equal(error.diagnosticClass, diagnosticClass);
+        assert.match(error.message, constraint);
+        assert.equal(error.failure.effect, "none");
+        assert.equal(error.failure.commitExecutor, "not_started");
+        assert.equal(error.failure.retry, "terminal");
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.diagnosticClass, diagnosticClass);
+        assert.equal(normalized.effectStarted, false);
+        assert.equal(normalized.failure.commitExecutor, "not_started");
+        assert.equal(normalized.failureClass, undefined);
+        assert.equal(normalized.cause, undefined);
+        assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_READINESS/u);
+        assert.doesNotMatch(error.message, /PRIVATE_READINESS/u);
+        return true;
+      },
+    );
+    assert.equal(localCommitSandboxCalls(fixture).length, 1);
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(commitExecutions, 0);
+  }
+});
+
+test("retains readiness refusal through a cleanup abort and reconstructed verification", async (t) => {
+  const controller = new AbortController();
+  let resource;
+  let commitExecutions = 0;
+  let rejection;
   const fixture = createFixture({
     handle({ call }) {
       if (call.file === "claude" && call.argumentsList.includes("-p")) {
         return {
           stdout: JSON.stringify(
             result({
+              output: "PRIVATE_READINESS_OUTPUT",
               structured: { ready: false },
             }),
           ),
           stderr: "",
         };
       }
-      return undefined;
     },
   });
-
   await assert.rejects(
     fixture.adapter.run(
       request({
         access: "local-commit",
+        signal: controller.signal,
         authorizationId: "authorization-1",
         commit: {
           expectedHead: EXPECTED_HEAD,
           message: "feat(test): create commit",
         },
+        onCommitExecution() {
+          commitExecutions += 1;
+        },
+        onResource(value) {
+          resource = value;
+          // Retirement follows result validation, so the refusal already exists.
+          if (value === null)
+            controller.abort(new Error("PRIVATE_ABORT_REASON"));
+        },
       }),
     ),
     (error) => {
-      assert.ok(hasCode("ERR_CLAUDE_LOCAL_COMMIT_POLICY")(error));
-      assert.equal(error.effectStarted, false);
-      assert.equal(error.failure.effect, "none");
-      assert.equal(error.failure.commitExecutor, "not_started");
+      assert.equal(controller.signal.aborted, true);
+      assert.equal(error.code, "ERR_CLAUDE_LOCAL_COMMIT_POLICY");
+      rejection = normalizeAdapterFailure("claude", error);
+      assert.equal(rejection.diagnosticClass, "commit_readiness_declined");
+      assert.equal(rejection.recoverable, false);
+      assert.equal(rejection.effectStarted, false);
+      assert.equal(rejection.failure.commitExecutor, "not_started");
+      assert.equal(rejection.cause, undefined);
+      assert.doesNotMatch(JSON.stringify(rejection), /PRIVATE_/u);
       return true;
     },
   );
+  assert.equal(resource, null);
+  assert.equal(commitExecutions, 0);
+  assert.equal(turnCalls(fixture).length, 1);
   assert.equal(localCommitSandboxCalls(fixture).length, 1);
+
+  let interruptVerification = true;
+  const execution = await createExecutionFixture(t, {
+    onRoleRun(_role, turn) {
+      if (turn.access === "local-commit") throw rejection;
+    },
+    onCommitVerify() {
+      if (interruptVerification) {
+        interruptVerification = false;
+        throw Object.assign(new Error("Verification interrupted."), {
+          code: "ERR_TEST_COMMIT_VERIFICATION",
+        });
+      }
+    },
+  });
+  const interrupted = await execution.run();
+  const saved = structuredClone(interrupted.pipelineState);
+  assert.equal(saved.pendingCommit.status, "consumed");
+  assert.deepEqual(saved.pendingCommit.preEffectRejection, {
+    code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+    recoverable: false,
+    diagnosticClass: "commit_readiness_declined",
+  });
+  execution.persistPipelineState(saved);
+  const retired = await execution.run();
+  assert.equal(retired.pipelineState.pendingCommit, null);
+  assert.equal(retired.pause.diagnosticClass, "commit_readiness_declined");
+  assert.throws(
+    () => planExecutionPipeline.validateResumeAction(retired, null),
+    /separately authorized follow-up/u,
+  );
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(retired).nextActions,
+    [{ type: "start-new-run", requirement: "resolved-commit-readiness" }],
+  );
+  const calls = execution.calls.worker.length;
+  await execution.run();
+  assert.equal(execution.calls.worker.length, calls);
+  assert.equal(
+    execution.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+  assert.doesNotMatch(JSON.stringify(execution.transitions), /PRIVATE_/u);
 });
 
-test("preserves immutable and primitive abort reasons before local commit execution", async () => {
+test("preserves unclassified abort reasons before local commit execution", async () => {
   for (const reason of [
     Object.freeze(new Error("Operator pause")),
     "Operator cancel",
+    Object.freeze({
+      diagnosticClass: "commit_readiness_declined",
+      nativeDetail: "PRIVATE_ABORT_REASON",
+    }),
   ]) {
     const fixture = createFixture();
     await assert.rejects(
@@ -5803,6 +6316,10 @@ test("preserves immutable and primitive abort reasons before local commit execut
         assert.ok(error instanceof ClaudeAdapterError);
         assert.equal(error.effectStarted, false);
         assert.equal(error.cause, reason);
+        const normalized = normalizeAdapterFailure("claude", error);
+        assert.equal(normalized.diagnosticClass, undefined);
+        assert.equal(normalized.cause, undefined);
+        assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_/u);
         return true;
       },
     );
@@ -6068,10 +6585,32 @@ test("expanded pipeline inventory schemas preserve strict Claude preflight and s
         schema,
       );
       const settings = JSON.parse(option(turn.argumentsList, "--settings"));
-      assert.deepEqual(
-        settings,
-        JSON.parse(option(turnCalls(baseline)[0].argumentsList, "--settings")),
+      const baselineTurn = turnCalls(baseline)[0];
+      const baselineSettings = JSON.parse(
+        option(baselineTurn.argumentsList, "--settings"),
       );
+      for (const [candidate, policy] of [
+        [turn, settings],
+        [baselineTurn, baselineSettings],
+      ]) {
+        assert.equal(
+          candidate.options.cwd,
+          join(dirname(dirname(candidate.commandLauncherPath)), "native"),
+        );
+        assert.equal(
+          policy.sandbox.filesystem.denyWrite.filter(
+            (path) => path === candidate.options.cwd,
+          ).length,
+          1,
+        );
+      }
+      // Each launch owns a different startup cwd. Compare the full policy
+      // after binding that one verified reservation to the current launch.
+      baselineSettings.sandbox.filesystem.denyWrite =
+        baselineSettings.sandbox.filesystem.denyWrite.map((path) =>
+          path === baselineTurn.options.cwd ? turn.options.cwd : path,
+        );
+      assert.deepEqual(settings, baselineSettings);
       assert.equal(settings.sandbox.enabled, true);
       assert.equal(settings.sandbox.failIfUnavailable, true);
       assert.equal(settings.sandbox.allowUnsandboxedCommands, false);

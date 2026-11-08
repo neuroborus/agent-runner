@@ -1,8 +1,7 @@
 # Agent Runner Operator Guide
 
-Use this procedure when supervising Agent Runner through the CLI or its local
-STDIO MCP server. The [product documents](README.md) own the current guarantees;
-the pipeline specifications own exact workflow and recovery contracts.
+Supervise CLI/STDIO MCP runs using this guide. See [product guarantees](README.md)
+and the pipeline specifications for exact workflow and recovery contracts.
 
 | Mode          | Quality | Speed | Token consumption | Meaning                                                         |
 | ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
@@ -30,44 +29,39 @@ authority or automatic coding checks. `auto` selects no custom coding skill;
 explicit guidance remains frozen. Preserve accepted receipts and outputs on
 recovery; changed inputs or earlier results require revised planning and a new run.
 
-`independent` is the default and recommended mode: separate primary and review
-roles provide independent semantic review, using more provider context and
-tokens. `lazy` is an explicit opt-in choice with lower consumption and no
-independent review. Coding pipelines use the primary role's bounded check/fix
-and separate read-only clean confirmations; audit continues one read-only
-Auditor through its separate discovery and finding-recheck gates. Never choose
-lazy automatically to save tokens.
+`independent` is the default and recommended mode, using separate primary and
+review roles at higher context and token cost. Choose `lazy` explicitly, never
+automatically to save tokens. It has no independent review: coding pipelines use
+bounded primary check/fix and separate read-only clean confirmations; audit uses
+one read-only Auditor with separate discovery and finding-recheck gates.
 
-Every pipeline supports all three modes. In coding pipelines, combined adds
-primary check/fix and a separate read-only clean confirmation before the full independent Reviewer gate.
-Candidate approvals bind the same
-fingerprint; content repairs restart primary convergence. Self-findings return
-directly to fixing. Only independent finding resolution may invoke a fresh
-Arbiter; unresolved bootstrap disagreements and primary or structural exhaustion
-pause without arbitration. Resume preserves mode, bounded correction accounting,
-and accepted evidence; interrupted corrections are charged once.
+All pipelines support three modes. Combined coding adds primary check/fix and a
+separate read-only clean confirmation before full independent review of the same
+fingerprint. Content repairs restart convergence; self-findings return to fixing.
+Only independent finding resolution may invoke a fresh Arbiter. Unresolved
+bootstrap disagreements and primary or structural exhaustion pause without
+arbitration. Resume preserves mode, evidence and bounded accounting; interrupted
+corrections are charged once.
 
-All planning turns remain repository-read-only, with runner-owned artifact writes.
-Execution and polishing additionally require finalization and a distinct read-only
-terminal confirmation over the resulting fingerprint and validation evidence:
-Worker in lazy mode, Reviewer otherwise.
-Commit execution then authorizes one Worker commit; consumed commits recover by
-verification only. Custom execution settles a durable result receipt. Polishing
+Planning stays repository-read-only; Runner writes artifacts. Execution and
+polishing require finalization and distinct read-only terminal confirmation of
+the resulting fingerprint and validation evidence: Worker in lazy mode, Reviewer
+otherwise. Commit execution authorizes one Worker commit, recovered by verification
+only if consumed. Custom execution settles a durable result receipt; polishing
 ends with runner-owned staging without a commit.
 See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
 [authoring](../pipelines/plan-authoring/docs/SPEC.md),
 [execution](../pipelines/plan-execution/docs/SPEC.md), and
 [polishing](../pipelines/polishing/docs/SPEC.md) specifications.
 
-Audit verifies every new or materially revised finding batch before further
-discovery in every mode. Combined retains each Auditor or correcting finding
-Reviewer until its own series is clean, then requires a later fresh owner's
-clean first pass. Discovery cleanliness and finding acceptance remain separate.
-Runner alone publishes the report; complete publication requires the selected
-discovery gate, no pending batch and unchanged bindings. Both run-wide pass
-budgets remain capped at 20 across resume. Pending candidates and hypotheses
-stay unverified; zero or Critical findings may accompany success. Findings
-grant no fixes, Git effects, retrieval or automatic issues. See the
+Audit defaults to whole-directory sources. Use `--source-scope git` for complete
+Git-selected sources, or repeat `--exclude-path` for opaque literal subtrees in
+directory scope. MCP uses `sourceScope` and `excludePaths`. Selection freezes
+before visible, cancellable preparation; changed selection requires a new run.
+Every material finding batch requires verification before discovery continues.
+Discovery cleanliness and finding acceptance remain separate; both run-wide
+budgets stay capped at 20. Runner alone publishes the report. Findings grant no
+fixes, Git effects, retrieval or automatic issues. See the
 [audit specification](../pipelines/audit/docs/SPEC.md).
 
 New eligible commit-plan runs can assess oversized unfinished work and accept
@@ -79,22 +73,19 @@ a deferred stop waits for the original logical step's last verified child.
 Legacy/intermediate runs remain disabled on resume. Size alone never fails work.
 See [preserved replacement execution](../pipelines/plan-execution/docs/SPEC.md#preserved-replacement-execution).
 
-Give a worktree one owner. Plan execution and polishing enforce a canonical
-worktree lease, including across CLI and MCP. While a run owns execution, do
-not mutate its repository, Git state, frozen inputs, configuration, local
-guidance, or finalization guidance. Do not switch branches, stash, reset,
-rewrite history, edit checks, or run another mutating workflow there. Read-only
-inspection is appropriate; inspect another base without changing this checkout.
-An execution lease ending does not authorize interference with resumable work.
+Plan execution and polishing enforce one canonical worktree owner across CLI/MCP.
+While execution is owned, do not mutate repository/Git state, frozen inputs,
+configuration or local/finalization guidance, switch branches, stash, reset,
+rewrite history, edit checks or start another mutating workflow. Inspect read-only;
+inspect other bases without changing this checkout. Lease release does not
+authorize interference with resumable work.
 
 ## 2. Prepare against the actual base
 
-Read the project's instructions, owning specifications, and relevant code.
-Verify that the intended base contains the files, symbols, and behavior named
-in the task. Recompute baselines, checksums, inventories, and acceptance
-assumptions against that base. Do not copy measurements from a previous task,
-another checkout, or a stale branch. Prefer explicit behavior and invariants
-to incidental counts; verify any required counts and path lists locally.
+Read project instructions, owning specifications and code on the intended base.
+Verify required files, symbols, behavior, counts and path lists locally. Recompute
+baselines, checksums, inventories and acceptance assumptions; never copy stale
+measurements. Prefer behavior and invariants to incidental counts.
 
 Use pipeline discovery (`agent-run pipelines` or `pipelines_list`) to confirm
 inputs and settings. Reconcile the task, context, plan, and existing
@@ -313,11 +304,11 @@ prohibited. Cleanup follows verified process retirement. Uncertain cleanup
 retains ownership evidence and resumes before new work; interrupted contents
 are never reused.
 
-Increasing the deadline does not repair sandbox incompatibility or reveal
-discarded diagnostics. Trusted execution retains no command stdout or stderr;
-a check may pass on the host yet fail closed in isolation with only a generic
-exit code. Preserve that boundary and investigate the isolated environment
-rather than using the timeout as a containment or diagnostics workaround.
+Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
+stdout/stderr. Missing legacy/controller timing stays unknown; never invent it
+or rerun for telemetry. The 60-second fast-gate target is advisory.
+See [validation evidence](product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)
+for timing and isolation/diagnostic limits.
 
 For public downloads, declare `capabilities.artifacts` entries with canonical
 HTTPS `url` and verified SHA-256 `sha256`; see the
@@ -370,13 +361,14 @@ Retain the run ID and each MCP mutation's original idempotency key. Retry
 uncertain mutations with identical arguments and key; a new key cannot recover
 the original receipt. Ownerless applicable-stop recovery is a separate
 `run_resume` mutation with a new key, not a recreated pause/cancel receipt.
-Use `run_wait` for event-driven waiting and cursor-based `run_activity` for
-deliberate inspection; never poll at a fixed cadence. Omitted
-`run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held
-waits return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners
-at continuation checkpoints, even between turns without records or revision
+Use `run_wait` for event-driven waits and cursor-based `run_activity` for
+inspection; never poll at a fixed cadence. Omitted
+`run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held waits
+return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners at
+continuation checkpoints, even between turns without records or revision
 changes. Use action-free `run_resume` below. Ownerless `idle` does not prove
-loss; terminal states and pending input still end waits.
+loss; terminal states and pending input end waits. See
+[observation safety](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
 
 Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
 and checkpoint. Compare byte measurements and token snapshots separately;
@@ -475,6 +467,8 @@ recorded owner, distinct from an ownerless run awaiting stop settlement. Recover
 that owner through supported actions or await normal release/identity-proved
 reclamation; never edit or bypass leases. See
 [operator stops](ARCHITECTURE.md#state-owned-operator-stop-protocol).
+
+Init: [failure and recovery contracts](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
 
 Structured role results allow exactly 2 MiB of serialized UTF-8 JSON. Semantic
 field and inventory limits still apply. This is byte headroom, not a token
@@ -643,7 +637,9 @@ null-action resume at the inspected revision. Do not ask a writable role to
 repeat the effect, edit state or infer a finding disposition. A validated
 `environment_blocked` result still requires resolving its stated blocker before
 resume. Candidate edits, input/configuration drift and read-only contamination
-retain their safety stops. All original review and effect gates remain required.
+retain their safety stops.
+All [review, correction and effect gates](product/VALIDATION_AND_REVIEW.md)
+remain required.
 
 New native sessions use `[<full Runner run UUID>] <bounded description>` on both
 providers. Codex names only a verified, durably acknowledged new child; Claude
@@ -652,24 +648,30 @@ Continuation and compaction preserve existing names, including user edits. Do
 not rename historical sessions, edit native session storage or relaunch work to
 repair a title. A metadata pause retains any verified child and the original
 request; resolve provider compatibility and explicitly resume that request.
-Naming grants no turn, source-fork, commit or handoff replay. Model-free flag/schema
-inspection and local fixtures do not establish opt-in live-provider or additional
-platform acceptance. Publication remains intentionally disabled until its separate
-identity, approval and public-verification gates pass.
+Naming grants no turn, source-fork, commit or handoff replay. Model-free fixtures
+and flag/schema inspection prove no live-provider or additional platform acceptance.
+Publication stays disabled pending identity, approval and public-verification gates.
 
-Some short runner bounds deliberately remain fixed. Each model-free subprocess
-used to prove CLI availability, sandbox support, commit-executor isolation, or
-process containment has a 10-second deadline. A local-commit probe has a
-one-second network-denial observation deadline inside that outer bound; a
-silent socket is not accepted as isolation proof. Codex's pre-effect local-commit
+Model-free CLI, sandbox, commit-executor and process-containment probes have a fixed
+10-second deadline. Within it, local-commit probes have a one-second network-denial observation
+deadline; silent sockets fail isolation proof. Codex's pre-effect local-commit
 Git metadata lookup uses a 60-second bound; Claude's pre-effect local-commit
 Git metadata lookup retains the 10-second bound. These preparation deadlines
-do not cap the authorized commit effect after it begins. Codex MCP
-configuration discovery gets at most two attempts with a 30-second subprocess
-deadline apiece. An ordinary non-commit turn with native context exhaustion may
-receive at most one in-session compaction retry when it has a usable native
-session. Outside source forks, persistent pressure and other ordinary
-recoverable provider work get one fresh reconstruction before the run pauses.
+do not cap the authorized commit effect after it begins. Codex MCP configuration
+discovery gets at most two attempts with a 30-second subprocess deadline apiece,
+without retry delay. Ordinary non-commit context exhaustion permits at most one
+in-session compaction retry with a usable session. Outside source forks, persistent
+pressure and other ordinary recoverable provider work get one fresh reconstruction
+before pausing. See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
+
+Classified Claude readiness refusals preserve the reviewed candidate. Exact
+`ready: false` establishes only a decline with unknown reason; malformed
+confirmation identifies a fixed shape constraint. COMMIT has no readiness-output
+correction checkpoint, so these pauses offer separately authorized follow-up
+instead of same-run retry. Preserve the work and follow the
+[commit recovery contract](../pipelines/plan-execution/docs/SPEC.md#137-commit).
+Interrupted verification still reconciles the saved proof without replay;
+legacy classless refusals retain their supported recovery.
 
 For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter prefers full
@@ -819,12 +821,11 @@ user work; the runner does not roll it back automatically.
 
 ## 6. Recognize the actual completion boundary
 
-Candidate convergence precedes finalization. Finalization follows the selected
-repository skill or the complete repository-derived fallback, runs writable
-formatting before the established non-mutating checks, and records direct
-evidence for every check. A separate read-only terminal confirmation inspects
-the resulting content and validation evidence. Formatter output is part of
-what must be confirmed.
+Candidate convergence precedes finalization under the selected repository skill
+or complete repository-derived fallback. Writable formatting precedes all
+established non-mutating checks; record direct evidence for each. A distinct
+read-only terminal confirmation covers resulting content, formatter output and
+validation evidence.
 
 In plan execution and polishing, terminal validation-evidence rejection
 invalidates the finalization result. Pure evidence findings return directly to
@@ -871,8 +872,8 @@ Keep these outcomes separate:
   project documentation.
 
 Reports go to one private per-user [global issue store](product/OPERATOR_MODEL.md#global-issue-store)
-that is shared across projects and survives deletion of the originating
-checkout. The target project needs no ignore rule. Each issue keeps its
+that is shared across projects and survives deletion of its Git or directory
+origin. No project ignore rule is needed. Each issue keeps its
 Markdown together with one authoritative tracking record that starts `open`.
 Earlier repository-local reports and issue indexes are no longer read or
 maintained; leave them in place. Manage the backlog with MCP `issues_list`,
@@ -901,13 +902,13 @@ prompts or active runs. See [guidance ownership](product/OPERATOR_MODEL.md#proje
 
 Keep local additions short, non-sensitive, and operator-authored. Exclude
 secrets, credentials, raw provider output, transcripts, and chain-of-thought.
-Reads do not create missing files or directories. Unsafe, linked, overlapping,
-malformed, or oversized targets are rejected. Integrated guidance and temporary
-files in Git must already be ignored and untracked. External resources use exact
-target-bound confinement without target or Git-control writes.
-Each document is bounded to 64 KiB of valid UTF-8 with safe text characters.
-Recognizable credential and transcript formats are rejected; this is not a
-guarantee that arbitrary prose is free of secrets.
+Reads create no files, directories or state. An absent, untracked local guide
+needs no ignore rule for CLI/MCP reads before init. Existing integrated Git
+guides, edit/update destinations and temporaries must be ignored and untracked.
+Unsafe paths fail closed; external resources stay target-bound without target
+or Git-control writes. Documents allow at most 64 KiB of safe UTF-8.
+Recognizable credentials/transcripts are rejected; operators still own content
+safety. See [guidance safety](product/SAFETY_MODEL.md).
 
 Replace local additions as a whole document, consolidating obsolete lessons.
 Empty content means no additions; missing files have null hashes, existing empty

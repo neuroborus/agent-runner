@@ -201,10 +201,39 @@ function executionOptions(configuration, providers) {
   return options;
 }
 
-async function runAdapter(adapter, backend, request, providers) {
+async function runAdapter(adapter, backend, request, providers, naming) {
+  let callbackFailure;
+  const guard = (callback) =>
+    request.access !== "read-only"
+      ? callback
+      : async (...args) => {
+          try {
+            return await callback(...args);
+          } catch (cause) {
+            callbackFailure ??= { cause };
+            throw cause;
+          }
+        };
+  const callbacks = Object.fromEntries(
+    ["onProcess", "onResource", "onSessionCreated", "onFreshSession"]
+      .filter((key) => typeof request[key] === "function")
+      .map((key) => [key, guard(request[key])]),
+  );
+  const namedRequest = sessionNamingRequest(
+    naming.run,
+    naming.pipeline,
+    naming.role,
+    { ...request, ...callbacks },
+    guard(naming.recordNaming),
+  );
   try {
-    return await adapter.run(request);
+    const response = await adapter.run(namedRequest);
+    if (callbackFailure !== undefined) throw callbackFailure.cause;
+    return response;
   } catch (cause) {
+    // Read-only callbacks carry no provider effect proof. Native wrapping must
+    // not turn their persistence, inspection or ownership errors into diagnosis.
+    if (callbackFailure !== undefined) throw callbackFailure.cause;
     const failure = normalizeAdapterFailure(backend, cause, providers);
     if (
       request.session?.mode === "fork" &&
@@ -399,14 +428,9 @@ function lazyArbiterAdapter(
       return runAdapter(
         resolve(),
         configuration.backend,
-        sessionNamingRequest(
-          run,
-          pipeline,
-          "arbiter",
-          directoryRequest(run, pipeline, "arbiter", request),
-          onSessionNaming,
-        ),
+        directoryRequest(run, pipeline, "arbiter", request),
         providers,
+        { run, pipeline, role: "arbiter", recordNaming: onSessionNaming },
       );
     },
   });
@@ -491,14 +515,9 @@ function configuredAdapter(
       return runAdapter(
         adapter,
         configuration.backend,
-        sessionNamingRequest(
-          run,
-          pipeline,
-          role,
-          directoryRequest(run, pipeline, role, request),
-          onSessionNaming,
-        ),
+        directoryRequest(run, pipeline, role, request),
         providers,
+        { run, pipeline, role, recordNaming: onSessionNaming },
       );
     },
   });

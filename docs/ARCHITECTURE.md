@@ -53,15 +53,27 @@ write-ahead journal, durable actions, execution leases, and state validation.
 The Git capability lives under `src/git/` behind its public `index.js`. The
 small index exposes only the service factory and shared safety error; its
 private service composes command execution, content and snapshot inspection,
-change measurement, exact source materialization, commit verification, and
-polishing handoff modules without exposing their implementation contracts to
-root consumers.
+change measurement, complete source selection, exact source materialization,
+commit verification, and polishing handoff modules without exposing their
+implementation contracts to root consumers.
 
 The filesystem-only workspace capability lives under `src/workspace/` behind
 `createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
-Private `paths.js`, `controls.js` and `snapshot.js` own confinement, filesystem
-control discovery and guarded capture; `service.js` composes inspection and
-mutation guards.
+Private `paths.js`, `scope.js`, `controls.js` and `snapshot.js` own confinement,
+inspection selection, filesystem control discovery and guarded capture;
+`traversal.js` owns cancellation/progress checkpoints and `service.js` composes
+inspection and mutation guards.
+
+Private `proof.js` projects complete whole-directory snapshots into bounded
+exact-path evidence plus hashes of the complete immutable remainder and link
+resolutions. `snapshotProof` derives missing leaves only from complete captured
+coverage and retains file/link ancestors as blockers. It refuses selected or
+excluded snapshots as absence evidence. `assertSnapshotProof` permits only its
+caller's exact journaled effect paths to differ, while preserving the remainder,
+scope and link proof. Deferred new temporaries can be removed from the current
+remainder only if the original hash proves their absence. These methods grant
+no traversal, write or publication authority and leave capture unchanged.
+
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
 capability. Authoring explicitly selects Git for commit plans or the directory
@@ -81,6 +93,33 @@ Outputs must be proper workspace descendants disjoint from all protected
 declarations and control trees. State is disjoint from workspace, task,
 infrastructure, declared read trees and discovered controls. Inspection grants
 no provider access, retrieval, publication, Git effect or write authority.
+
+Optional `inspectionPaths` selects literal workspace-confined file or directory
+roots, including missing paths; `[]` selects no ordinary source content. Omission
+selects the whole workspace. Optional `excludePaths` prunes literal
+workspace-relative subtrees; duplicate/descendant declarations collapse, dot-dot
+components and absolute exclusions fail, and no glob expansion occurs. Both
+declarations are normalized before recursive discovery and frozen with the
+inspection. Selected roots become absolute; exclusions remain workspace-relative
+for reconstruction. Real routing ancestors remain pinned. Selected leaf links
+are captured only when their resolution stays in selected or protected trees.
+Optional boolean `inspectionFilesOnly` requires explicit `inspectionPaths` and,
+when true, restricts every selected root to a regular file, leaf link or missing
+path. Directory replacements fail before descendant reads at admission, control
+discovery, link resolution and capture, including after reconstruction. The
+constraint remains frozen with the declarations and binds snapshot fingerprints
+and unchanged checks; omission retains the existing directory-root behavior.
+
+Excluded leaves and descendants receive no metadata/content reads or traversal.
+Their routing ancestors must be real directories or missing, and exclusions
+cannot hide exact selected roots, required input/source/configuration/task/
+artifact/infrastructure declarations, authorized outputs, reserved control
+components, discovered control boundaries or required link dependencies.
+Controls in selected trees, their routing ancestors, explicit protected trees
+and output roots retain discovery and protection. Excluded trees are opaque;
+undiscovered controls inside them grant no authority. No selection grants reads,
+outputs or state storage there, and state remains disjoint from the entire
+workspace. Omitted declarations retain the previous whole-directory behavior.
 
 Filesystem discovery protects `.git`, `.codex`, `.claude`, `.agents` and
 `.claude.json`, including nested controls and enclosing repository controls for
@@ -130,15 +169,18 @@ resolution to the declared tree or explicitly bound protected trees. Real
 ancestors may connect those trees without granting reads of their other
 children, supporting `.claude/skills` links to protected `.agents/skills`.
 Unbound intermediate hops, escaping, dangling and cyclic links fail.
+Absolute targets re-enter their selected root through the same component checks
+before processing any suffix, preserving file-only constraints and root dependency evidence.
 Resolution dependencies participate in snapshot
 race checks; snapshots return sorted `linkResolutions` alongside entries so
 output consumers can bind readable dependencies outside a selected subtree.
-Existing entry and input fingerprints remain unchanged.
+Omitted-scope entry and input fingerprints remain unchanged.
 Links cannot cross writable boundaries in either direction, including
 through intermediate resolution hops.
 
-`snapshot({inspection})` rechecks pinned ancestors and control bindings and
-captures the complete workspace plus explicit external protected paths. On the
+`snapshot({inspection, signal, onProgress})` rechecks pinned ancestors and control
+bindings and captures the selected workspace roots plus protected declarations
+and authorized outputs, pruning exclusions before descent or hashing. On the
 current Linux runtime, pinned directory descriptors through `/proc/self/fd`
 anchor enumeration and regular-file reads; unavailable descriptor access fails
 closed. Handle/path metadata and directory listings are checked around reads
@@ -146,7 +188,17 @@ and again before completing capture, including missing-path ancestor bindings.
 Workspace and protected-path identities remain pinned throughout capture.
 Results contain sorted metadata and hashes, never file bytes. Content
 fingerprints bind paths, kinds, modes, sizes and content; separate identity
-fingerprints also bind inodes and file timestamps.
+fingerprints also bind inodes and file timestamps. Explicit scope declarations
+participate in both fingerprints and the unchanged guard, even for an empty
+selection; legacy omitted-scope fingerprint construction stays unchanged.
+`inspect(declarations, {signal, onProgress})` and snapshot accept an optional
+AbortSignal and awaited progress hook. Control descent, per-entry capture,
+regular-file read chunks and final verification check cancellation, closing owned
+handles on interruption without writing source content. Progress contains only
+`phase` (`controls`, `capture` or `verify`) and an increasing `completed` operation
+counter, emitted at phase changes and every 128 checkpoints. Hooks grant no
+filesystem authority; cancellation preserves the signal's reason. These options
+remain transient and never enter frozen declarations.
 `snapshotInputs({paths, stateRoot})` captures only explicitly declared read trees
 with the same confined, race-checked reads and ancestor bindings. It rejects
 state overlap and grants no reads of unrelated workspace content. Supplemental
@@ -161,10 +213,49 @@ Directory lifecycle protected fingerprints exempt only declared outputs and
 artifacts. A task root coinciding with or containing the workspace never exempts
 other project content; runner-owned task artifacts must be declared explicitly.
 
-`readFile({path, projectPath, optional})` confines text input reads to a real
+`git.selectSources({projectPath, expectedSelectionFingerprint?, signal?})` resolves an
+existing worktree and enumerates complete current sources independently of the
+changed-path snapshot. `trackedPaths` is the sorted union of the literal HEAD
+tree and index entries, retaining staged-deletion names and ignored tracked
+files. `untrackedPaths` adds only non-ignored untracked files. Git's
+`ls-files --others --exclude-standard` prunes ignored untracked trees; Node does
+not recursively enumerate source directories. HEAD tree enumeration disables
+replacement objects. Strict UTF-8 decoding preserves literal names, including
+leading U+FEFF. Unchanged, assume-unchanged and skip-worktree files are selected
+and read from the working tree by subsequent workspace capture, never from
+staged blobs.
+
+The immutable result includes canonical `projectPath`, `head`, the existing Git
+`indexFingerprint`, relative tracked/untracked/deleted path lists and an
+`inspection` declaration containing absolute `inspectionPaths` together with
+`inspectionFilesOnly: true`. Consumers pass this complete declaration to
+workspace inspection; file paths alone lose the leaf constraint. Missing tracked
+files and missing tracked ancestors remain explicit missing inspection roots. The
+`selectionFingerprint` binds these declarations and provenance, not file bytes
+or content approval. Selection checks membership/provenance and file kinds
+twice; callers reselect with the saved fingerprint around confined capture and
+on reconstruction to reject membership, deletion or index/HEAD drift with
+`ERR_GIT_SOURCE_SELECTION_CHANGED`. Workspace capture separately owns content,
+identity, routing/control bindings and link resolution; a frozen file list alone
+cannot detect newly appearing untracked sources.
+
+Leaf symlinks remain links and grant no target reads at selection. Routing
+aliases, special files, file/directory replacements, unresolved index entries,
+gitlinks and embedded repositories fail closed rather than becoming recursive
+inspection roots. Submodule traversal is unsupported by this selector; existing
+Git snapshot and measurement gitlink behavior is unchanged. Selection neither
+initializes Git nor writes source, index, refs, remotes or identity, and grants
+no provider, staging or commit authority. Ordinary-directory consumers remain
+Git-independent. Cancellation interrupts path classification and Git commands;
+selection waits for child closure, including all concurrent index reads.
+Audit activates this selector through its descriptor-owned source settings.
+
+`readFile({path, projectPath, optional, maxBytes})` confines text input reads to a real
 regular file beneath the supplied root, reusing descriptor-anchored snapshot
 reads with no-follow, nonblocking opens and read-race checks. Only an absent
 optional file returns null; aliases and special files fail before content reads.
+Optional `maxBytes` bounds the descriptor-anchored read, including growth races;
+omission retains the existing safe-integer maximum.
 
 `measureChanges({projectPath, baseHead, expectedContentFingerprint})` measures
 the final worktree against the caller-verified immutable step-start commit
@@ -498,6 +589,20 @@ instructions/checks, selected roots, resource
 identities and live configuration exclusions. Its explicit reservation/result
 agent transitions stop at `PROPOSAL_ACCEPTED`; its lifecycle then dispatches only
 Runner-owned setup effects.
+
+Init state version 2 uses version-2 inspections with compact complete scope
+proofs and bounded role-facing setup destinations, documents, ancestors and
+control markers. Proposal paths need explicit coverage; omitted evidence never
+means absent. Publication and same-run repair baselines retain exact relevant
+entries plus complete remainder/link hashes, avoiding source-sized durable
+arrays. Guards and native turns still capture all original source/control
+content, and terminal confirmation binds the complete resulting snapshot.
+The identity migration preserves real version-1 records, original hash and
+comparison algorithms, pending effects, receipts, approvals and finite budgets;
+reinspection uses the saved version. Unsupported setup-evidence capacity fails
+before partial inspection can grant role or publication authority. Shared state
+collection limits and directory/Git permission boundaries remain unchanged.
+
 The separate `publishIntegratedInit` / `publishExternalInit` effects require those
 approvals, unchanged setup bindings and the existing exclusive leases. The clarification capability
 verifies the frozen transcript before baseline recording and throughout publication.
@@ -539,12 +644,61 @@ and its resumable checkpoint without reserving filesystem effects.
 Init validates reconciled operator stops against their preserved checkpoints,
 including pending turns and editor windows. Shared clarification appends can
 journal their exact result hash before replacement and recognize those bytes
-on recovery. Exceptional post-closure decisions use the same durable answer
+on recovery. Expected append-read failures use the scoped inspection diagnosis;
+write failures retain the existing effect recovery. Proactive completion is
+persisted atomically with its pending editor authorization, so failed preparation
+retries that window before provider work instead of consuming it.
+Exceptional post-closure decisions use the same durable answer
 authorization, freeze a new clarification version and restart proposal gates
 without redirecting selected paths or renewing correction budgets. Prepared
 baselines continue protecting infrastructure and all other task content while
 the clarification capability owns its exact transcript. Public pauses retain
 bounded concrete setup findings and reason-specific explanations.
+Expected init inspection/preparation rejection uses the descriptor-owned
+`inspectionFailure` policy at lifecycle dispatch and narrow root recovery checks.
+Initial task/context hashing uses one scoped capture, and prepared configuration
+and guidance verification use the same policy after prerequisite receipts.
+Canonical validation immediately after workspace acquisition diagnoses recognized
+failure before dispatch, under verified execution and workspace ownership.
+Acquisition and unknown ownership errors still propagate. Input submission diagnoses
+complete source verification failures and rejects when inspection prevents writing
+answers, preserving receipt meaning. The clarification service's
+[pre-write read hook](#clarification-lifecycle) scopes answer inspection without
+classifying writes or post-write readback. Existing
+non-resumable pauses, exhausted checkpoints, operator-pause restoration and
+submitted-answer receipts cannot become inspection retries. Publication resource
+reads and repair-baseline capture use scoped preparation without wrapping their effects.
+Its `inspectOperation` hook also tags the runtime adapter's preparation and
+verification snapshots without wrapping provider invocation. Editor authorization
+preparation and authorized-close reads use the same policy. Configuration and
+clarification file guards retain their public error codes, adding finite `file_size` or
+`isolated_regular_file` constraint metadata for bounded rejection. Unrecognized
+read, decoding and identity-corruption failures gain no new classification or
+retry authority.
+Runner journals its `init_inspection_failed` pause through atomic checkpoint
+settlement under the execution and canonical workspace leases, acquiring the
+latter for pre-lease recovery when necessary. The same transition retires the
+read-only reservation and active observations and settles a concurrent operator
+stop around the original diagnosis. Tagged inspection failures bypass ordinary
+turn retirement, which cannot advance through a pending immediate stop.
+The pause retains only a finite phase/constraint and fixed public explanation;
+unknown corruption, retained ownership and pending/ambiguous effects propagate
+without generic retry authority. Only recognized transient inspection failures
+permit unchanged-input resume; other diagnoses require preservation and a fresh
+run. CLI and MCP status/wait consume the same pipeline projection. The extensible
+pause envelope needs no state/proof version change or historical evidence rewrite.
+See [inspection failures](../pipelines/init/docs/SPEC.md#inspection-failures).
+Init also settles actual boundary-normalized terminal adapter failures to the
+existing `FAILED` state after unchanged-workspace proof and turn/resource
+retirement. Its exact failure pause uses the common registry-validated optional
+class and bounded code, with a same-transition safe activity. Only the matching
+logical reservation is retired; failed confirmation retains published resources
+and pending confirmation evidence without completion. Runner callback errors
+cross adapter wrapping unchanged rather than becoming provider evidence.
+Descriptor-declared nonresumability prevents new provider work after cleanup.
+Foreground CLI and shared status/wait consume this saved outcome; observation
+needs no recovery or global wait workaround. Legacy missing evidence remains
+unknown. See [terminal provider failures](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
 Init supplies its verified per-turn workspace snapshot through runtime turn
 settlement for inactivity recovery, including after Runner publication. Pre-turn
 reconstruction exhaustion persists a resumable provider interruption at the
@@ -669,8 +823,26 @@ catalog supplies classification validation, severity ordering and map text.
 Confirmed findings require evidence, impact/severity rationale and labeled
 concrete examples; unsupported claims remain separate hypotheses, and repeated
 cause keys require consolidation. The renderer returns `audit.md` text without
-filesystem or provider effects. Its descriptor selects read-only
-directory inspection and an exclusive canonical workspace lease. The discovery
+filesystem or provider effects. Audit schemas share portable constraints with
+semantic normalization; instructions cover normalized uniqueness and exact-copy
+bindings. Recognized validation errors expose one immutable finite-code diagnostic
+at a schema-owned, bounded field location, retaining existing error identities
+and excluding rejected keys/values and native causes. Audit-owned correction
+feedback retains only those constraints and exact checkpoint bindings for supported
+resume; it grants no acceptance or additional retry allowance. The audit
+specification owns the exact contract.
+Its descriptor selects read-only
+directory inspection and an exclusive canonical workspace lease. It freezes
+`sourceScope` (`directory` by default, or explicit `git`) and literal `excludePaths`
+(directory only) before preparation. Git scope resolves the worktree root without
+gaining Git effects. Runner journals membership before capture and verifies it
+around capture and reconstruction. Directory scope prunes exclusions before
+traversal and never invokes Git. Filesystem declarations bind provider receipts;
+Runner additionally binds Git provenance into snapshot fingerprints and role
+context. Report/finding bindings consume that same snapshot. New report bytes
+and report fingerprints also bind frozen source settings. Audit state version 7
+preserves legacy missing settings as whole-directory scope without altering
+evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
 transition capabilities; it grants no new root authority. Frozen scope,
 references, exclusions, criteria and snapshot/report bindings precede discovery.
@@ -682,6 +854,14 @@ requires verified report publication before public completion. Logical turns est
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.
+Terminal audit failures retain the boundary-normalized optional `diagnosticClass`
+in the existing common pause contract, without a state-version change. The common
+envelope owns registry membership; audit owns strict terminal shape/disposition
+and fixed evidence/guidance. A same-transition safe failure activity survives the
+public publication wrapper. CLI/MCP status, activity and wait retain the diagnosis
+after reconstruction; absent legacy classes remain absent. Neither diagnosis nor
+terminal continuation permits another agent turn or report publication; see the
+[audit failure contract](../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
 Report/ledger updates must also fit the escaped Markdown publisher's 32-MiB bound
 before acceptance; overflow preserves the prior ledger and pauses resumably
 without an impossible publication intent or a renewed pass budget.
@@ -714,6 +894,13 @@ State version 5 persists proactive clarification and defaults legacy runs to no
 proactive request. Audit uses the common one-shot editor and identified MCP input
 requests before its first Auditor turn and for material clarification questions;
 unanswered material requests remain pending without spending another round.
+State version 6 adds nullable checkpoint correction feedback; its version-5
+migration initializes absence without changing saved evidence. Rejection saves
+feedback, invalid accounting and the pause together. Only the matching role
+checkpoint receives canonical diagnostics with fixed correction instructions;
+validation replaces or clears feedback without changing session or budget rules.
+The descriptor exposes the same bounded constraint evidence through CLI/MCP pause
+projections, excluding native messages and rejected content.
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies
@@ -1185,6 +1372,14 @@ read, so replacing an empty target also invalidates the binding. The state
 boundary strictly validates both versions; legacy records are preserved without
 rediscovery, inferred bindings or new execution authority.
 
+The confined configuration reader retains `ERR_PROJECT_CONFIGURATION_READ`
+and adds optional finite `constraint` metadata: `file_size` for the existing
+1 MiB limit, or `isolated_regular_file` for its regular-file and single-link
+guard. An explicitly selected integrated file proven absent has `missing_file`;
+implicit absent discovery still returns `null`. Other read, decoding, confinement and identity failures retain their
+existing handling without inferred constraints. Metadata grants no retry,
+inspection acceptance or effect authority.
+
 The V1 shape is:
 
 ```json
@@ -1312,7 +1507,10 @@ lists.
 
 Descriptors may additionally validate relationships among resolved settings;
 configuration applies this hook to complete root settings and merged project
-settings before role resolution. Execution uses it to reject unsafe multiplication
+settings before role resolution. Preliminary workspace discovery validates each
+override value but defers relationships until the project overlay and overrides
+are merged; a provisional combination cannot reject a valid effective selection.
+Execution uses it to reject unsafe multiplication
 of its positive-safe-integer `preferredCommitLineLimit` (900) and
 `commitSizeAssessmentMultiplier` (3), including when its strict boolean
 `automaticCommitSplitting` (default `true`) disables assessment. All three
@@ -1459,6 +1657,14 @@ reconciliation or effect verification still requires the worktree lease.
 `resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
+An optional descriptor-owned `workflow.nonResumableStates` list prevents further
+preparation, provider probing or workflow invocation at those states. Runner
+returns only after ordinary owned-process, resource and observation retirement;
+pending operator stops retain their separate reconciliation path. Audit and init
+declare `FAILED`; other pipelines retain their existing recovery gates.
+Configuration-drift handling preserves a declared nonresumable disposition and
+its terminal evidence. Recovery still validates saved state and canonical ownership
+and retires owned work; retaining the failure accepts no changed configuration.
 
 Descriptors declare `workspace.kind` (`git` or `directory`) and `workspace.lease`
 (`none` or `exclusive`), alongside their existing role-access inventory. An
@@ -1620,16 +1826,20 @@ contains canonical project/local/configuration paths, complete `commonContent`
 and `localContent`, `combinedContent`, and `localHash`. Rendering separates the
 documents and states that local additions cannot weaken common safety or
 product contracts. Missing local content is an empty string with a null hash;
-an existing document, including an empty one, has a SHA-256 hash. Reading
-creates neither local artifacts nor external state.
+an existing document, including an empty one, has a SHA-256 hash. A positively
+verified absent, untracked local guide needs no ignore rule for reads, including
+before init in an unconfigured Git checkout. The existing selectors and resolved
+metadata remain unchanged; absence never triggers discovery of another placement.
+Reading creates neither local artifacts nor external state.
 
 Both documents have a 64 KiB UTF-8 byte limit. Reads and replacements reject
 invalid encoding, unsafe control characters, and recognizable credential or
 provider-transcript formats without echoing or partially redacting content.
 Operators remain responsible for excluding sensitive material that cannot be
-recognized deterministically. Integrated paths in a Git worktree must be ignored
-and untracked. External paths use exact target-bound confinement without target
-Git inspection or writes. All paths must be disjoint from project configuration
+recognized deterministically. Existing integrated guides, edit/update destinations
+and temporary files in a Git worktree must be ignored and untracked. External paths
+use exact target-bound confinement without target Git inspection or writes.
+All paths must be disjoint from project configuration
 and protected control paths. The workspace capability's `inspectControls` reuses
 control discovery along the exact target/destination ancestry, including Git
 pointers, shared metadata and canonical ancestor provider alias targets containing
@@ -1642,7 +1852,29 @@ metadata dependencies, including nested Git pointers, without traversing unrelat
 project content. Metadata reached only through state ancestors also protects
 selected destinations; this query grants no snapshot reads. Missing
 destinations receive the same safety inspection. Symlinks, hard links,
-non-regular files, and unsafe ancestors fail closed.
+non-regular files, and unsafe ancestors fail closed. The private selection boundary
+allows the read-only ignore exception only when both workspace and Git inspections
+prove absence; tracked paths reject even when missing from the worktree. Reads,
+including init's identity-bearing read, repeat selection and verify pinned
+directories after the document read. Any returned existing content requires
+strict ignore validation even if it disappears before reinspection. Edit/update
+selection and every publication recheck retain strict destination validation.
+
+The `read` and `readWithIdentity` entry points preserve trusted inspection
+categories through guidance error normalization with optional finite
+`readFailure` metadata: `inspection_unavailable`, `workspace_changed`,
+`unsafe_path` or `evidence_capacity`. Existing normalized error codes remain
+unchanged. Only recognized workspace/configuration errors and direct native
+read causes under the selection/file-helper control/path wrapper are classified;
+returned pinned-directory verification retains private read provenance without
+changing normalized codes. Init also consumes that finite `readFailure` metadata
+when verification normalizes to `ERR_GUIDANCE_STORAGE`; the storage code alone
+grants no classification. Descriptor cleanup and storage/recovery cause chains
+are not classified or searched. Unknown native codes and corruption remain
+unclassified. Edit/update and publication errors gain no read
+classification. Init consumes this metadata only at scoped inspection boundaries,
+retaining pending-effect and ownership guards before any resume. Metadata alone
+grants no continuation or effect authority.
 
 The public `update` method accepts the same selectors plus complete
 `localContent`, nullable `expectedHash`, and `idempotencyKey`. It validates the
@@ -1782,11 +2014,15 @@ optional bounded details, run ID, and error code. The service never gathers or
 attaches logs, transcripts, prompts, environment values, credentials, secrets,
 or other diagnostic data automatically. The shared capability validates the
 same field bounds as the MCP schema. It first replays a completed receipt for
-the lexically resolved request, then canonicalizes the Git project and
-validates the external-state boundary before action persistence. The origin is
-recorded as bounded context and grants no storage authority; no configuration
-is loaded and `projectConfigurationPath` only remains part of the request
-identity.
+the lexically resolved request, then resolves the origin through the workspace
+and external-state boundaries before action persistence. An enclosing Git
+marker requires successful Git resolution to the canonical worktree root;
+failed Git inspection never falls back to a directory. Without a marker,
+controls-only workspace inspection rejects unsafe controls and bare metadata,
+and the canonical selected directory is the origin. Source files are not read
+or snapshotted. The origin grants no storage or Git-effect authority; no
+configuration is loaded and `projectConfigurationPath` only remains part of
+the request identity.
 
 Issues live in one private per-user store selected from environment, home, and
 platform inputs injected at composition: `$XDG_DATA_HOME/agent-runner/issues`
@@ -1941,7 +2177,13 @@ does not end the wait. `live`, `unverifiable`, and `none` (a released or
 transferring lease) keep waiting, so recovery stays an explicit `run_resume`.
 Optional MCP progress notifications carry only bounded public activity with
 role labels; they do not wake a model or alter the run. Cancellation cancels
-only that wait.
+only that wait. Activity drains retain operation-local journal proof through
+bounded concurrent-publication continuations using the journal certificate
+rules below. Exhaustion after a proved extension returns
+`ERR_RUN_OBSERVATION_BUSY` with `retryable: true` as a structured MCP tool error
+for `run_activity` or `run_wait`. It ends only that observation; a later explicit
+observation is safe. MCP does not retry it automatically or classify other
+errors by matching their code or prose.
 
 An omitted `run_wait.timeoutMs` means 30 seconds and the public maximum is 24
 hours; either deadline ends only the client wait. Internal detached-dispatch
@@ -2074,6 +2316,90 @@ processes first, then performs the pipeline's ordinary interrupted-turn Git/inpu
 reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
+
+Common envelope version 25 adds nullable `workspacePreparation`, separate from
+trusted-command `preparation` process custody. The state capability accepts this
+only at run creation, before recursive workspace inspection. State validation
+owns its pure normalization and input fingerprinting; filesystem admission and
+capture consume those definitions. Its version-1 record freezes the directory
+policy (including any filesystem inspection roots,
+file-only constraint and literal exclusions), canonical exclusion lease path,
+real workspace/task/state/lease directory identities and routing ancestors,
+and bounded exact admission-input hashes and file identities. Missing optional
+task inputs remain explicit. Every admitted input requires its real parent
+directory binding and complete routing ancestry, including absent inputs.
+Resolved roles, input hashes, counters, source
+lineage, configuration protection and pipeline settings/checkpoints are bound by
+an admission fingerprint. The record is bounded to 1 MiB, 256 exact UTF-8 text
+inputs of at most 1 MiB each, and 4,096 routing bindings. The root caller must
+list every input consumed during admission; a selected configuration's exact
+protected hash is mandatory. Exact input reads reuse the workspace capability's
+bounded, descriptor-anchored reader. Admission performs no recursive source or control
+discovery and grants no workspace/provider/publication or Git authority.
+
+`captureWorkspacePreparation` requires the current execution lease, exact
+revision and canonical workspace lease. It verifies frozen directories and exact
+inputs, then asks the root caller to produce a fresh, fully verified workspace
+binding from those declarations. The callback runs outside the short state
+mutation boundary, while retaining workspace exclusion, so operator stops remain
+publishable. Publication rechecks the owner, revision, inputs, directory
+identities and cancellation, then journals one `workspace-preparation/captured`
+transition atomically binding the completed workspace and clearing the pending
+record. The resulting policy, exclusion key and absent inputs must match the
+admission, including the exact absent-input list during journal replay.
+Journal replay permits no other replacement or removal except the bounded
+source-selection transition described below. Interrupted
+capture publishes no partial fingerprints; recovery recaptures from frozen
+declarations. An interrupted complete publication uses ordinary journal recovery
+without repeating capture. Stale revisions, substituted inputs/roots, uncertain
+ownership and canceled runs cannot publish.
+
+Pending preparation permits only activity, pauses, stop settlement and restoration
+of the admission checkpoint; workflow/provider/effect work remains blocked.
+Pause and cancellation preserve the record. A quiescent pending record is not
+process custody and does not prevent lease release after stop settlement.
+Legacy absence normalizes to null and preserves completed historical preparation,
+existing workspace bindings and all pipeline evidence during ordinary leased
+migration; it never schedules a new capture.
+
+Common envelope version 26 adds optional `sourceSelection: {kind: "git",
+fingerprint}` to pending and completed directory bindings. Only new Git-scoped
+preparation starts with a null fingerprint and no inspection roots. Under both
+owners, `captureWorkspacePreparation` obtains the Git-owned selection outside
+the short mutation boundary, rechecks frozen inputs/revision/owners, then journals
+`workspace-preparation/selected` before capture. This transition may add only the
+confined file-only inspection declarations and non-null membership fingerprint;
+all other admission evidence remains identical. Capture and journal replay must
+preserve that exact selection. Interrupted selection publication recovers once;
+later capture/reconstruction verifies existing membership rather than reselecting.
+Partial capture supplies no authority. Version-25 preparation and completed
+bindings remain unchanged on migration. The detached token is `1:26`, with
+matching package metadata and audit version 7 compatibility.
+
+Audit selects `preparation: "deferred"` in its directory workspace descriptor.
+Runner and MCP boundary validation perform only canonical routing, configuration
+and exact-input inspection before admission. They do not call recursive workspace
+inspection. Runner creates the pending record with null provider receipts, then
+publishes creation activity and the durable run ID. `create` returns that admitted
+run; `run` and detached `resume` acquire execution ownership before the frozen
+canonical exclusion lease and capture controls/content with a stop-monitor signal.
+Directory audits share enclosing-worktree and overlapping-directory exclusion
+with other workflows. No admission or partial capture grants Git authority.
+
+An ordinary detached audit dispatch journals readiness under those leases before
+capture. MCP can publish its receipt while preparation is held, and exact-key
+recovery uses that readiness even after disconnect or lost receipt publication.
+Readiness acknowledges supervised preparation, not provider capability, source
+acceptance or completion. Status exposes nullable `workspacePreparation` with
+`status: "pending"`; CLI creation activity prints the identifier and supervision
+commands. Reads and waits remain observational. Stops during capture cancel
+traversal and settle only after owned work retires; an uncaptured workspace is
+never recursively inspected to settle a stop. Pause and cancellation preserve the
+pending record. A resumed pause and ownerless recovery reuse its declarations
+and exact input evidence without resolving configuration or selecting sources
+again. Only complete capture publishes a binding; capability validation precedes
+native role work. Other pipelines and legacy completed audit bindings retain
+their existing lifecycle.
 
 Common envelope version 24 adds a nullable immutable `workspace` binding. New
 runner-created runs save their selected kind, lease policy and canonical key;
@@ -2220,8 +2546,10 @@ argument binding. Its intent reserves the request selector and canonical
 origin, store path and directory identity, issue ID, creation time, document
 hash, and a private temporary name before publication. A saved selector maps an
 exact retry, including one naming a project subdirectory, to its verified
-canonical arguments without consulting a deleted origin. The temporary file is
-created exclusively with mode `0600`, its device, inode, and birth time are
+canonical arguments without consulting a deleted origin. Bound pending
+publications also retain their canonical origin for storage separation without
+resolving it again; replacement or deletion cannot redirect recovery. The
+temporary file is created exclusively with mode `0600`, its device, inode, and birth time are
 bound in the intent before content is written, and it is synced and hard-linked to its final
 name, which never replaces an existing file. The directory is synced and its
 identity and private ownership are rechecked before the action records a
@@ -2947,9 +3275,18 @@ isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
 that bounded proof on the consumed authorization before Git verification. After
 Git independently confirms that no commit was created, the pipeline retires the
-authorization before a later resume can issue a fresh ID. An absent marker or
-executor failure keeps the consumed authorization on the verification-only
+authorization before an eligible later resume can issue a fresh ID. An absent
+marker or executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
+Claude validates the exact boolean readiness shape before its value and emits
+only the finite provider-neutral [readiness diagnostics](product/PROVIDER_MODEL.md#isolation-and-effects).
+Execution carries the class through the consumed rejection and retired
+`commit_failed` pause. Classified readiness refusals preserve the reviewed
+candidate and offer separately authorized follow-up, with no same-run COMMIT
+retry or readiness-output correction. CLI and MCP share the fixed constraint,
+class evidence and null public resume state; legacy classless recovery remains
+unchanged. An interrupted verification still reconciles the consumed effect
+before applying that disposition, never reinvoking readiness or the executor.
 Polishing has no commit authorization and preserves the initial `HEAD`, refs,
 remotes, and Git identity through completion.
 
@@ -2976,6 +3313,18 @@ infrastructure stays globally fingerprinted. The persisted schedule must match
 its role evidence; only a confirmed current-step amendment may overlay the
 active inventory. Verified advancement clears that amendment and prior gates
 and selects the next schedule entry.
+
+An amendment can add an exact selected trusted command originally assigned
+elsewhere. Finalization normalizes against the full frozen selected catalog,
+requiring `NOT_RUN` even for newly proposed entries. Its normal, correction and
+reconstruction prompts retain that complete reservation list, as does terminal
+confirmation. `validation-schedule.js` intersects the resulting explicit
+candidate inventory with the frozen selection for execution; it never runs all
+future checks automatically. Original vectors, capabilities and bindings remain
+authoritative; persisted selected results require runner provenance and the exact
+command identity.
+Only the existing distinct terminal confirmation accepts the step-local amendment;
+role inventories, later schedules, state shape and version remain unchanged.
 
 State version 27 stores that schedule as one ordered `commands` catalog and
 per-step zero-based `commandIndexes`, expanding contiguous local check IDs only
@@ -3022,8 +3371,9 @@ Finalization records its active step and exact ordered checks; terminal
 confirmation hashes the complete canonical evidence tuple. Resume validates
 both bindings before reuse. Confirmation also sees future requirements when
 assessing shared infrastructure changes. Trusted capability inspection uses the
-complete catalog and both roles' additive reports; finalization reserves and
-executes only active selected commands. The frozen snapshot, vectors, identities,
+complete catalog and both roles' additive reports. Finalization reserves the full
+selection and executes only selected entries in the explicit current candidate
+inventory, including justified amendments. The frozen snapshot, vectors, identities,
 and command/configuration fingerprints stay intact.
 
 The explicit version-22 migration retains historical unscoped evidence under a
@@ -3141,6 +3491,16 @@ scoped to the current step and request content fingerprint and is cleared when
 that content scope changes. Rejected commands, paths, values, provider text,
 and transcripts remain outside state and public activity, while interruption
 preserves the pending attempt without replaying or recounting it.
+
+Finalization normalizers attach fixed constraint identifiers to schema fields
+and trusted zero-based check/issue positions. Independent violations are collected
+within the existing 512-diagnostic bound; invalid inventories suppress dependent
+identity comparisons. Reserved checks require Worker `NOT_RUN` and Runner
+replacement before persisted acceptance. CLI and MCP share the pipeline pause
+projection, which exposes the validated first terminal finalization diagnostic
+through its existing evidence list without new recovery authority. Unknown
+provider fields retain the semantic fallback; no rejected values or exception
+prose enter diagnostic identities, and no state migration or allowance changes.
 
 Plan execution state version 9 makes user finding overrides unique by exact
 finding ID and reviewed content fingerprint and requires every finalization
@@ -3395,12 +3755,28 @@ The strict provider-neutral turn contract also accepts an optional
 and `stateRoot`, optional `taskPath`, and the workspace service's six path arrays:
 `inputPaths`, `sourcePaths`, `outputPaths`, `configurationPaths`, `artifactPaths`
 and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
-`cwd`. Each array accepts at most 256 paths. Runner storage exclusions remove
-duplicates and descendants already covered by a parent; directory requests allow
+`cwd`. Optional `inspectionPaths` contains confined canonical absolute inspection
+roots; optional `excludePaths` contains literal workspace-relative subtrees.
+Both lists are normalized, copied and frozen. Inspection roots accept up to
+10,000 entries, matching the persisted directory policy; exclusions retain their
+256-entry limit. The file-only constraint applies to every selected root.
+Optional boolean `inspectionFilesOnly` requires explicit inspection roots and
+preserves their file/link/missing restriction through both providers' workspace
+checks, receipts and reconstruction without granting new native permissions.
+Omitting both retains whole-directory inspection and the existing policy receipt.
+The workspace capability validates scope before discovery, preserving required
+reads, outputs, controls and link dependencies. The same selection binds provider
+receipts and every pre-launch/post-retirement snapshot, including reconstruction;
+neither provider derives Git membership. Exclusions narrow inspection without
+widening native read/write permissions or storage placement.
+Each ordinary path array accepts at most 256 paths. Runner storage exclusions
+contain only canonical absolute protection roots, removing duplicates and
+descendants already covered by a parent. Relative inspection exclusions are
+covered by the workspace root and never become storage declarations. Directory requests allow
 up to 1,539 exclusions for all six arrays plus workspace, task and state roots.
-Every declared root remains protected. Unknown fields, relative paths and
-directory `local-commit` requests are invalid. Execution-option validation
-remains separate: `probe` additionally
+Every declared read/output root remains protected. Unknown fields, noncanonical
+inspection/read/output roots and directory `local-commit` requests are invalid.
+Execution-option validation remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
 access for directory proofs. Unsupported adapters reject it before provider work.
 
@@ -3458,6 +3834,9 @@ or widening access to their parents; new descendants can be created inside an
 existing output directory. Mount identities come from a fresh filesystem-owned
 snapshot after storage allocation. Both launchers recheck canonical paths,
 device/inode identity, ordinary file types and single-link files before admission.
+When scoped capture omits the workspace root, its separately verified inspection
+binding supplies that read-only mount identity without capturing unselected
+content.
 Controls and external reads receive exact read-only mounts, including references
 otherwise hidden by private temporary/runtime filesystems.
 Incidental host write mounts are discarded. Provider-native Edit/Write are omitted
@@ -3829,13 +4208,29 @@ Missing `.bashrc`, `.gitconfig`, `.mcp.json`, editor directories, and `.claude`
 tooling paths must never be materialized inside a writable project bind. No project file is
 ignored, filtered from a fingerprint, or cleaned by an agent.
 
+Native turns start in a mode-0700 `native` directory within their journaled
+adapter allocation, rather than in the task workspace. The public CLI's atomic
+staging initialization can create `.claude/.cc-writes` there before any sandboxed
+tool starts; a command-only projection cannot contain that earlier effect.
+`--add-dir` declares the real workspace, and fixed system instructions require
+absolute workspace paths for file tools and reading the applicable workspace
+instructions. Native profiles, authentication and session storage stay in their
+existing locations; continuation and forks still select the exact native session
+ID. Native startup and workspace roots both receive read-only command-preparation
+reservations. Projections discard self-mounts of owned startup content and
+incidental provider write mounts, including the selected configuration directory's
+`.cc-writes`. Commands retain the real workspace cwd and the original exact
+workspace, output, input and control mounts. No source placeholder, control
+filter, additional writable mount or source cleanup is introduced. Both isolation
+probes exercise separate native/workspace cwd projection.
+
 Commands receive an empty, read-only HOME/config projection with private
 namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
 filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v3` and
-`claude-command-boundary-v9`. Old receipts cannot authorize the new policy.
+projection launcher too; the contract revisions are `claude-isolation-v4` and
+`claude-command-boundary-v10`. Old receipts cannot authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`
@@ -3848,9 +4243,10 @@ attests a trusted validation command. A provider descriptor may register one
 unique resource identity and recovery hook. The runner dispatches retirement
 cleanup through this hook without provider branches or changes to Codex.
 Live directory cleanup and recovery add current filesystem-discovered controls
-to the cleanup exclusions, even when frozen input files are missing. An
-allocation newly referenced by a control pointer remains retained until that
-overlap is resolved.
+to the cleanup exclusions using the same inspection selection and subtree
+exclusions, even when frozen input files are missing. Cleanup never falls back
+to an unrestricted workspace traversal. An allocation newly referenced by a
+control pointer remains retained until that overlap is resolved.
 
 Cleanup verifies the host, canonical private root, owner, permissions, and child
 identity, pins the root descriptor, removes only the recorded child, syncs the
@@ -4460,8 +4856,12 @@ observations and exact prefix length, then rechecks the synced prefix and
 handle/path evidence; changed or completed tails retain ownership.
 Missing or conflicting authority stays reserved.
 An orphan custody log also rejects state and ownership reads after cold canonical
-rollback; a lock-free read first reloads to recognize concurrent reservation
-publication or settlement.
+rollback. State-owned authorization permits one caller-bounded reload to recognize
+concurrent reservation publication or settlement. Activity continuation anchors
+that reload to its already proved extended snapshot through `extendSnapshot`,
+retaining the original operation's consumed-prefix proof transitively. Unavailable
+advancement or proof retains the custody refusal; file presence or an unrelated
+append cannot establish authority. Observation never repairs or removes custody.
 Neither attachment nor admission proves that the probe ran, exited, or passed.
 Canonical replay enforces reservation, immutable authority, settlement and clearing
 in order; custody transitions cannot change workflow state or validation evidence.
@@ -4662,6 +5062,26 @@ cleanup before any new work. Acquisition failures return bounded, redacted
 uncertainty preserve an `environment_blocked` FINALIZE checkpoint and never attest the check. Cancellation
 preserves the abort outcome after safe cleanup; uncertain retirement retains
 ownership and blocks settlement.
+
+Completed bounded receipts append a Runner-measured attempt elapsed-time
+sentence in milliseconds, rounded to three decimal places. The service's
+injectable clock defaults to `process.hrtime.bigint()` and is independent of
+executor deadline clocks. Measurement starts after admission and the bound
+workspace snapshot, immediately before effectful preparation; it includes
+allocation, acquisition, source projection, sandbox preparation, invocation,
+verified process retirement, resource cleanup and the final safety check.
+Preflight and capability-availability probes produce no check timing evidence.
+The sentence distinguishes blockage before executor invocation from an invoked
+executor attempt; invocation alone does not prove payload admission or success.
+The outcome sentence retains exit, signal, timeout or bounded blockage meaning.
+Cancellation, uncertain retirement/cleanup, invalid executor results and safety
+failures preserve their errors without publishing completed receipts. No command
+streams, provider text or wall-clock subtraction supply this measurement.
+Both coding pipelines retain the sentence in their existing evidence lists,
+including persistence, reload and the terminal confirmation's validation tuple;
+receipt/state shapes and command, content, configuration and infrastructure
+bindings are unchanged. Existing receipts without elapsed evidence remain valid
+with timing unknown, without migration or invented historical measurements.
 
 The finalization agent returns `NOT_RUN` only for those selected entries; after
 the agent turn reconciles, the root executor replaces each placeholder by
@@ -4888,7 +5308,7 @@ Each store instance may retain at most eight validated journal checkpoints with
 a combined 16 MiB serialized footprint (counting shared references conservatively).
 A checkpoint contains only the last two adjacent events, the current stop's
 continuity proof, segment bindings, snapshot metadata, and bounded public
-projection records. Each validated scan produces an operation-local prefix
+projection records. Each stable validated scan produces an operation-local prefix
 certificate independently of optional checkpoint admission. It binds the run,
 first and last revisions, directory identity, ordered contiguous segment names,
 and each segment's revision endpoints, file identity, and exact `[0, length)`
@@ -4897,11 +5317,17 @@ digests over every certified byte prefix and compare them to the original bindin
 The scan re-lists the recognized journal namespace before certifying its result.
 Directory device/inode, mode, and ownership must remain stable; unrelated
 choosing/ready claims and derived/control publications may change directory
-timestamps or size without changing journal history. Full before/after file
-handle and path observations, including link count and change time, must remain
-stable across consumed-byte reading and semantic validation. Timestamps alone
-grant no reuse. Changed bytes, replacement, namespace races, or unavailable
-proof invalidate reuse conservatively without extra retry allowances.
+timestamps or size without changing journal history. Certification requires
+stable full before/after file handle and path observations, including link count
+and change time, while reading the byte prefix bound to semantic validation. Timestamps alone
+grant no reuse. A full scan retains bounded operation-local capture bindings
+for the exact complete bytes read even when append or rotation prevents these
+stable closing observations. Capture is not certification: canonical validation
+must prove the original digests, file and directory identities, ordered segment
+prefix and captured endpoint event while validating the complete observed history.
+A later self-consistent history or equal state endpoint cannot substitute for
+that proof. Changed bytes, replacement or unavailable proof invalidate reuse
+conservatively without extra retry allowances.
 Only appended records then need normalization and continuity validation. Every
 read still rereads and validates `state.json` and proves its exact event match;
 snapshots older than the retained adjacent pair require complete replay.
@@ -4930,21 +5356,60 @@ an owner's append or rotation from an edit, so they stay unchanged. When a
 lock-free page's drain fails with `ERR_INVALID_EVENT_LOG`, the journal's
 `extendSnapshot` reloads through the original certificate as publication proof:
 every original binding's digest, identity, link count and stable observation,
-the recognized namespace, and continuity of the appended records. Only a
-certified snapshot with a strictly later revision, passing the same custody and
-state-root checks, permits exactly one second drain under the same cursor and
-limit rules. Proof is unavailable only for `CheckpointInvalid`, which includes
+the recognized namespace, and continuity of the appended records. If append races
+this reload itself, observation alone may retain the complete consumed-byte
+capture under unchanged file identities and controls with a growing active
+segment. It must then drain a separate stable exact-prefix verification of all
+those bytes, binding the semantic validation to that same endpoint. This final
+verification requires the exact captured segment namespace; unvalidated rollover,
+including a newly sealed partial tail, cannot certify the raced scan. Changed
+bytes or unavailable or unstable final proof still fail strictly. No raced
+capture becomes a reusable checkpoint, and the finite continuation limit remains
+unchanged. Only a certified snapshot with a strictly later revision, passing the
+same custody and state-root checks, permits another drain under the same cursor
+and limit rules.
+If fully published custody appears after extension capture, authorization may
+extend that same snapshot once more before reapplying its checks. This reload
+must prove all preceding bindings and validated history through its own endpoint;
+an unconstrained cold load cannot replace the original operation's proof.
+Concurrent settlement uses the same bound. If the reloaded snapshot still lacks
+preparation authority while custody is observed, authorization fails without
+another reload.
+A page permits two such continuations (three drains). Each extension uses the
+preceding operation-local certificate, preserving the original run identity and
+every original byte binding transitively; optional checkpoint replacement or
+eviction grants no new proof. If the third drain fails, the same extension proof
+and authorization are still required before returning the typed
+`RunObservationBusyError` (`ERR_RUN_OBSERVATION_BUSY`, `retryable: true`). No
+partial page or cursor escapes, and only a new explicit observation starts a
+new bound. Proof is unavailable only for `CheckpointInvalid`, which includes
 a certificate-bound segment that can no longer be opened safely; then the
 original error is rethrown. Every other extension failure, such as runtime
 version skew, invalid or unsafe state, a filesystem or programming error, and
-any authorization or second-drain failure propagates. The extension writes
-nothing, takes no lease and populates no checkpoint.
+any authorization failure propagates. Changed bytes, rollback, substitution or
+unavailable proof never receive the retryable classification. The extension
+writes nothing, takes no lease and populates no checkpoint.
+
+When the first drain instead lacks certification because its full scan raced
+with publication, extension uses that scan's original capture bindings and
+endpoint. It repeats complete semantic validation rather than treating the
+capture as a reusable checkpoint. Only a certified strictly later revision
+enters the same continuation loop; certification adds no retry allowance.
+Append during cold capture, canonical recertification and extension can therefore
+continue through the same bound. The final stable byte proof may certify a
+consumed endpoint preceding the latest publication; its activities and cursor
+remain bound to that endpoint, with later activity available to a subsequent read.
+Canonical certification at an unchanged endpoint also requires the original
+capture proof. A returned page always pairs its activities and cursor with the
+same snapshot; certification never silently replaces it with newer activities.
 
 Progress publication uses retained records when they cover the complete run;
 overflow uses the same certified record stream with identical text. An
 operation-local certificate survives cache eviction or oversized checkpoint
-rejection. Missing bindings require one bounded canonical scan to certify the
-same snapshot before projection streaming; unavailable proof rejects publication.
+rejection. Missing certification requires one bounded canonical scan through
+the original capture to certify the same snapshot before projection streaming;
+missing capture evidence rejects publication. Publication and recovery cannot
+adopt a later endpoint through observation continuation.
 Certificates cover only complete consumed records, so partial tails stay
 uncached while their complete prefix can still serve a verified projection.
 Publication certifies the appended event before callbacks, then checks its
@@ -4982,7 +5447,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 24 (`1:24`); legacy runs require an explicit leased migration publishing
+version 26 (`1:26`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.
@@ -5089,6 +5554,18 @@ Pipelines own the artifact location, prompt, round limit, transition out of
 `CLARIFY`, and safe re-entry after an exceptional product decision. This is a
 bounded preparation protocol, not a general chat or dialogue engine.
 
+The transcript reader retains its existing error codes and 1 MiB limit. Its
+size and regular-file/single-link guards add optional `constraint` metadata of
+`file_size` or `isolated_regular_file`, respectively. Other path, read, decoding
+and write failures retain their existing handling; these tags grant no edit,
+retry or continuation authority.
+
+`writeEditAnswers` accepts an optional Runner-owned `inspectRead` callback. It
+wraps only the initial transcript inspection and the confined replacement
+recheck, before any write. Answer validation, replacement effects and post-write
+readback remain outside that callback. Callers without it retain the existing
+error and exact-hash replay behavior.
+
 Before the first clarification turn, the runner creates the Markdown artifact
 when missing and otherwise preserves its existing transcript. Keep the format
 intentionally simple: the runner appends questions without rewriting prior
@@ -5181,6 +5658,9 @@ that directory and its relative declarations; the enclosing repository supplies
 only its canonical exclusion key. Commit selection canonicalizes the workspace
 and retains the exact selected configuration file. The configuration boundary
 resolves preliminary settings without requiring project-supplied role backends.
+It validates individual values without applying relationships to an incomplete
+runner/override combination; effective settings are validated after the project
+overlay and overrides are merged, before binding, capture or provider work.
 Artifact binding checks the final merged declarations for overlap with inputs,
 sources and configuration; preliminary discovery cannot reject declarations
 superseded by project overrides. Directory bindings also protect inputs,

@@ -164,6 +164,23 @@ test("loads only ignored confined project configuration files", async (t) => {
   );
 });
 
+test("only explicit absent configurations carry trusted missing-file metadata", async () => {
+  const projectPath = join(tmpdir(), "agent-runner-absent-config");
+  const options = {
+    projectPath,
+    inspectPath: async ({ path }) => ({ path, exists: false }),
+    runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+  };
+  assert.equal(await loadProjectConfiguration(options), null);
+  await assert.rejects(
+    loadProjectConfiguration({
+      ...options,
+      configurationPath: "selected.json",
+    }),
+    { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "missing_file" },
+  );
+});
+
 test("guards project configuration content, identity, links, and ancestors", async (t) => {
   async function fixture(name) {
     const projectPath = await mkdtemp(
@@ -282,7 +299,10 @@ test(
           JSON.stringify({ schemaVersion: 1, defaultBackend: "codex" }),
         ),
       }),
-      (error) => error.code === "ERR_PROJECT_CONFIGURATION_READ",
+      {
+        code: "ERR_PROJECT_CONFIGURATION_READ",
+        constraint: "isolated_regular_file",
+      },
     );
   },
 );
@@ -338,3 +358,27 @@ test(
     }
   },
 );
+
+test("oversized configuration retains the bounded read constraint", async (t) => {
+  const projectPath = await mkdtemp(
+    join(tmpdir(), "agent-runner-config-size-"),
+  );
+  t.after(() => rm(projectPath, { recursive: true, force: true }));
+  const configurationPath = join(projectPath, PROJECT_CONFIG_FILENAME);
+  await writeFile(configurationPath, Buffer.alloc(1024 * 1024 + 1));
+
+  await assert.rejects(
+    loadProjectConfiguration({
+      configurationPath,
+      inspectPath: async () => ({
+        exists: true,
+        path: configurationPath,
+        relativePath: PROJECT_CONFIG_FILENAME,
+      }),
+      projectPath,
+      workspaceKind: "directory",
+      runnerConfiguration: parseRunnerConfiguration('{"schemaVersion":1}'),
+    }),
+    { code: "ERR_PROJECT_CONFIGURATION_READ", constraint: "file_size" },
+  );
+});

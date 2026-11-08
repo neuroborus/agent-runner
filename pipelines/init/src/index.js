@@ -5,6 +5,10 @@ import { assertInitRun, createInitState, INIT_MODES } from "./workflow.js";
 import { defaultExternalRoot } from "./inspection.js";
 import { runInit, inspectInitWorkspace } from "./lifecycle.js";
 import { initProjections, validateResumeAction } from "./projections.js";
+import {
+  initInspectionFailure,
+  inspectInitOperation,
+} from "./inspection-failure.js";
 
 export { inspectInitSetup, selectInitPlacement } from "./inspection.js";
 export { InitProposalError } from "./proposal.js";
@@ -37,10 +41,32 @@ const ROLES = Object.freeze(["planner", "reviewer"]);
 const LAZY_ROLES = Object.freeze(["planner"]);
 export const initPipeline = Object.freeze({
   id: "init",
-  stateVersion: 1,
-  migrations: Object.freeze({}),
+  stateVersion: 2,
+  // Existing evidence and its binding algorithm remain authentic. Reinspection
+  // follows the saved inspection version; migration grants no new allowance.
+  migrations: Object.freeze({
+    1: ({ pipelineState }) => structuredClone(pipelineState),
+  }),
   setup: true,
   inspectWorkspace: inspectInitWorkspace,
+  inspectOperation: inspectInitOperation,
+  inspectionFailure(run, cause, phase) {
+    if (run.pause != null) {
+      // Inspection may diagnose a retry, never replace a blocker, a submitted
+      // answer receipt or the one-shot restoration of an operator checkpoint.
+      if (
+        run.pause.reason === "operator_paused" ||
+        run.pause.inputResponse !== undefined
+      )
+        return null;
+      try {
+        validateResumeAction(run, null);
+      } catch {
+        return null;
+      }
+    }
+    return initInspectionFailure(run, cause, phase);
+  },
   projections: initProjections,
   validateResumeAction,
   description:
@@ -110,6 +136,7 @@ export const initPipeline = Object.freeze({
   runOptions: Object.freeze(["project", "task", "mode", "placement", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   workflow: Object.freeze({
+    nonResumableStates: Object.freeze(["FAILED"]),
     createState: createInitState,
     run: runInit,
     validateRun: assertInitRun,

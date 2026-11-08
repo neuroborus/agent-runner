@@ -20,10 +20,74 @@ resume read-only and keep their consumed accounting.
 
 ## Ordinary gate
 
+Fast `test/state/workspace-preparation.test.js` owns bounded pending admission,
+frozen declarations/inputs/identities, complete binding publication, interrupted
+capture and write-ahead recovery, replacement ownership, stale capture rejection,
+and concurrent pause/cancel settlement. Cold recovery rejects discarded
+absent-input evidence and missing parent bindings for absent nested inputs;
+replacement of a retained input parent blocks recapture. It uses isolated ordinary directories,
+controlled callbacks and process identities with real journal/lease publication;
+no providers, sleeps or host process census. Legacy version-24 migration retains
+completed bindings without manufacturing preparation. Common-envelope changes
+also retain state persistence/operator-stop, affected orchestration and legacy
+migration slow coverage and release-pack validation; these focused fixtures do
+not replace those gates or prove pipeline activation.
+
+The same state suite owns one-time Git membership publication before capture,
+malformed-selection rejection, lost publication recovery without reselection and
+journal substitution rejection. The optional selection uses common envelope 26;
+compatibility changes also require the release-pack slow check.
+
+Fast `test/runner-preparation.test.js` owns deferred audit activation through
+real state and workspace services: bounded creation/boundary validation,
+CLI identity before held traversal, cancellation without provider work,
+pause/resume and interrupted capture from frozen inputs, substitution rejection,
+detached readiness before capture and lost-receipt recovery after disconnect,
+and canonical/overlapping lease contention. Controlled events propagate early
+outcomes and always release/settle held operations; there are no sleeps or live
+providers. Existing orchestration, CLI/MCP workflow/control, state/operator-stop
+and effect-recovery slow suites retain their cross-capability coverage.
+
+That preparation suite also covers explicit Git selection through held capture,
+pause and cold resume, complete unchanged/ignored-tracked/dirty/deleted/untracked
+membership, scoped provider requests, unchanged Git state and later membership
+drift rejection. Ordinary-directory completion proves opaque exclusions, frozen
+public/report context and deliberate directory-origin issue capture. A version-25,
+audit-version-6 pending fixture resumes without changing settings or budgets.
+Audit publication coverage separately preserves completed legacy report bytes,
+acceptance receipts and histories. Existing workspace/provider suites retain
+control/input/link confinement, corruption and read-only effect denial. CLI,
+configuration and MCP tests cover field mapping, precedence and strict settings.
+Admission coverage includes a project scope override that makes CLI exclusions
+valid despite a different runner default, while invalid final combinations and
+individual paths still reject before traversal or probing. The directory
+completion case passes Runner's request through both real adapters' normalization
+and filesystem preparation, using a controlled CLI-capability failure before any
+provider invocation; relative exclusions never enter storage protection. Both
+provider suites cross 256 inspection roots through scoped receipt preparation and
+reject a directory substituted for the final file-only root, retaining the 10,000
+inspection-root bound and the 256-path bounds on other declarations.
+The final integrated change requires the complete slow gate; these focused cases
+do not attest unrun slow or opt-in live-provider acceptance.
+
 `npm run check` runs formatting verification, the fast test tier, and CLI help.
 Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
+
+Fast `test/trusted-timing.test.js` uses an injected monotonic clock and executor
+to distinguish outcomes, pre-invocation blockage, preparation-only availability,
+rejected admission and incomplete/unsafe attempts without sleeps or wall-clock
+assertions. `test/trusted-storage.test.js` binds the interval to real resource
+publication, controlled process retirement, cleanup and the final safety check;
+uncertain cleanup cannot publish a receipt. The execution pipeline's
+`trusted-timing.test.js` carries a real service-generated receipt through saved
+state reload and terminal confirmation, rejecting changed tuple evidence without
+rerunning the check. Existing unmeasured receipt and legacy fixtures remain
+valid. These cases do not attest the orchestration, CLI/MCP workflow/control,
+operator-stop, effect-recovery, legacy-compatibility or release-pack slow gates.
+Use available Runner measurements for the advisory target and keep unavailable
+historical/controller timing unknown; never rerun only for missing telemetry.
 
 Fast `test/runtime-payload.test.js` owns complete manifest/dependency/resource
 inspection, read-only modes, isolated storage, interrupted and concurrent
@@ -198,7 +262,10 @@ migration dispatch and argument validation without creating a runner.
 Fast `pipelines/audit/test/report.test.js` owns the pure audit report contract:
 strict evidence/examples and classification values, shared-cause consolidation,
 stable severity/ID ordering, optional recommendations, separate uncertainty,
-zero findings, and safe catalog-derived Markdown. It uses no providers,
+zero findings, safe catalog-derived Markdown, and bounded sanitized semantic
+diagnostics. Discovery/recheck fixtures verify role-field locations and exact
+fingerprint rejection; the Codex schema compatibility fixture includes audit.
+Report coverage uses no providers,
 processes, Git repositories, or temporary storage.
 Fast `pipelines/audit/test/discovery.test.js` owns frozen scope, read-only discovery,
 lazy/independent session isolation, duplicate/revised candidates, pending-batch
@@ -206,6 +273,8 @@ blocking, invalid/incomplete output, drift, write-ahead interruption and finite
 exhaustion recovery using injected root capabilities. It also covers the two-MiB
 role-result limit, complete frozen inputs/findings in fresh discovery prompts and
 propagation of unsettled execution ownership.
+Discovery also covers persisted clarification/discovery correction feedback,
+replacement, checkpoint confinement and rejection of unsafe diagnostics.
 Fast `pipelines/audit/test/verification.test.js` owns all five finding dispositions,
 fresh independent versus continuing lazy rechecks, review additions, retained
 rejections, version invalidation, stale/malformed/incomplete output, interrupted
@@ -213,6 +282,9 @@ reservations, exact acceptance recovery, Auditor-only legacy migration/resume
 without fabricated approval or role expansion, and run-wide recheck exhaustion.
 It shares injected effect-free fixtures with discovery through the pipeline's
 test support index.
+Recheck feedback coverage preserves pending dispositions and prior rejection
+history across lazy/independent resume and the version-5 migration; combined
+coverage keeps an invalid Reviewer's original clean-first accounting.
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
 same-Auditor batch convergence, correcting Reviewer continuity/additions and
@@ -229,6 +301,10 @@ provider structured-output failures remain resumable invalid passes. The actual
 transition normalizer proves persistent field/collection overflow is rejected
 before acceptance without reducing the two-MiB aggregate role allowance. No provider
 or Git process is needed for those policy tests.
+The same lightweight fixture verifies normalized feedback persistence and matching
+sanitized CLI/MCP pause evidence without a new storage or provider integration.
+Terminal provider fixtures retain registry-normalized classes, unknown/legacy
+absence and redaction, rejecting unsupported classes and contradictory pauses.
 Fast `pipelines/audit/test/publication.test.js` owns escaped report-size rejection
 before ledger acceptance and resumable retry, exact confirmed/pending
 projection, zero/Critical findings, all-mode completion, lost publication
@@ -237,6 +313,12 @@ Fast `test/runner-audit-publication.test.js` owns public Runner/CLI metadata and
 MCP report projection for Git and ordinary directories, plus actual
 confined artifact replacement, exact-byte and partial-write recovery without
 replaying accepted discovery, edits and temporary/alias substitution rejection.
+Its ordinary-directory terminal case reconstructs a failed audit from the real
+journal and checks matching CLI status, MCP status/wait and safe activity without
+replaying discovery or report publication on terminal continuation. Unexpected
+provider probes and agent turns are rejected after terminal failure.
+Changed and missing protected configuration preserve the exact terminal run,
+diagnosis and revision without provider or report-publication calls.
 The slow `test/mcp/control-plane.slow.test.js` suite owns actual audit MCP
 start/respond with optional and material clarification and persisted interactive
 CLI editor windows. These real journal/action/lease cases remain outside the fast gate.
@@ -261,7 +343,17 @@ configuration/ancestor identities. Pointer-resolved Git metadata, including
 nested control dependencies and state-ancestor pointers, and canonical ancestor
 provider alias targets cannot become external publication destinations.
 Existing guidance content, editor and publication suites retain integrated ignore,
-byte-limit and inode-provenance coverage. The content-and-safety suite also owns
+byte-limit and inode-provenance coverage. The content-and-safety suite owns absent
+bootstrap reads without ignore rules, strict edit/update rejection, deleted tracked
+guidance and appearance/disappearance during read reinspection. It also covers
+finite read-failure classification across guidance normalization, with unknown
+corruption, recovery and mutation failures retaining their existing handling.
+Native document/directory-open and returned pinned-directory verification failures
+exercise the actual guidance helpers, including transient rejection, vanished
+resources and unknown I/O codes. Descriptor-close failures retain unclassified
+cleanup handling.
+MCP guidance coverage compares CLI/MCP bootstrap reads with complete unchanged source/control
+snapshots and no local or state creation. The content-and-safety suite also owns
 integrated guidance beside an internal provider-control directory alias in Git
 and ordinary directories, protected rejection after retargeting that alias to the
 destination, and the controls diagnostic for an escaping alias. Publication tests also cover legacy
@@ -269,6 +361,13 @@ worktree-relative receipt recovery from Git subdirectories, including incomplete
 published intents. Current external actions reject changed selector identities
 rather than adopting legacy resolution. MCP guidance tests cover the same
 selection through its thin transport.
+
+Fast configuration loading and clarification lifecycle coverage own the existing
+bounded-file guards' finite constraint metadata while retaining their error
+codes. Configuration coverage also distinguishes explicit missing-file metadata
+from valid implicit absence. These read-contract fixtures establish no init pause/resume behavior or
+live-provider acceptance. Guidance integration changes also require the
+registered init slow suite; runtime-resource changes retain release-pack coverage.
 
 Fast `test/runner-configuration.test.js` covers relative external selectors in
 polishing and external project commit selections overriding runner custom
@@ -339,6 +438,12 @@ read/ancestor races. It also owns bounded internal provider-control directory
 aliases: canonical target protection, full-inspection alias-binding rejection,
 control-specific escaping, dangling, cyclic, file, FIFO, parent, Git-metadata,
 Git-link and state-overlap rejections, and target replacement during resolution.
+Scoped fixtures reject reads of excluded/unselected trees through both ordinary
+and descriptor paths, preserve protected inputs/controls and required link
+dependencies, bind reconstructed selections and routing identities, and cancel
+discovery/file hashing with verified handle closure and bounded anonymous progress.
+`test/workspace/output-directory.test.js` retains ordinary output preparation and
+scoped output authority independently of source selection.
 Temporary directories and injected filesystem effects need neither Git nor live
 providers. Workflow/provider integration remains separately owned as those
 consumers land. Fast `test/agents/codex.test.js` owns the public adapter's
@@ -358,6 +463,22 @@ the operator-owned post-install Claude acceptance below remains separate.
 Retiring completed and failed turns retain Claude allocations when changed
 control pointers reference storage or cannot be inspected, then permit the same
 owner to clean up after restoring controls without replaying the turn.
+Controlled 2.1.317-style initialization runs through the adapter's actual launch
+options before the tool launcher, proving unchanged ordinary-directory sources,
+controls and selected inputs, private mode-0700 atomic staging, separate command
+cwd, continuation and retained allocations pending process retirement. It covers
+missing controls and existing user bookkeeping without reading native provider
+storage. This is model-free regression coverage, not live-provider acceptance;
+version/help output does not prove native read-only behavior.
+
+Scoped public-adapter fixtures use malformed control pointers and dangling links
+inside excluded and unselected trees to reject unrestricted preparation or
+verification. They bind receipts to inspection roots and exclusions, preserve
+frozen scope through reconstruction despite caller mutation, reject selected
+source/control drift and protected exclusions, and exercise Claude cleanup with
+missing inputs under the same scope. Scoped mount preparation uses the verified
+workspace binding even when capture omits that root. Omitted-scope fixtures retain
+the existing native initialization and whole-directory contracts.
 
 Fast `test/runner-directory.test.js` owns descriptor-selected Git-independent
 lifecycle composition: access-specific probes, frozen policy/configuration,
@@ -561,6 +682,20 @@ test to this tier merely because it fails or has a slow fixture: first remove
 redundant setup and use lightweight effects for policy. Pure migration
 validation remains in the fast tier.
 
+MCP control-plane and Runner orchestration fixtures race expected events against
+their owning operations so early fulfillment or rejection propagates instead of
+leaving an event wait pending. Teardown settles held operations, callbacks and
+leases even after an assertion fails. Provider-activity teardown retires its
+synthetic process, observation and active turn under the currently held lease,
+including after replacement acquisition. Injected failures preserve the original
+error and prove fresh lease acquisition. The existing protected-configuration
+stop race and stop/recovery assertions remain unchanged; these fixture corrections
+change no production lifecycle or inspection diagnosis.
+
+The state operator-stop suite's interrupted checkpoint matrix also verifies
+atomic retirement of active observations before publication, alongside the
+saved stop outcome and exact receipt replay.
+
 ## Finalization
 
 The fast `pipelines/init/test/proposals.test.js` suite owns the pure
@@ -583,6 +718,25 @@ It also accepts an absent sibling covered by an enclosing task-tree snapshot.
 The proposal suite also keeps external finalization references limited to the
 target's finalization skills, without invoking unrelated inventoried skills.
 That proposal suite establishes no CLI/MCP setup, durable publication or native-provider acceptance.
+
+Fast `pipelines/init/test/inspection-failure.test.js` owns finite inspection
+constraints, complete over-capacity document rejection, redaction, strict pause
+validation, trusted bounded-file constraint mapping and narrow transient recovery
+policy, without filesystem/provider work. Clarification lifecycle coverage checks
+the existing transcript-size guard's constraint; configuration loading coverage
+checks the regular-file guard while preserving its existing read-error code.
+
+Fast `test/workspace/setup-proof.test.js` constructs complete snapshots beyond
+10,000 entries to prove compact persistence, exact publication allowances,
+deferred-temporary absence, missing-coverage rejection and source/input/control/
+link drift protection. `pipelines/init/test/inspection-proof.test.js` owns bounded
+role projection in both placements, beyond-cap source and selected-input drift,
+explicit destination evidence, additive reinspection, and authentic version-1
+hash/approval migration without renewed accounting. These pure fixtures create
+no source files or provider turns. Proof-version changes require the ordinary
+gate, both init publication slow suites, registered init lifecycle, orchestration,
+state persistence/journal compatibility and release-pack coverage; the focused
+fixtures replace none of those gates.
 
 `pipelines/init/test/integrated-publication.slow.test.js` owns real-Git ignore
 semantics and durable multi-resource publication through the public workspace
@@ -607,8 +761,28 @@ before publication intents or writes and rechecks them during recovery.
 It verifies subsequent configuration/finalization selection and
 unchanged Git and ordinary-directory targets, with no ignore inspection or
 provider activity. Run it when changing external init publication or its confined
-resource policy. Both publication suites belong to the complete slow tier;
+resource policy. Both publication suites belong to the complete slow tier.
+The external suite also injects complete large-source evidence around real
+publication effects, proving bounded durable baselines and rejection of changes
+beyond the former inspection cap before effects. Lost-root-receipt recovery
+covers both compact records and real version-1 bindings through migration,
+preserving identities, accepted approvals and accounting.
+
 `test/runner-init.slow.test.js` owns registered lifecycle composition: both
+placements' terminal provider failures, including early clarification/proposal,
+review/self-confirmation, repairs over prepared baselines and failed terminal
+confirmation retaining publication. Controlled failures cover exact reservation
+retirement, strict state reload, registry normalization/redaction, consumed
+fork/revision/reconstruction accounting, disposition precedence, failed retirement,
+callback persistence, outcome writes and activity publication. A foreground CLI
+case holds a real shared MCP wait through provider rejection and owner release;
+fresh/held waits and status share the durable unsuccessful diagnosis. These
+cases use model-free adapters and events without sleeps. Fast proposal tests own
+matching reservation/terminal shape policy and legacy absence; registry tests own
+boundary-only safe diagnosis. Fast session-naming coverage preserves Runner
+callback errors through wrapped/swallowed native failures. These focused cases
+do not attest unrun Runner-owned or live-provider checks.
+The registered lifecycle suite also covers both
 placements crossed with all three modes, proven unused source-fork recovery
 without repeating possible effects, guidance-last publication, distinct
 terminal confirmation, CLI/MCP setup projections, repeatable guidance,
@@ -622,7 +796,46 @@ intervening guidance edits, authorized pre-closure read-scope extension, and
 retired terminal-turn recovery with identity-sensitive provider receipts, frozen
 backend authority, and identical-byte guide substitution after a lost acknowledgement.
 It also owns stop settlement during reserved proposal turns and clarification
-windows, interrupted question/decision publication, structured decision answers
+windows, pre-provider inspection rejection with zero provider/publication effects,
+durable CLI/MCP status/wait diagnoses, start and exact-key ownerless resume receipt
+replay, stale/live-owner rejection, transient unchanged-input recovery, post-turn
+and additive reinspection rejection, and one-time inspection/stop races before
+and during a reserved turn, including canonical
+ownership acquisition after a recovery diagnosis. Further cases cover
+editor authorization, authorized close and runtime adapter preparation/verification
+rejection, initial oversized transcripts, and bounded/non-file configuration rejection during
+additive reinspection without accepting partial evidence or publishing resources.
+Append pre-read failures cover question and product-decision diagnosis and
+same-request resume without duplicate sections or renewed accounting; write-error
+interruption cases retain exact journaled replacement recovery. A fail-once
+proactive preparation case requires authorization and an unchanged close before
+provider work. The pure shared-clarification case checks that proactive completion
+and the pending authorization are recorded together.
+Initial task/context read failures retain an unstarted durable pause and verify
+single initial capture on unchanged-input resume. Prepared-configuration read
+rejection retains verified prerequisite receipts and resumes only guidance and
+terminal confirmation.
+Actual guidance-service control inspection and native directory-open failures
+after prerequisite publication also cross normalization into a durable diagnosis, preserving
+accepted receipts, selection and approvals before guidance/terminal recovery.
+Returned directory verification covers trusted `ERR_GUIDANCE_STORAGE` metadata
+through the same registered lifecycle. A selected integrated configuration
+disappearing between discovery and loading retains the prior inspection and
+produces a non-resumable diagnosis without provider or publication effects.
+Foreground admission coverage observes the diagnosis while both execution and
+workspace owners remain held, then checks release and
+resume; input-submission coverage rejects acknowledgement of unwritten answers
+after canonical validation, complete source-proof or clarification pre-read
+rejection.
+Shared clarification coverage separates initial/replacement reads from write and
+post-write readback failures, preserving bytes and exact answer replay. Blocked
+and exhausted init checkpoints retain their original diagnosis through failed
+recovery, reload and rejected resume; pure validation rejects an inspection
+pause over their state. Publication preparation read rejection retains approvals
+without reserving an effect.
+Proposal-policy source-read rejection remains distinct from invalid provider
+content; persistent inspection rejection during stop settlement retains diagnosis.
+It retains interrupted question/decision publication, structured decision answers
 with frozen selections and renewed gates, and concrete CLI/MCP blocker projections.
 Successful inactivity and provider-requested reconstruction cover both proposal
 and terminal confirmation; interrupted second attempts retain consumption and
@@ -637,7 +850,10 @@ It uses neutral directories,
 fake providers and a controlled directory publisher; the workspace tests retain
 native publication safety ownership. Run it for init lifecycle, setup lease or
 guidance integration changes, in addition to the affected prerequisite suites.
-Provider/native-platform acceptance remains opt-in.
+Provider/native-platform acceptance remains opt-in. Inspection-stop changes also
+affect CLI/MCP workflow and control-plane
+slow coverage, release packing and separate installed-package acceptance; the
+complete slow gate remains required for integrated acceptance.
 
 The fast configuration finalization-file suite owns confined reads and file,
 target and ancestor substitution. `test/runner-finalization.test.js` composes
@@ -665,6 +881,20 @@ Keep the ordinary gate as `npm run check`; never fold slow matrices into it.
 The fast execution `validation-schedule.test.js` uses injected effects to cover
 two-step selection in all modes, persisted reload, confirmation reuse, and
 migration of pending rework and correction accounting.
+Its selected-check amendment fixture follows candidate acceptance, terminal
+evidence rejection, bounded correction, amended execution and independent
+confirmation across reloads. It verifies full-catalog reservation, explicit
+candidate-only execution, unchanged later schedules and exact persisted executor
+identity; unselected placeholders and selected agent attestations remain invalid.
+The existing CLI workflow slow suite retains cross-capability execution coverage.
+Fast execution `finalization-diagnostics.test.js` covers field/constraint
+redaction, bounded independent batches, ordered check identity, reserved
+placeholders, distinct corrections across interrupted reconstruction, Runner
+replacement and terminal public evidence. Repeated, mixed and exhausted batches
+retain the finite ledger. Existing contract/custom fixtures retain strict stored
+evidence and empty-inventory compatibility. These focused fixtures do not replace
+the affected journal, CLI/MCP, orchestration, recovery, release-pack, separate
+package-install and complete slow gates for the integrated repair.
 The fast execution `step-policy.test.js` covers explicit plan-contract selection,
 criterion context, analysis without an artificial diff, directory-only inspection,
 absence of custom Git effects and explicit execution entry points. Its lightweight
@@ -715,6 +945,21 @@ public Git service; measurement itself runs no tests or agents and changes no
 index or history. Adding this unused capability does not change workflow,
 migration or effect ownership and requires no durable slow workflow matrix.
 
+The fast Git `source-selection.test.js` suite owns complete HEAD/index and
+non-ignored untracked membership, missing tracked paths, index-hidden worktree
+content, ignored-tree non-visitation through workspace capture, unchanged Git
+controls/index bytes, literal names, links, unsupported recursive boundaries,
+unborn/non-Git directories and controlled membership publication races. It uses
+isolated repositories and the public Git/workspace services without providers.
+Controlled file and missing-leaf replacements at handoff, discovery and capture
+assert zero descendant reads, including reconstructed declarations and absolute
+links entering a selected missing root replaced during capture. Valid absolute
+file links retain root dependency evidence. Provider
+receipt fixtures separately bind the optional file-only constraint and reject
+malformed declarations before activity.
+This capability does not activate pipeline scope selection or change run state;
+workflow and durable preparation coverage remains with their owning changes.
+
 The fast state `journal-checkpoints.test.js` suite owns namespace certification:
 real repeated choosing/ready claims during controlled directory observations
 must preserve unchanged-prefix reuse, while cold reads validate every event.
@@ -736,15 +981,60 @@ and legacy/redaction equivalence retain their original-prefix checks. A controll
 historical edit during lagging-snapshot matching also proves that canonical
 validation cannot replace the original publication certificate. A one-shot
 file-handle hook awaits a real lease-owner transition after a drain's stream
-opens: retained and overflow pages reread once with exact cursors, a second
-publication during the reread rejects, and a same-length restored-mtime prefix
-edit beside a real publication still rejects. A negative table proves that
+opens: retained and overflow pages continue with exact cursors. The real MCP
+wait and Runner status path also exercises two publications in successive drains
+for a new warm wait, a held wait with cold activity proof, and an evicted
+checkpoint. These controlled interleavings reproduce the formerly generic
+second-drain failure; they do not establish the historical interleaving.
+Three raced drains require one more certified extension before returning typed
+retryable exhaustion. A same-length restored-mtime prefix edit beside a real
+publication still rejects, including during the third drain after a nested
+reader caches the edited history. Unavailable proof during that continuation
+also rejects. The fast MCP control-plane suite checks the typed structured tool
+error for both observation tools, without automatic retries or code-based
+classification of an unproved failure. A negative table proves that
 runtime version skew, malformed state, a hard-linked state file and injected
 `EIO` and `TypeError` failures found by the extension propagate instead of the
 original read error, while the overflow hard-link case stays unavailable proof.
 The state slow suite's bounded-heap journal case also covers overflowed
 projections, complete progress, old cursors and repeated transitions across
 segments.
+
+Full-scan certification cases retain consumed-byte capture evidence when a
+lease-owner publication follows the actual read, and when append or a small
+legal rotation follows decoding during semantic validation. Cold, evicted and
+oversized unretained checkpoints exercise public page/cursor pairing; a cold
+full-scan MCP wait reaches the real Runner status and activity consumers.
+Both certified and full-scan starts retain the three-drain exhaustion bound.
+Additional controlled owner publications during capture, canonical recertification
+and extension exercise warm, cold, evicted and overflow pages. A separate stable
+consumed-prefix proof binds the raced extension's activities and cursor, even
+when canonical state is already later. Repeated raced extensions exhaust the
+existing bound only after that proof; observations leave all canonical journal,
+state and progress bytes unchanged. Original-prefix and newly consumed extension
+edits, file controls, hard links, namespace gaps and a newly sealed incomplete
+tail remain strict rejections. The real MCP activity/wait, Runner and cold CLI
+status consumers share these fixtures without sleeps, polling or providers.
+Custody-inspection hooks publish a complete reservation after a proved extension
+capture, comparing initial capture, warm reuse, cold settlement, eviction and an
+overflow page that must still drain its unread prefix. Exact pages and cursors
+remain paired; canonical journal, state, progress and custody bytes stay unchanged
+after owner publication. Repeated reservation/settlement preserves the three-drain
+bound, and another reservation at the once-only reload is refused. Distinct
+orphan and rolled-back custody survive unrelated advancement; edits to original
+or newly consumed bytes, changed controls and an unsafe hard link cannot obtain
+a replacement proof.
+Shared MCP activity and new/held waits consume the repaired schedule through real
+Runner/store calls, with exact progress consumption and a controlled client
+deadline rather than a fabricated terminal run.
+Activity edits with restored mtime at equal and advanced endpoints,
+file/directory replacement, namespace gaps and changed file controls cannot be
+certified by a later valid scan. Recovery and append reject a captured endpoint
+superseded by publication without changing canonical bytes. These callback-controlled cases establish
+the repaired contract, not the unavailable historical stack. The affected
+state/operator-stop, Runner operator-stop, legacy confirmation/migration,
+MCP control-plane, CLI/MCP workflow, orchestration, effect-recovery and
+release-pack slow checks remain required at finalization.
 
 The fast state `recovery-failures.test.js` suite owns the public state boundary
 for pre-lease and pre-readiness diagnostic publication, interrupted publication,

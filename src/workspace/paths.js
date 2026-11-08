@@ -95,7 +95,11 @@ export async function readDirectory(fs, path) {
 }
 
 // Bind every existing ancestor, including ancestors above the selected root.
-export async function inspectPath(fs, path, { missing = false } = {}) {
+export async function inspectPath(
+  fs,
+  path,
+  { missing = false, allowLink = false } = {},
+) {
   const chain = [];
   for (let current = path; ; current = dirname(current)) {
     chain.unshift(current);
@@ -110,7 +114,9 @@ export async function inspectPath(fs, path, { missing = false } = {}) {
       break;
     }
     assertSafe(
-      stat.isDirectory() || stat.isFile(),
+      stat.isDirectory() ||
+        stat.isFile() ||
+        (allowLink && current === path && stat.isSymbolicLink()),
       "Workspace paths cannot contain aliases or special files.",
     );
     assertSafe(
@@ -118,7 +124,8 @@ export async function inspectPath(fs, path, { missing = false } = {}) {
       "Workspace ancestors must be real directories.",
     );
     assertSafe(
-      (await fs.realpath(current)) === current,
+      (allowLink && current === path && stat.isSymbolicLink()) ||
+        (await fs.realpath(current)) === current,
       "Workspace paths cannot traverse aliases.",
     );
     if (current === path) leaf = stat;
@@ -127,7 +134,13 @@ export async function inspectPath(fs, path, { missing = false } = {}) {
   return {
     path,
     exists: leaf !== null,
-    kind: leaf?.isDirectory() ? "directory" : leaf ? "file" : "missing",
+    kind: leaf?.isDirectory()
+      ? "directory"
+      : leaf?.isSymbolicLink()
+        ? "symlink"
+        : leaf
+          ? "file"
+          : "missing",
     ancestors,
     identity: leaf ? identity(leaf) : null,
   };

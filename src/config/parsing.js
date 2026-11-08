@@ -60,10 +60,14 @@ const ROLE_FIELDS = new Set([
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 
 export class ConfigurationError extends Error {
-  constructor(message, { cause, code = "ERR_INVALID_CONFIGURATION" } = {}) {
+  constructor(
+    message,
+    { cause, code = "ERR_INVALID_CONFIGURATION", constraint } = {},
+  ) {
     super(message, { cause });
     this.name = "ConfigurationError";
     this.code = code;
+    if (constraint !== undefined) this.constraint = constraint;
   }
 }
 

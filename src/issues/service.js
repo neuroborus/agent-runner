@@ -1,12 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { link, realpath, rename } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveUserConfigurationPath } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import { getRuntimeContext, resolveRuntimeRoot } from "../runtime/index.js";
 import { createRunStore } from "../state/index.js";
+import {
+  createWorkspaceService,
+  WorkspaceSafetyError,
+} from "../workspace/index.js";
 import {
   assertReadInput,
   assertReportInput,
@@ -221,6 +233,7 @@ export function createIssueService({
   platform = process.platform,
   renameFile = rename,
   runStore = createRunStore(),
+  workspace = createWorkspaceService(),
 } = {}) {
   if (
     typeof clock !== "function" ||
@@ -230,7 +243,10 @@ export function createIssueService({
     typeof onPublished !== "function" ||
     typeof onUpdated !== "function" ||
     typeof openStore !== "function" ||
-    typeof renameFile !== "function"
+    typeof renameFile !== "function" ||
+    typeof workspace?.exclusionPath !== "function" ||
+    typeof workspace?.inspectControls !== "function" ||
+    typeof workspace?.inspectPath !== "function"
   ) {
     throw new IssueError("Issue service options are invalid.");
   }
@@ -240,14 +256,18 @@ export function createIssueService({
   // run state, or the origin project; ordinary shared platform parents are fine.
   async function assertSeparateStore(storePath, projectPath = null) {
     await runStore.assertRuntimeBoundary([storePath]);
-    const protectedPaths = await Promise.all(
-      [
-        ...(projectPath === null ? [] : [projectPath]),
-        installationPath,
-        resolveRuntimeRoot(location),
-        resolveUserConfigurationPath(location),
-      ].map(canonicalOrLexical),
-    );
+    const protectedPaths = [
+      // Origins are already canonical and may be deleted or replaced after
+      // reservation. Recovery retains that binding without inspecting them.
+      ...(projectPath === null ? [] : [projectPath]),
+      ...(await Promise.all(
+        [
+          installationPath,
+          resolveRuntimeRoot(location),
+          resolveUserConfigurationPath(location),
+        ].map(canonicalOrLexical),
+      )),
+    ];
     if (
       protectedPaths.some(
         (path) => isWithin(path, storePath) || isWithin(storePath, path),
@@ -258,6 +278,55 @@ export function createIssueService({
         { code: "ERR_UNSAFE_ISSUE_STORE" },
       );
     }
+  }
+
+  async function resolveOrigin(requestPath) {
+    const boundary = await runStore.validateStateBoundary({
+      projectPath: requestPath,
+      taskPath: requestPath,
+    });
+    const { projectPath } = boundary;
+    const leasePath = await workspace.exclusionPath({
+      workspacePath: projectPath,
+    });
+    const marker = await workspace.inspectPath({
+      projectPath: leasePath,
+      path: ".git",
+    });
+    let hasGit = leasePath !== projectPath || marker.exists;
+    if (!hasGit) {
+      // Validate ordinary origins without traversing source content. This also
+      // rejects control-tree origins and unsafe metadata, including bare Git.
+      const controls = await workspace.inspectControls({
+        workspacePath: projectPath,
+        paths: [],
+        stateRoot: runStore.rootPath,
+      });
+      if (controls.some((path) => isWithin(path, projectPath))) {
+        throw new WorkspaceSafetyError(
+          "Issue origin cannot be inside a control tree.",
+        );
+      }
+      for (const path of controls) {
+        // An incomplete enclosing .git directory is still a Git selection:
+        // failed Git inspection must never become an ordinary-directory fallback.
+        if (
+          basename(path) === ".git" &&
+          isWithin(dirname(path), projectPath) &&
+          (await workspace.inspectPath({ projectPath: dirname(path), path }))
+            .exists
+        ) {
+          hasGit = true;
+          break;
+        }
+      }
+    }
+    if (!hasGit) return boundary;
+    const root = await git.resolveProject(projectPath);
+    return runStore.validateStateBoundary({
+      projectPath: root,
+      taskPath: root,
+    });
   }
 
   function reservation(store, { projectPath, requestPath }, report) {
@@ -302,7 +371,7 @@ export function createIssueService({
     });
     const requestPath = resolve(input.projectPath);
     // Completed receipts and started intents need neither the mutable origin
-    // nor configuration, so both survive deletion of the checkout. The saved
+    // nor configuration, so both survive deletion of the origin. The saved
     // selector maps an exact retry to its canonical arguments, which the action
     // store still verifies; other selectors use their lexical path.
     let existing = null;
@@ -328,11 +397,7 @@ export function createIssueService({
     }
     let projectPath = requestPath;
     if (existing === null || isUnstartedLegacyContext(existing.context)) {
-      projectPath = await git.resolveProject(input.projectPath);
-      ({ projectPath } = await runStore.validateStateBoundary({
-        projectPath,
-        taskPath: projectPath,
-      }));
+      ({ projectPath } = await resolveOrigin(requestPath));
       existing = await runStore.readAction(identityFor(projectPath));
     }
     if (existing?.status === "completed") {

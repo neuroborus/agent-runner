@@ -1,5 +1,6 @@
 import { dirname, join, relative } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { inspectInitOperation } from "./inspection-failure.js";
 
 import {
   assertInit,
@@ -138,7 +139,11 @@ function unrelatedSettings(value) {
   return result;
 }
 
-export async function assertIntegratedPolicy(state, runtime) {
+export async function assertIntegratedPolicy(
+  state,
+  runtime,
+  inspectionPhase = "publication-preparation",
+) {
   const { workspace } = runtime;
   const projectPath = state.selection.rootPath;
   const resources = state.proposal.resources;
@@ -161,13 +166,16 @@ export async function assertIntegratedPolicy(state, runtime) {
         .every(({ path }) => path === finalizationPath),
     "Integrated finalization must preserve existing skills and derive its procedure from reviewed checks.",
   );
-  await assertInitConfiguration(state, runtime, finalizationPath);
+  await assertInitConfiguration(
+    state,
+    runtime,
+    finalizationPath,
+    inspectionPhase,
+  );
   const ignorePath = join(projectPath, ".gitignore");
-  const ignoreDocument = await workspace.readFile({
-    path: ignorePath,
-    projectPath,
-    optional: true,
-  });
+  const ignoreDocument = await inspectInitOperation(inspectionPhase, () =>
+    workspace.readFile({ path: ignorePath, projectPath, optional: true }),
+  );
   const originalIgnore = ignoreDocument ?? "";
   const needed = [];
   for (const path of integratedIgnorePaths(state)) {
@@ -175,7 +183,9 @@ export async function assertIntegratedPolicy(state, runtime) {
       within(projectPath, path),
       "Integrated ignore path escaped its target.",
     );
-    const evidence = await runtime.inspectIgnored(path);
+    const evidence = await inspectInitOperation(inspectionPhase, () =>
+      runtime.inspectIgnored(path),
+    );
     assertInit(
       !evidence.tracked,
       "Integrated infrastructure must be untracked.",
@@ -199,6 +209,7 @@ export async function assertInitConfiguration(
   state,
   runtime,
   finalizationPath,
+  inspectionPhase = "publication-preparation",
 ) {
   const { rootPath } = state.selection;
   const configuration = state.proposal.resources.find(
@@ -206,11 +217,13 @@ export async function assertInitConfiguration(
   );
   await runtime.validateConfiguration(configuration.content);
   const proposed = JSON.parse(configuration.content);
-  const original = await runtime.workspace.readFile({
-    path: configuration.path,
-    projectPath: rootPath,
-    optional: true,
-  });
+  const original = await inspectInitOperation(inspectionPhase, () =>
+    runtime.workspace.readFile({
+      path: configuration.path,
+      projectPath: rootPath,
+      optional: true,
+    }),
+  );
   assertInit(
     isDeepStrictEqual(
       unrelatedSettings(proposed),

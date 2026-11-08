@@ -8,7 +8,9 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  AgentBoundaryError,
   AVAILABILITY_REASONS,
+  ClaudeAdapterError,
   createCapabilityProof,
   createProviderRegistry,
   DEFAULT_CLIENT_ATTRIBUTION,
@@ -20,6 +22,7 @@ import {
   normalizeFailureRecord,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
+  terminalAdapterDiagnostic,
 } from "../../src/agents/index.js";
 import {
   parseRunnerConfiguration,
@@ -31,6 +34,48 @@ import { createRunner, parseSourceSession } from "../../src/runner/index.js";
 import { createRunStore } from "../../src/state/index.js";
 
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
+
+test("terminal diagnosis requires a normalized boundary and registry evidence", () => {
+  const native = Object.assign(new Error("Private provider content"), {
+    code: "invalid private code",
+    diagnosticClass: "private_unregistered_class",
+  });
+  assert.equal(terminalAdapterDiagnostic(native), null);
+  const unknown = normalizeAdapterFailure("codex", native);
+  assert.deepEqual(terminalAdapterDiagnostic(unknown), {
+    code: "ERR_AGENT_FAILED",
+  });
+  const failure = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("Private provider content", {
+      code: "ERR_CLAUDE_ISOLATION",
+      diagnosticClass: "isolation_workspace_policy",
+    }),
+  );
+  failure.diagnosticClass = "private_unregistered_class";
+  assert.deepEqual(terminalAdapterDiagnostic(failure), {
+    code: "ERR_CLAUDE_ISOLATION",
+    diagnosticClass: "isolation_workspace_policy",
+  });
+  for (const details of [
+    { retry: "transient" },
+    { retry: "terminal", disposition: "authentication_required" },
+    { retry: "terminal", disposition: "output_exhausted" },
+  ]) {
+    const boundary = new AgentBoundaryError(
+      {},
+      normalizeFailureRecord({
+        failureClass: "adapter_failure",
+        checkpoint: "turn",
+        outcome: "rejected",
+        effect: "possible",
+        ...details,
+      }),
+    );
+    assert.equal(terminalAdapterDiagnostic(boundary), null);
+  }
+  assert.doesNotMatch(JSON.stringify(failure), /Private provider content/u);
+});
 
 function fakeProvider() {
   const adapterOptions = [];
@@ -303,6 +348,58 @@ test("shared failure records strictly bound commit-executor proof", () => {
   }
 });
 
+test("registry retains only declared readiness diagnostics and validated effect proof", () => {
+  for (const diagnosticClass of [
+    "commit_readiness_declined",
+    "commit_readiness_not_object",
+    "commit_readiness_not_boolean",
+    "commit_readiness_extra_fields",
+  ]) {
+    assert.ok(
+      PROVIDER_REGISTRY.get("claude").failures.classes.has(diagnosticClass),
+    );
+    assert.ok(PROVIDER_REGISTRY.isDiagnosticClass(diagnosticClass));
+    const normalized = normalizeAdapterFailure(
+      "claude",
+      new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+        diagnosticClass,
+        code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+        effectStarted: false,
+        recoverable: true,
+        cause: new Error("PRIVATE_READINESS_CAUSE"),
+      }),
+    );
+    assert.equal(normalized.recoverable, false);
+    assert.equal(normalized.effectStarted, false);
+    assert.deepEqual(normalized.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "commit",
+      outcome: "rejected",
+      effect: "none",
+      retry: "terminal",
+      commitExecutor: "not_started",
+    });
+    assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_READINESS/u);
+  }
+  assert.equal(
+    PROVIDER_REGISTRY.isDiagnosticClass("commit_readiness_unknown"),
+    false,
+  );
+  const unknown = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+      diagnosticClass: "commit_readiness_unknown",
+      code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+      effectStarted: false,
+    }),
+  );
+  assert.equal(unknown.diagnosticClass, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(unknown),
+    /PRIVATE_READINESS|commit_readiness_unknown/u,
+  );
+});
+
 test("availability evidence is finite, redacted, and excludes uncertain commit effects", () => {
   const base = {
     failureClass: "adapter_failure",
@@ -490,6 +587,7 @@ test("runner construction, attribution, probing, and source sessions use the reg
   });
 
   for (const pipeline of listPipelines()) {
+    const probesBefore = adapter.probes.length;
     const { run } = await runner.create({
       pipelineId: pipeline.id,
       projectPath,
@@ -506,8 +604,14 @@ test("runner construction, attribution, probing, and source sessions use the reg
       new Set(Object.values(run.roles).map(({ backend }) => backend)),
       new Set(["fake"]),
     );
+    const deferred = pipeline.workspace?.preparation === "deferred";
+    if (deferred) {
+      assert.ok(run.workspacePreparation);
+      assert.equal(run.workspace, null);
+      assert.equal(adapter.probes.length, probesBefore);
+    }
     for (const [role, receipt] of Object.entries(run.providerPolicies)) {
-      if (role === "arbiter") {
+      if (role === "arbiter" || deferred) {
         assert.equal(receipt, null);
       } else {
         assert.equal(receipt.schemaVersion, 1);

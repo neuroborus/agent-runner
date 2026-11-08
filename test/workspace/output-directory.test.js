@@ -91,6 +91,41 @@ test("output preparation creates only a declared directory and preserves existin
   );
 });
 
+test("scoped capture preserves output preparation without granting excluded-tree authority", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(join(f.workspacePath, "source"));
+  await fs.writeFile(join(f.workspacePath, "source/input.txt"), "source\n");
+  await fs.mkdir(join(f.workspacePath, "opaque"));
+  // Unrestricted capture would reject this link.
+  await fs.symlink(f.root, join(f.workspacePath, "opaque/outside"));
+  const inspection = await f.service.inspect({
+    workspacePath: f.workspacePath,
+    stateRoot: join(f.root, "state"),
+    inspectionPaths: ["source"],
+    excludePaths: ["opaque"],
+    outputPaths: [f.path],
+  });
+  const before = await f.service.snapshot({ inspection });
+  const intent = await f.service.inspectOutputDirectory({
+    inspection,
+    path: f.path,
+  });
+  await f.service.prepareOutputDirectory({ inspection, intent });
+  await fs.writeFile(join(f.path, "report.md"), "result\n");
+  const after = await f.service.snapshot({ inspection });
+  f.service.assertUnchanged({ before, after, allowOutputs: true });
+  assert.throws(() => f.service.assertUnchanged({ before, after }), {
+    code: "ERR_WORKSPACE_DRIFT",
+  });
+  await assert.rejects(
+    f.service.inspectOutputDirectory({
+      inspection,
+      path: join(f.workspacePath, "opaque"),
+    }),
+    { code: "ERR_WORKSPACE_PATH" },
+  );
+});
+
 test("possibly completed directory creation cannot be adopted or retried from its absent intent", async (t) => {
   const f = await fixture(t);
   const intent = await f.service.inspectOutputDirectory({

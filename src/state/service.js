@@ -55,6 +55,10 @@ import { createPreservationStore } from "./preservation.js";
 import { createRecoveryFailureStore } from "./recovery-failures.js";
 import { createStopService } from "./stops.js";
 import {
+  createWorkspacePreparation,
+  createWorkspacePreparationService,
+} from "./workspace-preparation.js";
+import {
   assertRunCanAdvance,
   assertStopProgress,
   assertRunCanReleaseOwnership,
@@ -75,6 +79,7 @@ import {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RUN_STATE_SCHEMA_VERSION,
+  RunObservationBusyError,
   RunStoreError,
 } from "./validation.js";
 
@@ -96,6 +101,7 @@ const CREATE_RUN_FIELDS = new Set([
   "taskPath",
   "projectConfigurationProtection",
   "workspace",
+  "workspacePreparation",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -114,6 +120,7 @@ const CREATE_RUN_FIELDS = new Set([
 const MAX_RUN_ARTIFACT_BYTES = 1024 * 1024;
 const DEFAULT_ACTIVITY_LIMIT = 50;
 const MAX_ACTIVITY_LIMIT = 100;
+const MAX_ACTIVITY_PUBLICATION_RETRIES = 2;
 const LEASE_OWNER_STATUSES = Object.freeze([
   "none",
   "live",
@@ -624,6 +631,9 @@ export function createRunStore({
       });
     }
     rejectUnknownFields(input, CREATE_RUN_FIELDS, "runInput");
+    const workspacePreparation = structuredClone(
+      input.workspacePreparation ?? null,
+    );
 
     const [projectPath, taskPath, potentialStateRoot] = await Promise.all([
       canonicalDirectory(input.projectPath, "Project path"),
@@ -685,7 +695,7 @@ export function createRunStore({
           });
         }
       }
-      const state = normalizeRunState(
+      let state = normalizeRunState(
         {
           schemaVersion: RUN_STATE_SCHEMA_VERSION,
           revision: 1,
@@ -696,6 +706,7 @@ export function createRunStore({
           projectPath,
           taskPath,
           workspace: input.workspace ?? null,
+          workspacePreparation: null,
           projectConfigurationProtection:
             input.projectConfigurationProtection === undefined
               ? null
@@ -746,6 +757,17 @@ export function createRunStore({
             input.pipelineState === undefined ? {} : input.pipelineState,
           createdAt,
           updatedAt: createdAt,
+        },
+        runId,
+      );
+      state = normalizeRunState(
+        {
+          ...state,
+          workspacePreparation: await createWorkspacePreparation(
+            workspacePreparation,
+            state,
+            rootPath,
+          ),
         },
         runId,
       );
@@ -841,14 +863,16 @@ export function createRunStore({
       snapshot.state.preparation === null &&
       (await hasPreparationCustody(runDirectory))
     ) {
-      if (reload === null)
-        throw new RunStoreError(
-          "Unmerged preparation custody has no authority.",
-          { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
-        );
       // A lock-free read may precede reservation publication. Reload before
       // rejecting custody whose canonical authority was lost or rolled back.
-      return authorizeSnapshot(runDirectory, await reload());
+      if (reload !== null) {
+        const reloaded = await reload();
+        if (reloaded !== null) return authorizeSnapshot(runDirectory, reloaded);
+      }
+      throw new RunStoreError(
+        "Unmerged preparation custody has no authority.",
+        { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+      );
     }
     assertDisjointStateRoot(
       runDirectory,
@@ -1469,7 +1493,9 @@ export function createRunStore({
 
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      assertRunCanAdvance(snapshot.state, resolveStopBoundary);
+      assertRunCanAdvance(snapshot.state, resolveStopBoundary, {
+        allowWorkspacePreparation: true,
+      });
       if (
         expectedRevision !== undefined &&
         snapshot.state.revision !== expectedRevision
@@ -2075,20 +2101,31 @@ export function createRunStore({
       return deepFreeze({ activities, cursor });
     };
 
-    try {
-      return await drain(snapshot);
-    } catch (cause) {
-      if (
-        !(cause instanceof RunStoreError) ||
-        cause.code !== "ERR_INVALID_EVENT_LOG"
-      )
-        throw cause;
-      // The owner may publish during this lock-free drain. Stream observations
-      // cannot distinguish that from an edit, so reread once only after the
-      // original certified prefix is proven unchanged and validly extended.
-      const extended = await journal.extendSnapshot(runDirectory, snapshot);
-      if (extended === null) throw cause;
-      return drain(await authorizeSnapshot(runDirectory, extended));
+    let source = snapshot;
+    for (let retries = 0; ; retries += 1) {
+      try {
+        return await drain(source);
+      } catch (cause) {
+        if (
+          !(cause instanceof RunStoreError) ||
+          cause.code !== "ERR_INVALID_EVENT_LOG"
+        )
+          throw cause;
+        // Every continuation extends the preceding operation-local certificate,
+        // retaining the original bytes and run identity even after cache eviction.
+        // A raced extension must finish its exact consumed-prefix certification
+        // before authorization, another drain, or the existing exhaustion bound.
+        // Error codes alone grant neither a retry nor a retryable outcome.
+        const extended = await journal.extendSnapshot(runDirectory, source);
+        if (extended === null) throw cause;
+        // Custody published after this capture must retain the same proof on
+        // its once-only authorization reload, rather than starting a cold read.
+        source = await authorizeSnapshot(runDirectory, extended, () =>
+          journal.extendSnapshot(runDirectory, extended),
+        );
+        if (retries === MAX_ACTIVITY_PUBLICATION_RETRIES)
+          throw new RunObservationBusyError();
+      }
     }
   }
 
@@ -2111,6 +2148,15 @@ export function createRunStore({
       onPublicationBoundary: onLeasePublicationBoundary,
       prefix: ".custody-",
     }),
+  });
+  const workspacePreparation = createWorkspacePreparationService({
+    runLeases,
+    worktreeLeases,
+    getWorktreeLeaseDirectory,
+    loadSnapshot,
+    journal,
+    timestamp,
+    resolveStopBoundary,
   });
   const stops = createStopService({
     preparation,
@@ -2275,6 +2321,7 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    captureWorkspacePreparation: workspacePreparation.capture,
     capturePreservation: preservation.capture,
     restorePreservation: preservation.restore,
     reconcilePreservation: preservation.reconcile,

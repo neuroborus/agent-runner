@@ -65,7 +65,7 @@ function reportInput(projectPath, overrides = {}) {
 }
 
 // Every fixture isolates home, XDG locations, state, and the origin project.
-async function repository(t, prefix = "agent-runner-issue-report-") {
+async function directory(t, prefix = "agent-runner-issue-report-") {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   t.after(() => rm(root, { recursive: true, force: true }));
   const paths = {
@@ -78,6 +78,11 @@ async function repository(t, prefix = "agent-runner-issue-report-") {
     stateRoot: join(root, "state"),
   };
   await Promise.all([mkdir(paths.projectPath), mkdir(paths.home)]);
+  return paths;
+}
+
+async function repository(t, prefix) {
+  const paths = await directory(t, prefix);
   await executeFile("git", ["init", "-q", paths.projectPath]);
   return paths;
 }
@@ -171,6 +176,10 @@ test("conditionally discovers strict deliberate reporting guidance", async (t) =
   assert.match(tool.description, /documented environment blockers/u);
   assert.match(tool.description, /invalid user or configuration input/u);
   assert.match(tool.description, /no logs, transcripts, prompts/u);
+  assert.match(
+    tool.inputSchema.properties.projectPath.description,
+    /ordinary directory/u,
+  );
   assert.equal(tool.inputSchema.additionalProperties, false);
   assert.deepEqual(tool.inputSchema.required.sort(), [
     "actualBehavior",
@@ -405,6 +414,199 @@ test("shares an ordinary platform parent with user settings", async (t) => {
   }).unexpectedIssueReport(reportInput(paths.projectPath));
 
   assert.equal(receipt.issuePath, join(paths.issuesPath, `${ISSUE_ID}.json`));
+});
+
+test("publishes an ordinary directory origin without Git or project configuration", async (t) => {
+  const paths = await directory(t, "agent-runner-issue-directory-");
+  const origin = join(paths.projectPath, "nested");
+  await mkdir(origin);
+  await writeFile(join(origin, "source.txt"), "source content\n");
+  const configurationPath = join(origin, "configuration.json");
+  await writeFile(configurationPath, "not runner configuration\n");
+  const before = await stat(origin);
+  const control = reportingControl(paths, {
+    git: { resolveProject: () => assert.fail("must not invoke Git") },
+  });
+  const input = reportInput(origin, {
+    projectConfigurationPath: configurationPath,
+  });
+
+  const receipt = await control.unexpectedIssueReport(input);
+
+  const document = JSON.parse(await readFile(receipt.issuePath, "utf8"));
+  assert.deepEqual(document.tracking.origin, { name: "nested", path: origin });
+  assert.doesNotMatch(
+    JSON.stringify(document),
+    /source content|not runner configuration/u,
+  );
+  assert.deepEqual((await readdir(origin)).sort(), [
+    "configuration.json",
+    "source.txt",
+  ]);
+  assert.equal(
+    await readFile(join(origin, "source.txt"), "utf8"),
+    "source content\n",
+  );
+  assert.equal(
+    await readFile(configurationPath, "utf8"),
+    "not runner configuration\n",
+  );
+  const after = await stat(origin);
+  for (const field of ["dev", "ino", "mode", "mtimeMs", "ctimeMs"])
+    assert.equal(after[field], before[field]);
+  assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
+});
+
+test("recovers a bound directory publication and receipt without its deleted origin", async (t) => {
+  const paths = await directory(t, "agent-runner-issue-directory-recovery-");
+  const runStore = createRunStore({ stateRoot: paths.stateRoot });
+  const selector = join(paths.root, "origin");
+  await symlink(paths.projectPath, selector);
+  const input = reportInput(selector);
+  await assert.rejects(
+    reportingControl(
+      paths,
+      {
+        async linkFile() {
+          throw new Error("simulated interruption");
+        },
+      },
+      runStore,
+    ).unexpectedIssueReport(input),
+  );
+  const { context } = await runStore.readAction(
+    actionIdentity({ ...input, projectPath: paths.projectPath }),
+  );
+  assert.equal(context.projectPath, paths.projectPath);
+  assert.equal(context.phase, "reserved");
+  const reserved = await readFile(
+    join(paths.issuesPath, context.temporaryName),
+  );
+  await rm(paths.projectPath, { recursive: true, force: true });
+  const noInspection = () =>
+    assert.fail("must not inspect the origin on retry");
+  const options = {
+    git: { resolveProject: noInspection },
+    workspace: {
+      exclusionPath: noInspection,
+      inspectControls: noInspection,
+      inspectPath: noInspection,
+    },
+  };
+  const receipt = await reportingControl(paths, options, {
+    ...runStore,
+    validateStateBoundary: noInspection,
+  }).unexpectedIssueReport(input);
+
+  assert.equal(receipt.issueId, ISSUE_ID);
+  assert.deepEqual(await readFile(receipt.issuePath), reserved);
+  assert.deepEqual(await issueEntries(paths), [`${ISSUE_ID}.json`]);
+  assert.deepEqual(
+    await reportingControl(
+      paths,
+      {
+        ...options,
+        env: { XDG_DATA_HOME: "/unresolved\nlocation" },
+      },
+      runStore,
+    ).unexpectedIssueReport(input),
+    receipt,
+  );
+  await assert.rejects(access(paths.projectPath), failure("ENOENT"));
+});
+
+test("rejects unsafe directory origins and never falls back after Git failure", async (t) => {
+  for (const [name, prepare, code] of [
+    [
+      "missing directory",
+      async (paths) => join(paths.projectPath, "missing"),
+      "ERR_INVALID_RUN_PATH",
+    ],
+    [
+      "regular file",
+      async (paths) => {
+        const path = join(paths.projectPath, "source.txt");
+        await writeFile(path, "source content\n");
+        return path;
+      },
+      "ERR_INVALID_RUN_PATH",
+    ],
+    [
+      "control tree",
+      async (paths) => {
+        const path = join(paths.projectPath, ".agents");
+        await mkdir(path);
+        return path;
+      },
+      "ERR_WORKSPACE_PATH",
+    ],
+    [
+      "bare metadata",
+      async (paths) => {
+        await executeFile("git", ["init", "--bare", "-q", paths.projectPath]);
+        return paths.projectPath;
+      },
+      "ERR_WORKSPACE_PATH",
+    ],
+    [
+      "control alias",
+      async (paths) => {
+        await symlink(paths.home, join(paths.projectPath, ".claude"));
+        return paths.projectPath;
+      },
+      "ERR_WORKSPACE_PATH",
+    ],
+    [
+      "ancestor control alias targeting the origin",
+      async (paths) => {
+        await symlink(paths.projectPath, join(paths.root, ".claude"));
+        return paths.projectPath;
+      },
+      "ERR_WORKSPACE_PATH",
+    ],
+    [
+      "malformed enclosing Git",
+      async (paths) => {
+        await mkdir(join(paths.projectPath, ".git"));
+        const path = join(paths.projectPath, "nested");
+        await mkdir(path);
+        return path;
+      },
+      "ERR_NOT_GIT_REPOSITORY",
+    ],
+    [
+      "unavailable Git",
+      async (paths, options) => {
+        await executeFile("git", ["init", "-q", paths.projectPath]);
+        options.git = {
+          resolveProject() {
+            throw Object.assign(new Error("Git unavailable"), {
+              code: "ERR_GIT_UNAVAILABLE",
+            });
+          },
+        };
+        return paths.projectPath;
+      },
+      "ERR_GIT_UNAVAILABLE",
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const paths = await directory(t, "agent-runner-issue-origin-boundary-");
+      const options = {};
+      const projectPath = await prepare(paths, options);
+      await assert.rejects(
+        reportingControl(paths, options).unexpectedIssueReport(
+          reportInput(projectPath),
+        ),
+        failure(code),
+      );
+      await assert.rejects(access(paths.dataHome), failure("ENOENT"));
+      await assert.rejects(
+        access(join(paths.stateRoot, "actions")),
+        failure("ENOENT"),
+      );
+    });
+  }
 });
 
 test("retains reports and replays receipts after the origin is deleted", async (t) => {
@@ -755,7 +957,7 @@ test("rejects linked, shared, and overlapping storage", async (t) => {
     ],
   ]) {
     await t.test(name, async (t) => {
-      const paths = await repository(t, "agent-runner-issue-overlap-");
+      const paths = await directory(t, "agent-runner-issue-overlap-");
       const path = dataHome(paths);
       await assert.rejects(
         reportingControl(paths, {

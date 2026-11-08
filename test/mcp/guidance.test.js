@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
+  createWorkspaceService,
   main,
   MAX_GUIDANCE_BYTES,
   parseRunnerConfiguration,
@@ -162,6 +170,50 @@ test("rejects invalid guidance arguments before dispatch and accepts nullable ha
   await call(client, "guidance_update", input);
   await call(client, "guidance_update", { ...input, expectedHash: hash("") });
   assert.equal(updates, 2);
+});
+
+test("CLI and MCP bootstrap reads agree for an unconfigured Git target without ignore rules or effects", async (t) => {
+  const f = await fixture(t, { ignored: false });
+  await unlink(join(f.projectPath, ".gitignore"));
+  await writeFile(join(f.projectPath, "source.md"), "Source sentinel.\n");
+  const workspace = createWorkspaceService();
+  const scope = { paths: [f.projectPath], stateRoot: f.stateRoot };
+  const before = await workspace.snapshotInputs(scope);
+  const client = await connect(t, control(f));
+  const result = await call(client, "guidance_read", {
+    projectPath: f.projectPath,
+  });
+  assert.equal(result.projectPath, f.projectPath);
+  assert.equal(result.projectConfigurationPath, null);
+  assert.equal(result.localPath, f.localPath);
+  assert.equal(result.localContent, "");
+  assert.equal(result.localHash, null);
+  assert.equal(
+    result.commonContent,
+    await readFile(
+      new URL("../../docs/OPERATOR_GUIDE.md", import.meta.url),
+      "utf8",
+    ),
+  );
+  let output = "";
+  assert.equal(
+    await main(["guidance", "--project", f.projectPath], {
+      guidance: f.service,
+      stdout: {
+        write(chunk) {
+          output += chunk;
+        },
+      },
+      stderr: { write: () => assert.fail("bootstrap read should succeed") },
+      createCommandRunner: () =>
+        assert.fail("guidance must not construct a run"),
+    }),
+    0,
+  );
+  assert.equal(output, `${result.combinedContent}\n`);
+  assert.deepEqual(await workspace.snapshotInputs(scope), before);
+  assert.deepEqual(await readdir(f.root), ["project"]);
+  await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
 });
 
 test("default MCP wiring reads complete configured guidance without creating missing files or state", async (t) => {

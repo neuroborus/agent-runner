@@ -30,6 +30,10 @@ import {
 import { INIT_INSTRUCTIONS, PHASE_INSTRUCTIONS } from "./prompts.js";
 import { initGuidanceContent } from "./guidance.js";
 import {
+  assertInitInspection,
+  assertInspectionFailure,
+} from "./inspection-failure.js";
+import {
   CLARIFICATION_SCHEMA,
   PROPOSAL_SCHEMA,
   REVIEW_SCHEMA,
@@ -497,10 +501,11 @@ const turnBinding = (state) =>
 export function prepareInitTurn(state, inspection, transcriptHash) {
   assertInitState(state);
   assertInspection(inspection);
-  assertInit(
+  assertInitInspection(
     isHash(transcriptHash) &&
       (state.transcriptHash === null ||
         state.transcriptHash === transcriptHash),
+    "workspace_changed",
     "Init clarifications changed outside an authorized editor window.",
   );
   assertInit(
@@ -510,10 +515,10 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
   if (state.reinspectionRequired)
     assertInspectionExtension(state.inspection, inspection);
   else
-    assertInit(
+    assertInitInspection(
       state.inspection === null ||
         isDeepStrictEqual(state.inspection, inspection),
-      "Inspected init inputs or destinations changed.",
+      "workspace_changed",
     );
   selectInitPlacement(inspection, state.clarificationSelection);
   const next = structuredClone({
@@ -602,10 +607,10 @@ export function closeInitClarification(
     "Init clarification cannot close at this checkpoint.",
   );
   assertInspection(inspection);
-  assertInit(
+  assertInitInspection(
     state.inspection === null ||
       isDeepStrictEqual(state.inspection, inspection),
-    "Init setup changed during clarification.",
+    "workspace_changed",
   );
   const selected = selectInitPlacement(
     inspection,
@@ -673,6 +678,9 @@ export function authorizeInitEdit(state, authorization) {
     ...state,
     workflowState: "WAITING_FOR_USER",
     pendingEdit: structuredClone(authorization),
+    proactiveClarificationComplete:
+      state.proactiveClarificationComplete ||
+      authorization.action === "proactive-clarification",
   };
   assertInitState(next);
   return next;
@@ -734,11 +742,13 @@ export function acceptInitResult(
   { turnId, inspection, transcriptHash, result },
 ) {
   assertInitState(state);
-  assertInit(
-    state.pendingTurn !== null &&
-      state.pendingTurn.id === turnId &&
-      transcriptHash === state.transcriptHash &&
+  assertInitInspection(
+    transcriptHash === state.transcriptHash &&
       isDeepStrictEqual(state.inspection, inspection),
+    "workspace_changed",
+  );
+  assertInit(
+    state.pendingTurn !== null && state.pendingTurn.id === turnId,
     "Init turn is stale or changed read-only inputs.",
   );
   assertResultSize(result);
@@ -893,6 +903,63 @@ export function assertInitRun(run) {
       "Init cancellation requires a reconciled operator request.",
     );
   }
+  if (
+    run.pause?.reason === "internal_failure" ||
+    Object.hasOwn(run.pause ?? {}, "diagnosticClass")
+  ) {
+    const diagnostic = Object.hasOwn(run.pause, "diagnosticClass");
+    // Registry membership is validated by the common run envelope.
+    exact(run.pause, [
+      "reason",
+      "code",
+      ...(diagnostic ? ["diagnosticClass"] : []),
+    ]);
+    assertInit(
+      run.pipelineState.workflowState === "FAILED" &&
+        run.pause.reason === "internal_failure" &&
+        typeof run.pause.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/u.test(run.pause.code) &&
+        (!diagnostic ||
+          (typeof run.pause.diagnosticClass === "string" &&
+            /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass))) &&
+        run.pipelineState.pendingTurn === null &&
+        run.pipelineState.pendingEdit === null &&
+        run.pipelineState.completion === null &&
+        run.pipelineState.terminal?.status !== "CLEAN" &&
+        run.activeTurn === null &&
+        run.preparation == null &&
+        run.executionProcess == null &&
+        run.executionResource == null &&
+        run.pipelineState.publication?.pending == null &&
+        (run.pipelineState.guidanceIntent === null ||
+          run.pipelineState.guidanceReceipt !== null),
+      "Init terminal provider failure requires settled read-only work.",
+    );
+  }
+  if (run.pause?.reason === "init_inspection_failed") {
+    assertInspectionFailure(run.pause, run.pipelineState);
+    assertInit(
+      run.pipelineState.workflowState === "WAITING_FOR_USER" &&
+        run.pipelineState.pendingTurn === null &&
+        run.activeTurn === null &&
+        run.preparation == null &&
+        run.executionProcess == null &&
+        run.executionResource == null &&
+        run.pipelineState.publication?.pending == null &&
+        (run.pipelineState.guidanceIntent === null ||
+          run.pipelineState.guidanceReceipt !== null),
+      "Init inspection rejection requires a settled pause.",
+    );
+    if (
+      run.pipelineState.pendingEdit === null &&
+      run.pipelineState.productDecision === null &&
+      run.pipelineState.pauseReason !== "clarification_required"
+    )
+      assertInitState({
+        ...run.pipelineState,
+        workflowState: run.pause.resumeState,
+      });
+  }
   // Root safety blockers may suspend a still-reserved read-only turn. Validate
   // its original binding without granting a continuation through that blocker.
   const state = run.pipelineState;
@@ -905,4 +972,23 @@ export function assertInitRun(run) {
       ? state.pendingTurn.phase
       : state.workflowState;
   assertInitState({ ...state, workflowState: phase });
+}
+
+export function failInitTurn(state, request) {
+  assertInitState(state);
+  assertInit(
+    request.phase === "CONFIRM"
+      ? state.workflowState === "PROPOSAL_ACCEPTED" &&
+          state.pendingTurn === null &&
+          state.terminal?.status === "PENDING" &&
+          request.role ===
+            (state.settings.mode === "lazy" ? "planner" : "reviewer")
+      : state.pendingTurn !== null &&
+          state.pendingTurn.id === request.id &&
+          state.pendingTurn.phase === request.phase &&
+          state.pendingTurn.role === request.role &&
+          state.pendingTurn.binding === request.binding,
+    "Init failure does not own the reserved turn.",
+  );
+  return { ...state, workflowState: "FAILED", pendingTurn: null };
 }

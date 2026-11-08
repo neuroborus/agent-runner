@@ -12,57 +12,8 @@ choice affects the shared plan contract.
 
 ## Ownership Map
 
-- `bin/agent-run.js`: keep the executable entry point thin.
-- `src/index.js`: expose the root source API to the executable and root tests.
-- `src/cli.js`: own argument parsing, validation, concise terminal output, and dispatch.
-- `src/mcp/index.js`: expose the STDIO MCP protocol capability boundary.
-- `src/mcp/`: keep schemas, projections, revision waits, detached dispatch,
-  and issue reporting private to that boundary without duplicating runner logic.
-- `src/config/index.js`: expose the runner-configuration boundary.
-- `src/config/`: keep strict parsing, confined file loading, trusted profiles,
-  and resolution precedence private to that boundary.
-- `src/clarifications/index.js`: expose the clarification boundary.
-- `src/clarifications/`: keep coordination, confined transcript files, and
-  editor support private to that boundary.
-- `src/pipeline-registry.js`: own the explicit list of built-in pipelines; do not turn it into a plugin system.
-- `src/runner/index.js`: expose the runner-orchestration boundary.
-- `src/runner/`: keep input normalization, role and session setup, pipeline
-  migration, and run and resume orchestration private to that boundary.
-- `src/state/index.js`: expose and coordinate the run-store boundary.
-- `src/state/`: keep service coordination, atomic files, write-ahead journals,
-  action intents, execution leases, and persisted-shape validation private to
-  that boundary.
-- `src/git/index.js`: expose and coordinate the Git safety boundary.
-- `src/git/`: keep service coordination, command execution, snapshots and
-  fingerprints, commit verification, and handoff support private to that boundary.
-- `src/trusted-validation/index.js`: expose the runner-trusted validation boundary.
-- `src/trusted-validation/`: keep contract normalization, snapshot handling,
-  sandbox construction, and exact-command execution owned by that boundary.
-- `src/agents/codex/index.js`: expose the Codex provider boundary.
-- `src/agents/codex/`: keep Codex processes, App Server transport, flags,
-  parsing, sessions, local commits, and workspace storage private to that provider.
-- `src/agents/claude/index.js`: expose the Claude provider boundary.
-- `src/agents/claude/`: keep Claude Code processes, flags, parsing, sessions,
-  local commits, and native sandbox behavior private to that provider.
-- `src/agents/index.js`: expose the agent-adapter directory API.
-- `src/agents/registry.js`: own the frozen source-controlled provider
-  descriptors used by configuration, runner construction, source checks,
-  failure normalization, and MCP backend schemas.
-- `packages/commit-plan/`: own deterministic plan parsing, serialization, and validation shared by multiple pipelines.
-- `pipelines/<id>/src/`: own that pipeline's states, transitions, prompts, roles, and descriptor.
-- `pipelines/<id>/test/`: test that pipeline's behavior with `node:test` and fake adapters.
-- `pipelines/<id>/docs/`: keep that pipeline's product and implementation specification.
-- `test/agents/`: test provider behavior through provider indexes.
-- `test/clarifications/`: test clarification-service behavior.
-- `test/config/`: test configuration parsing, loading, profiles, and resolution.
-- `test/git/`: test Git-safety behavior.
-- `test/integration/`: test cross-capability workflows.
-- `test/mcp/`: test MCP control-plane and issue-reporting behavior.
-- `test/state/`: test state persistence and safety behavior.
-- `test/source-boundaries.test.js`: enforce public source indexes and internal
-  workspace dependency direction.
-- `test/`: test root runtime behavior, workspace boundaries, adapters, and temporary Git repositories.
-- `docs/`: keep cross-cutting architecture requirements.
+Read the complete [ownership map](references/ownership-map.md) before selecting
+or changing a capability, package, pipeline, source, test, or documentation owner.
 
 ## Rules
 
@@ -92,6 +43,22 @@ choice affects the shared plan contract.
 - Split a module only after it gains a distinct responsibility or becomes meaningfully large.
 - Add no cross-backend abstraction until both adapters demonstrate the shared contract.
 - Place tests by behavior, not by implementation detail, and avoid normal-test model usage.
+
+- Select workspace kind, access, and inspected scope before Git inspection or
+  recursive traversal; preserve ordinary-directory consumers of shared capabilities.
+- Keep native initialization and incidental bookkeeping within the backend's
+  authorized storage; declared read-only tool access alone does not prove an unchanged source tree.
+- Align role schemas and instructions with semantic validation and bounded,
+  actionable public diagnostics; keep raw provider data private.
+- Distinguish a proved concurrent journal extension from corruption at its owning
+  boundary; observation and retries must retain the original byte proof and effect authority.
+
+## Targeted Reviews
+
+For changed structured role/public contracts, use [contract-review](../contract-review/SKILL.md).
+For changed effects or lifecycle ownership, use [effect-review](../effect-review/SKILL.md).
+Apply the relevant procedure within the existing role and gate; these routes do
+not authorize another reviewer, pipeline role, or operational action.
 
 ## Review Questions
 

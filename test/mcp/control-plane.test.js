@@ -17,8 +17,60 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   MCP_INSTRUCTIONS,
 } from "../../src/mcp/index.js";
+import {
+  RunObservationBusyError,
+  RunStoreError,
+} from "../../src/state/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
+
+test("MCP exposes only proved observation exhaustion as a retryable tool result", async (t) => {
+  let failure;
+  let calls = 0;
+  const observe = async () => {
+    calls += 1;
+    throw failure;
+  };
+  const control = { runWait: observe, runActivity: observe };
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({ control, issueReportingEnabled: false });
+  const client = new Client({ name: "observation-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  for (const name of ["run_wait", "run_activity"]) {
+    for (const proved of [true, false]) {
+      failure = proved
+        ? new RunObservationBusyError()
+        : Object.assign(
+            new RunStoreError("Unclassified observation failure.", {
+              code: "ERR_RUN_OBSERVATION_BUSY",
+            }),
+            { retryable: true },
+          );
+      const before = calls;
+      const response = await client.callTool({
+        name,
+        arguments: { runId: RUN_ID },
+      });
+      assert.equal(calls, before + 1, "MCP never retries observation errors");
+      assert.equal(response.isError, true);
+      if (proved) {
+        assert.deepEqual(response.structuredContent, {
+          code: "ERR_RUN_OBSERVATION_BUSY",
+          message: failure.message,
+          retryable: true,
+        });
+      } else {
+        assert.equal(response.structuredContent, undefined);
+      }
+    }
+  }
+});
 
 test("status, wait and activity share derived revision progress with an explicit current-snapshot revision", async () => {
   const run = {
@@ -824,7 +876,7 @@ test("retry-time lease and stop inspections retain correlated causes without com
   }
 });
 
-test("MCP authoring and execution selections reach descriptor settings before start mutation", async () => {
+test("MCP selections reach descriptor settings before start mutation", async () => {
   let selection;
   const inspected = new Error("Boundary inspected");
   const control = createMcpControlPlane({
@@ -869,4 +921,76 @@ test("MCP authoring and execution selections reach descriptor settings before st
     (cause) => cause === inspected,
   );
   assert.deepEqual(selection.settingOverrides, { planKind: "custom" });
+  await assert.rejects(
+    control.runStart({
+      idempotencyKey: "audit-sources",
+      pipelineId: "audit",
+      projectPath: "/workspace",
+      taskPath: "/task",
+      sourceScope: "directory",
+      excludePaths: ["generated", "cache"],
+    }),
+    (cause) => cause === inspected,
+  );
+  assert.deepEqual(selection.settingOverrides, {
+    sourceScope: "directory",
+    excludePaths: ["generated", "cache"],
+  });
+  assert.equal(Object.hasOwn(selection, "sourceScope"), false);
+  assert.equal(Object.hasOwn(selection, "excludePaths"), false);
+});
+
+test("MCP advertises and strictly accepts audit source fields", async (t) => {
+  const calls = [];
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({
+    issueReportingEnabled: false,
+    control: {
+      runStart: async (input) => {
+        calls.push(input);
+        return { runId: RUN_ID };
+      },
+    },
+  });
+  const client = new Client({ name: "audit-scope-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const tool = (await client.listTools()).tools.find(
+    ({ name }) => name === "run_start",
+  );
+  assert.deepEqual(tool.inputSchema.properties.sourceScope.enum, [
+    "directory",
+    "git",
+  ]);
+  assert.equal(tool.inputSchema.properties.excludePaths.type, "array");
+  const input = {
+    idempotencyKey: "audit-sources",
+    pipelineId: "audit",
+    projectPath: "/workspace",
+    taskPath: "/task",
+    sourceScope: "directory",
+    excludePaths: ["generated"],
+  };
+  assert.notEqual(
+    (await client.callTool({ name: "run_start", arguments: input })).isError,
+    true,
+  );
+  assert.deepEqual(calls[0].excludePaths, ["generated"]);
+  assert.equal(calls[0].sourceScope, "directory");
+  for (const patch of [{ sourceScope: "other" }, { excludePaths: "generated" }])
+    assert.equal(
+      (
+        await client.callTool({
+          name: "run_start",
+          arguments: { ...input, ...patch },
+        })
+      ).isError,
+      true,
+    );
+  assert.equal(calls.length, 1);
 });

@@ -144,6 +144,7 @@ import {
   assertSettings,
   createFinalizationGuidanceDecision,
   createFinalizationRecovery,
+  commitReadinessConstraint,
   finalizationFeedbackFindings,
   findingFingerprint,
   createPersistedFinalizationEvidence,
@@ -820,20 +821,16 @@ ${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt })
 ${JSON.stringify(commands)}`;
   }
 
-  function trustedValidationInstructions(activeOnly = false) {
-    const commands = (
-      activeOnly
-        ? activeTrustedCommands(state())
-        : state().trustedValidation.commands
-    ).map(({ alias, command, identity }) => ({ alias, command, identity }));
+  function trustedValidationInstructions() {
+    const commands = state().trustedValidation.commands.map(
+      ({ alias, command, identity }) => ({ alias, command, identity }),
+    );
     if (commands.length === 0) {
-      return activeOnly
-        ? "No runner-trusted validation commands apply to this plan step. Commands selected for other steps remain reserved and must not execute in this turn."
-        : "No runner-trusted validation commands are selected for this run.";
+      return "No runner-trusted validation commands are selected for this run.";
     }
     return `Runner-trusted validation commands selected before agent work:
 ${JSON.stringify(commands, null, 2)}
-Include every listed command exactly once in requiredChecks with its actual canonical plan-step applicability during discovery; selection does not make it applicable to every step. Do not execute these commands in an agent turn. During finalization, return NOT_RUN for only these checks with evidence that each is reserved for the runner; the runner will execute their persisted exact vectors outside the agent turn.`;
+Include every listed command exactly once in requiredChecks with its actual canonical plan-step applicability during discovery; selection does not make it applicable to every step. Do not execute these commands in an agent turn, including commands selected for other steps. During finalization, return NOT_RUN for every selected command explicitly included in the proposed current-step inventory, including newly proposed checks, with evidence that each is reserved for the runner. Do not add future checks unless this step requires them. The runner executes only the selected entries in that resulting inventory using their persisted exact vectors outside the agent turn.`;
   }
 
   async function checkpointAfterCandidateConvergence(fingerprint, evidence) {
@@ -5463,7 +5460,7 @@ ${establishedValidationPrompt(state())}
 
 ${state().finalizationRecovery.required ? FINALIZATION_RECOVERY_INSTRUCTIONS + "\n\nAccepted evidence findings:\n" + JSON.stringify(finalizationFeedbackFindings(state())) : ""}
 
-${trustedValidationInstructions(true)}
+${trustedValidationInstructions()}
 
 ${evidence}
 
@@ -5491,7 +5488,7 @@ ${
           if (!(await verifyFinalizationGuidance())) return null;
           const result = normalizeFinalizationRoleOutput(
             output,
-            activeTrustedCommands(state()).map(({ command }) => command),
+            state().trustedValidation.commands.map(({ command }) => command),
             custom,
           );
           if (
@@ -5507,26 +5504,6 @@ ${
               {
                 field: "requiredChecks",
                 constraint: "maximum-512-catalog-commands",
-              },
-            );
-          }
-          const inactiveTrusted = state().trustedValidation.commands.filter(
-            ({ command }) =>
-              !activeTrustedCommands(state()).some(
-                (active) => active.command === command,
-              ),
-          );
-          if (
-            result.requiredChecks?.some(({ command }) =>
-              inactiveTrusted.some((inactive) => inactive.command === command),
-            )
-          ) {
-            throw invalidRoleOutput(
-              "Finalization cannot execute a future step's trusted check.",
-              context,
-              {
-                field: "requiredChecks",
-                constraint: "active-step-trusted-commands",
               },
             );
           }
@@ -5744,7 +5721,7 @@ ${
         result.validationInfrastructure,
       );
     const trustedByCommand = new Map(
-      activeTrustedCommands(state()).map((command) => [
+      activeTrustedCommands(state(), result.requiredChecks).map((command) => [
         command.command,
         command,
       ]),
@@ -5978,6 +5955,9 @@ ${JSON.stringify(
 
   function confirmationValidationPrompt(current) {
     return `${establishedValidationPrompt(current)}
+
+${prefinalizationTrustedCommands()}
+Do not execute selected commands during confirmation; assess their exact persisted runner evidence.
 
 Complete persisted plan-step schedule (commandIndexes are zero-based references into commands; an inventory amendment affects only the current step):
 ${JSON.stringify(current.validationSchedule)}
@@ -8658,6 +8638,8 @@ ${step.subject}`),
         currentRun.pause.reason === "commit_failed" &&
         (state().pendingCommit?.status === "consumed" ||
           (state().pendingCommit === null &&
+            commitReadinessConstraint(currentRun.pause.diagnosticClass) ===
+              null &&
             currentRun.pause.resumeState === "COMMIT"))
       ) {
         await transition(

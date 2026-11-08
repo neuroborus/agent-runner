@@ -159,13 +159,73 @@ test("continuation cannot retroactively name a session and failed creation ackno
     },
   });
   await selected.planner.run({ session: { mode: "continue", id: "existing" } });
+  const failure = new Error("Controlled persistence failure");
   await assert.rejects(
     selected.planner.run({
+      access: "read-only",
       onSessionCreated: async () => {
-        throw new Error("controlled persistence failure");
+        throw failure;
       },
     }),
+    (cause) => cause === failure,
   );
+});
+
+test("wrapped or swallowed Runner callbacks cannot become terminal provider evidence", async () => {
+  const pipeline = listPipelines()[0];
+  const run = {
+    runId: RUN_ID,
+    pipelineId: pipeline.id,
+    projectPath: "/workspace/project",
+    roles: { planner: { backend: "codex" } },
+    sessionLineage: { source: null, children: [] },
+  };
+  for (const key of [
+    "onProcess",
+    "onResource",
+    "onSessionCreated",
+    "onFreshSession",
+    "onSessionNaming",
+  ])
+    for (const wrapped of [true, false]) {
+      const failure = new Error("Controlled Runner callback failure");
+      const reject = async () => {
+        throw failure;
+      };
+      const selected = roleAdapters(
+        run,
+        pipeline,
+        {
+          codex: {
+            probe: async () => capabilities,
+            async run(request) {
+              try {
+                if (key === "onSessionNaming") {
+                  await request.onSessionCreated("child");
+                  await request.onSessionNaming({ status: "rejected" });
+                } else await request[key]("child");
+              } catch {
+                if (wrapped) throw new Error("Private native wrapper");
+              }
+              return { sessionId: "child" };
+            },
+          },
+        },
+        undefined,
+        undefined,
+        reject,
+      );
+      await assert.rejects(
+        selected.planner.run({
+          access: "read-only",
+          [key]: reject,
+          ...(key === "onSessionNaming"
+            ? { onSessionCreated: async () => {} }
+            : {}),
+        }),
+        (cause) => cause === failure,
+      );
+    }
 });
 
 test("concurrent metadata notifications cannot publish two diagnoses for one acknowledged child", async () => {

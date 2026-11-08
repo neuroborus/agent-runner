@@ -66,8 +66,11 @@ export function validationCatalog(state) {
   return [...commands];
 }
 
-export function activeTrustedCommands(state) {
-  const active = new Set(state.requiredChecks?.map(({ command }) => command));
+export function activeTrustedCommands(
+  state,
+  requiredChecks = state.requiredChecks,
+) {
+  const active = new Set(requiredChecks?.map(({ command }) => command));
   return state.trustedValidation.commands.filter(({ command }) =>
     active.has(command),
   );

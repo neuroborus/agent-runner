@@ -97,6 +97,7 @@ export async function readJournalSegment(
   limit,
   prefix = null,
   includePrefix = false,
+  captureAppend = false,
 ) {
   const handle = await openRegularFile(filePath, constants.O_RDONLY);
   try {
@@ -148,11 +149,34 @@ export async function readJournalSegment(
       before.links === 1 &&
       isDeepStrictEqual(before, after) &&
       isDeepStrictEqual(after, pathAfter);
-    if (prefix && !stable) return null;
+    const captured =
+      position === before.size &&
+      before.links === 1 &&
+      after.links === 1 &&
+      pathAfter.links === 1 &&
+      sameJournalIdentity(before, after) &&
+      sameJournalIdentity(after, pathAfter);
+    // Observation alone may retain a growing active segment for a subsequent
+    // exact-prefix proof. This never certifies the raced read or authorizes a
+    // retry: the caller must verify every captured byte under stable observations.
+    if (
+      prefix &&
+      !stable &&
+      !(
+        captureAppend &&
+        captured &&
+        after.size > before.size &&
+        pathAfter.size >= after.size
+      )
+    )
+      return null;
     return {
       source: source.toString("utf8"),
       observation: stable ? after : null,
-      binding: stable
+      // Retain the bytes actually consumed even when append or rotation makes
+      // the closing observation unstable. This is capture evidence only; a
+      // later canonical scan must prove it before it becomes a certificate.
+      binding: captured
         ? {
             ...identity(before),
             length: sourceOffset + completeEnd,

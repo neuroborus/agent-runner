@@ -11,6 +11,10 @@ import {
   MAX_DISCOVERY_PASSES,
   runAuditDiscovery,
 } from "../src/index.js";
+import {
+  acceptDiscovery,
+  normalizeClarification,
+} from "../src/discovery-contract.js";
 
 import {
   HASH,
@@ -22,6 +26,124 @@ import {
   pendingRun,
   recheck,
 } from "./support/index.js";
+
+test("role schemas and semantic diagnostics constrain the actual discovery request", async () => {
+  const f = fixture([
+    READY,
+    (request) => {
+      const properties = request.schema.properties;
+      const findingSchema = properties.candidates.items.anyOf[0].properties;
+      assert.equal(findingSchema.id.maxLength, 64);
+      assert.doesNotMatch("INVALID", new RegExp(findingSchema.id.pattern, "u"));
+      assert.equal(findingSchema.evidence.minItems, 1);
+      assert.equal(findingSchema.examples.minItems, 1);
+      assert.equal(findingSchema.impact.minLength, 1);
+      assert.doesNotMatch(" ", new RegExp(findingSchema.impact.pattern, "u"));
+      assert.equal(
+        properties.candidates.items.anyOf[0].additionalProperties,
+        false,
+      );
+      assert.match(
+        request.prompt,
+        /Copy the supplied snapshotFingerprint exactly/u,
+      );
+      const state = f.run().pipelineState;
+      const before = structuredClone(state);
+      for (const [patch, field, code] of [
+        [
+          { snapshotFingerprint: "b".repeat(64) },
+          "discovery.snapshotFingerprint",
+          "binding-mismatch",
+        ],
+        [
+          { candidates: [finding({ id: "UPPERCASE" })] },
+          "discovery.candidates[0].id",
+          "invalid-id",
+        ],
+        [
+          { candidates: [finding({ evidence: [] })] },
+          "discovery.candidates[0].evidence",
+          "required-items",
+        ],
+        [
+          { limitations: [" Note\r\ntext ", "Note\ntext"] },
+          "discovery.limitations",
+          "duplicate-items",
+        ],
+        [
+          {
+            hypotheses: [
+              {
+                id: "uncertain",
+                title: "Possible cost",
+                evidence: [],
+                uncertainty: "",
+              },
+            ],
+          },
+          "discovery.hypotheses[0].uncertainty",
+          "invalid-text",
+        ],
+      ]) {
+        assert.throws(
+          () => acceptDiscovery(state, complete(patch)),
+          (error) => {
+            assert.deepEqual(error.diagnostics, [{ field, code }]);
+            return true;
+          },
+        );
+        assert.deepEqual(state, before);
+      }
+      return complete();
+    },
+  ]);
+  assert.equal(
+    (await f.execute()).pipelineState.workflowState,
+    "DISCOVERY_CLEAN",
+  );
+});
+
+test("clarification diagnostics use bounded schema fields for invalid inputs and questions", () => {
+  for (const [value, field, code] of [
+    [
+      { ...READY, inputs: { ...INPUTS, criteria: [] } },
+      "clarification.inputs.criteria",
+      "required-items",
+    ],
+    [
+      { ...READY, inputs: { ...INPUTS, scope: ["Scope", " Scope "] } },
+      "clarification.inputs.scope",
+      "duplicate-items",
+    ],
+    [
+      {
+        status: "QUESTIONS",
+        inputs: null,
+        reason: "",
+        questions: [{ question: "Scope?", whyItMatters: "" }],
+      },
+      "clarification.questions[0].whyItMatters",
+      "invalid-text",
+    ],
+    [
+      { ...READY, ["PRIVATE_KEY"]: "PRIVATE_VALUE" },
+      "clarification",
+      "unsupported-fields",
+    ],
+  ]) {
+    assert.throws(
+      () => normalizeClarification(value),
+      (error) => {
+        assert.deepEqual(error.diagnostics, [{ field, code }]);
+        assert.doesNotMatch(
+          JSON.stringify(error),
+          /PRIVATE_KEY|PRIVATE_VALUE/u,
+        );
+        return true;
+      },
+    );
+  }
+});
 
 test("independent discovery freezes full scope and starts a fresh Auditor for each pass", async () => {
   const corrected = { limitations: ["Live checks unavailable"] };
@@ -225,6 +347,144 @@ test("malformed and incomplete passes never become clean evidence on reload", as
         assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
       },
     );
+});
+
+test("clarification feedback survives reload and is cleared before discovery", async () => {
+  const f = fixture([
+    {
+      ...READY,
+      inputs: { ...INPUTS, criteria: [] },
+      PRIVATE_KEY: "PRIVATE_VALUE",
+    },
+  ]);
+  const waiting = await f.execute();
+  const feedback = waiting.pipelineState.correctionFeedback;
+  assert.equal(feedback.phase, "clarify");
+  assert.equal(feedback.number, 0);
+  assert.deepEqual(feedback.diagnostics, [
+    { field: "clarification", code: "unsupported-fields" },
+  ]);
+  assert.equal(waiting.pipelineState.clarificationRounds, 0);
+  assert.equal(waiting.pipelineState.inputs, null);
+  assert.doesNotMatch(JSON.stringify(waiting), /PRIVATE_KEY|PRIVATE_VALUE/u);
+  const resumed = fixture([READY, complete()], {
+    saved: JSON.parse(JSON.stringify(waiting)),
+  });
+  const result = await resumed.execute();
+  const evidence = JSON.parse(resumed.calls[0].prompt.split("\n").at(-1));
+  assert.deepEqual(evidence.correctionFeedback, feedback);
+  assert.match(
+    resumed.calls[0].prompt,
+    /return the complete structured result/u,
+  );
+  assert.deepEqual(resumed.calls[0].session, {
+    mode: "continue",
+    id: waiting.sessionLineage.children[0].sessionId,
+  });
+  assert.equal(result.pipelineState.correctionFeedback, null);
+  assert.equal(result.pipelineState.clarificationRounds, 0);
+  assert.equal(result.pipelineState.history.length, 1);
+  assert.equal(
+    JSON.parse(resumed.calls[1].prompt.split("\n").at(-1)).correctionFeedback,
+    undefined,
+  );
+});
+
+test("discovery feedback replaces the rejected constraint without renewing passes or source forks", async () => {
+  const f = fixture(
+    [READY, complete({ snapshotFingerprint: "f".repeat(64) })],
+    {
+      source: "source-session",
+    },
+  );
+  const first = await f.execute();
+  const firstFeedback = structuredClone(first.pipelineState.correctionFeedback);
+  const resumed = fixture(
+    [complete({ candidates: [finding({ id: "PRIVATE_VALUE" })] })],
+    {
+      saved: JSON.parse(JSON.stringify(first)),
+    },
+  );
+  const second = await resumed.execute();
+  const feedback = second.pipelineState.correctionFeedback;
+  assert.deepEqual(
+    JSON.parse(resumed.calls[0].prompt.split("\n").at(-1)).correctionFeedback,
+    firstFeedback,
+  );
+  assert.equal(feedback.number, 2);
+  assert.notEqual(feedback.contextKey, firstFeedback.contextKey);
+  assert.deepEqual(feedback.diagnostics, [
+    { field: "discovery.candidates[0].id", code: "invalid-id" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(second), /PRIVATE_VALUE/u);
+  for (const mutate of [
+    (value) => {
+      value.number = 0;
+    },
+    (value) => {
+      value.contextKey = "f".repeat(64);
+    },
+    (value) => {
+      value.snapshotFingerprint = "f".repeat(64);
+    },
+    (value) => {
+      value.reportFingerprint = "f".repeat(64);
+    },
+    (value) => {
+      value.batchFingerprint = "f".repeat(64);
+    },
+    (value) => {
+      value.diagnostics[0].field = "discovery.PRIVATE_KEY";
+    },
+    (value) => {
+      value.diagnostics[0].code = "PRIVATE_CODE";
+    },
+    (value) => {
+      value.diagnostics.push(value.diagnostics[0]);
+    },
+  ]) {
+    const altered = structuredClone(second);
+    mutate(altered.pipelineState.correctionFeedback);
+    assert.throws(() => auditPipeline.workflow.validateRun(altered));
+  }
+  const clean = fixture([complete()], { saved: second });
+  const result = await clean.execute();
+  assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.equal(result.pipelineState.correctionFeedback, null);
+  assert.deepEqual(
+    result.pipelineState.history.map(({ outcome }) => outcome),
+    ["invalid", "invalid", "clean"],
+  );
+  assert.deepEqual(resumed.calls[0].session, {
+    mode: "fork",
+    id: "source-session",
+  });
+  assert.deepEqual(clean.calls[0].session, {
+    mode: "fork",
+    id: "source-session",
+  });
+});
+
+test("a lost rejection acknowledgement retains feedback and cannot bypass discovery exhaustion", async () => {
+  const f = fixture([READY, complete({ snapshotFingerprint: "f".repeat(64) })]);
+  f.run().pipelineState.settings.maxDiscoveryPasses = 1;
+  f.stopAt("WAITING_FOR_USER");
+  await assert.rejects(f.execute(), /gate response loss/u);
+  const waiting = JSON.parse(JSON.stringify(f.run()));
+  assert.equal(waiting.pause.reason, "invalid_discovery");
+  assert.equal(waiting.pipelineState.history[0].outcome, "invalid");
+  assert.deepEqual(waiting.pipelineState.correctionFeedback.diagnostics, [
+    { field: "discovery.snapshotFingerprint", code: "binding-mismatch" },
+  ]);
+  const resumed = fixture([], { saved: waiting });
+  const result = await resumed.execute();
+  assert.equal(result.pause.reason, "discovery_limit_reached");
+  assert.deepEqual(result.pipelineState.history, waiting.pipelineState.history);
+  assert.deepEqual(
+    result.pipelineState.correctionFeedback,
+    waiting.pipelineState.correctionFeedback,
+  );
+  assert.equal(resumed.calls.length, 0);
 });
 
 test("oversized clarification and discovery results cannot enter durable audit content", async () => {

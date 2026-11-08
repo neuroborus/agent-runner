@@ -35,6 +35,7 @@ import {
   projectOperatorStop,
   projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
+  RunObservationBusyError,
   RunStoreError,
   normalizeRecoveryDispatch,
   recoveryFailureDetails,
@@ -53,7 +54,7 @@ const MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_WAIT_MS = 30_000;
 const DISPATCH_TIMEOUT_MS = 30_000;
 const MAX_DISPATCH_INSPECTIONS = 64;
-const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline, then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. Action-free process-proof failures retain their checkpoint. Bounded ownership results preserve the intent: retry the identical key. Cancellation and disconnect end only the wait; reconciliation and receipt publication continue. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all registered pipelines; coding pipelines add primary convergence and clean confirmation before independent review, while audit uses separate read-only discovery and finding recheck cycles. Init prepares reviewed infrastructure in either placement, publishes guidance last and requires distinct read-only terminal confirmation; it never commits or starts another pipeline. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
+const RUN_INSTRUCTIONS = `Use run_start to start a durable pipeline. Audit start acknowledges exclusively owned pending workspace preparation before recursive capture; inspect workspacePreparation in status and use the ordinary pause/cancel controls. Frozen inputs and configuration survive preparation recovery. Then use one run_wait call for the desired waiting interval. Use run_activity only for explicit or historical reads; do not poll status, activity, or wait at a fixed cadence. Stop timing defaults to immediate; use after-current-commit only for a selected plan-execution step. A blocked or interrupted step stops at its reconciled checkpoint without extra work. Use run_pause or run_cancel with the exact inspected revision and a unique idempotency key; retry the same logical request with the same values and never refresh a stale revision silently. Cancellation is terminal. For an ownerless applicable stop, use run_resume with action: null, its exact inspected revision, and a new idempotency key; the original stop key is unnecessary. Recovery follows its correlated child until durable stop settlement or child exit. Action-free process-proof failures retain their checkpoint. Bounded ownership results preserve the intent: retry the identical key. Cancellation and disconnect end only the wait; reconciliation and receipt publication continue. independent is the default and recommended mode because it provides genuinely independent semantic review, but it uses more provider context and tokens. lazy is opt-in, reduces consumption, and does not provide independent review; never select it automatically to save tokens. combined is available for all registered pipelines; coding pipelines add primary convergence and clean confirmation before independent review, while audit uses separate read-only discovery and finding recheck cycles. Init prepares reviewed infrastructure in either placement, publishes guidance last and requires distinct read-only terminal confirmation; it never commits or starts another pipeline. Leave sourceSession unset unless the user deliberately chooses to fork a compatible current native session after being offered a fresh start. Offer its known trusted profile with the fork choice; when the profile is unknown, offer only current profile inheritance and never guess an alias. In independent and combined modes the primary and review roles fork the complete source context independently; in lazy mode the primary role forks it once. Recommend a fresh start for a long, multi-topic, or uncertain source session. Keep native session IDs opaque; never inspect provider-private storage or infer or fabricate an ID. Answer pending input from explicit user context when sufficient; otherwise ask the user. Never invent a material product decision.`;
 const ISSUE_REPORTING_INSTRUCTIONS = `Use unexpected_issue_report only when you, as the supervising client agent, explicitly conclude that Agent Runner behaved genuinely unexpectedly or contrary to its documented contract. Expected completion, exhausted configured budgets, usage limits, expected user pauses, documented environment blockers, and invalid user or configuration input are not reportable issues. Supply concise English Markdown deliberately; the server never collects or attaches logs, transcripts, prompts, environment values, credentials, secrets, or other diagnostics automatically.`;
 const GUIDANCE_INSTRUCTIONS =
   "Call guidance_read once before first managing a run for each project and follow the combined operator guide.";
@@ -205,6 +206,19 @@ function createRunStartSchema(providers) {
       taskPath: z.string().min(1),
       proactiveClarification: z.boolean().default(false),
       mode: pipelineMode.optional(),
+      sourceScope: z
+        .enum(["directory", "git"])
+        .optional()
+        .describe(
+          "Audit source selection, frozen before capture. Directory is the default; git selects complete tracked and non-ignored untracked sources without Git effects.",
+        ),
+      excludePaths: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional()
+        .describe(
+          "Audit-only literal confined subtrees, pruned before traversal. Requires directory source scope; cannot overlap required inputs or controls.",
+        ),
       placement: z
         .enum(["integrated", "external"])
         .optional()
@@ -282,7 +296,13 @@ const markdownContent = (maximumLength) =>
 const unexpectedIssueReportSchema = z
   .object({
     idempotencyKey,
-    projectPath: z.string().min(1).max(16_384),
+    projectPath: z
+      .string()
+      .min(1)
+      .max(16_384)
+      .describe(
+        "Origin Git worktree or ordinary directory. Git origins bind to the canonical worktree root; non-Git origins bind to the canonical selected directory.",
+      ),
     summary: markdownContent(1_000),
     expectedBehavior: markdownContent(4_000),
     actualBehavior: markdownContent(4_000),
@@ -363,6 +383,18 @@ function result(value) {
   };
 }
 
+async function observationResult(operation) {
+  try {
+    return result(await operation());
+  } catch (error) {
+    if (!(error instanceof RunObservationBusyError)) throw error;
+    return {
+      ...result({ code: error.code, message: error.message, retryable: true }),
+      isError: true,
+    };
+  }
+}
+
 async function detachedResult(operation) {
   try {
     return result(await operation());
@@ -394,6 +426,8 @@ function runnerStartInput(input) {
     contextSize,
     effort,
     mode,
+    sourceScope,
+    excludePaths,
     placement,
     planKind,
     criteriaPath,
@@ -412,6 +446,8 @@ function runnerStartInput(input) {
     settingOverrides: Object.fromEntries(
       Object.entries({
         mode,
+        sourceScope,
+        excludePaths,
         placement,
         planKind,
         criteriaPath,
@@ -523,11 +559,14 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
           }
         : null,
     execution: executionProjection(run, leaseOwner),
+    workspacePreparation:
+      run.workspacePreparation == null ? null : { status: "pending" },
     currentStep: status.currentStep,
     pause,
     clarificationPath: clarification.path,
     planPath: status.planPath,
     ...(status.auditReport ? { auditReport: status.auditReport } : {}),
+    ...(status.auditSource ? { auditSource: status.auditSource } : {}),
     ...(status.setup ? { setup: status.setup } : {}),
     refinementProgress: status.refinementProgress ?? null,
     pendingInput: pendingInput(run),
@@ -767,7 +806,9 @@ export function createMcpControlPlane(options = {}) {
           !skew && pipelineRequiresWorktreeLease(run.pipelineId, run.workspace)
             ? await inspect(() =>
                 runStore.worktreeLeaseOwner(
-                  run.workspace?.leasePath ?? run.projectPath,
+                  run.workspacePreparation?.leasePath ??
+                    run.workspace?.leasePath ??
+                    run.projectPath,
                   runIdValue,
                 ),
               )
@@ -810,7 +851,9 @@ export function createMcpControlPlane(options = {}) {
       ) {
         const owner = await inspect(() =>
           runStore.worktreeLeaseOwner(
-            run.workspace?.leasePath ?? run.projectPath,
+            run.workspacePreparation?.leasePath ??
+              run.workspace?.leasePath ??
+              run.projectPath,
             runIdValue,
           ),
         );
@@ -960,7 +1003,16 @@ export function createMcpControlPlane(options = {}) {
         ));
         boundary = await runner.validateBoundary(
           runnerStartInput(input),
-          run.workspace ?? { kind: "git" },
+          run.workspacePreparation != null
+            ? {
+                kind: "directory",
+                preparation: "deferred",
+                sourceScope: run.pipelineState.settings?.sourceScope,
+              }
+            : {
+                ...(run.workspace ?? { kind: "git" }),
+                sourceScope: run.pipelineState.settings?.sourceScope,
+              },
         );
       } catch (cause) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
@@ -985,6 +1037,8 @@ export function createMcpControlPlane(options = {}) {
           input.proactiveClarification ||
         (input.mode !== undefined && resolvedMode(run) !== input.mode) ||
         [
+          "sourceScope",
+          "excludePaths",
           "placement",
           "planKind",
           "criteriaPath",
@@ -1510,7 +1564,7 @@ export function createMcpServer(options = {}) {
     "run_start",
     {
       description:
-        "Start a durable pipeline. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined is available for all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
+        "Start a durable pipeline. Audit acknowledges owned detached workspace preparation before recursive capture; status exposes pending workspacePreparation and ordinary pause/cancel controls apply. Set effort separately from model using current|low|medium|high|xhigh; roleOverrides effort wins over run-wide effort, and current retains the provider default. independent is default and recommended for genuinely independent semantic review but uses more provider context and tokens; lazy is opt-in for lower consumption and has no independent review, so never select it automatically. combined is available for all registered pipelines; audit uses separate discovery and finding recheck cycles, while coding pipelines add primary convergence before independent review. Leave sourceSession unset unless the user deliberately selects a compatible current session after being offered a fresh start. independent and combined fork its complete context into primary and review roles; lazy forks it once into the primary role. Recommend fresh for a long, multi-topic, or uncertain session. Include its known trusted profile, use only current inheritance when unknown, keep native IDs opaque, and never inspect private storage or infer an ID or alias.",
       inputSchema: runStartSchema,
       annotations: mutating,
     },
@@ -1558,7 +1612,7 @@ export function createMcpServer(options = {}) {
     "run_activity",
     {
       description:
-        "Read bounded explicit or historical public activity after a cursor. This is not a polling primitive.",
+        "Read bounded explicit or historical public activity after a cursor. This is not a polling primitive. ERR_RUN_OBSERVATION_BUSY with retryable: true means proved concurrent publication exhausted the bounded read; a later explicit observation is safe and the run is unchanged.",
       inputSchema: z
         .object({
           runId,
@@ -1568,13 +1622,13 @@ export function createMcpServer(options = {}) {
         .strict(),
       annotations: readOnly,
     },
-    async (input) => result(await control.runActivity(input)),
+    async (input) => observationResult(() => control.runActivity(input)),
   );
   server.registerTool(
     "run_wait",
     {
       description:
-        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call.",
+        "Wait once for user input, completion, cancellation, failure, a positively observed execution-owner loss that run_resume recovers, or timeout. Do not call at a fixed cadence; a timeout leaves the run available for a later explicit call. ERR_RUN_OBSERVATION_BUSY with retryable: true means proved concurrent publication exhausted the bounded read; a later explicit observation is safe and the run is unchanged.",
       inputSchema: z
         .object({
           runId,
@@ -1591,8 +1645,8 @@ export function createMcpServer(options = {}) {
       annotations: readOnly,
     },
     async (input, context) =>
-      result(
-        await control.runWait(input, {
+      observationResult(() =>
+        control.runWait(input, {
           notify: context.mcpReq.notify,
           progressToken: context.mcpReq._meta?.progressToken,
           signal: context.mcpReq.signal,

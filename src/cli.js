@@ -212,6 +212,8 @@ Options:
                            combined adds primary convergence before independent review
                            and is available for all registered pipelines;
                            audit uses separate discovery and finding recheck cycles
+      --source-scope       Audit sources: directory (default) or git
+      --exclude-path       Literal directory-scope subtree to exclude; repeatable
       --placement          Init placement: integrated or external; separate from mode
       --fork-from          Fork a compatible backend session into active roles
                            independent and combined fork primary and review roles separately;
@@ -261,6 +263,11 @@ function writeActivity(stdout, activity) {
   stdout.write(
     `[${activity.actor}/${activity.phase}] ${activity.message}${runReference}\n`,
   );
+  if (runReference && activity.workspacePreparation != null)
+    stdout.write(
+      `Workspace preparation pending. Observe with: agent-run status --run ${activity.runId}\n` +
+        `Pause with: agent-run pause --run ${activity.runId}; cancel with: agent-run cancel --run ${activity.runId}\n`,
+    );
 }
 
 function refinementProgressLines(progress) {
@@ -307,6 +314,9 @@ function pauseActionLine(runId, action) {
     if (action.requirement === "resolved-finalization-guidance") {
       return "  Repair the reported finalization guidance and start a fresh plan-execution run.";
     }
+    if (action.requirement === "resolved-commit-readiness") {
+      return "  Preserve the reviewed candidate and resolve readiness through separately authorized follow-up before starting a fresh run. This run cannot retry COMMIT.";
+    }
     return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {
@@ -340,6 +350,13 @@ function runSummary({ directoryPath, run }) {
     `Mode: ${state.settings?.mode ?? pipeline.settings.mode.defaultValue}`,
     `State: ${state.workflowState}`,
   ];
+  if (run.workspacePreparation != null)
+    lines.push("Workspace preparation: pending");
+  if (status.auditSource) {
+    lines.push(`Audit source scope: ${status.auditSource.sourceScope}`);
+    for (const path of status.auditSource.excludePaths)
+      lines.push(`Excluded path: ${path}`);
+  }
   if (status.currentStep !== null) {
     lines.push(`Step: ${status.currentStep}`);
   }

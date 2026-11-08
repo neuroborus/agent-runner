@@ -104,6 +104,10 @@ no pending batch, unchanged bindings and verified complete report publication.
 Critical findings do not fail the audit or create automatic issues. Unavailable
 authorized checks remain explicit limitations; report corrections never grant
 source writes.
+Role schemas and instructions describe the same strict semantic constraints.
+Recognized validation errors identify one bounded schema field and finite
+constraint code without retaining rejected keys, values or native diagnostics;
+these details supply no approval or renewed attempt allowance.
 
 ## Bootstrap inventory
 
@@ -172,7 +176,8 @@ custom steps require only criterion-dependent checks and explicitly selected
 coding requirements. The runner preserves
 the accepted role assignments, merges commands in Worker-first order, and unions
 their applicability. A Reviewer-only requirement survives reconciliation.
-Later requirements remain persisted without executing during earlier finalization.
+Later requirements retain their accepted schedule; a justified current-step
+amendment can additionally require one of those checks for the current change.
 Polishing continues to use one workspace inventory.
 
 Execution establishes each role's catalog through broad read-only discovery,
@@ -192,8 +197,17 @@ step; advancing clears its amendment and gate evidence and selects the next
 persisted inventory. Shared infrastructure remains fingerprinted for the run,
 and confirmation must explicitly assess authorized changes against future
 requirements. Trusted capability preparation retains the complete catalog and
-both roles' reports, while finalization reserves and executes only active
-trusted commands. The frozen command vectors and identities never change.
+both roles' reports. Agent turns reserve every selected trusted command,
+including future requirements. A justified execution amendment may add an exact
+already selected check originally assigned elsewhere, without requiring all
+selected checks. The Worker reports selected candidate entries as `NOT_RUN`;
+only Runner executes the selected commands explicitly included in that resulting
+inventory. Selected agent attestations and unselected `NOT_RUN` entries are
+rejected. Persisted selected-check evidence must carry Runner provenance and
+the exact selected identity. Command vectors, capabilities and identities stay
+frozen; execution binds fresh evidence to the current content, infrastructure and
+trusted-command/configuration fingerprints. The amendment becomes active only
+after distinct fingerprint-bound terminal confirmation.
 
 Legacy execution inventories have no reliable applicability. Version-22 state
 migrates explicitly to version 23 with provisional historical evidence; fresh
@@ -294,6 +308,15 @@ only for a wholly new bounded diagnostic batch. Repetition or further invalid
 output pauses for explicit recovery. These limits prevent rejected provider
 output from becoming an unbounded hidden retry loop and do not consume the
 separate code-fix or semantic-evidence budgets.
+
+Finalization diagnostics identify the violated schema field and fixed constraint,
+using trusted list positions rather than rejected values or proposed identities.
+Independent violations form one bounded batch; invalid inventories do not create
+speculative downstream identity findings. Terminal CLI/MCP failure evidence
+retains the validated first diagnostic without granting retry authority. Missing
+provider field information and historical failures remain unknown. See the
+[execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
+for exact validation and correction rules.
 
 Two automatic semantic retries per execution step or polishing run are durable
 and separate from malformed-output and code-fix budgets. Pending retries survive
@@ -422,6 +445,19 @@ does not broaden an agent turn's permissions. Increasing the deadline cannot
 fix sandbox incompatibility or restore discarded stdout/stderr. A check may
 pass on the host yet fail closed in isolation with only a generic exit code;
 the timeout must not be presented as a diagnostics remedy.
+
+Trusted receipts include Runner-measured attempt elapsed time in milliseconds
+alongside the outcome. The [execution interval](../ARCHITECTURE.md) includes
+preparation, retirement, cleanup and safety checks, rather than child runtime
+alone. An invoked executor can still fail before payload admission; a timed
+blocked attempt never attests a passed check. Capability inspection provides no
+check measurement. Cancellation or uncertain cleanup produces no completed
+receipt. The existing evidence lists carry timing unchanged through persistence
+and terminal confirmation in execution and polishing. Legacy or older-controller
+receipts without timing remain timing-unknown; never ask an agent to measure a
+Runner-owned command, fabricate a duration or rerun only for absent telemetry.
+Report actual outcomes and available measurements against the advisory
+60-second ordinary-gate target; exceeding that target alone is not check failure.
 
 A producer-only test-location protocol is available to the repository harness
 through existing scratch requests; runtime allocation and consumption remain

@@ -36,3 +36,12 @@ These are requirements for writing and reviewing tests:
   slow check is not a pass. Live provider tests remain opt-in.
 - Run the affected coverage and required gate; repeat broad runs only for a
   concrete unresolved risk. Report actual outcomes and elapsed times.
+- For changed structured role contracts, exercise semantic restrictions and
+  bounded field-level rejection details together, without retaining raw replies.
+- Exercise relevant native initialization or incidental-write effects at the
+  read-only snapshot boundary; keep real provider smoke tests opt-in.
+- For journal and wait changes, control the publication interleaving and retain
+  distinct proofs for benign extension and changed-prefix rejection.
+- For workspace-scope changes, cover supported Git and ordinary-directory
+  consumers and exclusions before traversal. Preserve control/input protection
+  and test expensive-preparation visibility or cancellation where that contract changes.

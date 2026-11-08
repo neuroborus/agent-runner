@@ -45,7 +45,9 @@ export function hashBuffer(value) {
 
 export function decodeUtf8(value, name) {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(value);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      value,
+    );
   } catch (cause) {
     throw new GitSafetyError(`${name} contains invalid UTF-8.`, {
       cause,
@@ -95,8 +97,9 @@ export function createGitCommandRunner({ env, gitBinary }) {
   return async function runGit(
     workingDirectory,
     argumentsList,
-    { allowedExitCodes = [0], extraEnv = {} } = {},
+    { allowedExitCodes = [0], extraEnv = {}, signal } = {},
   ) {
+    signal?.throwIfAborted();
     return new Promise((resolvePromise, rejectPromise) => {
       const stdout = [];
       const stderr = [];
@@ -116,6 +119,9 @@ export function createGitCommandRunner({ env, gitBinary }) {
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
+      const abort = () => child.kill();
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
 
       function fail(error) {
         if (!settled) {
@@ -151,7 +157,12 @@ export function createGitCommandRunner({ env, gitBinary }) {
         ),
       );
       child.once("close", (exitCode) => {
+        signal?.removeEventListener("abort", abort);
         if (settled) {
+          return;
+        }
+        if (signal?.aborted) {
+          fail(signal.reason);
           return;
         }
         if (!allowedExitCodes.includes(exitCode)) {

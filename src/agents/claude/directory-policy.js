@@ -104,7 +104,13 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
               ...protectedPaths,
             ]),
           ].map((path) => {
-            const entry = entries.get(path);
+            // A scoped capture need not contain cwd. Snapshot verification pins
+            // its inspection binding without traversing unselected children.
+            const entry =
+              entries.get(path) ??
+              (path === inspection.workspacePath
+                ? inspection.bindings.find((binding) => binding.path === path)
+                : undefined);
             if (!["file", "directory"].includes(entry?.kind))
               throw directoryPolicyError(AdapterError);
             return {

@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createClarificationService } from "../../../src/clarifications/index.js";
 import { createWorkspaceService } from "../../../src/workspace/index.js";
+import { failInitTurn } from "../src/workflow.js";
 import {
   acceptInitEdit,
   acceptInitQuestionAppend,
@@ -231,6 +232,87 @@ const findings = (state) => ({
   status: "FINDINGS",
   proposalHash: state.proposalHash,
   findings: ["Preserve the existing validation command."],
+});
+
+test("terminal failure retires only its matching reservation and preserves proposal accounting", () => {
+  const setup = inspection();
+  for (const mode of ["independent", "lazy", "combined"]) {
+    let state = createInitState({ settings: { mode } });
+    const turns = mode === "combined" ? 5 : mode === "lazy" ? 4 : 3;
+    for (let index = 0; index < turns; index++) {
+      const reserved = prepareInitTurn(state, setup, HASH);
+      for (const changed of [{ id: -1 }, { role: "other" }, { binding: OTHER }])
+        assert.throws(
+          () =>
+            failInitTurn(reserved.state, { ...reserved.request, ...changed }),
+          /reserved turn/u,
+        );
+      const failed = failInitTurn(reserved.state, reserved.request);
+      assertInitState(failed);
+      assert.deepEqual(failed, {
+        ...reserved.state,
+        workflowState: "FAILED",
+        pendingTurn: null,
+      });
+      state = acceptInitResult(reserved.state, {
+        turnId: reserved.request.id,
+        inspection: setup,
+        transcriptHash: HASH,
+        result: roleResult(
+          state.workflowState === "CLARIFY"
+            ? ready
+            : ["PROPOSE", "CHECK_AND_FIX"].includes(state.workflowState)
+              ? proposal(reserved.state)
+              : clean(state),
+        ),
+      });
+      if (state.workflowState === "CLARIFY")
+        state = closeInitClarification(state, {
+          inspection: setup,
+          clarificationHash: HASH,
+        });
+    }
+  }
+});
+
+test("terminal pause validation preserves legacy absence and rejects contradictory diagnosis", () => {
+  const state = { ...createInitState(), workflowState: "FAILED" };
+  const run = {
+    pipelineId: "init",
+    pipelineState: state,
+    pause: null,
+    activeTurn: null,
+  };
+  initPipeline.workflow.validateRun(run);
+  for (const diagnostic of [{}, { diagnosticClass: "turn_bad_request" }]) {
+    const failed = {
+      ...run,
+      pause: {
+        reason: "internal_failure",
+        code: "ERR_AGENT_FAILED",
+        ...diagnostic,
+      },
+    };
+    initPipeline.workflow.validateRun(failed);
+    assert.deepEqual(initPipeline.projections.pause(failed).nextActions, []);
+    for (const patch of [
+      { activeTurn: { role: "planner", phase: "clarify" } },
+      { executionResource: {} },
+      { executionProcess: {} },
+      { preparation: {} },
+      { pipelineState: { ...state, workflowState: "CLARIFY" } },
+      ...(Object.hasOwn(diagnostic, "diagnosticClass")
+        ? [{ pause: { ...failed.pause, reason: "provider_interrupted" } }]
+        : []),
+      { pause: { ...failed.pause, code: "private data" } },
+      { pause: { ...failed.pause, diagnosticClass: "private data" } },
+      { pause: { ...failed.pause, resumeState: "CLARIFY" } },
+      { pause: { ...failed.pause, raw: "private data" } },
+    ])
+      assert.throws(() =>
+        initPipeline.workflow.validateRun({ ...failed, ...patch }),
+      );
+  }
 });
 
 test("a proposal cannot select multiple finalization resources for guidance and repair", () => {
@@ -716,9 +798,10 @@ test("shared clarification appends and answer windows retain unanswered rounds a
     transcriptPath: join(taskPath, "clarifications.md"),
   };
   const initial = await service.ensureTranscript(location);
-  let state = createInitState();
+  let state = createInitState({ proactiveClarification: true });
   state.transcriptHash = initial.hash;
   state = turn(state, setup, ready);
+  assert.equal(state.proactiveClarificationComplete, false);
   const optional = await service.prepareEdit({
     ...location,
     expectedHash: state.transcriptHash,
@@ -726,6 +809,8 @@ test("shared clarification appends and answer windows retain unanswered rounds a
     action: "proactive-clarification",
     persistPendingEdit: (authorization) => {
       state = authorizeInitEdit(state, authorization);
+      assert.equal(state.proactiveClarificationComplete, true);
+      assert.equal(state.pendingEdit.id, authorization.id);
     },
   });
   await service.acceptEdit(optional, {
@@ -1081,26 +1166,54 @@ test("inspection delegates confined reads, hashes actual inputs and detects conf
     }),
     inspectConfigurationPath: () => {},
     workspace: {
+      ...createWorkspaceService(),
       inspectPath: async ({ path }) => ({ path, exists: false, ancestors: [] }),
       inspect: async (request) => {
         calls.push(request);
+        const files = new Set([
+          ...request.inputPaths,
+          ...request.configurationPaths,
+        ]);
+        const directories = new Set([
+          request.workspacePath,
+          request.taskPath,
+          "/work/setup",
+        ]);
         return {
           bindings: [
             ...new Set([
               request.workspacePath,
               request.taskPath,
+              ...request.inputPaths,
               ...request.configurationPaths,
               ...request.infrastructurePaths,
               "/work/project/metadata",
             ]),
-          ].map((path) => ({ path, exists: false, ancestors: [] })),
+          ].map((path) => {
+            const kind = files.has(path)
+              ? "file"
+              : directories.has(path)
+                ? "directory"
+                : "missing";
+            return { path, kind, exists: kind !== "missing", ancestors: [] };
+          }),
           controlPaths: ["/work/project/metadata"],
         };
       },
       snapshot: async ({ inspection }) => ({
+        schemaVersion: 1,
+        workspacePath: options.projectPath,
+        outputPaths: [],
         entries: inspection.bindings
-          .filter((binding) => !binding.exists)
-          .map(({ path }) => ({ path, kind: "missing", hash: null })),
+          .map(({ path, kind }) => ({
+            path,
+            kind,
+            hash:
+              kind === "file"
+                ? createHash("sha256").update(path).digest("hex")
+                : null,
+          }))
+          .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
         linkResolutions: [],
       }),
       assertUnchanged: ({ before, after }) => assert.deepEqual(before, after),
@@ -1225,7 +1338,7 @@ test("new external destinations retain absence and ancestor bindings through ins
           externalRoot,
         );
       } else {
-        await assert.rejects(result, { code: "ERR_INIT_PROPOSAL" });
+        await assert.rejects(result, { code: "ERR_INIT_INSPECTION" });
       }
     });
   }
@@ -1256,6 +1369,7 @@ test("inspection ignores an unusable unselected default sibling", async () => {
       }),
       inspectConfigurationPath: () => {},
       workspace: {
+        ...createWorkspaceService(),
         inspectPath: async () => {
           throw Object.assign(
             new Error("Unselected sibling is a symbolic link."),
@@ -1276,7 +1390,17 @@ test("inspection ignores an unusable unselected default sibling", async () => {
             ].map((path) => ({ path })),
           };
         },
-        snapshot: async () => ({ entries: [], linkResolutions: [] }),
+        snapshot: async () => ({
+          schemaVersion: 1,
+          workspacePath: options.projectPath,
+          outputPaths: [],
+          entries: [
+            options.projectPath,
+            options.taskPath,
+            ...(existing ? [existing.rootPath] : []),
+          ].map((path) => ({ path, kind: "directory", hash: null })),
+          linkResolutions: [],
+        }),
         assertUnchanged: ({ before, after }) => assert.deepEqual(before, after),
       },
     };
@@ -1311,6 +1435,7 @@ test("additive inspection retains prior destinations and rejects input or ancest
   let ancestorIdentity = "original";
   const capabilities = {
     workspace: {
+      ...createWorkspaceService(),
       inspectPath: async ({ path }) => ({
         path,
         exists: false,
@@ -1330,6 +1455,9 @@ test("additive inspection retains prior destinations and rejects input or ancest
         })),
       }),
       snapshot: async ({ inspection }) => ({
+        schemaVersion: 1,
+        workspacePath: options.projectPath,
+        outputPaths: [],
         entries: [
           {
             path: "/state/task/task.md",

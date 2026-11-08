@@ -1657,7 +1657,12 @@ test(
       const startedPath = join(directory, `${phase}-started.txt`);
       await writeFile(
         ownerPath,
-        `import { writeFile } from "node:fs/promises";
+        `import { rename, writeFile } from "node:fs/promises";
+async function publishJson(path, value) {
+  const temporary = path + ".tmp";
+  await writeFile(temporary, JSON.stringify(value), { flag: "wx" });
+  await rename(temporary, path);
+}
 const { resolveOwnedProcessLauncher, spawnOwnedProcess } = await import(process.argv[2]);
 const child = spawnOwnedProcess(
   process.execPath,
@@ -1669,9 +1674,9 @@ const child = spawnOwnedProcess(
     env: process.env,
     onProcess: async (pid, proof) => {
       if (pid !== null && ${JSON.stringify(phase)} === "after") {
-        await writeFile(
+        await publishJson(
           ${JSON.stringify(registrationPath)},
-          JSON.stringify({ pid, processIdentity: proof.processIdentity }),
+          { pid, processIdentity: proof.processIdentity },
         );
       }
       await new Promise(() => {});
@@ -1689,7 +1694,7 @@ const child = spawnOwnedProcess(
     stdio: "ignore",
   },
 );
-await writeFile(${JSON.stringify(supervisorPath)}, JSON.stringify({ pid: child.pid }));
+await publishJson(${JSON.stringify(supervisorPath)}, { pid: child.pid });
 await child.ownedCompletion;
 `,
       );

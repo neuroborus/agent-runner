@@ -1,4 +1,8 @@
 import { join } from "node:path";
+import {
+  assertInspectionFailure,
+  inspectionFailureExplanation,
+} from "./inspection-failure.js";
 
 const RESUMABLE = [
   "operator_paused",
@@ -6,6 +10,7 @@ const RESUMABLE = [
   "invalid_result",
   "authentication_required",
   "output_exhausted",
+  "init_inspection_failed",
 ];
 const INPUT_CHECKPOINTS = [
   "clarification_required",
@@ -37,8 +42,18 @@ const EXPLANATIONS = Object.freeze({
     "Frozen setup inputs or workspace controls changed; preserve the setup and start a new run.",
   project_configuration_changed:
     "The active run configuration changed; preserve the setup and start a new run.",
+  internal_failure:
+    "The provider turn failed. Preserve this failed init and any prepared resources; review the supported diagnosis and resolve established prerequisites before a separately authorized new init run. Missing failure classification remains unknown.",
 });
 export function validateResumeAction(run, action) {
+  if (
+    run.pause?.reason === "init_inspection_failed" &&
+    assertInspectionFailure(run.pause, run.pipelineState).constraint !==
+      "inspection_unavailable"
+  )
+    throw new Error(
+      "Preserve existing work, correct the prerequisite outside this run, then start a fresh init run.",
+    );
   if (
     ["workspace_changed", "project_configuration_changed"].includes(
       run.pause?.reason,
@@ -76,19 +91,32 @@ export const initProjections = Object.freeze({
       code: /^[A-Z0-9_]{1,64}$/u.test(run.pause.code ?? "")
         ? run.pause.code
         : null,
+      ...(run.pause.reason === "init_inspection_failed"
+        ? { inspectionFailure: { ...assertInspectionFailure(run.pause) } }
+        : {}),
       explanation:
-        EXPLANATIONS[run.pause.reason] ??
+        (run.pause.reason === "init_inspection_failed"
+          ? inspectionFailureExplanation(run.pause)
+          : EXPLANATIONS[run.pause.reason]) ??
         "Init is paused at its saved setup checkpoint.",
       evidence:
-        state.productDecision?.evidence ??
-        findings(state).map(({ summary }) => summary),
+        run.pause.reason === "internal_failure"
+          ? run.pause.diagnosticClass === undefined
+            ? []
+            : [`Adapter diagnostic: ${run.pause.diagnosticClass}.`]
+          : run.pause.reason === "init_inspection_failed"
+            ? []
+            : (state.productDecision?.evidence ??
+              findings(state).map(({ summary }) => summary)),
       resumeState: resumable ? (run.pause.resumeState ?? null) : null,
       nextActions:
         run.pause.inputResponse !== undefined || !resumable
           ? []
-          : state.pendingEdit
-            ? [{ type: "respond", requestId: state.pendingEdit.id }]
-            : [{ type: "resume", action: null }],
+          : run.pause.reason === "init_inspection_failed"
+            ? [{ type: "resume", action: null }]
+            : state.pendingEdit
+              ? [{ type: "respond", requestId: state.pendingEdit.id }]
+              : [{ type: "resume", action: null }],
     };
   },
   status(run) {

@@ -47,6 +47,23 @@ declaration before provider work. Custom authoring uses read-only directory
 turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
+Directory policies may carry frozen filesystem inspection roots, literal subtree
+exclusions and a file-only root constraint that rejects directory replacements
+before traversal. Capability receipts bind that selection, and preparation,
+retired-attempt verification, reconstruction and owned-storage cleanup retain
+it without inspecting excluded descendants. Required inputs and controls remain
+protected; exclusions grant no additional native access, outputs or storage
+placement. Omission preserves existing whole-directory behavior and receipts.
+Providers consume these filesystem declarations without selecting Git sources.
+Inspection roots support the persisted 10,000-path capacity; ordinary read/output
+arrays and literal exclusions retain their 256-path bounds. Runner storage
+protection contains canonical absolute roots; relative exclusions remain covered
+by the workspace root rather than entering provider storage options.
+Audit's frozen directory exclusions or Git-selected file-only roots reach both
+adapters through this same policy. Membership/provenance checks remain Runner-
+and Git-owned; preparation and receipts retain the filesystem scope without
+visiting opaque descendants or gaining Git effects.
+
 Execution and polishing may supply `readPaths` containing one exact selected
 finalization Markdown file. Adapters reject directories and malformed declarations
 before launch. Codex retains its root read policy and protects the exact file in
@@ -141,8 +158,11 @@ generic default, and public projections, activity, prompts, and diagnostics do
 not expose either string.
 
 Claude owns its tool HOME/config projections, launcher, and temporary
-scaffolding outside project/task trees. Missing optional paths never authorize
-cwd-relative placeholders. Existing project restrictions remain effective;
+scaffolding outside project/task trees. Native startup also uses the owned
+allocation so atomic `.claude/.cc-writes` initialization precedes tools without
+changing an audited source. The real workspace remains an explicit tool directory;
+file tools use absolute workspace paths and sandboxed Bash starts there. Missing
+optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
 provider authentication, profiles, and native sessions retain their own access.
 Both native and fallback policy receipts bind this lifecycle. A receipt from an
 older projection policy is incompatible rather than silently replaced.
@@ -312,6 +332,31 @@ read-only `git var` subcommand to inspect the repository's existing author and
 committer identities; staging, commit, configuration, history, ref, and remote
 mutations remain outside that turn. Polishing never requests local commit.
 
+Claude's readiness schema requires exactly one boolean `ready` field. Only
+`{ "ready": true }` admits the constrained executor. Successful native output
+is checked for its complete shape before interpreting the value; refusals use
+fixed `ERR_CLAUDE_LOCAL_COMMIT_POLICY` diagnostics:
+
+| Diagnostic class                | Established constraint                     |
+| ------------------------------- | ------------------------------------------ |
+| `commit_readiness_declined`     | Exact `{ "ready": false }`; reason unknown |
+| `commit_readiness_not_object`   | Confirmation must be an object             |
+| `commit_readiness_not_boolean`  | An own boolean `ready` field is required   |
+| `commit_readiness_extra_fields` | Only the `ready` field is permitted        |
+
+Non-object and unsupported-field checks precede the boolean/value checks.
+Missing confirmation is not a deliberate decline. These terminal classes are
+registered by the adapter; native rejected fields, values and causes never
+cross the boundary. A coincident abort during result processing or cleanup
+preserves an already validated class without making the rejection recoverable.
+Every refusal retains validated
+`commitExecutor: "not_started"` proof and starts no commit executor. Execution's
+[commit recovery contract](../../pipelines/plan-execution/docs/SPEC.md#137-commit)
+preserves the reviewed candidate for separately authorized follow-up: COMMIT
+has no durable readiness-output correction checkpoint, so these classes grant
+no identical same-run retry. Legacy classless and other supported rejections
+retain their existing recovery rules.
+
 Model-free capability subprocesses for CLI, sandbox, commit-executor, and
 process-containment proofs each have a fixed 10-second deadline. Within that
 bound, a local-commit probe has a one-second network-denial observation
@@ -341,6 +386,15 @@ accepted large results therefore do not accumulate into one protocol response;
 current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
+
+Init persists an otherwise unhandled normalized terminal adapter failure before
+execution ownership releases, using only a bounded code and optional registered
+class. Registry interpretation stays at the agent boundary. Read-only Runner callback
+errors retain their original identity through native wrapping or swallowing;
+they provide no terminal provider evidence. Distinct dispositions and safety
+failures keep precedence. The [init contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
+owns settlement, preserved evidence and nonresumable guidance; missing historical
+classification is never reconstructed from native text or ownerless state.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
@@ -567,6 +621,12 @@ provider session.
 
 Provider messages, responses, prompts, denied tool input, standard error,
 credentials, and process causes do not enter public activity or durable state.
+Audit retains only the already normalized optional `diagnosticClass` on terminal
+failure, validated by the common registry-backed pause contract. A finite class
+is bounded evidence, not proof of an underlying environment cause; a generic
+error code or missing legacy class supplies no diagnosis. The
+[audit specification](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle)
+owns its fixed operator guidance and nonresumable terminal disposition.
 Adding another backend is a source-controlled runtime decision, not dynamic
 plugin loading, and must preserve these shared semantics without adding
 provider branches to pipeline policy.

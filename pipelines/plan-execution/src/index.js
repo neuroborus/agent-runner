@@ -51,9 +51,11 @@ import {
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   createFinalizationRecovery,
+  commitReadinessConstraint,
   finalizationFeedbackFindings,
   findingFingerprint,
   isFinalizationPolicy,
+  isOutputDiagnostic,
   resolveActiveRoles,
   sha256,
 } from "./workflow-contract.js";
@@ -293,6 +295,12 @@ function publicCode(value) {
 }
 
 function publicResumeState(run) {
+  if (
+    run.pause?.reason === "commit_failed" &&
+    run.pipelineState.pendingCommit === null &&
+    commitReadinessConstraint(run.pause.diagnosticClass) !== null
+  )
+    return null;
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
@@ -300,6 +308,10 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  const readinessConstraint = commitReadinessConstraint(pause.diagnosticClass);
+  if (pause.reason === "commit_failed" && readinessConstraint !== null) {
+    return `${readinessConstraint} The reviewed candidate is preserved. COMMIT has no readiness-output correction; separately authorized follow-up is required.`;
+  }
   if (
     ["internal_failure", "commit_failed"].includes(pause.reason) &&
     typeof pause.diagnosticClass === "string" &&
@@ -343,6 +355,23 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  if (
+    pause.reason === "commit_failed" &&
+    commitReadinessConstraint(pause.diagnosticClass) !== null
+  ) {
+    return Object.freeze([`Adapter diagnostic: ${pause.diagnosticClass}.`]);
+  }
+  if (
+    pause.reason === "internal_failure" &&
+    pause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+    isOutputDiagnostic(pause.diagnostic) &&
+    pause.diagnostic.role === "worker" &&
+    pause.diagnostic.phase === "finalization" &&
+    pause.diagnostic.contract === "finalization"
+  ) {
+    const { field, constraint } = pause.diagnostic;
+    return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
   if (pause.reason === "writable_output_invalid") {
     const phase = pause.resumeState;
     const diagnostic = writableResultDiagnostic(
@@ -475,6 +504,17 @@ function projectPause(run) {
         }),
       );
     } else if (
+      run.pause.reason === "commit_failed" &&
+      run.pipelineState.pendingCommit === null &&
+      commitReadinessConstraint(run.pause.diagnosticClass) !== null
+    ) {
+      nextActions.push(
+        Object.freeze({
+          type: "start-new-run",
+          requirement: "resolved-commit-readiness",
+        }),
+      );
+    } else if (
       ["finalization_skill_invalid", "finalization_skill_missing"].includes(
         run.pause.reason,
       )
@@ -582,6 +622,15 @@ function validateResumeAction(run, action) {
   )
     return;
   const state = run.pipelineState;
+  if (
+    run.pause?.reason === "commit_failed" &&
+    state.pendingCommit === null &&
+    commitReadinessConstraint(run.pause.diagnosticClass) !== null
+  ) {
+    throw new Error(
+      "Commit readiness rejection requires separately authorized follow-up.",
+    );
+  }
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
   }

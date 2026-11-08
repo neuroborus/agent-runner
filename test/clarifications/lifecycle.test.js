@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
+import fs, {
   link,
   lstat,
   mkdir,
@@ -10,6 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -743,6 +744,97 @@ test("writes identified MCP answers atomically and retries the exact content", a
   );
 });
 
+test("answer inspection scopes pre-write reads without classifying writes or readback", async (t) => {
+  for (const checkpoint of ["initial", "recheck", "write", "readback"])
+    await t.test(checkpoint, async (t) => {
+      const location = await createFixture(t);
+      const service = createClarificationService({ interactive: false });
+      const initial = await service.ensureTranscript(location);
+      const questions = await service.appendQuestionRound({
+        ...location,
+        expectedHash: initial.hash,
+        round: 1,
+        questions: [
+          { question: "Which check?", whyItMatters: "It defines acceptance." },
+        ],
+      });
+      const authorization = await service.prepareEdit({
+        ...location,
+        expectedHash: questions.hash,
+        suspendedState: "CLARIFY",
+        action: "clarification-answers",
+        persistPendingEdit: async () => {},
+      });
+      const answers = ["Use node --test."];
+      const preview = await service.previewEditAnswers(authorization, answers);
+      const inspectionFailure = new Error("Scoped inspection rejected.");
+      const nativeFailure = Object.assign(
+        new Error("Read resource unavailable."),
+        { code: "EMFILE" },
+      );
+      const nativeOpen = fs.open;
+      const readNumber = { initial: 1, recheck: 2, readback: 3 }[checkpoint];
+      let reads = 0;
+      let inspectedFailure;
+      const mockedOpen = t.mock.method(fs, "open", async (path, ...args) => {
+        if (path === location.transcriptPath && ++reads === readNumber)
+          throw nativeFailure;
+        return nativeOpen(path, ...args);
+      });
+      const mockedRename =
+        checkpoint === "write"
+          ? t.mock.method(fs, "rename", async () => {
+              throw nativeFailure;
+            })
+          : null;
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(
+          service.writeEditAnswers(authorization, answers, {
+            expectedHash: preview.hash,
+            async inspectRead(operation) {
+              try {
+                return await operation();
+              } catch (cause) {
+                inspectedFailure = cause;
+                throw inspectionFailure;
+              }
+            },
+          }),
+          checkpoint === "initial" || checkpoint === "recheck"
+            ? (error) => error === inspectionFailure
+            : {
+                code:
+                  checkpoint === "write"
+                    ? "ERR_CLARIFICATION_WRITE"
+                    : "ERR_CLARIFICATION_READ",
+                cause: nativeFailure,
+              },
+        );
+        if (checkpoint === "initial" || checkpoint === "recheck") {
+          assert.equal(inspectedFailure.code, "ERR_CLARIFICATION_READ");
+          assert.equal(inspectedFailure.cause, nativeFailure);
+        } else assert.equal(inspectedFailure, undefined);
+      } finally {
+        mockedOpen.mock.restore();
+        mockedRename?.mock.restore();
+        syncBuiltinESMExports();
+      }
+      assert.equal(
+        sha256(await readFile(location.transcriptPath)),
+        checkpoint === "readback" ? preview.hash : questions.hash,
+      );
+      assert.equal(
+        (
+          await service.writeEditAnswers(authorization, answers, {
+            expectedHash: preview.hash,
+          })
+        ).hash,
+        preview.hash,
+      );
+    });
+});
+
 test("round-trips generated product-decision MCP answers", async (t) => {
   const { artifactRoot, transcriptPath } = await createFixture(t);
   const service = createClarificationService({
@@ -940,7 +1032,11 @@ test("validates structured input and transcript size", async (t) => {
   await writeFile(transcriptPath, Buffer.alloc(1024 * 1024 + 1));
   await assert.rejects(
     service.inspectTranscript({ artifactRoot, transcriptPath }),
-    ClarificationError,
+    {
+      name: "ClarificationError",
+      code: "ERR_INVALID_CLARIFICATION",
+      constraint: "file_size",
+    },
   );
 });
 

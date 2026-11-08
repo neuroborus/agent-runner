@@ -7,7 +7,10 @@ import {
   attachOutputExhaustion,
   outputExhaustion,
 } from "../../../test/support/output-exhaustion.js";
-import { normalizeAdapterFailure } from "../../../src/agents/index.js";
+import {
+  ClaudeAdapterError,
+  normalizeAdapterFailure,
+} from "../../../src/agents/index.js";
 import {
   attachAuthentication,
   authenticationFailure,
@@ -465,6 +468,105 @@ test("carries a pre-effect Codex policy class into the commit pause", async (t) 
       .map(({ authorizationId }) => authorizationId),
     ["commit-1", "commit-2"],
   );
+});
+
+test("readiness refusals preserve the candidate without offering blind COMMIT retry", async (t) => {
+  for (const diagnosticClass of [
+    "commit_readiness_declined",
+    "commit_readiness_not_boolean",
+  ]) {
+    let interruptVerification = true;
+    const fixture = await createFixture(t, {
+      onCommitVerify() {
+        if (interruptVerification) {
+          interruptVerification = false;
+          throw Object.assign(new Error("Git verification was interrupted."), {
+            code: "ERR_FAKE_COMMIT_VERIFICATION",
+          });
+        }
+      },
+      onRoleRun(_role, request) {
+        if (request.access === "local-commit") {
+          throw normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError("PRIVATE_READINESS_VALUE", {
+              code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+              diagnosticClass,
+              effectStarted: false,
+            }),
+          );
+        }
+      },
+    });
+    const verificationPaused = await fixture.run();
+    const pending = verificationPaused.pipelineState.pendingCommit;
+    assert.equal(pending.status, "consumed");
+    assert.deepEqual(pending.preEffectRejection, {
+      code: "ERR_CLAUDE_LOCAL_COMMIT_POLICY",
+      recoverable: false,
+      diagnosticClass,
+    });
+    assert.doesNotThrow(() =>
+      planExecutionPipeline.validateResumeAction(verificationPaused, null),
+    );
+    const invalid = structuredClone(verificationPaused);
+    invalid.pipelineState.pendingCommit.preEffectRejection.recoverable = true;
+    assert.throws(() => planExecutionPipeline.workflow.validateRun(invalid), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+
+    // Reconstruction consumes the saved proof; it never invokes readiness again.
+    fixture.persistPipelineState(
+      structuredClone(verificationPaused.pipelineState),
+    );
+    const paused = await fixture.run();
+    assert.equal(paused.pipelineState.pendingCommit, null);
+    assert.equal(paused.pause.diagnosticClass, diagnosticClass);
+    for (const field of [
+      "finalizedFingerprint",
+      "reviewedFingerprint",
+      "finalizationResult",
+      "completedCommits",
+    ]) {
+      assert.deepEqual(
+        paused.pipelineState[field],
+        verificationPaused.pipelineState[field],
+      );
+    }
+    assert.deepEqual(paused.counters, verificationPaused.counters);
+    const projection = planExecutionPipeline.projections.pause(paused);
+    assert.equal(projection.resumeState, null);
+    assert.match(projection.explanation, /separately authorized follow-up/u);
+    assert.match(
+      projection.explanation,
+      diagnosticClass === "commit_readiness_declined"
+        ? /reason is unknown/u
+        : /boolean ready field/u,
+    );
+    assert.deepEqual(projection.evidence, [
+      `Adapter diagnostic: ${diagnosticClass}.`,
+    ]);
+    assert.deepEqual(projection.nextActions, [
+      { type: "start-new-run", requirement: "resolved-commit-readiness" },
+    ]);
+    assert.throws(
+      () => planExecutionPipeline.validateResumeAction(paused, null),
+      /separately authorized follow-up/u,
+    );
+    assert.equal(
+      (await fixture.run()).pipelineState.workflowState,
+      "WAITING_FOR_USER",
+    );
+    assert.equal(
+      fixture.calls.worker.filter(({ access }) => access === "local-commit")
+        .length,
+      1,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(fixture.transitions),
+      /PRIVATE_READINESS/u,
+    );
+  }
 });
 
 test("re-authorizes after a proven pre-effect Codex overload rejection", async (t) => {

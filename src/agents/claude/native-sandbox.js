@@ -334,6 +334,7 @@ function nativeArguments({
   outsideDirectory,
   shell,
   workspaceDirectory,
+  providerDirectory,
   directoryMode = "git",
 }) {
   return [
@@ -353,6 +354,12 @@ function nativeArguments({
     basePath,
     basePath,
     "--bind",
+    providerDirectory,
+    providerDirectory,
+    "--ro-bind",
+    providerDirectory,
+    providerDirectory,
+    "--bind",
     workspaceDirectory,
     workspaceDirectory,
     "--ro-bind",
@@ -367,7 +374,7 @@ function nativeArguments({
     "--proc",
     "/proc",
     "--chdir",
-    workspaceDirectory,
+    providerDirectory,
     "--unsetenv",
     PROBE_CREDENTIAL,
     "--setenv",
@@ -404,6 +411,7 @@ function fallbackProbeArguments({
   shell,
   socketPath,
   workspaceDirectory,
+  providerDirectory,
   directoryMode = "git",
 }) {
   const proxySocket = join(privateDirectory, "claude-http-probe.sock");
@@ -431,6 +439,12 @@ function fallbackProbeArguments({
     "/tmp/claude",
     "/tmp/claude",
     "--bind",
+    providerDirectory,
+    providerDirectory,
+    "--ro-bind",
+    providerDirectory,
+    providerDirectory,
+    "--bind",
     workspaceDirectory,
     workspaceDirectory,
     "--bind",
@@ -450,6 +464,8 @@ function fallbackProbeArguments({
     "/proc",
     "--unsetenv",
     PROBE_CREDENTIAL,
+    "--chdir",
+    providerDirectory,
     "--",
     shell,
     "-c",
@@ -621,12 +637,14 @@ async function probePolicy({
     // including when the test runner supplies a nested private temporary root.
     basePath = await mkdtemp(join(tmpdir(), "ar-c-"));
     const workspaceDirectory = join(basePath, "w");
+    const providerDirectory = join(basePath, "native");
     const gitDirectory = join(
       workspaceDirectory,
       directoryAccess === undefined ? ".git" : "control",
     );
     const outsideDirectory = join(basePath, "outside");
     await mkdir(workspaceDirectory);
+    await mkdir(providerDirectory, { mode: 0o700 });
     await Promise.all(
       [gitDirectory, outsideDirectory, join(workspaceDirectory, ".claude")].map(
         (path) => mkdir(path, { mode: 0o700 }),
@@ -678,6 +696,7 @@ async function probePolicy({
         architecture,
         bubblewrapBinary,
         cwd: workspaceDirectory,
+        providerCwd: providerDirectory,
         environment: env,
         gitDirectories: directoryPolicy?.protectedPaths ?? [gitDirectory],
         directoryPolicy,
@@ -697,6 +716,7 @@ async function probePolicy({
         shell: commandLauncher.shell,
         socketPath,
         workspaceDirectory,
+        providerDirectory,
         directoryMode,
       });
     } else {
@@ -705,6 +725,7 @@ async function probePolicy({
         architecture,
         bubblewrapBinary,
         cwd: workspaceDirectory,
+        providerCwd: providerDirectory,
         environment: env,
         gitDirectories: directoryPolicy?.protectedPaths ?? [gitDirectory],
         directoryPolicy,
@@ -719,6 +740,7 @@ async function probePolicy({
         outsideDirectory,
         shell: commandLauncher.shell,
         workspaceDirectory,
+        providerDirectory,
         directoryMode,
       });
       const providerCommand = [

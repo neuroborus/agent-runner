@@ -1,6 +1,8 @@
 import { acceptsCleanRecheck, recheckRole } from "./cycles.js";
+import { assertCorrectionFeedback } from "./correction-feedback.js";
 import {
   assertAudit,
+  assertAuditResult,
   assertDiscoveryRun,
   exact,
   fingerprint,
@@ -8,7 +10,12 @@ import {
   same,
   sessionContextKey,
 } from "./discovery-contract.js";
-import { normalizeAuditReport, texts } from "./findings.js";
+import {
+  normalizeAuditReport,
+  normalizeFinding,
+  normalizeHypothesis,
+  text,
+} from "./findings.js";
 import { assertPublication } from "./publication-contract.js";
 
 const KINDS = ["confirm", "correct", "reject", "merge", "hypothesis"];
@@ -21,58 +28,57 @@ const OUTCOMES = [
   "clean",
 ];
 
-function normalizeFinding(state, finding) {
-  return normalizeAuditReport({
-    ...state.report,
-    findings: [finding],
-    hypotheses: [],
-  }).findings[0];
-}
-
-function normalizeDecision(state, value, entry) {
-  exact(value, [
-    "id",
-    "kind",
-    "rationale",
-    "finding",
-    "targetId",
-    "hypothesis",
-  ]);
-  assertAudit(
-    value.id === entry.finding.id && KINDS.includes(value.kind),
-    "Audit disposition must identify its exact candidate.",
+function normalizeDecision(value, entry, path = "recheck.decisions[0]") {
+  exact(
+    value,
+    ["id", "kind", "rationale", "finding", "targetId", "hypothesis"],
+    path,
   );
-  const rationale = texts([value.rationale], "disposition.rationale", 1)[0];
+  assertAuditResult(
+    value.id === entry.finding.id,
+    `${path}.id`,
+    "candidate-mismatch",
+  );
+  assertAuditResult(
+    KINDS.includes(value.kind),
+    `${path}.kind`,
+    "unsupported-value",
+  );
+  const rationale = text(value.rationale, `${path}.rationale`);
   let finding = null;
   let hypothesis = null;
   if (value.kind === "correct") {
-    finding = normalizeFinding(state, value.finding);
-    assertAudit(
+    finding = normalizeFinding(value.finding, `${path}.finding`);
+    assertAuditResult(
       finding.id === value.id && finding.causeId === entry.finding.causeId,
-      "Audit corrections must preserve finding and cause identities.",
+      `${path}.finding`,
+      "identity-mismatch",
     );
   } else
-    assertAudit(value.finding === null, "Only corrections carry a finding.");
+    assertAuditResult(
+      value.finding === null,
+      `${path}.finding`,
+      "invalid-payload",
+    );
   if (value.kind === "hypothesis") {
-    hypothesis = normalizeAuditReport({
-      ...state.report,
-      findings: [],
-      hypotheses: [value.hypothesis],
-    }).hypotheses[0];
-    assertAudit(
+    hypothesis = normalizeHypothesis(value.hypothesis, `${path}.hypothesis`);
+    assertAuditResult(
       hypothesis.id === value.id,
-      "Audit hypothesis must retain its candidate ID.",
+      `${path}.hypothesis.id`,
+      "identity-mismatch",
     );
   } else
-    assertAudit(
+    assertAuditResult(
       value.hypothesis === null,
-      "Only hypotheses carry uncertainty.",
+      `${path}.hypothesis`,
+      "invalid-payload",
     );
-  assertAudit(
+  assertAuditResult(
     value.kind === "merge"
       ? typeof value.targetId === "string" && value.targetId !== value.id
       : value.targetId === null,
-    "Audit merge must name a distinct retained finding.",
+    `${path}.targetId`,
+    "invalid-merge",
   );
   return {
     id: value.id,
@@ -111,7 +117,7 @@ function assertBatch(state, batch) {
   for (const entry of batch.entries) {
     exact(entry, ["finding", "version", "sourcePass"]);
     assertAudit(
-      same(entry.finding, normalizeFinding(state, entry.finding)) &&
+      same(entry.finding, normalizeFinding(entry.finding)) &&
         !ids.has(entry.finding.id) &&
         Number.isSafeInteger(entry.version) &&
         entry.version > 0 &&
@@ -133,7 +139,7 @@ function assertBatch(state, batch) {
       "Audit dispositions must be unique batch members.",
     );
     assertAudit(
-      same(decision, normalizeDecision(state, decision, entry)),
+      same(decision, normalizeDecision(decision, entry)),
       "Audit disposition is not normalized.",
     );
     assertAudit(
@@ -144,10 +150,11 @@ function assertBatch(state, batch) {
       const target = batch.dispositions.find(
         ({ id }) => id === decision.targetId,
       );
-      assertAudit(
+      assertAuditResult(
         ids.has(decision.targetId) &&
           (!target || ["confirm", "correct"].includes(target.kind)),
-        "Audit merges must retain a confirmed or corrected target, without chains.",
+        "recheck.decisions",
+        "invalid-merge",
       );
     }
     reviewed.add(decision.id);
@@ -163,6 +170,20 @@ export function assertAuditRun(run) {
     "Audit recheck history is required.",
   );
   assertDiscoveryRun(run);
+  if (Object.hasOwn(run.pause ?? {}, "diagnosticClass")) {
+    // The common run envelope owns registry membership; audit owns disposition.
+    exact(run.pause, ["reason", "code", "diagnosticClass"]);
+    assertAudit(
+      state.workflowState === "FAILED" &&
+        run.pause.reason === "internal_failure" &&
+        typeof run.pause.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/u.test(run.pause.code) &&
+        typeof run.pause.diagnosticClass === "string" &&
+        /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass),
+      "Audit terminal provider diagnostic is invalid.",
+    );
+  }
+  assertCorrectionFeedback(run);
   assertPublication(run);
   assertAudit(
     state.recheckHistory.length <= state.settings.maxFindingRecheckPasses &&
@@ -228,7 +249,7 @@ export function assertAuditRun(run) {
         "Audit recheck decisions require unique ledger identities.",
       );
       assertAudit(
-        same(decision, normalizeDecision(state, decision, entry)),
+        same(decision, normalizeDecision(decision, entry)),
         "Audit historical decision is invalid.",
       );
       ids.add(decision.id);
@@ -331,56 +352,79 @@ export function finishRecheck(state, outcome) {
 
 /** Adopt a whole response atomically; every substantive change needs another distinct recheck. */
 export function acceptRecheck(state, value) {
-  exact(value, [
-    "status",
-    "snapshotFingerprint",
-    "reportFingerprint",
-    "batchFingerprint",
-    "decisions",
-    "additions",
-  ]);
-  const batch = state.pendingBatch;
-  assertAudit(
-    ["COMPLETE", "INCOMPLETE"].includes(value.status) &&
-      value.snapshotFingerprint === batch.snapshotFingerprint &&
-      value.reportFingerprint === batch.reportFingerprint &&
-      value.batchFingerprint === fingerprint(batch) &&
-      Array.isArray(value.decisions) &&
-      Array.isArray(value.additions),
-    "Audit recheck output has stale or incomplete bindings.",
+  exact(
+    value,
+    [
+      "status",
+      "snapshotFingerprint",
+      "reportFingerprint",
+      "batchFingerprint",
+      "decisions",
+      "additions",
+    ],
+    "recheck",
   );
+  const batch = state.pendingBatch;
+  assertAuditResult(
+    ["COMPLETE", "INCOMPLETE"].includes(value.status),
+    "recheck.status",
+    "unsupported-value",
+  );
+  for (const [field, expected] of Object.entries({
+    snapshotFingerprint: batch.snapshotFingerprint,
+    reportFingerprint: batch.reportFingerprint,
+    batchFingerprint: fingerprint(batch),
+  }))
+    assertAuditResult(
+      value[field] === expected,
+      `recheck.${field}`,
+      "binding-mismatch",
+    );
+  for (const field of ["decisions", "additions"])
+    assertAuditResult(
+      Array.isArray(value[field]),
+      `recheck.${field}`,
+      "required-items",
+    );
   const decisions = batch.entries.map((entry) => {
     const matches = value.decisions.filter(
       (decision) => decision?.id === entry.finding.id,
     );
-    assertAudit(
+    assertAuditResult(
       matches.length === 1,
-      "Audit recheck must decide every candidate exactly once.",
+      "recheck.decisions",
+      "candidate-mismatch",
     );
-    return normalizeDecision(state, matches[0], entry);
+    return normalizeDecision(
+      matches[0],
+      entry,
+      `recheck.decisions[${value.decisions.indexOf(matches[0])}]`,
+    );
   });
-  assertAudit(
+  assertAuditResult(
     decisions.length === value.decisions.length,
-    "Audit recheck cannot decide unknown candidates.",
+    "recheck.decisions",
+    "candidate-mismatch",
   );
-  const additions = value.additions.map((finding) =>
-    normalizeFinding(state, finding),
+  const additions = value.additions.map((finding, index) =>
+    normalizeFinding(finding, `recheck.additions[${index}]`),
   );
   if (value.status !== "COMPLETE") return finishRecheck(state, "incomplete");
 
   const ledger = [...state.ledger];
   const entries = [...batch.entries];
-  function adopt(finding) {
+  function adopt(finding, path) {
     const previous = ledger.find(
       (entry) =>
         entry.finding.id === finding.id ||
         entry.finding.causeId === finding.causeId,
     );
-    assertAudit(
+    assertAuditResult(
       !previous ||
         (previous.finding.id === finding.id &&
           previous.finding.causeId === finding.causeId),
-      "Audit recheck additions conflict with established identities.",
+      path,
+      "identity-mismatch",
     );
     const entry =
       previous && same(previous.finding, finding)
@@ -397,33 +441,40 @@ export function acceptRecheck(state, value) {
     else entries[index] = entry;
   }
   for (const decision of decisions)
-    if (decision.kind === "correct") adopt(decision.finding);
-  for (const finding of additions) {
+    if (decision.kind === "correct")
+      adopt(decision.finding, "recheck.decisions");
+  for (const [index, finding] of additions.entries()) {
     const existing = entries.find((entry) => entry.finding.id === finding.id);
-    assertAudit(
+    assertAuditResult(
       !existing || same(existing.finding, finding),
-      "Use a correction to revise a current batch member.",
+      `recheck.additions[${index}]`,
+      "identity-mismatch",
     );
     // Exact unchanged repeats add neither a candidate nor a new batch version.
-    if (!ledger.some((entry) => same(entry.finding, finding))) adopt(finding);
+    if (!ledger.some((entry) => same(entry.finding, finding)))
+      adopt(finding, `recheck.additions[${index}]`);
   }
   for (const decision of decisions.filter(({ kind }) => kind === "merge")) {
     const target = ledger.find(
       ({ finding }) => finding.id === decision.targetId,
     );
-    assertAudit(target, "Audit merge target must exist in the ledger.");
+    assertAuditResult(target, "recheck.decisions", "invalid-merge");
     if (!entries.some(({ finding }) => finding.id === decision.targetId))
       entries.push(target);
   }
-  assertAudit(
+  assertAuditResult(
     ledger.length <= 10_000,
-    "Audit ledger exceeds the persistent collection limit.",
+    "recheck.additions",
+    "collection-limit",
   );
-  normalizeAuditReport({
-    ...state.report,
-    findings: ledger.map(({ finding }) => finding),
-    hypotheses: [],
-  });
+  normalizeAuditReport(
+    {
+      ...state.report,
+      findings: ledger.map(({ finding }) => finding),
+      hypotheses: [],
+    },
+    { findings: "recheck.additions", ids: "recheck" },
+  );
   const unchanged =
     same(entries, batch.entries) &&
     decisions.every((decision) => {

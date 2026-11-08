@@ -1,6 +1,8 @@
 import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { assertInitInspection } from "./inspection-failure.js";
+
 import {
   assertInit,
   assertInspection,
@@ -28,10 +30,15 @@ export async function inspectInitSetup(
     candidatePaths = [],
     documents,
     previousInspection = null,
+    schemaVersion = previousInspection?.schemaVersion ?? 2,
   },
   { workspace, loadProjectConfiguration, inspectConfigurationPath },
 ) {
   exact(documents, GROUPS);
+  assertInit(
+    [1, 2].includes(schemaVersion),
+    "Unsupported init inspection version.",
+  );
   assertInit(
     Array.isArray(configurationPaths) && Array.isArray(candidatePaths),
     "Init configuration inventories must be arrays.",
@@ -61,6 +68,11 @@ export async function inspectInitSetup(
       ]),
     );
   }
+  assertInitInspection(
+    GROUPS.every((group) => new Set(documents[group]).size <= 256) &&
+      new Set(candidatePaths).size <= 32,
+    "evidence_capacity",
+  );
   assertInit(
     [
       projectPath,
@@ -92,9 +104,9 @@ export async function inspectInitSetup(
       configurationPath,
       inspectPath: inspectConfigurationPath,
     });
-    assertInit(
+    assertInitInspection(
       loaded !== null && loaded.protection.projectPath === projectPath,
-      "Init configuration belongs to another target.",
+      "destination_unavailable",
     );
     candidates.push({
       configurationPath: loaded.path,
@@ -146,13 +158,19 @@ export async function inspectInitSetup(
     configurationPaths,
     infrastructurePaths: roots.filter((root) => root !== projectPath),
   });
+  assertInitInspection(
+    inspection.bindings.length <= 10_000 &&
+      inspection.controlPaths.length <= 10_000,
+    "evidence_capacity",
+  );
   if (missingExternalRoot !== null) {
     const binding = inspection.bindings.find(
       (binding) => binding.path === missingExternalRoot.path,
     );
-    assertInit(
+    assertInitInspection(
       binding?.exists === false &&
         isDeepStrictEqual(binding.ancestors, missingExternalRoot.ancestors),
+      "workspace_changed",
       "Init destination or its ancestors changed during inspection.",
     );
   }
@@ -170,13 +188,18 @@ export async function inspectInitSetup(
   }
   const after = await workspace.snapshot({ inspection });
   workspace.assertUnchanged({ before, after });
+  assertInitInspection(
+    isDeepStrictEqual(before.linkResolutions, after.linkResolutions),
+    "workspace_changed",
+  );
   // A snapshot of an enclosing task tree omits absent children.
   if (missingExternalRoot !== null)
-    assertInit(
+    assertInitInspection(
       !after.entries.some(
         (entry) =>
           entry.path === missingExternalRoot.path && entry.kind !== "missing",
       ),
+      "destination_unavailable",
       "Init destination is occupied by unbound infrastructure.",
     );
   for (const candidate of candidates) {
@@ -185,8 +208,9 @@ export async function inspectInitSetup(
       configurationPath: candidate.configurationPath,
       inspectPath: inspectConfigurationPath,
     });
-    assertInit(
+    assertInitInspection(
       digest(loaded.protection) === candidate.protectionHash,
+      "workspace_changed",
       "Init destination configuration changed during inspection.",
     );
   }
@@ -194,6 +218,21 @@ export async function inspectInitSetup(
   const entries = after.entries.filter(
     ({ path }) => path !== join(taskPath, "clarifications.md"),
   );
+  const protectedSnapshot = { ...after, entries };
+  const proof =
+    schemaVersion === 1
+      ? null
+      : workspace.snapshotProof({
+          snapshot: protectedSnapshot,
+          paths: setupEvidencePaths({
+            projectPath,
+            artifactRoot,
+            roots,
+            candidates,
+            documents,
+            controlPaths: inspection.controlPaths,
+          }),
+        });
   const scopeBindings = [
     ...new Map(
       inspection.bindings.map((binding) => [
@@ -202,12 +241,21 @@ export async function inspectInitSetup(
           path: binding.path,
           hash: digest({
             binding,
-            entries: entries.filter((entry) =>
-              within(binding.path, entry.path),
-            ),
-            linkResolutions: after.linkResolutions.filter((link) =>
-              within(binding.path, link.path),
-            ),
+            ...(schemaVersion === 1
+              ? {
+                  entries: entries.filter((entry) =>
+                    within(binding.path, entry.path),
+                  ),
+                  linkResolutions: after.linkResolutions.filter((link) =>
+                    within(binding.path, link.path),
+                  ),
+                }
+              : {
+                  proof: workspace.snapshotProof({
+                    snapshot: protectedSnapshot,
+                    rootPath: binding.path,
+                  }),
+                }),
             controls: inspection.controlPaths.filter((path) =>
               within(binding.path, path),
             ),
@@ -217,7 +265,7 @@ export async function inspectInitSetup(
     ).values(),
   ].sort((a, b) => a.path.localeCompare(b.path));
   const result = {
-    schemaVersion: 1,
+    schemaVersion,
     projectPath,
     taskPath,
     artifactRoot,
@@ -228,19 +276,96 @@ export async function inspectInitSetup(
     documents: evidence,
     controlPaths: [...inspection.controlPaths],
     roots: roots.sort(),
-    entries: entries.map(({ path, kind, hash }) => ({ path, kind, hash })),
+    entries: (proof?.entries ?? entries).map(({ path, kind, hash }) => ({
+      path,
+      kind,
+      hash,
+    })),
     scopeBindings,
     // Bind missing paths, real ancestors, controls and file identities, not just bytes.
-    snapshotHash: digest({
-      inspection,
-      entries,
-      linkResolutions: after.linkResolutions,
-    }),
+    snapshotHash:
+      schemaVersion === 1
+        ? digest({
+            inspection,
+            entries,
+            linkResolutions: after.linkResolutions,
+          })
+        : digest({ inspection, proof }),
   };
+  assertInitInspection(
+    result.entries.length <= 10_000 &&
+      (schemaVersion === 1 ||
+        Buffer.byteLength(JSON.stringify(result)) <= 2 * 1024 * 1024),
+    "evidence_capacity",
+  );
   assertInspection(result);
   if (previousInspection !== null)
     assertInspectionExtension(previousInspection, result);
   return result;
+}
+
+// Only these exact setup resources can become destinations. Their real
+// ancestors and bare-control markers remain evidence; source descendants live
+// in complete scope hashes rather than role requests or durable arrays.
+function setupEvidencePaths({
+  projectPath,
+  artifactRoot,
+  roots,
+  candidates,
+  documents,
+  controlPaths,
+}) {
+  const paths = [
+    ...roots,
+    ...GROUPS.flatMap((group) => documents[group]),
+    ...controlPaths.flatMap((path) => [
+      path,
+      ...["HEAD", "objects", "refs"].map((name) => join(path, name)),
+    ]),
+  ];
+  for (const root of roots) {
+    const bound = candidates.filter(({ rootPath }) => rootPath === root);
+    const artifacts = bound.length
+      ? bound.map(({ artifactPath }) => artifactPath)
+      : [resolve(root, artifactRoot)];
+    paths.push(
+      ...artifacts,
+      ...artifacts.map((path) => join(path, "agent-runner", "rules.md")),
+      ...(bound.length
+        ? bound.map(({ configurationPath }) => configurationPath)
+        : [
+            join(
+              root,
+              ...(root === projectPath ? [artifactRoot] : []),
+              "agent-runner.json",
+            ),
+          ]),
+      ...bound.flatMap(({ finalizationPath }) =>
+        finalizationPath ? [finalizationPath] : [],
+      ),
+    );
+    if (root === projectPath) {
+      paths.push(join(root, ".gitignore"));
+      const skillRoots = [
+        ...[".agents", ".claude"].map((name) =>
+          join(root, name, "skills", "finalization"),
+        ),
+        ...documents.skills
+          .filter(
+            (path) =>
+              within(root, path) && path.endsWith("/finalization/SKILL.md"),
+          )
+          .map(dirname),
+      ];
+      paths.push(
+        ...skillRoots.flatMap((path) => [
+          join(path, "SKILL.md"),
+          join(path, "RUNNER.md"),
+        ]),
+      );
+    } else paths.push(join(root, "finalization", "SKILL.md"));
+  }
+  return paths;
 }
 
 export function defaultExternalRoot(projectPath) {
@@ -273,8 +398,9 @@ function matchingCandidates(
       (placement === null || candidate.placement === placement),
   );
   if (configurationPath !== null) {
-    assertInit(
+    assertInitInspection(
       matches.length === 1,
+      "destination_unavailable",
       "Explicit init selections disagree or are not inspected.",
     );
   }
@@ -297,8 +423,9 @@ export function selectInitPlacement(
     selected === "integrated"
       ? inspection.projectPath
       : defaultExternalRoot(inspection.projectPath);
-  assertInit(
+  assertInitInspection(
     inspection.roots.includes(rootPath),
+    "destination_unavailable",
     "Init destination is occupied by unbound infrastructure.",
   );
   return {

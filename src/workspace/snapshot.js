@@ -16,11 +16,20 @@ import {
   same,
   within,
 } from "./paths.js";
+import { assertInspectionDirectory, isExcluded } from "./scope.js";
 
 const RACE = "ERR_WORKSPACE_SNAPSHOT_RACE";
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 
-async function readRegularFile(fs, path, sourcePath, limit, retain) {
+async function readRegularFile(
+  fs,
+  path,
+  sourcePath,
+  limit,
+  retain,
+  checkpoint = async () => {},
+) {
+  await checkpoint("capture");
   const before = await fs.lstat(sourcePath, { bigint: true });
   assertSafe(
     before.isFile() && before.nlink === 1n && before.size <= BigInt(limit),
@@ -44,6 +53,7 @@ async function readRegularFile(fs, path, sourcePath, limit, retain) {
     const buffer = Buffer.alloc(65536);
     let size = 0;
     while (true) {
+      await checkpoint("capture");
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       size += bytesRead;
@@ -113,7 +123,14 @@ export async function capture(
   protectedPaths,
   verifyBindings,
   linkResolutions = [],
+  {
+    excludePaths = [],
+    checkpoint = async () => {},
+    linkPaths = [],
+    inspectionFilesOnly,
+  } = {},
 ) {
+  const selection = { inspectionPaths: linkPaths, inspectionFilesOnly };
   const entries = new Map();
   const observed = new Map();
   const bindings = [];
@@ -128,7 +145,7 @@ export async function capture(
   }
   // Resolve components before normalizing '..', checking every link hop.
   async function resolveLink(path, root) {
-    const linkRoots = compactPaths([root, ...protectedPaths]);
+    const linkRoots = compactPaths([root, ...protectedPaths, ...linkPaths]);
     const inTree = (candidate) =>
       linkRoots.some((tree) => within(tree, candidate));
     let current = dirname(path);
@@ -136,10 +153,15 @@ export async function capture(
     let links = 0;
     const dependencies = new Set();
     while (pending.length) {
+      await checkpoint("capture");
       const component = pending.shift();
       if (component === "" || component === ".") continue;
       current =
         component === ".." ? dirname(current) : join(current, component);
+      assertSafe(
+        !isExcluded(current, excludePaths),
+        "Workspace link dependencies cannot enter excluded trees.",
+      );
       assertSafe(
         inTree(current) || linkRoots.some((tree) => within(current, tree)),
         "Workspace snapshot link escapes its declared tree.",
@@ -153,6 +175,7 @@ export async function capture(
         "A workspace link crosses a writable boundary.",
       );
       const stat = await metadata(fs, current);
+      if (stat?.isDirectory()) assertInspectionDirectory(current, selection);
       observe(current, stat);
       dependencies.add(current);
       assertSafe(
@@ -182,8 +205,10 @@ export async function capture(
             targetRoot !== undefined,
             "Workspace snapshot link escapes its declared tree.",
           );
-          current = targetRoot;
-          suffix = target.slice(targetRoot.length);
+          // Process the selected root itself before its suffix, including its
+          // file-only constraint, link hops and resolution-dependency binding.
+          current = dirname(targetRoot);
+          suffix = basename(targetRoot) + target.slice(targetRoot.length);
         } else current = dirname(current);
         pending = [...suffix.split(sep), ...pending];
       } else
@@ -197,6 +222,10 @@ export async function capture(
       "Workspace snapshot link escapes its declared tree.",
     );
     assertSafe(
+      excludePaths.every((excluded) => !overlaps(current, excluded)),
+      "Workspace link targets overlap excluded trees.",
+    );
+    assertSafe(
       (await fs.realpath(path)) === current,
       "Workspace link changed during resolution.",
       RACE,
@@ -204,7 +233,10 @@ export async function capture(
     return { target: current, paths: [...dependencies].sort() };
   }
   async function visit(path, sourcePath, root) {
+    if (isExcluded(path, excludePaths)) return;
+    await checkpoint("capture");
     const before = await metadata(fs, sourcePath);
+    if (before?.isDirectory()) assertInspectionDirectory(path, selection);
     observe(path, before);
     if (before === null) {
       entries.set(path, {
@@ -245,6 +277,7 @@ export async function capture(
         sourcePath,
         Number.MAX_SAFE_INTEGER,
         false,
+        checkpoint,
       );
       assertSafe(
         same(observation(before), observation(result.stat)),
@@ -304,7 +337,12 @@ export async function capture(
     });
   }
   for (const path of compactPaths(roots)) {
-    const binding = await inspectPath(fs, path, { missing: true });
+    if (isExcluded(path, excludePaths)) continue;
+    await checkpoint("capture");
+    const binding = await inspectPath(fs, path, {
+      missing: true,
+      allowLink: true,
+    });
     bindings.push(binding);
     if (!binding.exists) {
       entries.set(path, {
@@ -331,13 +369,18 @@ export async function capture(
   }
   await verifyBindings();
   for (const binding of bindings) {
+    await checkpoint("verify");
     assertSafe(
-      same(binding, await inspectPath(fs, binding.path, { missing: true })),
+      same(
+        binding,
+        await inspectPath(fs, binding.path, { missing: true, allowLink: true }),
+      ),
       "Workspace path bindings changed during snapshot.",
       RACE,
     );
   }
   for (const [path, before] of observed) {
+    await checkpoint("verify");
     const after = await metadata(fs, path);
     assertSafe(
       same(before, after ? observation(after) : null),
@@ -350,7 +393,7 @@ export async function capture(
   );
 }
 
-export function fingerprints(entries) {
+export function fingerprints(entries, scope) {
   const content = entries.map(({ path, kind, mode, size, hash }) => ({
     path,
     kind,
@@ -359,7 +402,13 @@ export function fingerprints(entries) {
     hash,
   }));
   return {
-    contentFingerprint: hash(JSON.stringify(content)),
-    identityFingerprint: hash(JSON.stringify(entries)),
+    contentFingerprint: hash(
+      JSON.stringify(
+        scope === undefined ? content : { scope, entries: content },
+      ),
+    ),
+    identityFingerprint: hash(
+      JSON.stringify(scope === undefined ? entries : { scope, entries }),
+    ),
   };
 }

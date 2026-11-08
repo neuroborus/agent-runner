@@ -851,6 +851,8 @@ Pipeline settings use these defaults:
 | `init`           | `placement`                      |        `null` |
 | `init`           | `maxRevisionRounds`              |          `20` |
 | `audit`          | `mode`                           | `independent` |
+| `audit`          | `sourceScope`                    |   `directory` |
+| `audit`          | `excludePaths`                   |          `[]` |
 | `audit`          | `maxDiscoveryPasses`             |          `20` |
 | `audit`          | `maxFindingRecheckPasses`        |          `20` |
 | `polishing`      | `trustedChecks`                  |          `[]` |
@@ -1116,6 +1118,10 @@ and validation-infrastructure snapshots must remain stable. Isolation or
 process-tree retirement failures block or fail closed. Agent and runner results
 form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
+
+Trusted receipts include Runner-measured elapsed attempts through preparation,
+retirement, cleanup and safety checks. Missing legacy/controller timing stays
+unknown; see [validation evidence](docs/product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints).
 
 A longer deadline changes only when an exact command times out. It cannot make
 an incompatible sandbox work or improve native diagnostics. Trusted execution
@@ -1415,7 +1421,10 @@ Guidance supports ordinary directories without Git. Git selectors use the
 worktree target, including explicit configurations selected from subdirectories.
 An explicit configuration bound to the supplied directory retains that scope
 and shares the enclosing worktree's exclusion lease when present.
-Integrated Git destinations must already be ignored and untracked. Explicit
+An absent, untracked local guide can be read before init without an ignore rule;
+the result includes the complete common guide, empty local content, a null local
+hash and the resolved paths. Existing integrated Git guides, edit/update
+destinations and temporary files must already be ignored and untracked. Explicit
 external selection reads and updates only the bound infrastructure; it creates
 no target files, ignore rules, pointers or Git-control changes and never merges
 local additions from another placement. Reads create neither files nor state.
@@ -1855,7 +1864,8 @@ Call `guidance_read` once before first managing a run for each project, using
 `projectPath` and optional `projectConfigurationPath`. It returns the complete
 `commonContent`, `localContent`, and `combinedContent`, plus the resolved paths
 and `localHash` needed for editing. The startup reminder remains present when
-issue reporting is disabled.
+issue reporting is disabled. This read also works before init when the local
+guide is absent and untracked, without creating setup or requiring an ignore rule.
 
 After execution releases ownership, use `guidance_update` to replace the entire
 local Markdown with a stable project operating lesson. Supply the same project
@@ -1942,8 +1952,11 @@ user Application Support on macOS and local application data on Windows
 without extending execution-platform support. The store is user data,
 separate from settings, installed payloads, run state, and caches, and it
 survives deletion of the originating checkout. Publication needs no project
-ignore rule and never writes to the project. `projectConfigurationPath` stays
-part of the request identity but does not select storage.
+ignore rule and never writes to the project. `projectPath` accepts a Git
+worktree or an ordinary directory: Git origins use the canonical worktree root,
+while non-Git origins use the canonical selected directory. Unsafe controls and
+failed Git inspection are rejected. `projectConfigurationPath` stays part of
+the request identity but does not load configuration or select storage.
 
 The result is `{ "issueId", "issuePath" }`. `<issueId>.json` is one versioned
 document holding the immutable rendered Markdown with its hash and the
@@ -1993,6 +2006,14 @@ between turns with no execution records or revision change. Recover that run
 with an explicit `run_resume` using `action: null`, the inspected revision,
 and a new idempotency key. Use `run_activity` for deliberate inspection and
 `run_wait` for long event-driven waits.
+
+Concurrent journal publication permits bounded, byte-proved activity rereads.
+Cold reads and optional-cache overflow retain the original consumed-byte proof
+through append or rotation; later valid history alone cannot certify it.
+If publication exhausts that bound, `run_activity` and `run_wait` return a
+structured tool error with `code: "ERR_RUN_OBSERVATION_BUSY"` and
+`retryable: true`. A later explicit observation is safe; the run is unchanged.
+Corruption or unavailable proof receives no such classification.
 
 MCP represents paused clarification and product decisions as structured
 `pendingInput`. `run_respond` requires the request ID,
@@ -2133,6 +2154,17 @@ unchanged, needs no pointer/global registration, and references existing project
 skills without editing them. Explicit placement migration preserves the old
 setup. Reruns preserve useful guidance without duplicate setup metadata;
 interrupted effects reconcile their original identities before continuing.
+Expected init inspection failures persist an actionable pause before execution
+ownership is released, including rejection before any provider attempt. CLI and
+MCP status/wait report the same phase, constraint and supported recovery. Only
+transient inspection failures permit unchanged-input resume; other diagnoses
+require preserving work, correcting prerequisites and a fresh run. Start/resume
+receipts acknowledge admission/dispatch, not successful setup. See
+[inspection recovery](pipelines/init/docs/SPEC.md#inspection-failures).
+Terminal provider failures persist `FAILED` with bounded diagnosis before owner
+release. Foreground CLI exits unsuccessfully; status and held/new waits expose
+the same outcome. Preserve prepared resources and use separately authorized
+follow-up; see [init failures](pipelines/init/docs/SPEC.md#terminal-provider-failures).
 The managed guidance includes the exact selected finalization procedure.
 Interrupted reconstruction pauses resumably at its saved checkpoint and retains
 the consumed recovery allowance.
@@ -2155,11 +2187,43 @@ independent default/recommendation. Auditor and finding Reviewer always remain
 read-only. Combined uses distinct discovery and finding-review cycles; see the
 [specification](pipelines/audit/docs/SPEC.md).
 
+Audit defaults to whole-directory inspection, including ignored content. Select
+complete Git working-tree sources explicitly, or prune literal directory subtrees:
+
+```bash
+agent-run run audit --project /workspace/project --task /workspace/task --source-scope git
+agent-run run audit --project /workspace/project --task /workspace/task --exclude-path generated --exclude-path cache
+```
+
+MCP `run_start` accepts matching `sourceScope` and `excludePaths` fields. Git scope
+includes unchanged and ignored tracked files, dirty/deleted tracked paths and
+non-ignored untracked sources; it retains read-only directory permissions and
+grants no Git effects. Exclusions require directory scope and are confined literal
+paths, without glob expansion. They are pruned before discovery, hashing and
+provider preparation and cannot overlap required inputs, configuration, artifacts,
+controls or link dependencies. Settings and membership freeze before capture;
+clarification cannot expand them. Changed selection or membership requires a new
+run. CLI status and MCP `auditSource` expose the selection; new reports include
+the frozen scope and literal exclusions. Legacy runs retain whole-directory
+bindings, historical reports and consumed budgets.
+
+Audit publishes its run ID before recursive preparation. CLI activity shows
+status, pause and cancel commands immediately; MCP `run_start` acknowledges
+owned detached preparation while capture continues. Status exposes pending
+`workspacePreparation` in `CLARIFY`. Pause/cancel can interrupt capture before
+provider work; resume uses the frozen inputs/configuration under the same
+canonical exclusion. Client wait cancellation leaves detached work running.
+
 Runner publishes `<task-dir>/audit.md` as work progresses. Only rechecked findings
 appear confirmed; pending candidates and hypotheses remain explicitly unverified.
 Completion requires the selected clean-discovery gate, no pending batch and
 unchanged bindings. Both budgets are run-wide and capped at 20, including after
 interruption. Status exposes the report path/status/hash and finding/pass counts.
+Invalid role results expose bounded field diagnostics in CLI/MCP pause evidence;
+resume supplies structured correction feedback within the existing pass budgets.
+Terminal provider failures retain validated class evidence in status, wait and
+safe activity; they grant no same-run audit resumption. See the
+[audit failure contract](pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
 Zero or Critical findings can accompany success; findings create no automatic
 issues or repair permissions. Unavailable evidence remains visible. Report
 publication resumes without replaying accepted model work; unexpected report edits

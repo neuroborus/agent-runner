@@ -74,6 +74,19 @@ staged and unstaged diffs, excludes ignored untracked files, and reports binary
 changes separately. Link targets are never followed to obtain line counts.
 Measurement grants no staging, commit, refinement, or acceptance authority.
 
+Git-owned source selection enumerates unchanged and ignored tracked worktree
+files as well as non-ignored untracked sources, retaining tracked deletions.
+Ignored untracked trees are pruned instead of recursively inspected. Its frozen
+membership and Git provenance bind workspace-owned confined capture, which
+separately verifies source bytes, identities, controls and link safety. A file-only
+constraint rejects a selected or missing leaf replaced by a directory before
+descendant discovery or capture. Selection must be rechecked around capture and
+reconstruction; it grants no Git effects or provider authority. Unsupported
+gitlinks, embedded repositories and routing
+aliases fail closed. The [source-selection contract](../ARCHITECTURE.md#root-runner-ownership)
+owns the exact result, drift guard and traversal limitations; ordinary directory
+inspection continues to require no Git.
+
 Preservation saves unfinished changes in verified
 external state storage before any checked removal. Both run and worktree
 ownership are required. Raw bytes, deletions, executable modes and unfollowed
@@ -94,6 +107,22 @@ commits retain separate ownership.
 
 ## Inputs, artifacts, and state
 
+The state capability can retain pending workspace preparation before recursive
+inspection. Frozen declarations, exact admission-input evidence and canonical
+directory identities survive interruption and stop settlement. Partial capture
+grants no provider, report, approval or effect authority. Only a fresh verified
+capture under the execution and canonical exclusion leases may publish complete
+bindings; changed inputs, substituted roots, stale revisions and cancellation
+cannot accept a partial result. Legacy absence preserves completed preparation
+without inventing inspection evidence. The
+[state contract](../ARCHITECTURE.md#external-run-state) owns this foundation.
+Audit selects deferred preparation: its durable identity is visible before
+capture, and both execution and canonical workspace ownership precede recursive
+reads. Cancellation propagates through traversal; stop settlement preserves an
+uncaptured record without inspecting or adopting partial content. Detached start
+readiness acknowledges this supervision boundary and grants no provider or report
+authority. Other pipelines retain their existing lifecycle.
+
 The directory-workspace inspection foundation protects unrelated content and
 explicit inputs, references, configuration, artifacts, infrastructure and
 filesystem-discovered Git/provider controls. Only declared confined outputs may
@@ -108,6 +137,27 @@ content after every retired attempt, including failures before reconstruction. D
 access cannot request a Git commit, and unsupported providers fail closed.
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
+
+The filesystem capability can freeze a confined inspection selection with
+literal subtree exclusions before discovery. Excluded trees remain opaque:
+discovery and hashing never descend into them, and exclusion grants no read,
+output or storage authority. Required inputs, declared outputs, protected
+controls and link dependencies cannot be hidden. Scope and routing bindings
+survive reconstruction and participate in drift checks. Cancellation interrupts
+costly inspection without source writes; bounded progress reveals no source
+names or content. Omitted selection preserves whole-directory behavior. This is
+an inspection capability, separate from provider permissions and pipeline scope
+settings. Audit now owns those settings: directory scope is the default, literal
+exclusions require that scope, and explicit Git scope retains directory permissions.
+Its membership/provenance is journaled before capture and rechecked around capture
+and reconstruction without adopting drift. Clarification cannot expand frozen
+selection; changed selection requires a new run. Legacy scopes and both finite
+budgets retain their evidence. Both directory adapters freeze and bind the same selection through
+capability receipts, launch, retired-attempt verification and reconstruction.
+Claude storage cleanup rediscovers controls within that selection without
+expanding traversal or accepting changed source evidence. See the filesystem
+and [provider contracts](PROVIDER_MODEL.md#selection-and-capabilities) for the
+exact declarations and native mappings.
 
 The runner can bind a descriptor-selected directory lifecycle without Git.
 Workspace kind, permissions, exact local input/criterion paths, protected-content
@@ -144,6 +194,30 @@ Guidance publishes last through its existing durable expected-hash action under
 the held leases. Completion requires distinct read-only confirmation of the
 complete unchanged prepared snapshot. Recovery verifies exact original intents,
 identities and receipts; it cannot redirect writes or adopt intervening edits.
+
+Large init targets retain complete source/control traversal and unchanged-source
+proof. Bounded setup evidence is separate from that proof: omitted destinations
+grant no writes, and publication exemptions require exact journaled paths and
+independently verified effects. Compact baselines preserve the complete immutable
+remainder, file identities, links and selected inputs; unsupported evidence
+capacity cannot produce partial authorization. Legacy records retain their
+original bindings and consumed allowances. The
+[init specification](../../pipelines/init/docs/SPEC.md#inspection-and-placement)
+owns the proof versions and evidence limits. Expected inspection rejection
+settles to a durable, redacted diagnosis before execution ownership is released;
+complete accepted inspection remains mandatory for every turn and effect.
+Diagnoses grant no input edits, allowance renewal or bypass of pending-effect
+recovery. Unknown corruption, substituted controls and unavailable ownership
+remain fail-closed; only narrow transient inspection failures offer resume after
+restoring access/resources and reproving unchanged frozen inputs.
+
+Init terminal adapter diagnosis requires a real normalized boundary failure,
+unchanged workspace and retired physical work. Only the owned logical reservation
+is settled; counters, frozen bindings, approvals and publication records survive.
+Callback persistence/ownership failures, pending effects and cleanup uncertainty
+cannot become an acknowledged provider failure. Failed terminal confirmation
+preserves published resources without acceptance. The [init failure contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
+owns the bounded diagnosis and nonresumable follow-up.
 
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same
@@ -240,7 +314,12 @@ handle/path observations establish unchanged history. Unrelated control-claim
 publication cannot substitute for or invalidate that proof through directory
 timestamps alone. Namespace, replacement, link, ownership and restored-mtime
 tamper checks remain mandatory. Certificates are independent of optional bounded
-checkpoint retention; absent cache evidence requires canonical validation.
+checkpoint retention. Full scans retain original consumed-byte capture bindings
+through concurrent publication. Those bindings require canonical validation of
+the original bytes, identities, namespace and endpoint before certification;
+a later valid history cannot replace them, even at an equal endpoint. Only
+proved advancement permits bounded observation continuation, without mutation
+or stop authority; unavailable proof remains strict rejection.
 Authorized tail repair proves the original prefix, namespace, directory and
 captured file observations before truncation, then the same prefix and exact
 repaired size through stable handle/path observations after syncing. Only that
@@ -465,16 +544,22 @@ cancellation is terminal. Neither outcome authorizes replaying an effect,
 restoring contaminated content, or adopting replacement configuration.
 
 Local operating guidance uses the same new-run configuration and workspace safety
-boundaries. Integrated target and temporary files in Git must be ignored and
-untracked; external files stay confined to the explicitly selected target-bound
-infrastructure without target writes. Ordinary directories need no Git.
+boundaries. Read-only selection may inspect positively verified absent, untracked
+local guidance without an ignore rule. Existing integrated guides, edit/update
+destinations and temporary files in Git must be ignored and untracked; tracked
+paths reject even when missing from the worktree. External files stay confined to
+the explicitly selected target-bound infrastructure without target writes.
+Ordinary directories need no Git.
 All destinations stay separate from configuration, state and protected control paths. Linked, unsafe,
 non-regular, malformed, or oversized documents fail closed, including unsafe
 absent destinations. An internal provider-control directory alias, such as
 `.claude` linked to `.agents`, is accepted and its resolved target protected;
 unsupported control aliases fail with a control diagnostic rather than blaming
-the destination. Reading does not create files. Both common and local
-documents are bounded; document bodies never enter action metadata or errors.
+the destination. Repeated read selection and pinned directory checks retain
+absence and ancestor protection; the read exception grants no publication authority.
+Reading creates no files, directories, bindings, editor sessions or state.
+Both common and local documents are bounded; document bodies never enter action
+metadata or errors.
 
 Guidance replacement holds the canonical-worktree lease and, for external
 destinations outside that scope, the infrastructure-root lease. These exclude
@@ -675,7 +760,9 @@ raw error text, provider output or transcripts. Identical-key retries retain
 the existing readiness, settlement and ownership checks.
 
 Claude sandbox scaffolding is adapter-owned content outside project and task
-trees, including tool HOME/config projections and provider temporary storage.
+trees, including native startup cwd, tool HOME/config projections and provider
+temporary storage. Native atomic staging initializes in that owned cwd before
+command isolation; the real workspace stays separately declared and protected.
 Absent optional project masks cannot become host-visible mount-point files.
 Existing project masks and runner-owned workspace, Git, network, and process
 restrictions remain enforced. The repository view during execution is the same

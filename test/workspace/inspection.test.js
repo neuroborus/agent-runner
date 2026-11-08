@@ -25,6 +25,366 @@ const unsafe = (code) => (error) =>
   error instanceof WorkspaceSafetyError &&
   (code === undefined || error.code === code);
 
+// Include descriptor-anchored reads in the non-visitation assertion.
+function withoutReadsOf(paths) {
+  return Object.fromEntries(
+    Object.entries(fs).map(([name, method]) => [
+      name,
+      ["lstat", "open", "readdir", "readlink", "realpath"].includes(name)
+        ? async (candidate, ...args) => {
+            const match = /^(\/proc\/self\/fd\/\d+)(.*)$/u.exec(candidate);
+            const path = match
+              ? `${await fs.realpath(match[1])}${match[2]}`
+              : candidate;
+            assert.ok(
+              !paths.some(
+                (excluded) =>
+                  path === excluded || path.startsWith(`${excluded}/`),
+              ),
+              `Unexpected ${name} of an opaque tree`,
+            );
+            return method(candidate, ...args);
+          }
+        : method,
+    ]),
+  );
+}
+
+test("scoped snapshots prune excluded and unselected trees before discovery or reads", async (t) => {
+  const f = await fixture(t);
+  const source = join(f.workspacePath, "src");
+  const cache = join(source, "cache");
+  const unselected = join(f.workspacePath, "unselected");
+  await fs.mkdir(cache, { recursive: true });
+  await fs.mkdir(unselected);
+  // Neither an unsafe nested control nor an escaping link may be visited.
+  await fs.symlink(f.root, join(cache, ".git"));
+  await fs.symlink(f.root, join(unselected, "outside"));
+  await fs.writeFile(join(source, "input.txt"), "source\n");
+  await fs.mkdir(join(source, ".agents"));
+  await fs.writeFile(join(source, ".agents", "guide.md"), "protected\n");
+  const service = createWorkspaceService({
+    fileSystem: withoutReadsOf([cache, unselected]),
+  });
+  const declarations = {
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+    inspectionPaths: ["src", "./src/input.txt"],
+    excludePaths: ["src/cache", "src/cache/nested"],
+  };
+  const inspection = await service.inspect(declarations);
+  declarations.inspectionPaths.push("unselected");
+  declarations.excludePaths.length = 0;
+  assert.deepEqual(inspection.inspectionPaths, [source]);
+  assert.deepEqual(inspection.excludePaths, ["src/cache"]);
+  assert.deepEqual(inspection.readPaths, [source]);
+  assert.ok(Object.isFrozen(inspection.inspectionPaths));
+  assert.ok(inspection.controlPaths.includes(join(source, ".agents")));
+  const before = await service.snapshot({ inspection });
+  assert.ok(
+    !before.entries.some(
+      ({ path }) => path.startsWith(cache) || path.startsWith(unselected),
+    ),
+  );
+  await fs.writeFile(join(cache, "new.txt"), "opaque\n");
+  await fs.writeFile(join(unselected, "new.txt"), "unselected\n");
+  const reconstructed = JSON.parse(JSON.stringify(inspection));
+  service.assertUnchanged({
+    before,
+    after: await service.snapshot({ inspection: reconstructed }),
+  });
+  await fs.writeFile(join(source, "input.txt"), "changed\n");
+  const changed = await service.snapshot({ inspection });
+  assert.throws(
+    () => service.assertUnchanged({ before, after: changed }),
+    unsafe("ERR_WORKSPACE_DRIFT"),
+  );
+  await fs.writeFile(join(source, ".agents", "guide.md"), "changed control\n");
+  assert.notEqual(
+    changed.contentFingerprint,
+    (await service.snapshot({ inspection })).contentFingerprint,
+  );
+});
+
+test("scope admission rejects escapes, hidden protected declarations and aliased routing ancestors", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(join(f.workspacePath, "data"));
+  await fs.mkdir(join(f.workspacePath, "cache"));
+  await fs.symlink("cache", join(f.workspacePath, "alias"));
+  const service = createWorkspaceService();
+  const base = { workspacePath: f.workspacePath, stateRoot: f.stateRoot };
+  for (const scope of [
+    { inspectionFilesOnly: true },
+    { inspectionPaths: [], inspectionFilesOnly: "true" },
+    { inspectionPaths: null },
+    { excludePaths: null },
+    { inspectionPaths: ["../outside"] },
+    { inspectionPaths: ["alias/../data"] },
+    { inspectionPaths: ["alias/child"] },
+    { inspectionPaths: [".", "alias/child"] },
+    { excludePaths: ["."] },
+    { excludePaths: ["../outside"] },
+    { excludePaths: [join(f.workspacePath, "cache")] },
+    { excludePaths: ["alias/child"] },
+    { excludePaths: ["data/.agents"] },
+    { inspectionPaths: ["data"], excludePaths: ["data"] },
+    { inspectionPaths: ["data/input.md"], excludePaths: ["data"] },
+    { inspectionPaths: [".", "data/input.md"], excludePaths: ["data"] },
+    { sourcePaths: ["data"], excludePaths: ["data/cache"] },
+    ...[
+      "inputPaths",
+      "sourcePaths",
+      "configurationPaths",
+      "artifactPaths",
+      "infrastructurePaths",
+      "outputPaths",
+    ].map((name) => ({ [name]: ["data/required.md"], excludePaths: ["data"] })),
+    { taskPath: "data", excludePaths: ["data/cache"] },
+  ])
+    await assert.rejects(service.inspect({ ...base, ...scope }), unsafe());
+  // A Git pointer makes its metadata protected even outside the selected tree.
+  await fs.writeFile(join(f.workspacePath, ".git"), "gitdir: cache\n");
+  let excludedMetadataRead = false;
+  const pointed = createWorkspaceService({
+    fileSystem: {
+      ...fs,
+      async lstat(path, ...args) {
+        if (
+          path === join(f.workspacePath, "cache") ||
+          path.startsWith(`${join(f.workspacePath, "cache")}/`)
+        )
+          excludedMetadataRead = true;
+        return fs.lstat(path, ...args);
+      },
+    },
+  });
+  await assert.rejects(
+    pointed.inspect({
+      ...base,
+      inspectionPaths: ["data"],
+      excludePaths: ["cache"],
+    }),
+    unsafe(),
+  );
+  assert.equal(excludedMetadataRead, false);
+  await fs.rm(join(f.workspacePath, ".git"));
+  await fs.mkdir(join(f.workspacePath, "cache/objects"));
+  await fs.mkdir(join(f.workspacePath, "cache/refs"));
+  await fs.writeFile(
+    join(f.workspacePath, "cache/HEAD"),
+    "ref: refs/heads/main\n",
+  );
+  await assert.rejects(
+    service.inspect({
+      ...base,
+      inspectionPaths: ["cache"],
+      excludePaths: ["cache/objects"],
+    }),
+    unsafe(),
+  );
+  // Writable roots are inspected for controls even outside the source scope.
+  await fs.mkdir(join(f.workspacePath, "data/.git"));
+  await assert.rejects(
+    service.inspect({ ...base, inspectionPaths: [], outputPaths: ["data"] }),
+    unsafe(),
+  );
+  // Excluding a subtree never grants state storage inside the workspace.
+  await assert.rejects(
+    service.inspect({
+      ...base,
+      excludePaths: ["cache"],
+      stateRoot: join(f.workspacePath, "cache/state"),
+    }),
+    unsafe(),
+  );
+});
+
+test("scoped links require selected targets and reject excluded intermediate hops", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(join(f.workspacePath, "data"));
+  await fs.mkdir(join(f.workspacePath, "cache"));
+  await fs.writeFile(join(f.workspacePath, "data/input.md"), "input\n");
+  const link = join(f.workspacePath, "input-link.md");
+  await fs.symlink("data/input.md", link);
+  const service = createWorkspaceService();
+  const base = { workspacePath: f.workspacePath, stateRoot: f.stateRoot };
+  const inspection = await service.inspect({
+    ...base,
+    inspectionPaths: ["input-link.md", "data/input.md"],
+    excludePaths: ["cache"],
+  });
+  const snapshot = await service.snapshot({ inspection });
+  assert.equal(
+    snapshot.entries.find(({ path }) => path === link).kind,
+    "symlink",
+  );
+  const unbound = await service.inspect({
+    ...base,
+    inspectionPaths: ["input-link.md"],
+  });
+  await assert.rejects(service.snapshot({ inspection: unbound }), unsafe());
+  await fs.rm(link);
+  await fs.symlink("cache/../data/input.md", link);
+  const intermediate = await service.inspect({
+    ...base,
+    excludePaths: ["cache"],
+  });
+  await assert.rejects(
+    service.snapshot({ inspection: intermediate }),
+    unsafe(),
+  );
+  await fs.rm(link);
+  await fs.symlink("data", link);
+  const excludedTarget = await service.inspect({
+    ...base,
+    excludePaths: ["data/input.md"],
+  });
+  await assert.rejects(
+    service.snapshot({ inspection: excludedTarget }),
+    unsafe(),
+  );
+});
+
+test("scope bindings reject routing substitution and bind even empty selection declarations", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(join(f.workspacePath, "data"));
+  await fs.mkdir(join(f.workspacePath, "data/cache"));
+  const service = createWorkspaceService();
+  const base = {
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+    inspectionPaths: [],
+  };
+  const inspection = await service.inspect({
+    ...base,
+    excludePaths: ["data/cache"],
+  });
+  const before = await service.snapshot({ inspection });
+  const different = await service.inspect({
+    ...base,
+    excludePaths: ["another"],
+  });
+  const after = await service.snapshot({ inspection: different });
+  assert.deepEqual(before.entries, after.entries);
+  assert.notEqual(before.contentFingerprint, after.contentFingerprint);
+  assert.throws(
+    () => service.assertUnchanged({ before, after }),
+    unsafe("ERR_WORKSPACE_DRIFT"),
+  );
+  await fs.rename(
+    join(f.workspacePath, "data"),
+    join(f.workspacePath, "old-data"),
+  );
+  await fs.mkdir(join(f.workspacePath, "data"));
+  await assert.rejects(
+    service.snapshot({ inspection }),
+    unsafe("ERR_WORKSPACE_DRIFT"),
+  );
+});
+
+test("traversal cancellation closes discovery and hashing handles with bounded anonymous progress", async (t) => {
+  const f = await fixture(t);
+  await fs.mkdir(join(f.workspacePath, "src"));
+  const large = join(f.workspacePath, "src/input.txt");
+  await fs.writeFile(large, Buffer.alloc(130 * 65536, 65));
+  let controller = new AbortController();
+  const stopped = new Error("controlled cancellation");
+  const handles = new Set();
+  let cancelRead = false;
+  let reads = 0;
+  let cancelDiscovery = false;
+  const service = createWorkspaceService({
+    fileSystem: {
+      ...fs,
+      async readdir(path, options) {
+        const result = await fs.readdir(path, options);
+        if (
+          cancelDiscovery &&
+          (await fs.realpath(path)) === join(f.workspacePath, "src")
+        )
+          controller.abort(stopped);
+        return result;
+      },
+      async open(path, flags) {
+        const handle = await fs.open(path, flags);
+        handles.add(handle);
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          try {
+            await close();
+          } finally {
+            handles.delete(handle);
+          }
+        };
+        const read = handle.read.bind(handle);
+        handle.read = async (...args) => {
+          const result = await read(...args);
+          if (cancelRead && path.endsWith("/input.txt")) {
+            reads += 1;
+            controller.abort(stopped);
+          }
+          return result;
+        };
+        return handle;
+      },
+    },
+  });
+  const declarations = {
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+    inspectionPaths: ["src"],
+  };
+  cancelDiscovery = true;
+  await assert.rejects(
+    service.inspect(declarations, { signal: controller.signal }),
+    (error) => error === stopped,
+  );
+  assert.equal(handles.size, 0);
+  cancelDiscovery = false;
+  const inspection = await service.inspect(declarations);
+  controller = new AbortController();
+  cancelRead = true;
+  await assert.rejects(
+    service.snapshot({ inspection, signal: controller.signal }),
+    (error) => error === stopped,
+  );
+  assert.equal(reads, 1);
+  assert.equal(handles.size, 0);
+  cancelRead = false;
+  const progress = [];
+  await service.snapshot({
+    inspection,
+    onProgress: (entry) => {
+      progress.push(entry);
+    },
+  });
+  assert.ok(progress.some(({ phase }) => phase === "capture"));
+  assert.ok(
+    progress.some(
+      (entry, index) =>
+        index > 0 &&
+        entry.phase === "capture" &&
+        progress[index - 1].phase === "capture",
+    ),
+  );
+  assert.ok(
+    progress.every(
+      (entry, index) =>
+        Object.isFrozen(entry) &&
+        Object.keys(entry).join(",") === "phase,completed" &&
+        (index === 0 || progress[index - 1].completed < entry.completed),
+    ),
+  );
+  assert.ok(
+    progress.every(
+      (entry, index) =>
+        index === 0 ||
+        entry.phase !== progress[index - 1].phase ||
+        entry.completed % 128 === 0,
+    ),
+  );
+});
+
 test("confined input reads reject leaf substitution before consuming content", async (t) => {
   const f = await fixture(t);
   const path = join(f.workspacePath, "task.md");

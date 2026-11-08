@@ -195,7 +195,13 @@ confirmation accepts the complete snapshot. Status reports created/reused/change
 resources and effective paths only after completion. Partial prerequisites are
 not a setup-completion receipt. Explicit migration retains the old setup and
 prepares the newly selected placement non-destructively. See the [init specification](../../pipelines/init/docs/SPEC.md).
-Setup pauses expose concrete blockers. Operator stops preserve reserved turns
+Setup pauses expose concrete blockers. Expected inspection rejection persists a
+bounded phase/constraint before ownership release, even before a provider attempt.
+CLI and MCP status/wait give the same supported next step: restore transient
+inspection access/resources without changing inputs and resume, or preserve work,
+correct prerequisites and start a fresh run. Admission/dispatch receipts alone
+never establish successful inspection or setup. See
+[inspection recovery](../../pipelines/init/docs/SPEC.md#inspection-failures). Operator stops preserve reserved turns
 and clarification windows; cancellation remains terminal. An exceptional
 material decision after clarification uses durable authorized input and renews
 the proposal gates while retaining the exact selected placement and paths.
@@ -372,11 +378,35 @@ ownerless applicable stop may be recovered by exact-revision, action-free
 pause/cancel key unnecessary without replaying its acceptance receipt.
 
 Audit is available through `run audit` and MCP `run_start`. Pipeline discovery
+exposes `sourceScope` (`directory` by default or explicit `git`) and `excludePaths`.
+CLI uses `--source-scope` and repeatable `--exclude-path`; MCP uses the setting
+names. Exclusions require directory scope, stay literal and confined, and cannot
+hide required inputs, configuration, artifacts, controls or link dependencies.
+Scope settings freeze before preparation and Git membership before capture.
+Changed selection requires a new run. Status exposes `auditSource`; new reports
+show the frozen source scope and literal exclusions. Legacy reports and bindings
+remain unchanged. Pipeline discovery
 exposes its Auditor/Reviewer roles, independent default/recommendation and finite
 20-pass discovery/recheck settings. Status includes `auditReport` publication
 path/status/hash, finding counts and consumed pass totals. Pending candidates
 remain unverified; unavailable evidence stays in the report. Audit completion
 with Critical findings creates no automatic issue and authorizes no repair.
+Invalid audit role results expose bounded field/constraint diagnostics in the
+shared CLI/MCP pause evidence. Resume targets the saved checkpoint with structured
+correction feedback, preserving consumed passes, pending findings and prior
+decisions; it never exposes rejected output or renews a budget. The
+[audit specification](../../pipelines/audit/docs/SPEC.md#structured-report)
+owns diagnostic and compatibility details.
+
+Audit admission publishes a durable identifier before recursive preparation.
+CLI creation activity includes status, pause and cancel commands; MCP start
+acknowledges exclusively owned detached preparation without waiting for capture.
+Status exposes pending `workspacePreparation` while the workflow stays in
+`CLARIFY`. Pause/cancel can stop capture before any provider turn. Resume reuses
+frozen inputs/configuration and reacquires the canonical exclusion owner;
+cancellation retains that evidence and remains terminal. Status/activity/waits
+cannot drive preparation, and a disconnected wait cannot stop detached work.
+See the [audit lifecycle](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle).
 
 ## Durable state and local artifacts
 
@@ -414,14 +444,33 @@ pagination within explicit record and byte caps. Overflow or an older activity
 cursor streams the certified history without revalidating unchanged historical
 states; every activity, event-specific stop summary, revision, and progress line
 remains available. Even early-limit pages and atomic progress replacement
-require proof of the entire original prefix. Missing evidence requires bounded
-canonical validation before streaming; uncertain evidence returns no page or
-replacement. Activity reads and waits no longer fail only because the owner
-published during the read: a page rereads once, and only after the original
-prefix is proven unchanged and extended by a later revision. Corruption,
-uncertain evidence, or another publication during that reread still returns no
-page. Publication callbacks cannot replace the original certificate
-with different history, including through snapshot rollback or nested reads.
+require proof of the entire original prefix. A full scan racing with append or
+rotation retains its consumed-byte bindings independently of optional caches.
+Bounded canonical validation must prove those original bytes, identities,
+segment namespace and captured endpoint before certification; a later valid
+history or equal endpoint alone is insufficient. Missing or uncertain proof
+returns no page or replacement. Activity reads and waits permit two bounded
+continuations only after each preceding certified prefix is proven unchanged
+and extended by a later revision. This retains the original run identity and
+byte proof through both continuations. Further proved publication exhausting
+that bound returns `ERR_RUN_OBSERVATION_BUSY` with `retryable: true`; a later
+explicit observation is safe and the run continues unchanged. MCP projects that
+typed outcome without automatically retrying. Publication during canonical
+recertification or extension uses the same bound: a raced extension must first
+prove its complete validated byte capture under stable observations and the exact
+captured segment namespace. It may return an earlier consumed prefix while later
+publications remain available to a subsequent read. A preparation reservation
+published after continuation capture receives the same once-only authorization
+reload as initial capture, anchored to the already proved extension. Settlement
+may reconcile within that bound; unrelated advancement cannot authorize orphan
+custody. Reads preserve canonical and custody bytes and gain no execution or
+recovery authority. Corruption, rollback,
+substitution or uncertain proof still returns no page and grants no retryable
+classification. Publication
+callbacks cannot replace the original certificate with different history,
+including through snapshot rollback or nested reads. Full-scan certification
+uses the same continuation bound and pairs each page's cursor with its snapshot;
+it grants no mutation, recovery or stop authority.
 Public projections remain bounded and exclude private results. These byte
 limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified
@@ -584,6 +633,22 @@ the safe resume checkpoint when one exists, and concrete next actions. It does
 not expose prompts, transcripts, credentials, rejected provider output, or raw
 diagnostics.
 
+Terminal init provider failures persist `FAILED` before owner release. Foreground
+CLI prints the saved diagnosis and exits unsuccessfully; shared status/activity
+and new or already-held waits expose the same bounded evidence and fixed guidance.
+Waits finish with `timedOut: false`. Prepared/published resources remain preserved;
+failed confirmation grants neither setup completion nor same-run retry. Observation
+does not recover or mutate the run, and legacy ownerless runs gain no fabricated
+failure. See [init failure handling](../../pipelines/init/docs/SPEC.md#terminal-provider-failures).
+
+Terminal audit provider failures retain validated class evidence consistently in
+CLI/MCP status and wait, with a safe failure activity. Legacy missing classes stay
+unknown. Guidance identifies only what the class proves; diagnosis grants no
+same-run resumption or report acceptance. Preserve the failed run and use a
+separately authorized new audit after resolving a supported blocker; the
+[audit contract](../../pipelines/audit/docs/SPEC.md#read-only-discovery-lifecycle)
+owns the exact evidence and guidance.
+
 An eligible pre-effect transient launch failure adds the same strict
 `launchRecovery` value to CLI and MCP status: only its normalized failure class
 and launch checkpoint. An operator pause preserves that projection with the
@@ -654,6 +719,12 @@ checkout, worktree, or directory is deleted. Publication requires no project
 ignore rule, never changes ignore rules, and never writes to the project; the
 origin is recorded as context, not used as a storage location.
 
+Capture accepts Git worktrees and ordinary directories. A Git selector binds to
+its canonical worktree root; a non-Git selector binds to the canonical selected
+directory. Unsafe control-tree origins and failed Git inspection are rejected.
+Origin selection reads no source-file contents, loads no project configuration,
+and grants no Git effects.
+
 Each issue has a stable opaque ID and one document combining the immutable
 caller-authored Markdown with its single authoritative tracking record. The
 record holds the origin project name and path, creation and update times,
@@ -713,7 +784,10 @@ enclosing worktree's exclusion key.
 Explicit selection never merges competing placements or initializes infrastructure.
 Clear boundaries state that local additions may
 specialize project operation but cannot weaken common safety or product
-contracts. Missing local content is valid and reading never creates it.
+contracts. Before init, an absent, untracked local guide needs no ignore rule for
+CLI/MCP reads. The result retains complete common guidance, empty local content,
+a null local hash and the resolved metadata. Reading creates no files,
+directories, bindings, ignore rules, editor session or state.
 
 Local guidance is a complete, bounded, non-sensitive Markdown document. Whole
 replacement uses an expected content hash, an idempotency key, atomic
@@ -723,9 +797,10 @@ same destination. Stale concurrent edits fail;
 completed retries return their original receipt even after subsequent edits or
 configuration changes. Incomplete publication retains its selected paths,
 configuration and directory identities across restart; substitution or drift
-requires reconciliation, never automatic redirection. Integrated resources in
-Git remain ignored and untracked; external resources require the exact target
-binding and confinement, with no target or Git-control writes.
+requires reconciliation, never automatic redirection. Existing integrated guides,
+edit/update destinations and temporary files in Git remain ignored and untracked;
+external resources require the exact target binding and confinement, with no
+target or Git-control writes.
 Empty content means no additions. The common guide is never replaced.
 
 CLI operators use `agent-run guidance --project <directory>` to read both documents

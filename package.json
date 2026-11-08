@@ -27,10 +27,10 @@
     "schemaVersion": 1,
     "configurationVersion": 1,
     "runnerVersion": 1,
-    "runStateVersion": 24,
+    "runStateVersion": 26,
     "pipelines": {
-      "audit": 5,
-      "init": 1,
+      "audit": 7,
+      "init": 2,
       "plan-authoring": 7,
       "plan-execution": 39,
       "polishing": 19

@@ -1,5 +1,11 @@
 import { join } from "node:path";
 
+import { CORRECTION_STATES } from "./correction-feedback.js";
+import {
+  auditDiagnostic,
+  diagnosticIssues,
+  MAX_AUDIT_DIAGNOSTICS,
+} from "./diagnostics.js";
 import { projectAuditReport, REPORT_FILENAME } from "./publication-contract.js";
 
 const RESUMABLE = Object.freeze([
@@ -90,15 +96,42 @@ export const auditProjections = Object.freeze({
       run.pipelineState.workflowState === "WAITING_FOR_USER" &&
       run.pause.inputRequest !== undefined &&
       run.pause.inputResponse === undefined;
+    const feedback = run.pipelineState.correctionFeedback;
+    const correcting =
+      ["invalid_discovery", "invalid_recheck"].includes(run.pause.reason) &&
+      feedback != null &&
+      CORRECTION_STATES[feedback.phase] === run.pause.resumeState;
+    const diagnosticClass =
+      run.pipelineState.workflowState === "FAILED" &&
+      run.pause.reason === "internal_failure" &&
+      typeof run.pause.diagnosticClass === "string" &&
+      /^[a-z][a-z0-9_]{0,63}$/u.test(run.pause.diagnosticClass)
+        ? run.pause.diagnosticClass
+        : null;
     return Object.freeze({
       reason: known ? run.pause.reason : "unknown_pause",
       code:
         known && /^[A-Z0-9_]{1,64}$/u.test(run.pause.code ?? "")
           ? run.pause.code
           : null,
-      explanation:
-        EXPLANATIONS[run.pause.reason] ?? "No public diagnostic is available.",
-      evidence: Object.freeze([]),
+      explanation: correcting
+        ? "Audit structured content was rejected. Resume requests a complete corrected result within the remaining pass budget."
+        : diagnosticClass === "isolation_workspace_policy"
+          ? "The provider could not enforce the declared workspace policy. Preserve this failed audit and resolve provider/workspace compatibility before a separately authorized new audit."
+          : (EXPLANATIONS[run.pause.reason] ??
+            "No public diagnostic is available."),
+      evidence: Object.freeze(
+        correcting
+          ? feedback.diagnostics
+              .slice(0, MAX_AUDIT_DIAGNOSTICS)
+              .map((entry) => {
+                const diagnostic = auditDiagnostic(entry.field, entry.code);
+                return `${CORRECTION_STATES[feedback.phase]}: [${diagnostic.code}] ${diagnosticIssues(diagnostic)[0]}`;
+              })
+          : diagnosticClass === null
+            ? []
+            : [`Adapter diagnostic: ${diagnosticClass}.`],
+      ),
       resumeState: resumable ? (run.pause.resumeState ?? null) : null,
       nextActions: Object.freeze(
         pendingRequest
@@ -125,6 +158,13 @@ export const auditProjections = Object.freeze({
       stagnationDirection: null,
       finalizedFingerprint: null,
       reviewedFingerprint: null,
+      auditSource: Object.freeze({
+        sourceScope: state.settings.sourceScope ?? "directory",
+        excludePaths: Object.freeze([...(state.settings.excludePaths ?? [])]),
+        selectionFingerprint:
+          (run.workspacePreparation ?? run.workspace)?.sourceSelection
+            ?.fingerprint ?? null,
+      }),
       auditReport: Object.freeze({
         path: join(run.taskPath, REPORT_FILENAME),
         status:

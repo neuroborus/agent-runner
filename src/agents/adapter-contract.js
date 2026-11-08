@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const ACCESS_ORDER = Object.freeze([
   "read-only",
@@ -49,6 +49,8 @@ const WORKSPACE_POLICY_PATHS = Object.freeze([
   "infrastructurePaths",
 ]);
 const MAX_WORKSPACE_PATHS = 256;
+// File selections match persisted directory policy capacity, not permission roots.
+const MAX_INSPECTION_PATHS = 10_000;
 const MAX_DIRECTORY_STORAGE_PATHS =
   3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
@@ -763,6 +765,9 @@ export function createAdapterContract({
       "workspacePath",
       "stateRoot",
       "taskPath",
+      "inspectionPaths",
+      "inspectionFilesOnly",
+      "excludePaths",
       ...WORKSPACE_POLICY_PATHS,
     ];
     if (
@@ -799,6 +804,49 @@ export function createAdapterContract({
       if (!Array.isArray(entries) || entries.length > MAX_WORKSPACE_PATHS)
         throw optionsError("Declared workspace paths are invalid.");
       result[name] = [...new Set(Array.from(entries, path))].sort();
+    }
+    // Omission retains legacy whole-directory inspection and its receipt.
+    // Scope narrows inspection only; read/write/storage declarations stay separate.
+    if (value.inspectionFilesOnly !== undefined) {
+      if (
+        typeof value.inspectionFilesOnly !== "boolean" ||
+        value.inspectionPaths === undefined
+      )
+        throw optionsError(
+          "File-only inspection requires explicit inspection paths and a boolean.",
+        );
+      result.inspectionFilesOnly = value.inspectionFilesOnly;
+    }
+    for (const name of ["inspectionPaths", "excludePaths"]) {
+      if (value[name] === undefined) continue;
+      const entries = value[name];
+      const limit =
+        name === "inspectionPaths" ? MAX_INSPECTION_PATHS : MAX_WORKSPACE_PATHS;
+      if (!Array.isArray(entries) || entries.length > limit)
+        throw optionsError("Declared inspection scope is invalid.");
+      const paths = Array.from(entries, (entry) => {
+        assertString(entry, "Declared inspection path");
+        const selected = name === "inspectionPaths";
+        const resolved = selected
+          ? path(entry)
+          : resolve(result.workspacePath, entry);
+        const local = relative(result.workspacePath, resolved);
+        if (
+          isAbsolute(local) ||
+          local === ".." ||
+          local.startsWith(`..${sep}`) ||
+          (!selected &&
+            (isAbsolute(entry) ||
+              local === "" ||
+              /^[a-z][a-z0-9+.-]*:\/\//iu.test(entry) ||
+              entry.split(sep).includes("..")))
+        )
+          throw optionsError(
+            "Declared inspection paths must remain confined to the workspace.",
+          );
+        return selected ? resolved : local;
+      });
+      result[name] = [...new Set(paths)].sort();
     }
     if (!declaredWorkspace)
       throw optionsError(

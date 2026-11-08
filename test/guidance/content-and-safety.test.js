@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import {
+import filesystem, {
   link,
   lstat,
   mkdir,
@@ -11,17 +11,25 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import { ConfigurationError } from "../../src/config/index.js";
 import { createGitService } from "../../src/git/index.js";
 import { GuidanceError, MAX_GUIDANCE_BYTES } from "../../src/guidance/index.js";
+import { RunStoreError } from "../../src/state/index.js";
+import {
+  createWorkspaceService,
+  WorkspaceSafetyError,
+} from "../../src/workspace/index.js";
 import { executeFile, fixture } from "./support/index.js";
 
 const hash = (content) => createHash("sha256").update(content).digest("hex");
 
 test("missing guidance reads compose the installed guide without creating local or state paths", async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { ignored: false });
+  await unlink(join(f.projectPath, ".gitignore"));
   const before = await readdir(f.projectPath);
   const result = await f.service.read({ projectPath: f.projectPath });
   assert.equal(result.localContent, "");
@@ -41,6 +49,10 @@ test("missing guidance reads compose the installed guide without creating local 
     /cannot weaken common safety rules or product contracts/u,
   );
   assert.match(result.combinedContent, /No project-local additions/u);
+  assert.deepEqual(
+    await f.service.readWithIdentity({ projectPath: f.projectPath }),
+    { ...result, localIdentity: null },
+  );
   assert.deepEqual(await readdir(f.projectPath), before);
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
 });
@@ -102,8 +114,20 @@ test("current runner, discovered project, and explicit project configuration res
   assert.equal(result.projectConfigurationPath, custom);
 });
 
-test("reading and writing reject non-ignored and tracked targets even before creation", async (t) => {
+test("existing reads and all writes reject non-ignored or tracked guidance, including deleted tracked files", async (t) => {
   const f = await fixture(t, { ignored: false });
+  const service = f.createService({
+    launchEditor: () => assert.fail("unsafe guidance must not open an editor"),
+  });
+  await assert.rejects(service.edit({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(f.service.update(f.request("Lesson.")), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
+  await mkdir(dirname(f.localPath), { recursive: true });
+  await writeFile(f.localPath, "Existing lesson.");
   await assert.rejects(f.service.read({ projectPath: f.projectPath }), {
     code: "ERR_GUIDANCE_NOT_IGNORED",
   });
@@ -112,8 +136,6 @@ test("reading and writing reject non-ignored and tracked targets even before cre
   });
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
   await writeFile(join(f.projectPath, ".gitignore"), "LOCAL_ARTIFACTS/\n");
-  await mkdir(dirname(f.localPath), { recursive: true });
-  await writeFile(f.localPath, "Tracked lesson.");
   await executeFile(
     "git",
     ["add", "--force", "LOCAL_ARTIFACTS/agent-runner/rules.md"],
@@ -125,6 +147,46 @@ test("reading and writing reject non-ignored and tracked targets even before cre
   await assert.rejects(f.service.update(f.request("Replacement.")), {
     code: "ERR_GUIDANCE_NOT_IGNORED",
   });
+  await unlink(f.localPath);
+  await assert.rejects(f.service.read({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  await assert.rejects(f.service.update(f.request("Replacement.")), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+});
+
+test("an absent selection cannot return unignored content that appears during reading and disappears before reinspection", async (t) => {
+  const f = await fixture(t, { ignored: false });
+  const git = createGitService();
+  const workspace = createWorkspaceService();
+  let inspections = 0;
+  const service = f.createService({
+    git: {
+      ...git,
+      async inspectPath(input) {
+        const result = await git.inspectPath(input);
+        if (input.path === f.localPath && ++inspections === 1) {
+          await mkdir(dirname(f.localPath), { recursive: true });
+          await writeFile(f.localPath, "Unignored lesson.");
+        }
+        return result;
+      },
+    },
+    workspace: {
+      ...workspace,
+      async inspectPath(input) {
+        if (input.path === f.localPath && inspections === 1)
+          await unlink(f.localPath);
+        return workspace.inspectPath(input);
+      },
+    },
+  });
+  await assert.rejects(service.read({ projectPath: f.projectPath }), {
+    code: "ERR_GUIDANCE_NOT_IGNORED",
+  });
+  assert.equal(inspections, 2);
+  await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
 });
 
 test("linked, non-regular, escaping, and protected targets fail closed", async (t) => {
@@ -464,4 +526,309 @@ test("strict replacement input cannot supply common content or omit concurrency 
   }
   await assert.rejects(lstat(f.stateRoot), { code: "ENOENT" });
   await assert.rejects(lstat(f.localPath), { code: "ENOENT" });
+});
+
+test("guidance reads retain only trusted inspection classification through normalization", async (t) => {
+  const f = await fixture(t, { gitWorkspace: false });
+  const workspace = createWorkspaceService();
+  const inspectionError = (code) =>
+    new WorkspaceSafetyError("Private rejected evidence", {
+      code: "ERR_WORKSPACE_INSPECTION",
+      cause: Object.assign(new Error("Private rejected evidence"), { code }),
+    });
+  let fault;
+  const service = f.createService({
+    workspace: {
+      ...workspace,
+      async inspectControls() {
+        throw fault;
+      },
+    },
+  });
+  for (const [cause, code, readFailure] of [
+    [
+      inspectionError("EMFILE"),
+      "ERR_UNSAFE_GUIDANCE_PATH",
+      "inspection_unavailable",
+    ],
+    [inspectionError("EIO"), "ERR_UNSAFE_GUIDANCE_PATH", undefined],
+    [
+      new WorkspaceSafetyError("Private rejected evidence"),
+      "ERR_UNSAFE_GUIDANCE_PATH",
+      "unsafe_path",
+    ],
+    [
+      new WorkspaceSafetyError("Private rejected evidence", {
+        code: "ERR_WORKSPACE_DRIFT",
+      }),
+      "ERR_UNSAFE_GUIDANCE_PATH",
+      "workspace_changed",
+    ],
+    [
+      new WorkspaceSafetyError("Private rejected evidence", {
+        code: "ERR_WORKSPACE_PROOF_CAPACITY",
+      }),
+      "ERR_UNSAFE_GUIDANCE_PATH",
+      "evidence_capacity",
+    ],
+    [
+      new TypeError("Private rejected evidence"),
+      "ERR_GUIDANCE_STORAGE",
+      undefined,
+    ],
+    [
+      new GuidanceError("Recovery requires exact effect proof.", {
+        code: "ERR_GUIDANCE_RECOVERY",
+        cause: Object.assign(new Error(), { code: "EMFILE" }),
+      }),
+      "ERR_GUIDANCE_RECOVERY",
+      undefined,
+    ],
+    [
+      new RunStoreError("Private rejected evidence", {
+        cause: Object.assign(new Error(), { code: "EMFILE" }),
+      }),
+      "ERR_RUN_STORE",
+      undefined,
+    ],
+  ]) {
+    fault = cause;
+    for (const method of ["read", "readWithIdentity"])
+      await assert.rejects(
+        service[method]({ projectPath: f.projectPath }),
+        (error) => {
+          assert.ok(error instanceof GuidanceError);
+          assert.equal(error.code, code);
+          assert.equal(error.readFailure, readFailure);
+          assert.equal(
+            error.message.includes("Private rejected evidence"),
+            false,
+          );
+          return true;
+        },
+      );
+  }
+  fault = inspectionError("EMFILE");
+  for (const operation of [
+    () => service.edit({ projectPath: f.projectPath }),
+    () => service.update(f.request("Local operating lesson.")),
+  ])
+    await assert.rejects(operation(), (error) => {
+      assert.equal(error.code, "ERR_UNSAFE_GUIDANCE_PATH");
+      assert.equal(error.readFailure, undefined);
+      return true;
+    });
+  await assert.rejects(lstat(f.localPath), { code: "ENOENT" });
+});
+
+test("guidance file helpers classify native read rejection without changing mutation errors", async (t) => {
+  const f = await fixture(t, {
+    gitWorkspace: false,
+    initialContent: "Local operating lesson.",
+  });
+  const nativeOpen = filesystem.open;
+  let target;
+  let fault;
+  const mockedOpen = t.mock.method(
+    filesystem,
+    "open",
+    async (path, ...args) => {
+      if (
+        (target === "directory" && path === f.projectPath) ||
+        (target === "document" &&
+          typeof path === "string" &&
+          path.endsWith("/rules.md"))
+      )
+        throw fault;
+      return nativeOpen(path, ...args);
+    },
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mockedOpen.mock.restore();
+    syncBuiltinESMExports();
+  });
+  for (target of ["directory", "document"]) {
+    for (const [code, readFailure] of [
+      ["EMFILE", "inspection_unavailable"],
+      ["ENOENT", "workspace_changed"],
+      ["EIO", undefined],
+    ]) {
+      fault = Object.assign(new Error("Private rejected evidence"), {
+        code,
+        syscall: "open",
+      });
+      for (const method of ["read", "readWithIdentity"])
+        await assert.rejects(
+          f.service[method]({ projectPath: f.projectPath }),
+          (error) => {
+            assert.equal(error.code, "ERR_UNSAFE_GUIDANCE_PATH");
+            assert.equal(error.readFailure, readFailure);
+            assert.equal(error.cause, fault);
+            assert.equal(
+              error.message.includes("Private rejected evidence"),
+              false,
+            );
+            return true;
+          },
+        );
+    }
+    fault = Object.assign(new Error("Private rejected evidence"), {
+      code: "EMFILE",
+      syscall: "open",
+    });
+    await assert.rejects(
+      f.service.update(
+        f.request("Replacement.", {
+          expectedHash: hash("Local operating lesson."),
+        }),
+      ),
+      (error) => {
+        assert.equal(error.code, "ERR_UNSAFE_GUIDANCE_PATH");
+        assert.equal(error.readFailure, undefined);
+        return true;
+      },
+    );
+  }
+  target = null;
+  assert.equal(await readFile(f.localPath, "utf8"), "Local operating lesson.");
+});
+
+test("returned directory verification preserves read provenance without classifying cleanup", async (t) => {
+  const f = await fixture(t, {
+    gitWorkspace: false,
+    initialContent: "Local operating lesson.",
+  });
+  const nativeOpen = filesystem.open;
+  const nativeRealpath = filesystem.realpath;
+  let phase;
+  let armed = false;
+  let fault;
+  const mockedOpen = t.mock.method(
+    filesystem,
+    "open",
+    async (path, ...args) => {
+      const handle = await nativeOpen(path, ...args);
+      if (path === f.projectPath) {
+        const nativeClose = handle.close.bind(handle);
+        t.mock.method(handle, "close", async () => {
+          await nativeClose();
+          if (armed && phase === "cleanup") throw fault;
+        });
+      }
+      // Arm only after selection and directory opening have completed, so the
+      // failure comes from verification on the returned helper after a local read.
+      if (typeof path === "string" && path.endsWith("/rules.md")) armed = true;
+      return handle;
+    },
+  );
+  const mockedRealpath = t.mock.method(
+    filesystem,
+    "realpath",
+    async (path, ...args) => {
+      if (armed && phase === "verification" && path === f.projectPath)
+        throw fault;
+      return nativeRealpath(path, ...args);
+    },
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mockedOpen.mock.restore();
+    mockedRealpath.mock.restore();
+    syncBuiltinESMExports();
+  });
+
+  for (const [failurePhase, code, readFailure] of [
+    ["verification", "EMFILE", "inspection_unavailable"],
+    ["verification", "ENOENT", "workspace_changed"],
+    ["verification", "EIO", undefined],
+    ["cleanup", "EMFILE", undefined],
+  ]) {
+    phase = failurePhase;
+    fault = Object.assign(new Error("Private rejected evidence"), { code });
+    for (const method of ["read", "readWithIdentity"]) {
+      armed = false;
+      await assert.rejects(
+        f.service[method]({ projectPath: f.projectPath }),
+        (error) => {
+          assert.equal(error.code, "ERR_GUIDANCE_STORAGE");
+          assert.equal(error.readFailure, readFailure);
+          assert.equal(
+            error.message.includes("Private rejected evidence"),
+            false,
+          );
+          return true;
+        },
+      );
+    }
+  }
+  phase = "verification";
+  fault = Object.assign(new Error("Private rejected evidence"), {
+    code: "EMFILE",
+  });
+  for (const operation of [
+    () => f.service.edit({ projectPath: f.projectPath }),
+    () =>
+      f.service.update(
+        f.request("Replacement.", {
+          expectedHash: hash("Local operating lesson."),
+        }),
+      ),
+  ]) {
+    armed = false;
+    await assert.rejects(operation(), (error) => {
+      assert.equal(error.code, "ERR_GUIDANCE_STORAGE");
+      assert.equal(error.readFailure, undefined);
+      return true;
+    });
+  }
+  phase = null;
+  assert.equal(await readFile(f.localPath, "utf8"), "Local operating lesson.");
+});
+
+test("guidance reads preserve bounded configuration constraints without classifying mutations", async (t) => {
+  const f = await fixture(t, { gitWorkspace: false });
+  let fault;
+  const service = f.createService({
+    loadConfiguration: async () => {
+      throw fault;
+    },
+  });
+  for (const [constraint, classification] of [
+    ["file_size", "evidence_capacity"],
+    ["isolated_regular_file", "unsafe_path"],
+    ["missing_file", "workspace_changed"],
+  ]) {
+    fault = new ConfigurationError("Private rejected evidence", {
+      code: "ERR_PROJECT_CONFIGURATION_READ",
+      constraint,
+    });
+    await assert.rejects(
+      service.readWithIdentity({ projectPath: f.projectPath }),
+      {
+        code: "ERR_PROJECT_CONFIGURATION_READ",
+        readFailure: classification,
+      },
+    );
+    await assert.rejects(
+      service.update(f.request("Local lesson.")),
+      (error) => {
+        assert.equal(error.code, "ERR_PROJECT_CONFIGURATION_READ");
+        assert.equal(error.constraint, undefined);
+        assert.equal(error.readFailure, undefined);
+        return true;
+      },
+    );
+  }
+  fault = new ConfigurationError("Private rejected evidence", {
+    code: "ERR_PROJECT_CONFIGURATION_READ",
+    cause: Object.assign(new Error(), { code: "EMFILE" }),
+  });
+  await assert.rejects(
+    service.readWithIdentity({ projectPath: f.projectPath }),
+    {
+      code: "ERR_PROJECT_CONFIGURATION_READ",
+      readFailure: "inspection_unavailable",
+    },
+  );
 });
