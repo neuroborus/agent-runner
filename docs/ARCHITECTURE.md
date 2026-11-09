@@ -1276,6 +1276,17 @@ its admission until transport closure, including startup failure or early EOF.
 The MCP boundary closes the SDK transport when STDIO input ends or closes and
 removes its input listeners when the lifetime settles.
 
+The public CLI entry projects a runtime-prefixed admission or lifetime failure
+as one stderr line through a private closed code-to-fixed-text map. A
+recognized code is echoed exactly with bounded conditional guidance.
+`ERR_RUNTIME_ADMISSION` also wraps non-runtime causes and keeps unknown
+attribution; unrecognized, over-long or control-character codes render only a
+fixed unrecognized line. No line attributes a stage or claims that earlier
+request effects were absent, and error messages, causes and other properties
+are never projected. Non-runtime errors, including non-string codes, are
+rethrown unchanged. Exit status 1, stdout silence and original-failure
+precedence are unchanged.
+
 `state/runtime-admission.js` owns a bounded private `runtime-admission/runtime.json`
 projection under the existing state root. It records the active and pending
 payload identities plus explicitly registered users, their host, PID namespace,

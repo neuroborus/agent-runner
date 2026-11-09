@@ -134,7 +134,9 @@ Its in-process MCP fixture supplies controlled positive process observations;
 production admission still requires native owner identity and namespace proof.
 Unavailable owner metadata must deny startup before state creation.
 It also covers actual STDIO EOF retirement and caller-input mutation after
-candidate verification.
+candidate verification, plus bounded CLI runtime diagnostics: exact recognized
+codes, the unrecognized fallback, hostile message/cause/property redaction,
+identical non-runtime rejections and original-failure precedence.
 Existing runtime-pinning slow coverage retains actual detached-process proof;
 the new admission tests require no providers, host census, signals or installs.
 Recovery also covers a consumed activation after owner loss and colliding PIDs

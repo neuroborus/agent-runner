@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-09
 
+- **CLI runtime admission failures keep their stable code.** The public CLI
+  catch collapsed every runtime-prefixed admission, activation-deferral,
+  ownership, payload and reconciliation failure into one generic line, and a
+  non-string error code replaced the original failure with a TypeError. A
+  closed private map now echoes each recognized code with fixed conditional
+  guidance; the generic admission code and unrecognized codes stay
+  unattributed, and messages, causes and properties are never projected.
+  Admission, activation, ownership, leases, persistence, exit status and
+  original-failure precedence are unchanged. The code and root cause of the
+  historical generic failures remain unknown.
+
 - **Capability reports describe the assigned executor, not the discovery turn.**
   Coding bootstrap and validation-migration guidance previously offered
   `sourceProjection` for any command writing beside its source without naming

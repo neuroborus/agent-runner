@@ -106,8 +106,10 @@ its client, migrate saved progress or resume a run. A later compatible server
 requires explicit resume with supported leased migrations and the original
 frozen configuration. Unknown forward versions preserve progress and fail
 clearly; retained payloads cannot undo persisted migrations. Legacy/intermediate
-runs gain no execution authority. Activation currently has a root capability
-boundary shared by the explicit CLI/MCP operator actions. See
+runs gain no execution authority. CLI admission failures name the stable
+runtime code with fixed conditional guidance; uncertain causes stay unattributed.
+Activation currently has a root capability boundary shared by the explicit
+CLI/MCP operator actions. See
 [explicit versions and downgrade limits](../RELEASING.md#local-version-selection-and-restart).
 
 ## Configuration

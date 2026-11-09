@@ -703,12 +703,55 @@ export async function main(args = process.argv.slice(2), options = {}) {
         ),
     );
   } catch (error) {
-    if (!error?.code?.startsWith("ERR_RUNTIME_")) throw error;
+    if (
+      typeof error?.code !== "string" ||
+      !error.code.startsWith("ERR_RUNTIME_")
+    )
+      throw error;
     (options.stderr ?? process.stderr).write(
-      "Runtime admission or retirement could not be verified.\n",
+      `${runtimeDiagnostic(error.code)}\n`,
     );
     return 1;
   }
+}
+
+// Closed code-to-fixed-text map: unrecognized codes, messages, causes and other
+// properties are never projected. The outer catch cannot know which effects
+// already happened, so no line attributes a stage or certifies their absence.
+const RUNTIME_DIAGNOSTICS = new Map([
+  [
+    "ERR_RUNTIME_RESTART_REQUIRED",
+    "The runtime selection does not admit this process's payload now; another payload is selected or activation is deferred while associated users remain. If this installation is obsolete, start a new process from the selected installation; otherwise retry later.",
+  ],
+  [
+    "ERR_RUNTIME_OWNER_UNVERIFIABLE",
+    "A runtime owner, possibly this process, could not be verified; no ownership was taken over. Check that process identity is available before retrying.",
+  ],
+  [
+    "ERR_RUNTIME_RECONCILIATION_REQUIRED",
+    "An earlier runtime operation was interrupted and its recorded intent could not be reconciled with the current runtime state. Inspect runtime state before retrying.",
+  ],
+  [
+    "ERR_RUNTIME_PAYLOAD",
+    "The pinned application payload or Node identity is invalid or changed. Start a new process from a verified installation.",
+  ],
+  [
+    "ERR_RUNTIME_SELECTION_VERSION",
+    "The runtime selection version is unsupported. Use a compatible installation.",
+  ],
+  ["ERR_RUNTIME_VERSION_SKEW", "The runtime is incompatible."],
+  ["ERR_RUNTIME_MIGRATION_REQUIRED", "The run requires a runtime migration."],
+  [
+    "ERR_RUNTIME_ADMISSION",
+    "Runtime admission or retirement state could not be verified; the specific cause is unavailable.",
+  ],
+]);
+
+function runtimeDiagnostic(code) {
+  const explanation = RUNTIME_DIAGNOSTICS.get(code);
+  return explanation === undefined
+    ? "Runtime verification failed (unrecognized): the specific cause is unavailable."
+    : `Runtime verification failed (${code}): ${explanation}`;
 }
 
 function parseCommand(args) {

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import packageMetadata from "../package.json" with { type: "json" };
 import { main } from "../src/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { serveMcp } from "../src/mcp/index.js";
@@ -13,6 +14,46 @@ import {
   prepareRuntime,
 } from "../src/runtime/index.js";
 import { runtimeFixture } from "./support/index.js";
+
+const MARKER = "/sample/private/path sample-secret-token";
+const RESTART_LINE =
+  "Runtime verification failed (ERR_RUNTIME_RESTART_REQUIRED): The runtime selection does not admit this process's payload now; another payload is selected or activation is deferred while associated users remain. If this installation is obsolete, start a new process from the selected installation; otherwise retry later.\n";
+const ADMISSION_LINE =
+  "Runtime verification failed (ERR_RUNTIME_ADMISSION): Runtime admission or retirement state could not be verified; the specific cause is unavailable.\n";
+const RECONCILIATION_LINE =
+  "Runtime verification failed (ERR_RUNTIME_RECONCILIATION_REQUIRED): An earlier runtime operation was interrupted and its recorded intent could not be reconciled with the current runtime state. Inspect runtime state before retrying.\n";
+const UNRECOGNIZED_LINE =
+  "Runtime verification failed (unrecognized): the specific cause is unavailable.\n";
+
+function hostileError(code) {
+  return Object.assign(
+    new Error(`${MARKER} message`, {
+      cause: Object.assign(new Error(`${MARKER} cause`), {
+        code: "ERR_RUNTIME_PAYLOAD",
+        path: MARKER,
+      }),
+    }),
+    { code, path: MARKER, pid: 4242, environment: { SAMPLE: MARKER } },
+  );
+}
+
+function terminal(writeStdout) {
+  const writes = [];
+  return {
+    writes,
+    stdout: {
+      write(value) {
+        writeStdout?.(value);
+        writes.push(["stdout", value]);
+      },
+    },
+    stderr: {
+      write(value) {
+        writes.push(["stderr", value]);
+      },
+    },
+  };
+}
 
 test("a pinned MCP process defers activation; continuation uses its original tree until retirement", async (t) => {
   const a = await runtimeFixture(t);
@@ -167,8 +208,124 @@ test("CLI and Runner admission precede new-run and resume effects", async () => 
     1,
   );
   assert.equal(output, "");
-  assert.match(error, /Runtime admission/u);
+  assert.equal(error, RESTART_LINE);
   assert.deepEqual(calls, ["run", "run", "resume", "cli"]);
+});
+
+test("CLI runtime failures project only fixed text for exact recognized codes", async () => {
+  const cases = [
+    ["ERR_RUNTIME_RESTART_REQUIRED", RESTART_LINE],
+    [
+      "ERR_RUNTIME_OWNER_UNVERIFIABLE",
+      "Runtime verification failed (ERR_RUNTIME_OWNER_UNVERIFIABLE): A runtime owner, possibly this process, could not be verified; no ownership was taken over. Check that process identity is available before retrying.\n",
+    ],
+    ["ERR_RUNTIME_RECONCILIATION_REQUIRED", RECONCILIATION_LINE],
+    [
+      "ERR_RUNTIME_PAYLOAD",
+      "Runtime verification failed (ERR_RUNTIME_PAYLOAD): The pinned application payload or Node identity is invalid or changed. Start a new process from a verified installation.\n",
+    ],
+    [
+      "ERR_RUNTIME_SELECTION_VERSION",
+      "Runtime verification failed (ERR_RUNTIME_SELECTION_VERSION): The runtime selection version is unsupported. Use a compatible installation.\n",
+    ],
+    [
+      "ERR_RUNTIME_VERSION_SKEW",
+      "Runtime verification failed (ERR_RUNTIME_VERSION_SKEW): The runtime is incompatible.\n",
+    ],
+    [
+      "ERR_RUNTIME_MIGRATION_REQUIRED",
+      "Runtime verification failed (ERR_RUNTIME_MIGRATION_REQUIRED): The run requires a runtime migration.\n",
+    ],
+    ["ERR_RUNTIME_ADMISSION", ADMISSION_LINE],
+    ["ERR_RUNTIME_SAMPLE_UNKNOWN", UNRECOGNIZED_LINE],
+    ["ERR_RUNTIME_PAYLOAD\u001b[2K", UNRECOGNIZED_LINE],
+    [`ERR_RUNTIME_${"X".repeat(4096)}`, UNRECOGNIZED_LINE],
+  ];
+  const run = (failure) => {
+    const io = terminal();
+    const result = main(["--help"], {
+      runtimeAdmission: {
+        async withAdmission() {
+          throw failure;
+        },
+      },
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    return { io, result };
+  };
+  for (const [code, line] of cases) {
+    const { io, result } = run(hostileError(code));
+    assert.equal(await result, 1);
+    assert.deepEqual(io.writes, [["stderr", line]]);
+    assert.doesNotMatch(JSON.stringify(io.writes), /sample-|4242/u);
+  }
+  for (const code of ["ERR_SAMPLE", 7, { startsWith: () => true }]) {
+    const failure = hostileError(code);
+    const { io, result } = run(failure);
+    await assert.rejects(result, (error) => error === failure);
+    assert.deepEqual(io.writes, []);
+  }
+});
+
+test("CLI runtime diagnostics keep deferral and original-failure precedence", async (t) => {
+  const context = await prepareRuntime(await runtimeFixture(t));
+  function cli(status, { write, release } = {}) {
+    let releases = 0;
+    const io = terminal(write);
+    const result = main(["--version"], {
+      runtimeAdmission: createRuntimeAdmission({
+        context,
+        runStore: {
+          async assertRuntimeBoundary() {},
+          async admitRuntime() {
+            return { status };
+          },
+          async releaseRuntime() {
+            releases += 1;
+            if (release) throw release;
+          },
+        },
+      }),
+      stdout: io.stdout,
+      stderr: io.stderr,
+    });
+    return { io, result, releases: () => releases };
+  }
+
+  const deferred = cli("deferred");
+  assert.equal(await deferred.result, 1);
+  assert.deepEqual(deferred.io.writes, [["stderr", RESTART_LINE]]);
+  assert.equal(deferred.releases(), 1);
+
+  const release = hostileError("ERR_SAMPLE_RELEASE");
+  const reconciliation = cli("admitted", {
+    release,
+    write() {
+      throw hostileError("ERR_RUNTIME_RECONCILIATION_REQUIRED");
+    },
+  });
+  assert.equal(await reconciliation.result, 1);
+  assert.deepEqual(reconciliation.io.writes, [["stderr", RECONCILIATION_LINE]]);
+  assert.equal(reconciliation.releases(), 1);
+
+  const writeFailure = hostileError("ERR_SAMPLE_WRITE");
+  const original = cli("admitted", {
+    release,
+    write() {
+      throw writeFailure;
+    },
+  });
+  await assert.rejects(original.result, (error) => error === writeFailure);
+  assert.deepEqual(original.io.writes, []);
+  assert.equal(original.releases(), 1);
+
+  const retirement = cli("admitted", { release });
+  assert.equal(await retirement.result, 1);
+  assert.deepEqual(retirement.io.writes, [
+    ["stdout", `${packageMetadata.version}\n`],
+    ["stderr", ADMISSION_LINE],
+  ]);
 });
 
 test("development-managed calls stay outside global admission", async () => {
