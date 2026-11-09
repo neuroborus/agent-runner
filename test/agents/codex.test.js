@@ -4462,11 +4462,12 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
 });
 
-test("allows read-only Git identity queries during local-commit readiness", async () => {
+test("allows disclosed read-only Git inspection during local-commit readiness", async () => {
   for (const command of [
     "git var GIT_AUTHOR_IDENT",
     "git var GIT_COMMITTER_IDENT",
     "git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT",
+    "git status --short && git diff HEAD",
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -4497,6 +4498,26 @@ test("allows read-only Git identity queries during local-commit readiness", asyn
     );
 
     assert.deepEqual(result.structured, { ready: true });
+    const { text } = fixture.processes[0].messages.find(
+      ({ method }) => method === "turn/start",
+    ).params.input[0];
+    for (const disclosed of [
+      "git var GIT_AUTHOR_IDENT",
+      "git var GIT_COMMITTER_IDENT",
+      "status",
+      "diff",
+      "log",
+    ]) {
+      assert.ok(text.includes(disclosed));
+    }
+    assert.equal(
+      fixture.executeCalls.filter(
+        ({ argumentsList }) =>
+          argumentsList[0] === "sandbox" &&
+          argumentsList.includes(EXPECTED_HEAD),
+      ).length,
+      1,
+    );
   }
 });
 
@@ -4528,6 +4549,8 @@ test("rejects forbidden local-commit turns with per-branch diagnostic classes", 
       gitOperation,
     ),
     commandCase("git config user.name provider-private-detail", gitOperation),
+    commandCase("git config --get user.name", gitOperation),
+    commandCase("git branch --show-current", gitOperation),
     commandCase("git rebase HEAD^", gitOperation),
     commandCase("git update-ref refs/heads/main HEAD^", gitOperation),
     commandCase("git -C . push origin main", remoteWrite),

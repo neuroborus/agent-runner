@@ -1498,9 +1498,15 @@ provider, or confirmation-turn rejection before executor invocation carries
 preserves the original bounded error code and recoverable classification.
 `ERR_CODEX_LOCAL_COMMIT_POLICY` carries one diagnostic class per refusing rule:
 `operation_local_commit_file_change` for a reported file change,
-`operation_local_commit_git_operation` for a forbidden Git command, and
+`operation_local_commit_git_operation` for a Git subcommand outside the
+readiness inspection allowlist, and
 `operation_local_commit_confirmation` for a missing or invalid `{ ready: true }`
-confirmation. These classes never expose commands, paths, output, or native
+confirmation. The readiness prompt discloses that inspection allowlist,
+derived from the enforced set rather than a second list, and names the
+`git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` identity queries,
+so the git-operation class means a disclosed-policy refusal before executor
+invocation; it establishes neither a classifier defect nor an attempted
+mutation. These classes never expose commands, paths, output, or native
 messages. The retired single class `operation_local_commit` remains valid in
 historical failure records but is no longer emitted.
 

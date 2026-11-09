@@ -665,14 +665,14 @@ See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
 Explicit resume after audit output exhaustion reconstructs the same checkpoint
 in fresh native context; see [audit recovery](../pipelines/audit/docs/SPEC.md).
 
-Classified Claude readiness refusals preserve the reviewed candidate. Exact
-`ready: false` establishes only a decline with unknown reason; malformed
-confirmation identifies a fixed shape constraint. COMMIT has no readiness-output
-correction checkpoint, so these pauses offer separately authorized follow-up
-instead of same-run retry. Preserve the work and follow the
-[commit recovery contract](../pipelines/plan-execution/docs/SPEC.md#137-commit).
-Interrupted verification still reconciles the saved proof without replay;
-legacy classless refusals retain their supported recovery.
+Readiness refusals preserve the candidate, HEAD and index. Claude `ready: false`
+is a decline with unknown reason, malformed confirmation a fixed shape
+constraint; COMMIT has no output-correction checkpoint, so these need separately
+authorized follow-up. Codex `operation_local_commit_git_operation` refuses a Git
+subcommand outside the disclosed allowlist before effect, keeping no command and
+proving no classifier defect or mutation; `COMMIT` resume remains. Do not edit
+state or collect provider data; see
+[commit recovery](../pipelines/plan-execution/docs/SPEC.md#137-commit).
 
 For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter prefers full

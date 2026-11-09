@@ -317,6 +317,9 @@ const LOCAL_COMMIT_READ_ONLY_GIT_COMMANDS = new Set([
   "status",
   "var",
 ]);
+const LOCAL_COMMIT_READ_ONLY_GIT_COMMAND_LIST = [
+  ...LOCAL_COMMIT_READ_ONLY_GIT_COMMANDS,
+].join(", ");
 const SAFE_TURN_ITEM_TYPES = new Set([
   "agentMessage",
   "commandExecution",
@@ -753,8 +756,13 @@ function turnPrompt(request, recovery) {
       `\n\nConfirm that HEAD is ${request.commit.expectedHead} and that the ` +
       "current workspace is ready for the authorized commit. Do not modify " +
       "files, stage changes, create a commit, or mutate Git state. The adapter " +
-      "will perform the constrained commit after this turn. Return whether it " +
-      "is safe to proceed through the provided schema.";
+      "will perform the constrained commit after this turn. Inspect Git only " +
+      "with these read-only subcommands: " +
+      `${LOCAL_COMMIT_READ_ONLY_GIT_COMMAND_LIST}. For identity, use ` +
+      "`git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`. Any other " +
+      "Git subcommand, including read-only forms of `config` or `branch`, ends " +
+      "this turn before the commit. Return whether it is safe to proceed " +
+      "through the provided schema.";
   }
   return prompt;
 }
@@ -1617,7 +1625,8 @@ function auditItems(items, request) {
       }
       if (violation === "local-commit") {
         throw new CodexAdapterError(
-          "Codex attempted a forbidden local-commit operation.",
+          "Codex ran a Git subcommand outside the readiness inspection " +
+            "allowlist; the commit was refused before it started.",
           {
             code: "ERR_CODEX_LOCAL_COMMIT_POLICY",
             diagnosticClass: "operation_local_commit_git_operation",

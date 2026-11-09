@@ -20,6 +20,16 @@ remain in the owning documentation.
   repairs no external run and does not prove how any historical model
   interpreted its input.
 
+- **Codex readiness discloses its enforced Git inspection allowlist.** The
+  local-commit readiness prompt said only not to mutate Git state, while the
+  adapter refuses every Git subcommand outside a stricter read-only allowlist,
+  including read-only `config` and `branch` forms. The prompt now derives that
+  vocabulary from the enforced set and names the `git var` identity queries,
+  and the git-operation refusal carries a fixed actionable message. The
+  allowlist, lexical classification, schema, diagnostic classes and retry
+  authority are unchanged. The historical rejected command and its native
+  cause remain unknown.
+
 ## 2026-11-08
 
 - **Audit reconstructs output-exhausted checkpoints on explicit resume.**

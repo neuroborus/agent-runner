@@ -336,10 +336,15 @@ connectivity.
 
 Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
-not widen ordinary workspace-write access. Codex readiness may use the
-read-only `git var` subcommand to inspect the repository's existing author and
-committer identities; staging, commit, configuration, history, ref, and remote
-mutations remain outside that turn. Polishing never requests local commit.
+not widen ordinary workspace-write access. The Codex readiness prompt
+discloses the adapter-owned read-only Git inspection subcommand set, derived
+from the same allowlist the adapter enforces, and names `git var
+GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` for the existing author and
+committer identities. Any other Git subcommand, even a read-only `config` or
+`branch` form, is refused before effect with
+`operation_local_commit_git_operation`; staging, commit, configuration,
+history, ref, and remote mutations remain outside that turn. Polishing never
+requests local commit.
 
 Claude's readiness schema requires exactly one boolean `ready` field. Only
 `{ "ready": true }` admits the constrained executor. Successful native output
