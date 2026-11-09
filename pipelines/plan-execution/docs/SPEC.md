@@ -635,9 +635,14 @@ each active role's inventory. `capabilityRequirements` permits 256 reports per
 role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
 `scratch`, `cache`, and `sourceProjection`, up to 32 exact `{url, sha256}`
 artifacts, and `unsupported` with up to 16 unique lowercase capability
-identifiers. `sourceProjection` may be true only when the frozen exact command
-must write beside the staging-independent source it checks; agents cannot name a
-path or grant authority. `environmentBlockers` permits 256 reports per role:
+identifiers. Needs and blockers describe each command's assigned executor and
+checkpoint, either the ordinary Worker `FINALIZE` turn under its existing
+workspace-write access or Runner-trusted execution of a selected command, never
+the current read-only discovery, migration, or Reviewer turn; ordinary safe
+Worker workspace output needs no report. `sourceProjection` is separate frozen
+authority, not a synonym for workspace-write, and may be true only when evidence
+shows the actual executor must write beside the staging-independent source it
+checks; agents cannot name a path or grant authority. `environmentBlockers` permits 256 reports per role:
 `command`, `source` (`agent-sandbox` or `runner`), and 1–8 bounded single-line
 evidence strings. Every command must occur in that role's exact inventory;
 existing structured-result byte bounds also apply. Every capability report must

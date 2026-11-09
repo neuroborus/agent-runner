@@ -1041,8 +1041,10 @@ characters remain invalid. This example works in either configuration source:
 }
 ```
 
-`sourceProjection: true` is the closed authority for checks that must write
-build output beside source inputs. The runner reconstructs the accepted
+`sourceProjection: true` is the closed authority for selected Runner-trusted
+checks that must write build output beside source inputs; an ordinary
+agent-executed check writing only safe workspace output under the Worker's
+existing access needs no projection. The runner reconstructs the accepted
 staging-independent source in private owned storage and mounts only that copy
 writable at the canonical project path. It includes frozen HEAD content plus
 tracked and non-ignored untracked workspace changes, but not the index, `.git`,

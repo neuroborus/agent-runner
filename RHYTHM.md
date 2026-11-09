@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-09
+
+- **Capability reports describe the assigned executor, not the discovery turn.**
+  Coding bootstrap and validation-migration guidance previously offered
+  `sourceProjection` for any command writing beside its source without naming
+  who runs it, so a read-only discovery or Reviewer turn could mistake its own
+  restrictions for a command need. Needs and blockers now describe the ordinary
+  Worker `FINALIZE` turn under its existing workspace-write access or the
+  Runner-trusted executor of a selected command. Ordinary safe Worker output
+  needs no report; projection remains separate frozen trusted authority, and
+  genuine command-specific blockers still require evidence. Admission, schemas,
+  persistence, saved reports, counters and frozen authority are unchanged. This
+  repairs no external run and does not prove how any historical model
+  interpreted its input.
+
 ## 2026-11-08
 
 - **Audit reconstructs output-exhausted checkpoints on explicit resume.**

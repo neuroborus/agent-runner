@@ -415,7 +415,12 @@ Accepted active-role reports are preserved together; reconciliation cannot
 discard a role's needs. Plan execution and polishing independently require a
 boolean `sourceProjection` need in every report alongside scratch, cache,
 artifacts, and unsupported needs. They can identify only the frozen exact
-command: no report can choose a projection path or broader authority. Their
+command: no report can choose a projection path or broader authority. Reports
+describe the assigned executor and checkpoint, not the read-only discovery,
+migration, or Reviewer turn: ordinary safe output under the Worker's existing
+`FINALIZE` workspace-write access needs no report, while `sourceProjection` is
+separate frozen authority requested only when evidence shows the actual
+executor must write beside the staging-independent source. Their
 ordered migrations default historical reports to no projection without
 reloading configuration or changing workflow, evidence, correction, or effect
 state. Every capability report must identify an actual

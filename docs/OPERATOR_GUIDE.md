@@ -242,13 +242,23 @@ Declarations grant no environment, credentials, shell-string substitutes, or
 broader host authority. Isolation and mutation guards still apply; user-attested
 results cannot replace execution. See [configuration](product/OPERATOR_MODEL.md#configuration).
 
-For a check that must write beside its inputs, declare
-`"sourceProjection": true` in that command's capabilities. The runner creates
-an owned writable projection of frozen HEAD plus the exact tracked and non-
-ignored untracked workspace content. It does not copy the index, `.git`, ignored
+Capability reports name each check's assigned executor and checkpoint, never
+the read-only discovery or Reviewer turn: safe output under the ordinary
+Worker's `FINALIZE` workspace-write access needs no report. `sourceProjection`
+is selected trusted authority for checks writing beside their inputs. Use the
+[trusted build examples](../README.md#configuration) to declare exact vectors
+with `scratch`, `cache`, or `sourceProjection` in root or safe project
+configuration. Projection is an owned writable copy of frozen HEAD plus tracked
+and non-ignored untracked content, without the index, `.git`, ignored
 dependency trees, project configuration, task/state artifacts, credentials, or
-other host paths. Writes are disposable; the original checkout remains absent
-from the check. Declare scratch, cache, and pinned artifacts independently.
+other host paths; the original checkout stays absent. Supply tools/dependencies
+in accepted source or as pinned artifacts. Scratch binds
+`AGENT_RUNNER_SCRATCH`/`TMPDIR`; cache binds `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed; exact arguments do
+not expand variables. Storage, including projected writes, is private and
+disposable; original repository and network access remain prohibited. Cleanup
+follows verified process retirement. Uncertain cleanup retains ownership
+evidence and resumes before new work; interrupted contents are never reused.
 
 Set top-level `trustedCommandTimeoutMs` in root or safe project configuration:
 strict integer milliseconds `1`–`2147483647`, default `3600000` (60 minutes),
@@ -291,18 +301,6 @@ implementation. A legitimate infrastructure change must be explicitly within
 the task and current planned step and accepted by terminal confirmation.
 An environment blocker requires the permitted recovery action, not relaxed
 sandboxing, an invented command, a new baseline, or fabricated success.
-
-Use the [trusted build examples](../README.md#configuration) to declare exact
-vectors with `scratch`, `cache`, or `sourceProjection` capabilities in root or
-safe project configuration. Supply tools/dependencies in accepted source or as
-pinned artifacts, not ignored host dependency trees.
-Scratch binds `AGENT_RUNNER_SCRATCH`/`TMPDIR`; cache binds
-`AGENT_RUNNER_CACHE`, `XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed;
-exact arguments do not expand variables. Storage is private and disposable,
-including projected writes; original repository and network access remain
-prohibited. Cleanup follows verified process retirement. Uncertain cleanup
-retains ownership evidence and resumes before new work; interrupted contents
-are never reused.
 
 Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
 stdout/stderr. Missing legacy/controller timing stays unknown; never invent it

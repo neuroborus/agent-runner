@@ -93,9 +93,15 @@ There are at most 256 reports of each kind per role. Each need names an exact
 inventory command, an optional frozen identity (`commandIdentity`, otherwise
 null), `capabilities` with boolean `scratch`/`cache`, a required boolean
 `sourceProjection` need, up to 32 exact `{url, sha256}` artifacts, and up to 16
-unique `unsupported` identifiers. `sourceProjection` may be true only when the
-frozen exact command must write beside the staging-independent source it checks;
-agents cannot name a projection path or grant broader authority.
+unique `unsupported` identifiers. Needs and blockers describe each command's
+assigned executor and checkpoint, either the ordinary Worker `FINALIZE` turn
+under its existing workspace-write access or Runner-trusted execution of a
+selected command, never the current read-only discovery, migration, or Reviewer
+turn; ordinary safe Worker workspace output needs no report. `sourceProjection`
+is separate frozen authority, not a synonym for workspace-write, and may be true
+only when evidence shows the actual executor must write beside the
+staging-independent source it checks; agents cannot name a projection path or
+grant broader authority.
 Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
 and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
 Every capability report must contain at least one scratch, cache,
