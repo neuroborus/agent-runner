@@ -1029,9 +1029,13 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
   );
 });
 
-test("persists a terminal Claude finalization protocol diagnosis without acceptance", async (t) => {
+test("persists terminal Claude finalization diagnoses without acceptance", async (t) => {
   const marker = "PRIVATE_NATIVE_FRAME";
-  for (const diagnosticClass of ["protocol_record_after_result", undefined])
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", undefined],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+  ])
     await t.test(diagnosticClass ?? "unclassified", async (t) => {
       let before;
       const fixture = await createIntegrationFixture(t, {
@@ -1051,7 +1055,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
             "claude",
             new ClaudeAdapterError(marker, {
               cause: new Error(marker),
-              code: "ERR_CLAUDE_PROTOCOL",
+              code,
               diagnosticClass,
             }),
           );
@@ -1059,7 +1063,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       });
 
       await assert.rejects(fixture.run(), (error) => {
-        assert.equal(error.code, "ERR_CLAUDE_PROTOCOL");
+        assert.equal(error.code, code);
         assert.equal(error.recoverable, false);
         return true;
       });
@@ -1072,7 +1076,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(state.workflowState, "FAILED");
       assert.deepEqual(run.pause, {
         reason: "internal_failure",
-        code: "ERR_CLAUDE_PROTOCOL",
+        code,
         ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
       });
       const projected = polishingPipeline.projections.pause(run);
@@ -1090,8 +1094,8 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(
         activities.at(-1).message,
         diagnosticClass === undefined
-          ? "Polishing failed: ERR_CLAUDE_PROTOCOL."
-          : `Polishing failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+          ? `Polishing failed: ${code}.`
+          : `Polishing failed: ${code} (${diagnosticClass}).`,
       );
       assert.equal(state.finalizationResult, null);
       assert.equal(state.finalizedFingerprint, null);

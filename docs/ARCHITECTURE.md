@@ -4569,13 +4569,15 @@ Claude turn failures use a finite adapter-owned diagnostic allowlist. Structured
 take precedence over bounded message matching. The adapter discards denied tool
 input, native result text, raw standard error, and process causes; only its
 fixed code, fixed message, allowlisted class, and safety fields cross the
-boundary. Authentication remains terminal. A denial that identifies an
-unexposed tool or a Bash command outside the narrow positive repository-
-inspection allowlist is also terminal. Only an expected non-Bash tool or a
-positively recognized safe Bash inspection may be a recoverable capability or
-configuration failure. Structured provider recovery accepts only explicit
-transient HTTP statuses; non-transient client statuses and an `api_error`
-without a transient status fail closed with a fixed request-rejected error.
+boundary. Authentication remains terminal. A denial of an unexposed tool or of a
+Bash command outside the narrow positive repository-inspection allowlist is
+terminal and classified only as an unexposed tool or unclassified Bash whose
+refusal cause is unknown; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+Only an expected non-Bash tool or a positively recognized safe Bash inspection
+may be a recoverable capability or configuration failure. Structured provider
+recovery accepts only explicit transient HTTP statuses; non-transient client
+statuses and an `api_error` without a transient status fail closed with a fixed
+request-rejected error.
 
 The shared failure record optionally carries `availabilityReason`, restricted to
 `transport_unavailable`, `temporarily_overloaded`, `model_busy`, and

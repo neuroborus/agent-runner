@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-10
 
+- **Claude permission denials state only facts proven at the guard.** Every
+  exposed Bash denial outside the narrow safe-inspection allowlist was labeled
+  `permission_forbidden_operation`, although the guard proved only that it was
+  ineligible for capability recovery, and an unexposed tool shared that label.
+  The adapter now scans every structured denial and reports, independent of
+  entry order, `permission_tool_unexposed`, `permission_bash_unclassified`,
+  `permission_unclassified` or `permission_capability`, which remains the only
+  recoverable class. The refusal and recovery policy, failure records, native
+  permissions and commit gates are unchanged. Legacy forbidden-operation records
+  stay registered, terminal and unreinterpreted. The historical tool, operation,
+  refusal cause and legitimacy remain unknown.
+
 - **Read-only contamination stops keep their changed snapshot domains.** The
   Git guard already reported finite changed domains, but polishing and plan
   execution stored only the code, so their pauses could not say what changed.

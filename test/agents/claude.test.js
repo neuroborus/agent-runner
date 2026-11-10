@@ -3255,7 +3255,7 @@ test("Claude streaming preserves permission precedence and retires unfinished co
     fixture.adapter.run(request({ onProgress: (event) => events.push(event) })),
     hasDiagnostic(
       "ERR_CLAUDE_PERMISSION_DENIED",
-      "permission_forbidden_operation",
+      "permission_bash_unclassified",
     ),
   );
   assert.equal(turnCalls(fixture).length, 1);
@@ -5186,6 +5186,124 @@ test("validates requests, strict schemas, and structured results", async () => {
   );
 });
 
+test("classifies Claude permission denials only by facts established at the guard", async (t) => {
+  const unknownBash = {
+    tool_name: "Bash",
+    tool_input: {
+      command: "touch generated.txt",
+      description: "PRIVATE_DENIAL",
+    },
+  };
+  const safeBash = {
+    tool_name: "Bash",
+    tool_input: { command: "git status --short" },
+  };
+  const unexposed = {
+    tool_name: "WebFetch",
+    tool_input: { url: "https://private-denial.invalid" },
+  };
+  const exposed = {
+    tool_name: "Edit",
+    tool_input: { file_path: "generated.txt" },
+  };
+  for (const [name, denials, diagnosticClass, access] of [
+    ["ordinary write", [unknownBash], "permission_bash_unclassified"],
+    ["unexposed tool", [unexposed], "permission_tool_unexposed"],
+    [
+      "safe inspection and unknown Bash",
+      [safeBash, unknownBash],
+      "permission_bash_unclassified",
+    ],
+    [
+      "unknown Bash then unexposed tool",
+      [unknownBash, unexposed],
+      "permission_tool_unexposed",
+    ],
+    [
+      "unexposed tool then unknown Bash",
+      [unexposed, unknownBash],
+      "permission_tool_unexposed",
+    ],
+    [
+      "exposed tool and malformed entry",
+      [exposed, "PRIVATE_DENIAL"],
+      "permission_unclassified",
+    ],
+    [
+      "exposed tool and missing command",
+      [exposed, { tool_name: "Bash", tool_input: { note: "PRIVATE_DENIAL" } }],
+      "permission_unclassified",
+    ],
+    [
+      "local-commit readiness",
+      [unknownBash],
+      "permission_bash_unclassified",
+      "local-commit",
+    ],
+  ])
+    for (const failed of [false, true])
+      await t.test(`${name} (${failed ? "failed" : "completed"})`, async () => {
+        let commitExecutions = 0;
+        const payload = result({ error: failed, permission_denials: denials });
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (failed) throw processFailure(payload);
+            return { stdout: JSON.stringify(payload), stderr: "" };
+          },
+        });
+        const commit = access === "local-commit";
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access: access ?? "workspace-write",
+              ...(commit
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                    onCommitExecution() {
+                      commitExecutions += 1;
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic(
+                "ERR_CLAUDE_PERMISSION_DENIED",
+                diagnosticClass,
+              )(error),
+            );
+            assert.equal(error.recoverable, false);
+            assert.deepEqual(error.failure, {
+              failureClass: diagnosticClass,
+              checkpoint: commit ? "commit" : "turn",
+              outcome: "rejected",
+              effect: commit ? "none" : "possible",
+              retry: "terminal",
+              ...(commit ? { commitExecutor: "not_started" } : {}),
+            });
+            const normalized = normalizeAdapterFailure("claude", error);
+            assert.equal(normalized.diagnosticClass, diagnosticClass);
+            assert.equal(normalized.recoverable, false);
+            assert.doesNotMatch(
+              `${error.message}${JSON.stringify(normalized)}`,
+              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch/u,
+            );
+            return true;
+          },
+        );
+        assert.equal(turnCalls(fixture).length, 1);
+        assert.equal(commitExecutions, 0);
+        assert.ok(fixture.calls.every((call) => call.file !== "touch"));
+      });
+});
+
 test("rejects permission fallback and explicit model rerouting", async (t) => {
   const denied = createFixture({
     handle({ call }) {
@@ -5282,7 +5400,7 @@ test("rejects permission fallback and explicit model rerouting", async (t) => {
         assert.ok(
           hasDiagnostic(
             "ERR_CLAUDE_PERMISSION_DENIED",
-            "permission_forbidden_operation",
+            "permission_bash_unclassified",
           )(error),
         );
         assert.equal(error.recoverable, false);

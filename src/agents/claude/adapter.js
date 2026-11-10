@@ -65,8 +65,10 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "context_exhausted",
   "environment_preparation",
   "environment_cleanup",
+  "permission_bash_unclassified",
   "permission_capability",
   "permission_forbidden_operation",
+  "permission_tool_unexposed",
   "permission_unclassified",
   "provider_unavailable",
   "read_only_execution_failed",
@@ -228,6 +230,11 @@ const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
   /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
   /^git diff\s+(?:--check|--cached\s+--check|--staged\s+--check)$/u,
   /^git remote(?:\s+-v)?$/u,
+]);
+const PERMISSION_DIAGNOSTIC_PRECEDENCE = Object.freeze([
+  "permission_tool_unexposed",
+  "permission_bash_unclassified",
+  "permission_unclassified",
 ]);
 const ERROR_RESULT_SUBTYPES = new Set([
   "error_during_execution",
@@ -1083,30 +1090,28 @@ function permissionDiagnostic(denials, request) {
   const permittedTools = new Set(
     accessConfigurationFor(request).tools.split(","),
   );
-  let unclassified = false;
+  const facts = new Set();
   for (const denial of denials) {
     if (!isRecord(denial) || typeof denial.tool_name !== "string") {
-      unclassified = true;
-      continue;
-    }
-    if (!permittedTools.has(denial.tool_name)) {
-      return "permission_forbidden_operation";
-    }
-    if (denial.tool_name !== "Bash") {
-      continue;
-    }
-    const command = denial.tool_input?.command;
-    if (typeof command !== "string" || command.length === 0) {
-      unclassified = true;
-      continue;
-    }
-    if (
-      !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
-    ) {
-      return "permission_forbidden_operation";
+      facts.add("permission_unclassified");
+    } else if (!permittedTools.has(denial.tool_name)) {
+      facts.add("permission_tool_unexposed");
+    } else if (denial.tool_name === "Bash") {
+      const command = denial.tool_input?.command;
+      if (typeof command !== "string" || command.length === 0) {
+        facts.add("permission_unclassified");
+      } else if (
+        !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
+      ) {
+        facts.add("permission_bash_unclassified");
+      }
     }
   }
-  return unclassified ? "permission_unclassified" : "permission_capability";
+  return (
+    PERMISSION_DIAGNOSTIC_PRECEDENCE.find((diagnosticClass) =>
+      facts.has(diagnosticClass),
+    ) ?? "permission_capability"
+  );
 }
 
 function permissionError(denials, request, sessionId) {

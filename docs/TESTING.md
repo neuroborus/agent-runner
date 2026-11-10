@@ -206,6 +206,11 @@ unregistered classes and native text; `test/cli.test.js` owns the printed line.
 `pipelines/polishing/test/recovery.test.js` owns cold persisted FINALIZE
 diagnosis, status and activity, classified and unclassified, without
 finalization acceptance, fingerprints, staging, retry or resume.
+The Claude test also owns factual permission classes through completed and
+failed processes, order-independent mixed batches and local-commit
+`not_started` proof; the registry, persistence, polishing recovery and CLI
+tests own their terminal registration, legacy loading, redaction, cold pause
+and printed line.
 
 Fast `test/git/repository-safety.test.js` owns the read-only snapshot-change
 label normalizer and real-Git `readOnlyChanges` classification;

@@ -1524,7 +1524,7 @@ test("validates the shared structured input envelope", async (t) => {
 });
 
 test("accepts only finite adapter diagnostics in durable pause state", async (t) => {
-  const { created, store } = await createFixture(t);
+  const { created, stateRoot, store } = await createFixture(t);
 
   const transitioned = await store.transitionRun(created.lease, {
     pause: {
@@ -1535,17 +1535,34 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
   });
   assert.equal(transitioned.pause.diagnosticClass, "operation_multi_agent");
 
-  await assert.rejects(
-    store.transitionRun(created.lease, {
-      pause: {
-        reason: "internal_failure",
-        code: "ERR_CODEX_ISOLATION",
-        diagnosticClass: "native_provider_value",
-      },
-    }),
-    (error) =>
-      error instanceof RunStoreError && error.code === "ERR_INVALID_RUN_STATE",
-  );
+  for (const diagnosticClass of [
+    "permission_bash_unclassified",
+    "permission_forbidden_operation",
+  ]) {
+    const pause = {
+      reason: "internal_failure",
+      code: "ERR_CLAUDE_PERMISSION_DENIED",
+      diagnosticClass,
+    };
+    await store.transitionRun(created.lease, { pause });
+    const reloaded = await createRunStore({ stateRoot }).loadRun(
+      created.state.runId,
+    );
+    assert.deepEqual(reloaded.pause, pause);
+  }
+
+  for (const [code, diagnosticClass] of [
+    ["ERR_CODEX_ISOLATION", "native_provider_value"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_native_value"],
+  ])
+    await assert.rejects(
+      store.transitionRun(created.lease, {
+        pause: { reason: "internal_failure", code, diagnosticClass },
+      }),
+      (error) =>
+        error instanceof RunStoreError &&
+        error.code === "ERR_INVALID_RUN_STATE",
+    );
 });
 
 test("persists only canonical read-only snapshot change labels", async (t) => {

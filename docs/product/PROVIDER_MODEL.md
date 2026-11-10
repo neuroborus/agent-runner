@@ -415,6 +415,23 @@ when its guard proved the violated predicate; unattributed origins stay
 unclassified. The class adds no retry, effect evidence, recovery or acceptance,
 and direct CLI failures print only the bounded code and class.
 
+A Claude `ERR_CLAUDE_PERMISSION_DENIED` failure names only the fact its guard
+established from structured native `permission_denials`:
+
+| Class                            | Established fact                                                                                |
+| -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                            |
+| `permission_bash_unclassified`   | An exposed Bash command is not a recognized safe inspection; its refusal reason is unknown.     |
+| `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                         |
+| `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.        |
+| `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted. |
+
+The adapter examines every entry and reports the first present fact in the
+table order, independent of entry order, so no recoverable entry hides another.
+Only `permission_capability` is recoverable. No class claims a task-authority
+violation, a harmless command, or an integration defect, and a label grants no
+retry, approval, resume or acceptance.
+
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 They may also carry an internal synchronous progress observer receiving only a

@@ -1250,8 +1250,10 @@ capability, configuration, usage, provider, and expected-tool permission
 failures may be recoverable, but Bash permission recovery requires a positively
 recognized safe repository inspection. The normalized
 `authentication_required` disposition enters the fixed durable
-reauthentication pause; other authentication evidence, every other Bash denial,
-and permission denials proving a forbidden operation remain terminal.
+reauthentication pause; other authentication evidence, unexposed-tool and
+unclassified-Bash denials whose refusal cause is unknown, and legacy
+`permission_forbidden_operation` records remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)).
 Provider recovery requires an explicit transient HTTP status; non-transient
 client statuses and an unqualified structured `api_error` fail closed. An
 otherwise unclassified valid result or process failure is recoverable only for
@@ -1590,9 +1592,11 @@ Classify `permission_denials`, `api_error_status`, result subtype, and
 Expose only fixed error codes and messages plus a finite non-sensitive
 diagnostic class. Never attach denied `tool_input`, provider result text, raw
 standard error, or the native process error. A denial of an unexposed tool or a
-Bash command outside the positive repository-inspection allowlist is a terminal
-safety failure. An exposed non-Bash tool or a positively recognized safe Bash
-inspection may be a recoverable capability/configuration failure. For structured
+Bash command outside the positive repository-inspection allowlist is terminal and
+classified only by that fact, with an unknown refusal cause; see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+An exposed non-Bash tool or a positively recognized safe Bash inspection may be
+a recoverable capability/configuration failure. For structured
 API errors, treat only explicit transient HTTP statuses as provider unavailability;
 fail closed on non-transient client statuses and `api_error` without such a status. Unknown
 valid read-only result failures and unclassified read-only process exits are

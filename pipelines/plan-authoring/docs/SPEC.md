@@ -602,8 +602,10 @@ unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. A normalized
 `authentication_required` disposition enters the fixed durable
 reauthentication pause after that guard; other authentication evidence,
-forbidden-operation permission denials, protocol failures, and isolation
-failures remain terminal. Denied input and native provider text are discarded.
+unexposed-tool and unclassified-Bash permission denials whose refusal cause is
+unknown, legacy `permission_forbidden_operation` records, protocol failures,
+and isolation failures remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)). Denied input and native provider text are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
@@ -823,8 +825,8 @@ No large turn implementation moves into the policy module.
   including input drift, read-only mutation rejection, fresh recovery context,
   and retained activity until reconciliation.
 - Cover finite redacted Claude classification, durable reconstruction of a
-  failed read-only request, and terminal authentication and forbidden-operation
-  boundaries without retaining native provider text.
+  failed read-only request, and terminal authentication, unexposed-tool, and
+  unclassified-Bash permission boundaries without retaining native provider text.
 - Cover redacted terminal adapter diagnostics, including forbidden delegated
   turns, through durable state and the shared CLI/MCP pause projection.
 

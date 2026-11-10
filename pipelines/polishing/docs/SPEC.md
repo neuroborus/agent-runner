@@ -541,9 +541,11 @@ inspection; every other Bash denial fails closed. Structured API-error recovery
 requires an explicit transient HTTP status, while non-transient client statuses
 and an unqualified structured `api_error` are terminal. A normalized
 `authentication_required` disposition enters the fixed durable
-reauthentication pause; other authentication evidence, forbidden-operation
-denials, isolation or protocol failures, and unclassified writable process
-outcomes remain terminal. Denied input,
+reauthentication pause; other authentication evidence, unexposed-tool and
+unclassified-Bash denials whose refusal cause is unknown, legacy
+`permission_forbidden_operation` records, isolation or protocol failures, and
+unclassified writable process outcomes remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)). Denied input,
 native result text, raw standard error, and native process causes are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
@@ -1586,7 +1588,8 @@ semantics, and handoff behavior. Cover at least:
   without duplicating root sandbox or Git-materialization proofs;
 - finite redacted Claude failure classification, durable read-only request
   reconstruction, writable usage/provider reconciliation, and terminal
-  authentication, forbidden-operation, and ambiguous writable boundaries;
+  authentication, unexposed-tool, unclassified-Bash, and ambiguous writable
+  boundaries;
 - non-delegating role prompts plus terminal, redacted, durable, and publicly
   projected forbidden-collaboration diagnostics;
 - actual Codex workspace-write and Claude Git-directory/`git add` access
