@@ -400,7 +400,8 @@ function nativeArguments({
 
 // The fallback order adds Claude's credential removals, its proxy bridge bind
 // and rewrites, its private temporary bind, the capability drop and trailing
-// removals. The launcher discards the private mounts with their trees.
+// removals. The launcher discards the proxy bridge and the absent private
+// temporary bind with their trees.
 function fallbackProbeArguments({
   access,
   abstractSocketName,

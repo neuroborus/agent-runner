@@ -27,6 +27,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
 } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -42,7 +43,10 @@ import {
   recoverClaudeStorage,
   CLAUDE_STORAGE_IDENTITY,
 } from "../../src/agents/claude/index.js";
-import { claudeManagedBubblewrapOverride } from "../../src/agents/claude/command-launcher.js";
+import {
+  claudeManagedBubblewrapOverride,
+  createClaudeCommandLauncher,
+} from "../../src/agents/claude/command-launcher.js";
 import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
 import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
@@ -355,6 +359,7 @@ function claudeBubblewrapArguments({
   emptyMaskPath,
   payload,
   projectPath = PROJECT_PATH,
+  temporaryPath,
 }) {
   const argumentsList = [
     "--new-session",
@@ -365,6 +370,10 @@ function claudeBubblewrapArguments({
     "--ro-bind",
     "/",
     "/",
+    // Claude self-binds the temporary directory its shell exports.
+    ...(temporaryPath === undefined
+      ? []
+      : ["--bind", temporaryPath, temporaryPath]),
   ];
   if (access === "workspace-write") {
     argumentsList.push(
@@ -418,6 +427,7 @@ async function createFakeBubblewrap(t) {
   const logPath = join(directory, "arguments.jsonl");
   const filterLogPath = join(directory, "filters.jsonl");
   const helperLogPath = join(directory, "helper.jsonl");
+  const bindLogPath = join(directory, "binds.jsonl");
   await Promise.all([
     writeFile(
       join(directory, "claude"),
@@ -455,6 +465,14 @@ async function createFakeBubblewrap(t) {
         `const seccompIndex = args.indexOf("--seccomp");\n` +
         `if (seccompIndex === -1 || args[seccompIndex + 1] !== "3" || ` +
         `args.indexOf("--seccomp", seccompIndex + 1) !== -1) process.exit(13);\n` +
+        `for (let i = 0; i < args.indexOf("--"); i++) {\n` +
+        `  if (args[i] !== "--bind-fd") continue;\n` +
+        `  const outside = process.env.AGENT_RUNNER_FAKE_BWRAP_SUBSTITUTE;\n` +
+        `  if (outside) { require("node:fs").renameSync(args[i+2], args[i+2] + "-validated"); ` +
+        `require("node:fs").symlinkSync(outside, args[i+2]); }\n` +
+        `  const { dev, ino } = fstatSync(Number(args[i+1]));\n` +
+        `  appendFileSync(${JSON.stringify(bindLogPath)}, JSON.stringify({ dev, ino }) + "\\n");\n` +
+        `}\n` +
         `const filter = readFileSync(3);\n` +
         `const metadata = fstatSync(3);\n` +
         `let writeError;\n` +
@@ -489,7 +507,7 @@ async function createFakeBubblewrap(t) {
     writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
   ]);
   t.after(() => rm(directory, { force: true, recursive: true }));
-  return { directory, filterLogPath, helperLogPath, logPath };
+  return { bindLogPath, directory, filterLogPath, helperLogPath, logPath };
 }
 
 async function resolveTestExecutable(binary, path = process.env.PATH) {
@@ -504,6 +522,67 @@ async function resolveTestExecutable(binary, path = process.env.PATH) {
     }
   }
   return undefined;
+}
+
+// Real-process regressions need a supported architecture and a bubblewrap
+// that accepts the direct seccomp filter.
+async function directSeccompBubblewrap() {
+  const bubblewrapBinary = await resolveTestExecutable("bwrap");
+  if (
+    bubblewrapBinary === undefined ||
+    !Object.hasOwn(EXPECTED_SECCOMP_INSTRUCTIONS, process.arch)
+  )
+    return undefined;
+  const capabilityDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-bwrap-seccomp-"),
+  );
+  let capabilityResult;
+  try {
+    const filterPath = join(capabilityDirectory, "filter.bpf");
+    await writeFile(filterPath, expectedSeccompFilter(process.arch), {
+      mode: 0o400,
+    });
+    const descriptor = await open(filterPath, constants.O_RDONLY);
+    try {
+      await rm(filterPath);
+      capabilityResult = spawnSync(
+        bubblewrapBinary,
+        [
+          "--new-session",
+          "--die-with-parent",
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--as-pid-1",
+          "--cap-drop",
+          "ALL",
+          "--proc",
+          "/proc",
+          "--seccomp",
+          "3",
+          "--",
+          "/bin/true",
+        ],
+        {
+          env: process.env,
+          stdio: ["ignore", "ignore", "ignore", descriptor.fd],
+          timeout: 10_000,
+        },
+      );
+    } finally {
+      await descriptor.close();
+    }
+  } finally {
+    await rm(capabilityDirectory, { force: true, recursive: true });
+  }
+  return capabilityResult.error === undefined && capabilityResult.status === 0
+    ? bubblewrapBinary
+    : undefined;
 }
 
 async function commandLauncherEvidence(path) {
@@ -3892,6 +3971,11 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   await chmod(emptyMaskPath, 0o700);
   t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
+  const outsideDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-claude-outside-"),
+  );
+  t.after(() => rm(outsideDirectory, { force: true, recursive: true }));
+  let temporaryIdentity;
   const fixture = createFixture({
     architecture: "x64",
     env: {
@@ -3912,6 +3996,12 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       const access = ["read-only", "workspace-write", "local-commit"][
         turnIndex
       ];
+      let temporaryPath;
+      if (turnIndex === 0) {
+        temporaryPath = join(call.options.env.TMPDIR, "claude-fixture");
+        await mkdir(temporaryPath, { mode: 0o700 });
+        temporaryIdentity = await stat(temporaryPath);
+      }
       await executeFile(
         managedSettings.sandbox.bwrapPath,
         claudeBubblewrapArguments({
@@ -3919,10 +4009,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
           access,
           emptyMaskPath,
           payload: `model-command ${turnIndex}`,
+          temporaryPath,
         }),
         {
           encoding: "utf8",
-          env: { ...call.options.env, PATH: "" },
+          // The fake binder substitutes the path after launcher validation.
+          env: {
+            ...call.options.env,
+            PATH: "",
+            AGENT_RUNNER_FAKE_BWRAP_SUBSTITUTE: outsideDirectory,
+          },
           timeout: 10_000,
         },
       );
@@ -3952,7 +4048,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v10",
+      "claude-command-boundary-v11",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -4327,12 +4423,56 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
+    // Only the existing owner-only temporary self-bind survives the private
+    // tmpfs mounts; the remaining allocation stays hidden.
+    const storage = dirname(dirname(call.commandLauncherPath));
+    const temporaryPath = join(storage, "tmp", "claude-fixture");
+    const retained = ["--bind-fd", "4", temporaryPath];
+    assert.equal(includesSequence(boundaryArguments, retained), index === 0);
+    if (index === 0) {
+      const position = boundaryArguments.indexOf(temporaryPath) - 1;
+      for (const root of ["/tmp", "/run"])
+        assert.ok(
+          boundaryArguments.findIndex(
+            (argument, i) =>
+              argument === "--tmpfs" && boundaryArguments[i + 1] === root,
+          ) < position,
+        );
+      const home = join(storage, "launcher", "home");
+      assert.ok(includesSequence(boundaryArguments, ["--ro-bind", home, home]));
+      assert.ok(
+        includesSequence(boundaryArguments, ["--tmpfs", join(home, "tmp")]),
+      );
+      assert.deepEqual(
+        boundaryArguments.flatMap((argument, i) =>
+          ["--bind", "--ro-bind"].includes(argument) &&
+          boundaryArguments[i + 1].startsWith(storage + sep)
+            ? [boundaryArguments.slice(i, i + 3)]
+            : [],
+        ),
+        [["--ro-bind", home, home]],
+      );
+    }
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1), [
       "/bin/sh",
       "-c",
       `model-command ${index}`,
     ]);
   }
+  // Substituting the validated path cannot redirect the descriptor bind.
+  const outsideIdentity = await stat(outsideDirectory);
+  const [bound, ...extraBinds] = (
+    await readFile(fakeBubblewrap.bindLogPath, "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(extraBinds, []);
+  assert.deepEqual(bound, {
+    dev: temporaryIdentity.dev,
+    ino: temporaryIdentity.ino,
+  });
+  assert.notEqual(bound.ino, outsideIdentity.ino);
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
@@ -4377,7 +4517,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v10",
+        "claude-command-boundary-v11",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -4469,8 +4609,21 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
   const markerDirectory = await mkdtemp(
     join(tmpdir(), "agent-runner-claude-rejected-command-"),
   );
+  const outsideDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-claude-outside-"),
+  );
   t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   t.after(() => rm(markerDirectory, { force: true, recursive: true }));
+  t.after(() => rm(outsideDirectory, { force: true, recursive: true }));
+  // Claude self-binds its temporary directory after the read-only root.
+  const temporaryBind = (argumentsList, path) =>
+    argumentsList.splice(
+      argumentsList.indexOf("--ro-bind") + 3,
+      0,
+      "--bind",
+      path,
+      path,
+    );
   const cases = [
     {
       name: "unauthenticated",
@@ -4689,6 +4842,22 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         argumentsList.push("unsupported");
       },
     },
+    {
+      name: "substituted-temporary-bind",
+      async transform({ argumentsList, environment }) {
+        const path = join(environment.TMPDIR, "claude-substituted");
+        await symlink(outsideDirectory, path);
+        temporaryBind(argumentsList, path);
+      },
+    },
+    {
+      name: "non-directory-temporary-bind",
+      async transform({ argumentsList, environment }) {
+        const path = join(environment.TMPDIR, "claude-file");
+        await writeFile(path, "", { mode: 0o600 });
+        temporaryBind(argumentsList, path);
+      },
+    },
   ];
   let caseIndex = 0;
   const fixture = createFixture({
@@ -4717,7 +4886,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         ...call.options.env,
         AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
       };
-      current.transform({ argumentsList, environment });
+      await current.transform({ argumentsList, environment });
       await executeFile(managedSettings.sandbox.bwrapPath, argumentsList, {
         encoding: "utf8",
         env: environment,
@@ -6682,63 +6851,9 @@ test(
   "runs read-only inspection and denies mutations through direct bubblewrap seccomp",
   { skip: process.platform !== "linux" },
   async (t) => {
-    const bubblewrapBinary = await resolveTestExecutable("bwrap");
-    if (
-      bubblewrapBinary === undefined ||
-      !Object.hasOwn(EXPECTED_SECCOMP_INSTRUCTIONS, process.arch)
-    ) {
-      t.skip("A supported architecture and bubblewrap are required.");
-      return;
-    }
-    const capabilityDirectory = await mkdtemp(
-      join(tmpdir(), "agent-runner-bwrap-seccomp-"),
-    );
-    let capabilityResult;
-    try {
-      const filterPath = join(capabilityDirectory, "filter.bpf");
-      await writeFile(filterPath, expectedSeccompFilter(process.arch), {
-        mode: 0o400,
-      });
-      const descriptor = await open(filterPath, constants.O_RDONLY);
-      try {
-        await rm(filterPath);
-        capabilityResult = spawnSync(
-          bubblewrapBinary,
-          [
-            "--new-session",
-            "--die-with-parent",
-            "--unshare-net",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--unshare-pid",
-            "--unshare-user",
-            "--as-pid-1",
-            "--cap-drop",
-            "ALL",
-            "--proc",
-            "/proc",
-            "--seccomp",
-            "3",
-            "--",
-            "/bin/true",
-          ],
-          {
-            env: process.env,
-            stdio: ["ignore", "ignore", "ignore", descriptor.fd],
-            timeout: 10_000,
-          },
-        );
-      } finally {
-        await descriptor.close();
-      }
-    } finally {
-      await rm(capabilityDirectory, { force: true, recursive: true });
-    }
-    if (capabilityResult.error !== undefined || capabilityResult.status !== 0) {
-      t.skip("The direct bubblewrap seccomp capability is unavailable.");
+    const bubblewrapBinary = await directSeccompBubblewrap();
+    if (bubblewrapBinary === undefined) {
+      t.skip("Bubblewrap with direct seccomp support is required.");
       return;
     }
 
@@ -6799,6 +6914,110 @@ test(
     assert.equal(capabilities.workspaceWrite, true);
     assert.equal(fallbackProbeCount, 3);
     assert.equal(realProbeCount, 2);
+  },
+);
+
+test(
+  "keeps Claude's literal temporary directory and cwd receipt under both policies",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    const bubblewrapBinary = await directSeccompBubblewrap();
+    if (bubblewrapBinary === undefined) {
+      t.skip("Bubblewrap with direct seccomp support is required.");
+      return;
+    }
+    const projectPath = await realpath(
+      await mkdtemp(join(tmpdir(), "agent-runner-claude-receipt-project-")),
+    );
+    t.after(() => rm(projectPath, { force: true, recursive: true }));
+    await mkdir(join(projectPath, ".git"));
+    await writeFile(join(projectPath, "content.txt"), "Unchanged.\n");
+    for (const isolationPolicy of ["native", "runner-boundary"]) {
+      const directory = await realpath(
+        await mkdtemp(join(tmpdir(), "agent-runner-claude-receipt-")),
+      );
+      t.after(() => rm(directory, { force: true, recursive: true }));
+      const providerCwd = join(directory, "native");
+      const temporaryPath = join(directory, "tmp", "claude-fixture");
+      const receiptPath = join(temporaryPath, "cwd-fixture");
+      await mkdir(temporaryPath, { mode: 0o700, recursive: true });
+      await mkdir(providerCwd, { mode: 0o700 });
+      const launcher = await createClaudeCommandLauncher({
+        access: "read-only",
+        bubblewrapBinary,
+        cwd: projectPath,
+        providerCwd,
+        directory,
+        environment: process.env,
+        gitDirectories: [join(projectPath, ".git")],
+        isolationPolicy,
+        unsetEnvironmentNames: [],
+      });
+      // Claude's shell exports its selected path and writes the cwd receipt
+      // there, rather than using the injected environment TMPDIR.
+      const hiddenLauncher =
+        isolationPolicy === "runner-boundary"
+          ? `test ! -e ${shellArgument(launcher.path)} || exit 24; `
+          : "";
+      const payload =
+        `export TMPDIR=${shellArgument(temporaryPath)}; ` +
+        `test -d "$TMPDIR" || exit 23; ${hiddenLauncher}` +
+        `pwd -P >| ${shellArgument(receiptPath)}`;
+      const gitDirectory = join(projectPath, ".git");
+      const outcome = spawnSync(
+        launcher.path,
+        [
+          "--new-session",
+          "--die-with-parent",
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--tmpfs",
+          "/tmp",
+          "--bind",
+          temporaryPath,
+          temporaryPath,
+          "--ro-bind",
+          projectPath,
+          projectPath,
+          "--ro-bind",
+          gitDirectory,
+          gitDirectory,
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--bind",
+          "/proc",
+          "/proc",
+          "--",
+          launcher.shell,
+          "-c",
+          payload,
+        ],
+        {
+          encoding: "utf8",
+          env: launcher.environment({
+            ...process.env,
+            TMPDIR: join(directory, "tmp"),
+            PWD: providerCwd,
+          }),
+          timeout: 10_000,
+        },
+      );
+      try {
+        assert.equal(outcome.error, undefined);
+        assert.equal(outcome.status, 0, isolationPolicy);
+        assert.equal(await readFile(receiptPath, "utf8"), `${projectPath}\n`);
+        assert.equal(
+          await readFile(join(projectPath, "content.txt"), "utf8"),
+          "Unchanged.\n",
+        );
+      } finally {
+        await launcher.remove();
+      }
+    }
   },
 );
 

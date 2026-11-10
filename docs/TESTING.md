@@ -1181,12 +1181,18 @@ credential denial removing the shell proof: the generated shell must refuse that
 command, run Claude's unsandboxed use, and run the same command through the
 authenticated launcher. Probes require the same refusal with real execution.
 Directory-probe simulations execute the generated probe script against the
-same mount view.
-One bounded capability-gated Linux process regression exercises the installed
+same mount view. A read-only fallback turn proves that Claude's existing
+owner-only temporary self-bind follows the private `/tmp` and `/run` mounts
+while no other allocation path is bound, and that the descriptor bind keeps
+the validated directory when the path is substituted afterward; a substituted
+symlink and a regular file at that destination exit before bubblewrap starts.
+Two bounded capability-gated Linux process regressions exercise the installed
 bubblewrap direct-filter boundary without a model request, sleep, retry loop,
-or slow-tier promotion. Its read-only and workspace-write fallback probes run
-for real, confirming source changes and pinned-control denial with actual
-syscalls. It does not replace post-install acceptance: after the
+or slow-tier promotion. In the first, read-only and workspace-write fallback
+probes run for real, confirming source changes and pinned-control denial with
+actual syscalls. The second runs both generated launchers with a literal
+Claude TMPDIR and requires a parent-readable cwd receipt, unchanged project
+content, and a hidden restricted-host launcher. They do not replace post-install acceptance: after the
 finalized commit is installed, the supervising agent starts a fresh real Claude
 lazy plan-authoring run and requires preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before

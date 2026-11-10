@@ -690,9 +690,11 @@ Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
 access-specific workspace writes, and read-only Git metadata. Its launcher file
-is non-writable and its private allocation is outside command write authority;
-it pins canonical host `bwrap` rather than resolving it through a
-workspace-writable path. The
+is non-writable and its private allocation is outside command write authority,
+except for a validated owner-only directory Claude selects inside the private
+temporary directory; launcher controls stay hidden (see the
+[architecture contract](../ARCHITECTURE.md)). It pins canonical host `bwrap`
+rather than resolving it through a workspace-writable path. The
 launcher verifies an exact owner-read-only x64 or arm64 Runner seccomp filter,
 unlinks the verified resource, passes its sealed descriptor to bubblewrap, and
 executes bubblewrap directly once with the single validated user namespace.

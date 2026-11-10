@@ -300,7 +300,9 @@ It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname
 Unix-socket denial, credential and launcher-control removal, provider-proc
-secrecy, and outside-write denial. Exact
+secrecy, and outside-write denial. Under both policies Claude's shell keeps its
+TMPDIR, cwd receipt, and scratch writes in the turn's private temporary
+directory, while host `/tmp`, `/run`, and the launcher controls stay hidden. Exact
 launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
 Native policy remains stricter. The fallback does not require host
 `CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox

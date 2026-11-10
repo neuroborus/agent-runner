@@ -1413,7 +1413,7 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v10"
+              ? "claude-command-boundary-v11"
               : "claude-isolation-v4",
             policies: resolvedPolicies,
             version: version.text,

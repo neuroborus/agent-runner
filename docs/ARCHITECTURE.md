@@ -4140,8 +4140,14 @@ the canonical host `bwrap` executable from the unchanged environment before the
 turn instead of resolving it through a potentially workspace-writable path. The
 launcher file is non-writable.
 Its owner-only allocation is outside the project, task, and state trees, and
-command namespaces cannot write the allocation. The adapter retains directory
-authority for teardown.
+command namespaces cannot write the allocation except for an existing,
+validated, owner-only directory Claude selects strictly inside its private
+temporary directory. In every access mode commands may use that directory for
+shell bookkeeping, its exported TMPDIR and the cwd receipt the parent reads, and
+for scratch writes. The launcher executable and token, the provider cwd, and
+other allocation content stay hidden, and the tool HOME remains the read-only
+projection with private namespace-local scratch directories. The adapter
+retains directory authority for teardown.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
 assignments; network unsharing, optionally followed by same-path proxy-bridge
@@ -4156,19 +4162,29 @@ removed. The
 launcher translates the required user-unshare argument into exactly one
 bubblewrap user namespace. Claude's fixed
 incidental write binds for its temporary, npm-log, and debug paths are
-recognized exactly but discarded rather than exposing their host paths. All
-other writable binds must resolve inside the canonical workspace, must not
-resolve inside Git metadata, and are accepted only for workspace-write access.
+recognized exactly but discarded rather than exposing their host paths.
+Except for the private temporary self-bind below, which grants no write to the
+workspace, Git metadata, outside paths, or allocation controls, all other
+writable binds must resolve inside the canonical workspace, must not resolve
+inside Git metadata, and are accepted only for workspace-write access.
 Read-only binds must preserve their source path except for Claude's `/dev/null`
 or verified owner-only empty-directory masks beneath the canonical runtime
 temporary root, both limited to strict workspace descendants. Empty-directory
 masks are replaced by private read-only tmpfs mounts rather than exposing their
 host temporary sources.
 Exact workspace mounts of either kind and Git mounts, including redundant Git
-descendants, are replaced by Runner-owned mounts. Claude's own mounts strictly
-inside `/tmp`, `/run`, or the hidden allocation, without overlapping the
-workspace or Git metadata, are discarded because the launcher's private mounts
-replace those trees. Other same-path read-only workspace descendants and masks
+descendants, are replaced by Runner-owned mounts. Claude's same-path writable
+bind strictly inside the allocation's private temporary directory, overlapping
+neither the workspace nor Git metadata, is retained after the private tmpfs
+mounts when it names an existing canonical non-symlink directory owned by the
+current user beneath that canonical owner-only directory; any other existing
+target fails closed and a missing one is discarded. The launcher opens that
+directory without following symlinks, verifies the descriptor's owner, kind and
+canonical path, and binds the pinned descriptor with `--bind-fd`, so later path
+substitution cannot redirect the mount. Claude's other mounts
+strictly inside `/tmp`, `/run`, or the hidden allocation, without overlapping
+the workspace or Git metadata, are discarded because the launcher's private
+mounts replace those trees. Other same-path read-only workspace descendants and masks
 preserve Claude's command-protection policy for every access; outside the
 workspace, Claude may also mask an existing file with `/dev/null`. Every
 remaining read-only bind must not overlap the writable workspace or any part of
@@ -4186,7 +4202,7 @@ before any child starts.
 After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
 procfs, private `/tmp` and `/run`, a private `/tmp/claude`, a hidden launcher
-path, the exact workspace authority, read-only resolved Git metadata, missing
+path, the retained private temporary self-bind, the exact workspace authority, read-only resolved Git metadata, missing
 protected-environment removals, and the requested working directory. A private
 Claude module serializes a classic seccomp BPF for little-endian x64 or arm64.
 The program validates `seccomp_data.arch`, kills an architecture mismatch,
@@ -4313,7 +4329,7 @@ HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
 filter's temporary files belong to the same allocation. Probes exercise the
 projection launcher too; the contract revisions are `claude-isolation-v4` and
-`claude-command-boundary-v10`. Old receipts cannot authorize the new policy.
+`claude-command-boundary-v11`. Old receipts cannot authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`

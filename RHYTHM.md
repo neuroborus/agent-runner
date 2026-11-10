@@ -7,6 +7,24 @@ remain in the owning documentation.
 
 ## 2026-11-10
 
+- **Claude restricted-host shells keep their private temporary bookkeeping.**
+  A model-free real-bubblewrap reproduction confirmed that Claude's shell
+  exports a literal TMPDIR and writes its cwd receipt beneath the turn's private
+  temporary directory: the native launcher completed that round trip, while the
+  restricted-host launcher discarded Claude's self-bind behind its private
+  tmpfs mounts, so the command exited 23 and left no receipt. The launcher now
+  retains only an existing same-path bind strictly inside that canonical
+  owner-only directory, in every access mode, when it is a canonical
+  non-symlink directory owned by the current user that overlaps neither the
+  workspace nor Git, and binds it through a pinned descriptor so later path
+  substitution cannot redirect the mount; substituted, non-directory or
+  otherwise unsafe targets fail closed and missing ones are still discarded. The revision becomes
+  `claude-command-boundary-v11`, so older runner-boundary receipts cannot
+  authorize it, while `claude-isolation-v4` is unchanged. Native policy, the
+  tool-home projection and every other launcher rule are unchanged. Any
+  relation to earlier permission denials or historical commands remains
+  unknown.
+
 - **Claude permission denials state only facts proven at the guard.** Every
   exposed Bash denial outside the narrow safe-inspection allowlist was labeled
   `permission_forbidden_operation`, although the guard proved only that it was
