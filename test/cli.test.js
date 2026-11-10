@@ -4,6 +4,10 @@ import test from "node:test";
 import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  ClaudeAdapterError,
+  normalizeAdapterFailure,
+} from "../src/agents/index.js";
+import {
   createDetachedRuntimeCompatibilityToken,
   createRunner,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
@@ -989,6 +993,42 @@ test("renders bounded finalization correction activity without rejected content"
     /git status|DO_NOT_PERSIST|provider|transcript/u,
   );
   assert.equal(stderr.read(), "");
+});
+
+test("run reports a classified agent failure with only its bounded diagnosis", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const marker = "PRIVATE_NATIVE_FRAME";
+
+  const exitCode = await main(
+    ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run() {
+          throw normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError(marker, {
+              cause: new Error(marker),
+              code: "ERR_CLAUDE_PROTOCOL",
+              diagnosticClass: "protocol_record_after_result",
+            }),
+          );
+        },
+      }),
+    },
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(
+    stderr.read(),
+    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_record_after_result).\n",
+  );
+  assert.doesNotMatch(
+    `${stdout.read()}${stderr.read()}`,
+    new RegExp(marker, "u"),
+  );
 });
 
 for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {

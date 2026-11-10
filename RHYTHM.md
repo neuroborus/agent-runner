@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-10
+
+- **Claude protocol failures name the violated predicate.** Several Claude
+  stream and adapter guards raised `ERR_CLAUDE_PROTOCOL` without a class, the
+  stream merged distinct conditions into one flag, and the root boundary's
+  generic message hid existing classes from direct CLI callers. Each guard now
+  attaches a terminal `protocol_*` class from one private Claude table for the
+  first predicate it proved violated, and the boundary message is composed only
+  of fixed text, the validated code and the registered class. Unattributable
+  origins stay unclassified. Parsing, acceptance, retry, cleanup, effect proof
+  and persisted schemas are unchanged. The predicate and root cause of the
+  historical generic finalization failure remain unknown.
+
 ## 2026-11-09
 
 - **CLI runtime admission failures keep their stable code.** The public CLI

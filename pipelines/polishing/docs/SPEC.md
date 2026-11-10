@@ -595,9 +595,12 @@ eligible early request without charging correction work or duplicating a
 handoff effect. Operator pause, resume, and cancellation use the common state
 semantics.
 The root agent boundary normalizes the selected adapter's finite diagnostic
-class before workflow code sees a terminal failure. Only its fixed message,
-bounded code, safe control flags, shared structured-output class, and validated
-diagnostic class cross the boundary. Codex collaboration activity despite a
+class before workflow code sees a terminal failure. Only its bounded message
+composed from fixed text, the code and the validated class, the bounded code,
+safe control flags, shared structured-output class, and validated diagnostic
+class cross the boundary. A terminal FINALIZE protocol failure persists
+`internal_failure` with that class and grants no finalization acceptance,
+fingerprint, staging, retry, or resume. Codex collaboration activity despite a
 disabled multi-agent capability remains terminal `operation_multi_agent`; it is
 not an environment blocker or a transparent retry. Native messages, prompts,
 commands, provider responses, transcripts, credentials, and process causes are

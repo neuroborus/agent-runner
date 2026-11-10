@@ -106,7 +106,10 @@ test("normalizes finite adapter diagnostics at the root agent boundary", () => {
   const normalized = normalizeAdapterFailure("codex", nativeFailure);
 
   assert.ok(normalized instanceof AgentBoundaryError);
-  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(
+    normalized.message,
+    "Agent backend turn failed: ERR_CODEX_ISOLATION (operation_multi_agent).",
+  );
   assert.equal(normalized.code, "ERR_CODEX_ISOLATION");
   assert.equal(normalized.diagnosticClass, "operation_multi_agent");
   assert.equal(normalized.cause, undefined);
@@ -6548,7 +6551,10 @@ test("reports usage exhaustion as recoverable without native retry", async (t) =
 
       const normalized = normalizeAdapterFailure("codex", adapterError);
       assert.ok(normalized instanceof AgentBoundaryError);
-      assert.equal(normalized.message, "Agent backend turn failed.");
+      assert.equal(
+        normalized.message,
+        "Agent backend turn failed: ERR_CODEX_USAGE_LIMIT (turn_usage_limit_exceeded).",
+      );
       assert.equal(normalized.code, "ERR_CODEX_USAGE_LIMIT");
       assert.equal(normalized.diagnosticClass, "turn_usage_limit_exceeded");
       assert.equal(normalized.recoverable, true);

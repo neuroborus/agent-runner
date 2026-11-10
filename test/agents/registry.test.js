@@ -77,6 +77,58 @@ test("terminal diagnosis requires a normalized boundary and registry evidence", 
   assert.doesNotMatch(JSON.stringify(failure), /Private provider content/u);
 });
 
+test("boundary messages compose only validated codes and registered classes", () => {
+  const marker = "PRIVATE_NATIVE_FRAME";
+  const classified = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError(marker, {
+      cause: new Error(marker),
+      code: "ERR_CLAUDE_PROTOCOL",
+      diagnosticClass: "protocol_result_duplicate",
+    }),
+  );
+  assert.equal(classified.diagnosticClass, "protocol_result_duplicate");
+  assert.equal(
+    classified.message,
+    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_result_duplicate).",
+  );
+  assert.deepEqual(terminalAdapterDiagnostic(classified), {
+    code: "ERR_CLAUDE_PROTOCOL",
+    diagnosticClass: "protocol_result_duplicate",
+  });
+  const hostile = normalizeAdapterFailure(
+    "claude",
+    Object.assign(new Error(marker, { cause: new Error(marker) }), {
+      code: "ERR_CLAUDE_PROTOCOL",
+      diagnosticClass: `protocol_${marker.toLowerCase()}`,
+      frame: marker,
+    }),
+  );
+  const unclassified = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError(marker, { code: "ERR_CLAUDE_PROTOCOL" }),
+  );
+  for (const boundary of [hostile, unclassified]) {
+    assert.equal(boundary.diagnosticClass, undefined);
+    assert.equal(
+      boundary.message,
+      "Agent backend turn failed: ERR_CLAUDE_PROTOCOL.",
+    );
+    assert.deepEqual(terminalAdapterDiagnostic(boundary), {
+      code: "ERR_CLAUDE_PROTOCOL",
+    });
+  }
+  assert.equal(
+    normalizeAdapterFailure("claude", new Error(marker)).message,
+    "Agent backend turn failed.",
+  );
+  for (const boundary of [classified, hostile, unclassified])
+    assert.doesNotMatch(
+      `${boundary.message}\n${JSON.stringify(boundary)}`,
+      new RegExp(marker, "iu"),
+    );
+});
+
 function fakeProvider() {
   const adapterOptions = [];
   const adapter = {

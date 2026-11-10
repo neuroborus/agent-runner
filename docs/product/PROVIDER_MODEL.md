@@ -410,6 +410,11 @@ failures keep precedence. The [init contract](../../pipelines/init/docs/SPEC.md#
 owns settlement, preserved evidence and nonresumable guidance; missing historical
 classification is never reconstructed from native text or ownerless state.
 
+A terminal Claude protocol failure carries a registered `protocol_*` class only
+when its guard proved the violated predicate; unattributed origins stay
+unclassified. The class adds no retry, effect evidence, recovery or acceptance,
+and direct CLI failures print only the bounded code and class.
+
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
 They may also carry an internal synchronous progress observer receiving only a

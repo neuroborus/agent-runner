@@ -4037,6 +4037,16 @@ the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
 result or a post-result assistant, user, or stream-event record still rejects,
 and other trailing system records keep their existing handling.
+Each protocol guard attaches a terminal `protocol_*` diagnostic class from one
+private stream table for the first predicate it proved violated: invalid JSON,
+record, or UTF-8; line, stream, or tracking bounds; a missing, duplicate, or
+post-result record; session, continuation, or fork-lineage mismatch;
+unavailable fork lineage; denied results without a valid session; or retirement
+and observation observer failure. After a failed process exit, only the exact
+success envelope is classified as success; any other non-error payload is only
+an invalid error result. Exceptions from progress callbacks or the shared
+progress bound and write-after-finish remain unattributed. The classes change
+no acceptance, retry, cleanup, or local-commit effect proof.
 Owned process capture delivers bounded stdout chunks without bypassing durable
 registration, containment, cancellation, retirement, or storage cleanup.
 
@@ -5317,9 +5327,13 @@ configuration, usage, provider, permission, and process failures remain native
 recognition owned by their provider directories. The root agent boundary
 validates the descriptor classification once, derives pipeline control
 properties only from the shared record, and maps an unclassified cause to a
-terminal rejected outcome with possible effects. When an ambiguous provider
-turn precedes a local commit, the record retains its possible provider effects
-and may separately prove that the isolated commit executor never started. The
+terminal rejected outcome with possible effects. Its error message is composed
+only of fixed text, the pattern-validated code, and the registry-validated
+non-generic class: `Agent backend turn failed: CODE (class).`, `Agent backend
+turn failed: CODE.`, or `Agent backend turn failed.`; direct CLI failures print
+that line. When an ambiguous provider turn precedes a local commit, the record
+retains its possible provider effects and may separately prove that the
+isolated commit executor never started. The
 boundary derives `effectStarted` solely from that validated record; raw cause
 fields cannot override it. It does not duplicate backend class lists or
 traverse native cause chains. Every pipeline may persist the normalized class

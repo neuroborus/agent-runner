@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -8,7 +8,11 @@ import {
   outputExhaustion,
 } from "../../../test/support/output-exhaustion.js";
 
-import { normalizeAdapterFailure } from "../../../src/agents/index.js";
+import {
+  ClaudeAdapterError,
+  normalizeAdapterFailure,
+} from "../../../src/agents/index.js";
+import { createRunStore } from "../../../src/state/index.js";
 import { polishingPipeline, runPolishing } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
@@ -1023,6 +1027,99 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
     await readFile(join(fixture.directoryPath, "events.jsonl"), "utf8"),
     /DO_NOT_PERSIST/u,
   );
+});
+
+test("persists a terminal Claude finalization protocol diagnosis without acceptance", async (t) => {
+  const marker = "PRIVATE_NATIVE_FRAME";
+  for (const diagnosticClass of ["protocol_record_after_result", undefined])
+    await t.test(diagnosticClass ?? "unclassified", async (t) => {
+      let before;
+      const fixture = await createIntegrationFixture(t, {
+        roleBackends: {
+          worker: "claude",
+          reviewer: "claude",
+          arbiter: "claude",
+        },
+        async onRoleRun(role, request, _turn, { projectPath }) {
+          if (role !== "worker" || request.schema !== FINALIZATION_SCHEMA)
+            return;
+          before = {
+            head: (await runGit(projectPath, "rev-parse", "HEAD")).stdout,
+            state: fixture.currentRun.pipelineState,
+          };
+          throw normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError(marker, {
+              cause: new Error(marker),
+              code: "ERR_CLAUDE_PROTOCOL",
+              diagnosticClass,
+            }),
+          );
+        },
+      });
+
+      await assert.rejects(fixture.run(), (error) => {
+        assert.equal(error.code, "ERR_CLAUDE_PROTOCOL");
+        assert.equal(error.recoverable, false);
+        return true;
+      });
+
+      const store = createRunStore({
+        stateRoot: dirname(dirname(fixture.directoryPath)),
+      });
+      const run = await store.loadRun(fixture.currentRun.runId);
+      const state = run.pipelineState;
+      assert.equal(state.workflowState, "FAILED");
+      assert.deepEqual(run.pause, {
+        reason: "internal_failure",
+        code: "ERR_CLAUDE_PROTOCOL",
+        ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
+      });
+      const projected = polishingPipeline.projections.pause(run);
+      assert.equal(
+        projected.explanation,
+        diagnosticClass === undefined
+          ? "Polishing failed."
+          : `Polishing failed. Adapter diagnostic: ${diagnosticClass}.`,
+      );
+      assert.equal(projected.resumeState, null);
+      assert.deepEqual(projected.nextActions, []);
+      const { activities } = await store.readPublicActivity(run.runId, {
+        afterRevision: run.revision - 1,
+      });
+      assert.equal(
+        activities.at(-1).message,
+        diagnosticClass === undefined
+          ? "Polishing failed: ERR_CLAUDE_PROTOCOL."
+          : `Polishing failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+      );
+      assert.equal(state.finalizationResult, null);
+      assert.equal(state.finalizedFingerprint, null);
+      assert.equal(state.reviewedFingerprint, before.state.reviewedFingerprint);
+      assert.equal(
+        state.candidateReviewedFingerprint,
+        before.state.candidateReviewedFingerprint,
+      );
+      assert.equal(
+        (await runGit(fixture.projectPath, "rev-parse", "HEAD")).stdout,
+        before.head,
+      );
+      assert.equal(
+        (await runGit(fixture.projectPath, "diff", "--cached", "--name-only"))
+          .stdout,
+        "",
+      );
+      assert.equal(
+        fixture.calls.worker.filter(
+          ({ schema }) => schema === FINALIZATION_SCHEMA,
+        ).length,
+        1,
+      );
+      assert.doesNotMatch(
+        `${JSON.stringify(run)}\n${await readFile(join(fixture.directoryPath, "events.jsonl"), "utf8")}`,
+        new RegExp(marker, "u"),
+      );
+    });
 });
 
 test("recovers an ownerless writable turn with content-only changes", async (t) => {

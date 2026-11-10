@@ -197,6 +197,16 @@ on both providers, excluding inactive roles. Common slow coverage, exact package
 installation and Agent custom-execution assignments remain required; no predecessor
 gate evidence satisfies the final feature's current validation.
 
+Fast `test/agents/claude.test.js` owns the exact terminal `protocol_*` class,
+failure record, retry and single turn call for each malformed-stream, failed-exit,
+observer and lineage rejection, including unchanged local-commit `not_started`
+proof, while replayed completed-session init and accepted streams stay accepted.
+`test/agents/registry.test.js` owns bounded boundary messages and rejection of
+unregistered classes and native text; `test/cli.test.js` owns the printed line.
+`pipelines/polishing/test/recovery.test.js` owns cold persisted FINALIZE
+diagnosis, status and activity, classified and unclassified, without
+finalization acceptance, fingerprints, staging, retry or resume.
+
 Fast `test/update.test.js` owns on-demand official identity gating, version
 ordering and explicit prereleases, no-update success, Node/configuration/state
 compatibility, registry/permission failure redaction and body bounds. Registry
