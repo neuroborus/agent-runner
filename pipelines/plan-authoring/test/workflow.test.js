@@ -700,7 +700,7 @@ async function createFixture(
 }
 
 test("carries saved effort through role turns and omits current", async (t) => {
-  for (const effort of ["current", "xhigh"]) {
+  for (const effort of ["current", "xhigh", "max"]) {
     const fixture = await createFixture(t);
     fixture.currentRun.roles.planner.effort = effort;
     fixture.currentRun.roles.reviewer.effort = "medium";

@@ -16,6 +16,7 @@ test("registered providers validate portable effort separately from model IDs", 
       "medium",
       "high",
       "xhigh",
+      "max",
     ]) {
       assert.doesNotThrow(() =>
         PROVIDER_REGISTRY.validateExecutionOptions(backend, { effort }),
@@ -24,7 +25,7 @@ test("registered providers validate portable effort separately from model IDs", 
     for (const effort of [
       null,
       "",
-      "max",
+      "ultra",
       "minimal",
       "HIGH",
       " high",
@@ -59,7 +60,7 @@ test("invalid effort and combined model identifiers fail before provider probing
       },
     });
     for (const selection of [
-      { effort: "max" },
+      { effort: "ultra" },
       { effort: null },
       { effort: " high" },
       { model: "gpt-5.6-sol xhigh" },

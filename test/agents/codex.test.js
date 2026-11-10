@@ -106,7 +106,10 @@ test("normalizes finite adapter diagnostics at the root agent boundary", () => {
   const normalized = normalizeAdapterFailure("codex", nativeFailure);
 
   assert.ok(normalized instanceof AgentBoundaryError);
-  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(
+    normalized.message,
+    "Agent backend turn failed: ERR_CODEX_ISOLATION (operation_multi_agent).",
+  );
   assert.equal(normalized.code, "ERR_CODEX_ISOLATION");
   assert.equal(normalized.diagnosticClass, "operation_multi_agent");
   assert.equal(normalized.cause, undefined);
@@ -1365,7 +1368,7 @@ test("redacts Codex retirement observer errors without replacing provider failur
 });
 
 test("maps portable Codex effort across sessions and commit readiness", async () => {
-  for (const effort of ["low", "medium", "high", "xhigh"]) {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
     for (const mode of [undefined, "continue", "fork"]) {
       const fixture = createFixture();
       await fixture.adapter.run(
@@ -1401,7 +1404,7 @@ test("maps portable Codex effort across sessions and commit readiness", async ()
   });
   await fixture.adapter.run(
     request({
-      effort: "xhigh",
+      effort: "max",
       access: "local-commit",
       authorizationId: "effort-commit",
       commit: {
@@ -1413,7 +1416,7 @@ test("maps portable Codex effort across sessions and commit readiness", async ()
   assert.equal(
     fixture.processes[0].messages.find(({ method }) => method === "turn/start")
       .params.effort,
-    "xhigh",
+    "max",
   );
 });
 
@@ -1443,7 +1446,7 @@ test("validates explicit Codex effort capabilities without model work", async ()
       },
     });
     await assert.rejects(
-      fixture.adapter.run(request({ model, effort: "xhigh" })),
+      fixture.adapter.run(request({ model, effort: "max" })),
       hasCode("ERR_UNSUPPORTED_EFFORT"),
     );
     assert.equal(fixture.processes.length, 1);
@@ -4462,11 +4465,12 @@ test("creates an authorized commit through a networkless sandbox", async () => {
   );
 });
 
-test("allows read-only Git identity queries during local-commit readiness", async () => {
+test("allows disclosed read-only Git inspection during local-commit readiness", async () => {
   for (const command of [
     "git var GIT_AUTHOR_IDENT",
     "git var GIT_COMMITTER_IDENT",
     "git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT",
+    "git status --short && git diff HEAD",
   ]) {
     const fixture = createFixture({
       handle({ message }) {
@@ -4497,6 +4501,26 @@ test("allows read-only Git identity queries during local-commit readiness", asyn
     );
 
     assert.deepEqual(result.structured, { ready: true });
+    const { text } = fixture.processes[0].messages.find(
+      ({ method }) => method === "turn/start",
+    ).params.input[0];
+    for (const disclosed of [
+      "git var GIT_AUTHOR_IDENT",
+      "git var GIT_COMMITTER_IDENT",
+      "status",
+      "diff",
+      "log",
+    ]) {
+      assert.ok(text.includes(disclosed));
+    }
+    assert.equal(
+      fixture.executeCalls.filter(
+        ({ argumentsList }) =>
+          argumentsList[0] === "sandbox" &&
+          argumentsList.includes(EXPECTED_HEAD),
+      ).length,
+      1,
+    );
   }
 });
 
@@ -4528,6 +4552,8 @@ test("rejects forbidden local-commit turns with per-branch diagnostic classes", 
       gitOperation,
     ),
     commandCase("git config user.name provider-private-detail", gitOperation),
+    commandCase("git config --get user.name", gitOperation),
+    commandCase("git branch --show-current", gitOperation),
     commandCase("git rebase HEAD^", gitOperation),
     commandCase("git update-ref refs/heads/main HEAD^", gitOperation),
     commandCase("git -C . push origin main", remoteWrite),
@@ -6525,7 +6551,10 @@ test("reports usage exhaustion as recoverable without native retry", async (t) =
 
       const normalized = normalizeAdapterFailure("codex", adapterError);
       assert.ok(normalized instanceof AgentBoundaryError);
-      assert.equal(normalized.message, "Agent backend turn failed.");
+      assert.equal(
+        normalized.message,
+        "Agent backend turn failed: ERR_CODEX_USAGE_LIMIT (turn_usage_limit_exceeded).",
+      );
       assert.equal(normalized.code, "ERR_CODEX_USAGE_LIMIT");
       assert.equal(normalized.diagnosticClass, "turn_usage_limit_exceeded");
       assert.equal(normalized.recoverable, true);

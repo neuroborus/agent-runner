@@ -7,7 +7,7 @@ import {
   resolvePipelineConfiguration,
 } from "../../src/config/index.js";
 
-const VALUES = ["current", "low", "medium", "high", "xhigh"];
+const VALUES = ["current", "low", "medium", "high", "xhigh", "max"];
 
 test("root and project configuration strictly validate every effort declaration", () => {
   const root = { schemaVersion: 1, defaultBackend: "codex" };
@@ -29,7 +29,16 @@ test("root and project configuration strictly validate every effort declaration"
         effort,
       );
     }
-    for (const effort of [null, "", "max", "HIGH", " high", 1, {}, ["high"]]) {
+    for (const effort of [
+      null,
+      "",
+      "ultra",
+      "HIGH",
+      " high",
+      1,
+      {},
+      ["high"],
+    ]) {
       assert.throws(() =>
         parse(JSON.stringify({ schemaVersion: 1, defaultEffort: effort })),
       );
@@ -133,11 +142,11 @@ test("lazy effort resolution validates inactive vocabulary without resolving ina
     assert.equal(runner.pipelines[pipelineId].roles.reviewer.effort, "high");
     assert.throws(() =>
       resolvePipelineConfiguration(pipelineId, runner, {
-        reviewer: { effort: "max" },
+        reviewer: { effort: "ultra" },
       }),
     );
     assert.throws(() =>
-      resolvePipelineConfiguration(pipelineId, runner, {}, { effort: "max" }),
+      resolvePipelineConfiguration(pipelineId, runner, {}, { effort: "ultra" }),
     );
   }
 });

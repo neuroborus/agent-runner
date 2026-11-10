@@ -23,8 +23,14 @@ import {
   COMBINED_INSTRUCTIONS,
   CORRECTION_INSTRUCTIONS,
   DISCOVERY_INSTRUCTIONS,
+  OUTPUT_RECOVERY_INSTRUCTIONS,
   RECHECK_INSTRUCTIONS,
 } from "./prompts.js";
+import {
+  auditCheckpoint,
+  createOutputRecovery,
+  reserveOutputRecovery,
+} from "./output-recovery.js";
 import { publicationContent, reportPaths } from "./publication-contract.js";
 import {
   CLARIFICATION_SCHEMA,
@@ -72,14 +78,21 @@ export async function runAuditDiscovery({
     reason,
     resumeState = state().workflowState,
     details = {},
+    settled = {},
   ) => {
     await save(
-      { ...state(), workflowState: "WAITING_FOR_USER" },
+      { ...state(), ...settled, workflowState: "WAITING_FOR_USER" },
       { pause: { reason, resumeState, ...details } },
     );
     return current;
   };
   async function rejectResult(phase, cause) {
+    const recovery = state().outputRecovery;
+    // A rejected identity without an acknowledged replacement must not expose
+    // the retired child again on the next ordinary correction reservation.
+    const unlaunched =
+      recovery !== null &&
+      current.sessionLineage.children.length === recovery.retiredChildren;
     const pipelineState =
       phase === "recheck"
         ? finishRecheck(state(), "invalid")
@@ -90,6 +103,7 @@ export async function runAuditDiscovery({
       {
         ...pipelineState,
         workflowState: "WAITING_FOR_USER",
+        outputRecovery: unlaunched ? recovery : null,
         correctionFeedback: createCorrectionFeedback(
           current,
           phase,
@@ -129,6 +143,7 @@ export async function runAuditDiscovery({
     {
       expectedHash = current.hashes.clarifications,
       round = state().clarificationRounds,
+      settled = {},
       inputRequest = action === "proactive-clarification"
         ? {
             kind: "clarification",
@@ -147,6 +162,7 @@ export async function runAuditDiscovery({
         save(
           {
             ...state(),
+            ...settled,
             workflowState: "WAITING_FOR_USER",
             clarificationRounds: round,
             pendingEdit: authorization,
@@ -219,8 +235,15 @@ export async function runAuditDiscovery({
     const role = recheck ? recheckRole(state()) : "auditor";
     const resumeState = CORRECTION_STATES[phase];
     const finishReserved = async (outcome) => {
-      if (recheck) await save(finishRecheck(state(), outcome));
-      else if (phase === "discovery") await save(finishPass(state(), outcome));
+      if (phase === "clarify" && state().outputRecovery === null) return;
+      await save({
+        ...(recheck
+          ? finishRecheck(state(), outcome)
+          : phase === "discovery"
+            ? finishPass(state(), outcome)
+            : state()),
+        outputRecovery: null,
+      });
     };
     try {
       await runtime.workspace.assertUnchanged(state().repositoryBaseline);
@@ -230,12 +253,8 @@ export async function runAuditDiscovery({
     }
     const lazy = state().settings.mode === "lazy";
     const combined = state().settings.mode === "combined";
-    const key = sessionContextKey(
-      current,
-      phase,
-      recheck ? state().recheckHistory.length : state().history.length,
-    );
-    const checkpoint = `audit:${phase}:read-only:${recheck ? state().recheckHistory.length : phase === "discovery" ? state().history.length : state().clarificationRounds}`;
+    const { contextKey: key, number } = auditCheckpoint(current, phase);
+    const checkpoint = `audit:${phase}:read-only:${number}`;
     const repository = state().repositoryBaseline;
     try {
       if (
@@ -262,7 +281,9 @@ export async function runAuditDiscovery({
         details: { code: safeCode(cause) },
       };
     }
-    const previous = [...current.sessionLineage.children]
+    const recovery = state().outputRecovery;
+    const previous = current.sessionLineage.children
+      .slice(recovery?.retiredChildren ?? 0)
       .reverse()
       .find((child) => child.role === role && child.contextKey === key);
     const source = current.sessionLineage.source;
@@ -271,6 +292,7 @@ export async function runAuditDiscovery({
       !reconstructing && previous
         ? { mode: "continue", id: previous.sessionId }
         : !reconstructing &&
+            recovery === null &&
             state().sourceForkRecovery !== key &&
             source !== null &&
             (!lazy || !state().sourceForkConsumed) &&
@@ -298,7 +320,33 @@ export async function runAuditDiscovery({
       excludePaths: state().settings.excludePaths ?? [],
       fingerprint: current.workspace?.sourceSelection?.fingerprint ?? null,
     };
-    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}${correcting ? `\n\n${CORRECTION_INSTRUCTIONS}` : ""}\n\n${JSON.stringify({ ...evidence, sourceSelection, ...(correcting ? { correctionFeedback: feedback } : {}) })}`;
+    const recoveryEvidence =
+      recovery === null
+        ? {}
+        : {
+            outputRecovery: {
+              phase,
+              number,
+              contextKey: key,
+              discoveryHistory: state().history,
+              recheckHistory: state().recheckHistory,
+              acceptedBatches: state().acceptedBatches.map(
+                ({ batch, recheckPass }) => ({
+                  recheckPass,
+                  batchFingerprint: fingerprint(batch),
+                  entries: batch.entries.map(
+                    ({ finding, version, sourcePass }) => ({
+                      id: finding.id,
+                      version,
+                      sourcePass,
+                    }),
+                  ),
+                  dispositions: batch.dispositions,
+                }),
+              ),
+            },
+          };
+    const prompt = `${AUDIT_INSTRUCTIONS}\n\n${phase === "clarify" ? CLARIFICATION_INSTRUCTIONS : recheck ? RECHECK_INSTRUCTIONS : DISCOVERY_INSTRUCTIONS}${combined ? `\n\n${COMBINED_INSTRUCTIONS}` : ""}${correcting ? `\n\n${CORRECTION_INSTRUCTIONS}` : ""}${recovery === null ? "" : `\n\n${OUTPUT_RECOVERY_INSTRUCTIONS}`}\n\n${JSON.stringify({ ...evidence, sourceSelection, ...recoveryEvidence, ...(correcting ? { correctionFeedback: feedback } : {}) })}`;
     const configuration = current.roles[role];
     let response;
     let agentError;
@@ -369,8 +417,10 @@ export async function runAuditDiscovery({
         const policy = exhausted
           ? runtime.outputExhaustion
           : runtime.authentication;
-        // Only proof about this original fork can restore its unused allowance.
+        // Authentication can restore only a proven unused fork. Exhaustion
+        // always reconstructs without another source fork at this checkpoint.
         const noForkEffect =
+          !exhausted &&
           acknowledgedSessions.size === 0 &&
           session?.mode === "fork" &&
           !policy.hasPossibleEffect(agentError);
@@ -378,6 +428,9 @@ export async function runAuditDiscovery({
           {
             ...state(),
             workflowState: "WAITING_FOR_USER",
+            outputRecovery: exhausted
+              ? createOutputRecovery(current, phase)
+              : state().outputRecovery,
             sourceForkConsumed:
               noForkEffect && lazy ? false : state().sourceForkConsumed,
             sourceForkRecovery:
@@ -611,6 +664,7 @@ export async function runAuditDiscovery({
   }
   if ((await inspectInputs()) === null) return current;
   const recovering =
+    state().outputRecovery !== null ||
     current.inactivityRecovery != null ||
     current.availabilityRetry != null ||
     [
@@ -663,8 +717,7 @@ export async function runAuditDiscovery({
         throw cause;
       return rejectResult("clarify", cause);
     }
-    if (state().correctionFeedback !== null)
-      await save({ ...state(), correctionFeedback: null });
+    const settled = { correctionFeedback: null, outputRecovery: null };
     if (output.status === "READY") {
       const inputs = output.inputs;
       const frozen = await runtime.clarifications.freezeTranscript({
@@ -677,6 +730,7 @@ export async function runAuditDiscovery({
       });
       await save({
         ...state(),
+        ...settled,
         workflowState: "DISCOVER",
         inputs,
         clarificationHash: frozen.hash,
@@ -690,12 +744,15 @@ export async function runAuditDiscovery({
       break;
     }
     if (output.status === "BLOCKED") {
-      return pause("audit_scope_blocked", "CLARIFY", {
-        explanation: output.reason,
-      });
+      return pause(
+        "audit_scope_blocked",
+        "CLARIFY",
+        { explanation: output.reason },
+        settled,
+      );
     }
     if (state().clarificationRounds >= MAX_CLARIFICATION_ROUNDS)
-      return pause("clarification_limit_reached");
+      return pause("clarification_limit_reached", "CLARIFY", {}, settled);
     const round = state().clarificationRounds + 1;
     const appended = await runtime.clarifications.appendQuestionRound({
       ...transcript,
@@ -710,6 +767,7 @@ export async function runAuditDiscovery({
         {
           expectedHash: appended.hash,
           round,
+          settled,
           inputRequest: {
             kind: "clarification",
             questions: output.questions.map((question, index) => ({
@@ -747,7 +805,8 @@ export async function runAuditDiscovery({
         return pause("finding_recheck_limit_reached");
       const evidence = await inspectInputs();
       if (evidence === null) return current;
-      if (!reserved) await save(reserveRecheck(current));
+      if (!reserved)
+        await save(reserveOutputRecovery(current, reserveRecheck(current)));
       const result = await turn("recheck", {
         task: evidence.inputs.task.content,
         context: evidence.inputs.context?.content ?? "",
@@ -774,6 +833,7 @@ export async function runAuditDiscovery({
         accepted = {
           ...acceptRecheck(state(), result.output),
           correctionFeedback: null,
+          outputRecovery: null,
         };
         assertUpdateSize(accepted);
       } catch (cause) {
@@ -801,19 +861,21 @@ export async function runAuditDiscovery({
     const contextKey = sessionContextKey(current, "discovery", number);
     // Write-ahead reservation charges interrupted launches exactly once.
     if (!reserved)
-      await save({
-        ...state(),
-        history: [
-          ...state().history,
-          {
-            number,
-            contextKey,
-            outcome: "running",
-            reportFingerprint: state().reportFingerprint,
-            candidateIds: [],
-          },
-        ],
-      });
+      await save(
+        reserveOutputRecovery(current, {
+          ...state(),
+          history: [
+            ...state().history,
+            {
+              number,
+              contextKey,
+              outcome: "running",
+              reportFingerprint: state().reportFingerprint,
+              candidateIds: [],
+            },
+          ],
+        }),
+      );
     const result = await turn("discovery", {
       task: evidence.inputs.task.content,
       context: evidence.inputs.context?.content ?? "",
@@ -847,6 +909,7 @@ export async function runAuditDiscovery({
       accepted = {
         ...acceptDiscovery(state(), result.output),
         correctionFeedback: null,
+        outputRecovery: null,
       };
       assertUpdateSize(accepted);
     } catch (cause) {

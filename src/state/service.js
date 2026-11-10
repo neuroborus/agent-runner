@@ -57,6 +57,7 @@ import { createStopService } from "./stops.js";
 import {
   createWorkspacePreparation,
   createWorkspacePreparationService,
+  migrateWorkspacePreparation,
 } from "./workspace-preparation.js";
 import {
   assertRunCanAdvance,
@@ -1445,15 +1446,19 @@ export function createRunStore({
         });
       }
       const nextState = normalizeRunState(
-        {
-          ...snapshot.state,
-          schemaVersion: RUN_STATE_SCHEMA_VERSION,
-          revision: snapshot.state.revision + 1,
-          pipelineStateVersion,
-          runtimeCompatibility: RUNTIME_COMPATIBILITY,
-          pipelineState,
-          updatedAt: timestamp(snapshot.state.updatedAt),
-        },
+        migrateWorkspacePreparation(
+          snapshot.state,
+          {
+            ...snapshot.state,
+            schemaVersion: RUN_STATE_SCHEMA_VERSION,
+            revision: snapshot.state.revision + 1,
+            pipelineStateVersion,
+            runtimeCompatibility: RUNTIME_COMPATIBILITY,
+            pipelineState,
+            updatedAt: timestamp(snapshot.state.updatedAt),
+          },
+          normalizedActivity,
+        ),
         record.runId,
       );
       await journal.appendTransition(

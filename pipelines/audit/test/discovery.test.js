@@ -349,6 +349,78 @@ test("malformed and incomplete passes never become clean evidence on reload", as
     );
 });
 
+test("incomplete discovery preserves accepted findings and report evidence across reload", async () => {
+  const limitations = ["The optional isolated check is unavailable"];
+  const hypotheses = [
+    {
+      id: "allocation-cost",
+      title: "Large allocations may be costly",
+      evidence: ["The allocation size follows the supplied count"],
+      uncertainty: "Resource cost has not been measured",
+    },
+  ];
+  const first = fixture([
+    READY,
+    complete({ candidates: [finding()], limitations, hypotheses }),
+    recheck,
+  ]);
+  first.stopAt("VERIFY_FINDINGS");
+  await assert.rejects(first.execute(), /gate response loss/u);
+  first.stopAt("DISCOVER");
+  await assert.rejects(first.execute(), /gate response loss/u);
+  const saved = JSON.parse(JSON.stringify(first.run()));
+  assert.equal(saved.pipelineState.acceptedBatches.length, 1);
+  const incomplete = fixture(
+    [
+      complete({
+        status: "INCOMPLETE",
+        candidates: [
+          finding({
+            impact: "The operation exits before returning any result",
+          }),
+          finding({ id: "other-count", causeId: "other-parser" }),
+        ],
+        reportCorrections: ["Remove the earlier limitations and hypotheses"],
+      }),
+    ],
+    { saved },
+  );
+  const waiting = await incomplete.execute();
+  assert.equal(waiting.pause.reason, "discovery_incomplete");
+  assert.equal(waiting.pipelineState.pendingBatch, null);
+  for (const field of [
+    "repositoryBaseline",
+    "inputs",
+    "inputsFingerprint",
+    "clarificationHash",
+    "report",
+    "reportFingerprint",
+    "ledger",
+    "acceptedBatches",
+    "recheckHistory",
+  ])
+    assert.deepEqual(waiting.pipelineState[field], saved.pipelineState[field]);
+  assert.deepEqual(
+    waiting.pipelineState.history.map(({ outcome }) => outcome),
+    ["findings", "incomplete"],
+  );
+  assert.equal(
+    auditPipeline.projections.status(waiting).auditReport.confirmedFindings,
+    1,
+  );
+  const resumed = fixture([complete({ limitations, hypotheses })], {
+    saved: JSON.parse(JSON.stringify(waiting)),
+  });
+  const result = await resumed.execute();
+  assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.deepEqual(result.pipelineState.ledger, saved.pipelineState.ledger);
+  assert.deepEqual(result.pipelineState.report, saved.pipelineState.report);
+  assert.deepEqual(
+    result.pipelineState.acceptedBatches,
+    saved.pipelineState.acceptedBatches,
+  );
+});
+
 test("clarification feedback survives reload and is cleared before discovery", async () => {
   const f = fixture([
     {

@@ -24,6 +24,8 @@ import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
 } from "../../src/state/index.js";
+import { workspacePreparationInputFingerprint } from "../../src/state/validation.js";
+import { assertWorkspacePreparationContinuity } from "../../src/state/workspace-preparation.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
@@ -785,6 +787,74 @@ for (const kind of ["pause_requested", "cancel_requested"]) {
     }
   });
 }
+
+test("pipeline migration rebinds only pending admission state and retains its declarations across cold reload", async (t) => {
+  const f = await fixture(t);
+  const before = f.created.state;
+  const activity = {
+    actor: "runner",
+    phase: "runtime",
+    kind: "migrated",
+    message: "Migrated pipeline defaults.",
+  };
+  const migrated = await f.store.migrateRun(
+    f.created.lease,
+    {
+      pipelineState: { ...before.pipelineState, recoveryIntent: null },
+      pipelineStateVersion: 2,
+    },
+    { activity },
+  );
+  assert.notEqual(
+    migrated.workspacePreparation.inputFingerprint,
+    before.workspacePreparation.inputFingerprint,
+  );
+  assert.deepEqual(migrated.workspacePreparation, {
+    ...before.workspacePreparation,
+    inputFingerprint: workspacePreparationInputFingerprint(migrated),
+  });
+  const cold = createRunStore(f.options);
+  assert.deepEqual(await cold.loadRun(before.runId), migrated);
+  for (const mutate of [
+    (run) => {
+      run.workspacePreparation.inputs[0].contentHash = hash("changed");
+    },
+    (run) => {
+      run.workspacePreparation.policy.sourcePaths.push("/other-source");
+    },
+    (run) => {
+      run.hashes.task = hash("changed");
+    },
+    (run) => {
+      run.counters.corrections = 1;
+    },
+    (run) => {
+      run.roles.auditor.model = "other";
+    },
+    (run) => {
+      run.pipelineState.workflowState = "DISCOVER";
+    },
+    (run) => {
+      run.pipelineStateVersion = before.pipelineStateVersion;
+    },
+  ]) {
+    const changed = structuredClone(migrated);
+    mutate(changed);
+    changed.workspacePreparation.inputFingerprint =
+      workspacePreparationInputFingerprint(changed);
+    assert.throws(
+      () => assertWorkspacePreparationContinuity(before, changed, activity),
+      { code: "ERR_WORKSPACE_PREPARATION_CHANGED" },
+    );
+  }
+  const prepared = await f.prepare();
+  assert.equal(prepared.workspacePreparation, null);
+  assert.deepEqual(
+    prepared.workspace.policy,
+    before.workspacePreparation.policy,
+  );
+  assert.equal(prepared.pipelineState.recoveryIntent, null);
+});
 
 test("legacy absence migrates without inventing preparation or changing completed bindings", async (t) => {
   const f = await fixture(t);

@@ -34,7 +34,7 @@ import {
 } from "./local-commit.js";
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
-import { createClaudeStream } from "./stream.js";
+import { CLAUDE_PROTOCOL_DIAGNOSTICS, createClaudeStream } from "./stream.js";
 import { createClaudeObservations } from "./observations.js";
 import {
   directoryPolicyError,
@@ -74,6 +74,7 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "source_session_unavailable",
   "usage_limit",
   "writable_process_ambiguous",
+  ...Object.values(CLAUDE_PROTOCOL_DIAGNOSTICS),
 ]);
 export const CLAUDE_FAILURE_CLASSES = Object.freeze([
   ...CLAUDE_DIAGNOSTIC_CLASSES,
@@ -1164,6 +1165,7 @@ function normalizeResult(payload, request, session) {
     if (sessionId === undefined) {
       throw new ClaudeAdapterError("Claude returned an invalid result.", {
         code: "ERR_CLAUDE_PROTOCOL",
+        diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
       });
     }
     throw permissionError(payload.permission_denials, request, sessionId);
@@ -1643,9 +1645,10 @@ export function createClaudeAdapter(options = {}) {
     );
     const stream = createClaudeStream(
       request.onProgress,
-      () =>
+      (diagnosticClass) =>
         new ClaudeAdapterError("Claude returned an invalid JSON stream.", {
           code: "ERR_CLAUDE_PROTOCOL",
+          diagnosticClass,
         }),
       observations,
       selectedSession,
@@ -1817,13 +1820,23 @@ export function createClaudeAdapter(options = {}) {
           if (sessionId === undefined) {
             throw new ClaudeAdapterError("Claude returned an invalid result.", {
               code: "ERR_CLAUDE_PROTOCOL",
+              diagnosticClass:
+                CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
             });
           }
           throw permissionError(payload.permission_denials, request, sessionId);
         }
         if (!isClaudeErrorResult(payload)) {
+          // Only the exact success envelope proves success after a failed exit.
           throw new ClaudeAdapterError("Claude returned an invalid result.", {
             code: "ERR_CLAUDE_PROTOCOL",
+            diagnosticClass:
+              isRecord(payload) &&
+              payload.type === "result" &&
+              payload.subtype === "success" &&
+              payload.is_error === false
+                ? CLAUDE_PROTOCOL_DIAGNOSTICS.successAfterProcessFailure
+                : CLAUDE_PROTOCOL_DIAGNOSTICS.errorResultInvalid,
           });
         }
         stream.assertValid();
@@ -1860,6 +1873,7 @@ export function createClaudeAdapter(options = {}) {
       ) {
         throw new ClaudeAdapterError("Claude returned invalid fork lineage.", {
           code: "ERR_CLAUDE_PROTOCOL",
+          diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.forkLineageInvalid,
         });
       }
       if (
@@ -1868,7 +1882,10 @@ export function createClaudeAdapter(options = {}) {
       ) {
         throw new ClaudeAdapterError(
           "Claude continued an unexpected session.",
-          { code: "ERR_CLAUDE_PROTOCOL" },
+          {
+            code: "ERR_CLAUDE_PROTOCOL",
+            diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.continuationMismatch,
+          },
         );
       }
       await acknowledgeChild(result.sessionId, "named");
@@ -1918,6 +1935,7 @@ export function createClaudeAdapter(options = {}) {
               "Claude observation observer failed.",
               {
                 code: "ERR_CLAUDE_PROTOCOL",
+                diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.observerFailed,
               },
             );
         }
@@ -2133,6 +2151,8 @@ export function createClaudeAdapter(options = {}) {
             {
               cause,
               code: "ERR_CLAUDE_PROTOCOL",
+              diagnosticClass:
+                CLAUDE_PROTOCOL_DIAGNOSTICS.forkLineageUnavailable,
             },
           );
         }

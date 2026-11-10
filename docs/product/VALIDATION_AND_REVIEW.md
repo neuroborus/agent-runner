@@ -86,7 +86,10 @@ and correction accounting.
 Audit's batch gate is separate from coding-pipeline candidate review.
 Every new or materially revised batch requires a distinct read-only recheck of
 relevance, evidence, examples, impact, classification, overlap and optional
-recommendations. Lazy retains the discovering Auditor; independent requires a
+recommendations. A usable discovery batch need not exhaust the agreed scope,
+but verification must decide every exact entry before more discovery. Concise
+evidence cannot omit a decision, and incomplete work adds no accepted evidence.
+Lazy retains the discovering Auditor; independent requires a
 fresh finding Reviewer after each substantive correction. Combined first
 converges with the discovering Auditor, then requires a fresh Reviewer's clean
 first pass. A correcting Reviewer stays through its own series until clean,
@@ -412,7 +415,12 @@ Accepted active-role reports are preserved together; reconciliation cannot
 discard a role's needs. Plan execution and polishing independently require a
 boolean `sourceProjection` need in every report alongside scratch, cache,
 artifacts, and unsupported needs. They can identify only the frozen exact
-command: no report can choose a projection path or broader authority. Their
+command: no report can choose a projection path or broader authority. Reports
+describe the assigned executor and checkpoint, not the read-only discovery,
+migration, or Reviewer turn: ordinary safe output under the Worker's existing
+`FINALIZE` workspace-write access needs no report, while `sourceProjection` is
+separate frozen authority requested only when evidence shows the actual
+executor must write beside the staging-independent source. Their
 ordered migrations default historical reports to no projection without
 reloading configuration or changing workflow, evidence, correction, or effect
 state. Every capability report must identify an actual

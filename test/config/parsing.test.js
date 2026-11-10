@@ -61,19 +61,41 @@ test("tracked example is valid and local configuration is ignored", async () => 
     true,
   );
   assert.equal(configuration.pipelines.polishing.mode, "independent");
-  assert.deepEqual(configuration.pipelines["plan-authoring"].roles.reviewer, {
+  for (const pipeline of Object.values(configuration.pipelines)) {
+    assert.deepEqual(pipeline.roles.reviewer, {
+      backend: "codex",
+      profile: "current",
+      model: "gpt-6.1-sol",
+      effort: "xhigh",
+    });
+  }
+  for (const [pipelineId, role] of [
+    ["init", "planner"],
+    ["plan-authoring", "planner"],
+    ["plan-execution", "worker"],
+    ["polishing", "worker"],
+  ]) {
+    assert.deepEqual(configuration.pipelines[pipelineId].roles[role], {
+      backend: "claude",
+      profile: "current",
+      model: "opus",
+      effort: "high",
+    });
+  }
+  assert.deepEqual(configuration.pipelines.audit.roles.auditor, {
     backend: "claude",
-    profile: "claude-primary",
-    model: "sonnet",
+    profile: "current",
+    model: "fable",
+    effort: "max",
   });
-  assert.deepEqual(configuration.pipelines["plan-authoring"].roles.arbiter, {});
-  assert.deepEqual(configuration.pipelines.polishing.roles.reviewer, {
-    backend: "claude",
-    profile: "claude-primary",
-    model: "current",
-    contextSize: "current",
-    effort: "current",
-  });
+  for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
+    assert.deepEqual(configuration.pipelines[pipelineId].roles.arbiter, {
+      backend: "codex",
+      profile: "current",
+      model: "gpt-6.1-sol",
+      effort: "xhigh",
+    });
+  }
   assert.equal(configuration.pipelines["plan-execution"].finalization, "auto");
   assert.equal(configuration.pipelines.polishing.finalization, "auto");
   for (const pipelineId of ["plan-execution", "polishing"]) {

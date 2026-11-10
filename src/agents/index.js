@@ -8,18 +8,28 @@ import {
 import { PROVIDER_REGISTRY } from "./registry.js";
 
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,64}$/u;
+const FAILURE_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
+
+// Compose only fixed text, a validated code, and a validated failure class.
+function boundaryMessage(code, failureClass) {
+  if (code === undefined) return "Agent backend turn failed.";
+  return failureClass === ADAPTER_FAILURE_CLASS ||
+    typeof failureClass !== "string" ||
+    !FAILURE_CLASS_PATTERN.test(failureClass)
+    ? `Agent backend turn failed: ${code}.`
+    : `Agent backend turn failed: ${code} (${failureClass}).`;
+}
 
 export class AgentBoundaryError extends Error {
   constructor(cause, failure) {
-    super("Agent backend turn failed.");
+    const code =
+      typeof cause?.code === "string" && ERROR_CODE_PATTERN.test(cause.code)
+        ? cause.code
+        : undefined;
+    super(boundaryMessage(code, failure.failureClass));
     this.name = "AgentBoundaryError";
     this.failure = failure;
-    if (
-      typeof cause?.code === "string" &&
-      ERROR_CODE_PATTERN.test(cause.code)
-    ) {
-      this.code = cause.code;
-    }
+    if (code !== undefined) this.code = code;
     this.ambiguous = failure.outcome === "ambiguous";
     this.recoverable = failure.retry === "transient";
     const effectStarted = deriveEffectStarted(failure);

@@ -95,14 +95,15 @@ capability flags and access requirements retain their original frozen fingerprin
 before another agent turn; other pipelines retain their frozen receipt contracts.
 
 Adapter execution options and turn requests also accept the portable effort
-values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
+values `current`, `low`, `medium`, `high`, `xhigh`, and `max`. Effort is separate from
 the model identifier; identifiers containing whitespace, including combined
 model-and-effort strings, are invalid. Missing effort and `current` omit the
 native override and preserve the provider's effective default.
 
 Codex maps explicit effort to its reasoning-effort configuration and turn
-control. Claude uses `--effort`, mapping `xhigh` to native `max` only when the
-installed CLI advertises that tier. Explicit selections require native support;
+control. Claude uses `--effort`, passing explicit `max` unchanged and mapping
+legacy `xhigh` to native `max` only when the installed CLI advertises that tier.
+Explicit selections require native support;
 `current` adds no capability requirement. Codex checks discoverable model
 reasoning tiers before starting a turn, including the effective model of a
 continued or forked session. Model-specific support that cannot be discovered
@@ -335,10 +336,15 @@ connectivity.
 
 Plan execution's local commit is a separate constrained adapter capability. It
 is available only for the Worker's one-shot authorized `COMMIT` turn and does
-not widen ordinary workspace-write access. Codex readiness may use the
-read-only `git var` subcommand to inspect the repository's existing author and
-committer identities; staging, commit, configuration, history, ref, and remote
-mutations remain outside that turn. Polishing never requests local commit.
+not widen ordinary workspace-write access. The Codex readiness prompt
+discloses the adapter-owned read-only Git inspection subcommand set, derived
+from the same allowlist the adapter enforces, and names `git var
+GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` for the existing author and
+committer identities. Any other Git subcommand, even a read-only `config` or
+`branch` form, is refused before effect with
+`operation_local_commit_git_operation`; staging, commit, configuration,
+history, ref, and remote mutations remain outside that turn. Polishing never
+requests local commit.
 
 Claude's readiness schema requires exactly one boolean `ready` field. Only
 `{ "ready": true }` admits the constrained executor. Successful native output
@@ -403,6 +409,11 @@ they provide no terminal provider evidence. Distinct dispositions and safety
 failures keep precedence. The [init contract](../../pipelines/init/docs/SPEC.md#terminal-provider-failures)
 owns settlement, preserved evidence and nonresumable guidance; missing historical
 classification is never reconstructed from native text or ownerless state.
+
+A terminal Claude protocol failure carries a registered `protocol_*` class only
+when its guard proved the violated predicate; unattributed origins stay
+unclassified. The class adds no retry, effect evidence, recovery or acceptance,
+and direct CLI failures print only the bounded code and class.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
@@ -564,6 +575,12 @@ retains accepted progress and bounded role/checkpoint evidence, never partial
 provider output. Explicit operator retry preserves source-fork isolation and
 correction accounting. A consumed commit remains verification-only unless
 validated not-started proof and Git verification retire its unused authorization.
+Audit owns a stricter resumed-turn policy: explicit resume retires exhausted
+children and reconstructs the same logical checkpoint in fresh native context,
+without another source fork. It can continue an acknowledged replacement after
+response loss. Durable histories retain ownership and clean-first provenance;
+replacement grants no finding acceptance or renewed allowance. This audit policy
+does not change adapter normalization, automatic-replay policy or provider limits.
 
 Codex also refines native `other` failures when bounded, validated HTTP status
 and structured error-envelope evidence identify a non-transient client error.

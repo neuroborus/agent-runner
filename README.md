@@ -570,8 +570,17 @@ flowchart TD
     W --> Z["DONE: reviewed report; sources unchanged"]
 ```
 
-Clean discovery means no new candidates or substantive report corrections, not an
-empty report. Independent uses a fresh Auditor each pass and needs no redundant
+A finding-producing `COMPLETE` pass can finish one coherent, usable batch while
+later passes continue scope inspection. Use concise supported evidence and
+targeted reads; candidates contain only new findings or material revisions,
+without repeating the accumulated report. Existing result and collection limits
+apply without a finding quota or additional batch cap. Every material batch
+blocks further discovery until verified.
+`INCOMPLETE` work supplies no adopted candidates or report changes.
+
+Clean discovery requires complete agreed-scope inspection with no candidates or
+substantive report corrections; the accumulated report may contain findings.
+Independent uses a fresh Auditor each pass and needs no redundant
 unchanged-response turn after clean discovery. Combined always replaces the
 initial Auditor after its series becomes clean. A fresh successor that finds
 anything finishes its own lazy series before replacement; its later clean pass
@@ -799,7 +808,7 @@ Every role accepts string `profile`, `model`, `contextSize`, and `effort`
 selections.
 Root and safe ignored project configuration accept `defaultEffort`, with role
 `effort` values taking precedence within each layer. Portable effort values are
-`current`, `low`, `medium`, `high`, and `xhigh`; `current` retains the provider
+`current`, `low`, `medium`, `high`, `xhigh`, and `max`; `current` retains the provider
 default. Use `--effort` or MCP `run_start.effort` for a run-wide override, and
 `--<role>-effort` or `roleOverrides.<role>.effort` for a role override. Only
 active roles persist the resolved selection, and resume reuses it without
@@ -820,8 +829,12 @@ runtime plugin or configuration surface.
 | Claude  | Omit `--model` and use the effective Claude configuration/account default | Omit `CLAUDE_CONFIG_DIR` and inherit the current process configuration |
 
 The `current` selection delegates changing native model IDs to each backend.
-The tracked [example](.agent-runner.example.json) makes these native defaults
-explicit and shows `claude-primary` and `claude-secondary` aliases.
+The tracked [example](.agent-runner.example.json) selects Claude `opus` with
+`high` effort for Planner/Worker roles, Codex `gpt-6.1-sol` with `xhigh`
+effort for every Reviewer and Arbiter, and Claude `fable` with `max` effort
+for Auditor.
+It also shows `claude-primary` and `claude-secondary` profile aliases alongside
+the native defaults.
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`.
 
 Pipeline settings use these defaults:
@@ -1028,8 +1041,10 @@ characters remain invalid. This example works in either configuration source:
 }
 ```
 
-`sourceProjection: true` is the closed authority for checks that must write
-build output beside source inputs. The runner reconstructs the accepted
+`sourceProjection: true` is the closed authority for selected Runner-trusted
+checks that must write build output beside source inputs; an ordinary
+agent-executed check writing only safe workspace output under the Worker's
+existing access needs no projection. The runner reconstructs the accepted
 staging-independent source in private owned storage and mounts only that copy
 writable at the canonical project path. It includes frozen HEAD content plus
 tracked and non-ignored untracked workspace changes, but not the index, `.git`,
@@ -1481,7 +1496,7 @@ Role-specific values use derived flags such as `--worker-profile`,
 `--reviewer-model`, `--planner-context-size`, or `--worker-effort`; role-specific
 values win. Use a trusted alias, backend-native model ID, decimal token string,
 or portable effort value respectively. Effort accepts only
-`current|low|medium|high|xhigh`; select it separately from the model ID:
+`current|low|medium|high|xhigh|max`; select it separately from the model ID:
 
 ```bash
 agent-run run polishing \
@@ -1616,6 +1631,14 @@ fresh replay, availability or quota recovery, or output correction. That reason
 alone establishes neither a numeric output ceiling nor context utilization.
 See the [provider model](docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
 for the recognition and safety boundaries.
+
+For audit, explicit resume reconstructs the same suspended checkpoint in fresh
+native context, retiring the exhausted child without another source fork.
+Acknowledged replacements can continue after response loss. Frozen scope,
+accepted receipts, pending versions and dispositions, correction feedback and
+both finite budgets survive; replacement cannot establish clean coverage or
+confirm findings. Discovery may finish one coherent usable batch, and each exact
+batch still requires the complete selected verification gate before more discovery.
 
 Execution bootstrap separates repository discovery from bounded contiguous
 applicability units. Restart preserves accepted work; only unfinished units may

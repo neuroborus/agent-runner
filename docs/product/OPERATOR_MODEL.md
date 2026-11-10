@@ -106,8 +106,10 @@ its client, migrate saved progress or resume a run. A later compatible server
 requires explicit resume with supported leased migrations and the original
 frozen configuration. Unknown forward versions preserve progress and fail
 clearly; retained payloads cannot undo persisted migrations. Legacy/intermediate
-runs gain no execution authority. Activation currently has a root capability
-boundary shared by the explicit CLI/MCP operator actions. See
+runs gain no execution authority. CLI admission failures name the stable
+runtime code with fixed conditional guidance; uncertain causes stay unattributed.
+Activation currently has a root capability boundary shared by the explicit
+CLI/MCP operator actions. See
 [explicit versions and downgrade limits](../RELEASING.md#local-version-selection-and-restart).
 
 ## Configuration
@@ -277,6 +279,14 @@ not-started proof and unchanged Git verification. Public recovery distinguishes
 proven inactivity from generic reconstruction with `expiryProven`; legacy
 reconstruction markers prove no timeout and grant no new allowance.
 
+For audit, the offered null-action resume reconstructs the exact suspended
+checkpoint in fresh native context with concise output guidance. A durable
+retirement boundary excludes exhausted children, while an acknowledged
+replacement may continue after response loss. Frozen inputs, pending exact
+versions/dispositions, accepted receipts, logical histories and both consumed
+budgets survive. Reconstruction alone never confirms a candidate or approves a
+material revision; the complete selected finding-verification gate still applies.
+
 The separate `authentication_required` disposition never enters that retry
 policy. After repository reconciliation, every pipeline pauses durably at its
 exact logical checkpoint with the fixed `ERR_AUTHENTICATION_REQUIRED` code.
@@ -290,7 +300,7 @@ child. Commit readiness still requires pre-effect proof and Git verification
 before a consumed authorization is replaced.
 
 Both configuration layers accept portable `defaultEffort` and role `effort`
-values: `current`, `low`, `medium`, `high`, and `xhigh`. Effort stays separate
+values: `current`, `low`, `medium`, `high`, `xhigh`, and `max`. Effort stays separate
 from model selection and follows shared execution-preference precedence through
 CLI/MCP overrides. CLI `--effort` and MCP `run_start.effort` select run-wide
 effort; `--<role>-effort` and `roleOverrides.<role>.effort` win for one role.

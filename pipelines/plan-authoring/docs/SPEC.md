@@ -129,7 +129,7 @@ objects are validated, but lazy mode resolves, probes, persists, and invokes
 only the Planner. Reviewer and Arbiter configuration remains untouched for a
 later independent run and is not exposed through lazy-run state. Resolved roles
 and settings are persisted and not reloaded on resume.
-Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+Effort accepts only `current|low|medium|high|xhigh|max`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
 CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP

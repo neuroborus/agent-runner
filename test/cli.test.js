@@ -4,6 +4,10 @@ import test from "node:test";
 import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  ClaudeAdapterError,
+  normalizeAdapterFailure,
+} from "../src/agents/index.js";
+import {
   createDetachedRuntimeCompatibilityToken,
   createRunner,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
@@ -427,7 +431,7 @@ test("help describes the required commands", async () => {
   assert.equal(exitCode, 0);
   assert.match(stdout.read(), /--effort/u);
   assert.match(stdout.read(), /--<role>-effort/u);
-  assert.match(stdout.read(), /current\|low\|medium\|high\|xhigh/u);
+  assert.match(stdout.read(), /current\|low\|medium\|high\|xhigh\|max/u);
   assert.match(stdout.read(), /agent-run run <pipeline> --project/);
   assert.match(stdout.read(), /agent-run resume --run/);
   assert.match(stdout.read(), /agent-run pause --run/);
@@ -989,6 +993,42 @@ test("renders bounded finalization correction activity without rejected content"
     /git status|DO_NOT_PERSIST|provider|transcript/u,
   );
   assert.equal(stderr.read(), "");
+});
+
+test("run reports a classified agent failure with only its bounded diagnosis", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  const marker = "PRIVATE_NATIVE_FRAME";
+
+  const exitCode = await main(
+    ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run() {
+          throw normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError(marker, {
+              cause: new Error(marker),
+              code: "ERR_CLAUDE_PROTOCOL",
+              diagnosticClass: "protocol_record_after_result",
+            }),
+          );
+        },
+      }),
+    },
+  );
+
+  assert.equal(exitCode, 1);
+  assert.equal(
+    stderr.read(),
+    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_record_after_result).\n",
+  );
+  assert.doesNotMatch(
+    `${stdout.read()}${stderr.read()}`,
+    new RegExp(marker, "u"),
+  );
 });
 
 for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
@@ -1680,7 +1720,7 @@ test("pipelines lists the statically registered pipelines", async () => {
 
 test("CLI effort flags follow pipeline roles and shared precedence", async () => {
   for (const pipeline of listPipelines()) {
-    for (const effort of ["current", "low", "medium", "high", "xhigh"]) {
+    for (const effort of ["current", "low", "medium", "high", "xhigh", "max"]) {
       const stdout = createSink();
       let request;
       const code = await main(
@@ -1739,7 +1779,7 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
     "--reviewer-effort",
     "--arbiter-effort",
   ]) {
-    for (const effort of ["", "max", "HIGH", " high", "gpt-5.6-sol xhigh"]) {
+    for (const effort of ["", "ultra", "HIGH", " high", "gpt-5.6-sol xhigh"]) {
       const stderr = createSink();
       const code = await main(
         [
@@ -1767,7 +1807,7 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
       assert.equal(code, 1);
       assert.match(
         stderr.read(),
-        /must be current, low, medium, high, or xhigh/u,
+        /must be current, low, medium, high, xhigh, or max/u,
       );
     }
   }

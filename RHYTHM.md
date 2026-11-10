@@ -5,7 +5,84 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-10
+
+- **Claude protocol failures name the violated predicate.** Several Claude
+  stream and adapter guards raised `ERR_CLAUDE_PROTOCOL` without a class, the
+  stream merged distinct conditions into one flag, and the root boundary's
+  generic message hid existing classes from direct CLI callers. Each guard now
+  attaches a terminal `protocol_*` class from one private Claude table for the
+  first predicate it proved violated, and the boundary message is composed only
+  of fixed text, the validated code and the registered class. Unattributable
+  origins stay unclassified. Parsing, acceptance, retry, cleanup, effect proof
+  and persisted schemas are unchanged. The predicate and root cause of the
+  historical generic finalization failure remain unknown.
+
+## 2026-11-09
+
+- **CLI runtime admission failures keep their stable code.** The public CLI
+  catch collapsed every runtime-prefixed admission, activation-deferral,
+  ownership, payload and reconciliation failure into one generic line, and a
+  non-string error code replaced the original failure with a TypeError. A
+  closed private map now echoes each recognized code with fixed conditional
+  guidance; the generic admission code and unrecognized codes stay
+  unattributed, and messages, causes and properties are never projected.
+  Admission, activation, ownership, leases, persistence, exit status and
+  original-failure precedence are unchanged. The code and root cause of the
+  historical generic failures remain unknown.
+
+- **Capability reports describe the assigned executor, not the discovery turn.**
+  Coding bootstrap and validation-migration guidance previously offered
+  `sourceProjection` for any command writing beside its source without naming
+  who runs it, so a read-only discovery or Reviewer turn could mistake its own
+  restrictions for a command need. Needs and blockers now describe the ordinary
+  Worker `FINALIZE` turn under its existing workspace-write access or the
+  Runner-trusted executor of a selected command. Ordinary safe Worker output
+  needs no report; projection remains separate frozen trusted authority, and
+  genuine command-specific blockers still require evidence. Admission, schemas,
+  persistence, saved reports, counters and frozen authority are unchanged. This
+  repairs no external run and does not prove how any historical model
+  interpreted its input.
+
+- **Codex readiness discloses its enforced Git inspection allowlist.** The
+  local-commit readiness prompt said only not to mutate Git state, while the
+  adapter refuses every Git subcommand outside a stricter read-only allowlist,
+  including read-only `config` and `branch` forms. The prompt now derives that
+  vocabulary from the enforced set and names the `git var` identity queries,
+  and the git-operation refusal carries a fixed actionable message. The
+  allowlist, lexical classification, schema, diagnostic classes and retry
+  authority are unchanged. The historical rejected command and its native
+  cause remain unknown.
+
 ## 2026-11-08
+
+- **Audit reconstructs output-exhausted checkpoints on explicit resume.**
+  Audit state version 8 journals a retirement boundary in common child lineage
+  with the exhaustion pause. Fresh native context receives frozen inputs and
+  durable finding/decision history with concise output guidance; acknowledged
+  replacements survive response loss. Logical ownership, clean-first provenance,
+  exact pending versions/dispositions and both run-wide budgets remain intact.
+  Replacement creates no acceptance, retry episode or source-fork opportunity.
+  Legacy matching exhaustion pauses migrate through the leased boundary without
+  altering accepted receipts or publication bytes; unrelated states gain no work.
+  Pending admission rebinds only its state fingerprint during leased migration,
+  preserving frozen declarations and journaled provenance before capture.
+
+- **Audit can finish a usable finding batch before exhaustive discovery.**
+  Discovery instructions distinguish a coherent finding-producing `COMPLETE`
+  pass from full-scope clean inspection and unusable `INCOMPLETE` work. Targeted
+  reads and concise evidence avoid repeated accumulated reports without quotas,
+  new batch limits or provider controls. Every material batch still blocks
+  discovery until its exact versions and dispositions pass the selected
+  verification gate; batch acceptance never creates clean discovery. Incomplete
+  candidates and report changes supply no accepted evidence.
+
+- **Maximum effort can be selected explicitly.** Configuration, CLI/MCP,
+  adapter requests and saved role validation accept `max` without translating
+  its stored value. Providers still require the advertised tier and reject
+  unsupported selections without downgrading. Claude keeps its legacy
+  `xhigh`-to-`max` mapping; existing selections, frozen runs and accounting
+  remain unchanged. The tracked example uses `fable` with explicit `max`.
 
 - **Init preserves trusted semantic rejection feedback at its producing checkpoint.**
   Actual validators supply finite constraints and original codes so a rejected

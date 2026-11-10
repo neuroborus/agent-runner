@@ -16,6 +16,7 @@ import {
   normalizeHypothesis,
   text,
 } from "./findings.js";
+import { assertOutputRecovery } from "./output-recovery.js";
 import { assertPublication } from "./publication-contract.js";
 
 const KINDS = ["confirm", "correct", "reject", "merge", "hypothesis"];
@@ -184,6 +185,7 @@ export function assertAuditRun(run) {
     );
   }
   assertCorrectionFeedback(run);
+  assertOutputRecovery(run);
   assertPublication(run);
   assertAudit(
     state.recheckHistory.length <= state.settings.maxFindingRecheckPasses &&

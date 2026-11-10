@@ -854,7 +854,7 @@ around capture and reconstruction. Directory scope prunes exclusions before
 traversal and never invokes Git. Filesystem declarations bind provider receipts;
 Runner additionally binds Git provenance into snapshot fingerprints and role
 context. Report/finding bindings consume that same snapshot. New report bytes
-and report fingerprints also bind frozen source settings. Audit state version 7
+and report fingerprints also bind frozen source settings. Audit state version 8
 preserves legacy missing settings as whole-directory scope without altering
 evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
@@ -864,7 +864,11 @@ Lazy retains one logical Auditor, while independent creates a fresh Auditor per
 pass. A write-ahead pass history preserves the frozen run-wide budget capped at 20,
 including interrupted reservations. New/revised candidates block discovery at
 pending verification; clean discovery is separate from finding acceptance and
-requires verified report publication before public completion. Logical turns establish existing inactivity/availability checkpoints
+requires verified report publication before public completion. A finding-producing
+complete pass may finish one coherent batch before full-scope inspection, with
+verification before the next discovery pass. A no-finding clean result still
+requires complete agreed-scope inspection; incomplete work adopts no candidate
+or report update. Logical turns establish existing inactivity/availability checkpoints
 and use the common `repositoryBaseline` for recovery settlement. Distinct provider
 dispositions survive pauses, terminal failures stay failed, and result acceptance
 enforces enclosing persistent field/collection limits as well as aggregate bytes.
@@ -915,6 +919,20 @@ checkpoint receives canonical diagnostics with fixed correction instructions;
 validation replaces or clears feedback without changing session or budget rules.
 The descriptor exposes the same bounded constraint evidence through CLI/MCP pause
 projections, excluding native messages and rejected content.
+Audit state version 8 adds private nullable output-recovery intent: phase,
+round/pass ordinal, logical context and a retired prefix length in common child
+lineage. Exhaustion saves it atomically with the operator pause before native
+replacement. Explicit resume reconstructs that checkpoint without reforking a
+source; acknowledged replacements can continue after response loss, while retired
+children cannot supply results. Histories, exact finding/batch versions,
+dispositions, receipt references and correction feedback reconstruct the request;
+concise output guidance changes no verification gate or finite budget. The intent
+survives pause clearing, cold interruption and classified availability/inactivity
+recovery until its durable outcome settles it. Repeated exhaustion advances
+retirement and pauses again. The leased version-7 migration creates intent only
+for a genuine matching legacy exhaustion pause; unrelated absence becomes null.
+No native ID is duplicated and no common-envelope change is required. See the
+[audit recovery contract](../pipelines/audit/docs/SPEC.md#explicit-output-exhaustion-reconstruction).
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies
@@ -1258,6 +1276,17 @@ its admission until transport closure, including startup failure or early EOF.
 The MCP boundary closes the SDK transport when STDIO input ends or closes and
 removes its input listeners when the lifetime settles.
 
+The public CLI entry projects a runtime-prefixed admission or lifetime failure
+as one stderr line through a private closed code-to-fixed-text map. A
+recognized code is echoed exactly with bounded conditional guidance.
+`ERR_RUNTIME_ADMISSION` also wraps non-runtime causes and keeps unknown
+attribution; unrecognized, over-long or control-character codes render only a
+fixed unrecognized line. No line attributes a stage or claims that earlier
+request effects were absent, and error messages, causes and other properties
+are never projected. Non-runtime errors, including non-string codes, are
+rethrown unchanged. Exit status 1, stdout silence and original-failure
+precedence are unchanged.
+
 `state/runtime-admission.js` owns a bounded private `runtime-admission/runtime.json`
 projection under the existing state root. It records the active and pending
 payload identities plus explicitly registered users, their host, PID namespace,
@@ -1508,7 +1537,7 @@ auto-compaction token window. These controls are not treated as otherwise
 equivalent.
 
 Both configuration layers accept `defaultEffort` and role `effort` using only
-`current|low|medium|high|xhigh`. Vocabulary validation includes inactive roles;
+`current|low|medium|high|xhigh|max`. Vocabulary validation includes inactive roles;
 provider capability validation applies only to resolved active roles. Effort
 remains separate from model IDs, and native translation belongs to adapters.
 An explicit `current` at any precedence level retains the effective provider
@@ -2362,7 +2391,7 @@ transition atomically binding the completed workspace and clearing the pending
 record. The resulting policy, exclusion key and absent inputs must match the
 admission, including the exact absent-input list during journal replay.
 Journal replay permits no other replacement or removal except the bounded
-source-selection transition described below. Interrupted
+source-selection and migration transitions described below. Interrupted
 capture publishes no partial fingerprints; recovery recaptures from frozen
 declarations. An interrupted complete publication uses ordinary journal recovery
 without repeating capture. Stale revisions, substituted inputs/roots, uncertain
@@ -2376,6 +2405,15 @@ Legacy absence normalizes to null and preserves completed historical preparation
 existing workspace bindings and all pipeline evidence during ordinary leased
 migration; it never schedules a new capture.
 
+An explicit leased pipeline-version migration may rebind only the pending
+preparation's `inputFingerprint` to the validated migrated state representation.
+The original admission hash must still match its original state. Journal replay
+requires increasing pipeline version and `runner/runtime/migrated` activity,
+unchanged workflow state, and identical policy, source selection, root identities,
+input bytes/identities, roles, hashes, counters and lineage. Both complete states
+remain in history. This grants no capture, provider work, new inputs or changed
+scope; ordinary transitions still reject any admitted-state drift.
+
 Common envelope version 26 adds optional `sourceSelection: {kind: "git",
 fingerprint}` to pending and completed directory bindings. Only new Git-scoped
 preparation starts with a null fingerprint and no inspection roots. Under both
@@ -2388,7 +2426,7 @@ preserve that exact selection. Interrupted selection publication recovers once;
 later capture/reconstruction verifies existing membership rather than reselecting.
 Partial capture supplies no authority. Version-25 preparation and completed
 bindings remain unchanged on migration. The detached token is `1:26`, with
-matching package metadata and audit version 7 compatibility.
+matching package metadata and audit version 8 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration
@@ -3999,6 +4037,16 @@ the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
 result or a post-result assistant, user, or stream-event record still rejects,
 and other trailing system records keep their existing handling.
+Each protocol guard attaches a terminal `protocol_*` diagnostic class from one
+private stream table for the first predicate it proved violated: invalid JSON,
+record, or UTF-8; line, stream, or tracking bounds; a missing, duplicate, or
+post-result record; session, continuation, or fork-lineage mismatch;
+unavailable fork lineage; denied results without a valid session; or retirement
+and observation observer failure. After a failed process exit, only the exact
+success envelope is classified as success; any other non-error payload is only
+an invalid error result. Exceptions from progress callbacks or the shared
+progress bound and write-after-finish remain unattributed. The classes change
+no acceptance, retry, cleanup, or local-commit effect proof.
 Owned process capture delivers bounded stdout chunks without bypassing durable
 registration, containment, cancellation, retirement, or storage cleanup.
 
@@ -4021,12 +4069,13 @@ work budgets.
 
 The shared adapter contract accepts optional `effort` in execution options and
 turn requests, validated by each registered provider through that contract.
-Its closed vocabulary is `current|low|medium|high|xhigh`; omission and `current`
+Its closed vocabulary is `current|low|medium|high|xhigh|max`; omission and `current`
 normalize to no override. Model identifiers cannot contain whitespace, so a
 combined model-and-effort string is rejected before provider activity.
 Native translation stays within the providers: Codex supplies
 `model_reasoning_effort` at process launch and `effort` on every `turn/start`;
-Claude supplies `--effort`, translating portable `xhigh` to native `max`.
+Claude supplies `--effort`, passing explicit `max` unchanged and retaining the
+legacy translation of portable `xhigh` to native `max`.
 The supported Codex App Server baseline includes effort control. Claude's
 model-free help probe must advertise the requested native tier. These checks
 apply only to explicit selections and do not add requirements to `current`.
@@ -5278,9 +5327,13 @@ configuration, usage, provider, permission, and process failures remain native
 recognition owned by their provider directories. The root agent boundary
 validates the descriptor classification once, derives pipeline control
 properties only from the shared record, and maps an unclassified cause to a
-terminal rejected outcome with possible effects. When an ambiguous provider
-turn precedes a local commit, the record retains its possible provider effects
-and may separately prove that the isolated commit executor never started. The
+terminal rejected outcome with possible effects. Its error message is composed
+only of fixed text, the pattern-validated code, and the registry-validated
+non-generic class: `Agent backend turn failed: CODE (class).`, `Agent backend
+turn failed: CODE.`, or `Agent backend turn failed.`; direct CLI failures print
+that line. When an ambiguous provider turn precedes a local commit, the record
+retains its possible provider effects and may separately prove that the
+isolated commit executor never started. The
 boundary derives `effectStarted` solely from that validated record; raw cause
 fields cannot override it. It does not duplicate backend class lists or
 traverse native cause chains. Every pipeline may persist the normalized class

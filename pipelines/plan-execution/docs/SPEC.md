@@ -519,7 +519,7 @@ omits the corresponding native override and uses the effective source-session,
 process, profile, or backend default. Do not hard-code model names into
 workflow logic.
 
-Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+Effort accepts only `current|low|medium|high|xhigh|max`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
 CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
@@ -635,9 +635,14 @@ each active role's inventory. `capabilityRequirements` permits 256 reports per
 role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
 `scratch`, `cache`, and `sourceProjection`, up to 32 exact `{url, sha256}`
 artifacts, and `unsupported` with up to 16 unique lowercase capability
-identifiers. `sourceProjection` may be true only when the frozen exact command
-must write beside the staging-independent source it checks; agents cannot name a
-path or grant authority. `environmentBlockers` permits 256 reports per role:
+identifiers. Needs and blockers describe each command's assigned executor and
+checkpoint, either the ordinary Worker `FINALIZE` turn under its existing
+workspace-write access or Runner-trusted execution of a selected command, never
+the current read-only discovery, migration, or Reviewer turn; ordinary safe
+Worker workspace output needs no report. `sourceProjection` is separate frozen
+authority, not a synonym for workspace-write, and may be true only when evidence
+shows the actual executor must write beside the staging-independent source it
+checks; agents cannot name a path or grant authority. `environmentBlockers` permits 256 reports per role:
 `command`, `source` (`agent-sandbox` or `runner`), and 1–8 bounded single-line
 evidence strings. Every command must occur in that role's exact inventory;
 existing structured-result byte bounds also apply. Every capability report must
@@ -1159,7 +1164,7 @@ A request should contain only runner-level concepts such as:
   onProgress, // optional synchronous observer of internal normalized progress
   onFreshSession, // optional awaited reservation of the single fresh allowance
   onCommitExecution, // optional awaited boundary after readiness, before effects
-  effort: "current" | "low" | "medium" | "high" | "xhigh", // optional
+  effort: "current" | "low" | "medium" | "high" | "xhigh" | "max", // optional
   schema,
   session: { mode: "fork" | "continue", id }, // optional
   sessionNaming: { runId, project, pipeline, role }, // Runner-owned display data
@@ -1192,7 +1197,8 @@ progress without changing availability backoff or exposing native events publicl
 
 Adapter effort is independent of the model identifier. Missing effort or
 `current` omits the native override. Codex uses its reasoning-effort control;
-Claude maps `xhigh` to its advertised native `max` tier through `--effort`.
+Claude passes explicit `max` unchanged and maps legacy `xhigh` to its
+advertised native `max` tier through `--effort`.
 Explicit selections require native support, preserve every session/recovery
 and commit-readiness path, and use discoverable model capabilities before a
 turn. Unsupported selections and provider-only effort/model rejections return
@@ -1492,9 +1498,15 @@ provider, or confirmation-turn rejection before executor invocation carries
 preserves the original bounded error code and recoverable classification.
 `ERR_CODEX_LOCAL_COMMIT_POLICY` carries one diagnostic class per refusing rule:
 `operation_local_commit_file_change` for a reported file change,
-`operation_local_commit_git_operation` for a forbidden Git command, and
+`operation_local_commit_git_operation` for a Git subcommand outside the
+readiness inspection allowlist, and
 `operation_local_commit_confirmation` for a missing or invalid `{ ready: true }`
-confirmation. These classes never expose commands, paths, output, or native
+confirmation. The readiness prompt discloses that inspection allowlist,
+derived from the enforced set rather than a second list, and names the
+`git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` identity queries,
+so the git-operation class means a disclosed-policy refusal before executor
+invocation; it establishes neither a classifier defect nor an attempted
+mutation. These classes never expose commands, paths, output, or native
 messages. The retired single class `operation_local_commit` remains valid in
 historical failure records but is no longer emitted.
 

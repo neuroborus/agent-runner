@@ -172,8 +172,8 @@ and is absent from public projections and prompts. Project files and CLI/MCP
 cannot override it. Resume retains the fingerprinted selection; legacy runs
 use the generic default. See [client attribution](product/PROVIDER_MODEL.md#client-attribution).
 
-Select effort separately from model: `current`, `low`, `medium`, `high`, or
-`xhigh`. Use configuration `defaultEffort`/role `effort`, CLI `--effort`/
+Select effort separately from model: `current`, `low`, `medium`, `high`,
+`xhigh`, or `max`. Use configuration `defaultEffort`/role `effort`, CLI `--effort`/
 `--<role>-effort`, or MCP `run_start.effort`/`roleOverrides.<role>.effort`.
 Precedence is role override, run override, project role/default, runner
 role/default, then `current` (the provider default). Unsupported selections fail
@@ -242,13 +242,23 @@ Declarations grant no environment, credentials, shell-string substitutes, or
 broader host authority. Isolation and mutation guards still apply; user-attested
 results cannot replace execution. See [configuration](product/OPERATOR_MODEL.md#configuration).
 
-For a check that must write beside its inputs, declare
-`"sourceProjection": true` in that command's capabilities. The runner creates
-an owned writable projection of frozen HEAD plus the exact tracked and non-
-ignored untracked workspace content. It does not copy the index, `.git`, ignored
+Capability reports name each check's assigned executor and checkpoint, never
+the read-only discovery or Reviewer turn: safe output under the ordinary
+Worker's `FINALIZE` workspace-write access needs no report. `sourceProjection`
+is selected trusted authority for checks writing beside their inputs. Use the
+[trusted build examples](../README.md#configuration) to declare exact vectors
+with `scratch`, `cache`, or `sourceProjection` in root or safe project
+configuration. Projection is an owned writable copy of frozen HEAD plus tracked
+and non-ignored untracked content, without the index, `.git`, ignored
 dependency trees, project configuration, task/state artifacts, credentials, or
-other host paths. Writes are disposable; the original checkout remains absent
-from the check. Declare scratch, cache, and pinned artifacts independently.
+other host paths; the original checkout stays absent. Supply tools/dependencies
+in accepted source or as pinned artifacts. Scratch binds
+`AGENT_RUNNER_SCRATCH`/`TMPDIR`; cache binds `AGENT_RUNNER_CACHE`,
+`XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed; exact arguments do
+not expand variables. Storage, including projected writes, is private and
+disposable; original repository and network access remain prohibited. Cleanup
+follows verified process retirement. Uncertain cleanup retains ownership
+evidence and resumes before new work; interrupted contents are never reused.
 
 Set top-level `trustedCommandTimeoutMs` in root or safe project configuration:
 strict integer milliseconds `1`–`2147483647`, default `3600000` (60 minutes),
@@ -291,18 +301,6 @@ implementation. A legitimate infrastructure change must be explicitly within
 the task and current planned step and accepted by terminal confirmation.
 An environment blocker requires the permitted recovery action, not relaxed
 sandboxing, an invented command, a new baseline, or fabricated success.
-
-Use the [trusted build examples](../README.md#configuration) to declare exact
-vectors with `scratch`, `cache`, or `sourceProjection` capabilities in root or
-safe project configuration. Supply tools/dependencies in accepted source or as
-pinned artifacts, not ignored host dependency trees.
-Scratch binds `AGENT_RUNNER_SCRATCH`/`TMPDIR`; cache binds
-`AGENT_RUNNER_CACHE`, `XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed;
-exact arguments do not expand variables. Storage is private and disposable,
-including projected writes; original repository and network access remain
-prohibited. Cleanup follows verified process retirement. Uncertain cleanup
-retains ownership evidence and resumes before new work; interrupted contents
-are never reused.
 
 Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
 stdout/stderr. Missing legacy/controller timing stays unknown; never invent it
@@ -652,26 +650,29 @@ Naming grants no turn, source-fork, commit or handoff replay. Model-free fixture
 and flag/schema inspection prove no live-provider or additional platform acceptance.
 Publication stays disabled pending identity, approval and public-verification gates.
 
-Model-free CLI, sandbox, commit-executor and process-containment probes have a fixed
-10-second deadline. Within it, local-commit probes have a one-second network-denial observation
+Model-free CLI, sandbox, commit-executor and containment probes have a 10-second
+deadline. Local-commit probes have a one-second network-denial observation
 deadline; silent sockets fail isolation proof. Codex's pre-effect local-commit
 Git metadata lookup uses a 60-second bound; Claude's pre-effect local-commit
-Git metadata lookup retains the 10-second bound. These preparation deadlines
-do not cap the authorized commit effect after it begins. Codex MCP configuration
-discovery gets at most two attempts with a 30-second subprocess deadline apiece,
-without retry delay. Ordinary non-commit context exhaustion permits at most one
+Git metadata lookup retains the 10-second bound.
+Preparation deadlines do not cap the authorized commit effect.
+Codex MCP configuration discovery allows two attempts with a 30-second subprocess
+deadline each and no retry delay. Non-commit context exhaustion permits at most one
 in-session compaction retry with a usable session. Outside source forks, persistent
-pressure and other ordinary recoverable provider work get one fresh reconstruction
-before pausing. See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
+pressure and recoverable work permit one fresh reconstruction before pausing.
+See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
 
-Classified Claude readiness refusals preserve the reviewed candidate. Exact
-`ready: false` establishes only a decline with unknown reason; malformed
-confirmation identifies a fixed shape constraint. COMMIT has no readiness-output
-correction checkpoint, so these pauses offer separately authorized follow-up
-instead of same-run retry. Preserve the work and follow the
-[commit recovery contract](../pipelines/plan-execution/docs/SPEC.md#137-commit).
-Interrupted verification still reconciles the saved proof without replay;
-legacy classless refusals retain their supported recovery.
+Explicit resume after audit output exhaustion reconstructs the same checkpoint
+in fresh native context; see [audit recovery](../pipelines/audit/docs/SPEC.md).
+
+Readiness refusals preserve the candidate, HEAD and index. Claude `ready: false`
+is a decline with unknown reason, malformed confirmation a fixed shape
+constraint; COMMIT has no output-correction checkpoint, so these need separately
+authorized follow-up. Codex `operation_local_commit_git_operation` refuses a Git
+subcommand outside the disclosed allowlist before effect, keeping no command and
+proving no classifier defect or mutation; `COMMIT` resume remains. Do not edit
+state or collect provider data; see
+[commit recovery](../pipelines/plan-execution/docs/SPEC.md#137-commit).
 
 For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter prefers full

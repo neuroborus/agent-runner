@@ -29,7 +29,7 @@ const EXPLANATIONS = Object.freeze({
   recheck_incomplete: "Finding verification is incomplete.",
   authentication_required: "Authenticate the selected provider, then resume.",
   output_exhausted:
-    "The provider exhausted its response output; resume the saved checkpoint.",
+    "The provider exhausted its response output. Explicit resume reconstructs the same audit checkpoint in fresh native context, preserving finding verification and consumed budgets.",
   backend_unavailable: "The selected provider is temporarily unavailable.",
   clarification_answers_required:
     "Material clarification answers are required.",

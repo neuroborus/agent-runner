@@ -11,6 +11,27 @@ const DELTA_FIELDS = new Map([
 ]);
 const identifier = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 512;
+// Each class names only the protocol predicate its guard proved violated.
+export const CLAUDE_PROTOCOL_DIAGNOSTICS = Object.freeze({
+  invalidJson: "protocol_invalid_json",
+  invalidRecord: "protocol_invalid_record",
+  invalidUtf8: "protocol_invalid_utf8",
+  lineLimit: "protocol_line_limit",
+  streamLimit: "protocol_stream_limit",
+  trackingLimit: "protocol_tracking_limit",
+  resultMissing: "protocol_result_missing",
+  resultDuplicate: "protocol_result_duplicate",
+  recordAfterResult: "protocol_record_after_result",
+  sessionMismatch: "protocol_session_mismatch",
+  continuationMismatch: "protocol_continuation_mismatch",
+  forkLineageInvalid: "protocol_fork_lineage_invalid",
+  forkLineageUnavailable: "protocol_fork_lineage_unavailable",
+  deniedResultSessionInvalid: "protocol_denied_result_session_invalid",
+  successAfterProcessFailure: "protocol_success_after_process_failure",
+  errorResultInvalid: "protocol_error_result_invalid",
+  observerFailed: "protocol_observer_failed",
+});
+const DIAGNOSTICS = CLAUDE_PROTOCOL_DIAGNOSTICS;
 
 export function createClaudeStream(
   onProgress,
@@ -28,10 +49,19 @@ export function createClaudeStream(
   let messageId;
   let buffer = "";
   let bytes = 0;
-  let invalid = false;
+  // The first violated predicate classifies the stream rejection.
+  let invalidClass;
+  let trackingError;
   let hasRecords = false;
   let payload = null;
   let finished = false;
+  const reject = (diagnosticClass) => {
+    invalidClass ??= diagnosticClass;
+  };
+  const trackingLimit = () => {
+    trackingError = protocolError(DIAGNOSTICS.trackingLimit);
+    return trackingError;
+  };
 
   function observe(record) {
     const matchedObservations =
@@ -42,12 +72,12 @@ export function createClaudeStream(
         ? undefined
         : observations;
     if (record.type === "result") {
-      if (payload !== null) invalid = true;
+      if (payload !== null) reject(DIAGNOSTICS.resultDuplicate);
       if (sessionId !== undefined && record.session_id !== sessionId)
-        invalid = true;
+        reject(DIAGNOSTICS.sessionMismatch);
       payload = record;
       if (
-        !invalid &&
+        invalidClass === undefined &&
         SESSION_ID.test(record.session_id ?? "") &&
         typeof record.is_error === "boolean" &&
         typeof record.subtype === "string"
@@ -62,10 +92,10 @@ export function createClaudeStream(
       if (payload !== null) {
         // Claude may re-emit its completed session's init after the result.
         if (record.session_id !== (sessionId ?? payload.session_id))
-          invalid = true;
+          reject(DIAGNOSTICS.sessionMismatch);
       } else if (sessionId === undefined) {
         sessionId = record.session_id;
-        if (!invalid) progress.semantic();
+        if (invalidClass === undefined) progress.semantic();
       } else if (sessionId !== record.session_id) {
         // Keep ordinary progress handling, but do not infer a new child's ID.
         identityUncertain = true;
@@ -77,10 +107,15 @@ export function createClaudeStream(
       payload !== null &&
       ["assistant", "user", "stream_event"].includes(record.type)
     ) {
-      invalid = true;
+      reject(DIAGNOSTICS.recordAfterResult);
       return;
     }
-    if (sessionId === undefined || invalid || payload !== null) return;
+    if (
+      sessionId === undefined ||
+      invalidClass !== undefined ||
+      payload !== null
+    )
+      return;
     if (record.type === "system") {
       if (
         record.subtype === "compact_boundary" &&
@@ -149,7 +184,7 @@ export function createClaudeStream(
               isRecord(event.content_block.input)))
         ) {
           if (blocks.has(event.index)) return;
-          if (blocks.size >= 1024) throw protocolError();
+          if (blocks.size >= 1024) throw trackingLimit();
           blocks.set(event.index, event.content_block.type);
           progress.semantic();
         } else if (
@@ -194,7 +229,7 @@ export function createClaudeStream(
             typeof block.input.command === "string"
           ) {
             if (!commands.has(block.id) && commands.size >= 16_384)
-              throw protocolError();
+              throw trackingLimit();
             commands.add(block.id);
             progress.start(JSON.stringify(["tool", block.id]));
           } else if (
@@ -234,24 +269,27 @@ export function createClaudeStream(
   }
 
   function line(source) {
-    if (Buffer.byteLength(source) > MAX_LINE_BYTES) throw protocolError();
+    if (Buffer.byteLength(source) > MAX_LINE_BYTES)
+      throw protocolError(DIAGNOSTICS.lineLimit);
     if (source.trim().length === 0) return;
     let record;
     try {
       record = JSON.parse(source);
     } catch {
-      invalid = true;
+      reject(DIAGNOSTICS.invalidJson);
       return;
     }
     if (!isRecord(record) || typeof record.type !== "string") {
       hasRecords ||= isRecord(record);
-      invalid = true;
+      reject(DIAGNOSTICS.invalidRecord);
       return;
     }
     hasRecords = true;
     try {
       observe(record);
-    } catch {
+    } catch (cause) {
+      // Progress callbacks and shared progress bounds remain unattributed.
+      if (cause !== undefined && cause === trackingError) throw cause;
       throw protocolError();
     }
   }
@@ -259,14 +297,14 @@ export function createClaudeStream(
   function write(chunk) {
     if (finished) throw protocolError();
     bytes += Buffer.byteLength(chunk);
-    if (bytes > MAX_STREAM_BYTES) throw protocolError();
+    if (bytes > MAX_STREAM_BYTES) throw protocolError(DIAGNOSTICS.streamLimit);
     try {
       buffer += decoder.decode(
         Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
         { stream: true },
       );
     } catch {
-      throw protocolError();
+      throw protocolError(DIAGNOSTICS.invalidUtf8);
     }
     let end;
     while ((end = buffer.indexOf("\n")) !== -1) {
@@ -274,13 +312,14 @@ export function createClaudeStream(
       buffer = buffer.slice(end + 1);
       line(source);
     }
-    if (Buffer.byteLength(buffer) > MAX_LINE_BYTES) throw protocolError();
+    if (Buffer.byteLength(buffer) > MAX_LINE_BYTES)
+      throw protocolError(DIAGNOSTICS.lineLimit);
   }
 
   return Object.freeze({
     get sessionId() {
       const id = sessionId ?? payload?.session_id;
-      return !invalid &&
+      return invalidClass === undefined &&
         !identityUncertain &&
         SESSION_ID.test(id ?? "") &&
         (selectedSession?.mode !== "continue" || id === selectedSession.id) &&
@@ -299,7 +338,7 @@ export function createClaudeStream(
         try {
           buffer += decoder.decode();
         } catch {
-          throw protocolError();
+          throw protocolError(DIAGNOSTICS.invalidUtf8);
         }
         line(buffer);
         buffer = "";
@@ -308,13 +347,14 @@ export function createClaudeStream(
       return payload;
     },
     assertValid() {
-      if (invalid || payload === null) throw protocolError();
+      if (invalidClass !== undefined) throw protocolError(invalidClass);
+      if (payload === null) throw protocolError(DIAGNOSTICS.resultMissing);
     },
     retire() {
       try {
         progress.retire();
       } catch {
-        throw protocolError();
+        throw protocolError(DIAGNOSTICS.observerFailed);
       }
     },
   });

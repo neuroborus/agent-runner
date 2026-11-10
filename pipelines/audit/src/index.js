@@ -7,6 +7,7 @@ import {
   MAX_FINDING_RECHECK_PASSES,
   validDiscoveryBudget,
 } from "./discovery-contract.js";
+import { migrateOutputRecovery } from "./output-recovery.js";
 import { assertAuditRun } from "./verification-contract.js";
 import { reportPaths, REPORT_FILENAME } from "./publication-contract.js";
 import { runAudit } from "./publication.js";
@@ -38,7 +39,7 @@ const LAZY_ROLES = Object.freeze(["auditor"]);
 
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 7,
+  stateVersion: 8,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -71,6 +72,7 @@ export const auditPipeline = Object.freeze({
     // Absence retains whole-directory semantics and exact frozen evidence,
     // including the input fingerprint of any pending preparation.
     6: ({ pipelineState }) => ({ ...pipelineState }),
+    7: migrateOutputRecovery,
   }),
   roles: ROLES,
   resolveActiveRoles: (settings) =>

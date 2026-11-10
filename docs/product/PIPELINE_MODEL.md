@@ -87,6 +87,14 @@ materially revised finding batch requires distinct verification in every mode;
 accepting findings never cleans discovery. Discovery and recheck budgets are
 separate finite run-wide totals, each capped at 20, preserved across resume.
 
+A finding-producing pass can complete one coherent, usable batch before the
+whole scope is inspected. Its required verification blocks further discovery;
+later passes continue inspection. Concise evidence and targeted reads avoid
+repeating the accumulated report without imposing a finding quota or additional
+batch cap; existing result and collection limits apply.
+A no-finding clean result still requires complete agreed-scope inspection.
+Unusable incomplete work supplies no adopted findings or report changes.
+
 Lazy continues one logical Auditor. Independent starts a fresh Auditor per
 discovery pass and fresh finding Reviewers after corrections. Combined keeps
 each Auditor through its series until clean, then requires a later fresh

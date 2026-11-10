@@ -2958,31 +2958,64 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
     session_id: CHILD_SESSION,
   });
   const final = JSON.stringify(result());
-  for (const [name, stdout, failed] of [
-    ["malformed", `bad-json\n${final}\n`],
-    ["duplicate", `${final}\n${final}\n`],
-    ["conflicting-trailing-init", `${init}\n${final}\n${foreignInit}\n`],
-    ["conflicting-fallback-init", `${final}\n${foreignInit}\n`],
+  const blockStarts = [
+    { type: "message_start", message: { id: "message", role: "assistant" } },
+    ...Array.from({ length: 1025 }, (_, index) => ({
+      type: "content_block_start",
+      index,
+      content_block: { type: "text", text: "" },
+    })),
+  ]
+    .map((event) =>
+      JSON.stringify({
+        type: "stream_event",
+        session_id: FRESH_SESSION,
+        event,
+      }),
+    )
+    .join("\n");
+  for (const [name, stdout, diagnosticClass, failed] of [
+    ["malformed", `bad-json\n${final}\n`, "invalid_json"],
+    ["non-record", `[]\n${final}\n`, "invalid_record"],
+    ["duplicate", `${final}\n${final}\n`, "result_duplicate"],
+    [
+      "conflicting-trailing-init",
+      `${init}\n${final}\n${foreignInit}\n`,
+      "session_mismatch",
+    ],
+    [
+      "conflicting-fallback-init",
+      `${final}\n${foreignInit}\n`,
+      "session_mismatch",
+    ],
     [
       "trailing",
       `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
+      "record_after_result",
     ],
     [
       "mismatched",
       `${init}\n${JSON.stringify(result({ sessionId: CHILD_SESSION }))}\n`,
+      "session_mismatch",
     ],
-    ["missing", `${init}\n`],
-    ["failed-incomplete", `${init}\n`, true],
-    ["oversized", "x".repeat(16 * 1024 * 1024 + 1)],
-    ["oversized-whitespace", `${" ".repeat(16 * 1024 * 1024 + 1)}\n`],
-    ["invalid-utf8", Buffer.from([0xff, 10])],
+    ["missing", `${init}\n`, "result_missing"],
+    ["failed-incomplete", `${init}\n`, "result_missing", true],
+    ["oversized", "x".repeat(16 * 1024 * 1024 + 1), "line_limit"],
+    [
+      "oversized-whitespace",
+      `${" ".repeat(16 * 1024 * 1024 + 1)}\n`,
+      "line_limit",
+    ],
+    ["invalid-utf8", Buffer.from([0xff, 10]), "invalid_utf8"],
     [
       "stream-limit",
       (write) => {
         const line = `${JSON.stringify({ type: "ping", padding: "x".repeat(1024 * 1024) })}\n`;
         for (let index = 0; index < 64; index += 1) write(line);
       },
+      "stream_limit",
     ],
+    ["tracking-limit", `${init}\n${blockStarts}\n${final}\n`, "tracking_limit"],
   ])
     await t.test(name, async () => {
       const fixture = createFixture({
@@ -2995,10 +3028,105 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
           return { stdout: "", stderr: "" };
         },
       });
-      await assert.rejects(
-        fixture.adapter.run(request()),
-        hasCode("ERR_CLAUDE_PROTOCOL"),
-      );
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(
+          hasDiagnostic(
+            "ERR_CLAUDE_PROTOCOL",
+            `protocol_${diagnosticClass}`,
+          )(error),
+        );
+        assert.deepEqual(error.failure, {
+          failureClass: `protocol_${diagnosticClass}`,
+          checkpoint: "turn",
+          outcome: "rejected",
+          effect: "possible",
+          retry: "terminal",
+        });
+        assert.equal(error.recoverable, false);
+        return true;
+      });
+      assert.equal(turnCalls(fixture).length, 1);
+    });
+  await t.test("local-commit readiness", async () => {
+    let commitExecutions = 0;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        call.options.onStdout(`${final}\n${final}\n`);
+        return { stdout: "", stderr: "" };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          onCommitExecution() {
+            commitExecutions += 1;
+          },
+        }),
+      ),
+      (error) => {
+        assert.ok(
+          hasDiagnostic(
+            "ERR_CLAUDE_PROTOCOL",
+            "protocol_result_duplicate",
+          )(error),
+        );
+        assert.equal(error.effectStarted, false);
+        assert.deepEqual(error.failure, {
+          failureClass: "protocol_result_duplicate",
+          checkpoint: "commit",
+          outcome: "rejected",
+          effect: "none",
+          retry: "terminal",
+          commitExecutor: "not_started",
+        });
+        return true;
+      },
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(commitExecutions, 0);
+  });
+});
+
+test("classifies Claude results that contradict a failed process exit", async (t) => {
+  for (const [name, payload, diagnosticClass] of [
+    [
+      "denied without session",
+      result({
+        error: true,
+        sessionId: "invalid",
+        permission_denials: [{ tool_name: "Read" }],
+      }),
+      "protocol_denied_result_session_invalid",
+    ],
+    ["proven success", result(), "protocol_success_after_process_failure"],
+    [
+      "unsupported error subtype",
+      result({ error: true, subtype: "error_unsupported" }),
+      "protocol_error_result_invalid",
+    ],
+  ])
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          throw processFailure(payload);
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        assert.ok(hasDiagnostic("ERR_CLAUDE_PROTOCOL", diagnosticClass)(error));
+        assert.equal(error.failure.retry, "terminal");
+        assert.equal(error.recoverable, false);
+        return true;
+      });
       assert.equal(turnCalls(fixture).length, 1);
     });
 });
@@ -3190,9 +3318,12 @@ test("redacts Claude retirement observer errors without replacing provider failu
           ),
           (error) => {
             assert.ok(
-              hasCode(
-                failed ? "ERR_CLAUDE_USAGE_LIMIT" : "ERR_CLAUDE_PROTOCOL",
-              )(error),
+              failed
+                ? hasDiagnostic("ERR_CLAUDE_USAGE_LIMIT", "usage_limit")(error)
+                : hasDiagnostic(
+                    "ERR_CLAUDE_PROTOCOL",
+                    "protocol_observer_failed",
+                  )(error),
             );
             assert.doesNotMatch(error.message, /private-observer-error/u);
             assert.equal(error.cause, undefined);
@@ -3213,7 +3344,7 @@ function turnCalls(fixture) {
 const EFFORT_HELP = `${HELP}\n--effort <level> Effort level (low, medium, high, max)`;
 
 test("maps portable Claude effort across sessions and commit readiness", async () => {
-  for (const effort of ["low", "medium", "high", "xhigh"]) {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
     for (const mode of [undefined, "continue", "fork"]) {
       const fixture = createFixture({ help: EFFORT_HELP });
       await fixture.adapter.run(
@@ -3233,7 +3364,7 @@ test("maps portable Claude effort across sessions and commit readiness", async (
   const fixture = createFixture({ help: EFFORT_HELP });
   await fixture.adapter.run(
     request({
-      effort: "xhigh",
+      effort: "max",
       access: "local-commit",
       authorizationId: "effort-commit",
       commit: {
@@ -3252,14 +3383,16 @@ test("requires Claude effort support only for explicit selections", async () => 
   ]) {
     const fixture = createFixture({ help });
     await fixture.adapter.run(request({ effort: "current" }));
-    await assert.rejects(
-      fixture.adapter.probe({ effort: "xhigh" }),
-      hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
-    );
-    await assert.rejects(
-      fixture.adapter.run(request({ effort: "xhigh" })),
-      hasCode("ERR_UNSUPPORTED_EFFORT"),
-    );
+    for (const effort of ["xhigh", "max"]) {
+      await assert.rejects(
+        fixture.adapter.probe({ effort }),
+        hasDiagnostic("ERR_UNSUPPORTED_EFFORT", "effort_unsupported"),
+      );
+      await assert.rejects(
+        fixture.adapter.run(request({ effort })),
+        hasCode("ERR_UNSUPPORTED_EFFORT"),
+      );
+    }
     assert.equal(turnCalls(fixture).length, 1);
     assert.equal(
       option(turnCalls(fixture)[0].argumentsList, "--effort"),
@@ -3590,7 +3723,10 @@ test("reports custom client attribution as unsupported without provider activity
 
   assert.equal(fixture.calls.length, 0);
   const normalized = normalizeAdapterFailure("claude", nativeFailure);
-  assert.equal(normalized.message, "Agent backend turn failed.");
+  assert.equal(
+    normalized.message,
+    "Agent backend turn failed: ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION.",
+  );
   assert.equal(normalized.code, "ERR_UNSUPPORTED_CLAUDE_CLIENT_ATTRIBUTION");
   assert.doesNotMatch(
     JSON.stringify({ ...normalized, message: normalized.message }),
@@ -5830,7 +5966,7 @@ test("forks a supplied source directly and preserves child lineage", async () =>
     invalid.adapter.run(
       request({ session: { id: SOURCE_SESSION, mode: "fork" } }),
     ),
-    hasCode("ERR_CLAUDE_PROTOCOL"),
+    hasDiagnostic("ERR_CLAUDE_PROTOCOL", "protocol_fork_lineage_invalid"),
   );
 });
 
@@ -5898,7 +6034,12 @@ test("rejects Claude observations outside the selected session lineage", async (
           onObservation: (value) => observations.push(value),
         }),
       ),
-      hasCode("ERR_CLAUDE_PROTOCOL"),
+      hasDiagnostic(
+        "ERR_CLAUDE_PROTOCOL",
+        mode === "continue"
+          ? "protocol_continuation_mismatch"
+          : "protocol_fork_lineage_invalid",
+      ),
     );
     assert.equal(observations.length, 1);
     assert.equal(observations[0].accounting, "missing");
@@ -6032,7 +6173,16 @@ test("never continues a fork source after context exhaustion", async () => {
     fixture.adapter.run(
       request({ session: { id: SOURCE_SESSION, mode: "fork" } }),
     ),
-    hasCode("ERR_CLAUDE_PROTOCOL"),
+    (error) => {
+      assert.ok(
+        hasDiagnostic(
+          "ERR_CLAUDE_PROTOCOL",
+          "protocol_fork_lineage_unavailable",
+        )(error),
+      );
+      assert.equal(error.failure.retry, "terminal");
+      return true;
+    },
   );
   assert.equal(turnCalls(fixture).length, 1);
 });

@@ -93,9 +93,15 @@ There are at most 256 reports of each kind per role. Each need names an exact
 inventory command, an optional frozen identity (`commandIdentity`, otherwise
 null), `capabilities` with boolean `scratch`/`cache`, a required boolean
 `sourceProjection` need, up to 32 exact `{url, sha256}` artifacts, and up to 16
-unique `unsupported` identifiers. `sourceProjection` may be true only when the
-frozen exact command must write beside the staging-independent source it checks;
-agents cannot name a projection path or grant broader authority.
+unique `unsupported` identifiers. Needs and blockers describe each command's
+assigned executor and checkpoint, either the ordinary Worker `FINALIZE` turn
+under its existing workspace-write access or Runner-trusted execution of a
+selected command, never the current read-only discovery, migration, or Reviewer
+turn; ordinary safe Worker workspace output needs no report. `sourceProjection`
+is separate frozen authority, not a synonym for workspace-write, and may be true
+only when evidence shows the actual executor must write beside the
+staging-independent source it checks; agents cannot name a projection path or
+grant broader authority.
 Each blocker names an inventory command, `source` (`agent-sandbox` or `runner`),
 and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arrays.
 Every capability report must contain at least one scratch, cache,
@@ -227,7 +233,7 @@ role-specific CLI/MCP values win over run-wide and runner values, with
 `current` omitting the native override. Worker and Reviewer may use any
 Codex/Claude combination; Arbiter supports either backend.
 
-Effort accepts only `current|low|medium|high|xhigh`, independently of model IDs.
+Effort accepts only `current|low|medium|high|xhigh|max`, independently of model IDs.
 The shared root resolver applies role override → run override → project role →
 project `defaultEffort` → runner role → runner `defaultEffort` → `current`.
 CLI `--effort` and descriptor-derived `--<role>-effort` map to MCP
@@ -589,9 +595,12 @@ eligible early request without charging correction work or duplicating a
 handoff effect. Operator pause, resume, and cancellation use the common state
 semantics.
 The root agent boundary normalizes the selected adapter's finite diagnostic
-class before workflow code sees a terminal failure. Only its fixed message,
-bounded code, safe control flags, shared structured-output class, and validated
-diagnostic class cross the boundary. Codex collaboration activity despite a
+class before workflow code sees a terminal failure. Only its bounded message
+composed from fixed text, the code and the validated class, the bounded code,
+safe control flags, shared structured-output class, and validated diagnostic
+class cross the boundary. A terminal FINALIZE protocol failure persists
+`internal_failure` with that class and grants no finalization acceptance,
+fingerprint, staging, retry, or resume. Codex collaboration activity despite a
 disabled multi-agent capability remains terminal `operation_multi_agent`; it is
 not an environment blocker or a transparent retry. Native messages, prompts,
 commands, provider responses, transcripts, credentials, and process causes are

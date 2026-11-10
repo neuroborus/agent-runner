@@ -14,6 +14,7 @@ Inspect only the supplied boundary. Excluded descendants stay opaque; never trav
 References grant no retrieval or write authority. Do not fetch URLs or expand declared access. Do not delegate.
 Use relevant established rules and agreed task criteria; invent no rules, finding quotas or observations.
 Deduplicate shared causes. Findings require supported evidence, impact/severity rationale and concrete observed or code-derived examples.
+Use targeted source reads and concise supported evidence and examples; retain the required rationale and exact bindings.
 Keep unsupported hypotheses explicitly unverified. Recommendations are optional. Zero findings is valid.
 Use only the schema's fields and exact classification values. Supply every required collection as an array, even when empty.
 Finding, cause and hypothesis IDs must start with a lowercase ASCII letter, use lowercase letters/digits separated by single hyphens, and contain at most ${MAX_ID_LENGTH} characters without whitespace.
@@ -34,15 +35,19 @@ export const DISCOVERY_INSTRUCTIONS = `Clarification is closed; do not ask ordin
 Inspect the frozen scope at the supplied snapshot. Receive only frozen inputs and compact accumulated findings when starting fresh.
 Copy the supplied snapshotFingerprint exactly; do not derive it from inspected files, shorten it or substitute another fingerprint.
 Assess accumulated findings, including evidence, concrete examples, impact/severity rationale, classification consistency and optional recommendations.
-Return material finding corrections as candidates with their existing finding/cause IDs.
+Return only new findings or material finding corrections as candidates, preserving existing finding/cause IDs for corrections.
+Do not echo accumulated findings or generate an exhaustive report in each response.
 COMPLETE means this discovery pass finished, not that the audit or any proposed finding is accepted.
-A clean discovery proposes no candidates and needs no substantive report correction. Repeated or later rejected candidates cannot make this pass clean.
-Return complete limitations and explicitly unverified hypotheses. List substantive report corrections; a report change prevents clean evidence.
-Use stable finding/cause IDs across revisions. Return INCOMPLETE when inspection is unfinished; never claim clean evidence from partial work.`;
+A finding-producing COMPLETE pass may finish one coherent, usable batch before the entire scope is inspected; later passes continue discovery after this batch's required verification.
+Finish the batch with supported evidence and all required fields. Impose no finding quota or additional numeric batch bound; preserve the existing result and collection constraints.
+A no-finding clean result requires complete agreed-scope inspection, no candidates and no substantive report correction. Repeated or later rejected candidates cannot make this pass clean.
+Return complete current limitations and explicitly unverified hypotheses, retaining prior entries unless substantively corrected. List substantive report corrections; a report change prevents clean evidence.
+Use INCOMPLETE when the pass cannot finish usable work, rather than merely because later passes must continue scope inspection.
+INCOMPLETE candidates and report updates are not adopted. Never claim clean evidence from partial work.`;
 
 export const RECHECK_INSTRUCTIONS = `Clarification is closed. Recheck only the exact supplied finding batch and its dispositions, read-only.
 Verify relevance to frozen scope/criteria, supporting evidence, labeled concrete examples, impact, severity/category, overlap and recommendations when present.
-Decide every batch entry exactly once. Use confirm, correct, reject, merge or hypothesis with a supported rationale.
+Decide every batch entry exactly once, even when keeping evidence concise. Use confirm, correct, reject, merge or hypothesis with a supported rationale.
 Only correct carries a complete replacement finding, preserving finding/cause IDs. Only merge carries a distinct retained targetId.
 Consolidate all supporting material into the retained target through correction; merge targets must remain confirmed or corrected, never chained or dismissed.
 Only hypothesis carries explicitly unverified content with its original ID and concrete uncertainty. Other payload fields must be null.
@@ -63,3 +68,10 @@ export const CORRECTION_INSTRUCTIONS = `The supplied correctionFeedback identifi
 Correct those fields using the schema and audit instructions, then return the complete structured result for the current request.
 Copy bindings from the current request exactly. Preserve frozen scope, established IDs and supported prior decisions; do not invent findings, cleanliness or approval to satisfy validation.
 This retry retains the existing session policy and consumed pass budgets. It grants no new access, questions after clarification, or other authority.`;
+
+export const OUTPUT_RECOVERY_INSTRUCTIONS = `Resume the exact suspended logical checkpoint after response output exhaustion, using the supplied frozen inputs and durable evidence.
+Native replacement does not start a new discovery/recheck cycle or reset a first-pass opportunity. Preserve IDs, exact versions, uncertainty, rejections, pending dispositions and correction feedback.
+Accumulated ledger entries are proposals, not confirmed findings. Only exact current versions with mode-required accepted-batch receipts are confirmed; an old receipt cannot approve a pending revision.
+Use targeted reads and concise evidence. Discovery may return one coherent usable finding batch; no-finding clean discovery still requires full agreed-scope inspection.
+Recheck must decide every exact batch entry. Missing, invalid or incomplete decisions grant no acceptance. Do not echo accumulated findings or produce a full report.
+Output exhaustion grants no partial-result acceptance, additional source fork, retry allowance, budget renewal or change to the selected mode.`;

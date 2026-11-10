@@ -26,7 +26,7 @@ test("MCP discovers and validates portable effort before dispatch", async (t) =>
   const start = (await client.listTools()).tools.find(
     ({ name }) => name === "run_start",
   );
-  const values = ["current", "low", "medium", "high", "xhigh"];
+  const values = ["current", "low", "medium", "high", "xhigh", "max"];
   assert.deepEqual(start.inputSchema.properties.effort.enum, values);
   assert.deepEqual(
     start.inputSchema.properties.roleOverrides.additionalProperties.properties
@@ -58,7 +58,7 @@ test("MCP discovers and validates portable effort before dispatch", async (t) =>
     null,
     1,
     "",
-    "max",
+    "ultra",
     "HIGH",
     " high",
     "gpt-5.6-sol xhigh",

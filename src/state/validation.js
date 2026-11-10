@@ -803,7 +803,7 @@ export function normalizeRoles(value, { allowMissingEffort = true } = {}) {
       configuration.effort = "current";
     }
     if (
-      !["current", "low", "medium", "high", "xhigh"].includes(
+      !["current", "low", "medium", "high", "xhigh", "max"].includes(
         configuration.effort,
       )
     ) {
