@@ -171,6 +171,8 @@ import {
   normalizeStagnationResult,
   normalizedCounters,
   sha256,
+  snapshotChangeEvidence,
+  snapshotChangeLabels,
   workflowError,
 } from "./workflow-contract.js";
 
@@ -342,6 +344,14 @@ function contextKeyFor(role, checkpoint, context) {
     throw workflowError("Plan-execution session checkpoint is invalid.");
   }
   return sha256(`${role}\0${checkpoint}\0${context}`);
+}
+
+// Only the Git facade classifies its own guard failure; custom facades and
+// foreign causes stay unavailable without Git inspection.
+function readOnlySnapshotChanges(safety, cause) {
+  return typeof safety?.readOnlyChanges === "function"
+    ? snapshotChangeLabels(safety.readOnlyChanges(cause))
+    : null;
 }
 
 function diagnosticCode(cause, fallback) {
@@ -1128,6 +1138,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       code,
       message = "Plan-execution input changed outside an authorized window.",
       phase = "inputs",
+      snapshotChanges = null,
     } = {},
   ) {
     const current = state();
@@ -1195,7 +1206,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
           fixRounds: 0,
           correctionRounds: 0,
         },
-        pause: { reason, ...(code === undefined ? {} : { code }) },
+        pause: {
+          reason,
+          ...(code === undefined ? {} : { code }),
+          ...(snapshotChanges === null ? {} : { snapshotChanges }),
+        },
         publicActivity: activity("runner", phase, "changed", message),
       },
     );
@@ -9131,10 +9146,12 @@ ${step.subject}`),
       });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+      const snapshotChanges = readOnlySnapshotChanges(safety, cause);
       return invalidateInputs("read_only_agent_mutated_repository", {
         code: cause.code,
         phase: "repository",
-        message: "Repository changed during a read-only plan-execution turn.",
+        message: `Repository changed during a read-only plan-execution turn. ${snapshotChangeEvidence(snapshotChanges)}`,
+        snapshotChanges,
       });
     }
     if (

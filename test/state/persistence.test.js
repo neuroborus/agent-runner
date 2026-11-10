@@ -1548,6 +1548,56 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
   );
 });
 
+test("persists only canonical read-only snapshot change labels", async (t) => {
+  const { created, stateRoot, store } = await createFixture(t);
+  const contamination = {
+    reason: "read_only_agent_mutated_repository",
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  };
+  await store.transitionRun(created.lease, { pause: contamination });
+  const legacy = await createRunStore({ stateRoot }).loadRun(
+    created.state.runId,
+  );
+  assert.deepEqual(legacy.pause, contamination);
+
+  const labeled = { ...contamination, snapshotChanges: ["head", "index"] };
+  await store.transitionRun(created.lease, { pause: labeled });
+  const reloaded = await createRunStore({ stateRoot }).loadRun(
+    created.state.runId,
+  );
+  assert.deepEqual(reloaded.pause, labeled);
+  const retained = (pause) => ({
+    reason: "operator_paused",
+    resumeAction: null,
+    operatorResume: {
+      workflowState: "WAITING_FOR_USER",
+      pause,
+      activeTurn: null,
+    },
+  });
+  await store.transitionRun(created.lease, { pause: retained(labeled) });
+
+  for (const snapshotChanges of [
+    ["unknown-domain"],
+    ["head", "unknown-domain"],
+    ["index", "head"],
+    ["head", "head"],
+    [],
+    "head",
+    null,
+  ]) {
+    const invalid = { ...contamination, snapshotChanges };
+    for (const pause of [invalid, retained(invalid)]) {
+      await assert.rejects(
+        store.transitionRun(created.lease, { pause }),
+        (error) =>
+          error instanceof RunStoreError &&
+          error.code === "ERR_INVALID_RUN_STATE",
+      );
+    }
+  }
+});
+
 test("persists only strict launch recovery and applies operator stop semantics", async (t) => {
   const { created, store } = await createFixture(t);
   const launchRecovery = {

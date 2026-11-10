@@ -1234,7 +1234,13 @@ identified questions stay in the root pending-input projection. Input response,
 safe null retry, one concrete valid extra-fix round, and exact finding overrides
 continue to use the existing resume validation. A read-only repository mutation
 instead instructs the user to abandon the contaminated run and start fresh from
-an uncontaminated worktree. `environment_blocked` retains why nondelegated work
+an uncontaminated worktree. That `read_only_agent_mutated_repository` pause
+retains the Git-classified changed snapshot domains as `snapshotChanges` and its
+activity and single evidence line name them, for example `Changed snapshot
+domains: untracked-content.`; legacy, unclassified, or unknown labels report
+`unavailable`. The pause keeps existing pipeline state, including persisted
+finalization evidence, and grants no approval, staging, or resume.
+`environment_blocked` retains why nondelegated work
 or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHECK_AND_FIX`, or
 `RESOLVE_FINDINGS` retry checkpoint. This read-only projection does not itself
 change the pipeline state version. The runner-owned handoff is represented by

@@ -26,6 +26,7 @@ import {
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
 } from "./workflow-contract.js";
 
 export {
@@ -265,8 +266,17 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(run) {
+function publicEvidence(run, readOnlySnapshotChanges) {
   const pause = run.pause;
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (pause.reason === "output_exhausted") {
     return Object.freeze([
       `Suspended role: ${pause.role}.`,
@@ -318,7 +328,9 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+// The root registry injects the Git-owned label normalizer; a direct
+// uncomposed call has none and reports the diagnosis as unavailable.
+function projectPause(run, { readOnlySnapshotChanges } = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -412,7 +424,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run),
+    evidence: publicEvidence(run, readOnlySnapshotChanges),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });

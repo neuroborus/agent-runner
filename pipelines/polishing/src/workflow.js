@@ -108,6 +108,8 @@ import {
   normalizedCounters,
   PolishingWorkflowError,
   sha256,
+  snapshotChangeEvidence,
+  snapshotChangeLabels,
   workflowError,
   WORKFLOW_STATES,
 } from "./workflow-contract.js";
@@ -809,7 +811,9 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           "runner",
           "polishing",
           "paused",
-          `Polishing paused: ${reason}.`,
+          reason === "read_only_agent_mutated_repository"
+            ? `Polishing paused: ${reason}. ${snapshotChangeEvidence(details.snapshotChanges)}`
+            : `Polishing paused: ${reason}.`,
         ),
       },
     );
@@ -6731,8 +6735,10 @@ ${evidence}`,
       return pause(interruptedControlChange(cause), { code: cause.code });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+      const snapshotChanges = readOnlySnapshotChanges(runtime.git, cause);
       return pause("read_only_agent_mutated_repository", {
         code: cause.code,
+        ...(snapshotChanges === null ? {} : { snapshotChanges }),
       });
     }
     if (
@@ -6762,6 +6768,14 @@ ${evidence}`,
     }
     return fail(cause);
   }
+}
+
+// Only the Git facade classifies its own guard failure; foreign causes stay
+// unavailable without Git inspection.
+function readOnlySnapshotChanges(safety, cause) {
+  return typeof safety?.readOnlyChanges === "function"
+    ? snapshotChangeLabels(safety.readOnlyChanges(cause))
+    : null;
 }
 
 function isOwnershipFailure(cause) {

@@ -39,6 +39,11 @@ const SNAPSHOT_COMPARISONS = Object.freeze([
   ["remoteConfigurationFingerprint", "remote-configuration"],
   ["identityFingerprint", "identity"],
 ]);
+// The only canonical read-only snapshot change-domain labels, in comparison
+// order. Diagnostics may name these labels but never the compared values.
+const READ_ONLY_SNAPSHOT_CHANGES = Object.freeze(
+  SNAPSHOT_COMPARISONS.map(([, change]) => change),
+);
 const SNAPSHOT_FINGERPRINT_FIELDS = Object.freeze([
   "contentFingerprint",
   ...SNAPSHOT_COMPARISONS.slice(2).map(([field]) => field),
@@ -55,6 +60,46 @@ const INTERRUPTED_CONTROL_COMPARISONS = Object.freeze([
 ]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+
+// Total and pure: return the known labels in canonical order, or null for
+// anything malformed, unknown, duplicated, empty, oversized, or unreadable.
+// Elements are read once by index, so custom iterators are never invoked.
+export function normalizeReadOnlySnapshotChanges(value) {
+  try {
+    if (!Array.isArray(value)) return null;
+    const { length } = value;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 1 ||
+      length > READ_ONLY_SNAPSHOT_CHANGES.length
+    ) {
+      return null;
+    }
+    const labels = new Set();
+    for (let index = 0; index < length; index += 1) {
+      const label = value[index];
+      if (!READ_ONLY_SNAPSHOT_CHANGES.includes(label) || labels.has(label)) {
+        return null;
+      }
+      labels.add(label);
+    }
+    return Object.freeze(
+      READ_ONLY_SNAPSHOT_CHANGES.filter((label) => labels.has(label)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function readOnlyChanges(cause) {
+  try {
+    return cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED"
+      ? normalizeReadOnlySnapshotChanges(cause.changes)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -718,6 +763,7 @@ export function createGitService(options = {}) {
     contentFingerprint,
     inspectPath,
     preflight,
+    readOnlyChanges,
     reconcileInterrupted,
     inspectHead,
     materializeSource,

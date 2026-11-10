@@ -392,7 +392,7 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
       explanation:
         "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
-      evidence: [],
+      evidence: ["Changed snapshot domains: unavailable."],
       resumeState: null,
       nextActions: [
         {
@@ -402,6 +402,61 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       ],
     },
   );
+});
+
+test("contamination pauses publish only Git-normalized snapshot domains", () => {
+  const contamination = (snapshotChanges) =>
+    pausedRun({
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      ...(snapshotChanges === undefined ? {} : { snapshotChanges }),
+    });
+  const unavailable = ["Changed snapshot domains: unavailable."];
+  for (const [id, descriptor] of [
+    ["plan-execution", planExecutionApi.planExecutionPipeline],
+    ["polishing", polishingApi.polishingPipeline],
+  ]) {
+    const composed = getPipeline(id);
+    assert.ok(Object.isFrozen(composed));
+    assert.ok(Object.isFrozen(composed.projections));
+    assert.equal(
+      listPipelines().find((pipeline) => pipeline.id === id),
+      composed,
+    );
+    assert.notEqual(composed, descriptor);
+    assert.equal(composed.workflow, descriptor.workflow);
+
+    const projected = composed.projections.pause(
+      contamination(["head", "index"]),
+    );
+    assert.deepEqual(projected.evidence, [
+      "Changed snapshot domains: head, index.",
+    ]);
+    assert.equal(projected.reason, "read_only_agent_mutated_repository");
+    assert.equal(projected.code, "ERR_READ_ONLY_REPOSITORY_CHANGED");
+    assert.equal(projected.resumeState, null);
+    assert.deepEqual(projected.nextActions, [
+      { type: "start-new-run", requirement: "uncontaminated-worktree" },
+    ]);
+
+    for (const snapshotChanges of [
+      undefined,
+      ["unknown-domain"],
+      ["head", "unknown-domain"],
+      ["head", "head"],
+      ["head\nPrivate value"],
+      "head",
+    ]) {
+      assert.deepEqual(
+        composed.projections.pause(contamination(snapshotChanges)).evidence,
+        unavailable,
+      );
+    }
+    assert.deepEqual(
+      descriptor.projections.pause(contamination(["head", "index"])).evidence,
+      unavailable,
+    );
+  }
 });
 
 test("pipeline pause projections expose only applicable response and resume actions", () => {

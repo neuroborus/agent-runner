@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { getPipeline } from "../src/index.js";
 import { createWorkspaceService } from "../src/workspace/index.js";
 import {
   createExecutionAdapter,
@@ -699,9 +700,22 @@ test("terminal confirmation cannot mutate outputs or accept changed content", as
     },
   });
   const stopped = await f.run();
-  assert.equal(stopped.run.pause.reason, "read_only_agent_mutated_repository");
+  assert.deepEqual(stopped.run.pause, {
+    reason: "read_only_agent_mutated_repository",
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  });
+  const projected = getPipeline("plan-execution").projections.pause(
+    stopped.run,
+  );
+  assert.deepEqual(projected.evidence, [
+    "Changed snapshot domains: unavailable.",
+  ]);
+  assert.deepEqual(projected.nextActions, [
+    { type: "start-new-run", requirement: "uncontaminated-worktree" },
+  ]);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
   assert.equal(f.currentRun.pipelineState.customResults.accepted.length, 1);
+  assert.equal(await readFile(f.output, "utf8"), "Unexpected replacement.\n");
 });
 
 test("custom trusted validation binds the workspace bytes while semantic gates bind the result", async (t) => {

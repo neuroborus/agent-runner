@@ -6122,6 +6122,22 @@ function matchesRefinementOutputCheckpoint(state, pause) {
   );
 }
 
+// Structural shape only; the root-composed Git normalizer owns label meaning.
+export function snapshotChangeLabels(value) {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 8 &&
+    value.every((label) => typeof label === "string") &&
+    new Set(value).size === value.length
+    ? Object.freeze([...value])
+    : null;
+}
+
+export function snapshotChangeEvidence(value) {
+  const labels = snapshotChangeLabels(value);
+  return `Changed snapshot domains: ${labels === null ? "unavailable" : labels.join(", ")}.`;
+}
+
 export function assertRun(run) {
   if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
     const checkpoint = run.pause.operatorResume;
@@ -6332,6 +6348,20 @@ export function assertRun(run) {
         run.pause.reason.length === 0))
   ) {
     throw workflowError("Plan-execution pause state is invalid.");
+  }
+  if (
+    Object.hasOwn(run.pause ?? {}, "snapshotChanges") &&
+    (run.pause.reason !== "read_only_agent_mutated_repository" ||
+      run.pause.code !== "ERR_READ_ONLY_REPOSITORY_CHANGED" ||
+      snapshotChangeLabels(run.pause.snapshotChanges) === null ||
+      !isDeepStrictEqual(
+        snapshotChangeLabels(run.pause.snapshotChanges),
+        run.pause.snapshotChanges,
+      ))
+  ) {
+    throw workflowError(
+      "Plan-execution snapshot change diagnostics are invalid.",
+    );
   }
   if (
     state.writableResult !== null &&

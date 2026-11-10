@@ -20,7 +20,9 @@ Each role turn receives the narrowest access required by its phase:
 
 The runner snapshots content, index state, `HEAD`, branch or detached context,
 local refs, remotes, and Git identity around turns. Read-only mutation is a
-safety failure. Writable turns still reject index, history, ref, remote, or
+safety failure. Its contamination stop names only the fixed changed snapshot
+domains when Git classified them, never their values, and otherwise reports
+them as unavailable. Writable turns still reject index, history, ref, remote, or
 identity changes. The runner never discards unexpected user work
 automatically.
 

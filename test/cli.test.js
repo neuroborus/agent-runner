@@ -1421,9 +1421,11 @@ test("status renders input and fresh-run pause actions", async () => {
       pause: {
         reason: "read_only_agent_mutated_repository",
         code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+        snapshotChanges: ["head", "untracked-content"],
       },
       state: {},
       expected: /Abandon this run and start a fresh run/u,
+      alsoExpected: /Changed snapshot domains: head, untracked-content\./u,
     },
     {
       pause: {

@@ -207,6 +207,15 @@ unregistered classes and native text; `test/cli.test.js` owns the printed line.
 diagnosis, status and activity, classified and unclassified, without
 finalization acceptance, fingerprints, staging, retry or resume.
 
+Fast `test/git/repository-safety.test.js` owns the read-only snapshot-change
+label normalizer and real-Git `readOnlyChanges` classification;
+`test/state/persistence.test.js` owns durable label validation, including
+operator-retained pauses; and `test/pipeline-registry.test.js` owns composed
+and uncomposed contamination evidence. Polishing `mode-routing` and execution
+`clarification-and-bootstrap` own the guard-to-pause path, cold reload,
+activity and unchanged clearing; `test/runner-custom-execution.test.js` owns
+the Git-free unavailable stop.
+
 Fast `test/update.test.js` owns on-demand official identity gating, version
 ordering and explicit prereleases, no-update success, Node/configuration/state
 compatibility, registry/permission failure redaction and body bounds. Registry

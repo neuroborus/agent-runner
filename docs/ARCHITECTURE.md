@@ -13,7 +13,10 @@ root CLI/runtime ──static registry──▶ pipeline workspaces
 
 The root runner imports registered pipelines. Pipelines do not import the root
 application; the runner supplies state, event, agent, and Git services through a
-runtime context. Plan authoring and execution consume
+runtime context. The registry stores each descriptor as one frozen composed copy
+whose pause projection receives frozen root capabilities, currently only the
+Git-owned read-only snapshot-change normalizer; a direct uncomposed projection
+has no capability and fails closed. Plan authoring and execution consume
 `@agent-runner/commit-plan`; polishing has no shared-package dependency, and
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
@@ -1817,6 +1820,10 @@ saved logical checkpoint, and one null resume action. Provider-native
 diagnostics never participate in that projection.
 plan-execution finalization-backed `no_progress` exposes only the active
 finalization issue IDs and never their commands, problems, evidence, or paths.
+`read_only_agent_mutated_repository` projects exactly one evidence line,
+`Changed snapshot domains: <labels>.` from the composed Git normalizer, or
+`Changed snapshot domains: unavailable.` for absent, malformed, unknown, custom,
+directory, or legacy diagnostics; its persisted evidence and causes never cross.
 Plan execution also projects `finalization_transition_invalid` as a resumable
 `FINALIZE` checkpoint with a fixed bounded diagnostic when an unexpected
 runner-owned finalization invariant rejects advancement. The retained state
@@ -5841,3 +5848,16 @@ Every pipeline inherits non-negotiable runner controls:
 - no repository-local clarification artifact outside an already ignored path;
 - state outside target and task repositories;
 - explicit pause on unsafe or unrecoverable state.
+
+The Git capability alone defines the read-only snapshot change domains, in
+comparison order: `head`, `branch`, `refs`, `tracked-content`,
+`untracked-content`, `index`, `remote-configuration`, and `identity`. Its pure
+normalizer accepts only one to eight unique known labels and returns them in
+canonical order, otherwise `null`; the service's `readOnlyChanges(cause)`
+applies it only to `ERR_READ_ONLY_REPOSITORY_CHANGED` and runs no Git command.
+Polishing and plan execution persist the result as the optional
+`pause.snapshotChanges` of `read_only_agent_mutated_repository` only when their
+safety facade offers that accessor. Root pause validation, including pauses
+retained by operator stops, rejects any value the normalizer would change, and
+pipeline validation accepts it only on that reason and code. Absent labels mean
+the diagnosis is unavailable, so state versions are unchanged.

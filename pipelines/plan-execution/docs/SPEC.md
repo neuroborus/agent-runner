@@ -4001,7 +4001,12 @@ overridable finding receives its exact ID. `plan_revision_required` preserves
 the validated rationale and evidence but offers only revision of `plan.md` and
 a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
-worktree; it never accepts hybrid changes. `environment_blocked` preserves why
+worktree; it never accepts hybrid changes. Its one evidence line names the
+Git-classified changed snapshot domains retained as `snapshotChanges`, for
+example `Changed snapshot domains: head, index.`, and the activity message adds
+the same sentence. Custom and directory workspaces, legacy pauses, and
+unclassified or unknown labels report `unavailable`; input invalidation still
+clears approvals and grants no retry, commit, or resume. `environment_blocked` preserves why
 nondelegated work or finalization is blocked, its bounded evidence, and the
 exact retry checkpoint.
 For a finalization-backed `no_progress` pause, the descriptor derives immutable

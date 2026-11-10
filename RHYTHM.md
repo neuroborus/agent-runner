@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-10
 
+- **Read-only contamination stops keep their changed snapshot domains.** The
+  Git guard already reported finite changed domains, but polishing and plan
+  execution stored only the code, so their pauses could not say what changed.
+  The Git capability now owns the only label list and a total normalizer; both
+  pipelines persist the normalized labels as an optional pause field when their
+  safety facade classifies the cause, and the registry injects the normalizer
+  into pause projections so status, wait and CLI show one bounded line or
+  `unavailable`. Custom, directory, legacy and unknown causes stay unavailable
+  without Git inspection. Snapshot comparisons, guards, pause reasons, clearing,
+  recovery and state versions are unchanged. The historical changed domain and
+  root cause remain unknown, and no guard or model mutation is claimed.
+
 - **Claude protocol failures name the violated predicate.** Several Claude
   stream and adapter guards raised `ERR_CLAUDE_PROTOCOL` without a class, the
   stream merged distinct conditions into one flag, and the root boundary's
