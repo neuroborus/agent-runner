@@ -4172,7 +4172,10 @@ position, logical turn, and preceding pause. Resuming an already paused
 checkpoint restores its blockers and pending editor authorization without
 consuming them. Session reconstruction uses frozen roles, mode, settings, and
 source lineage; an interrupted role does not refork its source. `CANCELED` is
-terminal and inspectable, and every resume path rejects it.
+terminal and inspectable, and every resume path rejects it. A settled pause
+accepts only a fresh cancellation at its current revision; until reconciliation
+validation accepts that pending cancellation over the preserved pause checkpoint,
+which reconciliation wraps once as `operator_canceled` without provider work.
 
 Writable partial changes advance the baseline only after index, history/ref,
 remote, identity, and input checks pass. They invalidate dependent candidate,

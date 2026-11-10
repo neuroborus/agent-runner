@@ -424,11 +424,11 @@ After both fixes pass review and commit gates, follow the operator-owned
 before dependent work.
 
 Stop with `agent-run pause --run <run-id>` or `agent-run cancel --run <run-id>`.
-The shorthand reads status once and binds its revision to a fresh key.
-Automation supplies both `--expected-revision` and `--idempotency-key`; MCP uses
-`run_pause`/`run_cancel` with the same rule. Retry exact values without silently
-refreshing stale requests. Pause is resumable; cancellation is terminal and
-older intents cannot revive it. Requests survive disconnect/owner loss. Follow
+Shorthand binds one status revision to a new key. Automation passes both
+`--expected-revision` and `--idempotency-key`; MCP uses `run_pause`/`run_cancel`
+alike. Retry exact values; stale requests are never refreshed. A pause resumes
+or cancels with a fresh status revision and key; cancellation is terminal and
+old intents cannot revive it. Requests survive disconnect/owner loss. Follow
 status/wait while the owner or detached same-run continuation reconciles them.
 MCP waits for durable settlement or correlated child exit, not transient lease
 acquisition. Exit before settlement retains applicable, retryable recovery,

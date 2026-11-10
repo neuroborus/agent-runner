@@ -12,6 +12,7 @@ import {
   listPipelines,
   RUNTIME_COMPATIBILITY,
 } from "../src/index.js";
+import { createAdapter, operatorFixture, runnerFor } from "./support/index.js";
 
 test("detached compatibility canonically binds every pipeline state version", () => {
   const pipelines = listPipelines();
@@ -650,4 +651,86 @@ test("pipelines do not duplicate the shared validation API", () => {
   assert.equal("assertCommitSubject" in planAuthoringApi, false);
   assert.equal("assertCommitSubject" in planExecutionApi, false);
   assert.equal("assertCommitSubject" in polishingApi, false);
+});
+
+test("pipeline validators accept only a pending cancellation over a settled pause", async (t) => {
+  const settledPause = (run) => ({
+    ...run,
+    revision: run.revision + 2,
+    pipelineState: { ...run.pipelineState, workflowState: "WAITING_FOR_USER" },
+    pause: {
+      reason: "operator_paused",
+      resumeAction: null,
+      operatorResume: {
+        workflowState: run.pipelineState.workflowState,
+        pause: run.pause,
+        activeTurn: run.activeTurn,
+      },
+    },
+    stopRequest: {
+      requestId: "a".repeat(64),
+      kind: "pause_requested",
+      expectedRevision: run.revision,
+      acceptedRevision: run.revision + 1,
+      checkpoint: {
+        revision: run.revision,
+        workflowState: run.pipelineState.workflowState,
+        activeTurn: run.activeTurn,
+        resumeAction: null,
+      },
+      reconciledRevision: run.revision + 2,
+    },
+  });
+  const pendingStop = (run, kind, checkpoint = {}) => ({
+    ...run,
+    revision: run.revision + 1,
+    stopRequest: {
+      requestId: "b".repeat(64),
+      kind,
+      expectedRevision: run.revision,
+      acceptedRevision: run.revision + 1,
+      checkpoint: {
+        revision: run.revision,
+        workflowState: run.pipelineState.workflowState,
+        activeTurn: run.activeTurn,
+        resumeAction: null,
+        ...checkpoint,
+      },
+      reconciledRevision: null,
+    },
+  });
+  const fixture = await operatorFixture(t, "plan-execution");
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, {
+    codex: {
+      ...adapter,
+      probe: async (options) => ({
+        ...(await adapter.probe(options)),
+        declaredWorkspace: true,
+      }),
+    },
+  });
+  for (const pipeline of listPipelines()) {
+    const { run } = await runner.create({
+      pipelineId: pipeline.id,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    });
+    const { validateRun } = pipeline.workflow;
+    const paused = settledPause(run);
+    validateRun(paused);
+    validateRun(pendingStop(paused, "cancel_requested"));
+    if (pipeline.id === "audit") continue;
+    for (const invalid of [
+      pendingStop(paused, "pause_requested"),
+      pendingStop(paused, "cancel_requested", { workflowState: "CLARIFY" }),
+      {
+        ...pendingStop(paused, "cancel_requested"),
+        pipelineState: { ...paused.pipelineState, workflowState: "CANCELED" },
+        pause: { ...paused.pause, reason: "operator_canceled" },
+      },
+    ]) {
+      assert.throws(() => validateRun(invalid), /operator stop/iu);
+    }
+  }
 });

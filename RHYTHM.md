@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-11-10
 
+- **A settled operator pause can be canceled.** A model-free reproduction
+  showed that after a pause was reconciled and its lease released, a fresh
+  immediate cancellation at the exact current revision failed with
+  `ERR_STOP_PENDING`, because stop acceptance rejected every request over an
+  effective `operator_paused` checkpoint before distinguishing its kind. That
+  guard now rejects only repeated pauses. The accepted cancellation journals the
+  settled checkpoint while the run keeps its preserved pause, and the
+  plan-authoring, plan-execution, polishing and init validators accept exactly
+  that pending cancellation over a quiescent `WAITING_FOR_USER` checkpoint.
+  Runner reconciliation restores the underlying checkpoint before simulated
+  continuation, so settlement wraps its blocker, input authorization and
+  active-turn marker once as `operator_canceled`. Stale revisions, including the
+  old pause's inspected revision, terminal permanence, deferred-timing
+  eligibility, original receipt replay, normal pause resume and its strict
+  provider-policy probes are unchanged; cancellation runs no provider probe or
+  turn.
+
 - **Claude restricted-host shells keep their private temporary bookkeeping.**
   A model-free real-bubblewrap reproduction confirmed that Claude's shell
   exports a literal TMPDIR and writes its cwd receipt beneath the turn's private

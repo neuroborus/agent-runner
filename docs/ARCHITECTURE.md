@@ -3288,6 +3288,13 @@ Otherwise it reconstructs the preserved logical role from frozen configuration
 and session lineage only after reacquiring any required worktree lease.
 Invalidated content returns through the pipeline's
 candidate gate before further finalization. Cancellation cannot resume.
+A settled pause rejects further pauses but accepts a fresh cancellation at its
+current revision; the old pause's inspected revision grants no authority, and
+deferred timing keeps its existing eligibility. Until reconciliation the pending
+cancellation coexists with the preserved `operator_paused` checkpoint; the
+plan-authoring, plan-execution, polishing, and init validators accept exactly
+that combination. Reconciliation unwraps the checkpoint, retires owned work, and
+wraps the underlying state once as `operator_canceled` without provider probes.
 Cancellation superseding a pause during reconciliation changes only the final
 outcome; verification never replays an effect or counts its progress twice.
 Authorized clarification edits remain pending; stop reconciliation checks Git

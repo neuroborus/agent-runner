@@ -6138,6 +6138,21 @@ export function snapshotChangeEvidence(value) {
   return `Changed snapshot domains: ${labels === null ? "unavailable" : labels.join(", ")}.`;
 }
 
+// A settled pause retains its checkpoint until a fresh cancellation of exactly
+// that quiescent state is reconciled; cancellation itself must be reconciled.
+function operatorStopRequestValid(request, canceled) {
+  if (request == null) return false;
+  if (request.reconciledRevision !== null)
+    return request.kind === (canceled ? "cancel_requested" : "pause_requested");
+  return (
+    !canceled &&
+    request.kind === "cancel_requested" &&
+    request.checkpoint.revision < request.acceptedRevision &&
+    request.checkpoint.workflowState === "WAITING_FOR_USER" &&
+    request.checkpoint.activeTurn === null
+  );
+}
+
 export function assertRun(run) {
   if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
     const checkpoint = run.pause.operatorResume;
@@ -6157,10 +6172,7 @@ export function assertRun(run) {
       run.pause.resumeAction !== null ||
       run.pipelineState?.workflowState !==
         (canceled ? "CANCELED" : "WAITING_FOR_USER") ||
-      run.stopRequest == null ||
-      run.stopRequest.reconciledRevision === null ||
-      run.stopRequest.kind !==
-        (canceled ? "cancel_requested" : "pause_requested")
+      !operatorStopRequestValid(run.stopRequest, canceled)
     ) {
       throw workflowError("Operator stop checkpoint is invalid.");
     }

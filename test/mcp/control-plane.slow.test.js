@@ -43,6 +43,7 @@ import {
 } from "../../src/agents/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+import { createAdapter, operatorFixture, runnerFor } from "../support/index.js";
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -1466,6 +1467,77 @@ test("persists stop receipts and projects pending stops without replacing a live
       effectiveTiming: "immediate",
       targetStep: null,
     },
+  );
+});
+
+test("MCP cancels a settled pause through validated detached reconciliation", async (t) => {
+  const fixture = await operatorFixture(t, "plan-authoring");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, { codex: adapter }, { runStore: store });
+  const { run } = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  const launches = [];
+  const control = createMcpControlPlane({
+    runner,
+    runStore: store,
+    async launchRun(runId, action, options) {
+      launches.push(options.stopCheckpointRevision);
+      // The in-process child receives the same input as a detached CLI resume.
+      await runner.resume({
+        runId,
+        action,
+        dispatch: options.dispatch,
+        stopCheckpointRevision: options.stopCheckpointRevision,
+        expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+      });
+      options.onExit(0, null);
+    },
+  });
+  const pauseInput = {
+    runId: run.runId,
+    expectedRevision: run.revision,
+    idempotencyKey: "pause-key",
+  };
+  const pause = await control.runPause(pauseInput);
+  const paused = await store.loadRun(run.runId);
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.notEqual(paused.stopRequest.reconciledRevision, null);
+  const cancelInput = {
+    runId: run.runId,
+    expectedRevision: paused.revision,
+    idempotencyKey: "cancel-key",
+  };
+  await assert.rejects(
+    control.runCancel({
+      ...cancelInput,
+      expectedRevision: pause.expectedRevision,
+      idempotencyKey: "stale-cancel",
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
+  );
+
+  const cancel = await control.runCancel(cancelInput);
+  assert.equal(cancel.revision, paused.revision + 1);
+  const canceled = await store.loadRun(run.runId);
+  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+  assert.equal(canceled.pause.reason, "operator_canceled");
+  assert.deepEqual(canceled.pause.operatorResume, paused.pause.operatorResume);
+  assert.deepEqual(launches, [pause.expectedRevision, paused.revision]);
+  assert.equal(adapter.calls.length, 0);
+  assert.deepEqual(await control.runPause(pauseInput), pause);
+  assert.deepEqual(await control.runCancel(cancelInput), cancel);
+  assert.equal(launches.length, 2);
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: canceled.revision,
+      idempotencyKey: "late-pause",
+    }),
+    { code: "ERR_RUN_TERMINAL" },
   );
 });
 

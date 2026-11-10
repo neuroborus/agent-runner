@@ -1008,6 +1008,114 @@ test("operator pause over existing pending input restores the blocker without co
   assert.equal(delegate.calls.length, calls);
 });
 
+test("ownerless cancellation of a settled pause reconciles its blocker without provider work", async (t) => {
+  const fixture = await operatorFixture(t, "plan-authoring");
+  const delegate = createAdapter({ questionFirst: true });
+  const original = (
+    await runnerFor(fixture, { codex: delegate }).run({
+      pipelineId: "plan-authoring",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    })
+  ).run;
+  const runId = original.runId;
+  const pause = {
+    runId,
+    kind: "pause_requested",
+    expectedRevision: original.revision,
+    idempotencyKey: "pause",
+  };
+  const pauseReceipt = await runnerFor(fixture, {
+    codex: delegate,
+  }).requestOperatorStop(pause);
+  const paused = (
+    await runnerFor(fixture, { codex: delegate }).resume({
+      runId,
+      action: null,
+    })
+  ).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  const gitState = () =>
+    Promise.all(
+      [
+        ["rev-parse", "HEAD"],
+        ["for-each-ref"],
+        ["ls-files", "--stage"],
+        ["remote", "-v"],
+        ["status", "--porcelain", "--ignored"],
+      ].map(
+        async (args) =>
+          (await executeFile("git", ["-C", fixture.projectPath, ...args]))
+            .stdout,
+      ),
+    );
+  const gitBefore = await gitState();
+  const delegateCalls = delegate.calls.length;
+  // A changed provider policy must not block cancellation of the checkpoint.
+  const providerCalls = [];
+  const changed = runnerFor(fixture, {
+    codex: {
+      ...delegate,
+      async probe() {
+        providerCalls.push("probe");
+        throw new Error("Provider policy changed.");
+      },
+      async run() {
+        providerCalls.push("run");
+        throw new Error("Provider policy changed.");
+      },
+    },
+  });
+  const cancel = {
+    runId,
+    kind: "cancel_requested",
+    expectedRevision: paused.revision,
+    idempotencyKey: "cancel",
+  };
+  const cancelReceipt = await changed.requestOperatorStop(cancel);
+  assert.equal(cancelReceipt.revision, paused.revision + 1);
+  const pending = (await changed.status(runId)).run;
+  assert.deepEqual(pending.pause, paused.pause);
+  assert.equal(pending.stopRequest.kind, "cancel_requested");
+  assert.equal(pending.stopRequest.reconciledRevision, null);
+  assert.deepEqual(await changed.requestOperatorStop(cancel), cancelReceipt);
+
+  const canceled = (await changed.resume({ runId, action: null })).run;
+  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+  assert.equal(canceled.pause.reason, "operator_canceled");
+  assert.deepEqual(canceled.pause.operatorResume, {
+    workflowState: "WAITING_FOR_USER",
+    pause: original.pause,
+    activeTurn: null,
+  });
+  assert.deepEqual(canceled.pipelineState, {
+    ...paused.pipelineState,
+    workflowState: "CANCELED",
+  });
+  for (const field of [
+    "hashes",
+    "roles",
+    "providerPolicies",
+    "sessionLineage",
+    "counters",
+    "preservationRecords",
+  ])
+    assert.deepEqual(canceled[field], paused[field]);
+  assert.deepEqual(providerCalls, []);
+  assert.equal(delegate.calls.length, delegateCalls);
+  assert.deepEqual(await gitState(), gitBefore);
+  assert.deepEqual(await changed.requestOperatorStop(pause), pauseReceipt);
+  assert.deepEqual(await changed.requestOperatorStop(cancel), cancelReceipt);
+  await assert.rejects(changed.resume({ runId, action: null }), {
+    code: "ERR_RUN_CANCELED",
+  });
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  await (await store.acquireRunLease(runId)).release();
+  await (
+    await store.acquireWorktreeLease(fixture.projectPath, runId)
+  ).release();
+});
+
 test("operator cancellation racing a consumed commit verifies and records its effect exactly once", async () => {
   const fixture = await executionLifecycle.commit.restore();
   const store = createRunStore({ stateRoot: fixture.stateRoot });

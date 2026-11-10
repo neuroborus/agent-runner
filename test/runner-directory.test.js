@@ -7,6 +7,7 @@ import {
   mkdtemp,
   lstat,
   readFile,
+  readdir,
   readlink,
   rename,
   rm,
@@ -824,32 +825,60 @@ test("directory outputs cannot enter nested worktrees with a different exclusion
   }
 });
 
-test("directory stop reconciliation preserves the checkpoint and resumes without Git", async (t) => {
-  const f = await fixture(t);
-  let reconciliations = 0;
-  const runner = f.runner(async ({ run, runtime, operatorStop }) => {
-    if (operatorStop) {
-      reconciliations += 1;
-      return run;
-    }
-    return runtime.transition({
-      pipelineState: { ...run.pipelineState, workflowState: "COMPLETED" },
+test("directory stop reconciliation preserves the checkpoint and resumes or cancels without Git", async (t) => {
+  for (const cancel of [false, true]) {
+    const f = await fixture(t);
+    const reconciled = [];
+    const runner = f.runner(async ({ run, runtime, operatorStop }) => {
+      if (operatorStop) {
+        reconciled.push(run.pipelineState.workflowState);
+        return run;
+      }
+      return runtime.transition({
+        pipelineState: { ...run.pipelineState, workflowState: "COMPLETED" },
+      });
     });
-  });
-  const { run } = await runner.create(f.input);
-  await f.store.requestOperatorStop({
-    runId: run.runId,
-    kind: "pause_requested",
-    expectedRevision: run.revision,
-    idempotencyKey: "pause-directory",
-  });
-  const paused = (await runner.resume({ runId: run.runId })).run;
-  assert.equal(paused.pause.reason, "operator_paused");
-  assert.equal(reconciliations, 1);
-  assert.equal(
-    (await runner.resume({ runId: run.runId })).run.pipelineState.workflowState,
-    "COMPLETED",
-  );
+    const { run } = await runner.create(f.input);
+    await f.store.requestOperatorStop({
+      runId: run.runId,
+      kind: "pause_requested",
+      expectedRevision: run.revision,
+      idempotencyKey: "pause-directory",
+    });
+    const paused = (await runner.resume({ runId: run.runId })).run;
+    assert.equal(paused.pause.reason, "operator_paused");
+    assert.deepEqual(reconciled, ["CLARIFY"]);
+    if (!cancel) {
+      assert.equal(
+        (await runner.resume({ runId: run.runId })).run.pipelineState
+          .workflowState,
+        "COMPLETED",
+      );
+      continue;
+    }
+    const probes = f.probes.length;
+    await f.store.requestOperatorStop({
+      runId: run.runId,
+      kind: "cancel_requested",
+      expectedRevision: paused.revision,
+      idempotencyKey: "cancel-directory",
+    });
+    const canceled = (await runner.resume({ runId: run.runId })).run;
+    assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+    assert.deepEqual(
+      canceled.pause.operatorResume,
+      paused.pause.operatorResume,
+    );
+    assert.deepEqual(canceled.workspace, paused.workspace);
+    assert.deepEqual(reconciled, ["CLARIFY", "CLARIFY"]);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.probes.length, probes);
+    assert.deepEqual(await readdir(f.projectPath), ["input.txt"]);
+    assert.equal(
+      await readFile(join(f.projectPath, "input.txt"), "utf8"),
+      "frozen input\n",
+    );
+  }
 });
 
 test("a stop accepted during output preflight prevents allocation and publication", async (t) => {

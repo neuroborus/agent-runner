@@ -354,6 +354,10 @@ export async function reconcileOperatorStop({
   await publish(activity, current);
 
   onRecoveryStage("checkpoint-continuation");
+  // Cancelling a settled pause reconciles its underlying checkpoint so that
+  // settlement wraps it once rather than nesting operator checkpoints.
+  if (current.pause?.reason === "operator_paused")
+    current = { ...current, ...restoreOperatorPause(current) };
   const simulated =
     current.workspacePreparation == null
       ? reconciliationRuntime(runtime, current)
