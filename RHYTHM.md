@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-11
 
+- **Reviewed handoffs have standing local commit and installation approval.**
+  After successful Runner finalization and review cover the entire unchanged
+  staged change set, the supervising operator may create the local commit
+  without another confirmation, including after `polishing`. The user has also
+  authorized global installation of verified fixes after their checks and local
+  commit. These are separate operator actions; pipeline permissions, the
+  uncommitted polishing handoff, user configuration, durable runs and the remote
+  write prohibition remain unchanged. `AGENTS.md` owns this standing authorization.
+
 - **Claude authorizes workspace Bash through the proved sandbox.** Git
   workspace-write turns disabled sandbox auto-allow under shell classification.
   Claude 2.1.322 still admitted native read-only inspection and the filesystem
