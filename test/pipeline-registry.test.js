@@ -340,6 +340,10 @@ test("every pipeline projects bounded adapter diagnostics", () => {
     for (const [code, diagnosticClass] of [
       ["ERR_CODEX_ISOLATION", "operation_multi_agent"],
       ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+      [
+        "ERR_CLAUDE_PERMISSION_DENIED",
+        "permission_reason_auto_mode_stop_no_verdict",
+      ],
     ])
       assert.deepEqual(
         getPipeline(pipelineId).projections.pause(

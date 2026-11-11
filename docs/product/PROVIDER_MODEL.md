@@ -425,6 +425,7 @@ established from structured native `permission_denials`:
 | `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                                             |
 | `permission_bash_unclassified`   | An exposed Bash command is neither a recognized safe inspection nor an inventory command; its reason is unknown. |
 | `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                                          |
+| `permission_reason_<code>`       | Every non-safe Bash denial has the same uniquely matched closed native refusal reason `<code>`.                  |
 | `permission_bash_required_check` | An exposed Bash command is exactly equal to a command of the turn's Runner-persisted required-check inventory.   |
 | `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.                         |
 | `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted.                  |
@@ -454,6 +455,27 @@ command, stays terminal, and is hidden by any unexposed, unclassified Bash, or
 malformed entry in the same batch. An older `permission_bash_unclassified`
 record keeps its terminal meaning and is not read as a denial of a command
 outside the inventory.
+
+Claude may also emit a best-effort `system/permission_denied` event with a
+closed `decision_reason_code`: `classifier_transcript_too_long`,
+`outside_reads_blocked`, `memory_paused`, `auto_mode_no_check_in_session`,
+`auto_mode_stop_no_check_in_session`, `auto_mode_stop_no_result_for_calls`, or
+`auto_mode_stop_no_verdict`. The authoritative `permission_denials` batch can
+take a reason only when every entry has a valid `tool_use_id` that no other
+entry repeats. Each non-safe Bash denial then needs exactly one pre-result
+event in the same session with its id, its tool name, no subagent id, and a
+recognized code; the match is re-checked after the stream ends, so a later
+protocol violation, identity uncertainty, result-session mismatch, or
+continuation or fork-lineage mismatch discards it. When every such denial has
+the same code, the batch is `permission_reason_<code>`; any missing, unknown,
+duplicate, conflicting, mixed, or unbound evidence keeps the operation class.
+In table order the reason class replaces unclassified Bash and ranks above the
+required-check label, but never hides an unexposed or malformed entry. It names
+only the native reason: it identifies no operation and claims no legitimacy,
+policy fault, executed effect, or historical command, stays terminal, and grants
+no retry, approval, or backend change. Native free-text reasons are never read
+or retained. Records that predate reason classes are not read as having no
+reason.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.

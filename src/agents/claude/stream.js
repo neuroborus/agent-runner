@@ -11,6 +11,7 @@ const DELTA_FIELDS = new Map([
 ]);
 const identifier = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 512;
+export { identifier as isClaudeIdentifier };
 // Each class names only the protocol predicate its guard proved violated.
 export const CLAUDE_PROTOCOL_DIAGNOSTICS = Object.freeze({
   invalidJson: "protocol_invalid_json",
@@ -32,6 +33,20 @@ export const CLAUDE_PROTOCOL_DIAGNOSTICS = Object.freeze({
   observerFailed: "protocol_observer_failed",
 });
 const DIAGNOSTICS = CLAUDE_PROTOCOL_DIAGNOSTICS;
+// Closed native decision_reason_code values; free-text reasons are never read.
+export const CLAUDE_PERMISSION_REASON_CODES = Object.freeze([
+  "classifier_transcript_too_long",
+  "outside_reads_blocked",
+  "memory_paused",
+  "auto_mode_no_check_in_session",
+  "auto_mode_stop_no_check_in_session",
+  "auto_mode_stop_no_result_for_calls",
+  "auto_mode_stop_no_verdict",
+]);
+const PERMISSION_REASON_CODES = new Set(CLAUDE_PERMISSION_REASON_CODES);
+const MAX_PERMISSION_REASONS = 16_384;
+// A repeated event leaves its tool call without a known code.
+const CONFLICTING_REASON = Object.freeze({});
 
 export function createClaudeStream(
   onProgress,
@@ -44,6 +59,8 @@ export function createClaudeStream(
   const blocks = new Map();
   const commands = new Set();
   const tasks = new Set();
+  const permissionReasons = new Map();
+  let permissionReasonsOverflowed = false;
   let sessionId;
   let identityUncertain = false;
   let messageId;
@@ -117,6 +134,24 @@ export function createClaudeStream(
     )
       return;
     if (record.type === "system") {
+      if (
+        record.subtype === "permission_denied" &&
+        identifier(record.tool_use_id)
+      ) {
+        if (permissionReasons.has(record.tool_use_id))
+          permissionReasons.set(record.tool_use_id, CONFLICTING_REASON);
+        else if (permissionReasons.size >= MAX_PERMISSION_REASONS)
+          permissionReasonsOverflowed = true;
+        else
+          permissionReasons.set(record.tool_use_id, {
+            toolName: record.tool_name,
+            code:
+              !Object.hasOwn(record, "agent_id") &&
+              PERMISSION_REASON_CODES.has(record.decision_reason_code)
+                ? record.decision_reason_code
+                : undefined,
+          });
+      }
       if (
         record.subtype === "compact_boundary" &&
         identifier(record.uuid) &&
@@ -325,6 +360,21 @@ export function createClaudeStream(
         (selectedSession?.mode !== "continue" || id === selectedSession.id) &&
         (selectedSession?.mode !== "fork" || id !== selectedSession.id)
         ? id
+        : undefined;
+    },
+    // Re-binds a cached reason to the final stream state; unknown otherwise.
+    permissionReason(expectedSessionId, toolUseId, toolName) {
+      const id = this.sessionId;
+      const entry = permissionReasons.get(toolUseId);
+      return finished &&
+        !permissionReasonsOverflowed &&
+        id !== undefined &&
+        id === payload?.session_id &&
+        id === expectedSessionId &&
+        entry?.code !== undefined &&
+        typeof toolName === "string" &&
+        entry.toolName === toolName
+        ? entry.code
         : undefined;
     },
     get hasRecords() {

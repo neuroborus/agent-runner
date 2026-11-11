@@ -457,6 +457,7 @@ test("registry keeps every non-capability permission class terminal and redacted
     "permission_tool_unexposed",
     "permission_bash_unclassified",
     "permission_bash_required_check",
+    "permission_reason_auto_mode_stop_no_verdict",
     "permission_forbidden_operation",
   ]) {
     assert.ok(

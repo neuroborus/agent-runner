@@ -34,7 +34,12 @@ import {
 } from "./local-commit.js";
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
-import { CLAUDE_PROTOCOL_DIAGNOSTICS, createClaudeStream } from "./stream.js";
+import {
+  CLAUDE_PERMISSION_REASON_CODES,
+  CLAUDE_PROTOCOL_DIAGNOSTICS,
+  createClaudeStream,
+  isClaudeIdentifier,
+} from "./stream.js";
 import { createClaudeObservations } from "./observations.js";
 import {
   directoryPolicyError,
@@ -50,6 +55,15 @@ const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 233]);
 const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
+// Each class names only a matched closed native reason code.
+const PERMISSION_REASON_CLASSES = Object.freeze(
+  Object.fromEntries(
+    CLAUDE_PERMISSION_REASON_CODES.map((code) => [
+      code,
+      `permission_reason_${code}`,
+    ]),
+  ),
+);
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
   "isolation_workspace_policy",
@@ -71,6 +85,7 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "permission_forbidden_operation",
   "permission_tool_unexposed",
   "permission_unclassified",
+  ...Object.values(PERMISSION_REASON_CLASSES),
   "provider_unavailable",
   "read_only_execution_failed",
   "read_only_process_failed",
@@ -236,6 +251,7 @@ const PERMISSION_DIAGNOSTIC_PRECEDENCE = Object.freeze([
   "permission_tool_unexposed",
   "permission_bash_unclassified",
   "permission_unclassified",
+  ...Object.values(PERMISSION_REASON_CLASSES),
   "permission_bash_required_check",
 ]);
 const ERROR_RESULT_SUBTYPES = new Set([
@@ -1088,12 +1104,18 @@ function isClaudeErrorResult(payload) {
   );
 }
 
-function permissionDiagnostic(denials, request) {
+function permissionDiagnostic(denials, request, sessionId, stream) {
   const permittedTools = new Set(
     accessConfigurationFor(request).tools.split(","),
   );
   const requiredChecks = new Set(request.requiredCheckCommands);
   const facts = new Set();
+  // Reasons need one valid, unique authoritative id for every denial.
+  const toolUseIds = denials.map((denial) => denial?.tool_use_id);
+  const ownedIds =
+    toolUseIds.every(isClaudeIdentifier) &&
+    new Set(toolUseIds).size === toolUseIds.length;
+  const reasons = [];
   for (const denial of denials) {
     if (!isRecord(denial) || typeof denial.tool_name !== "string") {
       facts.add("permission_unclassified");
@@ -1112,8 +1134,24 @@ function permissionDiagnostic(denials, request) {
             ? "permission_bash_required_check"
             : "permission_bash_unclassified",
         );
+        reasons.push(
+          stream.permissionReason(
+            sessionId,
+            denial.tool_use_id,
+            denial.tool_name,
+          ),
+        );
       }
     }
+  }
+  // Only one matched code shared by every non-safe Bash denial names a reason.
+  if (
+    ownedIds &&
+    reasons.length > 0 &&
+    reasons.every((code) => code !== undefined && code === reasons[0])
+  ) {
+    facts.delete("permission_bash_unclassified");
+    facts.add(PERMISSION_REASON_CLASSES[reasons[0]]);
   }
   return (
     PERMISSION_DIAGNOSTIC_PRECEDENCE.find((diagnosticClass) =>
@@ -1122,8 +1160,13 @@ function permissionDiagnostic(denials, request) {
   );
 }
 
-function permissionError(denials, request, sessionId) {
-  const diagnosticClass = permissionDiagnostic(denials, request);
+function permissionError(denials, request, sessionId, stream) {
+  const diagnosticClass = permissionDiagnostic(
+    denials,
+    request,
+    sessionId,
+    stream,
+  );
   return diagnosticError("Claude requested denied permission.", {
     code: "ERR_CLAUDE_PERMISSION_DENIED",
     diagnosticClass,
@@ -1164,7 +1207,7 @@ function validateRequestedModel(payload, model) {
   }
 }
 
-function normalizeResult(payload, request, session) {
+function normalizeResult(payload, request, session, stream) {
   const schema = outputSchemaFor(request);
   const hasValidOutput =
     typeof payload?.result === "string"
@@ -1181,7 +1224,12 @@ function normalizeResult(payload, request, session) {
         diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
       });
     }
-    throw permissionError(payload.permission_denials, request, sessionId);
+    throw permissionError(
+      payload.permission_denials,
+      request,
+      sessionId,
+      stream,
+    );
   }
   if (isClaudeErrorResult(payload)) {
     throw outputError(payload, request, session);
@@ -1837,7 +1885,12 @@ export function createClaudeAdapter(options = {}) {
                 CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
             });
           }
-          throw permissionError(payload.permission_denials, request, sessionId);
+          throw permissionError(
+            payload.permission_denials,
+            request,
+            sessionId,
+            stream,
+          );
         }
         if (!isClaudeErrorResult(payload)) {
           // Only the exact success envelope proves success after a failed exit.
@@ -1879,7 +1932,7 @@ export function createClaudeAdapter(options = {}) {
         stream.assertValid();
       if (isClaudeErrorResult(payload) && !payload.permission_denials?.length)
         await acknowledgeChild(payloadSessionId(payload), "unavailable");
-      const result = normalizeResult(payload, request, selectedSession);
+      const result = normalizeResult(payload, request, selectedSession, stream);
       if (
         selectedSession?.mode === "fork" &&
         result.sessionId === selectedSession.id

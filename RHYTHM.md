@@ -7,6 +7,21 @@ remain in the owning documentation.
 
 ## 2026-11-11
 
+- **Claude retains matched native permission refusal reasons.** Claude 2.1.322
+  emits a best-effort `system/permission_denied` event whose closed
+  `decision_reason_code` names a reason a host can act on, but the stream
+  ignored it, so a denied operation's matched reason was lost. The stream now
+  keeps only the tool name and a recognized code per `tool_use_id`, never free
+  text, and answers lookups only after the stream ends with no protocol
+  violation, identity uncertainty, or session or lineage mismatch. A batch
+  becomes the terminal `permission_reason_<code>` class only when every denial
+  has a valid unique id and every non-safe Bash denial has the same matched
+  code; otherwise the operation classes stand. The class replaces unclassified
+  Bash and outranks the required-check label, never an unexposed or malformed
+  entry, and adds no retry, approval or backend change. It claims no operation,
+  legitimacy, policy fault or historical command; the reported historical
+  refusal stays unattributed, and older records are not read as reasonless.
+
 - **Claude labels denials of exact required-check commands.** A denied project
   check, such as a documentation check, could only be reported as
   `permission_bash_unclassified` because the adapter never received the

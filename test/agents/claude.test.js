@@ -49,6 +49,10 @@ import {
 } from "../../src/agents/claude/command-launcher.js";
 import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
 import {
+  CLAUDE_PERMISSION_REASON_CODES as CLAUDE_REASON_CODES,
+  createClaudeStream,
+} from "../../src/agents/claude/stream.js";
+import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
@@ -5627,6 +5631,313 @@ test("accepts a bounded required-check inventory unchanged", async () => {
     ),
   );
   assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("classifies Claude permission denials by uniquely matched native reasons", async (t) => {
+  const bash = (command, id) => ({
+    tool_name: "Bash",
+    tool_use_id: id,
+    tool_input: { command },
+  });
+  const unknown = bash("touch generated.txt", "call-1");
+  const other = bash("touch other.txt", "call-2");
+  const requiredCommand = "npm run synthetic-docs-check";
+  const required = bash(requiredCommand, "call-3");
+  const reason = (fields = {}) => ({
+    type: "system",
+    subtype: "permission_denied",
+    session_id: FRESH_SESSION,
+    tool_name: "Bash",
+    tool_use_id: "call-1",
+    decision_reason_type: "classifier",
+    decision_reason_code: "memory_paused",
+    decision_reason: "PRIVATE_REASON",
+    message: "PRIVATE_MESSAGE",
+    uuid: "private-uuid",
+    ...fields,
+  });
+  const init = (sessionId = FRESH_SESSION) => ({
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+  });
+  const fallback = "permission_bash_unclassified";
+  for (const [name, records, denials, diagnosticClass, options = {}] of [
+    ...CLAUDE_REASON_CODES.map((code) => [
+      `matched ${code}`,
+      [reason({ decision_reason_code: code })],
+      [unknown],
+      `permission_reason_${code}`,
+    ]),
+    ["missing event", [], [unknown], fallback],
+    ["mismatched id", [reason({ tool_use_id: "call-9" })], [unknown], fallback],
+    ["mismatched tool", [reason({ tool_name: "Read" })], [unknown], fallback],
+    [
+      "another session",
+      [reason({ session_id: CHILD_SESSION })],
+      [unknown],
+      fallback,
+    ],
+    ["after result", [], [unknown], fallback, { after: [reason()] }],
+    ["subagent event", [reason({ agent_id: "agent-1" })], [unknown], fallback],
+    ["duplicate event", [reason(), reason()], [unknown], fallback],
+    [
+      "conflicting events",
+      [reason(), reason({ decision_reason_code: "outside_reads_blocked" })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "absent code",
+      [reason({ decision_reason_code: undefined })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "unrecognized code",
+      [reason({ decision_reason_code: "synthetic_code" })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "non-string code",
+      [reason({ decision_reason_code: 1 })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "mixed codes",
+      [
+        reason(),
+        reason({
+          tool_use_id: "call-2",
+          decision_reason_code: "outside_reads_blocked",
+        }),
+      ],
+      [unknown, other],
+      fallback,
+    ],
+    [
+      "uniform codes",
+      [reason(), reason({ tool_use_id: "call-2" })],
+      [unknown, other],
+      "permission_reason_memory_paused",
+    ],
+    [
+      "overflow",
+      [
+        reason(),
+        ...Array.from({ length: 16_384 }, (_, index) =>
+          reason({ tool_use_id: `overflow-${index}` }),
+        ),
+      ],
+      [unknown],
+      fallback,
+    ],
+    [
+      "later result-session mismatch",
+      [reason()],
+      [unknown],
+      fallback,
+      { resultSession: CHILD_SESSION },
+    ],
+    [
+      "conflicting initialization",
+      [reason(), init(CHILD_SESSION)],
+      [unknown],
+      fallback,
+    ],
+    ["protocol corruption", [reason(), "bad-json"], [unknown], fallback],
+    [
+      "mismatched continuation",
+      [reason()],
+      [unknown],
+      fallback,
+      { session: { id: SOURCE_SESSION, mode: "continue" } },
+    ],
+    [
+      "mismatched fork lineage",
+      [reason()],
+      [unknown],
+      fallback,
+      { session: { id: FRESH_SESSION, mode: "fork" } },
+    ],
+    [
+      "shared id, first command matched",
+      [reason()],
+      [unknown, bash("touch other.txt", "call-1")],
+      fallback,
+    ],
+    [
+      "shared id, second command matched",
+      [reason()],
+      [bash("touch other.txt", "call-1"), unknown],
+      fallback,
+    ],
+    [
+      "id shared with another tool",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_use_id: "call-1", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "missing id",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "invalid id",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_use_id: "", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "unexposed tool",
+      [reason()],
+      [
+        unknown,
+        { tool_name: "WebFetch", tool_use_id: "call-2", tool_input: {} },
+      ],
+      "permission_tool_unexposed",
+    ],
+    [
+      "malformed entry",
+      [reason()],
+      [unknown, { tool_use_id: "call-2" }],
+      "permission_unclassified",
+    ],
+    [
+      "required check with the same reason",
+      [reason(), reason({ tool_use_id: "call-3" })],
+      [unknown, required],
+      "permission_reason_memory_paused",
+      { requiredCheckCommands: [requiredCommand] },
+    ],
+    [
+      "required check without a reason",
+      [reason({ tool_use_id: "call-3", decision_reason_code: undefined })],
+      [required],
+      "permission_bash_required_check",
+      { requiredCheckCommands: [requiredCommand] },
+    ],
+    [
+      "safe inspection beside a reason",
+      [reason()],
+      [bash("git status --short", "call-2"), unknown],
+      "permission_reason_memory_paused",
+    ],
+  ])
+    for (const failed of [false, true])
+      await t.test(`${name} (${failed ? "failed" : "completed"})`, async () => {
+        const events = [];
+        const payload = result({
+          error: failed,
+          permission_denials: denials,
+          ...(options.resultSession === undefined
+            ? {}
+            : { sessionId: options.resultSession }),
+        });
+        const stdout = [init(), ...records, payload, ...(options.after ?? [])]
+          .map((record) =>
+            typeof record === "string" ? record : JSON.stringify(record),
+          )
+          .join("\n");
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (failed)
+              throw Object.assign(new Error("process failed"), {
+                stdout,
+                stderr: "",
+              });
+            return { stdout, stderr: "" };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access: "workspace-write",
+              onProgress: (event) => events.push(event),
+              onObservation: (event) => events.push(event),
+              ...(options.session === undefined
+                ? {}
+                : { session: options.session }),
+              ...(options.requiredCheckCommands === undefined
+                ? {}
+                : { requiredCheckCommands: options.requiredCheckCommands }),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic(
+                "ERR_CLAUDE_PERMISSION_DENIED",
+                diagnosticClass,
+              )(error),
+            );
+            assert.equal(error.recoverable, false);
+            assert.deepEqual(error.failure, {
+              failureClass: diagnosticClass,
+              checkpoint: "turn",
+              outcome: "rejected",
+              effect: "possible",
+              retry: "terminal",
+            });
+            const normalized = normalizeAdapterFailure("claude", error);
+            assert.equal(normalized.diagnosticClass, diagnosticClass);
+            assert.equal(normalized.recoverable, false);
+            assert.doesNotMatch(
+              `${error.message}${JSON.stringify(normalized)}${JSON.stringify(events)}`,
+              /PRIVATE_|private-uuid|touch|generated|synthetic|call-|agent-1/u,
+            );
+            return true;
+          },
+        );
+        assert.equal(turnCalls(fixture).length, 1);
+      });
+});
+
+test("binds a cached Claude permission reason only to the finished stream", () => {
+  const stream = createClaudeStream(
+    undefined,
+    () => new Error("protocol"),
+    undefined,
+    undefined,
+  );
+  stream.write(
+    [
+      { type: "system", subtype: "init", session_id: FRESH_SESSION },
+      {
+        type: "system",
+        subtype: "permission_denied",
+        session_id: FRESH_SESSION,
+        tool_name: "Bash",
+        tool_use_id: "call-1",
+        decision_reason_code: "memory_paused",
+      },
+      result({ permission_denials: [] }),
+    ]
+      .map((record) => `${JSON.stringify(record)}\n`)
+      .join(""),
+  );
+  assert.ok(Object.isFrozen(stream));
+  assert.equal(
+    stream.permissionReason(FRESH_SESSION, "call-1", "Bash"),
+    undefined,
+  );
+  stream.finish();
+  assert.equal(
+    stream.permissionReason(FRESH_SESSION, "call-1", "Bash"),
+    "memory_paused",
+  );
+  for (const [sessionId, id, tool] of [
+    [CHILD_SESSION, "call-1", "Bash"],
+    [FRESH_SESSION, "call-2", "Bash"],
+    [FRESH_SESSION, "call-1", "Read"],
+    [FRESH_SESSION, "call-1", undefined],
+  ])
+    assert.equal(stream.permissionReason(sessionId, id, tool), undefined);
 });
 
 test("rejects permission fallback and explicit model rerouting", async (t) => {

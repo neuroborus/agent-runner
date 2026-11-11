@@ -4051,6 +4051,16 @@ the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
 result or a post-result assistant, user, or stream-event record still rejects,
 and other trailing system records keep their existing handling.
+Before the result, a session-matched `system/permission_denied` event with a
+valid `tool_use_id` records only its tool name and a closed
+`decision_reason_code`; an absent, unrecognized or non-string code, or an
+`agent_id`, records an unknown reason, a repeated id records a conflict, and
+more than 16,384 ids make every reason unknown without failing the stream. Free
+text such as `decision_reason`, `message` and `uuid` is never read. The frozen
+`permissionReason` lookup answers only after `finish()`, and only when the
+stream has no protocol violation or identity uncertainty, its lineage-checked
+session equals both the final result's and the caller's session, and the entry
+is unique, unconflicted, known and for the same tool name.
 Each protocol guard attaches a terminal `protocol_*` diagnostic class from one
 private stream table for the first predicate it proved violated: invalid JSON,
 record, or UTF-8; line, stream, or tracking bounds; a missing, duplicate, or
@@ -4608,6 +4618,14 @@ Codex ignores it. Claude labels a denied non-safe Bash command
 `permission_bash_required_check` only on exact string equality with one of
 them; that terminal class ranks below unexposed, unclassified Bash and malformed
 entries and above the capability fallback.
+On both completed and failed exits, the permission path passes the stream and
+the result session to classification. When every denial in the batch carries a
+valid, unique `tool_use_id` and every non-safe Bash denial has the same code
+from the bound stream lookup, the batch is the terminal
+`permission_reason_<code>` class, which replaces unclassified Bash and outranks
+the required-check label but never an unexposed or malformed entry. A missing,
+invalid or repeated id, or any missing, unknown, conflicting, mixed or unbound
+reason, keeps the operation classes.
 Only an expected non-Bash tool or a positively recognized safe Bash inspection
 may be a recoverable capability or configuration failure. Structured provider
 recovery accepts only explicit transient HTTP statuses; non-transient client

@@ -542,6 +542,9 @@ inspection, an exact single-space command form that includes the
 whitespace variants and compounds, fails closed. Role requests carry the
 established persisted required-check commands for diagnosis only; a denial
 exactly equal to one is the terminal `permission_bash_required_check` class.
+A closed native refusal reason uniquely matched to every non-safe Bash denial
+in the batch yields the terminal `permission_reason_<code>` class instead,
+without naming the operation.
 Structured API-error recovery requires an explicit transient HTTP status,
 while non-transient client statuses and an unqualified structured `api_error`
 are terminal. A normalized
