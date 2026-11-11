@@ -5390,7 +5390,19 @@ test("classifies Claude permission denials only by facts established at the guar
     "git diff --check HEAD && true",
     "git diff --check HEAD\ntrue",
   ];
-  for (const [name, denials, diagnosticClass, access] of [
+  const requiredCommand = "npm run synthetic-docs-check";
+  const requiredCheck = bash(requiredCommand);
+  const inventory = [requiredCommand, "git status --short"];
+  const requiredNearMatches = [
+    "npm run  synthetic-docs-check",
+    " npm run synthetic-docs-check",
+    "npm run synthetic-docs-check ",
+    "npm run 'synthetic-docs-check'",
+    "env npm run synthetic-docs-check",
+    "npm run synthetic-docs-check && true",
+    "npm run synthetic-docs-check\ntrue",
+  ];
+  for (const [name, denials, diagnosticClass, access, requiredChecks] of [
     ["HEAD-relative content check", [headCheck], "permission_capability"],
     ...nearMatches.map((command) => [
       `near match ${JSON.stringify(command)}`,
@@ -5435,6 +5447,74 @@ test("classifies Claude permission denials only by facts established at the guar
       "permission_bash_unclassified",
       "local-commit",
     ],
+    [
+      "exact required check",
+      [requiredCheck],
+      "permission_bash_required_check",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check without inventory",
+      [requiredCheck],
+      "permission_bash_unclassified",
+    ],
+    ...requiredNearMatches.map((command) => [
+      `required-check near match ${JSON.stringify(command)}`,
+      [bash(command)],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ]),
+    [
+      "required check then unknown Bash",
+      [requiredCheck, unknownBash],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "unknown Bash then required check",
+      [unknownBash, requiredCheck],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and unexposed tool",
+      [requiredCheck, unexposed],
+      "permission_tool_unexposed",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and malformed entry",
+      [requiredCheck, "PRIVATE_DENIAL"],
+      "permission_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and safe inspection",
+      [safeBash, requiredCheck],
+      "permission_bash_required_check",
+      undefined,
+      inventory,
+    ],
+    [
+      "inventory-equal safe inspection",
+      [safeBash],
+      "permission_capability",
+      undefined,
+      inventory,
+    ],
+    [
+      "local-commit readiness with required check",
+      [requiredCheck],
+      "permission_bash_required_check",
+      "local-commit",
+      inventory,
+    ],
   ])
     for (const failed of [false, true])
       await t.test(`${name} (${failed ? "failed" : "completed"})`, async () => {
@@ -5453,6 +5533,9 @@ test("classifies Claude permission denials only by facts established at the guar
           fixture.adapter.run(
             request({
               access: access ?? "workspace-write",
+              ...(requiredChecks === undefined
+                ? {}
+                : { requiredCheckCommands: requiredChecks }),
               ...(commit
                 ? {
                     authorizationId: "authorization-1",
@@ -5489,15 +5572,61 @@ test("classifies Claude permission denials only by facts established at the guar
             assert.equal(normalized.recoverable, recoverable);
             assert.doesNotMatch(
               `${error.message}${JSON.stringify(normalized)}`,
-              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch|\bgit\b|out\.txt/u,
+              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch|\bgit\b|out\.txt|npm|synthetic/u,
             );
             return true;
           },
+        );
+        assert.doesNotMatch(
+          JSON.stringify(fixture.calls),
+          /synthetic-docs-check/u,
         );
         assert.equal(turnCalls(fixture).length, 1);
         assert.equal(commitExecutions, 0);
         assert.ok(fixture.calls.every((call) => call.file !== "touch"));
       });
+});
+
+test("accepts a bounded required-check inventory unchanged", async () => {
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `${String(index).padStart(3, "0")}${"x".repeat(3_997)}`,
+  );
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const denial = {
+        tool_name: "Bash",
+        tool_input: { command: inventory.at(-1) },
+      };
+      return {
+        stdout: JSON.stringify(result({ permission_denials: [denial] })),
+        stderr: "",
+      };
+    },
+  });
+  for (const requiredCheckCommands of [
+    [...inventory, "extra"],
+    "npm test",
+    [""],
+    ["a\0b"],
+    ["x".repeat(4_001)],
+    [1],
+    [, "npm test"],
+  ])
+    await assert.rejects(
+      fixture.adapter.run(request({ requiredCheckCommands })),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+  assert.equal(turnCalls(fixture).length, 0);
+  await assert.rejects(
+    fixture.adapter.run(request({ requiredCheckCommands: inventory })),
+    hasDiagnostic(
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_bash_required_check",
+    ),
+  );
+  assert.equal(turnCalls(fixture).length, 1);
 });
 
 test("rejects permission fallback and explicit model rerouting", async (t) => {

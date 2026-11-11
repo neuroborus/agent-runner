@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-11
 
+- **Claude labels denials of exact required-check commands.** A denied project
+  check, such as a documentation check, could only be reported as
+  `permission_bash_unclassified` because the adapter never received the
+  Runner-persisted inventory that identifies it. Polishing and plan-execution
+  role requests now carry the established inventory commands in a bounded,
+  diagnostic-only `requiredCheckCommands` field of at most 512 entries, the
+  aggregate validation capacity, so two disjoint maximum role inventories are not
+  truncated. The field reaches no prompt, native argument, setting or record.
+  A non-safe Bash denial exactly equal to one of those commands becomes the
+  terminal `permission_bash_required_check`; whitespace, quoting, wrapper and
+  compound variants stay unclassified. Unexposed, unclassified Bash and malformed
+  entries keep precedence, and a safe entry beside it never makes it
+  recoverable. The class names only the inventory match and claims no
+  harmlessness, authorization, policy fault, executed effect or historical
+  command. Older `permission_bash_unclassified` records keep their meaning.
+
 - **Claude safe Bash inspections match only exact single commands.** A
   model-free reproduction through `adapter.run` showed that the safe-inspection
   allowlist joined tokens with a general whitespace class, so a newline compound

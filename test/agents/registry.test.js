@@ -456,6 +456,7 @@ test("registry keeps every non-capability permission class terminal and redacted
   for (const diagnosticClass of [
     "permission_tool_unexposed",
     "permission_bash_unclassified",
+    "permission_bash_required_check",
     "permission_forbidden_operation",
   ]) {
     assert.ok(

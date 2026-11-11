@@ -1035,6 +1035,7 @@ test("persists terminal Claude finalization diagnoses without acceptance", async
     ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
     ["ERR_CLAUDE_PROTOCOL", undefined],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
   ])
     await t.test(diagnosticClass ?? "unclassified", async (t) => {
       let before;

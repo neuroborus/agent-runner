@@ -336,28 +336,27 @@ test("every pipeline projects bounded adapter diagnostics", () => {
     ["plan-authoring", "Plan authoring failed."],
     ["plan-execution", "Plan execution failed."],
     ["polishing", "Polishing failed."],
-  ]) {
-    assert.deepEqual(
-      getPipeline(pipelineId).projections.pause(
-        pausedRun(
-          {
-            reason: "internal_failure",
-            code: "ERR_CODEX_ISOLATION",
-            diagnosticClass: "operation_multi_agent",
-          },
-          { workflowState: "FAILED" },
+  ])
+    for (const [code, diagnosticClass] of [
+      ["ERR_CODEX_ISOLATION", "operation_multi_agent"],
+      ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    ])
+      assert.deepEqual(
+        getPipeline(pipelineId).projections.pause(
+          pausedRun(
+            { reason: "internal_failure", code, diagnosticClass },
+            { workflowState: "FAILED" },
+          ),
         ),
-      ),
-      {
-        reason: "internal_failure",
-        code: "ERR_CODEX_ISOLATION",
-        explanation: `${explanation} Adapter diagnostic: operation_multi_agent.`,
-        evidence: [],
-        resumeState: null,
-        nextActions: [],
-      },
-    );
-  }
+        {
+          reason: "internal_failure",
+          code,
+          explanation: `${explanation} Adapter diagnostic: ${diagnosticClass}.`,
+          evidence: [],
+          resumeState: null,
+          nextActions: [],
+        },
+      );
 });
 
 test("plan-execution pause projection distinguishes fresh-run requirements", () => {

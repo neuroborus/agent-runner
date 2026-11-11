@@ -1596,6 +1596,9 @@ standard error, or the native process error. A denial of an unexposed tool or a
 Bash command outside the positive repository-inspection allowlist is terminal and
 classified only by that fact, with an unknown refusal cause; see the
 [provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+Role requests carry the established persisted required-check commands for that
+diagnosis only, so a denial exactly equal to one is terminal
+`permission_bash_required_check` rather than unclassified Bash.
 An exposed non-Bash tool or a positively recognized safe Bash inspection may be
 a recoverable capability/configuration failure. For structured
 API errors, treat only explicit transient HTTP statuses as provider unavailability;

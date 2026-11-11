@@ -183,11 +183,16 @@ test("corrects finalization inventory that omits frozen guidance", async (t) => 
       constraint: "includes-frozen-finalization-guidance",
     },
   ]);
-  assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
-      .length,
-    2,
+  const finalizationCalls = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
   );
+  assert.equal(finalizationCalls.length, 2);
+  for (const { requiredCheckCommands } of finalizationCalls)
+    assert.deepEqual(
+      requiredCheckCommands,
+      REQUIRED_CHECKS.map(({ command }) => command),
+    );
+  assert.equal(fixture.calls.worker[0].requiredCheckCommands, undefined);
   assert.equal(
     fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
       .length,

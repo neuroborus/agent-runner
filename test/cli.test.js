@@ -1000,6 +1000,7 @@ test("run reports a classified agent failure with only its bounded diagnosis", a
   for (const [code, diagnosticClass] of [
     ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
   ]) {
     const stdout = createSink();
     const stderr = createSink();

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { polishingPipeline } from "../src/index.js";
+import { FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
@@ -221,6 +222,15 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  const finalization = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  );
+  assert.equal(finalization.length, 1);
+  assert.deepEqual(
+    finalization[0].requiredCheckCommands,
+    derivedCommands.map(({ command }) => command),
+  );
+  assert.equal(fixture.calls.worker[0].requiredCheckCommands, undefined);
   for (const field of ["requiredChecks", "validationInfrastructure"]) {
     const extra =
       field === "requiredChecks"

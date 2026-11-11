@@ -2138,6 +2138,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
       schema: custom ? customTurnSchema(schema, resultTurn) : schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
+      // Diagnostic-only: lets the adapter label denials of exact inventory commands.
+      ...(Array.isArray(state().requiredChecks)
+        ? {
+            requiredCheckCommands: state().requiredChecks.map(
+              ({ command }) => command,
+            ),
+          }
+        : {}),
     };
     resumeSessionContext = false;
     let response;

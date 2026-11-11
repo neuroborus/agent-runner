@@ -539,9 +539,12 @@ permission, and harmless read-only execution failures are resumable. Bash
 permission recovery requires a positively recognized safe repository
 inspection, an exact single-space command form that includes the
 `HEAD`-relative `git diff --check HEAD`; every other Bash denial, including
-whitespace variants and compounds, fails closed. Structured API-error recovery
-requires an explicit transient HTTP status, while non-transient client statuses
-and an unqualified structured `api_error` are terminal. A normalized
+whitespace variants and compounds, fails closed. Role requests carry the
+established persisted required-check commands for diagnosis only; a denial
+exactly equal to one is the terminal `permission_bash_required_check` class.
+Structured API-error recovery requires an explicit transient HTTP status,
+while non-transient client statuses and an unqualified structured `api_error`
+are terminal. A normalized
 `authentication_required` disposition enters the fixed durable
 reauthentication pause; other authentication evidence, unexposed-tool and
 unclassified-Bash denials whose refusal cause is unknown, legacy

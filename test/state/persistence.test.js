@@ -1537,6 +1537,7 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
 
   for (const diagnosticClass of [
     "permission_bash_unclassified",
+    "permission_bash_required_check",
     "permission_forbidden_operation",
   ]) {
     const pause = {

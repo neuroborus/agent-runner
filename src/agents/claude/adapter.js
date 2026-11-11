@@ -65,6 +65,7 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "context_exhausted",
   "environment_preparation",
   "environment_cleanup",
+  "permission_bash_required_check",
   "permission_bash_unclassified",
   "permission_capability",
   "permission_forbidden_operation",
@@ -235,6 +236,7 @@ const PERMISSION_DIAGNOSTIC_PRECEDENCE = Object.freeze([
   "permission_tool_unexposed",
   "permission_bash_unclassified",
   "permission_unclassified",
+  "permission_bash_required_check",
 ]);
 const ERROR_RESULT_SUBTYPES = new Set([
   "error_during_execution",
@@ -1090,6 +1092,7 @@ function permissionDiagnostic(denials, request) {
   const permittedTools = new Set(
     accessConfigurationFor(request).tools.split(","),
   );
+  const requiredChecks = new Set(request.requiredCheckCommands);
   const facts = new Set();
   for (const denial of denials) {
     if (!isRecord(denial) || typeof denial.tool_name !== "string") {
@@ -1103,7 +1106,12 @@ function permissionDiagnostic(denials, request) {
       } else if (
         !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
       ) {
-        facts.add("permission_bash_unclassified");
+        // Only byte-exact inventory equality identifies a required check.
+        facts.add(
+          requiredChecks.has(command)
+            ? "permission_bash_required_check"
+            : "permission_bash_unclassified",
+        );
       }
     }
   }

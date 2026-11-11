@@ -420,13 +420,14 @@ and direct CLI failures print only the bounded code and class.
 A Claude `ERR_CLAUDE_PERMISSION_DENIED` failure names only the fact its guard
 established from structured native `permission_denials`:
 
-| Class                            | Established fact                                                                                |
-| -------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                            |
-| `permission_bash_unclassified`   | An exposed Bash command is not a recognized safe inspection; its refusal reason is unknown.     |
-| `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                         |
-| `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.        |
-| `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted. |
+| Class                            | Established fact                                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                                             |
+| `permission_bash_unclassified`   | An exposed Bash command is neither a recognized safe inspection nor an inventory command; its reason is unknown. |
+| `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                                          |
+| `permission_bash_required_check` | An exposed Bash command is exactly equal to a command of the turn's Runner-persisted required-check inventory.   |
+| `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.                         |
+| `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted.                  |
 
 A safe Bash inspection is a whole command exactly equal to one fixed read-only
 Git form: bounded `git status` options, `git rev-parse` repository queries,
@@ -441,6 +442,18 @@ table order, independent of entry order, so no recoverable entry hides another.
 Only `permission_capability` is recoverable. No class claims a task-authority
 violation, a harmless command, or an integration defect, and a label grants no
 retry, approval, resume or acceptance.
+
+Polishing and plan-execution role requests carry their established persisted
+required-check commands for this diagnosis only. A denied Bash command outside
+the safe-inspection forms is labeled `permission_bash_required_check` only on
+whole-string equality with one of them, without trimming, parsing, prefix or
+substring matching; quoting, whitespace, wrapper and compound variants stay
+unclassified Bash. The class identifies only that inventory match: it claims no
+harmlessness, authorization, policy fault, executed effect or historical
+command, stays terminal, and is hidden by any unexposed, unclassified Bash, or
+malformed entry in the same batch. An older `permission_bash_unclassified`
+record keeps its terminal meaning and is not read as a denial of a command
+outside the inventory.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.

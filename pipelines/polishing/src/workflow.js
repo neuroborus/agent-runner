@@ -1519,6 +1519,14 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
+      // Diagnostic-only: lets the adapter label denials of exact inventory commands.
+      ...(Array.isArray(state().requiredChecks)
+        ? {
+            requiredCheckCommands: state().requiredChecks.map(
+              ({ command }) => command,
+            ),
+          }
+        : {}),
     };
     resumeSessionContext = false;
     let response;

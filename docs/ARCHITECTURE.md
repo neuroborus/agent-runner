@@ -4598,6 +4598,16 @@ terminal and classified only as an unexposed tool or unclassified Bash whose
 refusal cause is unknown. The allowlist matches whole single commands whose
 tokens are separated by exactly one space, including the `HEAD`-relative
 `git diff --check HEAD` content check; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+The shared request contract accepts an optional diagnostic-only
+`requiredCheckCommands` array of at most 512 non-empty commands of at most
+4,000 characters without NUL, matching the pipelines' aggregate validation
+capacity, and stores a frozen copy. Polishing and plan-execution role requests
+pass the established persisted inventory commands unchanged; it never enters
+prompts, native arguments, settings, storage, events or failure records, and
+Codex ignores it. Claude labels a denied non-safe Bash command
+`permission_bash_required_check` only on exact string equality with one of
+them; that terminal class ranks below unexposed, unclassified Bash and malformed
+entries and above the capability fallback.
 Only an expected non-Bash tool or a positively recognized safe Bash inspection
 may be a recoverable capability or configuration failure. Structured provider
 recovery accepts only explicit transient HTTP statuses; non-transient client

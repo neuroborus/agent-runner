@@ -932,6 +932,34 @@ test("accepts one exact finalization read and rejects broader declarations befor
   assert.equal(fixture.processes.length, 1);
 });
 
+test("accepts a bounded required-check inventory without using it", async () => {
+  const fixture = createFixture();
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `${String(index).padStart(3, "0")}${"x".repeat(3_997)}`,
+  );
+  for (const requiredCheckCommands of [
+    [...inventory, "extra"],
+    "npm test",
+    [""],
+    ["a\0b"],
+    ["x".repeat(4_001)],
+    [1],
+    [, "npm test"],
+  ])
+    await assert.rejects(
+      fixture.adapter.run(request({ requiredCheckCommands })),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  assert.equal(fixture.processes.length, 0);
+  await fixture.adapter.run(request({ requiredCheckCommands: inventory }));
+  assert.equal(fixture.processes.length, 1);
+  assert.doesNotMatch(
+    JSON.stringify([fixture.executeCalls, fixture.processes]),
+    /x{3997}/u,
+  );
+});
+
 test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
   const entered = Promise.withResolvers();
   const observations = [];
