@@ -4595,7 +4595,9 @@ fixed code, fixed message, allowlisted class, and safety fields cross the
 boundary. Authentication remains terminal. A denial of an unexposed tool or of a
 Bash command outside the narrow positive repository-inspection allowlist is
 terminal and classified only as an unexposed tool or unclassified Bash whose
-refusal cause is unknown; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+refusal cause is unknown. The allowlist matches whole single commands whose
+tokens are separated by exactly one space, including the `HEAD`-relative
+`git diff --check HEAD` content check; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
 Only an expected non-Bash tool or a positively recognized safe Bash inspection
 may be a recoverable capability or configuration failure. Structured provider
 recovery accepts only explicit transient HTTP statuses; non-transient client

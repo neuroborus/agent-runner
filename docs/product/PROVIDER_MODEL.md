@@ -428,6 +428,14 @@ established from structured native `permission_denials`:
 | `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.        |
 | `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted. |
 
+A safe Bash inspection is a whole command exactly equal to one fixed read-only
+Git form: bounded `git status` options, `git rev-parse` repository queries,
+`git remote` with optional `-v`, `git diff --check`, `git diff --check HEAD`,
+`git diff --cached --check`, or `git diff --staged --check`. Tokens are
+separated by exactly one space, so tabs, newlines, repeated or trailing
+whitespace, quoting, other revisions, paths, output options, and compound
+commands remain unclassified Bash.
+
 The adapter examines every entry and reports the first present fact in the
 table order, independent of entry order, so no recoverable entry hides another.
 Only `permission_capability` is recoverable. No class claims a task-authority

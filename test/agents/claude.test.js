@@ -5375,7 +5375,33 @@ test("classifies Claude permission denials only by facts established at the guar
     tool_name: "Edit",
     tool_input: { file_path: "generated.txt" },
   };
+  const bash = (command) => ({ tool_name: "Bash", tool_input: { command } });
+  const headCheck = bash("git diff --check HEAD");
+  const nearMatches = [
+    "git status\n--short",
+    "git diff --check HEAD~1",
+    "git diff --check HEAD -- docs",
+    "git diff --check HEAD --output=out.txt",
+    "git diff --check 'HEAD'",
+    "git diff --check  HEAD",
+    "git diff --check\tHEAD",
+    "git diff --check HEAD ",
+    "git diff --check HEAD; true",
+    "git diff --check HEAD && true",
+    "git diff --check HEAD\ntrue",
+  ];
   for (const [name, denials, diagnosticClass, access] of [
+    ["HEAD-relative content check", [headCheck], "permission_capability"],
+    ...nearMatches.map((command) => [
+      `near match ${JSON.stringify(command)}`,
+      [bash(command)],
+      "permission_bash_unclassified",
+    ]),
+    [
+      "HEAD-relative content check and unknown Bash",
+      [headCheck, unknownBash],
+      "permission_bash_unclassified",
+    ],
     ["ordinary write", [unknownBash], "permission_bash_unclassified"],
     ["unexposed tool", [unexposed], "permission_tool_unexposed"],
     [
@@ -5448,21 +5474,22 @@ test("classifies Claude permission denials only by facts established at the guar
                 diagnosticClass,
               )(error),
             );
-            assert.equal(error.recoverable, false);
+            const recoverable = diagnosticClass === "permission_capability";
+            assert.equal(error.recoverable, recoverable);
             assert.deepEqual(error.failure, {
               failureClass: diagnosticClass,
               checkpoint: commit ? "commit" : "turn",
               outcome: "rejected",
               effect: commit ? "none" : "possible",
-              retry: "terminal",
+              retry: recoverable ? "transient" : "terminal",
               ...(commit ? { commitExecutor: "not_started" } : {}),
             });
             const normalized = normalizeAdapterFailure("claude", error);
             assert.equal(normalized.diagnosticClass, diagnosticClass);
-            assert.equal(normalized.recoverable, false);
+            assert.equal(normalized.recoverable, recoverable);
             assert.doesNotMatch(
               `${error.message}${JSON.stringify(normalized)}`,
-              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch/u,
+              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch|\bgit\b|out\.txt/u,
             );
             return true;
           },

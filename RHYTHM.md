@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-11
+
+- **Claude safe Bash inspections match only exact single commands.** A
+  model-free reproduction through `adapter.run` showed that the safe-inspection
+  allowlist joined tokens with a general whitespace class, so a newline compound
+  such as `git status` followed by `--short` on a second line was reported as a
+  recoverable `permission_capability`. Every form now requires exactly one space
+  between tokens, so tab, newline, repeated or trailing whitespace and compounds
+  are terminal `permission_bash_unclassified`. The allowlist also lacked the
+  `HEAD`-relative `git diff --check HEAD` content check that in-pipeline
+  validation inventories use; that one form is added without other revisions,
+  paths or output options. Aggregation, precedence, recovery and native
+  permissions are unchanged. Existing `permission_capability` and
+  `permission_bash_unclassified` records keep their original meaning and
+  disposition, and this mismatch does not identify the command behind any
+  historical refusal, which stays unknown.
+
 ## 2026-11-10
 
 - **A settled operator pause can be canceled.** A model-free reproduction

@@ -1248,7 +1248,8 @@ allowlist. Structured permission denials, HTTP status, result subtype, and
 terminal reason take precedence over bounded message matching. Backend,
 capability, configuration, usage, provider, and expected-tool permission
 failures may be recoverable, but Bash permission recovery requires a positively
-recognized safe repository inspection. The normalized
+recognized safe repository inspection: an exact single-space command form,
+including the `HEAD`-relative `git diff --check HEAD`. The normalized
 `authentication_required` disposition enters the fixed durable
 reauthentication pause; other authentication evidence, unexposed-tool and
 unclassified-Bash denials whose refusal cause is unknown, and legacy

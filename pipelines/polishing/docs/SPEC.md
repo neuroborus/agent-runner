@@ -537,7 +537,9 @@ and terminal reason before consulting a bounded native-text slice. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool
 permission, and harmless read-only execution failures are resumable. Bash
 permission recovery requires a positively recognized safe repository
-inspection; every other Bash denial fails closed. Structured API-error recovery
+inspection, an exact single-space command form that includes the
+`HEAD`-relative `git diff --check HEAD`; every other Bash denial, including
+whitespace variants and compounds, fails closed. Structured API-error recovery
 requires an explicit transient HTTP status, while non-transient client statuses
 and an unqualified structured `api_error` are terminal. A normalized
 `authentication_required` disposition enters the fixed durable

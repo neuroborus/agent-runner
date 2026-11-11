@@ -226,10 +226,10 @@ const EFFORT_ERROR_PATTERN =
 const NAMING_ERROR_PATTERN =
   /^(?:error: )?(?:unknown option ['"]--name['"]|option ['"](?:-n, )?--name <name>['"] argument missing|(?:failed|unable) to (?:set|save) (?:the )?session name(?:[.:]|$))/imu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
-  /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
-  /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
-  /^git diff\s+(?:--check|--cached\s+--check|--staged\s+--check)$/u,
-  /^git remote(?:\s+-v)?$/u,
+  /^git status(?: (?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
+  /^git rev-parse (?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify HEAD|HEAD)$/u,
+  /^git diff (?:--check|--check HEAD|--cached --check|--staged --check)$/u,
+  /^git remote(?: -v)?$/u,
 ]);
 const PERMISSION_DIAGNOSTIC_PRECEDENCE = Object.freeze([
   "permission_tool_unexposed",
