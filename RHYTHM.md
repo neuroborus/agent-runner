@@ -7,6 +7,37 @@ remain in the owning documentation.
 
 ## 2026-11-11
 
+- **Claude authorizes workspace Bash through the proved sandbox.** Git
+  workspace-write turns disabled sandbox auto-allow under shell classification.
+  Claude 2.1.322 still admitted native read-only inspection and the filesystem
+  commands of its accept-edits fast path, but other ordinary work such as
+  script-driven content changes needed a classifier verdict. Pre-ask
+  refusals emit best-effort permission events, while headless ask-path
+  refusals surface only in the final denial batch. Blanket Git-subcommand
+  rules matched each subcommand by prefix before sandbox auto-allow and
+  rejected inspection such as the current branch or remotes without a closed
+  reason code. They were never the authority boundary: the proved sandbox
+  already denies Git metadata, outside writes, network, sockets and
+  credentials. Separately, the root-relative `Edit(/.git)` rules
+  resolved against the native startup directory, so file tools had no
+  workspace Git-metadata denial. Workspace-write now shares the autonomous
+  Bash envelope, file-tool denials name each resolved absolute protected
+  directory, and a protected path with rule, glob or control characters fails
+  before launch. Declared-directory turns keep their Git-subcommand denials. The
+  native and fallback access proofs now require compound Git inspection to
+  succeed and index, branch, tag, remote, configuration, identity-bearing commit
+  and push mutations to fail under every access. A model-free installed-CLI
+  suite reproduces both defects through the real adapter and launcher. This
+  native-platform acceptance runs only when explicitly enabled on the host,
+  because the Runner-trusted outer isolation cannot supply its nested sandbox.
+  The ordinary slow gate skips it, so a separate enabled host run is required
+  before installation for Claude permission, access-proof or policy-identity
+  changes in addition to the complete slow gate; an ordinary slow pass never
+  establishes native acceptance. The policy identity changes for every access,
+  so receipts pinned under the prior policy fail closed without migration.
+  Denial classification is unchanged, and no historical refusal is attributed
+  to either defect.
+
 - **Claude retains matched native permission refusal reasons.** Claude 2.1.322
   emits a best-effort `system/permission_denied` event whose closed
   `decision_reason_code` names a reason a host can act on, but the stream

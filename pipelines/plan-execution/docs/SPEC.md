@@ -1530,8 +1530,15 @@ turns derive their advertised read-only capability and invocation arguments
 from the same access envelope. They do not expose editing tools, deny command
 writes to the workspace and Git metadata, and set
 `sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
-without a prompt only inside the required native sandbox. Unsandboxed fallback
-and command network access remain disabled. On Linux, prove read-only,
+without a prompt only inside the required native sandbox. Git workspace-write
+turns share that envelope with the added Edit and Write tools and the
+launcher-granted workspace write; the proved sandbox denies Git index, ref,
+tag, remote, configuration and identity changes, outside writes, network and
+Unix sockets under every access policy. File-tool Git-metadata denials bind
+each resolved absolute protected directory, a protected path with rule, glob or
+control characters fails before launch, and declared-directory turns keep
+their Git-subcommand denials. Unsandboxed fallback and command network access
+remain disabled. On Linux, prove read-only,
 workspace-write, and local-commit turn policies independently with fixed,
 model-free effective invocations. Prefer Claude's full native sandbox. Only a
 recognized nested-user-namespace denial may select Claude's weaker parent
@@ -1544,7 +1551,8 @@ Runner-owned restrictions, scrubs its token and credential environment, and
 executes the pinned real bubblewrap binary once with the validated payload. The
 fallback proof uses representative effective arguments through that identical
 launcher validation, strengthening, and execution path. Each proof checks
-workspace write authority, Git and outside-write denial, network and
+workspace write authority, compound Git inspection, Git mutation and
+outside-write denial, network and
 Unix-socket denial, and credential removal, including denial of the provider
 process's proc environment. Generic failures cannot enable the fallback, no
 diagnostic is retained, and no proof selects a profile, authenticates, or

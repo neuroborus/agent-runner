@@ -164,10 +164,15 @@ const COMMON_DENY_POLICY = Object.freeze([
   "Task",
   "WebFetch",
   "WebSearch",
-  "Edit(/.git)",
-  "Edit(/.git/**)",
 ]);
-const WORKSPACE_DENY_POLICY = Object.freeze([
+// Claude resolves single-slash rules against the native startup directory, so
+// file-tool denials bind each canonical protected path in its absolute form.
+const PROTECTED_DIRECTORY_EDIT_DENIALS = Object.freeze([
+  "Edit(//<protected-directory>)",
+  "Edit(//<protected-directory>/**)",
+]);
+// Directory turns keep these denials; Git turns rely on the proved sandbox.
+const DIRECTORY_DENY_POLICY = Object.freeze([
   ...COMMON_DENY_POLICY,
   "Bash(git add *)",
   "Bash(git branch *)",
@@ -195,8 +200,8 @@ const READ_ONLY_ACCESS = Object.freeze({
   tools: READ_ONLY_TOOLS,
 });
 const WORKSPACE_ACCESS = Object.freeze({
-  autoAllowBashIfSandboxed: false,
-  deny: WORKSPACE_DENY_POLICY,
+  autoAllowBashIfSandboxed: true,
+  deny: COMMON_DENY_POLICY,
   permissionMode: "auto",
   tools: WORKSPACE_TOOLS,
 });
@@ -607,10 +612,23 @@ function outputSchemaFor(request) {
 
 function accessConfigurationFor(request) {
   if (request.workspacePolicy !== undefined)
-    return { ...READ_ONLY_ACCESS, deny: WORKSPACE_DENY_POLICY };
+    return { ...READ_ONLY_ACCESS, deny: DIRECTORY_DENY_POLICY };
   return request.access === "workspace-write"
     ? WORKSPACE_ACCESS
     : READ_ONLY_ACCESS;
+}
+
+// Reject a protected path that could broaden or split its native rule.
+function protectedDirectoryEditDenials(paths) {
+  if (
+    paths.some((path) => !isAbsolute(path) || /[*?[\]{}()\\\p{Cc}]/u.test(path))
+  )
+    throw directoryPolicyError(ClaudeAdapterError);
+  return paths.flatMap((path) =>
+    PROTECTED_DIRECTORY_EDIT_DENIALS.map((rule) =>
+      rule.replace("/<protected-directory>", () => path),
+    ),
+  );
 }
 
 function policyIdentity(isolationPolicies, architecture, directory = false) {
@@ -626,7 +644,10 @@ function policyIdentity(isolationPolicies, architecture, directory = false) {
           autoMode: { classifyAllShell: true },
           disableBypassPermissionsMode: "disable",
           permissionMode: configuration.permissionMode,
-          permissions: { deny: configuration.deny },
+          permissions: {
+            deny: configuration.deny,
+            protectedDirectoryDeny: PROTECTED_DIRECTORY_EDIT_DENIALS,
+          },
           sandbox: {
             allowUnsandboxedCommands: false,
             autoAllowBashIfSandboxed: configuration.autoAllowBashIfSandboxed,
@@ -691,6 +712,7 @@ function cliSettings(
   request,
   accessConfiguration,
   gitDirectories,
+  protectedEditDenials,
   credentialEnvironmentNames,
   isolationPolicy,
   providerCwd,
@@ -714,7 +736,7 @@ function cliSettings(
     fallbackModel: [],
     fileCheckpointingEnabled: false,
     permissions: {
-      deny: accessConfiguration.deny,
+      deny: [...accessConfiguration.deny, ...protectedEditDenials],
     },
     sandbox: {
       enabled: true,
@@ -751,6 +773,7 @@ function cliSettings(
 function commandArguments(
   request,
   gitDirectories,
+  protectedEditDenials,
   credentialEnvironmentNames,
   session,
   isolationPolicy,
@@ -772,6 +795,7 @@ function commandArguments(
       request,
       accessConfiguration,
       gitDirectories,
+      protectedEditDenials,
       credentialEnvironmentNames,
       isolationPolicy,
       providerCwd,
@@ -1693,6 +1717,7 @@ export function createClaudeAdapter(options = {}) {
         (await gitMetadataDirectories(request))),
       ...(request.readPaths ?? []),
     ];
+    const protectedEditDenials = protectedDirectoryEditDenials(gitDirectories);
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy =
       request.isolationPolicy ?? isolationPolicies?.[request.access];
@@ -1791,6 +1816,7 @@ export function createClaudeAdapter(options = {}) {
       const argumentsList = commandArguments(
         request,
         gitDirectories,
+        protectedEditDenials,
         credentialEnvironmentNames,
         selectedSession,
         isolationPolicy,

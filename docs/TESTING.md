@@ -1156,10 +1156,17 @@ and filter tampering or setup failure, prove direct bubblewrap execution with
 one user namespace and no fallback Claude helper, and retain provider
 connectivity, environment scrubbing, argument rejection before payload
 execution, and the complete command-isolation argument contract.
-Access-policy coverage also proves that one compound `git log`, `git cat-file`,
-`git branch -a`, and `ls` inspection succeeds in the read-only sandbox while
-representative workspace, Git, and remote mutations fail, local-commit
-readiness uses the same policy, and workspace-write settings stay unchanged.
+Access-policy coverage also proves that one compound `git status`,
+`git branch --show-current`, `git branch -a`, `git remote -v`, `git tag --list`,
+`git log`, `git cat-file`, `git diff --check HEAD`, and `ls` inspection succeeds
+under every access policy while index, branch, tag, remote, configuration,
+identity-bearing commit, and push mutations fail; the read-only sandbox also
+denies workspace writes, and local-commit readiness uses that policy.
+Workspace-write settings share the autonomous envelope with no `Bash(...)` rule
+or root-relative `Edit(/.git…)` entry and exactly the absolute protected-directory
+Edit denials; declared-directory workspace-write keeps its Git-subcommand
+denials, and a protected Git path with a rule metacharacter fails before any
+turn starts.
 Git workspace-write coverage resolves each generated native and fallback
 launcher through the turn's `PATH`, feeds it Claude's producer-ordered
 arguments for the read-only preparation settings, and replays the resulting
@@ -1197,6 +1204,43 @@ finalized commit is installed, the supervising agent starts a fresh real Claude
 lazy plan-authoring run and requires preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before
 dependent provider work continues.
+
+The slow `test/agents/claude-native-policy.slow.test.js` suite owns the
+model-free reproduction of the Claude workspace-write native permission policy
+through the installed CLI. Enable it explicitly on the host with
+`AGENT_RUNNER_NATIVE_CLAUDE=1 npm run test:slow -- test/agents/claude-native-policy.slow.test.js`.
+It is operator-owned native-platform acceptance: the Runner-trusted executor's
+outer isolation does not provide the nested Claude sandbox required by this test.
+The ordinary slow gate skips it, so passing that gate never establishes native
+acceptance. When enabled, it skips only on non-Linux hosts or when `claude` or
+`bwrap` is absent from `PATH`; unavailable workspace-write isolation and any
+other preflight or protocol failure still fail. Every turn runs through the real
+adapter probe, generated settings, authenticated launcher, and stream
+normalization against an owned Git repository, configuration directory,
+synthetic key, and loopback Messages stub that scripts tool calls and refuses
+every other request. Claude receives only a fixture-owned environment; seeded
+conflicting host provider routing, authentication, header and proxy settings
+must never reach a Claude invocation. Only baseline turns replace the generated
+settings with the superseded workspace policy: a subcommand-rule refusal of
+ordinary inspection must end as terminal unclassified Bash, script-driven
+content work outside Claude's accept-edits fast path must receive a terminal
+classifier refusal, and a workspace Git-metadata `Write` must miss the
+root-relative rule and reach a classifier decision. Corrected turns must admit
+Git inspection, fast-path filesystem work and script-driven content work without
+a permission denial, deny an absolute Git-metadata `Write` without a classifier
+decision, and admit direct Bash writes to Git `HEAD` and `config` without a
+native denial so each returns a command-sandbox permission error. Claude may
+still require separate native approval for sensitive Git commands, so the suite
+does not claim that every Git mutation reaches the sandbox; the effective access
+proof exercises those mutations directly. Every case leaves HEAD, refs, index,
+configuration, and remotes unchanged, owned decoys for the stripped ambient Git
+routing stay untouched, and public errors, records, and diagnostics carry no
+command, path, free-text reason, provider payload, or key. A loopback endpoint
+leaves auto mode without its server-side check, so test-local native records
+distinguish rule decisions from classifier decisions. Changes to Claude
+permission settings, effective access proofs, or policy identity require a
+separate enabled host run before installation in addition to the complete slow
+gate. Record both results and report any skip explicitly. No live model is used.
 
 Preparation custody regressions extend `test/state/journal-checkpoints.test.js`'s
 real growing/rotating journal fixtures and normalization counters with byte,

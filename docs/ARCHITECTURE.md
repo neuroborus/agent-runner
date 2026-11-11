@@ -4403,9 +4403,21 @@ denials that would reject compound inspection, while retaining collaboration,
 editing, and web restrictions. Autonomous Bash is available only inside the
 proved sandbox, which denies workspace and Git-metadata writes, closes command
 network and Unix-socket access, and forbids unsandboxed fallback.
-Workspace-write turns retain their separate `auto` permission policy,
-background classifier, broader content tools, and existing command denials
-while denying Git-directory writes and `git add`. Codex repository workspace-write
+Git workspace-write turns share that envelope, adding only the Edit and Write
+tools and the launcher-granted workspace write; no Git-subcommand rule rejects
+ordinary inspection before sandbox auto-allow. Under every access policy the
+sandbox enforces, and the effective access proof shows, that one compound Git
+inspection succeeds while index, branch, tag, remote, configuration,
+identity-bearing commit and push mutations fail, outside writes stay denied,
+and network and Unix-socket access stay closed. File tools run outside that
+sandbox, so their Git-metadata denials name each resolved absolute protected
+directory in Claude's `//` rule form; a root-relative rule would resolve against
+the native startup directory. A protected path containing a rule, glob or
+control character fails with the workspace-policy error before launch.
+Declared-directory turns keep their Git-subcommand denials. The policy identity
+serializes these settings and the path-independent rule template, so a receipt
+pinned under the prior policy fails closed on resume or reconstruction without
+migration. Codex repository workspace-write
 isolation likewise exposes safe content
 writes without Git-metadata writes. Codex protects project-root `.agents` as
 provider metadata by default, so a workspace-write turn adds it as an explicit

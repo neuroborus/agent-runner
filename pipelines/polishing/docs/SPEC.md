@@ -251,12 +251,13 @@ status and activity omit these provider-private values.
 Worker capability preflight requires structured output, read-only inspection,
 autonomous safe content writes, remote-write blocking, and the explicit
 `gitMetadataWriteBlocked` guarantee. Codex satisfies it through workspace-write
-isolation; Claude satisfies it through its Git-directory write and `git add`
-denials. On Linux, Claude proves read-only and workspace-write policies
-separately. It prefers full native isolation and may use the weaker parent
-invocation only after a recognized nested-user-namespace denial and a complete
-proof through the authenticated provider-private launcher. The launcher
-validates and strengthens Claude's parent bubblewrap invocation, then executes
+isolation; Claude satisfies it through its proved sandbox's Git-directory write
+and `git add` denials and absolute file-tool Git-metadata denials. On Linux,
+Claude proves read-only and workspace-write policies separately. It prefers
+full native isolation and may use the weaker parent invocation only after a
+recognized nested-user-namespace denial and a complete proof through the
+authenticated provider-private launcher. The launcher validates and
+strengthens Claude's parent bubblewrap invocation, then executes
 the pinned real binary once so each command crosses one effective boundary
 while provider transport stays outside. That proof follows the identical
 launcher path and covers the exact workspace authority plus Git, outside-write,

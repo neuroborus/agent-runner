@@ -72,6 +72,46 @@ function controlOperations() {
   }
 }
 `.trim();
+// Ordinary compound Git inspection must succeed under every access, while
+// index, ref, tag, remote, configuration, identity-bearing commit and push
+// mutations must fail. Explicit identity leaves the sandbox as their only refusal.
+const GIT_OPERATIONS = String.raw`
+function gitOperations() {
+  run(
+    "/bin/sh",
+    [
+      "-c",
+      "git status --short >/dev/null && git branch --show-current >/dev/null && git branch -a >/dev/null && git remote -v >/dev/null && git tag --list >/dev/null && git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git diff --check HEAD && ls >/dev/null",
+    ],
+    true,
+  );
+  run("git", ["add", "inspection.txt"], false);
+  run("git", ["branch", "sandbox-command-probe"], false);
+  run("git", ["tag", "sandbox-command-probe"], false);
+  run("git", ["remote", "add", "sandbox-command-probe", outsideDirectory], false);
+  run("git", ["config", "user.name", "Sandbox Probe"], false);
+  run(
+    "git",
+    [
+      "-c",
+      "user.name=Sandbox Probe",
+      "-c",
+      "user.email=sandbox-probe@example.invalid",
+      "commit",
+      "--allow-empty",
+      "--quiet",
+      "--message",
+      "probe",
+    ],
+    false,
+  );
+  run(
+    "git",
+    ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
+    false,
+  );
+}
+`.trim();
 const NATIVE_PROBE_SCRIPT = String.raw`
 import { spawnSync } from "node:child_process";
 import {
@@ -115,6 +155,7 @@ function run(file, argumentsList, expected) {
   if ((result.status === 0) !== expected) process.exit(26);
 }
 ${SOURCE_OPERATIONS}
+${GIT_OPERATIONS}
 if (process.env.${PROBE_CREDENTIAL} !== undefined) process.exit(12);
 if (!/^[1-9][0-9]*$/.test(providerPid)) process.exit(17);
 try {
@@ -128,23 +169,9 @@ if (directoryMode === "directory") {
   if (readFileSync(join(outsideDirectory, "reference.md"), "utf8") !== "reference\n") process.exit(31);
   write("out/result.txt", writable);
 } else {
-  run(
-    "/bin/sh",
-    [
-      "-c",
-      "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
-    ],
-    true,
-  );
-  if (!writable) {
+  gitOperations();
+  if (!writable)
     run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
-    run("git", ["branch", "sandbox-command-probe"], false);
-    run(
-      "git",
-      ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
-      false,
-    );
-  }
 }
 if (process.env.HOME === process.cwd()) process.exit(28);
 if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);
@@ -229,6 +256,7 @@ function run(file, argumentsList, expected) {
   if ((result.status === 0) !== expected) process.exit(26);
 }
 ${SOURCE_OPERATIONS}
+${GIT_OPERATIONS}
 if (
   process.env.${PROBE_CREDENTIAL} !== undefined ||
   process.env.${CLAUDE_COMMAND_LAUNCHER_TOKEN} !== undefined ||
@@ -247,23 +275,9 @@ if (directoryMode === "directory") {
   if (readFileSync(join(outsideDirectory, "reference.md"), "utf8") !== "reference\n") process.exit(31);
   write("out/result.txt", writable);
 } else {
-  run(
-    "/bin/sh",
-    [
-      "-c",
-      "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
-    ],
-    true,
-  );
-  if (!writable) {
+  gitOperations();
+  if (!writable)
     run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
-    run("git", ["branch", "sandbox-command-probe"], false);
-    run(
-      "git",
-      ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
-      false,
-    );
-  }
 }
 if (process.env.HOME === process.cwd()) process.exit(28);
 if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);

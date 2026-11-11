@@ -324,9 +324,17 @@ tools. Provider command-denial patterns that reject safe compound inspection
 are omitted from that access policy; collaboration, editing, and web tools stay
 restricted, and the sandbox remains the authority for filesystem and Git
 mutation, process escape, socket access, credential exposure, and remote-write
-denial. Workspace-write turns retain their existing tool and denial policy. The
-private receipt fingerprint binds these effective access-specific settings and
-the installed CLI version without expanding the provider-neutral receipt.
+denial. Git workspace-write turns share this envelope and differ only by the
+Edit and Write tools and the launcher-granted workspace write, so ordinary Git
+inspection and content commands are admitted and the sandbox, not a
+Git-subcommand rule, refuses Git, outside-write, network and socket effects.
+Claude may still separately require native approval for sensitive Git
+commands. File-tool Git-metadata denials name
+each resolved absolute protected directory; a path that would broaden that
+rule fails before launch. Declared-directory turns keep their Git-subcommand
+denials. The private receipt fingerprint binds these effective access-specific
+settings and the installed CLI version without expanding the provider-neutral
+receipt.
 
 Codex model-issued commands derive from the provider process environment only
 through a strict shell policy. Automatic secret-name exclusions run before
@@ -476,6 +484,17 @@ policy fault, executed effect, or historical command, stays terminal, and grants
 no retry, approval, or backend change. Native free-text reasons are never read
 or retained. Records that predate reason classes are not read as having no
 reason.
+
+The corrected workspace policy keeps this classification order. A non-safe
+Bash denial whose command exactly equals a persisted required-check inventory
+command stays `permission_bash_required_check` when no recognized native reason
+is bound. A non-safe Bash denial outside that inventory and without a uniquely
+bound recognized native reason stays `permission_bash_unclassified`; a
+permission-rule decision that Claude reports without a closed code is one
+example. When every non-safe Bash denial in a batch has the same uniquely bound
+recognized code, the batch takes `permission_reason_<code>`, and the table
+precedence still decides mixed batches. Older records keep their meaning, and
+no historical refusal is attributed to the superseded workspace policy.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.

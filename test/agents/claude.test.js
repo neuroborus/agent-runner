@@ -112,15 +112,16 @@ const STRICT_SCHEMA = Object.freeze({
 });
 
 const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
-const COMMON_DENY_POLICY = [
-  "Agent",
-  "Task",
-  "WebFetch",
-  "WebSearch",
-  "Edit(/.git)",
-  "Edit(/.git/**)",
+const COMMON_DENY_POLICY = ["Agent", "Task", "WebFetch", "WebSearch"];
+const PROTECTED_DIRECTORY_EDIT_DENIALS = [
+  "Edit(//<protected-directory>)",
+  "Edit(//<protected-directory>/**)",
 ];
-const WORKSPACE_DENY_POLICY = [
+const PROJECT_EDIT_DENIALS = [
+  `Edit(/${PROJECT_PATH}/.git)`,
+  `Edit(/${PROJECT_PATH}/.git/**)`,
+];
+const DIRECTORY_DENY_POLICY = [
   ...COMMON_DENY_POLICY,
   "Bash(git add *)",
   "Bash(git branch *)",
@@ -301,14 +302,22 @@ function isolationProbeScripts(argumentsList) {
 function assertReadOnlyInspectionProbe(script) {
   assert.match(
     script,
-    /git log -1 --format=%H[\s\S]+git cat-file -e[\s\S]+git branch -a[\s\S]+ls/u,
+    /git status --short[\s\S]+git branch --show-current[\s\S]+git branch -a[\s\S]+git remote -v[\s\S]+git tag --list[\s\S]+git log -1 --format=%H[\s\S]+git cat-file -e[\s\S]+git diff --check HEAD[\s\S]+ls/u,
   );
   assert.match(script, /GIT_CONFIG_GLOBAL: "\/dev\/null"/u);
   assert.match(script, /GIT_CONFIG_NOSYSTEM: "1"/u);
   assert.match(script, /GIT_TERMINAL_PROMPT: "0"/u);
   assert.match(script, /workspace-command-probe/u);
-  assert.match(script, /"branch", "sandbox-command-probe"/u);
-  assert.match(script, /"push", outsideDirectory/u);
+  for (const mutation of [
+    /"add", "inspection\.txt"/u,
+    /"branch", "sandbox-command-probe"/u,
+    /"tag", "sandbox-command-probe"/u,
+    /"remote", "add", "sandbox-command-probe", outsideDirectory/u,
+    /"config", "user\.name"/u,
+    /"user\.email=[^"]+",\s+"commit",\s+"--allow-empty"/u,
+    /"push", outsideDirectory/u,
+  ])
+    assert.match(script, mutation);
 }
 
 function isProbeRepositorySetup({ file, argumentsList }) {
@@ -630,11 +639,12 @@ function policyFingerprint(
           disableBypassPermissionsMode: "disable",
           permissionMode: "auto",
           permissions: {
-            deny: readOnly ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
+            deny: COMMON_DENY_POLICY,
+            protectedDirectoryDeny: PROTECTED_DIRECTORY_EDIT_DENIALS,
           },
           sandbox: {
             allowUnsandboxedCommands: false,
-            autoAllowBashIfSandboxed: readOnly,
+            autoAllowBashIfSandboxed: true,
             credentials: { denyDiscoveredEnvironment: true },
             enabled: true,
             enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
@@ -5113,7 +5123,10 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
     ),
     { mode: "deny", name: "ANTHROPIC_API_KEY" },
   );
-  assert.deepEqual(settings.permissions.deny, COMMON_DENY_POLICY);
+  assert.deepEqual(settings.permissions.deny, [
+    ...COMMON_DENY_POLICY,
+    ...PROJECT_EDIT_DENIALS,
+  ]);
   assert.ok(
     settings.permissions.deny.every((entry) => !entry.startsWith("Bash(")),
   );
@@ -5220,7 +5233,7 @@ test("rejects invalid Claude profiles and context sizes", async () => {
   assert.equal(fixture.calls.length, 0);
 });
 
-test("keeps autonomous workspace policy unchanged", async () => {
+test("authorizes workspace-write Bash only through the enforced sandbox", async () => {
   const fixture = createFixture();
 
   await fixture.adapter.run(request({ access: "workspace-write" }));
@@ -5231,13 +5244,83 @@ test("keeps autonomous workspace policy unchanged", async () => {
     option(turn.argumentsList, "--tools"),
     "Bash,Read,Edit,Write,Glob,Grep",
   );
+  assert.ok(
+    turn.argumentsList.every(
+      (argument) =>
+        !argument.startsWith("--") || !argument.includes("dangerously"),
+    ),
+  );
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
-  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, false);
+  assert.equal(settings.disableBypassPermissionsMode, "disable");
+  assert.deepEqual(settings.autoMode, { classifyAllShell: true });
+  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.deepEqual(settings.sandbox.excludedCommands, []);
+  assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
+  assert.equal(settings.sandbox.network.strictAllowlist, true);
   assert.ok(settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
   assert.ok(
     settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
   );
-  assert.deepEqual(settings.permissions.deny, WORKSPACE_DENY_POLICY);
+  assert.equal(
+    JSON.parse(option(turn.argumentsList, "--managed-settings")).sandbox
+      .bwrapPath,
+    turn.commandLauncherPath,
+  );
+  // Root-relative rules would bind the native startup directory instead.
+  assert.deepEqual(settings.permissions.deny, [
+    ...COMMON_DENY_POLICY,
+    ...PROJECT_EDIT_DENIALS,
+  ]);
+});
+
+test("keeps Git-subcommand denials for directory workspace-write turns", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture();
+
+  await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    }),
+  );
+
+  const turn = turnCalls(fixture)[0];
+  const settings = JSON.parse(option(turn.argumentsList, "--settings"));
+  const protectedPaths = settings.sandbox.filesystem.denyWrite.filter(
+    (path) => path !== directory.cwd && path !== turn.options.cwd,
+  );
+  assert.ok(protectedPaths.includes(directory.input));
+  assert.deepEqual(settings.permissions.deny, [
+    ...DIRECTORY_DENY_POLICY,
+    ...protectedPaths.flatMap((path) => [
+      `Edit(/${path})`,
+      `Edit(/${path}/**)`,
+    ]),
+  ]);
+});
+
+test("rejects a protected Git path that would broaden its file-tool rule", async (t) => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-claude-rule-")),
+  );
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const common = join(root, "common(1)");
+  await mkdir(common);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "git" && call.argumentsList.includes("rev-parse"))
+        return { stdout: `${PROJECT_PATH}/.git\n${common}\n`, stderr: "" };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(turnCalls(fixture).length, 0);
 });
 
 test("passes option-like prompts through stdin", async () => {
@@ -6984,7 +7067,7 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.deepEqual(
     JSON.parse(option(readinessTurn.argumentsList, "--settings")).permissions
       .deny,
-    COMMON_DENY_POLICY,
+    [...COMMON_DENY_POLICY, ...PROJECT_EDIT_DENIALS],
   );
   const bubblewrapCalls = localCommitSandboxCalls(fixture);
   assert.equal(bubblewrapCalls.length, 2);
@@ -7353,8 +7436,9 @@ test(
       }
       if (isRunnerBoundaryProbe(call)) {
         fallbackProbeCount += 1;
-        // Real syscalls confirm read-only denial and writable source changes
-        // beside a pinned nested control.
+        // Real syscalls confirm compound Git inspection and Git mutation
+        // denial under both accesses, read-only denial, and writable source
+        // changes beside a pinned nested control.
         if (realProbeCount < 2) {
           realProbeCount += 1;
           return executeFile(file, argumentsList, options);
@@ -7571,10 +7655,10 @@ test("expanded pipeline inventory schemas preserve strict Claude preflight and s
       assert.equal(settings.sandbox.enableWeakerNestedSandbox, false);
       assert.notEqual(settings.sandbox.network.allowAllUnixSockets, true);
       assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
-      assert.deepEqual(
-        settings.permissions.deny,
-        access === "read-only" ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
-      );
+      assert.deepEqual(settings.permissions.deny, [
+        ...COMMON_DENY_POLICY,
+        ...PROJECT_EDIT_DENIALS,
+      ]);
       assert.ok(
         settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
       );

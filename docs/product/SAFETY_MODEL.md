@@ -719,8 +719,15 @@ They do not rely on broad shell-command denials that can misclassify compound
 inspection; collaboration, editing, and web restrictions remain explicit, and
 the sandbox continues to deny repository content writes, Git and remote
 mutation, credentials, process escape, network access, and host Unix sockets.
-Workspace-write turns retain their existing command denials and
-autonomous-write restrictions. Claude prepares every command against a
+Git workspace-write turns share that autonomous Bash envelope with the added
+Edit and Write tools; the proved sandbox, not a Git-subcommand rule, denies Git
+index, ref, tag, remote, configuration and identity changes, outside writes,
+network and Unix sockets under every access policy, while ordinary compound Git
+inspection succeeds. File-tool Git-metadata denials bind each resolved absolute
+protected directory, and a protected path with rule, glob or control
+characters fails before launch. Declared-directory turns keep their
+Git-subcommand denials, and receipts pinned under a prior policy fail closed.
+Claude prepares every command against a
 read-only workspace reservation; each turn makes both the spawning-parent
 policy and `PATH` select the authenticated launcher, which alone replaces that
 reservation with the authorized workspace access. Sandboxed commands can then
