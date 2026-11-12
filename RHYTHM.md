@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-12
 
+- **Agent instructions follow a concise ownership convention.** A new
+  `instruction-authoring` skill governs role prompts, agent-governing
+  instructions and skills: each rule must change a concrete decision or
+  contract, a general obligation is stated once at its narrowest owner and
+  composed into every actual consumer route, conditional detail stays
+  progressive but discoverable, and meaning is compared before and after so no
+  real constraint is dropped to save lines. Prompt prose is described as
+  semantic guidance, not enforcement. The documentation map, change gate and
+  `skill-authoring` route to it. `test-authoring` also adopted general rules
+  from an external test-authoring guide: valid sanitized nested fixtures,
+  cleanup before release-checking boundaries, integration-caller tracing,
+  honest interrupted-run reporting and mandatory gates without repeated
+  expensive runs. Its Node 24 `node:test` policy, whole fast-gate budget,
+  slow-tier and opt-in smoke rules were kept; nothing project-specific was
+  imported.
+
 - **Coding pipelines separate pipeline checks from operator acceptance.** A
   polishing task explicitly assigned three ordinary pipeline commands and,
   separately, seventeen checks to the supervising operator after `DONE`. One
