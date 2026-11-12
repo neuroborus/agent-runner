@@ -2617,7 +2617,10 @@ Established required-check execution and attestation belong exclusively to
 `FINALIZE`. Selected runner-trusted commands never execute inside an agent
 turn. Their agent-sandbox limitations must not cause `BLOCKED` or prevent
 applicable content repairs and semantic review; the runner executes the
-persisted exact vectors during `FINALIZE`.
+persisted exact vectors during `FINALIZE`. Explicit owner and timing
+assignments bind validation work under any label, so these turns neither run
+nor claim work reserved for another owner or later checkpoint, while authorized
+in-scope development tests stay allowed.
 
 External environment constraints affecting work not delegated to an exact
 selected command still produce `BLOCKED` with bounded reason and evidence,
@@ -3449,6 +3452,11 @@ Reviewer and lazy terminal confirmation do not treat leaving out explicit
 post-completion operator acceptance as an omission. They reject evidence or
 summaries claiming that such acceptance ran or passed and a finalization that
 adds it, while a missing genuine pipeline-owned check remains an omission.
+Candidate review, lazy self-review and terminal confirmation also report a
+claim that relabeled reserved work ran early, even when final acceptance stays
+pending; dispute reconsideration and arbitration do not withdraw that finding
+because of the label. This semantic rule follows the
+[validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
 
 The Reviewer must not receive the Worker's private implementation reasoning.
 

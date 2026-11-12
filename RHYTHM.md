@@ -7,6 +7,24 @@ remain in the owning documentation.
 
 ## 2026-11-12
 
+- **Explicit check ownership binds validation work in every coding turn.**
+  Pre-finalization writable turns were told only to leave the inventory and
+  selected Runner-trusted commands alone. No rule bound operator-reserved
+  validation work given another label, such as development checks, a
+  temporary copy, a repeated subset or a predecessor comparison. Terminal
+  confirmation already rejected claims that post-completion acceptance ran,
+  but candidate review, self-review and adjudication had no work-based
+  ownership guidance. One owned rule per coding pipeline now reaches
+  implementation or polishing, check-and-fix, finding resolution, candidate,
+  self and terminal review, dispute reconsideration and arbitration through
+  their existing composition, continuation and correction routes. Writable
+  turns neither run nor claim such work, while authorized development tests
+  stay allowed; reviews report early-execution claims even when final
+  acceptance is left pending, and relabeling cannot withdraw that finding. The
+  fix is semantic only: schemas, state, settings, permissions, validators and
+  budgets are unchanged. Whether the reported execution actually happened
+  remains unknown, and no deterministic defect was proved.
+
 - **Agent instructions follow a concise ownership convention.** A new
   `instruction-authoring` skill governs role prompts, agent-governing
   instructions and skills: each rule must change a concrete decision or

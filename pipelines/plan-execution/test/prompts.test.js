@@ -183,6 +183,7 @@ Work only on this planned commit.
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+Owner and timing assignments that the task or clarifications make explicit bind the validation work itself for the whole run: calling it development, investigation, or non-acceptance, changing its entrypoint, using a temporary copy, repeating a subset, or comparing with a predecessor never transfers its owner or permits early execution. Do not execute such work early or under another owner, or claim to have done so, in this turn; leave it pending with its owner and timing. In-scope development inspection and focused tests that the task and this phase authorize remain allowed; the reservations above and selected commands' capabilities are unchanged.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 Return the status fields inside the schema's result object.
@@ -235,6 +236,7 @@ If a finding is incorrect, dispute it with concise evidence instead of changing 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+Owner and timing assignments that the task or clarifications make explicit bind the validation work itself for the whole run: calling it development, investigation, or non-acceptance, changing its entrypoint, using a temporary copy, repeating a subset, or comparing with a predecessor never transfers its owner or permits early execution. Do not execute such work early or under another owner, or claim to have done so, in this turn; leave it pending with its owner and timing. In-scope development inspection and focused tests that the task and this phase authorize remain allowed; the reservations above and selected commands' capabilities are unchanged.
 Do not create a commit in this turn.
 Return the status fields and finding decisions inside the schema's result object.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -335,6 +337,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 
 Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
+Owner and timing assignments that the task or clarifications make explicit bind the validation work itself for the whole run: calling it development, investigation, or non-acceptance, changing its entrypoint, using a temporary copy, repeating a subset, or comparing with a predecessor never transfers its owner or permits early execution. Relabeling or still-pending final acceptance never makes a claim that such work ran early or under another owner correct: uphold a valid finding about it (UPHOLD or REVIEWER_CORRECT), and withdraw it (WITHDRAW or WORKER_CORRECT) only on evidence that the reported work was authorized in-scope development work or was never claimed.
 For RESOLVED, return exactly one decision per dispute; every decision requires reason, while evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`,
@@ -356,6 +359,7 @@ test("arbitration prompts preserve the mandatory cores", () => {
     `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
 
 Do not modify the repository or rewrite requirements. Always provide rationale.
+Owner and timing assignments that the task or clarifications make explicit bind the validation work itself for the whole run: calling it development, investigation, or non-acceptance, changing its entrypoint, using a temporary copy, repeating a subset, or comparing with a predecessor never transfers its owner or permits early execution. Relabeling or still-pending final acceptance never makes a claim that such work ran early or under another owner correct: uphold a valid finding about it (UPHOLD or REVIEWER_CORRECT), and withdraw it (WITHDRAW or WORKER_CORRECT) only on evidence that the reported work was authorized in-scope development work or was never claimed.
 For WORKER_CORRECT or REVIEWER_CORRECT, set question and whyBlocked to "", and options and evidence to [].
 For REQUIREMENT_AMBIGUOUS, use the product-decision fields.`,
   );
@@ -454,5 +458,33 @@ test("check ownership survives commit and custom execution adaptation", () => {
     assert.match(prompt, /operator or another owner is not an omission/u);
     assert.match(prompt, /reject a finalization that adds it/u);
     assert.match(prompt, /missing genuine pipeline-owned check/u);
+  }
+  for (const prompt of [
+    ...adapted(IMPLEMENTATION_INSTRUCTIONS),
+    ...adapted(CHECK_AND_FIX_INSTRUCTIONS),
+    ...adapted(FINDING_RESOLUTION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /bind the validation work itself for the whole run/u);
+    assert.match(prompt, /leave it pending with its owner and timing/u);
+    assert.match(prompt, /focused tests that the task and this phase/u);
+  }
+  for (const prompt of [
+    ...adapted(CANDIDATE_REVIEW_INSTRUCTIONS),
+    ...adapted(CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS),
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /even when final external acceptance is also/u);
+    assert.match(prompt, /assert that the execution was undone/u);
+  }
+  for (const prompt of [
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+  ].flatMap((instructions) => [
+    instructions,
+    customExecutionPrompt(instructions),
+  ])) {
+    assert.match(prompt, /still-pending final acceptance never makes/u);
+    assert.match(prompt, /authorized in-scope development work/u);
   }
 });

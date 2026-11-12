@@ -188,13 +188,28 @@ nor the executing host decides ownership. Bootstrap, correction, validation
 migration, catalog correction, reconciliation, arbitration, finalization and
 terminal confirmation carry the same rule.
 
+Explicit owner and timing assignments bind the validation work itself, not
+only inventories. Calling reserved work development, investigation or
+non-acceptance, changing its entrypoint, using a temporary copy, repeating a
+subset or comparing with a predecessor neither transfers its owner nor permits
+early execution. Implementation or polishing, check-and-fix and finding
+resolution neither run nor claim such work and keep it pending with its owner
+and timing; in-scope development inspection and focused tests that the task and
+phase authorize stay allowed. Candidate, self and terminal review report a
+summary or evidence claiming early execution as a finding even when final
+acceptance is also left pending, preserving honestly reported facts, useful
+content and pending coverage. Dispute reconsideration and arbitration never
+withdraw that finding because the work was relabeled.
+
 This is semantic instruction, not deterministic parsing of task prose.
 Accepted inventories stay additive, so reconciliation and arbitration never
 remove a misclassified command. Deterministic validators check command
 structure, capability reports and matching evidence, not ownership: a valid
 operator-owned command that the roles misclassify can be accepted, executed and
-pass. Only an ownership violation that a role actually reports, such as a
-terminal-confirmation finding, blocks through the existing gates.
+pass. Prompts likewise do not enforce arbitrary command effects or owner
+prose. Only an ownership violation that a role actually reports, such as a
+candidate-review or terminal-confirmation finding, blocks through the existing
+gates.
 
 Execution inventories are scoped to canonical plan steps. Every active role
 discovers a complete procedure for every step. Commit steps require the ordinary

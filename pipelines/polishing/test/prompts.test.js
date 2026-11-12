@@ -242,6 +242,12 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /For BLOCKED/u);
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
+  for (const instructions of [
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /still-pending final acceptance never makes/u);
+  }
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
   assert.match(
     finalizationBootstrapInstructions({
@@ -304,6 +310,7 @@ test("terminal recovery instructions distinguish evidence from content without w
     );
     assert.match(prompt, /operator or another owner is not an omission/u);
     assert.match(prompt, /missing genuine pipeline-owned check/u);
+    assert.match(prompt, /even when final external acceptance is also/u);
   }
   for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
     assert.ok(schema.required.includes("finalizationFindingIds"));
@@ -349,6 +356,7 @@ test("writable candidate instructions defer checks without suppressing unrelated
       instructions,
       /work not delegated to a selected runner-trusted command/u,
     );
+    assert.match(instructions, /leave it pending with its owner and timing/u);
     assert.doesNotMatch(
       instructions,
       /NOT_RUN|requiredChecks|validationInfrastructure/u,

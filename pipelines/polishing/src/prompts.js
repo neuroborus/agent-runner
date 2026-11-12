@@ -23,7 +23,13 @@ const CHECK_OWNERSHIP_INSTRUCTIONS = `Before putting any command in requiredChec
 
 const EXTERNAL_ACCEPTANCE_SUMMARY_INSTRUCTIONS = `Keep post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner in the resolved summary as pending external work with its owner and timing; it is never a pipeline check, and this turn still cannot add, select, or remove commands, paths, or reports.`;
 
-const EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS = `Leaving out post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not an omission. Reject evidence or summaries claiming that such acceptance ran or passed, and reject a finalization that adds it to the inventory. A missing genuine pipeline-owned check remains an omission.`;
+const VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS = `Owner and timing assignments that the task or clarifications make explicit bind the validation work itself for the whole run: calling it development, investigation, or non-acceptance, changing its entrypoint, using a temporary copy, repeating a subset, or comparing with a predecessor never transfers its owner or permits early execution.`;
+
+const VALIDATION_WORK_REVIEW_INSTRUCTIONS = `${VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS} Report a finding for any summary or evidence claiming that such work ran early or under another owner, even when final external acceptance is also left pending. Keep honestly reported facts, useful content, and pending coverage; never relabel the claim, assert that the execution was undone, or approve it.`;
+
+const VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS = `${VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS} Relabeling or still-pending final acceptance never makes a claim that such work ran early or under another owner correct: uphold a valid finding about it (UPHOLD or REVIEWER_CORRECT), and withdraw it (WITHDRAW or WORKER_CORRECT) only on evidence that the reported work was authorized in-scope development work or was never claimed.`;
+
+const EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS = `Leaving out post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not an omission. Reject evidence or summaries claiming that such acceptance ran or passed, and reject a finalization that adds it to the inventory. A missing genuine pipeline-owned check remains an omission. ${VALIDATION_WORK_REVIEW_INSTRUCTIONS}`;
 
 const CAPABILITY_EXECUTOR_INSTRUCTIONS = `Describe needs and blockers for each command's actual future executor at its assigned checkpoint: the ordinary Worker FINALIZE turn under its existing declared workspace-write access, or Runner-trusted execution of a selected frozen exact command; never describe the current read-only discovery, migration, or Reviewer turn. An ordinary agent-executed command that writes only safe workspace output under that existing Worker access needs no report: no scratch, cache, projection, or unsupported need. Selected trusted commands remain reserved from agent execution; report every capability their trusted executor actually requires. sourceProjection is separate frozen authority, not a synonym for workspace-write; set it to true only when supported evidence shows the actual executor must write beside the staging-independent source the command validates. Report a genuine command-specific blocker, including a nondelegated one, only with evidence; never run an unpermitted probe or claim that no blockers exist without evidence.`;
 
@@ -67,7 +73,8 @@ export const FINALIZATION_CORRECTION_INSTRUCTIONS = `Your previous structured fi
 Correct only the identified contract violation using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute the rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A repeated invalid result fails closed.`;
 
 const PREFINALIZATION_VALIDATION_INSTRUCTIONS = `The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
-Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.`;
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+${VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS} Do not execute such work early or under another owner, or claim to have done so, in this turn; leave it pending with its owner and timing. In-scope development inspection and focused tests that the task and this phase authorize remain allowed; the reservations above and selected commands' capabilities are unchanged.`;
 
 export const POLISH_INSTRUCTIONS = `Polish the existing local repository changes into a correct, idiomatic, minimal result that satisfies the task and follows the target project's conventions.
 
@@ -116,6 +123,7 @@ export const CANDIDATE_REVIEW_INSTRUCTIONS = `In combined mode, independently re
 Review the complete current change set independently against the task, resolved context, architecture, tests, edge cases, minimality, and project conventions.
 
 Do not modify the repository. Review the complete result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
+${VALIDATION_WORK_REVIEW_INSTRUCTIONS}
 Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
 For APPROVED, set findings, options, and evidence to []; set question and whyBlocked to "".
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
@@ -150,6 +158,7 @@ Review the candidate changes and verify that they are correct, idiomatic, minima
 
 Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
 Do not run the project finalization procedure, attest finalization, validate terminal evidence, or perform generic handoff preparation; those remain owned by FINALIZE, CONFIRM, and HANDOFF.
+${VALIDATION_WORK_REVIEW_INSTRUCTIONS}
 For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
@@ -189,12 +198,14 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider each disputed finding from the current repository evidence and the Worker's evidence.
 
 Do not modify the repository. Withdraw an incorrect finding; uphold a valid one. Return exactly one decision for every dispute with reason and optional evidence.
+${VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS}
 For RESOLVED, set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.`;
 
 export const FINDING_ARBITRATION_INSTRUCTIONS = `Resolve the disputed finding from the task, repository, current changes, and recorded evidence.
 
-Do not modify the repository. Choose WORKER_CORRECT when the finding should be withdrawn, REVIEWER_CORRECT when it must be fixed, or REQUIREMENT_AMBIGUOUS only for a genuinely blocking unresolved product requirement. Always provide rationale.`;
+Do not modify the repository. Choose WORKER_CORRECT when the finding should be withdrawn, REVIEWER_CORRECT when it must be fixed, or REQUIREMENT_AMBIGUOUS only for a genuinely blocking unresolved product requirement. Always provide rationale.
+${VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS}`;
 
 export const STAGNATION_INSTRUCTIONS = `Resolve a stalled polishing correction loop from the current blockers and compact correction history.
 

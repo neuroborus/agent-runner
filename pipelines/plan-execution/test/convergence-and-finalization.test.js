@@ -17,6 +17,8 @@ import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
   IMPLEMENTATION_SCHEMA,
@@ -3546,6 +3548,16 @@ test("arbitrates an upheld finding only after its dispute budget", async (t) => 
     fixture.calls.arbiter[0].prompt,
     /Prior decisions for this finding[\s\S]*"findingId": "R1"/u,
   );
+  const reconsiderations = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === DISPUTE_RECONSIDERATION_SCHEMA,
+  );
+  assert.equal(reconsiderations.length, 2);
+  for (const { prompt } of [...reconsiderations, fixture.calls.arbiter[0]]) {
+    assert.match(
+      prompt,
+      /withdraw it \(WITHDRAW or WORKER_CORRECT\) only on evidence/u,
+    );
+  }
 });
 
 test("requires a fix after the Arbiter upholds the Reviewer", async (t) => {
@@ -4624,6 +4636,10 @@ for (const mode of ["independent", "lazy"]) {
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));
+          assert.match(
+            prompt,
+            /Do not execute such work early or under another owner/u,
+          );
         }
         if (phase === "check") {
           checkRounds += 1;
@@ -4697,6 +4713,22 @@ for (const mode of ["independent", "lazy"]) {
           ({ request }) => request.prompt !== request.recoveryPrompt,
         ),
       );
+      const recorded = Object.values(fixture.calls).flat();
+      for (const schemas of [
+        [CANDIDATE_REVIEW_SCHEMA, CANDIDATE_CLEAN_CONFIRM_SCHEMA],
+        [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA],
+      ]) {
+        const reviews = recorded.filter(({ schema }) =>
+          schemas.includes(schema),
+        );
+        assert.ok(reviews.length > 0);
+        for (const { prompt } of reviews) {
+          assert.match(
+            prompt,
+            /Report a finding for any summary or evidence claiming that such work ran early/u,
+          );
+        }
+      }
       if (mode === "lazy") {
         assert.equal(checkRounds, 4);
         assert.equal(fixture.calls.reviewer.length, 0);

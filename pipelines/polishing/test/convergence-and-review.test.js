@@ -9,6 +9,7 @@ import {
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
   POLISH_SCHEMA,
@@ -2229,6 +2230,19 @@ test("arbitrates a repeatedly upheld dispute in a fresh read-only turn", async (
     result.pipelineState.disputeHistory.map(({ attempt }) => attempt),
     [1, 2],
   );
+  const reconsiderations = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === DISPUTE_RECONSIDERATION_SCHEMA,
+  );
+  assert.equal(reconsiderations.length, 2);
+  for (const { prompt } of [
+    ...reconsiderations,
+    fixture.calls.arbiter.at(-1),
+  ]) {
+    assert.match(
+      prompt,
+      /withdraw it \(WITHDRAW or WORKER_CORRECT\) only on evidence/u,
+    );
+  }
 
   const recovered = await fixture.recover();
   assert.deepEqual(
@@ -2836,6 +2850,10 @@ for (const mode of ["independent", "lazy"]) {
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));
+          assert.match(
+            prompt,
+            /Do not execute such work early or under another owner/u,
+          );
         }
         if (phase === "check") {
           checkRounds += 1;
@@ -2907,6 +2925,22 @@ for (const mode of ["independent", "lazy"]) {
           ({ request }) => request.prompt !== request.recoveryPrompt,
         ),
       );
+      const recorded = Object.values(fixture.calls).flat();
+      for (const schemas of [
+        [CANDIDATE_REVIEW_SCHEMA, CANDIDATE_CLEAN_CONFIRM_SCHEMA],
+        [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA],
+      ]) {
+        const reviews = recorded.filter(({ schema }) =>
+          schemas.includes(schema),
+        );
+        assert.ok(reviews.length > 0);
+        for (const { prompt } of reviews) {
+          assert.match(
+            prompt,
+            /Report a finding for any summary or evidence claiming that such work ran early/u,
+          );
+        }
+      }
       if (mode === "lazy") {
         assert.equal(checkRounds, 4);
         assert.equal(fixture.calls.reviewer.length, 0);
