@@ -158,6 +158,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     assert.match(instructions, /input only to the dedicated FINALIZE/u);
     assert.match(instructions, /runner derives the final required-check/u);
     assert.match(instructions, /Do not propose, select, or repeat commands/u);
+    assert.match(instructions, /pending external work with its owner/u);
     assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
   }
   for (const schema of [
@@ -301,6 +302,8 @@ test("terminal recovery instructions distinguish evidence from content without w
       prompt,
       /Evidence rejection is valid even when inventories are unchanged/u,
     );
+    assert.match(prompt, /operator or another owner is not an omission/u);
+    assert.match(prompt, /missing genuine pipeline-owned check/u);
   }
   for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
     assert.ok(schema.required.includes("finalizationFindingIds"));

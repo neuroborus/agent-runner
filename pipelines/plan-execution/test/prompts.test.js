@@ -28,6 +28,11 @@ import {
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
+import {
+  APPLICABILITY_INSTRUCTIONS,
+  customExecutionPrompt,
+  REPOSITORY_DISCOVERY_INSTRUCTIONS,
+} from "../src/prompts.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
   assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
@@ -409,4 +414,45 @@ test("execution discovery and finalization classify infrastructure by responsibi
     BOOTSTRAP_INSTRUCTIONS,
     /Check requiredChecks first, then validationInfrastructure/u,
   );
+});
+
+test("check ownership survives commit and custom execution adaptation", () => {
+  const adapted = (instructions) => {
+    const custom = customExecutionPrompt(instructions);
+    assert.notEqual(custom, instructions);
+    return [instructions, custom];
+  };
+  for (const prompt of [
+    ...adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS),
+    ...adapted(BOOTSTRAP_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /determine the owner and checkpoint/u);
+    assert.match(prompt, /selected Runner-trusted commands, which remain/u);
+    assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    assert.match(prompt, /expected to fail never becomes a PASS-required/u);
+    assert.match(prompt, /never drops other genuine in-scope requirements/u);
+  }
+  for (const prompt of adapted(APPLICABILITY_INSTRUCTIONS)) {
+    assert.match(prompt, /Catalog correction never adds post-completion/u);
+    assert.match(prompt, /Do not silently change or drop accepted/u);
+  }
+  for (const prompt of [
+    ...adapted(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS),
+    ...adapted(BOOTSTRAP_ARBITRATION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /pending external work with its owner and timing/u);
+    assert.match(prompt, /cannot add, select, or remove commands/u);
+  }
+  for (const prompt of adapted(FINALIZATION_INSTRUCTIONS)) {
+    assert.match(prompt, /PASS covers only the pipeline-owned inventory/u);
+    assert.match(prompt, /never permits removing or weakening/u);
+  }
+  for (const prompt of [
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /operator or another owner is not an omission/u);
+    assert.match(prompt, /reject a finalization that adds it/u);
+    assert.match(prompt, /missing genuine pipeline-owned check/u);
+  }
 });

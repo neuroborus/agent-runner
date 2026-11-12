@@ -5,6 +5,33 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-12
+
+- **Coding pipelines separate pipeline checks from operator acceptance.** A
+  polishing task explicitly assigned three ordinary pipeline commands and,
+  separately, seventeen checks to the supervising operator after `DONE`. One
+  bootstrap role promoted all seventeen into its required checks. Polishing
+  and plan-execution prompts asked for every required check and the complete
+  finalization procedure but never said whose check it was or when it ran.
+  Accepted role inventories merge additively, and reconciliation and
+  arbitration resolve summaries only, so a promoted check cannot be removed
+  safely afterwards. Bootstrap, correction, validation migration, catalog
+  correction, reconciliation, arbitration, finalization and terminal
+  confirmation now tell each role to determine the owner and checkpoint first.
+  Pipeline-owned checks include selected Runner-trusted commands; explicitly
+  post-completion operator acceptance stays pending external work in the
+  summaries and is never run, attested or claimed by `DONE`. The repair is a
+  prompt contract only. Merging, trusted-command completeness, schemas, state,
+  budgets, review gates and Git authority are unchanged, because the runner
+  cannot and should not parse ownership from task prose. Detection stays
+  semantic: a valid command that the roles misclassify can still be accepted,
+  executed and pass unless a role reports the violation. The original run
+  paused before its summary was resolved or an inventory accepted, so whether
+  its resolver would have completed is unknown. No deterministic engine
+  defect was proven, and the original task was not rerun. Fake-agent
+  regressions prove instruction delivery and the unchanged runner guarantees,
+  not real-model compliance.
+
 ## 2026-11-11
 
 - **Reviewed handoffs have standing local commit and installation approval.**

@@ -972,24 +972,20 @@ test("invalidates version-1 validation evidence before completed polishing resum
       constraint: "unique-ids-and-commands",
     },
   ]);
-  assert.ok(
-    fixture.calls.worker.some(
-      ({ prompt }) =>
-        prompt.includes("versioned-state migration checkpoint") &&
-        prompt.includes(
-          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
-        ),
-    ),
-  );
-  assert.ok(
-    fixture.calls.reviewer.some(
-      ({ prompt }) =>
-        prompt.includes("versioned-state migration checkpoint") &&
-        prompt.includes(
-          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
-        ),
-    ),
-  );
+  for (const role of ["worker", "reviewer"]) {
+    const migrations = fixture.calls[role].filter(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    );
+    assert.ok(migrations.length > 0);
+    for (const { prompt } of migrations) {
+      assert.match(
+        prompt,
+        /The frozen finalization skill or Markdown procedure is \.agents\/skills\/finalization\/SKILL\.md/u,
+      );
+      assert.match(prompt, /determine the owner and checkpoint/u);
+      assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    }
+  }
 });
 
 test("corrects staging-dependent validation-migration checks", async (t) => {

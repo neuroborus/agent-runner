@@ -172,6 +172,30 @@ deterministic rules. Reconciliation may resolve summaries, but cannot add, selec
 checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
+Coding-pipeline roles determine each obligation's owner and checkpoint before
+cataloguing checks. A pipeline inventory contains only checks owned by that
+pipeline's finalization: ordinary Worker `FINALIZE` checks and selected
+Runner-trusted commands, which keep their frozen identities and capabilities
+although Runner executes them on the host. Acceptance that the task or
+clarifications explicitly assign to the supervising operator or another owner
+after the run completes remains mandatory external work: summaries keep it
+pending with its owner and timing, the pipeline never runs or attests it, and
+`DONE` never claims it succeeded. An operator-owned witness expected to fail
+never becomes a PASS-required command, while negative assertions inside
+in-scope tests stay required. A task's command list does not drop other
+genuine requirements from conventions or applicable skills; neither a label
+nor the executing host decides ownership. Bootstrap, correction, validation
+migration, catalog correction, reconciliation, arbitration, finalization and
+terminal confirmation carry the same rule.
+
+This is semantic instruction, not deterministic parsing of task prose.
+Accepted inventories stay additive, so reconciliation and arbitration never
+remove a misclassified command. Deterministic validators check command
+structure, capability reports and matching evidence, not ownership: a valid
+operator-owned command that the roles misclassify can be accepted, executed and
+pass. Only an ownership violation that a role actually reports, such as a
+terminal-confirmation finding, blocks through the existing gates.
+
 Execution inventories are scoped to canonical plan steps. Every active role
 discovers a complete procedure for every step. Commit steps require the ordinary
 fast gate and only slow checks whose documented guarantees that step affects;

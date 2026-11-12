@@ -2242,6 +2242,16 @@ assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
 arbitration cannot discard or reassign requirements. Infrastructure paths are
 deduplicated globally and fingerprinted by the runner.
 
+Discovery, legacy bootstrap, correction and validation migration catalogue only
+checks owned by this pipeline's finalization, including selected Runner-trusted
+commands. Acceptance explicitly assigned to the supervising operator or another
+owner after the run completes stays pending external work in the summaries,
+with its owner and timing; applicability catalog correction never adds it. This
+semantic rule follows the
+[validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory);
+the runner does not parse task prose for ownership or remove a misclassified
+accepted command.
+
 `validationSchedule` persists one ordered `commands` catalog and a `steps` array
 of `{step, commandIndexes}` entries. Indexes are zero-based references into that
 catalog, so command text is retained once rather than repeated for every step.
@@ -2465,7 +2475,9 @@ Resolve differences from task/plan/repository evidence.
 Reconciliation and any arbitration resolve only the summary and a remaining
 material disagreement. The runner independently derives the established
 validation inventory from the two already accepted role inventories regardless
-of which summary direction is selected.
+of which summary direction is selected. The resolved summary keeps explicitly
+assigned post-completion acceptance as pending external work with its owner and
+timing.
 
 Persist the agreed context:
 
@@ -3069,6 +3081,11 @@ staging-independent and expresses an applicable content check against `HEAD` or
 explicit trees. This phase-owned deferral is neither a validation blocker nor a
 skipped required check and must not prevent `PASS`.
 
+Commit and custom finalization neither add nor run explicit post-completion
+operator acceptance. `PASS` covers only the pipeline inventory, and the summary
+lists that acceptance as pending without claiming success. This never permits
+removing or weakening an established check.
+
 Every non-availability result carries the complete inventory actually used and
 exactly one ordered result for each required check. `PASS` requires every result
 to be `PASS` after the runner replaces the exact selected trusted-command
@@ -3427,6 +3444,11 @@ explicitly `ACCEPTED` as authorized by the current plan step or `REJECTED` with
 a finding. The decision and its bounded evidence are bound to the same content
 fingerprint as terminal confirmation. Exactly one successful confirmation
 advances directly to `COMMIT`.
+
+Reviewer and lazy terminal confirmation do not treat leaving out explicit
+post-completion operator acceptance as an omission. They reject evidence or
+summaries claiming that such acceptance ran or passed and a finalization that
+adds it, while a missing genuine pipeline-owned check remains an omission.
 
 The Reviewer must not receive the Worker's private implementation reasoning.
 

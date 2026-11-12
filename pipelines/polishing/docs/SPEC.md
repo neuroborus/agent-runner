@@ -656,6 +656,15 @@ IDs. Every command or path found by any active role is preserved. Reconciliation
 and arbitration resolve only summaries and material disagreements; their output
 contains no inventory fields and cannot invent, select, or omit commands or
 paths. The runner—not an agent—fingerprints the derived files.
+Bootstrap, its correction and validation migration catalogue only checks owned
+by this pipeline's finalization, including selected Runner-trusted commands.
+Acceptance explicitly assigned to the supervising operator or another owner
+after the run completes stays pending external work in the summaries, with its
+owner and timing, and reconciliation or arbitration keeps it there. This
+semantic rule follows the
+[validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory);
+the runner does not parse task prose for ownership or remove a misclassified
+accepted command.
 Bootstrap and validation migration receive only the frozen selected path or
 fallback decision, never skill content. A selected skill is mandatory
 validation infrastructure; the runner retains it in the established inventory.
@@ -787,7 +796,10 @@ commit preparation, and complete the staging-independent content gate. Express
 an applicable tracked-content check against `HEAD` or explicit trees. This
 deferral is neither a skipped check nor a validation blocker. Report strict
 `PASS`, `FAIL`, `SKILL_MISSING`, `SKILL_INVALID`, `BLOCKED`, or the narrowly
-allowed product decision outcome.
+allowed product decision outcome. Finalization neither adds nor runs explicit
+post-completion operator acceptance; `PASS` covers only the pipeline inventory,
+and the summary lists that acceptance as pending without claiming success. This
+never permits removing or weakening an established check.
 
 Missing, escaping, invalid, or changed frozen guidance pauses without a retry
 checkpoint and requires a new run; automatic guidance never switches or falls
@@ -919,6 +931,11 @@ declared fix without a proven repository mutation does not invalidate evidence.
 Actual content or infrastructure changes, provider correction-scope drift, and
 content-changing interruption reconciliation always do. One fresh successful
 terminal confirmation remains required immediately before `HANDOFF`.
+
+Terminal confirmation does not treat leaving out explicit post-completion
+operator acceptance as an omission. It rejects evidence or summaries claiming
+that such acceptance ran or passed and a finalization that adds it, while a
+missing genuine pipeline-owned check remains an omission.
 
 Terminal `validationChange: REJECTED` has a separate recovery route shared by
 both terminal roles. First honor the existing whole-result override gate for

@@ -1941,7 +1941,17 @@ Run tests and formatting, then stage changes, inspect the cached diff, and draft
       call.prompt,
       /constrained COMMIT executor alone runs git add -A/u,
     );
+    assert.match(call.prompt, /PASS covers only the pipeline-owned inventory/u);
+    assert.match(call.prompt, /pending external work with its owner/u);
   }
+  const confirmation = fixture.calls.reviewer.find(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  );
+  assert.match(
+    confirmation.prompt,
+    /operator or another owner is not an omission/u,
+  );
+  assert.match(confirmation.prompt, /missing genuine pipeline-owned check/u);
   assert.match(commitCall.prompt, /exact supplied subject/u);
   assert.match(commitCall.prompt, /constrained executor alone stages/u);
   assert.match(
