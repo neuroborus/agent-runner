@@ -129,14 +129,16 @@ For APPROVED, set findings, options, and evidence to []; set question and whyBlo
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.`;
 
-export const REVIEW_INSTRUCTIONS = `Confirm the finalized change set is correct, idiomatic, minimal, consistent with the project's conventions, and ready for runner-owned handoff.
-
-Do not modify the repository. This is the distinct terminal confirmation over finalized content and evidence, not candidate review or generic handoff preparation. Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
-${TRUSTED_TIMING_INSTRUCTIONS}
+const TERMINAL_EVIDENCE_INSTRUCTIONS = `${TRUSTED_TIMING_INSTRUCTIONS}
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
 ${EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS}
 Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
-Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.`;
+
+export const REVIEW_INSTRUCTIONS = `Confirm the finalized change set is correct, idiomatic, minimal, consistent with the project's conventions, and ready for runner-owned handoff.
+
+Do not modify the repository. This is the distinct terminal confirmation over finalized content and evidence, not candidate review or generic handoff preparation. Reuse an existing R-prefixed ID for an unchanged finding. Report every actionable blocker, but do not report preferences or already-resolved issues.
+${TERMINAL_EVIDENCE_INSTRUCTIONS}
 For APPROVED, set finalizationFindingIds to []; set findings, options, and evidence to []; set question and whyBlocked to "".
 For FINDINGS, provide one or more findings with stable IDs, repository-relative file, problem, reason, and suggestedAction; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.`;
@@ -167,11 +169,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const CLEAN_CONFIRM_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, and consistent with the project's conventions, and ready for runner-owned handoff.
 
 Do not modify the repository. This is the distinct terminal confirmation over finalized content and evidence. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
-${TRUSTED_TIMING_INSTRUCTIONS}
-Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
-${EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS}
-Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
-Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+${TERMINAL_EVIDENCE_INSTRUCTIONS}
 For CLEAN, set finalizationFindingIds to []; set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
