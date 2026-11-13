@@ -41,20 +41,6 @@ const EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS = `Leaving out post-completi
 
 const CAPABILITY_EXECUTOR_INSTRUCTIONS = `Describe needs and blockers for each command's actual future executor at its assigned checkpoint: the ordinary Worker FINALIZE turn under its existing declared workspace-write access, or Runner-trusted execution of a selected frozen exact command; never describe the current read-only discovery, migration, or Reviewer turn. An ordinary agent-executed command that writes only safe workspace output under that existing Worker access needs no report: no scratch, cache, projection, or unsupported need. Selected trusted commands remain reserved from agent execution; report every capability their trusted executor actually requires. sourceProjection is separate frozen authority, not a synonym for workspace-write; set it to true only when supported evidence shows the actual executor must write beside the staging-independent source the command validates. Report a genuine command-specific blocker, including a nondelegated one, only with evidence; never run an unpermitted probe or claim that no blockers exist without evidence.`;
 
-export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
-Return the following fields inside the schema's result object. Provide a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure. Independently identify every required check as a stable C-prefixed ID, exact command, and steps array of applicable canonical plan step numbers, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
-Each check's steps must be a nonempty ascending list without duplicates or references outside the canonical plan. Independently provide a complete procedure for every plan step: the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects. Include all selected trusted commands in the complete catalog, with their actual step applicability; selection alone does not make a check applicable to every step. Do not execute future-step checks during earlier finalization. The runner preserves each role's accepted assignments and derives stable Worker-first per-step inventories, unioning applicability of identical commands. Reconciliation and arbitration cannot discard or reassign requirements.
-${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
-Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit-message drafting. Generic commit preparation belongs only to COMMIT. Express an applicable content check against HEAD or explicit trees instead of the index.
-${CHECK_OWNERSHIP_INSTRUCTIONS}
-Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative regular files, except for the exact declared label of selected external finalization guidance when supplied; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
-Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
-Report capabilityRequirements and environmentBlockers as bounded arrays (up to 256 each), tied to exact commands in your requiredChecks inventory; use [] when none. Each capability requirement must identify at least one actual need: scratch, cache, a writable source projection, one or more artifacts, or one or more unsupported capabilities. Omit the report instead of returning an entry with no needs. Each requirement has command, commandIdentity (the supplied frozen identity or null), capabilities {scratch: boolean, cache: boolean, sourceProjection: boolean, artifacts: [{url, sha256}]}, and unsupported (up to 16 short capability identifiers). ${CAPABILITY_EXECUTOR_INSTRUCTIONS} Any non-null identity must exactly match the selected command's frozen identity; never invent or substitute one. Artifact URLs and SHA-256 must match the canonical HTTPS declaration contract; at most 32 artifacts per report. Do not request projection paths, credentials, or broader authority. Each environment blocker has command, source ("agent-sandbox" or "runner"), and evidence (1–8 concise single-line strings). Report missing runner selection or authority as needs, not as permission to grant them. The runner preserves every role's reports, evaluates the frozen declarations and actual availability, and pauses before writable work when unsatisfied. An agent-sandbox limitation is resolved only for that exact delegated command when runner inspection succeeds; a limitation of another command remains blocking. Do not execute required checks during discovery. Set both arrays to [] for every non-READY outcome.
-For READY, provide summary, requiredChecks, and validationInfrastructure; set capacityField, reason, question, and whyBlocked to "", capacityLimit to 0, and options and evidence to [].
-For CAPACITY_EXHAUSTED, set summary, reason, question, and whyBlocked to "", requiredChecks, validationInfrastructure, options, and evidence to [], and provide capacityField and capacityLimit as described above.
-For PLAN_REVISION_REQUIRED, set summary, capacityField, question, and whyBlocked to "", capacityLimit to 0, and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary, capacityField, and reason to "", capacityLimit to 0, and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
-
 export const REPOSITORY_DISCOVERY_INSTRUCTIONS = `Study the repository, task, complete validated plan, clarifications, project instructions, relevant skills, checks, tests, and Git history independently and without modifying the repository.
 Provide a concise bootstrap summary covering architecture, relevant files, invariants, planned commits, risks, and the complete staging-independent finalization procedure. This discovery is a repository catalog, not a plan applicability matrix. Return the six discovery fields inside result: stepAssessment, summary, requiredChecks, validationInfrastructure, capabilityRequirements, environmentBlockers. Each required check has only id and exact command, without steps. Later focused batches assign applicability.
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
@@ -297,7 +283,6 @@ export function customExecutionPrompt(prompt) {
     PLAN_COMPATIBILITY_INSTRUCTIONS,
     REPOSITORY_DISCOVERY_INSTRUCTIONS,
     APPLICABILITY_INSTRUCTIONS,
-    BOOTSTRAP_INSTRUCTIONS,
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
     BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -320,24 +305,12 @@ export function customExecutionPrompt(prompt) {
       ? CUSTOM_FINALIZATION_INSTRUCTIONS
       : base
           .replace(
-            "the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects",
-            "only checks required by that step's agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
-          )
-          .replace(
             "the ordinary fast gate and only slow checks whose documented guarantees that step affects",
             "only checks required by the agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
           )
           .replace(
             /Staging, [^\n]*?belong only to COMMIT\./gu,
             "Staging and commit preparation are forbidden throughout custom execution.",
-          )
-          .replace(
-            "Generic commit preparation belongs only to COMMIT.",
-            "No custom phase permits generic commit preparation.",
-          )
-          .replace(
-            "Express an applicable content check against HEAD or explicit trees instead of the index.",
-            "Validate the inspected custom inputs and outputs without staging or requiring Git.",
           )
           .replace(
             "For CHANGED, use only when you changed repository content;",

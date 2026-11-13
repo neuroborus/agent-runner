@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
   CANDIDATE_REVIEW_INSTRUCTIONS,
@@ -35,33 +34,6 @@ import {
 } from "../src/prompts.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /canonical repository-relative regular files/u,
-  );
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /except for the exact declared label of selected external finalization guidance/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /independently identify every required check/iu,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /keep the summary and required-check inventory staging-independent/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     /runner derives each plan step's required-check/u,
@@ -400,7 +372,7 @@ test("writable candidate instructions defer checks without suppressing unrelated
 
 test("execution discovery and finalization classify infrastructure by responsibility", () => {
   for (const instructions of [
-    BOOTSTRAP_INSTRUCTIONS,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
     FINALIZATION_INSTRUCTIONS,
   ]) {
     assert.match(
@@ -413,10 +385,13 @@ test("execution discovery and finalization classify infrastructure by responsibi
     );
     assert.match(instructions, /responsibility, not its name or extension/u);
   }
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /per-role capacity of 256 items/u);
   assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /Check requiredChecks first, then validationInfrastructure/u,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /per-role catalog limit is 256; report CAPACITY_EXHAUSTED/u,
+  );
+  assert.match(
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /checking requiredChecks before infrastructure/u,
   );
 });
 
@@ -426,10 +401,7 @@ test("check ownership survives commit and custom execution adaptation", () => {
     assert.notEqual(custom, instructions);
     return [instructions, custom];
   };
-  for (const prompt of [
-    ...adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS),
-    ...adapted(BOOTSTRAP_INSTRUCTIONS),
-  ]) {
+  for (const prompt of adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS)) {
     assert.match(prompt, /determine the owner and checkpoint/u);
     assert.match(prompt, /selected Runner-trusted commands, which remain/u);
     assert.match(prompt, /mandatory external acceptance, not a pipeline/u);

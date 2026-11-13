@@ -2242,10 +2242,10 @@ assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
 arbitration cannot discard or reassign requirements. Infrastructure paths are
 deduplicated globally and fingerprinted by the runner.
 
-Discovery, legacy bootstrap, correction and validation migration catalogue only
-checks owned by this pipeline's finalization, including selected Runner-trusted
-commands. Acceptance explicitly assigned to the supervising operator or another
-owner after the run completes stays pending external work in the summaries,
+Discovery, correction and validation migration catalogue only checks owned by
+this pipeline's finalization, including selected Runner-trusted commands.
+Acceptance explicitly assigned to the supervising operator or another owner
+after the run completes stays pending external work in the summaries,
 with its owner and timing; applicability catalog correction never adds it. This
 semantic rule follows the
 [validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory);
