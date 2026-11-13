@@ -1043,6 +1043,23 @@ configured budget. Every finding must be fixed, withdrawn, arbitrated, or
 explicitly overridden by the user for the exact candidate or terminal
 fingerprint that reported it.
 
+Each decision `reason` is nonempty single-line plain text of at most 4000 UTF-16
+code units, without control characters or line or paragraph separators. The
+resolution instructions state this rule, and the nested schema field carries the
+supported `minLength` and pattern subset; top-level `reason`, `question`, and
+`whyBlocked` stay generic bounded text because inactive outcomes require `""`.
+The strict normalizer remains authoritative and also rejects whitespace-only
+text. Each rejection carries one bounded diagnostic with a fixed field and
+constraint, never a rejected value or finding ID: `result`/`exact-field-set`,
+`status`/`resolution-status`, `empty-array` or `empty-string` for the first
+inapplicable field in schema order, `reason`, `evidence`, and `evidence[j]` for
+a blocked outcome, and positional `decisions[i]`, `decisions[i].id`,
+`decisions[i].decision`, `decisions[i].reason`, `decisions[i].evidence`, and
+`decisions[i].evidence[j]` identities. A non-array batch and positions of 32 or
+more report `decisions`/`array-up-to-32-items`; a batch that does not resolve
+every current blocker exactly once reports
+`decisions`/`every-current-blocker-exactly-once`.
+
 If an external environment constraint blocks nondelegated work during finding
 resolution, the Worker returns `BLOCKED` with no decisions and bounded reason
 and evidence. A selected trusted command's agent-sandbox limitation alone

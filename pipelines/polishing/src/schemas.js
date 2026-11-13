@@ -23,6 +23,11 @@ function deepFreeze(value) {
 }
 
 const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
+const NONEMPTY_PLAIN_TEXT = {
+  ...TEXT,
+  minLength: 1,
+  pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
+};
 const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
 const TEXT_LIST = { type: "array", maxItems: MAX_ITEMS, items: TEXT };
 const REQUIRED_CHECK = {
@@ -437,7 +442,7 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
         properties: {
           id: { type: "string", pattern: "^[FR][1-9][0-9]{0,8}$" },
           decision: { type: "string", enum: ["FIX", "DISPUTE"] },
-          reason: TEXT,
+          reason: NONEMPTY_PLAIN_TEXT,
           evidence: TEXT_LIST,
         },
         required: ["id", "decision", "reason", "evidence"],

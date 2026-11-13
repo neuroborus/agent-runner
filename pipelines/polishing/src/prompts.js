@@ -188,7 +188,7 @@ export const FINDING_RESOLUTION_INSTRUCTIONS = `Resolve every current blocker in
 
 Do not run the project finalization procedure, perform generic commit preparation, or create a commit. Those actions remain owned by FINALIZE or HANDOFF as applicable. Finalization failures must be fixed and cannot be disputed. A finding already upheld by the Arbiter must be fixed.
 ${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
+For RESOLVED, return exactly one decision per blocker; every decision requires reason as nonempty single-line plain text without control characters or line or paragraph separators, at most 4000 UTF-16 code units; DISPUTE requires evidence, while FIX evidence may be []. Set top-level reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;

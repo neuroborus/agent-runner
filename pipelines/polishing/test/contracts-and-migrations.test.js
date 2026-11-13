@@ -25,6 +25,7 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
 } from "../src/schemas.js";
 import {
   assertRun,
@@ -39,6 +40,7 @@ import {
   normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
   normalizePipelineState,
+  normalizeResolutionResult,
 } from "../src/workflow-contract.js";
 import {
   SETTINGS,
@@ -1965,4 +1967,53 @@ test("normalizes legacy polishing state to the default artifact root", () => {
   const normalized = normalizePipelineState(state);
   assert.equal(normalized.artifactRoot, "LOCAL_ARTIFACTS");
   assert.equal(normalized.settings.finalization, "auto");
+});
+
+test("finding-resolution reasons follow the strict plain-text contract", () => {
+  const blockers = [{ id: "R7" }];
+  const resolved = (reason) => ({
+    status: "RESOLVED",
+    decisions: [{ id: "R7", decision: "FIX", reason, evidence: [] }],
+    reason: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  });
+  const valid = resolved("Applied the requested correction.");
+  assert.equal(matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, valid), true);
+  assert.deepEqual(normalizeResolutionResult(valid, blockers, new Set()), {
+    status: "RESOLVED",
+    decisions: valid.decisions,
+  });
+  assert.deepEqual(FINDING_RESOLUTION_SCHEMA.properties.reason, {
+    type: "string",
+    maxLength: 4000,
+  });
+
+  const multiline = "Applied sentinel-value.\nSecond line.";
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, resolved(multiline)),
+    false,
+  );
+  for (const reason of ["", multiline]) {
+    assert.throws(
+      () => normalizeResolutionResult(resolved(reason), blockers, new Set()),
+      (error) => {
+        assert.equal(error.code, "ERR_INVALID_POLISHING_OUTPUT");
+        assert.deepEqual(
+          { ...error.diagnostic },
+          {
+            field: "decisions[0].reason",
+            constraint: "nonempty-plain-text-up-to-4000-characters",
+          },
+        );
+        for (const text of [error.message, JSON.stringify(error.diagnostic)]) {
+          assert.equal(text.includes("sentinel-value"), false);
+          assert.equal(text.includes("R7"), false);
+        }
+        return true;
+      },
+    );
+  }
 });
