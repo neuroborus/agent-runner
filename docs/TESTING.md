@@ -212,6 +212,11 @@ failed processes, order-independent mixed batches and local-commit
 tests own their terminal registration, legacy loading, redaction, cold pause
 and printed line.
 
+Fast polishing `convergence-and-review` owns the lazy clean-confirmation cold
+null retry through a reopened run store: its bounded candidate-review diagnostic
+and the latest accepted changed and unchanged check/fix summaries in the next
+primary requests and saved state.
+
 Fast `test/git/repository-safety.test.js` owns the read-only snapshot-change
 label normalizer and real-Git `readOnlyChanges` classification;
 `test/state/persistence.test.js` owns durable label validation, including
@@ -489,8 +494,10 @@ runner custom default before plan parsing.
 Focused reconstruction coverage rejects writable provider-policy drift before
 another turn while preserving startup receipts, accepted results and permissions.
 `test/runner-custom-execution.slow.test.js` owns real leased authoring-to-execution
-composition and accepted-result recovery without Git; run it when changing public
-custom selection, directory role probing, custom orchestration or settlement.
+composition and accepted-result recovery without Git, plus a durable lazy
+candidate-review diagnostic through its cold null retry; run it when changing public
+custom selection, directory role probing, custom orchestration, settlement, or
+candidate-review correction diagnostics and recovery.
 Its slow invocation is `npm run test:slow -- test/runner-custom-execution.slow.test.js`.
 Fast recovery cases cover compatible authorized decisions before acceptance and
 after an earlier receipt, fresh gates for the new clarification version, and
@@ -702,6 +709,13 @@ The provider suites cover exact-file admission without model turns: Codex keeps
 root reads separate from temporary write exclusions, and Claude rejects binary
 sources hidden by the selected runner-boundary command masks. The runner policy
 suite checks admission forwarding after immutable policy-receipt validation.
+
+Fast `test/source-boundaries.test.js` owns source index, dependency-direction
+and provider-isolation boundaries. Its source walks cover the root runtime and
+exactly the root manifest's `workspaces` declarations. A synthetic temporary
+root proves that an undeclared hidden directory is not walked, declared regular
+workspaces still are, and an explicitly declared hidden workspace is discovered
+and strictly validated; run it when changing workspace layout or declarations.
 
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical

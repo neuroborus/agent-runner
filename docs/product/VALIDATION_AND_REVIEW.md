@@ -298,6 +298,9 @@ turns converge before finalization. A passing finalization enters a distinct
 read-only terminal clean confirmation over the exact validation evidence. Only
 a clean result over unchanged fingerprints advances; ordinary findings return directly
 to the next check-and-fix pass and the same fingerprint-bound reuse decision.
+In lazy and combined polishing, each accepted check-and-fix report becomes the
+Worker summary that later turns receive. It is context only: confirmation and
+review still decide whether the report and content are acceptable.
 
 ## Evidence and fingerprints
 
@@ -356,7 +359,9 @@ using trusted list positions rather than rejected values or proposed identities.
 Independent violations form one bounded batch; invalid inventories do not create
 speculative downstream identity findings. Terminal CLI/MCP failure evidence
 retains the validated first diagnostic without granting retry authority. Missing
-provider field information and historical failures remain unknown. See the
+provider field information and historical failures remain unknown. Candidate
+review and candidate clean confirmation in both coding pipelines identify their
+first rejected field and constraint the same way. See the
 [execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
 for exact validation and correction rules.
 

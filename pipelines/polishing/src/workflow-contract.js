@@ -933,18 +933,34 @@ function normalizeProductDecision(payload) {
       payload.question,
       "product decision question",
       INVALID_OUTPUT_CODE,
+      outputConstraint("question", "nonempty-plain-text-up-to-4000-characters"),
     ),
     options: normalizeTextList(payload.options, "product decision options", {
       allowEmpty: true,
+      diagnosticField: "options",
       maximum: MAX_OPTIONS,
     }),
     whyBlocked: normalizeText(
       payload.whyBlocked,
       "product decision rationale",
       INVALID_OUTPUT_CODE,
+      outputConstraint(
+        "whyBlocked",
+        "nonempty-plain-text-up-to-4000-characters",
+      ),
     ),
-    evidence: normalizeTextList(payload.evidence, "product decision evidence"),
+    evidence: normalizeTextList(payload.evidence, "product decision evidence", {
+      diagnosticField: "evidence",
+    }),
   });
+}
+
+function inactiveDecisionField(payload) {
+  return ["question", "whyBlocked", "options", "evidence"].find((field) =>
+    field === "question" || field === "whyBlocked"
+      ? payload[field] !== ""
+      : !emptyArray(payload[field]),
+  );
 }
 
 export function normalizeClarificationResult(payload) {
@@ -1323,14 +1339,23 @@ function normalizeOptionalEvidence(value, name, code = INVALID_OUTPUT_CODE) {
   return normalizeTextList(value, name, { allowEmpty: true, code });
 }
 
-function normalizeRelativePath(value, name, code = INVALID_OUTPUT_CODE) {
-  const path = normalizeText(value, name, code);
+function normalizeRelativePath(
+  value,
+  name,
+  code = INVALID_OUTPUT_CODE,
+  diagnostic,
+) {
+  const path = normalizeText(value, name, code, diagnostic);
   if (
     isAbsolute(path) ||
     path === "." ||
     path.split(/[\\/]/u).some((part) => part === "..")
   ) {
-    throw workflowError(`${name} must be repository-relative.`, code);
+    throw workflowError(
+      `${name} must be repository-relative.`,
+      code,
+      diagnostic,
+    );
   }
   return path;
 }
@@ -1693,26 +1718,61 @@ function normalizeCheckResults(
   );
 }
 
-function normalizeReviewFinding(value, code = INVALID_OUTPUT_CODE) {
-  if (!isRecord(value) || !REVIEW_FINDING_ID_PATTERN.test(value.id)) {
-    throw workflowError("Reviewer finding has an invalid ID.", code);
+function normalizeReviewFinding(value, code, index) {
+  const field = `findings[${index}]`;
+  if (!isRecord(value)) {
+    throw workflowError(
+      "Reviewer finding has an invalid ID.",
+      code,
+      outputConstraint(field, "object"),
+    );
   }
-  assertExactFields(
-    value,
-    ["id", "file", "problem", "reason", "suggestedAction"],
-    `finding ${value.id}`,
-    code,
-  );
+  if (!REVIEW_FINDING_ID_PATTERN.test(value.id)) {
+    throw workflowError(
+      "Reviewer finding has an invalid ID.",
+      code,
+      outputConstraint(`${field}.id`, "review-finding-id"),
+    );
+  }
+  if (
+    !hasExactFields(value, [
+      "id",
+      "file",
+      "problem",
+      "reason",
+      "suggestedAction",
+    ])
+  ) {
+    throw workflowError(
+      `finding ${value.id} has invalid fields.`,
+      code,
+      outputConstraint(field, "exact-field-set"),
+    );
+  }
+  const text = (name, label) =>
+    normalizeText(
+      value[name],
+      `finding ${value.id} ${label}`,
+      code,
+      outputConstraint(
+        `${field}.${name}`,
+        "nonempty-plain-text-up-to-4000-characters",
+      ),
+    );
   return Object.freeze({
     id: value.id,
-    file: normalizeRelativePath(value.file, `finding ${value.id} file`, code),
-    problem: normalizeText(value.problem, `finding ${value.id} problem`, code),
-    reason: normalizeText(value.reason, `finding ${value.id} reason`, code),
-    suggestedAction: normalizeText(
-      value.suggestedAction,
-      `finding ${value.id} suggested action`,
+    file: normalizeRelativePath(
+      value.file,
+      `finding ${value.id} file`,
       code,
+      outputConstraint(
+        `${field}.file`,
+        "repository-relative-path-up-to-4000-characters",
+      ),
     ),
+    problem: text("problem", "problem"),
+    reason: text("reason", "reason"),
+    suggestedAction: text("suggestedAction", "suggested action"),
   });
 }
 
@@ -1721,13 +1781,18 @@ function normalizeReviewFindings(value, code = INVALID_OUTPUT_CODE) {
     throw workflowError(
       "Reviewer findings have an invalid number of items.",
       code,
+      outputConstraint("findings", "array-up-to-32-items"),
     );
   }
   const findings = Object.freeze(
-    value.map((finding) => normalizeReviewFinding(finding, code)),
+    value.map((finding, index) => normalizeReviewFinding(finding, code, index)),
   );
   if (new Set(findings.map(({ id }) => id)).size !== findings.length) {
-    throw workflowError("Reviewer finding IDs must be unique.", code);
+    throw workflowError(
+      "Reviewer finding IDs must be unique.",
+      code,
+      outputConstraint("findings", "unique-ids"),
+    );
   }
   return findings;
 }
@@ -1924,23 +1989,24 @@ export function normalizeCandidateReviewResult(
     "whyBlocked",
     "evidence",
   ];
-  assertExactFields(
-    payload,
-    fields,
-    "Candidate review result",
-    INVALID_OUTPUT_CODE,
-  );
+  assertExactOutputFields(payload, fields);
   assertStructuredResult(payload);
   if (
     ![acceptedStatus, "FINDINGS", "PRODUCT_DECISION_REQUIRED"].includes(
       payload.status,
     )
   ) {
-    throw outputError("Agent returned an invalid candidate-review result.");
+    throw outputError(
+      "Agent returned an invalid candidate-review result.",
+      outputConstraint("status", "supported-status"),
+    );
   }
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (!emptyArray(payload.findings)) {
-      throw outputError("Product decision must not include findings.");
+      throw outputError(
+        "Product decision must not include findings.",
+        outputConstraint("findings", "empty-for-product-decision"),
+      );
     }
     return Object.freeze({
       status: payload.status,
@@ -1948,23 +2014,39 @@ export function normalizeCandidateReviewResult(
     });
   }
   if (!emptyDecision(payload)) {
-    throw outputError("Candidate review contains inapplicable fields.");
+    throw outputError(
+      "Candidate review contains inapplicable fields.",
+      outputConstraint(inactiveDecisionField(payload), "empty-for-review"),
+    );
   }
   const findings = normalizeReviewFindings(payload.findings);
   if (
     (payload.status === acceptedStatus && findings.length !== 0) ||
     (payload.status === "FINDINGS" && findings.length === 0)
   ) {
-    throw outputError("Candidate-review status does not match its findings.");
+    throw outputError(
+      "Candidate-review status does not match its findings.",
+      outputConstraint(
+        "findings",
+        payload.status === "FINDINGS"
+          ? "nonempty-when-findings"
+          : clean
+            ? "empty-when-clean"
+            : "empty-when-approved",
+      ),
+    );
   }
-  for (const finding of findings) {
+  for (const [index, finding] of findings.entries()) {
     const previous = previousFindings.find(
       (candidate) =>
         candidate.file === finding.file &&
         candidate.problem === finding.problem,
     );
     if (previous !== undefined && previous.id !== finding.id) {
-      throw outputError("Agent changed the ID of an unchanged finding.");
+      throw outputError(
+        "Agent changed the ID of an unchanged finding.",
+        outputConstraint(`findings[${index}].id`, "stable-finding-id"),
+      );
     }
   }
   return Object.freeze({ status: payload.status, findings });

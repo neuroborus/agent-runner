@@ -5,7 +5,44 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-13
+
+- **Source-boundary checks discover workspaces from the root manifest.** The
+  boundary tests treated every directory under `packages/` and `pipelines/` as
+  a workspace, so an undeclared hidden operational directory without `src/`
+  failed the checks while npm ignored it. The helper now matches the root
+  `package.json` `workspaces` patterns with native `fs.glob`, returning sorted
+  repository-relative directories. Wildcards skip hidden entries as npm does,
+  and an explicitly declared hidden workspace is still discovered and checked.
+  The source, index and dependency-direction assertions are unchanged, and
+  no name filter, ignore rule or dependency was added.
+
+- **Polishing keeps the latest accepted check/fix summary.** Accepted
+  `CHECK_AND_FIX` results were validated but their summaries were discarded,
+  so clean confirmation, review and reconstructed requests kept receiving the
+  original polishing summary even after a corrected report. Both accepted
+  changed and unchanged transitions now store the result summary in the
+  existing `polishSummary` field after status and mutation validation. Invalid,
+  blocked and product-decision results leave it unchanged, and a summary-only
+  correction is neither a content change nor approval. State shape, budgets,
+  fingerprints and gates are unchanged.
+
 ## 2026-11-12
+
+- **Candidate-review rejections name their violated field and constraint.**
+  Candidate review and lazy or combined `CLEAN_CONFIRM` rejected accepted
+  statuses with findings, `FINDINGS` without findings, inactive decision
+  fields and several finding and product-decision violations without an
+  identity, so correction prompts and repeated-invalid pauses showed only
+  `result`/`semantic-contract`. In both coding pipelines, each first violation
+  now carries a source-defined identity built from fixed schema field names
+  and `findings[i]` positions through the existing output-error helpers and
+  correction ledgers. Terminal review shares the finding normalization, so its
+  finding violations carry the same identities instead of a generic
+  fallback. Two constraint names are new: `empty-when-clean` and
+  `review-finding-id`. Validity, check order, budgets, guards, prompts, schemas
+  and state versions are unchanged, and old generic records stay readable. The
+  cause of the historically rejected results remains unknown.
 
 - **Explicit check ownership binds validation work in every coding turn.**
   Pre-finalization writable turns were told only to leave the inventory and

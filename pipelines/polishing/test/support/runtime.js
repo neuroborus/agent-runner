@@ -289,6 +289,67 @@ function migrateVersionOneState(state) {
   });
 }
 
+function matchesSchemaSubset(schema, value) {
+  const objectValue =
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (schema.type === "string" && typeof value !== "string") {
+    return false;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return false;
+  }
+  if (schema.type === "object" && !objectValue) {
+    return false;
+  }
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (
+      (schema.minLength !== undefined && length < schema.minLength) ||
+      (schema.maxLength !== undefined && length > schema.maxLength) ||
+      (schema.pattern !== undefined &&
+        !new RegExp(schema.pattern, "u").test(value))
+    ) {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) {
+    if (
+      (schema.minItems !== undefined && value.length < schema.minItems) ||
+      (schema.maxItems !== undefined && value.length > schema.maxItems) ||
+      (schema.items !== undefined &&
+        value.some((item) => !matchesSchemaSubset(schema.items, item)))
+    ) {
+      return false;
+    }
+  }
+  if (objectValue) {
+    if (
+      schema.required?.some((field) => !Object.hasOwn(value, field)) ||
+      (schema.additionalProperties === false &&
+        Object.keys(value).some(
+          (field) => !Object.hasOwn(schema.properties, field),
+        )) ||
+      Object.entries(schema.properties ?? {}).some(
+        ([field, propertySchema]) =>
+          Object.hasOwn(value, field) &&
+          !matchesSchemaSubset(propertySchema, value[field]),
+      )
+    ) {
+      return false;
+    }
+  }
+  if (
+    schema.anyOf !== undefined &&
+    !schema.anyOf.some((branch) => matchesSchemaSubset(branch, value))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -1663,6 +1724,7 @@ export {
   findingArbitration,
   hash,
   invalidProductionFinalization,
+  matchesSchemaSubset,
   migrateVersionOneState,
   polishingBlocked,
   polishingCompleted,

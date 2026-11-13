@@ -3498,7 +3498,14 @@ persist its separate reviewed fingerprint and enter `COMMIT`.
 If the candidate schema or final `REVIEW_SCHEMA` provider reports the shared structured-output
 failure class, deterministic normalization rejects the result, or the
 validation-change decision conflicts with accepted finalization evidence, map
-the failure to bounded candidate-review or confirmation field-and-constraint diagnostics. After
+the failure to bounded candidate-review or confirmation field-and-constraint diagnostics.
+Candidate-review normalization, shared by Reviewer candidate review and lazy or
+combined `CLEAN_CONFIRM`, identifies shape and status, inactive decision fields,
+status/findings consistency, finding identity, content, uniqueness and stability
+at `findings[i]` positions, and product-decision fields by fixed schema field
+names, never by values or IDs. Final review and confirmation share the same
+finding count, identity, content and uniqueness identities. Unknown and
+historical causes stay `result`/`semantic-contract`. After
 the first invalid result, durably record automatic attempt `1` and publish only
 one redacted `review-correction` activity. Reconstruct the complete review
 request from durable task, plan, context, prior-decision, and the applicable

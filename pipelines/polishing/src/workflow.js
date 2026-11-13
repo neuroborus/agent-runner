@@ -4771,6 +4771,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               ...state(),
               availabilityCorrectionCharged: false,
               pendingLazyCorrection: null,
+              polishSummary: result.summary,
             },
             {
               publicActivity: activity(
@@ -4794,6 +4795,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
             workflowState: "CLEAN_CONFIRM",
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
+            polishSummary: result.summary,
             previousFindings:
               !combinedReview(current.settings) && fixingConfirmationFindings
                 ? current.findings

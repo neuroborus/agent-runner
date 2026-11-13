@@ -1068,7 +1068,12 @@ This is a workspace-write turn. Its strict result reports changed or unchanged
 content, an external blocker, or the narrow product-decision outcome, and the
 runner compares that claim with the actual content fingerprint. Every change
 clears candidate, finalization, and terminal-confirmation evidence and requires
-another check/fix pass.
+another check/fix pass. After that validation, an accepted `CHANGED` or
+`UNCHANGED` summary replaces the stored Worker polishing summary, so every later
+role context, including reconstructed requests, carries the latest accepted
+primary report. Invalid, blocked, and product-decision results leave it
+unchanged. A replaced summary is neither a content change nor approval and
+renews no budget.
 
 An unchanged pass is not approval. It enters a separate read-only
 candidate `CLEAN_CONFIRM` over the exact current content and
@@ -1095,7 +1100,12 @@ exhaustion never accepts a non-clean result.
 
 Provider structured-output failure and deterministic candidate check/fix or
 clean-confirmation contract failure are reduced to a bounded batch of Worker,
-phase, contract, field, and constraint diagnostics. The first invalid result
+phase, contract, field, and constraint diagnostics. Candidate-review
+normalization identifies shape and status, inactive decision fields,
+status/findings consistency, finding identity, content, uniqueness and stability
+at `findings[i]` positions, and product-decision fields by fixed schema field
+names, never by values or IDs; unknown and historical causes stay
+`result`/`semantic-contract`. The first invalid result
 for the exact phase, candidate content fingerprint, and
 validation-infrastructure fingerprint persists attempt `1` and a pending
 marker, then reconstructs the complete durable request with the original schema
@@ -1120,6 +1130,10 @@ fingerprints. Candidate corrections cannot accept validation evidence, and
 terminal corrections cannot themselves provide finalization or reuse a
 candidate approval. Correction-scope drift invalidates the retained
 finalization record and routes through `FINALIZE`.
+Candidate Reviewer rejections carry the same candidate-review field and
+constraint identities as lazy clean confirmation. Terminal confirmation shares
+their finding count, identity, content, uniqueness and product-decision field
+identities.
 Repeated invalid output pauses at the exact `REVIEW` or `CONFIRM` checkpoint
 with bounded diagnostics and an explicit null retry.
 

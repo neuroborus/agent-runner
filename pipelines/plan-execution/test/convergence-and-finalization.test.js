@@ -2166,6 +2166,39 @@ test("binds corrected candidate and finalization evidence across formatting", as
   );
 });
 
+test("corrects candidate Reviewer findings status with a precise diagnostic", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [{ ...reviewApproved(), status: "FINDINGS" }],
+  });
+
+  const result = await fixture.run();
+  const candidateCalls = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+  );
+  const { reviewCorrection } = fixture.transitions.find(
+    ({ patch }) => (patch?.pipelineState?.reviewCorrection ?? null) !== null,
+  ).patch.pipelineState;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(candidateCalls.length, 2);
+  assert.equal(candidateCalls[1].access, "read-only");
+  assert.equal(candidateCalls[1].session, undefined);
+  assert.deepEqual(reviewCorrection.diagnostics, [
+    {
+      role: "reviewer",
+      phase: "review",
+      contract: "candidate-review",
+      field: "findings",
+      constraint: "nonempty-when-findings",
+    },
+  ]);
+  assert.ok(
+    candidateCalls[1].prompt.includes(
+      JSON.stringify(reviewCorrection, null, 2),
+    ),
+  );
+});
+
 test("runs lazy execution with one Worker source fork and no review roles", async (t) => {
   const fixture = await createFixture(t, {
     mode: "lazy",
