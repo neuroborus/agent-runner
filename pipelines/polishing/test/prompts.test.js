@@ -310,7 +310,10 @@ test("terminal recovery instructions distinguish evidence from content without w
     );
     assert.match(prompt, /operator or another owner is not an omission/u);
     assert.match(prompt, /missing genuine pipeline-owned check/u);
-    assert.match(prompt, /even when final external acceptance is also/u);
+    assert.match(
+      prompt,
+      /Source observation or overlap alone is not a violation/u,
+    );
   }
   for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
     assert.ok(schema.required.includes("finalizationFindingIds"));
@@ -356,7 +359,7 @@ test("writable candidate instructions defer checks without suppressing unrelated
       instructions,
       /work not delegated to a selected runner-trusted command/u,
     );
-    assert.match(instructions, /leave it pending with its owner and timing/u);
+    assert.match(instructions, /never as reserved-check coverage/u);
     assert.doesNotMatch(
       instructions,
       /NOT_RUN|requiredChecks|validationInfrastructure/u,

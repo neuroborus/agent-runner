@@ -3588,7 +3588,7 @@ test("arbitrates an upheld finding only after its dispute budget", async (t) => 
   for (const { prompt } of [...reconsiderations, fixture.calls.arbiter[0]]) {
     assert.match(
       prompt,
-      /withdraw it \(WITHDRAW or WORKER_CORRECT\) only on evidence/u,
+      /Decide each validation-work finding by the allegation it makes/u,
     );
   }
 });
@@ -4669,10 +4669,7 @@ for (const mode of ["independent", "lazy"]) {
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));
-          assert.match(
-            prompt,
-            /Do not execute such work early or under another owner/u,
-          );
+          assert.match(prompt, /never as reserved-check coverage/u);
         }
         if (phase === "check") {
           checkRounds += 1;
@@ -4758,7 +4755,7 @@ for (const mode of ["independent", "lazy"]) {
         for (const { prompt } of reviews) {
           assert.match(
             prompt,
-            /Report a finding for any summary or evidence claiming that such work ran early/u,
+            /Source observation or overlap alone is not a violation/u,
           );
         }
       }

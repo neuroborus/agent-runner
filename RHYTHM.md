@@ -7,6 +7,25 @@ remain in the owning documentation.
 
 ## 2026-11-13
 
+- **Validation ownership separates development work from reserved checks.**
+  Both coding prompt modules bound reserved validation under a catalogue of
+  historical workarounds that included repeating a subset, while also allowing
+  authorized development inspection and focused tests, and review and
+  adjudication had no way to tell overlapping source work from actual reserved
+  execution or from evidence too thin to decide. One principle now classifies
+  work by its actual purpose, scope and evidence against explicit task
+  authority, never by its label. Executing a reserved check, its full
+  equivalent or an explicitly reserved subset is reserved work; permitted
+  source inspection and focused tests stay development evidence even when they
+  overlap, never complete the reserved check and never replace it. Reviews
+  report only shown early execution or a claimed coverage substitution, never
+  confirm a violation from overlap or undecidable evidence, and adjudication
+  decides each finding by its allegation. The change is semantic only:
+  schemas, state, settings, permissions, validators, budgets and exception
+  settings are unchanged, and the full `FINALIZE` gates still run under their
+  owners. No code defect was demonstrated, and the historical whitespace claim
+  that prompted the review remains unknown.
+
 - **Source-boundary checks discover workspaces from the root manifest.** The
   boundary tests treated every directory under `packages/` and `pipelines/` as
   a workspace, so an undeclared hidden operational directory without `src/`

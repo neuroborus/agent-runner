@@ -776,9 +776,11 @@ Established required-check execution and attestation belong exclusively to
 Their agent-sandbox limitations must not cause `BLOCKED` or prevent applicable
 content repairs and semantic review; the runner executes the persisted exact
 vectors during `FINALIZE`. Explicit owner and timing assignments bind
-validation work under any label, so these turns neither run nor claim work
-reserved for another owner or later checkpoint, while authorized in-scope
-development tests stay allowed.
+validation work by its actual purpose, scope and evidence rather than its
+label, so these turns neither run nor claim work reserved for another owner or
+later checkpoint. Permitted source inspection and focused development tests
+stay development evidence even when they overlap a reserved check, which still
+runs in full under its owner.
 
 An external environment constraint affecting nondelegated work pauses at
 `POLISH` without discarding safe Worker changes. Any stale candidate,
@@ -939,10 +941,12 @@ Terminal confirmation does not treat leaving out explicit post-completion
 operator acceptance as an omission. It rejects evidence or summaries claiming
 that such acceptance ran or passed and a finalization that adds it, while a
 missing genuine pipeline-owned check remains an omission. Candidate review,
-Worker self-review and terminal confirmation also report a claim that relabeled
-reserved work ran early, even when final acceptance stays pending; dispute
-reconsideration and arbitration do not withdraw that finding because of the
-label. This semantic rule follows the
+Worker self-review and terminal confirmation also report evidence that reserved
+work actually ran early or that development evidence is claimed as reserved
+coverage, even when final acceptance stays pending; source observation, overlap
+or undecidable evidence alone is not a confirmed violation. Dispute
+reconsideration and arbitration decide such a finding by the allegation it
+makes, never by the label. This semantic rule follows the
 [validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
 
 Terminal `validationChange: REJECTED` has a separate recovery route shared by

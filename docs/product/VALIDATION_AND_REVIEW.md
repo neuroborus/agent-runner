@@ -189,17 +189,27 @@ migration, catalog correction, reconciliation, arbitration, finalization and
 terminal confirmation carry the same rule.
 
 Explicit owner and timing assignments bind the validation work itself, not
-only inventories. Calling reserved work development, investigation or
-non-acceptance, changing its entrypoint, using a temporary copy, repeating a
-subset or comparing with a predecessor neither transfers its owner nor permits
-early execution. Implementation or polishing, check-and-fix and finding
-resolution neither run nor claim such work and keep it pending with its owner
-and timing; in-scope development inspection and focused tests that the task and
-phase authorize stay allowed. Candidate, self and terminal review report a
-summary or evidence claiming early execution as a finding even when final
-acceptance is also left pending, preserving honestly reported facts, useful
-content and pending coverage. Dispute reconsideration and arbitration never
-withdraw that finding because the work was relabeled.
+only inventories. Roles classify work by its actual purpose, scope and evidence
+against explicit task authority, never by its label. Executing a check reserved
+for another owner or a later checkpoint, its full equivalent, or a subset that
+the task or clarifications explicitly reserve is reserved work under any name or
+entrypoint. Source reading or inspection and focused development tests that the
+task and phase permit stay development work even when they overlap a reserved
+check; overlap is neither a violation nor completion, the reserved check still
+runs in full under its owner, and explicit task restrictions on development
+work still apply. Implementation or polishing, check-and-fix and finding
+resolution neither run nor claim reserved work, report development work only as
+development evidence and keep reserved checks pending with their owner and
+timing. Candidate, self and terminal review report a finding when evidence
+shows that reserved work actually ran early or under another owner, or that
+development evidence is claimed as reserved coverage, even when final
+acceptance is also left pending. Source observation or overlap alone is not a
+violation; evidence that cannot establish what ran yields neither invented
+command facts nor a confirmed violation, and provides no reserved coverage.
+Reviews preserve honestly reported facts, useful content and pending coverage.
+Dispute reconsideration and arbitration decide an execution allegation by
+evidence of the execution and a coverage allegation by evidence of the claim;
+relabeling or pending final acceptance never makes either incorrect.
 
 This is semantic instruction, not deterministic parsing of task prose.
 Accepted inventories stay additive, so reconciliation and arbitration never
