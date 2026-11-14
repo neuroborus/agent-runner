@@ -3051,6 +3051,8 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
     session_id: CHILD_SESSION,
   });
   const final = JSON.stringify(result());
+  const postResult = (type) =>
+    JSON.stringify({ type, session_id: FRESH_SESSION });
   const blockStarts = [
     { type: "message_start", message: { id: "message", role: "assistant" } },
     ...Array.from({ length: 1025 }, (_, index) => ({
@@ -3082,9 +3084,20 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       "session_mismatch",
     ],
     [
-      "trailing",
-      `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
-      "record_after_result",
+      "trailing-assistant",
+      `${final}\n${postResult("assistant")}\n`,
+      "assistant_after_result",
+    ],
+    ["trailing-user", `${final}\n${postResult("user")}\n`, "user_after_result"],
+    [
+      "trailing-stream-event",
+      `${final}\n${postResult("stream_event")}\n`,
+      "stream_event_after_result",
+    ],
+    [
+      "first-violation-wins",
+      `${final}\n${postResult("assistant")}\n${final}\n`,
+      "assistant_after_result",
     ],
     [
       "mismatched",
@@ -3140,52 +3153,160 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       });
       assert.equal(turnCalls(fixture).length, 1);
     });
-  await t.test("local-commit readiness", async () => {
-    let commitExecutions = 0;
-    const fixture = createFixture({
-      handle({ call }) {
-        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
-          return;
-        call.options.onStdout(`${final}\n${final}\n`);
-        return { stdout: "", stderr: "" };
-      },
+  for (const [name, trailing, diagnosticClass] of [
+    ["duplicate", final, "protocol_result_duplicate"],
+    ["post-result", postResult("assistant"), "protocol_assistant_after_result"],
+  ])
+    await t.test(`local-commit readiness ${name}`, async () => {
+      let commitExecutions = 0;
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          call.options.onStdout(
+            `${JSON.stringify(result({ structured: { ready: true } }))}\n${trailing}\n`,
+          );
+          return { stdout: "", stderr: "" };
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            access: "local-commit",
+            authorizationId: "authorization-1",
+            commit: {
+              expectedHead: EXPECTED_HEAD,
+              message: "feat(test): create commit",
+            },
+            onCommitExecution() {
+              commitExecutions += 1;
+            },
+          }),
+        ),
+        (error) => {
+          assert.ok(
+            hasDiagnostic("ERR_CLAUDE_PROTOCOL", diagnosticClass)(error),
+          );
+          assert.equal(error.effectStarted, false);
+          assert.deepEqual(error.failure, {
+            failureClass: diagnosticClass,
+            checkpoint: "commit",
+            outcome: "rejected",
+            effect: "none",
+            retry: "terminal",
+            commitExecutor: "not_started",
+          });
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+      assert.equal(commitExecutions, 0);
+      assert.equal(localCommitSandboxCalls(fixture).length, 1); // Capability probe only.
     });
-    await assert.rejects(
-      fixture.adapter.run(
-        request({
-          access: "local-commit",
-          authorizationId: "authorization-1",
-          commit: {
-            expectedHead: EXPECTED_HEAD,
-            message: "feat(test): create commit",
-          },
-          onCommitExecution() {
-            commitExecutions += 1;
-          },
+});
+
+test("Claude post-result families cannot supply progress or command evidence", () => {
+  const marker = "PRIVATE_POST_RESULT_PAYLOAD";
+  for (const [type, diagnosticClass, fields] of [
+    [
+      "assistant",
+      "protocol_assistant_after_result",
+      {
+        message: {
+          id: "late-message",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "late-command",
+              name: "Bash",
+              input: { command: marker },
+            },
+          ],
+        },
+      },
+    ],
+    [
+      "user",
+      "protocol_user_after_result",
+      {
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "command", content: marker },
+          ],
+        },
+      },
+    ],
+    [
+      "stream_event",
+      "protocol_stream_event_after_result",
+      {
+        event: {
+          type: "message_start",
+          message: { id: marker, role: "assistant" },
+        },
+      },
+    ],
+  ]) {
+    const progress = [];
+    const observations = [];
+    const stream = createClaudeStream(
+      (event) => progress.push(event),
+      (diagnosticClass) =>
+        new ClaudeAdapterError("Invalid stream.", {
+          code: "ERR_CLAUDE_PROTOCOL",
+          diagnosticClass,
         }),
-      ),
-      (error) => {
-        assert.ok(
-          hasDiagnostic(
-            "ERR_CLAUDE_PROTOCOL",
-            "protocol_result_duplicate",
-          )(error),
-        );
-        assert.equal(error.effectStarted, false);
-        assert.deepEqual(error.failure, {
-          failureClass: "protocol_result_duplicate",
-          checkpoint: "commit",
-          outcome: "rejected",
-          effect: "none",
-          retry: "terminal",
-          commitExecutor: "not_started",
-        });
-        return true;
+      {
+        result() {
+          observations.push("result");
+        },
+        command() {
+          observations.push("command");
+        },
       },
     );
-    assert.equal(turnCalls(fixture).length, 1);
-    assert.equal(commitExecutions, 0);
-  });
+    const send = (record) =>
+      stream.write(
+        `${JSON.stringify({ session_id: FRESH_SESSION, ...record })}\n`,
+      );
+    send({ type: "system", subtype: "init" });
+    send({
+      type: "assistant",
+      message: {
+        id: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "command",
+            name: "Bash",
+            input: { command: "true" },
+          },
+        ],
+      },
+    });
+    send(result());
+    const before = [...progress];
+    send({ type, ...fields });
+    // Later duplicate and malformed records cannot replace the first violation.
+    send(result());
+    stream.write("bad-json\n");
+    stream.finish();
+    assert.throws(
+      stream.assertValid,
+      hasDiagnostic("ERR_CLAUDE_PROTOCOL", diagnosticClass),
+    );
+    assert.equal(stream.sessionId, undefined);
+    assert.deepEqual(progress, before);
+    assert.deepEqual(observations, ["result"]);
+    stream.retire();
+    assert.doesNotMatch(
+      JSON.stringify({ progress, observations }),
+      new RegExp(marker, "u"),
+    );
+  }
 });
 
 test("classifies Claude results that contradict a failed process exit", async (t) => {

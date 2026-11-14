@@ -79,23 +79,44 @@ test("terminal diagnosis requires a normalized boundary and registry evidence", 
 
 test("boundary messages compose only validated codes and registered classes", () => {
   const marker = "PRIVATE_NATIVE_FRAME";
-  const classified = normalizeAdapterFailure(
-    "claude",
-    new ClaudeAdapterError(marker, {
-      cause: new Error(marker),
+  const protocolClasses = [
+    "protocol_result_duplicate",
+    "protocol_assistant_after_result",
+    "protocol_user_after_result",
+    "protocol_stream_event_after_result",
+    "protocol_record_after_result",
+  ];
+  const classified = protocolClasses.map((diagnosticClass) =>
+    normalizeAdapterFailure(
+      "claude",
+      new ClaudeAdapterError(marker, {
+        cause: new Error(marker),
+        code: "ERR_CLAUDE_PROTOCOL",
+        diagnosticClass,
+        recoverable: true,
+      }),
+    ),
+  );
+  for (const [index, diagnosticClass] of protocolClasses.entries()) {
+    const boundary = classified[index];
+    assert.equal(boundary.diagnosticClass, diagnosticClass);
+    assert.equal(
+      boundary.message,
+      `Agent backend turn failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+    );
+    assert.deepEqual(boundary.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+    });
+    assert.equal(boundary.recoverable, false);
+    assert.deepEqual(terminalAdapterDiagnostic(boundary), {
       code: "ERR_CLAUDE_PROTOCOL",
-      diagnosticClass: "protocol_result_duplicate",
-    }),
-  );
-  assert.equal(classified.diagnosticClass, "protocol_result_duplicate");
-  assert.equal(
-    classified.message,
-    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_result_duplicate).",
-  );
-  assert.deepEqual(terminalAdapterDiagnostic(classified), {
-    code: "ERR_CLAUDE_PROTOCOL",
-    diagnosticClass: "protocol_result_duplicate",
-  });
+      diagnosticClass,
+    });
+  }
   const hostile = normalizeAdapterFailure(
     "claude",
     Object.assign(new Error(marker, { cause: new Error(marker) }), {
@@ -122,7 +143,7 @@ test("boundary messages compose only validated codes and registered classes", ()
     normalizeAdapterFailure("claude", new Error(marker)).message,
     "Agent backend turn failed.",
   );
-  for (const boundary of [classified, hostile, unclassified])
+  for (const boundary of [...classified, hostile, unclassified])
     assert.doesNotMatch(
       `${boundary.message}\n${JSON.stringify(boundary)}`,
       new RegExp(marker, "iu"),

@@ -1535,15 +1535,22 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
   });
   assert.equal(transitioned.pause.diagnosticClass, "operation_multi_agent");
 
-  for (const diagnosticClass of [
-    "permission_bash_unclassified",
-    "permission_bash_required_check",
-    "permission_reason_auto_mode_stop_no_verdict",
-    "permission_forbidden_operation",
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_assistant_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_user_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_stream_event_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    [
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_reason_auto_mode_stop_no_verdict",
+    ],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_forbidden_operation"],
   ]) {
     const pause = {
       reason: "internal_failure",
-      code: "ERR_CLAUDE_PERMISSION_DENIED",
+      code,
       diagnosticClass,
     };
     await store.transitionRun(created.lease, { pause });
@@ -1555,6 +1562,7 @@ test("accepts only finite adapter diagnostics in durable pause state", async (t)
 
   for (const [code, diagnosticClass] of [
     ["ERR_CODEX_ISOLATION", "native_provider_value"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_native_value"],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_native_value"],
   ])
     await assert.rejects(

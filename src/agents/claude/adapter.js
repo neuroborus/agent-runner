@@ -86,6 +86,8 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "permission_tool_unexposed",
   "permission_unclassified",
   ...Object.values(PERMISSION_REASON_CLASSES),
+  // Legacy persisted diagnostic; no longer emitted by the stream parser.
+  "protocol_record_after_result",
   "provider_unavailable",
   "read_only_execution_failed",
   "read_only_process_failed",

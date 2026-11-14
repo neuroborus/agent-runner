@@ -998,6 +998,9 @@ test("renders bounded finalization correction activity without rejected content"
 test("run reports a classified agent failure with only its bounded diagnosis", async () => {
   const marker = "PRIVATE_NATIVE_FRAME";
   for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_assistant_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_user_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_stream_event_after_result"],
     ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],

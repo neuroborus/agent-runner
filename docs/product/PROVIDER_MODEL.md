@@ -426,6 +426,13 @@ A terminal Claude protocol failure carries a registered `protocol_*` class only
 when its guard proved the violated predicate; unattributed origins stay
 unclassified. The class adds no retry, effect evidence, recovery or acceptance,
 and direct CLI failures print only the bounded code and class.
+Post-result assistant, user, and stream-event records are distinguished by
+`protocol_assistant_after_result`, `protocol_user_after_result`, and
+`protocol_stream_event_after_result`, without inspecting their payloads. Existing
+session guards and the first violated predicate determine rejection. The legacy
+`protocol_record_after_result` class remains valid for historical persistence
+and recovery but is no longer emitted. No raw native records or transcripts
+cross the public or durable boundary.
 
 A Claude `ERR_CLAUDE_PERMISSION_DENIED` failure names only the fact its guard
 established from structured native `permission_denials`:

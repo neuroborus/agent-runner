@@ -22,7 +22,9 @@ export const CLAUDE_PROTOCOL_DIAGNOSTICS = Object.freeze({
   trackingLimit: "protocol_tracking_limit",
   resultMissing: "protocol_result_missing",
   resultDuplicate: "protocol_result_duplicate",
-  recordAfterResult: "protocol_record_after_result",
+  assistantAfterResult: "protocol_assistant_after_result",
+  userAfterResult: "protocol_user_after_result",
+  streamEventAfterResult: "protocol_stream_event_after_result",
   sessionMismatch: "protocol_session_mismatch",
   continuationMismatch: "protocol_continuation_mismatch",
   forkLineageInvalid: "protocol_fork_lineage_invalid",
@@ -33,6 +35,11 @@ export const CLAUDE_PROTOCOL_DIAGNOSTICS = Object.freeze({
   observerFailed: "protocol_observer_failed",
 });
 const DIAGNOSTICS = CLAUDE_PROTOCOL_DIAGNOSTICS;
+const POST_RESULT_DIAGNOSTICS = new Map([
+  ["assistant", DIAGNOSTICS.assistantAfterResult],
+  ["user", DIAGNOSTICS.userAfterResult],
+  ["stream_event", DIAGNOSTICS.streamEventAfterResult],
+]);
 // Closed native decision_reason_code values; free-text reasons are never read.
 export const CLAUDE_PERMISSION_REASON_CODES = Object.freeze([
   "classifier_transcript_too_long",
@@ -120,11 +127,9 @@ export function createClaudeStream(
       return;
     }
     if (sessionId !== undefined && record.session_id !== sessionId) return;
-    if (
-      payload !== null &&
-      ["assistant", "user", "stream_event"].includes(record.type)
-    ) {
-      reject(DIAGNOSTICS.recordAfterResult);
+    const postResultDiagnostic = POST_RESULT_DIAGNOSTICS.get(record.type);
+    if (payload !== null && postResultDiagnostic !== undefined) {
+      reject(postResultDiagnostic);
       return;
     }
     if (

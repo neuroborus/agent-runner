@@ -4091,8 +4091,12 @@ permission failures and uncertain killed-process outcomes retain precedence.
 A `system/init` after the result must match the session already established by
 the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
-result or a post-result assistant, user, or stream-event record still rejects,
-and other trailing system records keep their existing handling.
+result rejects as `protocol_result_duplicate`. Post-result assistant, user, and
+stream-event records reject as `protocol_assistant_after_result`,
+`protocol_user_after_result`, and `protocol_stream_event_after_result`,
+respectively, without reading their payload fields. Existing session guards and
+first-violation precedence remain unchanged; other trailing system records keep
+their existing handling.
 Before the result, a session-matched `system/permission_denied` event with a
 valid `tool_use_id` records only its tool name and a closed
 `decision_reason_code`; an absent, unrecognized or non-string code, or an
@@ -4113,6 +4117,10 @@ success envelope is classified as success; any other non-error payload is only
 an invalid error result. Exceptions from progress callbacks or the shared
 progress bound and write-after-finish remain unattributed. The classes change
 no acceptance, retry, cleanup, or local-commit effect proof.
+The historical `protocol_record_after_result` class remains registered for
+persisted diagnosis and recovery, but the parser no longer emits it. Only closed
+classes cross public or durable boundaries; rejected native records and
+transcripts are never retained there.
 Owned process capture delivers bounded stdout chunks without bypassing durable
 registration, containment, cancellation, retirement, or storage cleanup.
 

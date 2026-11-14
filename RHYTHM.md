@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Claude post-result diagnostics identify the record family.** The generic
+  rejection hid whether assistant, user, or stream-event traffic followed the
+  result. The parser now reports a closed class for each family without reading
+  rejected payloads or exposing native records. Session guards, first-violation
+  precedence, terminal behavior and commit-executor proof remain unchanged. The
+  old generic class stays registered so saved diagnoses and recovery remain valid.
+
 - **Claude retains its private native cwd between sandboxed commands.** A
   read-only audit acquired an empty mode-0700 `.claude/.cc-writes` in its
   source; the original creating process remains unknown. The qualified

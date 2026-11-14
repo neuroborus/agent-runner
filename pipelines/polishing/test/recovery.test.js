@@ -1032,6 +1032,7 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
 test("persists terminal Claude finalization diagnoses without acceptance", async (t) => {
   const marker = "PRIVATE_NATIVE_FRAME";
   for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_assistant_after_result"],
     ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
     ["ERR_CLAUDE_PROTOCOL", undefined],
     ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
