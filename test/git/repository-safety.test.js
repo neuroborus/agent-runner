@@ -15,12 +15,24 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createGitService, GitSafetyError } from "../../src/git/index.js";
+import {
+  createGitService,
+  GitSafetyError,
+  normalizeReadOnlySnapshotChanges,
+} from "../../src/git/index.js";
 
 const executeFile = promisify(execFile);
 
 function isGitError(code) {
   return (error) => error instanceof GitSafetyError && error.code === code;
+}
+
+function readOnlyChangesAre(service, expected) {
+  return (error) => {
+    assert.ok(isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error));
+    assert.deepEqual(service.readOnlyChanges(error), expected);
+    return true;
+  };
 }
 
 async function runGit(repositoryPath, env, ...argumentsList) {
@@ -760,9 +772,7 @@ test("read-only guards preserve dirty baselines and constrain allowed paths", as
   await writeFile(join(dirty.repositoryPath, "other.txt"), "mutation\n");
   await assert.rejects(
     dirty.service.assertUnchanged(dirtyBaseline),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("untracked-content"),
+    readOnlyChangesAre(dirty.service, ["untracked-content"]),
   );
 
   const allowed = await createFixture(t);
@@ -775,9 +785,7 @@ test("read-only guards preserve dirty baselines and constrain allowed paths", as
   await runGit(allowed.repositoryPath, allowed.env, "add", "tracked.txt");
   await assert.rejects(
     allowed.service.assertUnchanged(allowedBaseline),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("index"),
+    readOnlyChangesAre(allowed.service, ["index"]),
   );
 });
 
@@ -883,9 +891,7 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   await runGit(repositoryPath, env, "tag", "unexpected-tag");
   await assert.rejects(
     service.assertUnchanged(beforeRef),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("refs"),
+    readOnlyChangesAre(service, ["refs"]),
   );
 
   await runGit(
@@ -909,9 +915,7 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   assert.doesNotMatch(JSON.stringify(afterRemote), new RegExp(credential, "u"));
   await assert.rejects(
     service.assertUnchanged(beforeRemote),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("remote-configuration"),
+    readOnlyChangesAre(service, ["remote-configuration"]),
   );
 
   await runGit(
@@ -945,10 +949,94 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   await runGit(repositoryPath, env, "config", "user.name", "Changed Identity");
   await assert.rejects(
     service.assertUnchanged(beforeIdentity),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("identity"),
+    readOnlyChangesAre(service, ["identity"]),
   );
+});
+
+test("read-only change labels accept only known snapshot domains", () => {
+  const labels = [
+    "head",
+    "branch",
+    "refs",
+    "tracked-content",
+    "untracked-content",
+    "index",
+    "remote-configuration",
+    "identity",
+  ];
+  const all = normalizeReadOnlySnapshotChanges([...labels].reverse());
+  assert.deepEqual(all, labels);
+  assert.ok(Object.isFrozen(all));
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(["index", "head"]), [
+    "head",
+    "index",
+  ]);
+  for (const value of [
+    undefined,
+    null,
+    "head",
+    { 0: "head", length: 1 },
+    [],
+    ["unknown-domain"],
+    ["head", "unknown-domain"],
+    ["head", "head"],
+    [...labels, "head"],
+    [1],
+    [null],
+    ["head\nrefs"],
+    ["HEAD"],
+    ["refs/heads/main"],
+    ["/tmp/project/index"],
+  ]) {
+    assert.equal(normalizeReadOnlySnapshotChanges(value), null);
+  }
+  const throwing = () => {
+    throw new Error("Hostile diagnostic access.");
+  };
+  const iterated = ["head"];
+  iterated[Symbol.iterator] = function* () {
+    yield "head";
+    yield "index";
+  };
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(iterated), ["head"]);
+  const throwingIterator = ["head"];
+  throwingIterator[Symbol.iterator] = throwing;
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(throwingIterator), [
+    "head",
+  ]);
+  const throwingElement = ["head"];
+  Object.defineProperty(throwingElement, 0, { get: throwing });
+  for (const value of [
+    throwingElement,
+    new Proxy(["head"], { get: throwing }),
+    new Proxy(["head"], {
+      get: (target, key) => (key === "length" ? -1 : target[key]),
+    }),
+  ]) {
+    assert.equal(normalizeReadOnlySnapshotChanges(value), null);
+  }
+
+  const service = createGitService();
+  const cause = new GitSafetyError("Read-only repository snapshot changed.", {
+    changes: ["index", "head"],
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  });
+  assert.deepEqual(service.readOnlyChanges(cause), ["head", "index"]);
+  for (const value of [
+    undefined,
+    null,
+    { code: "ERR_READ_ONLY_REPOSITORY_CHANGED" },
+    { code: "ERR_READ_ONLY_REPOSITORY_CHANGED", changes: ["unknown-domain"] },
+    { code: "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED", changes: ["head"] },
+    Object.defineProperty(
+      { code: "ERR_READ_ONLY_REPOSITORY_CHANGED" },
+      "changes",
+      { get: throwing },
+    ),
+    Object.defineProperty({}, "code", { get: throwing }),
+  ]) {
+    assert.equal(service.readOnlyChanges(value), null);
+  }
 });
 
 test("validation-infrastructure fingerprints accept 512 paths without widening other path lists", async (t) => {

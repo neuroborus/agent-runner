@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rm, stat } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import {
   basename,
   dirname,
@@ -13,6 +13,11 @@ import {
 } from "node:path";
 
 import { createWorkspaceService } from "../../workspace/index.js";
+
+// New allocations use the fixed platform temporary location so the provider
+// TMPDIR leaves room for Claude's Unix-socket bridge names (sun_path is 108
+// bytes including the terminator). Ambient temporary variables never apply.
+const STORAGE_PARENT = "/tmp";
 
 // The execution-resource journal uses a frozen command identity for each owner.
 // This identity belongs to adapter preparation, never to a trusted check.
@@ -67,7 +72,7 @@ async function inspect(path) {
 
 async function storageRoot(forbiddenPaths, recordedPath) {
   const name = `agent-runner-claude-${process.getuid()}`;
-  const root = recordedPath ?? join(await realpath(tmpdir()), name);
+  const root = recordedPath ?? join(await realpath(STORAGE_PARENT), name);
   if (
     !isAbsolute(root) ||
     resolve(root) !== root ||

@@ -26,6 +26,7 @@ import {
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
 } from "./workflow-contract.js";
 
 export {
@@ -51,6 +52,7 @@ export {
   NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  RESOLUTION_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -145,6 +147,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_evidence_rejected",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
@@ -196,6 +199,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The bounded automatic terminal-confirmation correction remains invalid.",
   lazy_output_invalid:
     "The bounded automatic lazy checkpoint correction remains invalid.",
+  resolution_output_invalid:
+    "The bounded read-only finding-resolution report restatement remains invalid.",
   review_output_invalid:
     "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
@@ -233,6 +238,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 
@@ -265,8 +271,17 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(run) {
+function publicEvidence(run, readOnlySnapshotChanges) {
   const pause = run.pause;
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (pause.reason === "output_exhausted") {
     return Object.freeze([
       `Suspended role: ${pause.role}.`,
@@ -318,7 +333,9 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+// The root registry injects the Git-owned label normalizer; a direct
+// uncomposed call has none and reports the diagnosis as unavailable.
+function projectPause(run, { readOnlySnapshotChanges } = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -412,7 +429,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run),
+    evidence: publicEvidence(run, readOnlySnapshotChanges),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -479,6 +496,24 @@ function validateResumeAction(run, action) {
     )
       return;
     throw new Error("Semantic finalization retry is not applicable.");
+  }
+  const correction = state.resolutionCorrection;
+  if (
+    run.pause?.reason === "resolution_output_invalid" ||
+    (run.pause?.reason === "environment_blocked" &&
+      correction?.stage === "blocked")
+  ) {
+    if (
+      action === null &&
+      run.pause.resumeState === "RESOLVE_FINDINGS" &&
+      correction?.stage ===
+        (run.pause.reason === "environment_blocked"
+          ? "blocked"
+          : "exhausted") &&
+      Number.isSafeInteger(correction.additionalAttempts + 2)
+    )
+      return;
+    throw new Error("Finding-resolution restatement retry is not applicable.");
   }
   if (state.candidateMigrationPending && action === null) {
     return;
@@ -1113,9 +1148,17 @@ export function migratePolishingStateV17(run) {
   });
 }
 
+export function migratePolishingStateV19(run) {
+  // Shape-only: historical rejections and lost reports are never inferred.
+  return Object.freeze({
+    ...run.pipelineState,
+    resolutionCorrection: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 19,
+  stateVersion: 20,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1141,6 +1184,7 @@ export const polishingPipeline = Object.freeze({
     17: migratePolishingStateV17,
     // Preserve existing path/fallback decisions and consumed-effect evidence.
     18: (run) => Object.freeze({ ...run.pipelineState }),
+    19: migratePolishingStateV19,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

@@ -14,6 +14,12 @@ owns real journal reconstruction preserving an earlier accepted commit and the
 candidate through exhausted result recovery, without a duplicate charge or
 commit. Changes to this lifecycle require that slow suite and the complete slow
 release gate; focused policy coverage does not attest those gates.
+That slow suite also owns real journal reconstruction of a lost polishing
+writable finding-resolution report: one invalid read-only restatement, the
+explicit null retry, a once-only writable call and fix charge, and the staged
+handoff. Fast `pipelines/polishing/test/resolution-correction.test.js` keeps the
+policy matrix. Changes to this lifecycle require that slow suite and the
+complete slow release gate; focused fast coverage does not attest either.
 Operator-stop slow fixtures retain separate prepared and invoked checkpoints:
 native containment starts from proven unstarted work, while interrupted effects
 resume read-only and keep their consumed accounting.
@@ -206,6 +212,32 @@ unregistered classes and native text; `test/cli.test.js` owns the printed line.
 `pipelines/polishing/test/recovery.test.js` owns cold persisted FINALIZE
 diagnosis, status and activity, classified and unclassified, without
 finalization acceptance, fingerprints, staging, retry or resume.
+The Claude test also owns factual permission classes through completed and
+failed processes, order-independent mixed batches and local-commit
+`not_started` proof; the registry, persistence, polishing recovery and CLI
+tests own their terminal registration, legacy loading, redaction, cold pause
+and printed line.
+
+Fast polishing `convergence-and-review` owns the lazy clean-confirmation cold
+null retry through a reopened run store: its bounded candidate-review diagnostic
+and the latest accepted changed and unchanged check/fix summaries in the next
+primary requests and saved state.
+
+Fast polishing `resolution-correction` owns finding-resolution report recovery
+in independent and combined modes: one fresh read-only restatement after an
+invalid, lost or interrupted report, once-only fix charges, operator-stop
+settlement, blocked, product-decision, drift and exhaustion stops, and the
+explicit null retry. `contracts-and-migrations` owns the version-20 checkpoint
+validator, migration and diagnostic allowlist.
+
+Fast `test/git/repository-safety.test.js` owns the read-only snapshot-change
+label normalizer and real-Git `readOnlyChanges` classification;
+`test/state/persistence.test.js` owns durable label validation, including
+operator-retained pauses; and `test/pipeline-registry.test.js` owns composed
+and uncomposed contamination evidence. Polishing `mode-routing` and execution
+`clarification-and-bootstrap` own the guard-to-pause path, cold reload,
+activity and unchanged clearing; `test/runner-custom-execution.test.js` owns
+the Git-free unavailable stop.
 
 Fast `test/update.test.js` owns on-demand official identity gating, version
 ordering and explicit prereleases, no-update success, Node/configuration/state
@@ -475,8 +507,10 @@ runner custom default before plan parsing.
 Focused reconstruction coverage rejects writable provider-policy drift before
 another turn while preserving startup receipts, accepted results and permissions.
 `test/runner-custom-execution.slow.test.js` owns real leased authoring-to-execution
-composition and accepted-result recovery without Git; run it when changing public
-custom selection, directory role probing, custom orchestration or settlement.
+composition and accepted-result recovery without Git, plus a durable lazy
+candidate-review diagnostic through its cold null retry; run it when changing public
+custom selection, directory role probing, custom orchestration, settlement, or
+candidate-review correction diagnostics and recovery.
 Its slow invocation is `npm run test:slow -- test/runner-custom-execution.slow.test.js`.
 Fast recovery cases cover compatible authorized decisions before acceptance and
 after an earlier receipt, fresh gates for the new clarification version, and
@@ -689,6 +723,13 @@ root reads separate from temporary write exclusions, and Claude rejects binary
 sources hidden by the selected runner-boundary command masks. The runner policy
 suite checks admission forwarding after immutable policy-receipt validation.
 
+Fast `test/source-boundaries.test.js` owns source index, dependency-direction
+and provider-isolation boundaries. Its source walks cover the root runtime and
+exactly the root manifest's `workspaces` declarations. A synthetic temporary
+root proves that an undeclared hidden directory is not walked, declared regular
+workspaces still are, and an explicitly declared hidden workspace is discovered
+and strictly validated; run it when changing workspace layout or declarations.
+
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical
 disk latency from disposable fixtures without mocking filesystem operations or
@@ -730,22 +771,22 @@ all test files; neither silently excludes a failed test. Use
 pass multiple paths for one affected batch; selected files retain the same
 bounded runner and per-file timing output.
 
-| Suite                                                                     | Distinct observable guarantee                                                                                                       | Run when changing                                                                                                                                  |
-| ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test/runtime-pinning.slow.test.js`                                       | Running and detached synthetic applications retain the complete pinned payload after outer replacement; drift blocks another launch | Startup/bootstrap, runtime manifests or storage, delayed resources, Node identity, detached launch                                                 |
-| `test/release-pack.slow.test.js`                                          | Actual npm tarball matches the complete assembled production application, real dependencies, modes and resources                    | Release assembly, file allowlists, lock closure, package metadata or runtime resources                                                             |
-| `test/package-install.slow.test.js`                                       | Exact inspected bytes install outside the checkout and expose pinned CLI/MCP behavior with complete teardown                        | Packaging/release gates, candidate installation/activation, installed CLI/MCP update contracts, or final provider/operator installation acceptance |
-| `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff                              | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                                          |
-| `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced                              | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                                   |
-| `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts                               | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention                   |
-| `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order                             | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring            |
-| `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content                             | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume            |
-| `test/runner-effects.slow.test.js`                                        | Commit effects settle exactly once across interruption, verification, and deferred checkpoints                                      | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, or consumed-effect recovery                           |
-| `test/runner-audit-recovery.slow.test.js`                                 | Cold audit reconstruction preserves exact pending verification, provenance and budgets across native replacement and migration      | Audit output recovery, persisted migration, native selection, availability/inactivity composition or public recovery projections                   |
-| `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                   | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency                      |
-| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                             | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases             |
-| `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                   | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events            |
-| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                                             | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                                 |
+| Suite                                                                     | Distinct observable guarantee                                                                                                                             | Run when changing                                                                                                                                                                               |
+| ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/runtime-pinning.slow.test.js`                                       | Running and detached synthetic applications retain the complete pinned payload after outer replacement; drift blocks another launch                       | Startup/bootstrap, runtime manifests or storage, delayed resources, Node identity, detached launch                                                                                              |
+| `test/release-pack.slow.test.js`                                          | Actual npm tarball matches the complete assembled production application, real dependencies, modes and resources                                          | Release assembly, file allowlists, lock closure, package metadata or runtime resources                                                                                                          |
+| `test/package-install.slow.test.js`                                       | Exact inspected bytes install outside the checkout and expose pinned CLI/MCP behavior with complete teardown                                              | Packaging/release gates, candidate installation/activation, installed CLI/MCP update contracts, or final provider/operator installation acceptance                                              |
+| `test/integration/cli-workflows.slow.test.js`                             | Root CLI composition produces one plan artifact, one exact-subject commit, and one uncommitted handoff                                                    | CLI projection or root plan-authoring, plan-execution, polishing, real-Git commit, or handoff composition                                                                                       |
+| `test/integration/mcp-workflows.slow.test.js`                             | A detached MCP workflow continues through durable runner state after the requesting client is replaced                                                    | MCP-to-runner workflow composition, detached continuation, client replacement, or cross-capability durable state                                                                                |
+| `test/mcp/control-plane.slow.test.js`                                     | Detached STDIO dispatch preserves protocol cleanliness and exactly owned durable intents and receipts                                                     | MCP STDIO, detached starts or stops, action receipts, disconnects, waits, restart or version skew, or execution-owner contention                                                                |
+| `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order                                                   | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring                                                         |
+| `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content                                                   | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume                                                         |
+| `test/runner-effects.slow.test.js`                                        | Commit effects and polishing finding-resolution checkpoints settle exactly once across interruption, verification, deferred and reconstructed checkpoints | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, consumed-effect recovery, or polishing finding-resolution checkpoint durability or report recovery |
+| `test/runner-audit-recovery.slow.test.js`                                 | Cold audit reconstruction preserves exact pending verification, provenance and budgets across native replacement and migration                            | Audit output recovery, persisted migration, native selection, availability/inactivity composition or public recovery projections                                                                |
+| `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                                         | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency                                                                   |
+| `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                                                   | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases                                                          |
+| `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                                         | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events                                                         |
+| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                                                                   | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                                                                              |
 
 Run the affected slow coverage once before handing off a change to the listed
 contracts. After the ordinary `npm run check` gate, run the complete
@@ -1142,10 +1183,17 @@ and filter tampering or setup failure, prove direct bubblewrap execution with
 one user namespace and no fallback Claude helper, and retain provider
 connectivity, environment scrubbing, argument rejection before payload
 execution, and the complete command-isolation argument contract.
-Access-policy coverage also proves that one compound `git log`, `git cat-file`,
-`git branch -a`, and `ls` inspection succeeds in the read-only sandbox while
-representative workspace, Git, and remote mutations fail, local-commit
-readiness uses the same policy, and workspace-write settings stay unchanged.
+Access-policy coverage also proves that one compound `git status`,
+`git branch --show-current`, `git branch -a`, `git remote -v`, `git tag --list`,
+`git log`, `git cat-file`, `git diff --check HEAD`, and `ls` inspection succeeds
+under every access policy while index, branch, tag, remote, configuration,
+identity-bearing commit, and push mutations fail; the read-only sandbox also
+denies workspace writes, and local-commit readiness uses that policy.
+Workspace-write settings share the autonomous envelope with no `Bash(...)` rule
+or root-relative `Edit(/.git…)` entry and exactly the absolute protected-directory
+Edit denials; declared-directory workspace-write keeps its Git-subcommand
+denials, and a protected Git path with a rule metacharacter fails before any
+turn starts.
 Git workspace-write coverage resolves each generated native and fallback
 launcher through the turn's `PATH`, feeds it Claude's producer-ordered
 arguments for the read-only preparation settings, and replays the resulting
@@ -1167,16 +1215,59 @@ credential denial removing the shell proof: the generated shell must refuse that
 command, run Claude's unsandboxed use, and run the same command through the
 authenticated launcher. Probes require the same refusal with real execution.
 Directory-probe simulations execute the generated probe script against the
-same mount view.
-One bounded capability-gated Linux process regression exercises the installed
+same mount view. A read-only fallback turn proves that Claude's existing
+owner-only temporary self-bind follows the private `/tmp` and `/run` mounts
+while no other allocation path is bound, and that the descriptor bind keeps
+the validated directory when the path is substituted afterward; a substituted
+symlink and a regular file at that destination exit before bubblewrap starts.
+Two bounded capability-gated Linux process regressions exercise the installed
 bubblewrap direct-filter boundary without a model request, sleep, retry loop,
-or slow-tier promotion. Its read-only and workspace-write fallback probes run
-for real, confirming source changes and pinned-control denial with actual
-syscalls. It does not replace post-install acceptance: after the
+or slow-tier promotion. In the first, read-only and workspace-write fallback
+probes run for real, confirming source changes and pinned-control denial with
+actual syscalls. The second runs both generated launchers with a literal
+Claude TMPDIR and requires a parent-readable cwd receipt, unchanged project
+content, and a hidden restricted-host launcher. They do not replace post-install acceptance: after the
 finalized commit is installed, the supervising agent starts a fresh real Claude
 lazy plan-authoring run and requires preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before
 dependent provider work continues.
+
+The slow `test/agents/claude-native-policy.slow.test.js` suite owns the
+model-free reproduction of the Claude workspace-write native permission policy
+through the installed CLI. Enable it explicitly on the host with
+`AGENT_RUNNER_NATIVE_CLAUDE=1 npm run test:slow -- test/agents/claude-native-policy.slow.test.js`.
+It is operator-owned native-platform acceptance: the Runner-trusted executor's
+outer isolation does not provide the nested Claude sandbox required by this test.
+The ordinary slow gate skips it, so passing that gate never establishes native
+acceptance. When enabled, it skips only on non-Linux hosts or when `claude` or
+`bwrap` is absent from `PATH`; unavailable workspace-write isolation and any
+other preflight or protocol failure still fail. Every turn runs through the real
+adapter probe, generated settings, authenticated launcher, and stream
+normalization against an owned Git repository, configuration directory,
+synthetic key, and loopback Messages stub that scripts tool calls and refuses
+every other request. Claude receives only a fixture-owned environment; seeded
+conflicting host provider routing, authentication, header and proxy settings
+must never reach a Claude invocation. Only baseline turns replace the generated
+settings with the superseded workspace policy: a subcommand-rule refusal of
+ordinary inspection must end as terminal unclassified Bash, script-driven
+content work outside Claude's accept-edits fast path must receive a terminal
+classifier refusal, and a workspace Git-metadata `Write` must miss the
+root-relative rule and reach a classifier decision. Corrected turns must admit
+Git inspection, fast-path filesystem work and script-driven content work without
+a permission denial, deny an absolute Git-metadata `Write` without a classifier
+decision, and admit direct Bash writes to Git `HEAD` and `config` without a
+native denial so each returns a command-sandbox permission error. Claude may
+still require separate native approval for sensitive Git commands, so the suite
+does not claim that every Git mutation reaches the sandbox; the effective access
+proof exercises those mutations directly. Every case leaves HEAD, refs, index,
+configuration, and remotes unchanged, owned decoys for the stripped ambient Git
+routing stay untouched, and public errors, records, and diagnostics carry no
+command, path, free-text reason, provider payload, or key. A loopback endpoint
+leaves auto mode without its server-side check, so test-local native records
+distinguish rule decisions from classifier decisions. Changes to Claude
+permission settings, effective access proofs, or policy identity require a
+separate enabled host run before installation in addition to the complete slow
+gate. Record both results and report any skip explicitly. No live model is used.
 
 Preparation custody regressions extend `test/state/journal-checkpoints.test.js`'s
 real growing/rotating journal fixtures and normalization counters with byte,

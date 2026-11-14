@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { getPipeline } from "../src/index.js";
 import { createWorkspaceService } from "../src/workspace/index.js";
 import {
   createExecutionAdapter,
@@ -109,6 +110,22 @@ for (const mode of ["independent", "lazy", "combined"]) {
     assert.ok(f.probes.every((probe) => probe.access !== "local-commit"));
     if (mode === "lazy")
       assert.ok(f.calls.every(({ role }) => role === "worker"));
+    if (mode === "combined") {
+      const writable = /never as reserved-check coverage/u;
+      const review = /Source observation or overlap alone is not a violation/u;
+      const markers = {
+        implement: writable,
+        "check-and-fix": writable,
+        "clean-confirm": review,
+        review,
+        confirm: review,
+      };
+      for (const { phase, request } of f.calls) {
+        if (!Object.hasOwn(markers, phase)) continue;
+        for (const prompt of [request.prompt, request.recoveryPrompt])
+          if (prompt !== undefined) assert.match(prompt, markers[phase]);
+      }
+    }
   });
 }
 
@@ -138,6 +155,15 @@ test("custom reconstruction retains earlier acceptance and retries only the inte
     JSON.stringify(resumed.run.pause),
   );
   assert.equal(f.calls.filter((call) => call.phase === "implement").length, 2);
+  const retried = f.calls
+    .filter((call) => call.step === 2 && call.phase === "confirm")
+    .at(-1);
+  for (const prompt of [retried.request.prompt, retried.request.recoveryPrompt])
+    if (prompt !== undefined)
+      assert.match(
+        prompt,
+        /Source observation or overlap alone is not a violation/u,
+      );
 });
 
 test("custom reconstruction rejects writable policy drift before another turn", async (t) => {
@@ -699,9 +725,22 @@ test("terminal confirmation cannot mutate outputs or accept changed content", as
     },
   });
   const stopped = await f.run();
-  assert.equal(stopped.run.pause.reason, "read_only_agent_mutated_repository");
+  assert.deepEqual(stopped.run.pause, {
+    reason: "read_only_agent_mutated_repository",
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  });
+  const projected = getPipeline("plan-execution").projections.pause(
+    stopped.run,
+  );
+  assert.deepEqual(projected.evidence, [
+    "Changed snapshot domains: unavailable.",
+  ]);
+  assert.deepEqual(projected.nextActions, [
+    { type: "start-new-run", requirement: "uncontaminated-worktree" },
+  ]);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
   assert.equal(f.currentRun.pipelineState.customResults.accepted.length, 1);
+  assert.equal(await readFile(f.output, "utf8"), "Unexpected replacement.\n");
 });
 
 test("custom trusted validation binds the workspace bytes while semantic gates bind the result", async (t) => {

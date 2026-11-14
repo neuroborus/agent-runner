@@ -4,11 +4,9 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
-  inspectOwnedSessionProcesses,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminalAdapterDiagnostic,
-  terminateOwnedProcess,
 } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
@@ -26,6 +24,10 @@ import {
   getPipeline as registeredPipeline,
   resolveStopBoundary,
 } from "../pipeline-registry.js";
+import {
+  inspectOwnedSessionProcesses,
+  terminateOwnedProcess,
+} from "../platform/index.js";
 import { createWorkspaceService } from "../workspace/index.js";
 import { createRuntimeAdmission } from "../runtime/index.js";
 import {

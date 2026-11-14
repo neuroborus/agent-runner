@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import {
+  glob,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -32,17 +41,22 @@ async function walk(directory, predicate) {
   return paths;
 }
 
-async function workspaceDirectories() {
-  const directories = [];
-  for (const group of ["packages", "pipelines"]) {
-    const entries = await readdir(join(ROOT, group), { withFileTypes: true });
-    directories.push(
-      ...entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => join(group, entry.name)),
-    );
+// Workspaces are the root manifest's declarations. As in npm, `*` skips hidden
+// entries; symbolic links are not workspace directories.
+async function workspaceDirectories(root = ROOT) {
+  const { workspaces } = JSON.parse(
+    await readFile(join(root, "package.json"), "utf8"),
+  );
+  const directories = new Set();
+  for await (const entry of glob(workspaces, {
+    cwd: root,
+    withFileTypes: true,
+  })) {
+    if (entry.isDirectory()) {
+      directories.add(relative(root, join(entry.parentPath, entry.name)));
+    }
   }
-  return directories;
+  return [...directories].sort();
 }
 
 function isWithin(directory, path) {
@@ -59,18 +73,18 @@ function sourceOwner(path, manifests) {
     .sort((left, right) => right.directory.length - left.directory.length)[0];
 }
 
-async function sourceImports() {
+async function sourceImports(root = ROOT) {
   const sourceRoots = [
     "bin",
     "src",
-    ...(await workspaceDirectories()).map((directory) =>
+    ...(await workspaceDirectories(root)).map((directory) =>
       join(directory, "src"),
     ),
   ];
   const files = (
     await Promise.all(
       sourceRoots.map((directory) =>
-        walk(join(ROOT, directory), (path) => extname(path) === ".js"),
+        walk(join(root, directory), (path) => extname(path) === ".js"),
       ),
     )
   ).flat();
@@ -83,6 +97,63 @@ async function sourceImports() {
   }
   return { files, imports };
 }
+
+test("source walks follow root workspace declarations", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "agent-runner-workspaces-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const declare = (workspaces) =>
+    writeFile(join(root, "package.json"), JSON.stringify({ workspaces }));
+  const sourceFiles = async () =>
+    (await sourceImports(root)).files
+      .map((path) => relative(root, path))
+      .sort();
+  for (const directory of [
+    "bin",
+    "src",
+    "packages/shared/src",
+    "pipelines/regular/src",
+    "pipelines/.operational",
+  ]) {
+    await mkdir(join(root, directory), { recursive: true });
+  }
+  for (const path of [
+    "bin/cli.js",
+    "src/index.js",
+    "packages/shared/src/index.js",
+    "pipelines/regular/src/index.js",
+  ]) {
+    await writeFile(join(root, path), "export {};\n");
+  }
+  await writeFile(join(root, "pipelines/.operational/state.json"), "{}\n");
+
+  await declare(["packages/*", "pipelines/*"]);
+  assert.deepEqual(await workspaceDirectories(root), [
+    "packages/shared",
+    "pipelines/regular",
+  ]);
+  assert.deepEqual(await sourceFiles(), [
+    "bin/cli.js",
+    "packages/shared/src/index.js",
+    "pipelines/regular/src/index.js",
+    "src/index.js",
+  ]);
+
+  await declare(["packages/*", "pipelines/*", "pipelines/.operational"]);
+  assert.deepEqual(await workspaceDirectories(root), [
+    "packages/shared",
+    "pipelines/.operational",
+    "pipelines/regular",
+  ]);
+  await assert.rejects(sourceImports(root), { code: "ENOENT" });
+  await mkdir(join(root, "pipelines/.operational/src"));
+  await writeFile(
+    join(root, "pipelines/.operational/src/index.js"),
+    "export {};\n",
+  );
+  assert.ok(
+    (await sourceFiles()).includes("pipelines/.operational/src/index.js"),
+  );
+});
 
 test("source imports respect indexed capability boundaries", async () => {
   const { files, imports } = await sourceImports();
@@ -274,6 +345,35 @@ test("provider-private source stays inside the agent capability", async () => {
         `${relative(ROOT, importer)} imports ${specifier}`,
     );
   assert.deepEqual(failures, []);
+});
+
+test("platform source imports only Node built-ins and its own siblings", async () => {
+  const platform = join(ROOT, "src/platform");
+  const { imports } = await sourceImports();
+  const failures = imports
+    .filter(
+      ({ importer, specifier }) =>
+        isWithin(platform, importer) &&
+        !specifier.startsWith("node:") &&
+        !(
+          specifier.startsWith("./") &&
+          isWithin(platform, resolve(dirname(importer), specifier))
+        ),
+    )
+    .map(
+      ({ importer, specifier }) =>
+        `${relative(ROOT, importer)} imports ${specifier}`,
+    );
+  assert.deepEqual(failures, []);
+});
+
+test("the agent index does not re-export platform capabilities", async () => {
+  const agents = await import("../src/agents/index.js");
+  const platform = await import("../src/platform/index.js");
+  assert.deepEqual(
+    Object.keys(platform).filter((name) => Object.hasOwn(agents, name)),
+    [],
+  );
 });
 
 test("operator guidance stays outside pipeline roles and run reconstruction", async () => {

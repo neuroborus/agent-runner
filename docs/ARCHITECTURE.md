@@ -13,10 +13,17 @@ root CLI/runtime ──static registry──▶ pipeline workspaces
 
 The root runner imports registered pipelines. Pipelines do not import the root
 application; the runner supplies state, event, agent, and Git services through a
-runtime context. Plan authoring and execution consume
+runtime context. The registry stores each descriptor as one frozen composed copy
+whose pause projection receives frozen root capabilities, currently only the
+Git-owned read-only snapshot-change normalizer; a direct uncomposed projection
+has no capability and fails closed. Plan authoring and execution consume
 `@agent-runner/commit-plan`; polishing has no shared-package dependency, and
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
+
+Inside the root, `src/platform/` is the lowest capability: it imports only
+Node built-ins and its own siblings, and every other root capability may consume
+its index.
 
 ## Root Runner Ownership
 
@@ -359,8 +366,11 @@ effects and stop recovery remain ahead of preparation for new writable work.
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep
-snapshot validation, exact command vectors, sandboxing, bounded evidence, and
-repository mutation guards within the capability.
+snapshot validation, exact command vectors, sandbox policy, bounded evidence, and
+repository mutation guards within the capability. Trusted validation owns
+exposure, storage, environment, and authorization policy and passes an ordered
+mount program to the platform boundary, which owns launcher discovery and
+verification and renders the fixed Linux isolation profile.
 
 Execution's private `commit-size-assessment.js` owns safe threshold arithmetic,
 fingerprint-bound atomic/split decisions and a three-attempt original-step
@@ -579,6 +589,20 @@ activity. Neither adapter maps client attribution into native session names,
 commit attribution, or undocumented environment variables, and bounded
 failures retain none of its values. Provider-visible origin identity does not
 promise a distinct provider dashboard category.
+
+The root `src/platform/index.js` is the one native-platform boundary. It
+statically selects the only implementation, Linux, and exposes three groups:
+process facts (`readProcessIdentity`, `readProcessNamespace`), owned processes
+(launch, execution, retirement, session inspection and the protected launcher)
+and trusted-command isolation (system paths, launcher resolution and
+verification, and the fixed bubblewrap profile), plus the process-group
+availability fact. Each capability keeps its own host guard, so other hosts fail
+closed: process facts are unverifiable, owned launches fail with
+`ERR_EXECUTION_PROCESS_UNVERIFIABLE` and isolated commands are rejected before
+launch. No other operating system is claimed.
+Importing the index has no side effects, and every consumer shares its single
+active-process registry. `runtime/bootstrap.js` and `runtime/admission.js`
+stay standard-library-only and keep their own checks outside it.
 
 ## Pipeline Ownership
 
@@ -1817,6 +1841,10 @@ saved logical checkpoint, and one null resume action. Provider-native
 diagnostics never participate in that projection.
 plan-execution finalization-backed `no_progress` exposes only the active
 finalization issue IDs and never their commands, problems, evidence, or paths.
+`read_only_agent_mutated_repository` projects exactly one evidence line,
+`Changed snapshot domains: <labels>.` from the composed Git normalizer, or
+`Changed snapshot domains: unavailable.` for absent, malformed, unknown, custom,
+directory, or legacy diagnostics; its persisted evidence and causes never cross.
 Plan execution also projects `finalization_transition_invalid` as a resumable
 `FINALIZE` checkpoint with a fixed bounded diagnostic when an unexpected
 runner-owned finalization invariant rejects advancement. The retained state
@@ -3122,7 +3150,7 @@ records with or without those optional proofs use the same ownership policy.
 Before a provider or trusted command can execute, a private supervisor waits on
 a separate inherited Node IPC channel while the runner journals its host PID,
 hostname, boot/start identity, matching launch cutoff and PID namespace identity.
-The shared agents boundary owns the
+The platform boundary owns the
 closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
 processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,
@@ -3281,6 +3309,13 @@ Otherwise it reconstructs the preserved logical role from frozen configuration
 and session lineage only after reacquiring any required worktree lease.
 Invalidated content returns through the pipeline's
 candidate gate before further finalization. Cancellation cannot resume.
+A settled pause rejects further pauses but accepts a fresh cancellation at its
+current revision; the old pause's inspected revision grants no authority, and
+deferred timing keeps its existing eligibility. Until reconciliation the pending
+cancellation coexists with the preserved `operator_paused` checkpoint; the
+plan-authoring, plan-execution, polishing, and init validators accept exactly
+that combination. Reconciliation unwraps the checkpoint, retires owned work, and
+wraps the underlying state once as `operator_canceled` without provider probes.
 Cancellation superseding a pause during reconciliation changes only the final
 outcome; verification never replays an effect or counts its progress twice.
 Authorized clarification edits remain pending; stop reconciliation checks Git
@@ -4037,6 +4072,16 @@ the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
 result or a post-result assistant, user, or stream-event record still rejects,
 and other trailing system records keep their existing handling.
+Before the result, a session-matched `system/permission_denied` event with a
+valid `tool_use_id` records only its tool name and a closed
+`decision_reason_code`; an absent, unrecognized or non-string code, or an
+`agent_id`, records an unknown reason, a repeated id records a conflict, and
+more than 16,384 ids make every reason unknown without failing the stream. Free
+text such as `decision_reason`, `message` and `uuid` is never read. The frozen
+`permissionReason` lookup answers only after `finish()`, and only when the
+stream has no protocol violation or identity uncertainty, its lineage-checked
+session equals both the final result's and the caller's session, and the entry
+is unique, unconflicted, known and for the same tool name.
 Each protocol guard attaches a terminal `protocol_*` diagnostic class from one
 private stream table for the first predicate it proved violated: invalid JSON,
 record, or UTF-8; line, stream, or tracking bounds; a missing, duplicate, or
@@ -4133,8 +4178,14 @@ the canonical host `bwrap` executable from the unchanged environment before the
 turn instead of resolving it through a potentially workspace-writable path. The
 launcher file is non-writable.
 Its owner-only allocation is outside the project, task, and state trees, and
-command namespaces cannot write the allocation. The adapter retains directory
-authority for teardown.
+command namespaces cannot write the allocation except for an existing,
+validated, owner-only directory Claude selects strictly inside its private
+temporary directory. In every access mode commands may use that directory for
+shell bookkeeping, its exported TMPDIR and the cwd receipt the parent reads, and
+for scratch writes. The launcher executable and token, the provider cwd, and
+other allocation content stay hidden, and the tool HOME remains the read-only
+projection with private namespace-local scratch directories. The adapter
+retains directory authority for teardown.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
 assignments; network unsharing, optionally followed by same-path proxy-bridge
@@ -4149,19 +4200,31 @@ removed. The
 launcher translates the required user-unshare argument into exactly one
 bubblewrap user namespace. Claude's fixed
 incidental write binds for its temporary, npm-log, and debug paths are
-recognized exactly but discarded rather than exposing their host paths. All
-other writable binds must resolve inside the canonical workspace, must not
-resolve inside Git metadata, and are accepted only for workspace-write access.
+recognized exactly but discarded rather than exposing their host paths.
+Except for the private temporary self-bind below, which grants no write to the
+workspace, Git metadata, outside paths, or allocation controls, all other
+writable binds must resolve inside the canonical workspace, must not resolve
+inside Git metadata, and are accepted only for workspace-write access.
 Read-only binds must preserve their source path except for Claude's `/dev/null`
-or verified owner-only empty-directory masks beneath the canonical runtime
-temporary root, both limited to strict workspace descendants. Empty-directory
-masks are replaced by private read-only tmpfs mounts rather than exposing their
-host temporary sources.
+or verified owner-only empty-directory masks, both limited to strict workspace
+descendants. Turn masks must lie beneath the allocation's canonical private
+temporary directory that Claude receives as `TMPDIR`; directory-free probes
+use the canonical runtime temporary root. Empty-directory masks are replaced
+by private read-only tmpfs mounts rather than exposing their host temporary
+sources.
 Exact workspace mounts of either kind and Git mounts, including redundant Git
-descendants, are replaced by Runner-owned mounts. Claude's own mounts strictly
-inside `/tmp`, `/run`, or the hidden allocation, without overlapping the
-workspace or Git metadata, are discarded because the launcher's private mounts
-replace those trees. Other same-path read-only workspace descendants and masks
+descendants, are replaced by Runner-owned mounts. Claude's same-path writable
+bind strictly inside the allocation's private temporary directory, overlapping
+neither the workspace nor Git metadata, is retained after the private tmpfs
+mounts when it names an existing canonical non-symlink directory owned by the
+current user beneath that canonical owner-only directory; any other existing
+target fails closed and a missing one is discarded. The launcher opens that
+directory without following symlinks, verifies the descriptor's owner, kind and
+canonical path, and binds the pinned descriptor with `--bind-fd`, so later path
+substitution cannot redirect the mount. Claude's other mounts
+strictly inside `/tmp`, `/run`, or the hidden allocation, without overlapping
+the workspace or Git metadata, are discarded because the launcher's private
+mounts replace those trees. Other same-path read-only workspace descendants and masks
 preserve Claude's command-protection policy for every access; outside the
 workspace, Claude may also mask an existing file with `/dev/null`. Every
 remaining read-only bind must not overlap the writable workspace or any part of
@@ -4179,7 +4242,7 @@ before any child starts.
 After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
 procfs, private `/tmp` and `/run`, a private `/tmp/claude`, a hidden launcher
-path, the exact workspace authority, read-only resolved Git metadata, missing
+path, the retained private temporary self-bind, the exact workspace authority, read-only resolved Git metadata, missing
 protected-environment removals, and the requested working directory. A private
 Claude module serializes a classic seccomp BPF for little-endian x64 or arm64.
 The program validates `seccomp_data.arch`, kills an architecture mismatch,
@@ -4304,9 +4367,16 @@ Commands receive an empty, read-only HOME/config projection with private
 namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
-filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v4` and
-`claude-command-boundary-v10`. Old receipts cannot authorize the new policy.
+filter's temporary files belong to the same allocation. New allocations live
+beneath the fixed platform temporary location without consulting ambient
+temporary variables, as Codex workspace storage does. This keeps the provider
+`TMPDIR` short enough for the Unix sockets Claude binds there: Linux socket
+paths hold at most 108 bytes including the terminator, and a nested ambient
+temporary root left no room for a bridge socket name. Recorded allocation
+roots, including earlier ambient ones, still recover and clean up unchanged.
+Probes exercise the projection launcher too; the contract revisions are
+`claude-isolation-v4` and `claude-command-boundary-v11`. Old receipts cannot
+authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`
@@ -4363,9 +4433,21 @@ denials that would reject compound inspection, while retaining collaboration,
 editing, and web restrictions. Autonomous Bash is available only inside the
 proved sandbox, which denies workspace and Git-metadata writes, closes command
 network and Unix-socket access, and forbids unsandboxed fallback.
-Workspace-write turns retain their separate `auto` permission policy,
-background classifier, broader content tools, and existing command denials
-while denying Git-directory writes and `git add`. Codex repository workspace-write
+Git workspace-write turns share that envelope, adding only the Edit and Write
+tools and the launcher-granted workspace write; no Git-subcommand rule rejects
+ordinary inspection before sandbox auto-allow. Under every access policy the
+sandbox enforces, and the effective access proof shows, that one compound Git
+inspection succeeds while index, branch, tag, remote, configuration,
+identity-bearing commit and push mutations fail, outside writes stay denied,
+and network and Unix-socket access stay closed. File tools run outside that
+sandbox, so their Git-metadata denials name each resolved absolute protected
+directory in Claude's `//` rule form; a root-relative rule would resolve against
+the native startup directory. A protected path containing a rule, glob or
+control character fails with the workspace-policy error before launch.
+Declared-directory turns keep their Git-subcommand denials. The policy identity
+serializes these settings and the path-independent rule template, so a receipt
+pinned under the prior policy fails closed on resume or reconstruction without
+migration. Codex repository workspace-write
 isolation likewise exposes safe content
 writes without Git-metadata writes. Codex protects project-root `.agents` as
 provider metadata by default, so a workspace-write turn adds it as an explicit
@@ -4527,6 +4609,21 @@ commits, or replaces a mode-required gate. The owning
 [execution specification](../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery)
 defines the checkpoint and pause contract.
 
+Polishing owns finding-resolution report recovery in its own workflow and
+contract without importing execution internals. Polishing state version 20 adds
+nullable `resolutionCorrection`; the version-19 migration initializes absence
+without inferring recovery evidence or changing terminal history. In independent
+and combined modes, each original `RESOLVE_FINDINGS` turn reserves the
+checkpoint atomically with its active turn. A returned report first publishes
+the reconciled candidate binding, approval invalidation and any single fix
+charge, keeping its blockers at `RESOLVE_FINDINGS`, before the turn retires.
+Invalid, lost or interrupted reports receive one durably consumed fresh
+read-only restatement; repeated invalid or lost output pauses
+`resolution_output_invalid`, and explicit null resume authorizes exactly one
+further read-only attempt. Lazy mode keeps its existing resolution contract. The
+owning [polishing specification](../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery)
+defines the checkpoint and pause contract.
+
 Plan execution also owns lazy structured-output recovery. Provider and
 deterministic checkpoint failures are reduced to bounded diagnostics, then one
 fresh Worker session receives the complete durable checkpoint request with its
@@ -4562,13 +4659,35 @@ Claude turn failures use a finite adapter-owned diagnostic allowlist. Structured
 take precedence over bounded message matching. The adapter discards denied tool
 input, native result text, raw standard error, and process causes; only its
 fixed code, fixed message, allowlisted class, and safety fields cross the
-boundary. Authentication remains terminal. A denial that identifies an
-unexposed tool or a Bash command outside the narrow positive repository-
-inspection allowlist is also terminal. Only an expected non-Bash tool or a
-positively recognized safe Bash inspection may be a recoverable capability or
-configuration failure. Structured provider recovery accepts only explicit
-transient HTTP statuses; non-transient client statuses and an `api_error`
-without a transient status fail closed with a fixed request-rejected error.
+boundary. Authentication remains terminal. A denial of an unexposed tool or of a
+Bash command outside the narrow positive repository-inspection allowlist is
+terminal and classified only as an unexposed tool or unclassified Bash whose
+refusal cause is unknown. The allowlist matches whole single commands whose
+tokens are separated by exactly one space, including the `HEAD`-relative
+`git diff --check HEAD` content check; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+The shared request contract accepts an optional diagnostic-only
+`requiredCheckCommands` array of at most 512 non-empty commands of at most
+4,000 characters without NUL, matching the pipelines' aggregate validation
+capacity, and stores a frozen copy. Polishing and plan-execution role requests
+pass the established persisted inventory commands unchanged; it never enters
+prompts, native arguments, settings, storage, events or failure records, and
+Codex ignores it. Claude labels a denied non-safe Bash command
+`permission_bash_required_check` only on exact string equality with one of
+them; that terminal class ranks below unexposed, unclassified Bash and malformed
+entries and above the capability fallback.
+On both completed and failed exits, the permission path passes the stream and
+the result session to classification. When every denial in the batch carries a
+valid, unique `tool_use_id` and every non-safe Bash denial has the same code
+from the bound stream lookup, the batch is the terminal
+`permission_reason_<code>` class, which replaces unclassified Bash and outranks
+the required-check label but never an unexposed or malformed entry. A missing,
+invalid or repeated id, or any missing, unknown, conflicting, mixed or unbound
+reason, keeps the operation classes.
+Only an expected non-Bash tool or a positively recognized safe Bash inspection
+may be a recoverable capability or configuration failure. Structured provider
+recovery accepts only explicit transient HTTP statuses; non-transient client
+statuses and an `api_error` without a transient status fail closed with a fixed
+request-rejected error.
 
 The shared failure record optionally carries `availabilityReason`, restricted to
 `transport_unavailable`, `temporarily_overloaded`, `model_busy`, and
@@ -5841,3 +5960,16 @@ Every pipeline inherits non-negotiable runner controls:
 - no repository-local clarification artifact outside an already ignored path;
 - state outside target and task repositories;
 - explicit pause on unsafe or unrecoverable state.
+
+The Git capability alone defines the read-only snapshot change domains, in
+comparison order: `head`, `branch`, `refs`, `tracked-content`,
+`untracked-content`, `index`, `remote-configuration`, and `identity`. Its pure
+normalizer accepts only one to eight unique known labels and returns them in
+canonical order, otherwise `null`; the service's `readOnlyChanges(cause)`
+applies it only to `ERR_READ_ONLY_REPOSITORY_CHANGED` and runs no Git command.
+Polishing and plan execution persist the result as the optional
+`pause.snapshotChanges` of `read_only_agent_mutated_repository` only when their
+safety facade offers that accessor. Root pause validation, including pauses
+retained by operator stops, rejects any value the normalizer would change, and
+pipeline validation accepts it only on that reason and code. Absent labels mean
+the diagnosis is unavailable, so state versions are unchanged.

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { readProcessIdentity as readNativeProcessIdentity } from "../agents/index.js";
+import { readProcessIdentity as readNativeProcessIdentity } from "../platform/index.js";
 import { RunStoreError, validateProcessIdentity } from "./validation.js";
 
 // Linux process start ticks and boot identity distinguish a PID from its owner.

@@ -12,6 +12,12 @@ import test from "node:test";
 
 import { polishingPipeline } from "../src/index.js";
 import {
+  BOOTSTRAP_RECONCILIATION_SCHEMA,
+  BOOTSTRAP_SCHEMA,
+  FINALIZATION_SCHEMA,
+  REVIEW_SCHEMA,
+} from "../src/schemas.js";
+import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
   normalizePipelineState,
@@ -33,6 +39,7 @@ import {
   reconciliationDisagreement,
   reconciliationResolved,
   reviewApproved,
+  trustedValidationSnapshot,
 } from "./support/index.js";
 
 test("carries saved effort through role turns and omits current", async (t) => {
@@ -114,6 +121,138 @@ test("derives one stable complete inventory from independent role evidence", asy
     workerPath,
     reviewerPath,
   ]);
+});
+
+// Scripted roles prove instruction delivery and deterministic runner
+// guarantees only; they do not prove that real models classify ownership.
+test("delivers check ownership while keeping additive trusted inventories", async (t) => {
+  const trustedValidation = trustedValidationSnapshot();
+  const [trusted] = trustedValidation.commands;
+  const ordinary = ["npm test", "npm run lint", "npm run typecheck"];
+  const inventory = (commands) =>
+    commands.map((command, index) => ({ id: `C${index + 1}`, command }));
+  const requiredChecks = inventory([
+    ...ordinary,
+    trusted.command,
+    "npm run format:check",
+  ]);
+  const scratch = {
+    command: trusted.command,
+    commandIdentity: trusted.identity,
+    capabilities: {
+      scratch: true,
+      cache: false,
+      sourceProjection: false,
+      artifacts: [],
+    },
+    unsupported: [],
+  };
+  const reconciled = {
+    ...reconciliationResolved(),
+    summary:
+      "Pipeline checks are established. Pending after DONE: supervising operator runs the expected-failure witness and paired-device placeholder.",
+  };
+  const executions = [];
+  const fixture = await createFixture(t, {
+    trustedValidation,
+    modeSettings: { trustedChecks: [trusted.alias] },
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks: inventory(ordinary) },
+      {
+        ...bootstrapReady("Corrected Worker"),
+        requiredChecks: inventory([...ordinary, trusted.command]),
+      },
+      reconciled,
+      polishingCompleted(),
+      {
+        ...finalizationPassed(),
+        requiredChecks,
+        checks: requiredChecks.map(({ id, command }) => ({
+          checkId: id,
+          command,
+          status: command === trusted.command ? "NOT_RUN" : "PASS",
+          evidence: ["Fixture evidence."],
+        })),
+      },
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks: inventory([
+          trusted.command,
+          "npm test",
+          "npm run format:check",
+        ]),
+        capabilityRequirements: [scratch],
+      },
+      reviewApproved(),
+    ],
+    onTrustedValidation(input) {
+      executions.push(input.commandIdentity);
+      return {
+        ...input.bindings,
+        commandIdentity: input.commandIdentity,
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["Passed"],
+      };
+    },
+  });
+  await writeFile(
+    join(fixture.taskPath, "task.md"),
+    `# Neutral polishing task
+
+Pipeline checks: ${[...ordinary, trusted.command].join(", ")}.
+After DONE, the supervising operator separately runs node witness/old-source.js, expected to fail, and a paired-device placeholder check.
+`,
+  );
+
+  const completed = await fixture.run();
+  const state = completed.pipelineState;
+  const prompts = (role, schema) =>
+    fixture.calls[role]
+      .filter((request) => request.schema === schema)
+      .map(({ prompt }) => prompt);
+  const bootstrapPrompts = [
+    ...prompts("worker", BOOTSTRAP_SCHEMA),
+    ...prompts("reviewer", BOOTSTRAP_SCHEMA),
+  ];
+
+  assert.equal(state.workflowState, "DONE");
+  assert.equal(bootstrapPrompts.length, 3);
+  for (const prompt of bootstrapPrompts) {
+    assert.match(prompt, /determine the owner and checkpoint/u);
+    assert.match(prompt, /selected Runner-trusted commands, which remain/u);
+    assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    assert.match(prompt, /expected to fail never becomes a PASS-required/u);
+    assert.match(prompt, /never drops other genuine in-scope requirements/u);
+  }
+  for (const [role, schema, pattern] of [
+    [
+      "worker",
+      BOOTSTRAP_RECONCILIATION_SCHEMA,
+      /pending external work with its owner and timing/u,
+    ],
+    ["worker", FINALIZATION_SCHEMA, /PASS covers only the pipeline-owned/u],
+    ["reviewer", REVIEW_SCHEMA, /missing genuine pipeline-owned check/u],
+  ]) {
+    const [prompt] = prompts(role, schema);
+    assert.match(prompt, pattern);
+  }
+  assert.deepEqual(
+    state.bootstrapCorrections.map(({ role, constraint }) => ({
+      role,
+      constraint,
+    })),
+    [{ role: "worker", constraint: "includes-runner-trusted-commands" }],
+  );
+  assert.equal(state.resolvedSummary, reconciled.summary);
+  assert.deepEqual(state.requiredChecks, requiredChecks);
+  assert.deepEqual(state.reviewerValidation.capabilityRequirements, [scratch]);
+  assert.deepEqual(executions, [trusted.identity]);
 });
 
 test("persists and finalizes a disjoint maximum role-derived inventory", async (t) => {
@@ -221,6 +360,15 @@ test("persists and finalizes a disjoint maximum role-derived inventory", async (
     MAX_VALIDATION_ITEMS,
   );
   assert.equal(state.finalizationResult.checks.length, MAX_VALIDATION_ITEMS);
+  const finalization = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  );
+  assert.equal(finalization.length, 1);
+  assert.deepEqual(
+    finalization[0].requiredCheckCommands,
+    derivedCommands.map(({ command }) => command),
+  );
+  assert.equal(fixture.calls.worker[0].requiredCheckCommands, undefined);
   for (const field of ["requiredChecks", "validationInfrastructure"]) {
     const extra =
       field === "requiredChecks"

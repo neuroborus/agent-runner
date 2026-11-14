@@ -300,7 +300,9 @@ It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname
 Unix-socket denial, credential and launcher-control removal, provider-proc
-secrecy, and outside-write denial. Exact
+secrecy, and outside-write denial. Under both policies Claude's shell keeps its
+TMPDIR, cwd receipt, and scratch writes in the turn's private temporary
+directory, while host `/tmp`, `/run`, and the launcher controls stay hidden. Exact
 launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
 Native policy remains stricter. The fallback does not require host
 `CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox
@@ -322,9 +324,17 @@ tools. Provider command-denial patterns that reject safe compound inspection
 are omitted from that access policy; collaboration, editing, and web tools stay
 restricted, and the sandbox remains the authority for filesystem and Git
 mutation, process escape, socket access, credential exposure, and remote-write
-denial. Workspace-write turns retain their existing tool and denial policy. The
-private receipt fingerprint binds these effective access-specific settings and
-the installed CLI version without expanding the provider-neutral receipt.
+denial. Git workspace-write turns share this envelope and differ only by the
+Edit and Write tools and the launcher-granted workspace write, so ordinary Git
+inspection and content commands are admitted and the sandbox, not a
+Git-subcommand rule, refuses Git, outside-write, network and socket effects.
+Claude may still separately require native approval for sensitive Git
+commands. File-tool Git-metadata denials name
+each resolved absolute protected directory; a path that would broaden that
+rule fails before launch. Declared-directory turns keep their Git-subcommand
+denials. The private receipt fingerprint binds these effective access-specific
+settings and the installed CLI version without expanding the provider-neutral
+receipt.
 
 Codex model-issued commands derive from the provider process environment only
 through a strict shell policy. Automatic secret-name exclusions run before
@@ -414,6 +424,77 @@ A terminal Claude protocol failure carries a registered `protocol_*` class only
 when its guard proved the violated predicate; unattributed origins stay
 unclassified. The class adds no retry, effect evidence, recovery or acceptance,
 and direct CLI failures print only the bounded code and class.
+
+A Claude `ERR_CLAUDE_PERMISSION_DENIED` failure names only the fact its guard
+established from structured native `permission_denials`:
+
+| Class                            | Established fact                                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                                             |
+| `permission_bash_unclassified`   | An exposed Bash command is neither a recognized safe inspection nor an inventory command; its reason is unknown. |
+| `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                                          |
+| `permission_reason_<code>`       | Every non-safe Bash denial has the same uniquely matched closed native refusal reason `<code>`.                  |
+| `permission_bash_required_check` | An exposed Bash command is exactly equal to a command of the turn's Runner-persisted required-check inventory.   |
+| `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.                         |
+| `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted.                  |
+
+A safe Bash inspection is a whole command exactly equal to one fixed read-only
+Git form: bounded `git status` options, `git rev-parse` repository queries,
+`git remote` with optional `-v`, `git diff --check`, `git diff --check HEAD`,
+`git diff --cached --check`, or `git diff --staged --check`. Tokens are
+separated by exactly one space, so tabs, newlines, repeated or trailing
+whitespace, quoting, other revisions, paths, output options, and compound
+commands remain unclassified Bash.
+
+The adapter examines every entry and reports the first present fact in the
+table order, independent of entry order, so no recoverable entry hides another.
+Only `permission_capability` is recoverable. No class claims a task-authority
+violation, a harmless command, or an integration defect, and a label grants no
+retry, approval, resume or acceptance.
+
+Polishing and plan-execution role requests carry their established persisted
+required-check commands for this diagnosis only. A denied Bash command outside
+the safe-inspection forms is labeled `permission_bash_required_check` only on
+whole-string equality with one of them, without trimming, parsing, prefix or
+substring matching; quoting, whitespace, wrapper and compound variants stay
+unclassified Bash. The class identifies only that inventory match: it claims no
+harmlessness, authorization, policy fault, executed effect or historical
+command, stays terminal, and is hidden by any unexposed, unclassified Bash, or
+malformed entry in the same batch. An older `permission_bash_unclassified`
+record keeps its terminal meaning and is not read as a denial of a command
+outside the inventory.
+
+Claude may also emit a best-effort `system/permission_denied` event with a
+closed `decision_reason_code`: `classifier_transcript_too_long`,
+`outside_reads_blocked`, `memory_paused`, `auto_mode_no_check_in_session`,
+`auto_mode_stop_no_check_in_session`, `auto_mode_stop_no_result_for_calls`, or
+`auto_mode_stop_no_verdict`. The authoritative `permission_denials` batch can
+take a reason only when every entry has a valid `tool_use_id` that no other
+entry repeats. Each non-safe Bash denial then needs exactly one pre-result
+event in the same session with its id, its tool name, no subagent id, and a
+recognized code; the match is re-checked after the stream ends, so a later
+protocol violation, identity uncertainty, result-session mismatch, or
+continuation or fork-lineage mismatch discards it. When every such denial has
+the same code, the batch is `permission_reason_<code>`; any missing, unknown,
+duplicate, conflicting, mixed, or unbound evidence keeps the operation class.
+In table order the reason class replaces unclassified Bash and ranks above the
+required-check label, but never hides an unexposed or malformed entry. It names
+only the native reason: it identifies no operation and claims no legitimacy,
+policy fault, executed effect, or historical command, stays terminal, and grants
+no retry, approval, or backend change. Native free-text reasons are never read
+or retained. Records that predate reason classes are not read as having no
+reason.
+
+The corrected workspace policy keeps this classification order. A non-safe
+Bash denial whose command exactly equals a persisted required-check inventory
+command stays `permission_bash_required_check` when no recognized native reason
+is bound. A non-safe Bash denial outside that inventory and without a uniquely
+bound recognized native reason stays `permission_bash_unclassified`; a
+permission-rule decision that Claude reports without a closed code is one
+example. When every non-safe Bash denial in a batch has the same uniquely bound
+recognized code, the batch takes `permission_reason_<code>`, and the table
+precedence still decides mixed batches. Older records keep their meaning, and
+no historical refusal is attributed to the superseded workspace policy.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.

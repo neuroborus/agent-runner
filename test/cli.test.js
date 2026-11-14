@@ -996,39 +996,49 @@ test("renders bounded finalization correction activity without rejected content"
 });
 
 test("run reports a classified agent failure with only its bounded diagnosis", async () => {
-  const stdout = createSink();
-  const stderr = createSink();
   const marker = "PRIVATE_NATIVE_FRAME";
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    [
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_reason_auto_mode_stop_no_verdict",
+    ],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
 
-  const exitCode = await main(
-    ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
-    {
-      stdout: stdout.stream,
-      stderr: stderr.stream,
-      runner: fakeRunner({
-        async run() {
-          throw normalizeAdapterFailure(
-            "claude",
-            new ClaudeAdapterError(marker, {
-              cause: new Error(marker),
-              code: "ERR_CLAUDE_PROTOCOL",
-              diagnosticClass: "protocol_record_after_result",
-            }),
-          );
-        },
-      }),
-    },
-  );
+    const exitCode = await main(
+      ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
+      {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run() {
+            throw normalizeAdapterFailure(
+              "claude",
+              new ClaudeAdapterError(marker, {
+                cause: new Error(marker),
+                code,
+                diagnosticClass,
+              }),
+            );
+          },
+        }),
+      },
+    );
 
-  assert.equal(exitCode, 1);
-  assert.equal(
-    stderr.read(),
-    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_record_after_result).\n",
-  );
-  assert.doesNotMatch(
-    `${stdout.read()}${stderr.read()}`,
-    new RegExp(marker, "u"),
-  );
+    assert.equal(exitCode, 1);
+    assert.equal(
+      stderr.read(),
+      `Agent backend turn failed: ${code} (${diagnosticClass}).\n`,
+    );
+    assert.doesNotMatch(
+      `${stdout.read()}${stderr.read()}`,
+      new RegExp(marker, "u"),
+    );
+  }
 });
 
 for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
@@ -1421,9 +1431,11 @@ test("status renders input and fresh-run pause actions", async () => {
       pause: {
         reason: "read_only_agent_mutated_repository",
         code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+        snapshotChanges: ["head", "untracked-content"],
       },
       state: {},
       expected: /Abandon this run and start a fresh run/u,
+      alsoExpected: /Changed snapshot domains: head, untracked-content\./u,
     },
     {
       pause: {

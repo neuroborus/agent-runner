@@ -27,6 +27,7 @@ export {
   findingArbitration,
   hash,
   invalidProductionFinalization,
+  matchesSchemaSubset,
   migrateVersionOneState,
   polishingBlocked,
   polishingCompleted,

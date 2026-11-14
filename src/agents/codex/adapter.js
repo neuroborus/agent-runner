@@ -4,7 +4,10 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
+import {
+  executeOwnedProcess,
+  spawnOwnedProcess,
+} from "../../platform/index.js";
 import { canReadFiles } from "../file-access.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {

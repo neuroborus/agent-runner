@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
-import { readProcessIdentity } from "../agents/index.js";
+import { readProcessIdentity } from "../platform/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../pipeline-registry.js";
 import { prepareRuntimeLaunch, RUNTIME_PAYLOAD_ENV } from "../runtime/index.js";
 import { normalizeRecoveryDispatch, RunStoreError } from "../state/index.js";

@@ -5,7 +5,315 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-14
+
+- **Claude private storage leaves room for bridge sockets.** New Claude
+  allocations used the runner's ambient temporary directory, beneath which the
+  provider `TMPDIR` adds 66 bytes for a four-digit UID. Below the nested
+  private test root that `TMPDIR` alone is 106 bytes, while Claude's shortest
+  bridge socket path needs 119 bytes against 108 bytes of Linux socket-path
+  capacity including the terminator, so corrected turns failed although
+  readiness probes, which never run the bridge, passed. Following Codex's fixed
+  storage parent, new allocations now live beneath canonical `/tmp`, and turn
+  launchers admit empty-directory masks only beneath the allocation's private
+  temporary directory. Recorded roots, including earlier ambient ones, still
+  recover and clean up; no legacy run is revived. The defect predates the Linux
+  platform extraction, which did not touch this path.
+
+- **Linux process mechanisms move behind a root platform boundary.** Process
+  facts and the owned-process supervisor lived in the agents capability
+  although state, Runner, MCP, trusted validation and update consumed them
+  directly. Planned on 2026-11-13, the current modules now move unchanged into
+  `src/platform/`, whose static index selects the only implementation, Linux,
+  and is the lowest root capability. Every consumer imports that index, so one
+  active-process registry remains and the agents index no longer re-exports
+  the primitives. Other hosts keep the existing per-capability fail-closed
+  results; no other operating system is claimed. Durable records, error codes,
+  budgets and recovery are unchanged, and provider native sandboxes, update
+  candidate isolation and the standard-library bootstrap keep their owners.
+
+- **Polishing restates invalid finding-resolution reports read-only.** A
+  rejected finding-resolution reason terminally failed a polishing run after
+  its writable work was already done. The rejected value and its historical
+  cause remain unknown. The demonstrated defects were an undiscoverable reason
+  rule, a rejection without a field diagnostic, and no safe way to recover the
+  report. The reason rule and positional diagnostics landed first. State
+  version 20 now reserves each original independent or combined resolution
+  turn in a strict checkpoint. Its reconciled effects, approval invalidation
+  and single fix charge publish before the report is settled. An invalid, lost
+  or interrupted report gets one fresh, durably consumed read-only restatement
+  that may not edit, validate or invent dispositions. Exhaustion and blocked
+  restatements stop with an explicit null retry for exactly one further
+  read-only attempt. Writable work is never replayed and no allowance is
+  renewed. Lazy mode, legacy checkpoints and historical `FAILED` and `DONE`
+  runs keep their existing contracts, and every convergence, review,
+  finalization and handoff gate is unchanged.
+
+## 2026-11-13
+
+- **Validation ownership separates development work from reserved checks.**
+  Both coding prompt modules bound reserved validation under a catalogue of
+  historical workarounds that included repeating a subset, while also allowing
+  authorized development inspection and focused tests, and review and
+  adjudication had no way to tell overlapping source work from actual reserved
+  execution or from evidence too thin to decide. One principle now classifies
+  work by its actual purpose, scope and evidence against explicit task
+  authority, never by its label. Executing a reserved check, its full
+  equivalent or an explicitly reserved subset is reserved work; permitted
+  source inspection and focused tests stay development evidence even when they
+  overlap, never complete the reserved check and never replace it. Reviews
+  report only shown early execution or a claimed coverage substitution, never
+  confirm a violation from overlap or undecidable evidence, and adjudication
+  decides each finding by its allegation. The change is semantic only:
+  schemas, state, settings, permissions, validators, budgets and exception
+  settings are unchanged, and the full `FINALIZE` gates still run under their
+  owners. No code defect was demonstrated, and the historical whitespace claim
+  that prompted the review remains unknown.
+
+- **Source-boundary checks discover workspaces from the root manifest.** The
+  boundary tests treated every directory under `packages/` and `pipelines/` as
+  a workspace, so an undeclared hidden operational directory without `src/`
+  failed the checks while npm ignored it. The helper now matches the root
+  `package.json` `workspaces` patterns with native `fs.glob`, returning sorted
+  repository-relative directories. Wildcards skip hidden entries as npm does,
+  and an explicitly declared hidden workspace is still discovered and checked.
+  The source, index and dependency-direction assertions are unchanged, and
+  no name filter, ignore rule or dependency was added.
+
+- **Polishing keeps the latest accepted check/fix summary.** Accepted
+  `CHECK_AND_FIX` results were validated but their summaries were discarded,
+  so clean confirmation, review and reconstructed requests kept receiving the
+  original polishing summary even after a corrected report. Both accepted
+  changed and unchanged transitions now store the result summary in the
+  existing `polishSummary` field after status and mutation validation. Invalid,
+  blocked and product-decision results leave it unchanged, and a summary-only
+  correction is neither a content change nor approval. State shape, budgets,
+  fingerprints and gates are unchanged.
+
+## 2026-11-12
+
+- **Candidate-review rejections name their violated field and constraint.**
+  Candidate review and lazy or combined `CLEAN_CONFIRM` rejected accepted
+  statuses with findings, `FINDINGS` without findings, inactive decision
+  fields and several finding and product-decision violations without an
+  identity, so correction prompts and repeated-invalid pauses showed only
+  `result`/`semantic-contract`. In both coding pipelines, each first violation
+  now carries a source-defined identity built from fixed schema field names
+  and `findings[i]` positions through the existing output-error helpers and
+  correction ledgers. Terminal review shares the finding normalization, so its
+  finding violations carry the same identities instead of a generic
+  fallback. Two constraint names are new: `empty-when-clean` and
+  `review-finding-id`. Validity, check order, budgets, guards, prompts, schemas
+  and state versions are unchanged, and old generic records stay readable. The
+  cause of the historically rejected results remains unknown.
+
+- **Explicit check ownership binds validation work in every coding turn.**
+  Pre-finalization writable turns were told only to leave the inventory and
+  selected Runner-trusted commands alone. No rule bound operator-reserved
+  validation work given another label, such as development checks, a
+  temporary copy, a repeated subset or a predecessor comparison. Terminal
+  confirmation already rejected claims that post-completion acceptance ran,
+  but candidate review, self-review and adjudication had no work-based
+  ownership guidance. One owned rule per coding pipeline now reaches
+  implementation or polishing, check-and-fix, finding resolution, candidate,
+  self and terminal review, dispute reconsideration and arbitration through
+  their existing composition, continuation and correction routes. Writable
+  turns neither run nor claim such work, while authorized development tests
+  stay allowed; reviews report early-execution claims even when final
+  acceptance is left pending, and relabeling cannot withdraw that finding. The
+  fix is semantic only: schemas, state, settings, permissions, validators and
+  budgets are unchanged. Whether the reported execution actually happened
+  remains unknown, and no deterministic defect was proved.
+
+- **Agent instructions follow a concise ownership convention.** A new
+  `instruction-authoring` skill governs role prompts, agent-governing
+  instructions and skills: each rule must change a concrete decision or
+  contract, a general obligation is stated once at its narrowest owner and
+  composed into every actual consumer route, conditional detail stays
+  progressive but discoverable, and meaning is compared before and after so no
+  real constraint is dropped to save lines. Prompt prose is described as
+  semantic guidance, not enforcement. The documentation map, change gate and
+  `skill-authoring` route to it. `test-authoring` also adopted general rules
+  from an external test-authoring guide: valid sanitized nested fixtures,
+  cleanup before release-checking boundaries, integration-caller tracing,
+  honest interrupted-run reporting and mandatory gates without repeated
+  expensive runs. Its Node 24 `node:test` policy, whole fast-gate budget,
+  slow-tier and opt-in smoke rules were kept; nothing project-specific was
+  imported.
+
+- **Coding pipelines separate pipeline checks from operator acceptance.** A
+  polishing task explicitly assigned three ordinary pipeline commands and,
+  separately, seventeen checks to the supervising operator after `DONE`. One
+  bootstrap role promoted all seventeen into its required checks. Polishing
+  and plan-execution prompts asked for every required check and the complete
+  finalization procedure but never said whose check it was or when it ran.
+  Accepted role inventories merge additively, and reconciliation and
+  arbitration resolve summaries only, so a promoted check cannot be removed
+  safely afterwards. Bootstrap, correction, validation migration, catalog
+  correction, reconciliation, arbitration, finalization and terminal
+  confirmation now tell each role to determine the owner and checkpoint first.
+  Pipeline-owned checks include selected Runner-trusted commands; explicitly
+  post-completion operator acceptance stays pending external work in the
+  summaries and is never run, attested or claimed by `DONE`. The repair is a
+  prompt contract only. Merging, trusted-command completeness, schemas, state,
+  budgets, review gates and Git authority are unchanged, because the runner
+  cannot and should not parse ownership from task prose. Detection stays
+  semantic: a valid command that the roles misclassify can still be accepted,
+  executed and pass unless a role reports the violation. The original run
+  paused before its summary was resolved or an inventory accepted, so whether
+  its resolver would have completed is unknown. No deterministic engine
+  defect was proven, and the original task was not rerun. Fake-agent
+  regressions prove instruction delivery and the unchanged runner guarantees,
+  not real-model compliance.
+
+## 2026-11-11
+
+- **Reviewed handoffs have standing local commit and installation approval.**
+  After successful Runner finalization and review cover the entire unchanged
+  staged change set, the supervising operator may create the local commit
+  without another confirmation, including after `polishing`. The user has also
+  authorized global installation of verified fixes after their checks and local
+  commit. These are separate operator actions; pipeline permissions, the
+  uncommitted polishing handoff, user configuration, durable runs and the remote
+  write prohibition remain unchanged. `AGENTS.md` owns this standing authorization.
+
+- **Claude authorizes workspace Bash through the proved sandbox.** Git
+  workspace-write turns disabled sandbox auto-allow under shell classification.
+  Claude 2.1.322 still admitted native read-only inspection and the filesystem
+  commands of its accept-edits fast path, but other ordinary work such as
+  script-driven content changes needed a classifier verdict. Pre-ask
+  refusals emit best-effort permission events, while headless ask-path
+  refusals surface only in the final denial batch. Blanket Git-subcommand
+  rules matched each subcommand by prefix before sandbox auto-allow and
+  rejected inspection such as the current branch or remotes without a closed
+  reason code. They were never the authority boundary: the proved sandbox
+  already denies Git metadata, outside writes, network, sockets and
+  credentials. Separately, the root-relative `Edit(/.git)` rules
+  resolved against the native startup directory, so file tools had no
+  workspace Git-metadata denial. Workspace-write now shares the autonomous
+  Bash envelope, file-tool denials name each resolved absolute protected
+  directory, and a protected path with rule, glob or control characters fails
+  before launch. Declared-directory turns keep their Git-subcommand denials. The
+  native and fallback access proofs now require compound Git inspection to
+  succeed and index, branch, tag, remote, configuration, identity-bearing commit
+  and push mutations to fail under every access. A model-free installed-CLI
+  suite reproduces both defects through the real adapter and launcher. This
+  native-platform acceptance runs only when explicitly enabled on the host,
+  because the Runner-trusted outer isolation cannot supply its nested sandbox.
+  The ordinary slow gate skips it, so a separate enabled host run is required
+  before installation for Claude permission, access-proof or policy-identity
+  changes in addition to the complete slow gate; an ordinary slow pass never
+  establishes native acceptance. The policy identity changes for every access,
+  so receipts pinned under the prior policy fail closed without migration.
+  Denial classification is unchanged, and no historical refusal is attributed
+  to either defect.
+
+- **Claude retains matched native permission refusal reasons.** Claude 2.1.322
+  emits a best-effort `system/permission_denied` event whose closed
+  `decision_reason_code` names a reason a host can act on, but the stream
+  ignored it, so a denied operation's matched reason was lost. The stream now
+  keeps only the tool name and a recognized code per `tool_use_id`, never free
+  text, and answers lookups only after the stream ends with no protocol
+  violation, identity uncertainty, or session or lineage mismatch. A batch
+  becomes the terminal `permission_reason_<code>` class only when every denial
+  has a valid unique id and every non-safe Bash denial has the same matched
+  code; otherwise the operation classes stand. The class replaces unclassified
+  Bash and outranks the required-check label, never an unexposed or malformed
+  entry, and adds no retry, approval or backend change. It claims no operation,
+  legitimacy, policy fault or historical command; the reported historical
+  refusal stays unattributed, and older records are not read as reasonless.
+
+- **Claude labels denials of exact required-check commands.** A denied project
+  check, such as a documentation check, could only be reported as
+  `permission_bash_unclassified` because the adapter never received the
+  Runner-persisted inventory that identifies it. Polishing and plan-execution
+  role requests now carry the established inventory commands in a bounded,
+  diagnostic-only `requiredCheckCommands` field of at most 512 entries, the
+  aggregate validation capacity, so two disjoint maximum role inventories are not
+  truncated. The field reaches no prompt, native argument, setting or record.
+  A non-safe Bash denial exactly equal to one of those commands becomes the
+  terminal `permission_bash_required_check`; whitespace, quoting, wrapper and
+  compound variants stay unclassified. Unexposed, unclassified Bash and malformed
+  entries keep precedence, and a safe entry beside it never makes it
+  recoverable. The class names only the inventory match and claims no
+  harmlessness, authorization, policy fault, executed effect or historical
+  command. Older `permission_bash_unclassified` records keep their meaning.
+
+- **Claude safe Bash inspections match only exact single commands.** A
+  model-free reproduction through `adapter.run` showed that the safe-inspection
+  allowlist joined tokens with a general whitespace class, so a newline compound
+  such as `git status` followed by `--short` on a second line was reported as a
+  recoverable `permission_capability`. Every form now requires exactly one space
+  between tokens, so tab, newline, repeated or trailing whitespace and compounds
+  are terminal `permission_bash_unclassified`. The allowlist also lacked the
+  `HEAD`-relative `git diff --check HEAD` content check that in-pipeline
+  validation inventories use; that one form is added without other revisions,
+  paths or output options. Aggregation, precedence, recovery and native
+  permissions are unchanged. Existing `permission_capability` and
+  `permission_bash_unclassified` records keep their original meaning and
+  disposition, and this mismatch does not identify the command behind any
+  historical refusal, which stays unknown.
+
 ## 2026-11-10
+
+- **A settled operator pause can be canceled.** A model-free reproduction
+  showed that after a pause was reconciled and its lease released, a fresh
+  immediate cancellation at the exact current revision failed with
+  `ERR_STOP_PENDING`, because stop acceptance rejected every request over an
+  effective `operator_paused` checkpoint before distinguishing its kind. That
+  guard now rejects only repeated pauses. The accepted cancellation journals the
+  settled checkpoint while the run keeps its preserved pause, and the
+  plan-authoring, plan-execution, polishing and init validators accept exactly
+  that pending cancellation over a quiescent `WAITING_FOR_USER` checkpoint.
+  Runner reconciliation restores the underlying checkpoint before simulated
+  continuation, so settlement wraps its blocker, input authorization and
+  active-turn marker once as `operator_canceled`. Stale revisions, including the
+  old pause's inspected revision, terminal permanence, deferred-timing
+  eligibility, original receipt replay, normal pause resume and its strict
+  provider-policy probes are unchanged; cancellation runs no provider probe or
+  turn.
+
+- **Claude restricted-host shells keep their private temporary bookkeeping.**
+  A model-free real-bubblewrap reproduction confirmed that Claude's shell
+  exports a literal TMPDIR and writes its cwd receipt beneath the turn's private
+  temporary directory: the native launcher completed that round trip, while the
+  restricted-host launcher discarded Claude's self-bind behind its private
+  tmpfs mounts, so the command exited 23 and left no receipt. The launcher now
+  retains only an existing same-path bind strictly inside that canonical
+  owner-only directory, in every access mode, when it is a canonical
+  non-symlink directory owned by the current user that overlaps neither the
+  workspace nor Git, and binds it through a pinned descriptor so later path
+  substitution cannot redirect the mount; substituted, non-directory or
+  otherwise unsafe targets fail closed and missing ones are still discarded. The revision becomes
+  `claude-command-boundary-v11`, so older runner-boundary receipts cannot
+  authorize it, while `claude-isolation-v4` is unchanged. Native policy, the
+  tool-home projection and every other launcher rule are unchanged. Any
+  relation to earlier permission denials or historical commands remains
+  unknown.
+
+- **Claude permission denials state only facts proven at the guard.** Every
+  exposed Bash denial outside the narrow safe-inspection allowlist was labeled
+  `permission_forbidden_operation`, although the guard proved only that it was
+  ineligible for capability recovery, and an unexposed tool shared that label.
+  The adapter now scans every structured denial and reports, independent of
+  entry order, `permission_tool_unexposed`, `permission_bash_unclassified`,
+  `permission_unclassified` or `permission_capability`, which remains the only
+  recoverable class. The refusal and recovery policy, failure records, native
+  permissions and commit gates are unchanged. Legacy forbidden-operation records
+  stay registered, terminal and unreinterpreted. The historical tool, operation,
+  refusal cause and legitimacy remain unknown.
+
+- **Read-only contamination stops keep their changed snapshot domains.** The
+  Git guard already reported finite changed domains, but polishing and plan
+  execution stored only the code, so their pauses could not say what changed.
+  The Git capability now owns the only label list and a total normalizer; both
+  pipelines persist the normalized labels as an optional pause field when their
+  safety facade classifies the cause, and the registry injects the normalizer
+  into pause projections so status, wait and CLI show one bounded line or
+  `unavailable`. Custom, directory, legacy and unknown causes stay unavailable
+  without Git inspection. Snapshot comparisons, guards, pause reasons, clearing,
+  recovery and state versions are unchanged. The historical changed domain and
+  root cause remain unknown, and no guard or model mutation is claimed.
 
 - **Claude protocol failures name the violated predicate.** Several Claude
   stream and adapter guards raised `ERR_CLAUDE_PROTOCOL` without a class, the

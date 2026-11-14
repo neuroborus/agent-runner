@@ -172,6 +172,55 @@ deterministic rules. Reconciliation may resolve summaries, but cannot add, selec
 checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
+Coding-pipeline roles determine each obligation's owner and checkpoint before
+cataloguing checks. A pipeline inventory contains only checks owned by that
+pipeline's finalization: ordinary Worker `FINALIZE` checks and selected
+Runner-trusted commands, which keep their frozen identities and capabilities
+although Runner executes them on the host. Acceptance that the task or
+clarifications explicitly assign to the supervising operator or another owner
+after the run completes remains mandatory external work: summaries keep it
+pending with its owner and timing, the pipeline never runs or attests it, and
+`DONE` never claims it succeeded. An operator-owned witness expected to fail
+never becomes a PASS-required command, while negative assertions inside
+in-scope tests stay required. A task's command list does not drop other
+genuine requirements from conventions or applicable skills; neither a label
+nor the executing host decides ownership. Bootstrap, correction, validation
+migration, catalog correction, reconciliation, arbitration, finalization and
+terminal confirmation carry the same rule.
+
+Explicit owner and timing assignments bind the validation work itself, not
+only inventories. Roles classify work by its actual purpose, scope and evidence
+against explicit task authority, never by its label. Executing a check reserved
+for another owner or a later checkpoint, its full equivalent, or a subset that
+the task or clarifications explicitly reserve is reserved work under any name or
+entrypoint. Source reading or inspection and focused development tests that the
+task and phase permit stay development work even when they overlap a reserved
+check; overlap is neither a violation nor completion, the reserved check still
+runs in full under its owner, and explicit task restrictions on development
+work still apply. Implementation or polishing, check-and-fix and finding
+resolution neither run nor claim reserved work, report development work only as
+development evidence and keep reserved checks pending with their owner and
+timing. Candidate, self and terminal review report a finding when evidence
+shows that reserved work actually ran early or under another owner, or that
+development evidence is claimed as reserved coverage, even when final
+acceptance is also left pending. Source observation or overlap alone is not a
+violation; evidence that cannot establish what ran yields neither invented
+command facts nor a confirmed violation, and provides no reserved coverage.
+Reviews preserve honestly reported facts, useful content and pending coverage.
+Dispute reconsideration and arbitration decide an execution allegation by
+evidence of the execution and a coverage allegation by evidence of the claim;
+relabeling or pending final acceptance never makes either incorrect.
+
+This is semantic instruction, not deterministic parsing of task prose.
+Accepted inventories stay additive, so reconciliation and arbitration never
+remove a misclassified command. Deterministic validators check command
+structure, capability reports and matching evidence, not ownership: a valid
+operator-owned command that the roles misclassify can be accepted, executed and
+pass. Prompts likewise do not enforce arbitrary command effects or owner
+prose. Only an ownership violation that a role actually reports, such as a
+candidate-review or terminal-confirmation finding, blocks through the existing
+gates.
+
 Execution inventories are scoped to canonical plan steps. Every active role
 discovers a complete procedure for every step. Commit steps require the ordinary
 fast gate and only slow checks whose documented guarantees that step affects;
@@ -259,6 +308,9 @@ turns converge before finalization. A passing finalization enters a distinct
 read-only terminal clean confirmation over the exact validation evidence. Only
 a clean result over unchanged fingerprints advances; ordinary findings return directly
 to the next check-and-fix pass and the same fingerprint-bound reuse decision.
+In lazy and combined polishing, each accepted check-and-fix report becomes the
+Worker summary that later turns receive. It is context only: confirmation and
+review still decide whether the report and content are acceptable.
 
 ## Evidence and fingerprints
 
@@ -317,7 +369,9 @@ using trusted list positions rather than rejected values or proposed identities.
 Independent violations form one bounded batch; invalid inventories do not create
 speculative downstream identity findings. Terminal CLI/MCP failure evidence
 retains the validated first diagnostic without granting retry authority. Missing
-provider field information and historical failures remain unknown. See the
+provider field information and historical failures remain unknown. Candidate
+review and candidate clean confirmation in both coding pipelines identify their
+first rejected field and constraint the same way. See the
 [execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
 for exact validation and correction rules.
 

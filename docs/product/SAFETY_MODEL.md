@@ -20,7 +20,9 @@ Each role turn receives the narrowest access required by its phase:
 
 The runner snapshots content, index state, `HEAD`, branch or detached context,
 local refs, remotes, and Git identity around turns. Read-only mutation is a
-safety failure. Writable turns still reject index, history, ref, remote, or
+safety failure. Its contamination stop names only the fixed changed snapshot
+domains when Git classified them, never their values, and otherwise reports
+them as unavailable. Writable turns still reject index, history, ref, remote, or
 identity changes. The runner never discards unexpected user work
 automatically.
 
@@ -688,9 +690,11 @@ Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
 access-specific workspace writes, and read-only Git metadata. Its launcher file
-is non-writable and its private allocation is outside command write authority;
-it pins canonical host `bwrap` rather than resolving it through a
-workspace-writable path. The
+is non-writable and its private allocation is outside command write authority,
+except for a validated owner-only directory Claude selects inside the private
+temporary directory; launcher controls stay hidden (see the
+[architecture contract](../ARCHITECTURE.md)). It pins canonical host `bwrap`
+rather than resolving it through a workspace-writable path. The
 launcher verifies an exact owner-read-only x64 or arm64 Runner seccomp filter,
 unlinks the verified resource, passes its sealed descriptor to bubblewrap, and
 executes bubblewrap directly once with the single validated user namespace.
@@ -715,8 +719,15 @@ They do not rely on broad shell-command denials that can misclassify compound
 inspection; collaboration, editing, and web restrictions remain explicit, and
 the sandbox continues to deny repository content writes, Git and remote
 mutation, credentials, process escape, network access, and host Unix sockets.
-Workspace-write turns retain their existing command denials and
-autonomous-write restrictions. Claude prepares every command against a
+Git workspace-write turns share that autonomous Bash envelope with the added
+Edit and Write tools; the proved sandbox, not a Git-subcommand rule, denies Git
+index, ref, tag, remote, configuration and identity changes, outside writes,
+network and Unix sockets under every access policy, while ordinary compound Git
+inspection succeeds. File-tool Git-metadata denials bind each resolved absolute
+protected directory, and a protected path with rule, glob or control
+characters fails before launch. Declared-directory turns keep their
+Git-subcommand denials, and receipts pinned under a prior policy fail closed.
+Claude prepares every command against a
 read-only workspace reservation; each turn makes both the spawning-parent
 policy and `PATH` select the authenticated launcher, which alone replaces that
 reservation with the authorized workspace access. Sandboxed commands can then

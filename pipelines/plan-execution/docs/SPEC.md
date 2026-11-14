@@ -1248,10 +1248,13 @@ allowlist. Structured permission denials, HTTP status, result subtype, and
 terminal reason take precedence over bounded message matching. Backend,
 capability, configuration, usage, provider, and expected-tool permission
 failures may be recoverable, but Bash permission recovery requires a positively
-recognized safe repository inspection. The normalized
+recognized safe repository inspection: an exact single-space command form,
+including the `HEAD`-relative `git diff --check HEAD`. The normalized
 `authentication_required` disposition enters the fixed durable
-reauthentication pause; other authentication evidence, every other Bash denial,
-and permission denials proving a forbidden operation remain terminal.
+reauthentication pause; other authentication evidence, unexposed-tool and
+unclassified-Bash denials whose refusal cause is unknown, and legacy
+`permission_forbidden_operation` records remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)).
 Provider recovery requires an explicit transient HTTP status; non-transient
 client statuses and an unqualified structured `api_error` fail closed. An
 otherwise unclassified valid result or process failure is recoverable only for
@@ -1527,8 +1530,15 @@ turns derive their advertised read-only capability and invocation arguments
 from the same access envelope. They do not expose editing tools, deny command
 writes to the workspace and Git metadata, and set
 `sandbox.autoAllowBashIfSandboxed: true` so repository inspection proceeds
-without a prompt only inside the required native sandbox. Unsandboxed fallback
-and command network access remain disabled. On Linux, prove read-only,
+without a prompt only inside the required native sandbox. Git workspace-write
+turns share that envelope with the added Edit and Write tools and the
+launcher-granted workspace write; the proved sandbox denies Git index, ref,
+tag, remote, configuration and identity changes, outside writes, network and
+Unix sockets under every access policy. File-tool Git-metadata denials bind
+each resolved absolute protected directory, a protected path with rule, glob or
+control characters fails before launch, and declared-directory turns keep
+their Git-subcommand denials. Unsandboxed fallback and command network access
+remain disabled. On Linux, prove read-only,
 workspace-write, and local-commit turn policies independently with fixed,
 model-free effective invocations. Prefer Claude's full native sandbox. Only a
 recognized nested-user-namespace denial may select Claude's weaker parent
@@ -1541,7 +1551,8 @@ Runner-owned restrictions, scrubs its token and credential environment, and
 executes the pinned real bubblewrap binary once with the validated payload. The
 fallback proof uses representative effective arguments through that identical
 launcher validation, strengthening, and execution path. Each proof checks
-workspace write authority, Git and outside-write denial, network and
+workspace write authority, compound Git inspection, Git mutation and
+outside-write denial, network and
 Unix-socket denial, and credential removal, including denial of the provider
 process's proc environment. Generic failures cannot enable the fallback, no
 diagnostic is retained, and no proof selects a profile, authenticates, or
@@ -1590,9 +1601,17 @@ Classify `permission_denials`, `api_error_status`, result subtype, and
 Expose only fixed error codes and messages plus a finite non-sensitive
 diagnostic class. Never attach denied `tool_input`, provider result text, raw
 standard error, or the native process error. A denial of an unexposed tool or a
-Bash command outside the positive repository-inspection allowlist is a terminal
-safety failure. An exposed non-Bash tool or a positively recognized safe Bash
-inspection may be a recoverable capability/configuration failure. For structured
+Bash command outside the positive repository-inspection allowlist is terminal and
+classified only by that fact, with an unknown refusal cause; see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+Role requests carry the established persisted required-check commands for that
+diagnosis only, so a denial exactly equal to one is terminal
+`permission_bash_required_check` rather than unclassified Bash. A closed native
+refusal reason uniquely matched to every non-safe Bash denial in the batch
+yields the terminal `permission_reason_<code>` class instead, without naming the
+operation.
+An exposed non-Bash tool or a positively recognized safe Bash inspection may be
+a recoverable capability/configuration failure. For structured
 API errors, treat only explicit transient HTTP statuses as provider unavailability;
 fail closed on non-transient client statuses and `api_error` without such a status. Unknown
 valid read-only result failures and unclassified read-only process exits are
@@ -2223,6 +2242,16 @@ assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
 arbitration cannot discard or reassign requirements. Infrastructure paths are
 deduplicated globally and fingerprinted by the runner.
 
+Discovery, correction and validation migration catalogue only checks owned by
+this pipeline's finalization, including selected Runner-trusted commands.
+Acceptance explicitly assigned to the supervising operator or another owner
+after the run completes stays pending external work in the summaries,
+with its owner and timing; applicability catalog correction never adds it. This
+semantic rule follows the
+[validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory);
+the runner does not parse task prose for ownership or remove a misclassified
+accepted command.
+
 `validationSchedule` persists one ordered `commands` catalog and a `steps` array
 of `{step, commandIndexes}` entries. Indexes are zero-based references into that
 catalog, so command text is retained once rather than repeated for every step.
@@ -2446,7 +2475,9 @@ Resolve differences from task/plan/repository evidence.
 Reconciliation and any arbitration resolve only the summary and a remaining
 material disagreement. The runner independently derives the established
 validation inventory from the two already accepted role inventories regardless
-of which summary direction is selected.
+of which summary direction is selected. The resolved summary keeps explicitly
+assigned post-completion acceptance as pending external work with its owner and
+timing.
 
 Persist the agreed context:
 
@@ -2586,7 +2617,12 @@ Established required-check execution and attestation belong exclusively to
 `FINALIZE`. Selected runner-trusted commands never execute inside an agent
 turn. Their agent-sandbox limitations must not cause `BLOCKED` or prevent
 applicable content repairs and semantic review; the runner executes the
-persisted exact vectors during `FINALIZE`.
+persisted exact vectors during `FINALIZE`. Explicit owner and timing
+assignments bind validation work by its actual purpose, scope and evidence
+rather than its label, so these turns neither run nor claim work reserved for
+another owner or later checkpoint. Permitted source inspection and focused
+development tests stay development evidence even when they overlap a reserved
+check, which still runs in full under its owner.
 
 External environment constraints affecting work not delegated to an exact
 selected command still produce `BLOCKED` with bounded reason and evidence,
@@ -3050,6 +3086,11 @@ staging-independent and expresses an applicable content check against `HEAD` or
 explicit trees. This phase-owned deferral is neither a validation blocker nor a
 skipped required check and must not prevent `PASS`.
 
+Commit and custom finalization neither add nor run explicit post-completion
+operator acceptance. `PASS` covers only the pipeline inventory, and the summary
+lists that acceptance as pending without claiming success. This never permits
+removing or weakening an established check.
+
 Every non-availability result carries the complete inventory actually used and
 exactly one ordered result for each required check. `PASS` requires every result
 to be `PASS` after the runner replaces the exact selected trusted-command
@@ -3409,6 +3450,18 @@ a finding. The decision and its bounded evidence are bound to the same content
 fingerprint as terminal confirmation. Exactly one successful confirmation
 advances directly to `COMMIT`.
 
+Reviewer and lazy terminal confirmation do not treat leaving out explicit
+post-completion operator acceptance as an omission. They reject evidence or
+summaries claiming that such acceptance ran or passed and a finalization that
+adds it, while a missing genuine pipeline-owned check remains an omission.
+Candidate review, lazy self-review and terminal confirmation also report
+evidence that reserved work actually ran early or that development evidence is
+claimed as reserved coverage, even when final acceptance stays pending; source
+observation, overlap or undecidable evidence alone is not a confirmed
+violation. Dispute reconsideration and arbitration decide such a finding by the
+allegation it makes, never by the label. This semantic rule follows the
+[validation ownership guarantee](../../../docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
+
 The Reviewer must not receive the Worker's private implementation reasoning.
 
 Machine-actionable review output:
@@ -3449,7 +3502,14 @@ persist its separate reviewed fingerprint and enter `COMMIT`.
 If the candidate schema or final `REVIEW_SCHEMA` provider reports the shared structured-output
 failure class, deterministic normalization rejects the result, or the
 validation-change decision conflicts with accepted finalization evidence, map
-the failure to bounded candidate-review or confirmation field-and-constraint diagnostics. After
+the failure to bounded candidate-review or confirmation field-and-constraint diagnostics.
+Candidate-review normalization, shared by Reviewer candidate review and lazy or
+combined `CLEAN_CONFIRM`, identifies shape and status, inactive decision fields,
+status/findings consistency, finding identity, content, uniqueness and stability
+at `findings[i]` positions, and product-decision fields by fixed schema field
+names, never by values or IDs. Final review and confirmation share the same
+finding count, identity, content and uniqueness identities. Unknown and
+historical causes stay `result`/`semantic-contract`. After
 the first invalid result, durably record automatic attempt `1` and publish only
 one redacted `review-correction` activity. Reconstruct the complete review
 request from durable task, plan, context, prior-decision, and the applicable
@@ -4001,7 +4061,12 @@ overridable finding receives its exact ID. `plan_revision_required` preserves
 the validated rationale and evidence but offers only revision of `plan.md` and
 a fresh execution run. `read_only_agent_mutated_repository` explains that the
 run is contaminated and offers only a fresh run from an uncontaminated
-worktree; it never accepts hybrid changes. `environment_blocked` preserves why
+worktree; it never accepts hybrid changes. Its one evidence line names the
+Git-classified changed snapshot domains retained as `snapshotChanges`, for
+example `Changed snapshot domains: head, index.`, and the activity message adds
+the same sentence. Custom and directory workspaces, legacy pauses, and
+unclassified or unknown labels report `unavailable`; input invalidation still
+clears approvals and grants no retry, commit, or resume. `environment_blocked` preserves why
 nondelegated work or finalization is blocked, its bounded evidence, and the
 exact retry checkpoint.
 For a finalization-backed `no_progress` pause, the descriptor derives immutable
@@ -4163,7 +4228,10 @@ position, logical turn, and preceding pause. Resuming an already paused
 checkpoint restores its blockers and pending editor authorization without
 consuming them. Session reconstruction uses frozen roles, mode, settings, and
 source lineage; an interrupted role does not refork its source. `CANCELED` is
-terminal and inspectable, and every resume path rejects it.
+terminal and inspectable, and every resume path rejects it. A settled pause
+accepts only a fresh cancellation at its current revision; until reconciliation
+validation accepts that pending cancellation over the preserved pause checkpoint,
+which reconciliation wraps once as `operator_canceled` without provider work.
 
 Writable partial changes advance the baseline only after index, history/ref,
 remote, identity, and input checks pass. They invalidate dependent candidate,

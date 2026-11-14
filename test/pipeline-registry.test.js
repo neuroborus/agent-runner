@@ -12,6 +12,7 @@ import {
   listPipelines,
   RUNTIME_COMPATIBILITY,
 } from "../src/index.js";
+import { createAdapter, operatorFixture, runnerFor } from "./support/index.js";
 
 test("detached compatibility canonically binds every pipeline state version", () => {
   const pipelines = listPipelines();
@@ -335,28 +336,31 @@ test("every pipeline projects bounded adapter diagnostics", () => {
     ["plan-authoring", "Plan authoring failed."],
     ["plan-execution", "Plan execution failed."],
     ["polishing", "Polishing failed."],
-  ]) {
-    assert.deepEqual(
-      getPipeline(pipelineId).projections.pause(
-        pausedRun(
-          {
-            reason: "internal_failure",
-            code: "ERR_CODEX_ISOLATION",
-            diagnosticClass: "operation_multi_agent",
-          },
-          { workflowState: "FAILED" },
+  ])
+    for (const [code, diagnosticClass] of [
+      ["ERR_CODEX_ISOLATION", "operation_multi_agent"],
+      ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+      [
+        "ERR_CLAUDE_PERMISSION_DENIED",
+        "permission_reason_auto_mode_stop_no_verdict",
+      ],
+    ])
+      assert.deepEqual(
+        getPipeline(pipelineId).projections.pause(
+          pausedRun(
+            { reason: "internal_failure", code, diagnosticClass },
+            { workflowState: "FAILED" },
+          ),
         ),
-      ),
-      {
-        reason: "internal_failure",
-        code: "ERR_CODEX_ISOLATION",
-        explanation: `${explanation} Adapter diagnostic: operation_multi_agent.`,
-        evidence: [],
-        resumeState: null,
-        nextActions: [],
-      },
-    );
-  }
+        {
+          reason: "internal_failure",
+          code,
+          explanation: `${explanation} Adapter diagnostic: ${diagnosticClass}.`,
+          evidence: [],
+          resumeState: null,
+          nextActions: [],
+        },
+      );
 });
 
 test("plan-execution pause projection distinguishes fresh-run requirements", () => {
@@ -392,7 +396,7 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
       explanation:
         "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
-      evidence: [],
+      evidence: ["Changed snapshot domains: unavailable."],
       resumeState: null,
       nextActions: [
         {
@@ -402,6 +406,61 @@ test("plan-execution pause projection distinguishes fresh-run requirements", () 
       ],
     },
   );
+});
+
+test("contamination pauses publish only Git-normalized snapshot domains", () => {
+  const contamination = (snapshotChanges) =>
+    pausedRun({
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      ...(snapshotChanges === undefined ? {} : { snapshotChanges }),
+    });
+  const unavailable = ["Changed snapshot domains: unavailable."];
+  for (const [id, descriptor] of [
+    ["plan-execution", planExecutionApi.planExecutionPipeline],
+    ["polishing", polishingApi.polishingPipeline],
+  ]) {
+    const composed = getPipeline(id);
+    assert.ok(Object.isFrozen(composed));
+    assert.ok(Object.isFrozen(composed.projections));
+    assert.equal(
+      listPipelines().find((pipeline) => pipeline.id === id),
+      composed,
+    );
+    assert.notEqual(composed, descriptor);
+    assert.equal(composed.workflow, descriptor.workflow);
+
+    const projected = composed.projections.pause(
+      contamination(["head", "index"]),
+    );
+    assert.deepEqual(projected.evidence, [
+      "Changed snapshot domains: head, index.",
+    ]);
+    assert.equal(projected.reason, "read_only_agent_mutated_repository");
+    assert.equal(projected.code, "ERR_READ_ONLY_REPOSITORY_CHANGED");
+    assert.equal(projected.resumeState, null);
+    assert.deepEqual(projected.nextActions, [
+      { type: "start-new-run", requirement: "uncontaminated-worktree" },
+    ]);
+
+    for (const snapshotChanges of [
+      undefined,
+      ["unknown-domain"],
+      ["head", "unknown-domain"],
+      ["head", "head"],
+      ["head\nPrivate value"],
+      "head",
+    ]) {
+      assert.deepEqual(
+        composed.projections.pause(contamination(snapshotChanges)).evidence,
+        unavailable,
+      );
+    }
+    assert.deepEqual(
+      descriptor.projections.pause(contamination(["head", "index"])).evidence,
+      unavailable,
+    );
+  }
 });
 
 test("pipeline pause projections expose only applicable response and resume actions", () => {
@@ -458,6 +517,48 @@ test("pipeline pause projections expose only applicable response and resume acti
       pausedRun(
         { reason: "backend_unavailable", resumeState: "POLISH" },
         { findings: [] },
+      ),
+    ).nextActions,
+    [{ type: "resume", action: null }],
+  );
+
+  const restatementState = {
+    findings: [{ id: "R1" }],
+    findingOverrides: [],
+    settings: { mode: "independent" },
+  };
+  const exhaustedRestatement = polishingPause(
+    pausedRun(
+      {
+        reason: "resolution_output_invalid",
+        code: "ERR_INVALID_POLISHING_OUTPUT",
+        explanation: "Retained explanation.",
+        evidence: [
+          "Worker field decisions[0].reason violated nonempty-plain-text-up-to-4000-characters.",
+        ],
+        resumeState: "RESOLVE_FINDINGS",
+      },
+      {
+        ...restatementState,
+        resolutionCorrection: { stage: "exhausted", additionalAttempts: 0 },
+      },
+    ),
+  );
+  assert.deepEqual(exhaustedRestatement.evidence, [
+    "Worker field decisions[0].reason violated nonempty-plain-text-up-to-4000-characters.",
+  ]);
+  assert.equal(exhaustedRestatement.resumeState, "RESOLVE_FINDINGS");
+  assert.deepEqual(exhaustedRestatement.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.deepEqual(
+    polishingPause(
+      pausedRun(
+        { reason: "environment_blocked", resumeState: "RESOLVE_FINDINGS" },
+        {
+          ...restatementState,
+          resolutionCorrection: { stage: "blocked", additionalAttempts: 0 },
+        },
       ),
     ).nextActions,
     [{ type: "resume", action: null }],
@@ -595,4 +696,86 @@ test("pipelines do not duplicate the shared validation API", () => {
   assert.equal("assertCommitSubject" in planAuthoringApi, false);
   assert.equal("assertCommitSubject" in planExecutionApi, false);
   assert.equal("assertCommitSubject" in polishingApi, false);
+});
+
+test("pipeline validators accept only a pending cancellation over a settled pause", async (t) => {
+  const settledPause = (run) => ({
+    ...run,
+    revision: run.revision + 2,
+    pipelineState: { ...run.pipelineState, workflowState: "WAITING_FOR_USER" },
+    pause: {
+      reason: "operator_paused",
+      resumeAction: null,
+      operatorResume: {
+        workflowState: run.pipelineState.workflowState,
+        pause: run.pause,
+        activeTurn: run.activeTurn,
+      },
+    },
+    stopRequest: {
+      requestId: "a".repeat(64),
+      kind: "pause_requested",
+      expectedRevision: run.revision,
+      acceptedRevision: run.revision + 1,
+      checkpoint: {
+        revision: run.revision,
+        workflowState: run.pipelineState.workflowState,
+        activeTurn: run.activeTurn,
+        resumeAction: null,
+      },
+      reconciledRevision: run.revision + 2,
+    },
+  });
+  const pendingStop = (run, kind, checkpoint = {}) => ({
+    ...run,
+    revision: run.revision + 1,
+    stopRequest: {
+      requestId: "b".repeat(64),
+      kind,
+      expectedRevision: run.revision,
+      acceptedRevision: run.revision + 1,
+      checkpoint: {
+        revision: run.revision,
+        workflowState: run.pipelineState.workflowState,
+        activeTurn: run.activeTurn,
+        resumeAction: null,
+        ...checkpoint,
+      },
+      reconciledRevision: null,
+    },
+  });
+  const fixture = await operatorFixture(t, "plan-execution");
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, {
+    codex: {
+      ...adapter,
+      probe: async (options) => ({
+        ...(await adapter.probe(options)),
+        declaredWorkspace: true,
+      }),
+    },
+  });
+  for (const pipeline of listPipelines()) {
+    const { run } = await runner.create({
+      pipelineId: pipeline.id,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    });
+    const { validateRun } = pipeline.workflow;
+    const paused = settledPause(run);
+    validateRun(paused);
+    validateRun(pendingStop(paused, "cancel_requested"));
+    if (pipeline.id === "audit") continue;
+    for (const invalid of [
+      pendingStop(paused, "pause_requested"),
+      pendingStop(paused, "cancel_requested", { workflowState: "CLARIFY" }),
+      {
+        ...pendingStop(paused, "cancel_requested"),
+        pipelineState: { ...paused.pipelineState, workflowState: "CANCELED" },
+        pause: { ...paused.pause, reason: "operator_canceled" },
+      },
+    ]) {
+      assert.throws(() => validateRun(invalid), /operator stop/iu);
+    }
+  }
 });

@@ -17,6 +17,8 @@ import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
+  CLEAN_CONFIRM_SCHEMA,
+  DISPUTE_RECONSIDERATION_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
   IMPLEMENTATION_SCHEMA,
@@ -183,11 +185,16 @@ test("corrects finalization inventory that omits frozen guidance", async (t) => 
       constraint: "includes-frozen-finalization-guidance",
     },
   ]);
-  assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
-      .length,
-    2,
+  const finalizationCalls = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
   );
+  assert.equal(finalizationCalls.length, 2);
+  for (const { requiredCheckCommands } of finalizationCalls)
+    assert.deepEqual(
+      requiredCheckCommands,
+      REQUIRED_CHECKS.map(({ command }) => command),
+    );
+  assert.equal(fixture.calls.worker[0].requiredCheckCommands, undefined);
   assert.equal(
     fixture.calls.reviewer.filter(({ schema }) => schema === REVIEW_SCHEMA)
       .length,
@@ -1936,7 +1943,17 @@ Run tests and formatting, then stage changes, inspect the cached diff, and draft
       call.prompt,
       /constrained COMMIT executor alone runs git add -A/u,
     );
+    assert.match(call.prompt, /PASS covers only the pipeline-owned inventory/u);
+    assert.match(call.prompt, /pending external work with its owner/u);
   }
+  const confirmation = fixture.calls.reviewer.find(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  );
+  assert.match(
+    confirmation.prompt,
+    /operator or another owner is not an omission/u,
+  );
+  assert.match(confirmation.prompt, /missing genuine pipeline-owned check/u);
   assert.match(commitCall.prompt, /exact supplied subject/u);
   assert.match(commitCall.prompt, /constrained executor alone stages/u);
   assert.match(
@@ -2146,6 +2163,39 @@ test("binds corrected candidate and finalization evidence across formatting", as
   assert.equal(
     confirmationState.finalizationCorrections[0].contentFingerprint,
     confirmationState.finalizedFingerprint,
+  );
+});
+
+test("corrects candidate Reviewer findings status with a precise diagnostic", async (t) => {
+  const fixture = await createFixture(t, {
+    workReviewer: [{ ...reviewApproved(), status: "FINDINGS" }],
+  });
+
+  const result = await fixture.run();
+  const candidateCalls = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+  );
+  const { reviewCorrection } = fixture.transitions.find(
+    ({ patch }) => (patch?.pipelineState?.reviewCorrection ?? null) !== null,
+  ).patch.pipelineState;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(candidateCalls.length, 2);
+  assert.equal(candidateCalls[1].access, "read-only");
+  assert.equal(candidateCalls[1].session, undefined);
+  assert.deepEqual(reviewCorrection.diagnostics, [
+    {
+      role: "reviewer",
+      phase: "review",
+      contract: "candidate-review",
+      field: "findings",
+      constraint: "nonempty-when-findings",
+    },
+  ]);
+  assert.ok(
+    candidateCalls[1].prompt.includes(
+      JSON.stringify(reviewCorrection, null, 2),
+    ),
   );
 });
 
@@ -3531,6 +3581,16 @@ test("arbitrates an upheld finding only after its dispute budget", async (t) => 
     fixture.calls.arbiter[0].prompt,
     /Prior decisions for this finding[\s\S]*"findingId": "R1"/u,
   );
+  const reconsiderations = fixture.calls.reviewer.filter(
+    ({ schema }) => schema === DISPUTE_RECONSIDERATION_SCHEMA,
+  );
+  assert.equal(reconsiderations.length, 2);
+  for (const { prompt } of [...reconsiderations, fixture.calls.arbiter[0]]) {
+    assert.match(
+      prompt,
+      /Decide each validation-work finding by the allegation it makes/u,
+    );
+  }
 });
 
 test("requires a fix after the Arbiter upholds the Reviewer", async (t) => {
@@ -4609,6 +4669,7 @@ for (const mode of ["independent", "lazy"]) {
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));
+          assert.match(prompt, /never as reserved-check coverage/u);
         }
         if (phase === "check") {
           checkRounds += 1;
@@ -4682,6 +4743,22 @@ for (const mode of ["independent", "lazy"]) {
           ({ request }) => request.prompt !== request.recoveryPrompt,
         ),
       );
+      const recorded = Object.values(fixture.calls).flat();
+      for (const schemas of [
+        [CANDIDATE_REVIEW_SCHEMA, CANDIDATE_CLEAN_CONFIRM_SCHEMA],
+        [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA],
+      ]) {
+        const reviews = recorded.filter(({ schema }) =>
+          schemas.includes(schema),
+        );
+        assert.ok(reviews.length > 0);
+        for (const { prompt } of reviews) {
+          assert.match(
+            prompt,
+            /Source observation or overlap alone is not a violation/u,
+          );
+        }
+      }
       if (mode === "lazy") {
         assert.equal(checkRounds, 4);
         assert.equal(fixture.calls.reviewer.length, 0);

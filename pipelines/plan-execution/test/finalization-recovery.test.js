@@ -31,6 +31,7 @@ import {
   finalizationPassed,
   implementationCompleted,
   implementationProductDecision,
+  matchesSchemaSubset,
   reconciliationResolved,
   resolution,
   reviewApproved,
@@ -496,6 +497,131 @@ test("terminal evidence classification is structured, bounded, and absent from c
       finalizationFindingIds: [],
     }),
   );
+});
+
+test("candidate-review rejections carry bounded source-defined diagnostics", () => {
+  const sentinel = "sentinel-value";
+  const finding = (fields = {}) => ({
+    id: "R1",
+    file: "source.js",
+    problem: `Problem ${sentinel}.`,
+    reason: "Reason.",
+    suggestedAction: "Fix it.",
+    ...fields,
+  });
+  const result = (status, fields = {}) => ({
+    status,
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+    ...fields,
+  });
+  const decision = { whyBlocked: "Blocked.", evidence: ["Evidence."] };
+  const text = "nonempty-plain-text-up-to-4000-characters";
+  for (const clean of [true, false]) {
+    const accepted = clean ? "CLEAN" : "APPROVED";
+    const schema = clean
+      ? CANDIDATE_CLEAN_CONFIRM_SCHEMA
+      : CANDIDATE_REVIEW_SCHEMA;
+    const semantic = [
+      [
+        result(accepted, { findings: [finding()] }),
+        "findings",
+        clean ? "empty-when-clean" : "empty-when-approved",
+      ],
+      [result("FINDINGS"), "findings", "nonempty-when-findings"],
+      [
+        result(accepted, { question: sentinel }),
+        "question",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { evidence: [sentinel] }),
+        "evidence",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { options: [sentinel], whyBlocked: sentinel }),
+        "whyBlocked",
+        "empty-for-review",
+      ],
+      [
+        result("PRODUCT_DECISION_REQUIRED", {
+          ...decision,
+          question: "Choose?",
+          findings: [finding()],
+        }),
+        "findings",
+        "empty-for-product-decision",
+      ],
+      [result("PRODUCT_DECISION_REQUIRED", decision), "question", text],
+      [
+        result("FINDINGS", { findings: [finding({ file: `/${sentinel}` })] }),
+        "findings[0].file",
+        "repository-relative-path-up-to-4000-characters",
+      ],
+      [
+        result("FINDINGS", { findings: [finding({ suggestedAction: "" })] }),
+        "findings[0].suggestedAction",
+        text,
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding(), finding({ file: "other.js" })],
+        }),
+        "findings",
+        "unique-ids",
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding({ file: "other.js" }), finding({ id: "R3" })],
+        }),
+        "findings[1].id",
+        "stable-finding-id",
+      ],
+    ];
+    const structural = [
+      [{ ...result(accepted), extra: sentinel }, "result", "exact-field-set"],
+      [result(sentinel), "status", "supported-status"],
+      [result("FINDINGS", { findings: [sentinel] }), "findings[0]", "object"],
+      [
+        result("FINDINGS", { findings: [finding({ id: sentinel })] }),
+        "findings[0].id",
+        "review-finding-id",
+      ],
+    ];
+    for (const [cases, schemaValid] of [
+      [semantic, true],
+      [structural, false],
+    ]) {
+      for (const [payload, field, constraint] of cases) {
+        assert.equal(matchesSchemaSubset(schema, payload), schemaValid);
+        assert.throws(
+          () =>
+            normalizeCandidateReviewResult(payload, [finding({ id: "R2" })], {
+              clean,
+            }),
+          (error) => {
+            assert.equal(error.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+            assert.deepEqual({ ...error.diagnostic }, { field, constraint });
+            assert.equal(
+              JSON.stringify(error.diagnostic).includes(sentinel),
+              false,
+            );
+            return true;
+          },
+        );
+      }
+    }
+    const valid = result("FINDINGS", { findings: [finding()] });
+    assert.equal(matchesSchemaSubset(schema, valid), true);
+    assert.deepEqual(normalizeCandidateReviewResult(valid, [], { clean }), {
+      status: "FINDINGS",
+      findings: [finding()],
+    });
+  }
 });
 
 test("version 14 migration initializes only recovery metadata and validates its durable bounds", async (t) => {

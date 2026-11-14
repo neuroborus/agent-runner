@@ -73,7 +73,18 @@ contract.
   declarations grant no permissions or Git authority. Declare consumer dependencies
   only when their imports land.
 - Require each commit-plan heading to carry the exact subject-only Conventional Commit message: `type(scope)[!]: imperative summary`.
-- Outside an Agent Runner workflow, do not create a Git commit during direct repository maintenance unless the user explicitly asks for one. Finalization stages only the relevant change set and drafts its commit message.
+- Outside an Agent Runner workflow, create a Git commit only with an explicit
+  user request or the standing authorization below. Finalization stages only
+  the relevant change set and drafts its commit message.
+- The user grants standing authorization for a separate local operator commit
+  after successful Agent Runner finalization and review cover the entire
+  unchanged staged change set, including a completed `polishing` handoff. Verify
+  that binding and commit without asking again. This does not change pipeline
+  permissions: `polishing` itself still leaves changes staged and uncommitted.
+- The user has authorized global installation of verified builds after fixes
+  in this repository. Perform it after the required checks and local commit
+  without asking again; keep installation operator-owned and preserve user
+  configuration and durable runs.
 - Never push, mutate a remote ref, change `origin` or another remote's configuration, or write through a hosting-service API or CLI.
 - Never add a `Co-authored-by` trailer or change Git author/committer identity on the user's behalf.
 - Preserve unrelated user changes in a dirty worktree.
@@ -276,7 +287,9 @@ All pipelines additionally require:
 | `src/guidance/index.js`           | Public operator-guidance capability boundary                          |
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates    |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                  |
-| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution       |
+| `src/trusted-validation/`         | Private contracts, snapshots, sandbox policy, and command execution   |
+| `src/platform/index.js`           | Public native-platform boundary with static Linux selection           |
+| `src/platform/`                   | Private Linux process facts, supervision, trusted-command isolation   |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                               |
 | `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                 |
 | `src/agents/claude/index.js`      | Public Claude provider boundary                                       |
@@ -299,6 +312,7 @@ All pipelines additionally require:
 | `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests       |
 | `test/integration/`               | Cross-capability workflow integration tests                           |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                  |
+| `test/platform/`                  | Platform process facts and owned-process containment tests            |
 | `test/state/`                     | State persistence and safety behavior tests                           |
 | `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression          |
 | `test/`                           | Root CLI, registry, adapter, and repository-boundary tests            |

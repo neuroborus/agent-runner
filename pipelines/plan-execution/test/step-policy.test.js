@@ -16,7 +16,6 @@ import {
 import {
   customExecutionPrompt,
   APPLICABILITY_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   FINALIZATION_INSTRUCTIONS,
   IMPLEMENTATION_INSTRUCTIONS,
@@ -70,28 +69,18 @@ test("custom instructions preserve frozen task, criteria and evidence text verba
 });
 
 test("custom bootstrap derives checks from criteria without a mandatory coding gate", () => {
-  for (const instructions of [
-    BOOTSTRAP_INSTRUCTIONS,
-    APPLICABILITY_INSTRUCTIONS,
-  ]) {
-    const context =
-      "\n\nCriterion data: preserve the ordinary fast gate wording.";
-    const prompt = customExecutionPrompt(instructions + context);
-    assert.ok(prompt.endsWith(context));
-    assert.equal(
-      prompt.slice(0, -context.length).includes("ordinary fast gate"),
-      false,
-    );
-    assert.ok(
-      prompt.includes("semantic-only steps may have no executable checks"),
-    );
-    assert.equal(
-      prompt.includes("commit preparation belongs only to ACCEPT"),
-      false,
-    );
-    assert.equal(prompt.includes("against HEAD or explicit trees"), false);
-    assert.ok(instructions.includes("ordinary fast gate"));
-  }
+  const context =
+    "\n\nCriterion data: preserve the ordinary fast gate wording.";
+  const prompt = customExecutionPrompt(APPLICABILITY_INSTRUCTIONS + context);
+  assert.ok(prompt.endsWith(context));
+  assert.equal(
+    prompt.slice(0, -context.length).includes("ordinary fast gate"),
+    false,
+  );
+  assert.ok(
+    prompt.includes("semantic-only steps may have no executable checks"),
+  );
+  assert.ok(APPLICABILITY_INSTRUCTIONS.includes("ordinary fast gate"));
 });
 
 test("custom check/fix status accounts for result-only repairs without rewriting task data", () => {

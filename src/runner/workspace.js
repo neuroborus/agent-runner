@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { spawnOwnedProcess } from "../agents/index.js";
+import { spawnOwnedProcess } from "../platform/index.js";
 import { deepFreeze, MAX_WORKSPACE_PREPARATION_BYTES } from "../state/index.js";
 import { WorkspaceSafetyError } from "../workspace/index.js";
 import { RunnerError, rejectUnknownFields } from "./input.js";

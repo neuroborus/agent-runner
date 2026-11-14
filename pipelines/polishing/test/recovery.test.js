@@ -1029,9 +1029,18 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
   );
 });
 
-test("persists a terminal Claude finalization protocol diagnosis without acceptance", async (t) => {
+test("persists terminal Claude finalization diagnoses without acceptance", async (t) => {
   const marker = "PRIVATE_NATIVE_FRAME";
-  for (const diagnosticClass of ["protocol_record_after_result", undefined])
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", undefined],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    [
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_reason_auto_mode_stop_no_verdict",
+    ],
+  ])
     await t.test(diagnosticClass ?? "unclassified", async (t) => {
       let before;
       const fixture = await createIntegrationFixture(t, {
@@ -1051,7 +1060,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
             "claude",
             new ClaudeAdapterError(marker, {
               cause: new Error(marker),
-              code: "ERR_CLAUDE_PROTOCOL",
+              code,
               diagnosticClass,
             }),
           );
@@ -1059,7 +1068,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       });
 
       await assert.rejects(fixture.run(), (error) => {
-        assert.equal(error.code, "ERR_CLAUDE_PROTOCOL");
+        assert.equal(error.code, code);
         assert.equal(error.recoverable, false);
         return true;
       });
@@ -1072,7 +1081,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(state.workflowState, "FAILED");
       assert.deepEqual(run.pause, {
         reason: "internal_failure",
-        code: "ERR_CLAUDE_PROTOCOL",
+        code,
         ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
       });
       const projected = polishingPipeline.projections.pause(run);
@@ -1090,8 +1099,8 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(
         activities.at(-1).message,
         diagnosticClass === undefined
-          ? "Polishing failed: ERR_CLAUDE_PROTOCOL."
-          : `Polishing failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+          ? `Polishing failed: ${code}.`
+          : `Polishing failed: ${code} (${diagnosticClass}).`,
       );
       assert.equal(state.finalizationResult, null);
       assert.equal(state.finalizedFingerprint, null);
@@ -1272,6 +1281,7 @@ test("accounts for a content-changing interrupted correction before recovery", a
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1290,17 +1300,28 @@ test("accounts for a content-changing interrupted correction before recovery", a
     },
   });
 
+  // The lost report retains its charged checkpoint and is restated read-only.
   const interruptedRun = await fixture.run();
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.counters.fixRounds, 1);
   assert.equal(interruptedRun.pipelineState.pendingCorrection, true);
+  assert.equal(
+    interruptedRun.pipelineState.resolutionCorrection.stage,
+    "ready",
+  );
 
   await fixture.recover();
   const resumed = await fixture.run();
   assert.equal(resumed.pause.reason, "no_progress");
   assert.equal(resumed.counters.fixRounds, 1);
   assert.equal(resumed.counters.correctionRounds, 1);
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ schema }) => schema === FINDING_RESOLUTION_SCHEMA)
+      .map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
 });
 
 test("invalidates retained finalization after content-changing interrupted terminal resolution", async (t) => {
@@ -1319,6 +1340,7 @@ test("invalidates retained finalization after content-changing interrupted termi
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1340,7 +1362,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   const interruptedRun = await fixture.run();
 
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.pipelineState.finalizationResult, null);
 
   await fixture.recover();
@@ -1354,7 +1376,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   );
 });
 
-test("clears a reconciled correction marker without replaying the turn", async (t) => {
+test("clears a legacy reconciled correction marker without replaying the turn", async (t) => {
   const processLoss = new Error(
     "Process stopped after correction reconciliation.",
   );
@@ -1389,7 +1411,24 @@ test("clears a reconciled correction marker without replaying the turn", async (
     if (processStopped) {
       throw processLoss;
     }
-    const next = await transition(patch, options);
+    const ready = patch.pipelineState.resolutionCorrection?.stage === "ready";
+    // Persist the version-19 shape: reconciliation already entered REVIEW
+    // and no report checkpoint exists for the retained turn marker.
+    const next = await transition(
+      ready
+        ? {
+            ...patch,
+            pipelineState: {
+              ...patch.pipelineState,
+              workflowState: "REVIEW",
+              previousFindings: patch.pipelineState.findings,
+              findings: [],
+              resolutionCorrection: null,
+            },
+          }
+        : patch,
+      options,
+    );
     if (
       next.activeTurn?.phase === "resolve-findings" &&
       next.pipelineState.workflowState === "REVIEW" &&

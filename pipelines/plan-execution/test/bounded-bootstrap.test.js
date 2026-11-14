@@ -294,6 +294,73 @@ test("catalog correction invalidates coverage and preserves consumed output and 
   );
 });
 
+test("discovery, applicability and validation migration deliver check ownership to both roles", async (t) => {
+  const prompts = [];
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      bootstrapReady("Migrating Reviewer"),
+    ],
+    onRoleRun(role, { schema, prompt }) {
+      if (
+        schema === REPOSITORY_DISCOVERY_SCHEMA ||
+        schema === APPLICABILITY_BATCH_SCHEMA
+      )
+        prompts.push({
+          key: `${role}:${fixture.currentRun.activeTurn.phase}:${schema === REPOSITORY_DISCOVERY_SCHEMA ? "discovery" : "applicability"}`,
+          prompt,
+        });
+    },
+    onTransition(run) {
+      if (
+        run.pipelineState.workflowState === "IMPLEMENT" &&
+        !run.pipelineState.validationMigrationPending
+      )
+        throw stop;
+    },
+  });
+  await assert.rejects(fixture.run(), (error) => error === stop);
+  fixture.persistPipelineState({
+    ...fixture.currentRun.pipelineState,
+    validationMigrationPending: true,
+    validationScopeLegacy: true,
+    validationSchedule: null,
+    workerValidation: null,
+    reviewerValidation: null,
+  });
+  await assert.rejects(fixture.run(), (error) => error === stop);
+
+  assert.deepEqual(
+    [...new Set(prompts.map(({ key }) => key))].sort(),
+    ["reviewer", "worker"]
+      .flatMap((role) =>
+        ["bootstrap", "validation-migration"].flatMap((phase) => [
+          `${role}:${phase}:applicability`,
+          `${role}:${phase}:discovery`,
+        ]),
+      )
+      .sort(),
+  );
+  for (const { key, prompt } of prompts) {
+    if (key.endsWith(":applicability")) {
+      assert.match(prompt, /Catalog correction never adds post-completion/u);
+      continue;
+    }
+    assert.match(prompt, /determine the owner and checkpoint/u);
+    assert.match(prompt, /selected Runner-trusted commands, which remain/u);
+    assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    assert.match(prompt, /expected to fail never becomes a PASS-required/u);
+    assert.match(prompt, /never drops other genuine in-scope requirements/u);
+  }
+});
+
 for (const target of ["discovery", "indivisible", "mutation", "input-drift"]) {
   test(`${target} cannot accept partial bootstrap or acquire writable authority`, async (t) => {
     let affected = false;

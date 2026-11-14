@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
   CANDIDATE_REVIEW_INSTRUCTIONS,
@@ -28,35 +27,13 @@ import {
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
+import {
+  APPLICABILITY_INSTRUCTIONS,
+  customExecutionPrompt,
+  REPOSITORY_DISCOVERY_INSTRUCTIONS,
+} from "../src/prompts.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /canonical repository-relative regular files/u,
-  );
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /except for the exact declared label of selected external finalization guidance/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /independently identify every required check/iu,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /keep the summary and required-check inventory staging-independent/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     /runner derives each plan step's required-check/u,
@@ -178,6 +155,7 @@ Work only on this planned commit.
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+Owner and timing assignments that the task or clarifications make explicit bind validation work for the whole run. Classify the work by its actual purpose, scope, and evidence against explicit task authority, never by its label. Executing a check reserved for another owner or a later checkpoint, its full equivalent, or a subset that the task or clarifications explicitly reserve is reserved work under any name or entrypoint; that never transfers its owner or permits early execution. Reading or inspecting source and focused development tests that the task and phase permit stay development work even when they overlap a reserved check: overlap is neither a violation nor completion, and the reserved check still runs in full under its owner. Explicit task restrictions on development work still apply. Do not run reserved work in this turn or claim that it ran. Report development work only as development evidence, never as reserved-check coverage, and leave reserved checks pending with their owner and timing. The reservations above and selected commands' capabilities are unchanged.
 Do not create a commit in this turn.
 Before returning, perform a concise self-review.
 Return the status fields inside the schema's result object.
@@ -230,6 +208,7 @@ If a finding is incorrect, dispute it with concise evidence instead of changing 
 Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
 The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
 Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+Owner and timing assignments that the task or clarifications make explicit bind validation work for the whole run. Classify the work by its actual purpose, scope, and evidence against explicit task authority, never by its label. Executing a check reserved for another owner or a later checkpoint, its full equivalent, or a subset that the task or clarifications explicitly reserve is reserved work under any name or entrypoint; that never transfers its owner or permits early execution. Reading or inspecting source and focused development tests that the task and phase permit stay development work even when they overlap a reserved check: overlap is neither a violation nor completion, and the reserved check still runs in full under its owner. Explicit task restrictions on development work still apply. Do not run reserved work in this turn or claim that it ran. Report development work only as development evidence, never as reserved-check coverage, and leave reserved checks pending with their owner and timing. The reservations above and selected commands' capabilities are unchanged.
 Do not create a commit in this turn.
 Return the status fields and finding decisions inside the schema's result object.
 For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -330,6 +309,7 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 
 Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
+Owner and timing assignments that the task or clarifications make explicit bind validation work for the whole run. Classify the work by its actual purpose, scope, and evidence against explicit task authority, never by its label. Executing a check reserved for another owner or a later checkpoint, its full equivalent, or a subset that the task or clarifications explicitly reserve is reserved work under any name or entrypoint; that never transfers its owner or permits early execution. Reading or inspecting source and focused development tests that the task and phase permit stay development work even when they overlap a reserved check: overlap is neither a violation nor completion, and the reserved check still runs in full under its owner. Explicit task restrictions on development work still apply. Decide each validation-work finding by the allegation it makes. Uphold an allegation that reserved work ran early or under another owner (UPHOLD or REVIEWER_CORRECT) when evidence shows that execution, whether or not anyone claimed coverage; withdraw it (WITHDRAW or WORKER_CORRECT) only when it rests solely on source observation, overlap, or unsupported inference, or when evidence shows the work was permitted development work. Uphold an allegation that development evidence was presented as reserved coverage when evidence shows that claim, even if the underlying work was permitted development work; withdraw it only when evidence shows no such claim was made. Relabeling or still-pending final acceptance never makes either allegation incorrect.
 For RESOLVED, return exactly one decision per dispute; every decision requires reason, while evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`,
@@ -351,6 +331,7 @@ test("arbitration prompts preserve the mandatory cores", () => {
     `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
 
 Do not modify the repository or rewrite requirements. Always provide rationale.
+Owner and timing assignments that the task or clarifications make explicit bind validation work for the whole run. Classify the work by its actual purpose, scope, and evidence against explicit task authority, never by its label. Executing a check reserved for another owner or a later checkpoint, its full equivalent, or a subset that the task or clarifications explicitly reserve is reserved work under any name or entrypoint; that never transfers its owner or permits early execution. Reading or inspecting source and focused development tests that the task and phase permit stay development work even when they overlap a reserved check: overlap is neither a violation nor completion, and the reserved check still runs in full under its owner. Explicit task restrictions on development work still apply. Decide each validation-work finding by the allegation it makes. Uphold an allegation that reserved work ran early or under another owner (UPHOLD or REVIEWER_CORRECT) when evidence shows that execution, whether or not anyone claimed coverage; withdraw it (WITHDRAW or WORKER_CORRECT) only when it rests solely on source observation, overlap, or unsupported inference, or when evidence shows the work was permitted development work. Uphold an allegation that development evidence was presented as reserved coverage when evidence shows that claim, even if the underlying work was permitted development work; withdraw it only when evidence shows no such claim was made. Relabeling or still-pending final acceptance never makes either allegation incorrect.
 For WORKER_CORRECT or REVIEWER_CORRECT, set question and whyBlocked to "", and options and evidence to [].
 For REQUIREMENT_AMBIGUOUS, use the product-decision fields.`,
   );
@@ -391,7 +372,7 @@ test("writable candidate instructions defer checks without suppressing unrelated
 
 test("execution discovery and finalization classify infrastructure by responsibility", () => {
   for (const instructions of [
-    BOOTSTRAP_INSTRUCTIONS,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
     FINALIZATION_INSTRUCTIONS,
   ]) {
     assert.match(
@@ -404,9 +385,84 @@ test("execution discovery and finalization classify infrastructure by responsibi
     );
     assert.match(instructions, /responsibility, not its name or extension/u);
   }
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /per-role capacity of 256 items/u);
   assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /Check requiredChecks first, then validationInfrastructure/u,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /per-role catalog limit is 256; report CAPACITY_EXHAUSTED/u,
   );
+  assert.match(
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /checking requiredChecks before infrastructure/u,
+  );
+});
+
+test("check ownership survives commit and custom execution adaptation", () => {
+  const adapted = (instructions) => {
+    const custom = customExecutionPrompt(instructions);
+    assert.notEqual(custom, instructions);
+    return [instructions, custom];
+  };
+  for (const prompt of adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS)) {
+    assert.match(prompt, /determine the owner and checkpoint/u);
+    assert.match(prompt, /selected Runner-trusted commands, which remain/u);
+    assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    assert.match(prompt, /expected to fail never becomes a PASS-required/u);
+    assert.match(prompt, /never drops other genuine in-scope requirements/u);
+  }
+  for (const prompt of adapted(APPLICABILITY_INSTRUCTIONS)) {
+    assert.match(prompt, /Catalog correction never adds post-completion/u);
+    assert.match(prompt, /Do not silently change or drop accepted/u);
+  }
+  for (const prompt of [
+    ...adapted(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS),
+    ...adapted(BOOTSTRAP_ARBITRATION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /pending external work with its owner and timing/u);
+    assert.match(prompt, /cannot add, select, or remove commands/u);
+  }
+  for (const prompt of adapted(FINALIZATION_INSTRUCTIONS)) {
+    assert.match(prompt, /PASS covers only the pipeline-owned inventory/u);
+    assert.match(prompt, /never permits removing or weakening/u);
+  }
+  for (const prompt of [
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /operator or another owner is not an omission/u);
+    assert.match(prompt, /reject a finalization that adds it/u);
+    assert.match(prompt, /missing genuine pipeline-owned check/u);
+  }
+  for (const prompt of [
+    ...adapted(IMPLEMENTATION_INSTRUCTIONS),
+    ...adapted(CHECK_AND_FIX_INSTRUCTIONS),
+    ...adapted(FINDING_RESOLUTION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /never by its label/u);
+    assert.match(prompt, /never as reserved-check coverage/u);
+    assert.match(prompt, /leave reserved checks pending with their owner/u);
+  }
+  for (const prompt of [
+    ...adapted(CANDIDATE_REVIEW_INSTRUCTIONS),
+    ...adapted(CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS),
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(
+      prompt,
+      /Source observation or overlap alone is not a violation/u,
+    );
+    assert.match(prompt, /do not invent command facts/u);
+  }
+  for (const prompt of [
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+  ].flatMap((instructions) => [
+    instructions,
+    customExecutionPrompt(instructions),
+  ])) {
+    assert.match(
+      prompt,
+      /Decide each validation-work finding by the allegation it makes/u,
+    );
+    assert.match(prompt, /still-pending final acceptance never makes/u);
+  }
 });

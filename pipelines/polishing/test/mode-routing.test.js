@@ -12,6 +12,7 @@ import {
   outputExhaustion,
 } from "../../../test/support/output-exhaustion.js";
 
+import { getPipeline } from "../../../src/index.js";
 import { polishingPipeline } from "../src/index.js";
 import { runPolishing } from "../src/workflow.js";
 import {
@@ -206,9 +207,15 @@ for (const mode of ["independent", "lazy"]) {
       runtime: fixture.runtime,
       operatorStop: true,
     });
+    // Independent finding resolution retains its blockers in a ready report
+    // checkpoint; resume restates the report instead of replaying the repair.
     assert.equal(
       reconciled.pipelineState.workflowState,
-      mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+      mode === "lazy" ? "CHECK_AND_FIX" : "RESOLVE_FINDINGS",
+    );
+    assert.equal(
+      reconciled.pipelineState.resolutionCorrection?.stage,
+      mode === "lazy" ? undefined : "ready",
     );
     assert.equal(reconciled.counters.fixRounds, before.counters.fixRounds + 1);
     assert.equal(reconciled.pipelineState.finalizationResult, null);
@@ -301,6 +308,8 @@ for (const mode of ["independent", "lazy"]) {
   test(`${mode} terminal confirmation cannot mutate the repository or reach handoff`, async (t) => {
     const fixture = await createFixture(t, {
       mode,
+      repository: "git",
+      stateStore: "disk",
       worker: [
         ...bootstrap(),
         polishingCompleted(),
@@ -316,8 +325,46 @@ for (const mode of ["independent", "lazy"]) {
           );
       },
     });
-    const result = await fixture.run();
-    assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
+    const staging = [];
+    fixture.runtime.git = {
+      ...fixture.runtime.git,
+      async stagePolishingHandoff(options) {
+        staging.push(options);
+        throw new Error("Staging is not authorized in this test.");
+      },
+    };
+    await fixture.run();
+    const confirming = fixture.transitions.find(
+      ({ patch }) => patch.pipelineState?.workflowState === "CONFIRM",
+    ).patch.pipelineState;
+    assert.notEqual(confirming.finalizedFingerprint, null);
+    const result = await fixture.recover();
+    assert.deepEqual(result.pause, {
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      snapshotChanges: ["untracked-content"],
+    });
+    assert.doesNotThrow(() => polishingPipeline.workflow.validateRun(result));
+    const projected = getPipeline("polishing").projections.pause(result);
+    assert.equal(projected.code, "ERR_READ_ONLY_REPOSITORY_CHANGED");
+    assert.deepEqual(projected.evidence, [
+      "Changed snapshot domains: untracked-content.",
+    ]);
+    assert.deepEqual(projected.nextActions, [
+      { type: "start-new-run", requirement: "uncontaminated-worktree" },
+    ]);
+    assert.equal(
+      fixture.transitions.at(-1).options.activity.message,
+      "Polishing paused: read_only_agent_mutated_repository. Changed snapshot domains: untracked-content.",
+    );
+    assert.equal(
+      result.pipelineState.finalizedFingerprint,
+      confirming.finalizedFingerprint,
+    );
+    assert.deepEqual(
+      result.pipelineState.finalizationResult,
+      confirming.finalizationResult,
+    );
     assert.equal(
       fixture.transitions.some(
         ({ patch }) => patch.pipelineState?.workflowState === "HANDOFF",
@@ -325,6 +372,8 @@ for (const mode of ["independent", "lazy"]) {
       false,
     );
     assert.equal(result.pipelineState.reviewedFingerprint, null);
+    assert.equal(result.pipelineState.reviewResult, null);
+    assert.deepEqual(staging, []);
   });
 }
 

@@ -6,9 +6,25 @@ import { planAuthoringPipeline } from "@agent-runner/plan-authoring";
 import { planExecutionPipeline } from "@agent-runner/plan-execution";
 import { polishingPipeline } from "@agent-runner/polishing";
 
+import { normalizeReadOnlySnapshotChanges } from "./git/index.js";
 import { RUNTIME_COMPATIBILITY } from "./state/index.js";
 
 const PIPELINES = new Map();
+// Root-owned capabilities injected into descriptor projections, so pipelines
+// never import root modules to publish canonical diagnostics.
+const PROJECTION_CAPABILITIES = Object.freeze({
+  readOnlySnapshotChanges: normalizeReadOnlySnapshotChanges,
+});
+
+function composePipeline(pipeline) {
+  return Object.freeze({
+    ...pipeline,
+    projections: Object.freeze({
+      ...pipeline.projections,
+      pause: (run) => pipeline.projections.pause(run, PROJECTION_CAPABILITIES),
+    }),
+  });
+}
 
 for (const pipeline of [
   planAuthoringPipeline,
@@ -21,7 +37,7 @@ for (const pipeline of [
     throw new Error(`Duplicate pipeline id: ${pipeline.id}`);
   }
 
-  PIPELINES.set(pipeline.id, pipeline);
+  PIPELINES.set(pipeline.id, composePipeline(pipeline));
 }
 
 export function getPipeline(pipelineId) {

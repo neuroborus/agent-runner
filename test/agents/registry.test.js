@@ -452,6 +452,54 @@ test("registry retains only declared readiness diagnostics and validated effect 
   );
 });
 
+test("registry keeps every non-capability permission class terminal and redacted", () => {
+  for (const diagnosticClass of [
+    "permission_tool_unexposed",
+    "permission_bash_unclassified",
+    "permission_bash_required_check",
+    "permission_reason_auto_mode_stop_no_verdict",
+    "permission_forbidden_operation",
+  ]) {
+    assert.ok(
+      PROVIDER_REGISTRY.get("claude").failures.classes.has(diagnosticClass),
+    );
+    const normalized = normalizeAdapterFailure(
+      "claude",
+      Object.assign(
+        new ClaudeAdapterError("PRIVATE_DENIAL_MESSAGE", {
+          code: "ERR_CLAUDE_PERMISSION_DENIED",
+          diagnosticClass,
+          recoverable: true,
+          cause: new Error("PRIVATE_DENIAL_CAUSE"),
+        }),
+        { permission_denials: [{ tool_name: "PRIVATE_DENIAL_TOOL" }] },
+      ),
+    );
+    assert.equal(normalized.diagnosticClass, diagnosticClass);
+    assert.equal(normalized.recoverable, false);
+    assert.deepEqual(normalized.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+    });
+    assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_DENIAL/u);
+  }
+  const hostile = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("PRIVATE_DENIAL_MESSAGE", {
+      code: "ERR_CLAUDE_PERMISSION_DENIED",
+      diagnosticClass: "permission_private_hostile",
+    }),
+  );
+  assert.equal(hostile.diagnosticClass, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(hostile),
+    /PRIVATE_DENIAL|permission_private_hostile/u,
+  );
+});
+
 test("availability evidence is finite, redacted, and excludes uncertain commit effects", () => {
   const base = {
     failureClass: "adapter_failure",

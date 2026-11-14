@@ -278,6 +278,7 @@ const {
   openSync,
   readSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmdirSync,
   rmSync,
@@ -307,6 +308,7 @@ const expectedFilter = Buffer.from(${JSON.stringify(filter.base64)}, "base64");
 const expectedFilterByteLength = ${JSON.stringify(filter.byteLength)};
 const expectedFilterSha256 = ${JSON.stringify(filter.sha256)};
 const hiddenDirectory = ${JSON.stringify(hiddenDirectory)};
+const privateTemporaryDirectory = ${JSON.stringify(join(hiddenDirectory, "tmp"))};
 const gitDirectories = new Set(
   ${JSON.stringify([...new Set(gitDirectories)])},
 );
@@ -323,6 +325,7 @@ const presentUnsetEnvironmentNames = [];
 const environmentOperations = new Set();
 const privateWorkspaceMasks = new Map();
 const readOnlyWorkspacePaths = new Set();
+const temporaryBindDescriptors = [];
 let index = 0;
 
 function fail() {
@@ -531,7 +534,7 @@ function takeEnvironmentOperations(networkUnshared = false) {
   }
 }
 // The launcher replaces /tmp, /run and its hidden allocation with private
-// mounts, so Claude's own mounts strictly inside them are discarded.
+// mounts, so Claude's other mounts strictly inside them are discarded.
 function privateDestination(path) {
   const canonical = canonicalPath(path);
   const strictlyPrivate = (value) =>
@@ -545,6 +548,54 @@ function privateDestination(path) {
       (root) => containsPath(root, canonical) || containsPath(canonical, root),
     )
   );
+}
+// Claude's shell exports its selected temporary directory and writes the cwd
+// receipt its parent reads there, so an existing owner-only self-bind strictly
+// inside the private temporary directory survives the private tmpfs mounts.
+// Bubblewrap binds the validated directory through an inherited descriptor, so
+// a later substitution of its path cannot redirect the mount.
+function retainedTemporaryBind(operation, source, destination) {
+  if (
+    operation !== "--bind" ||
+    source !== destination ||
+    destination === privateTemporaryDirectory ||
+    !containsPath(privateTemporaryDirectory, destination) ||
+    !privateDestination(destination) ||
+    pathKind(destination) === "missing"
+  ) return false;
+  try {
+    const parent = lstatSync(privateTemporaryDirectory);
+    const owned = (value) =>
+      process.getuid === undefined || value.uid === process.getuid();
+    if (
+      !parent.isDirectory() ||
+      !owned(parent) ||
+      (parent.mode & 0o077) !== 0 ||
+      realpathSync(privateTemporaryDirectory) !== privateTemporaryDirectory ||
+      !Number.isInteger(constants.O_DIRECTORY) ||
+      !Number.isInteger(constants.O_NOFOLLOW)
+    ) fail();
+    const descriptor = openSync(
+      destination,
+      constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_RDONLY,
+    );
+    temporaryBindDescriptors.push(descriptor);
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isDirectory() ||
+      !owned(metadata) ||
+      readlinkSync("/proc/self/fd/" + descriptor) !== destination
+    ) fail();
+  } catch {
+    fail();
+  }
+  // Child descriptor 3 carries the seccomp filter.
+  validatedArguments.push(
+    "--bind-fd",
+    String(3 + temporaryBindDescriptors.length),
+    destination,
+  );
+  return true;
 }
 
 take("--new-session");
@@ -603,6 +654,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
   const source = takeValue();
   const destination = takeValue();
   if (!validPath(source) || !validPath(destination)) fail();
+  if (retainedTemporaryBind(operation, source, destination)) continue;
   // Runner-owned workspace authority replaces Claude's exact workspace mounts.
   const runnerWorkspaceMount = source === cwd && destination === cwd;
   const runnerGitMount =
@@ -776,13 +828,23 @@ try {
     ],
     {
       env: environment,
-      stdio: ["inherit", "inherit", "inherit", filterDescriptor],
+      stdio: [
+        "inherit",
+        "inherit",
+        "inherit",
+        filterDescriptor,
+        ...temporaryBindDescriptors,
+      ],
     },
   );
 } catch {
   result = undefined;
 }
-if (!closeDescriptor(filterDescriptor)) process.exit(125);
+if (
+  ![filterDescriptor, ...temporaryBindDescriptors]
+    .map(closeDescriptor)
+    .every(Boolean)
+) process.exit(125);
 if (
   result === undefined ||
   result.error !== undefined ||
@@ -929,7 +991,11 @@ export async function createClaudeCommandLauncher({
               bubblewrapBinary: resolvedBubblewrapBinary,
               canonicalCwd,
               canonicalGitDirectories,
-              canonicalTemporaryRoot: temporaryRoot,
+              // Turn masks must lie beneath the TMPDIR Claude receives.
+              canonicalTemporaryRoot:
+                directory === undefined
+                  ? temporaryRoot
+                  : join(directory, "tmp"),
               privateTemporaryRoot: directory ?? temporaryRoot,
               claudeWritablePaths,
               cwd,

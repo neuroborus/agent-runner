@@ -19,6 +19,11 @@ It grants no writable replay, additional fix budget or approval. Resolve a
 validated environment blocker before resuming; unsafe drift or contamination
 retains its existing stop. See the
 [execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+Polishing applies the same rule to a finding-resolution report in independent
+and combined modes: `resolution_output_invalid` means its one automatic
+read-only restatement was consumed, and resuming that checkpoint authorizes one
+further read-only restatement. See the
+[polishing recovery contract](../../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
 
 ## Local application artifacts
 
@@ -572,6 +577,9 @@ partial workspace changes and task artifacts remain available in either case.
 CLI shorthand captures one status revision and key, while explicit CLI and MCP
 requests require both values for repeatable automation. Exact retries replay
 their durable receipt; stale requests are never refreshed implicitly.
+A settled pause rejects another pause but accepts cancellation with a new key
+at its current revision. Reconciliation retains its underlying checkpoint and
+blockers in terminal `CANCELED` without agent work or provider probes.
 
 The runner service supports `after-current-commit` for a selected execution
 step, including suspended steps; other pipelines and pre-step checkpoints reject

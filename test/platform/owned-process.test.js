@@ -17,12 +17,12 @@ import {
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const BOOT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const OWNED_PROCESS_MODULE = fileURLToPath(
-  new URL("../../src/agents/index.js", import.meta.url),
+  new URL("../../src/platform/index.js", import.meta.url),
 );
 
 function hostSessionLauncher(cwd, { ownershipMode }) {
@@ -1177,7 +1177,7 @@ test("watchdog cleanup requires the supervisor's retained ownership before clear
       // Exercise the actual parent with injected effects, alongside the actual
       // embedded supervisor. No processes, signals or timers reach the host.
       const source = readFileSync(
-        new URL("../../src/agents/owned-process.js", import.meta.url),
+        new URL("../../src/platform/linux-owned-process.js", import.meta.url),
         "utf8",
       )
         .replace(/^import[\s\S]*?;\n/gmu, "")

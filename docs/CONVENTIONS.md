@@ -80,6 +80,7 @@ Assign every behavior to one owner before deciding where its file belongs.
 | Run and resume coordination                                  | root runner                 |
 | State, Git, clarification, and trusted-command effects       | their root capability       |
 | Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
+| Process facts, owned-process supervision, protected launcher | root platform boundary      |
 | Workflow decisions and structured role contracts             | owning pipeline             |
 | Commit-plan parsing and subject validation                   | `packages/commit-plan`      |
 | Criterion-driven custom-plan parsing and validation          | `packages/custom-plan`      |
@@ -195,8 +196,10 @@ Keep a cross-cutting effect in the root capability that owns its lifecycle:
   guidance, using state-owned actions and leases;
 - shell-free editor launch and candidate selection belong to `src/editor.js`;
   clarification authorization and guidance publication retain their own exit policy;
-- allowlists and host execution belong to trusted validation;
-- provider processes and native sandboxes belong to agents.
+- allowlists, sandbox policy, and host execution belong to trusted validation;
+- owned-process supervision, process facts, the protected launcher, and Linux
+  isolation mechanics belong to platform;
+- provider flags, transport, and native sandboxes belong to agents.
 
 Pipelines consume these capabilities and must not reproduce their effects.
 Transport boundaries such as CLI and MCP project the same runner instead of

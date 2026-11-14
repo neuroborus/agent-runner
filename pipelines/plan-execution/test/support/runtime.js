@@ -2081,6 +2081,8 @@ async function createFixture(
         if (snapshot.fingerprint !== current.fingerprint) {
           const error = new Error("Read-only repository changed.");
           error.code = "ERR_READ_ONLY_REPOSITORY_CHANGED";
+          // The fake has one combined fingerprint; name a fixed domain.
+          error.changes = ["tracked-content"];
           throw error;
         }
       },
