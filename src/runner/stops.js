@@ -1,4 +1,4 @@
-import { terminateOwnedProcess } from "../agents/index.js";
+import { terminateOwnedProcess } from "../platform/index.js";
 
 import { RunnerError } from "./input.js";
 

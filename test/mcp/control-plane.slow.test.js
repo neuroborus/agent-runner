@@ -40,7 +40,7 @@ import {
 import {
   inspectOwnedSessionProcesses,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 import { createAdapter, operatorFixture, runnerFor } from "../support/index.js";

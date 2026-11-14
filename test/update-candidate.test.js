@@ -9,7 +9,7 @@ import { gzipSync } from "node:zlib";
 import {
   inspectOwnedSessionProcesses,
   readProcessNamespace,
-} from "../src/agents/index.js";
+} from "../src/platform/index.js";
 import { createRunStore, RUNTIME_COMPATIBILITY } from "../src/state/index.js";
 import {
   createRuntimeAdmission,

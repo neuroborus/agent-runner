@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Linux process mechanisms move behind a root platform boundary.** Process
+  facts and the owned-process supervisor lived in the agents capability
+  although state, Runner, MCP, trusted validation and update consumed them
+  directly. Planned on 2026-11-13, the current modules now move unchanged into
+  `src/platform/`, whose static index selects the only implementation, Linux,
+  and is the lowest root capability. Every consumer imports that index, so one
+  active-process registry remains and the agents index no longer re-exports
+  the primitives. Other hosts keep the existing per-capability fail-closed
+  results; no other operating system is claimed. Durable records, error codes,
+  budgets and recovery are unchanged, and provider native sandboxes, update
+  candidate isolation and the standard-library bootstrap keep their owners.
+
 - **Polishing restates invalid finding-resolution reports read-only.** A
   rejected finding-resolution reason terminally failed a polishing run after
   its writable work was already done. The rejected value and its historical

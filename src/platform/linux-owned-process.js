@@ -16,7 +16,7 @@ import {
   readProcessChildren,
   readProcessIdentity,
   readProcessNamespace,
-} from "./process-containment.js";
+} from "./linux-process.js";
 
 const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",

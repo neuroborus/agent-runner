@@ -347,6 +347,35 @@ test("provider-private source stays inside the agent capability", async () => {
   assert.deepEqual(failures, []);
 });
 
+test("platform source imports only Node built-ins and its own siblings", async () => {
+  const platform = join(ROOT, "src/platform");
+  const { imports } = await sourceImports();
+  const failures = imports
+    .filter(
+      ({ importer, specifier }) =>
+        isWithin(platform, importer) &&
+        !specifier.startsWith("node:") &&
+        !(
+          specifier.startsWith("./") &&
+          isWithin(platform, resolve(dirname(importer), specifier))
+        ),
+    )
+    .map(
+      ({ importer, specifier }) =>
+        `${relative(ROOT, importer)} imports ${specifier}`,
+    );
+  assert.deepEqual(failures, []);
+});
+
+test("the agent index does not re-export platform capabilities", async () => {
+  const agents = await import("../src/agents/index.js");
+  const platform = await import("../src/platform/index.js");
+  assert.deepEqual(
+    Object.keys(platform).filter((name) => Object.hasOwn(agents, name)),
+    [],
+  );
+});
+
 test("operator guidance stays outside pipeline roles and run reconstruction", async () => {
   const { files, imports } = await sourceImports();
   for (const { importer, specifier } of imports) {

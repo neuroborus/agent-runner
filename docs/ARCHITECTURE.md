@@ -21,6 +21,10 @@ has no capability and fails closed. Plan authoring and execution consume
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
 
+Inside the root, `src/platform/` is the lowest capability: it imports only
+Node built-ins and its own siblings, and every other root capability may consume
+its index.
+
 ## Root Runner Ownership
 
 - CLI parsing, pipeline selection, and concise terminal output.
@@ -582,6 +586,17 @@ activity. Neither adapter maps client attribution into native session names,
 commit attribution, or undocumented environment variables, and bounded
 failures retain none of its values. Provider-visible origin identity does not
 promise a distinct provider dashboard category.
+
+The root `src/platform/index.js` is the one native-platform boundary. It
+statically selects the only implementation, Linux, and exposes two groups:
+process facts (`readProcessIdentity`, `readProcessNamespace`) and owned
+processes (launch, execution, retirement, session inspection and the protected
+launcher). Each capability keeps its own host guard, so other hosts fail closed:
+process facts are unverifiable and owned launches fail with
+`ERR_EXECUTION_PROCESS_UNVERIFIABLE`. No other operating system is claimed.
+Importing the index has no side effects, and every consumer shares its single
+active-process registry. `runtime/bootstrap.js` and `runtime/admission.js`
+stay standard-library-only and keep their own checks outside it.
 
 ## Pipeline Ownership
 
@@ -3129,7 +3144,7 @@ records with or without those optional proofs use the same ownership policy.
 Before a provider or trusted command can execute, a private supervisor waits on
 a separate inherited Node IPC channel while the runner journals its host PID,
 hostname, boot/start identity, matching launch cutoff and PID namespace identity.
-The shared agents boundary owns the
+The platform boundary owns the
 closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
 processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,

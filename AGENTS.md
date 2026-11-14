@@ -288,6 +288,8 @@ All pipelines additionally require:
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates    |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                  |
 | `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution       |
+| `src/platform/index.js`           | Public native-platform boundary with static Linux selection           |
+| `src/platform/`                   | Private Linux process facts and owned-process supervision             |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                               |
 | `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                 |
 | `src/agents/claude/index.js`      | Public Claude provider boundary                                       |
@@ -310,6 +312,7 @@ All pipelines additionally require:
 | `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests       |
 | `test/integration/`               | Cross-capability workflow integration tests                           |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                  |
+| `test/platform/`                  | Platform process facts and owned-process containment tests            |
 | `test/state/`                     | State persistence and safety behavior tests                           |
 | `test/source-boundaries.test.js`  | Source indexes and workspace dependency-direction regression          |
 | `test/`                           | Root CLI, registry, adapter, and repository-boundary tests            |

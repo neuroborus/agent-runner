@@ -19,7 +19,7 @@ import {
   sep,
 } from "node:path";
 
-import { spawnOwnedProcess } from "../agents/index.js";
+import { spawnOwnedProcess } from "../platform/index.js";
 import { requestsMount, STORAGE_PATHS } from "./resources.js";
 
 const BUBBLEWRAP_CANDIDATES = Object.freeze([

@@ -26,7 +26,7 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   main,
 } from "../src/index.js";
-import { spawnOwnedProcess } from "../src/agents/index.js";
+import { spawnOwnedProcess } from "../src/platform/index.js";
 import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {

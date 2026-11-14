@@ -4,7 +4,7 @@ import { mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { executeOwnedProcess } from "../owned-process.js";
+import { executeOwnedProcess } from "../../platform/index.js";
 import { canReadFiles } from "../file-access.js";
 import {
   ADAPTER_FAILURE_CLASS,
