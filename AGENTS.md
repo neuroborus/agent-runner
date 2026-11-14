@@ -287,9 +287,9 @@ All pipelines additionally require:
 | `src/guidance/index.js`           | Public operator-guidance capability boundary                          |
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates    |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                  |
-| `src/trusted-validation/`         | Private contracts, snapshots, sandboxing, and command execution       |
+| `src/trusted-validation/`         | Private contracts, snapshots, sandbox policy, and command execution   |
 | `src/platform/index.js`           | Public native-platform boundary with static Linux selection           |
-| `src/platform/`                   | Private Linux process facts and owned-process supervision             |
+| `src/platform/`                   | Private Linux process facts, supervision, trusted-command isolation   |
 | `src/agents/index.js`             | Public agent-adapter directory boundary                               |
 | `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                 |
 | `src/agents/claude/index.js`      | Public Claude provider boundary                                       |

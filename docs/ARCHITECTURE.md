@@ -366,8 +366,11 @@ effects and stop recovery remain ahead of preparation for new writable work.
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep
-snapshot validation, exact command vectors, sandboxing, bounded evidence, and
-repository mutation guards within the capability.
+snapshot validation, exact command vectors, sandbox policy, bounded evidence, and
+repository mutation guards within the capability. Trusted validation owns
+exposure, storage, environment, and authorization policy and passes an ordered
+mount program to the platform boundary, which owns launcher discovery and
+verification and renders the fixed Linux isolation profile.
 
 Execution's private `commit-size-assessment.js` owns safe threshold arithmetic,
 fingerprint-bound atomic/split decisions and a three-attempt original-step
@@ -588,12 +591,15 @@ failures retain none of its values. Provider-visible origin identity does not
 promise a distinct provider dashboard category.
 
 The root `src/platform/index.js` is the one native-platform boundary. It
-statically selects the only implementation, Linux, and exposes two groups:
-process facts (`readProcessIdentity`, `readProcessNamespace`) and owned
-processes (launch, execution, retirement, session inspection and the protected
-launcher). Each capability keeps its own host guard, so other hosts fail closed:
-process facts are unverifiable and owned launches fail with
-`ERR_EXECUTION_PROCESS_UNVERIFIABLE`. No other operating system is claimed.
+statically selects the only implementation, Linux, and exposes three groups:
+process facts (`readProcessIdentity`, `readProcessNamespace`), owned processes
+(launch, execution, retirement, session inspection and the protected launcher)
+and trusted-command isolation (system paths, launcher resolution and
+verification, and the fixed bubblewrap profile), plus the process-group
+availability fact. Each capability keeps its own host guard, so other hosts fail
+closed: process facts are unverifiable, owned launches fail with
+`ERR_EXECUTION_PROCESS_UNVERIFIABLE` and isolated commands are rejected before
+launch. No other operating system is claimed.
 Importing the index has no side effects, and every consumer shares its single
 active-process registry. `runtime/bootstrap.js` and `runtime/admission.js`
 stay standard-library-only and keep their own checks outside it.

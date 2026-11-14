@@ -25,10 +25,10 @@
   fingerprints, commit verification, and handoff support private to that boundary.
 - `src/trusted-validation/index.js`: expose the runner-trusted validation boundary.
 - `src/trusted-validation/`: keep contract normalization, snapshot handling,
-  sandbox construction, and exact-command execution owned by that boundary.
+  sandbox policy, and exact-command execution owned by that boundary.
 - `src/platform/index.js`: expose the native-platform boundary with static Linux selection.
-- `src/platform/`: keep Linux process facts and owned-process supervision
-  private to that boundary.
+- `src/platform/`: keep Linux process facts, owned-process supervision, and
+  trusted-command isolation private to that boundary.
 - `src/agents/codex/index.js`: expose the Codex provider boundary.
 - `src/agents/codex/`: keep Codex processes, App Server transport, flags,
   parsing, sessions, local commits, and workspace storage private to that provider.

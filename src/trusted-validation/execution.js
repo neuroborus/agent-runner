@@ -5,7 +5,6 @@ import {
   existsSync,
   lstatSync,
   readFileSync,
-  readlinkSync,
   realpathSync,
 } from "node:fs";
 import {
@@ -19,24 +18,25 @@ import {
   sep,
 } from "node:path";
 
-import { spawnOwnedProcess } from "../platform/index.js";
+import {
+  createIsolatedCommand,
+  ISOLATION_SYSTEM_PATHS,
+  PROCESS_GROUPS_AVAILABLE,
+  resolveIsolationLauncher,
+  spawnOwnedProcess,
+  verifyIsolationLauncher,
+} from "../platform/index.js";
 import { requestsMount, STORAGE_PATHS } from "./resources.js";
 
-const BUBBLEWRAP_CANDIDATES = Object.freeze([
-  "/usr/bin/bwrap",
-  "/bin/bwrap",
-  "/usr/local/bin/bwrap",
-  "/usr/local/sbin/bwrap",
-]);
 const DEFAULT_TERMINATION_GRACE_MS = 1_000;
-const SYSTEM_MOUNTS = Object.freeze([
-  "/usr",
-  "/bin",
-  "/sbin",
-  "/lib",
-  "/lib64",
-  "/etc",
-]);
+const LAUNCHER_MESSAGES = Object.freeze({
+  relative: "Trusted validation launcher must be absolute.",
+  unavailable: "Trusted validation launcher is unavailable.",
+  unsafe: "Trusted validation launcher is unsafe.",
+  "not-executable": "Trusted validation launcher is not executable.",
+  writable: "Trusted validation launcher is writable by the runner identity.",
+  changed: "Trusted validation launcher changed during verification.",
+});
 const READINESS_SCRIPT = `
 const { spawn } = require("node:child_process");
 const { writeSync } = require("node:fs");
@@ -76,91 +76,40 @@ export class TrustedExecutionError extends Error {
   }
 }
 
-function assertReadOnlyPath(path) {
-  let current = path;
-  while (true) {
-    try {
-      accessSync(current, constants.W_OK);
-    } catch (cause) {
-      if (!["EACCES", "EPERM", "EROFS"].includes(cause?.code)) {
-        throw new TrustedExecutionError(
-          "Trusted validation launcher changed during verification.",
-          { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-        );
-      }
-      // Continue only when this path cannot be changed by the runner identity.
-      if (current === sep) {
-        return;
-      }
-      current = dirname(current);
-      continue;
+function launcherError(reason) {
+  return new TrustedExecutionError(LAUNCHER_MESSAGES[reason], {
+    code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+  });
+}
+
+// Platform launcher failures map to trusted diagnostics; others pass through.
+function trustedLauncher(verify) {
+  try {
+    return verify();
+  } catch (cause) {
+    if (Object.hasOwn(LAUNCHER_MESSAGES, cause?.reason)) {
+      throw launcherError(cause.reason);
     }
-    throw new TrustedExecutionError(
-      "Trusted validation launcher is writable by the runner identity.",
-      { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-    );
+    throw cause;
   }
 }
 
 export function verifyTrustedBubblewrap(path, projectPath = null) {
-  if (typeof path !== "string" || !isAbsolute(path) || !existsSync(path)) {
-    throw new TrustedExecutionError(
-      "Trusted validation launcher is unavailable.",
-      { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-    );
-  }
-  const canonicalPath = realpathSync(path);
-  const metadata = lstatSync(canonicalPath);
+  // Project coverage outranks executable and writability failures.
   if (
-    path !== canonicalPath ||
-    !metadata.isFile() ||
-    metadata.nlink !== 1 ||
-    (projectPath !== null && coversPath(projectPath, canonicalPath))
+    projectPath !== null &&
+    typeof path === "string" &&
+    isAbsolute(path) &&
+    existsSync(path) &&
+    coversPath(projectPath, realpathSync(path))
   ) {
-    throw new TrustedExecutionError("Trusted validation launcher is unsafe.", {
-      code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
-    });
+    throw launcherError("unsafe");
   }
-  try {
-    accessSync(canonicalPath, constants.X_OK);
-  } catch {
-    throw new TrustedExecutionError(
-      "Trusted validation launcher is not executable.",
-      { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-    );
-  }
-  assertReadOnlyPath(canonicalPath);
-  return canonicalPath;
+  return trustedLauncher(() => verifyIsolationLauncher(path));
 }
 
 export function resolveTrustedBubblewrap(executable = null) {
-  if (
-    executable !== null &&
-    (typeof executable !== "string" || !isAbsolute(executable))
-  ) {
-    throw new TrustedExecutionError(
-      "Trusted validation launcher must be absolute.",
-      { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-    );
-  }
-  for (const candidate of executable === null
-    ? BUBBLEWRAP_CANDIDATES
-    : [executable]) {
-    if (!existsSync(candidate)) {
-      continue;
-    }
-    try {
-      return verifyTrustedBubblewrap(realpathSync(candidate));
-    } catch (cause) {
-      if (executable !== null) {
-        throw cause;
-      }
-    }
-  }
-  throw new TrustedExecutionError(
-    "Trusted validation launcher is unavailable.",
-    { code: "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE" },
-  );
+  return trustedLauncher(() => resolveIsolationLauncher(executable));
 }
 
 function delay(milliseconds) {
@@ -238,7 +187,7 @@ export async function runExactCommand(
     await onNoLaunch?.();
     signal.throwIfAborted();
   }
-  if (process.platform === "win32") {
+  if (!PROCESS_GROUPS_AVAILABLE) {
     await onNoLaunch?.();
     return {
       status: "BLOCKED",
@@ -518,31 +467,6 @@ function coversPath(parent, child) {
   return parent === child || isInside(parent, child);
 }
 
-function mountParents(targetPath) {
-  const parts = relative(sep, targetPath).split(sep);
-  const parents = [];
-  let current = sep;
-  for (const part of parts.slice(0, -1)) {
-    current = join(current, part);
-    parents.push(current);
-  }
-  return parents;
-}
-
-function appendSystemMounts(argumentsList) {
-  for (const path of SYSTEM_MOUNTS) {
-    if (!existsSync(path)) {
-      continue;
-    }
-    const metadata = lstatSync(path);
-    if (metadata.isSymbolicLink()) {
-      argumentsList.push("--symlink", readlinkSync(path), path);
-    } else {
-      argumentsList.push("--ro-bind", path, path);
-    }
-  }
-}
-
 function executableCandidate(executable, environment) {
   if (isAbsolute(executable)) {
     return existsSync(executable) ? executable : null;
@@ -643,9 +567,9 @@ function dynamicExposures(
       exposures.push(exposure);
     }
   }
-  const systemPaths = SYSTEM_MOUNTS.filter((path) => existsSync(path)).map(
-    (path) => realpathSync(path),
-  );
+  const systemPaths = ISOLATION_SYSTEM_PATHS.filter((path) =>
+    existsSync(path),
+  ).map((path) => realpathSync(path));
   const ordered = [
     ...new Map(exposures.map((value) => [value.target, value])).values(),
   ]
@@ -684,7 +608,7 @@ export function runtimeStorageExposures(
 ) {
   try {
     return [
-      ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
+      ...ISOLATION_SYSTEM_PATHS.filter((path) => existsSync(path)).map((path) =>
         realpathSync(path),
       ),
       ...dynamicExposures(command, {
@@ -711,6 +635,7 @@ function sandboxArguments(
     cwd,
     environment,
     homePath,
+    launcher,
     resources,
     privateStorageRoot,
     protectedPaths,
@@ -724,22 +649,6 @@ function sandboxArguments(
       throw new Error("The declared executable is unavailable.");
     accessSync(executable, constants.X_OK);
   }
-  const argumentsList = [
-    "--die-with-parent",
-    "--unshare-user",
-    "--unshare-net",
-    "--unshare-pid",
-    "--cap-drop",
-    "ALL",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/run",
-    "--tmpfs",
-    "/tmp",
-  ];
   const sourceProjection = command.capabilities?.sourceProjection === true;
   const exposures = dynamicExposures(command, {
     cwd,
@@ -782,17 +691,12 @@ function sandboxArguments(
   ) {
     throw new Error("Trusted runtime exposes a protected path.");
   }
-  appendSystemMounts(argumentsList);
-  const createdParents = new Set();
-  for (const { source, target } of exposures) {
-    for (const parent of mountParents(target)) {
-      if (!createdParents.has(parent)) {
-        argumentsList.push("--dir", parent);
-        createdParents.add(parent);
-      }
-    }
-    argumentsList.push("--ro-bind", source, target);
-  }
+  const mounts = exposures.map(({ source, target }) => ({
+    source,
+    target,
+    writable: false,
+    parents: "all",
+  }));
   if (sourceProjection) {
     const source = resources.source;
     if (
@@ -805,13 +709,7 @@ function sandboxArguments(
     ) {
       throw new Error("Trusted source projection is invalid.");
     }
-    for (const parent of mountParents(cwd)) {
-      if (!createdParents.has(parent)) {
-        argumentsList.push("--dir", parent);
-        createdParents.add(parent);
-      }
-    }
-    argumentsList.push("--bind", source, cwd);
+    mounts.push({ source, target: cwd, writable: true, parents: "all" });
   } else if (resources.source !== undefined) {
     throw new Error("Undeclared source projection is invalid.");
   }
@@ -830,27 +728,27 @@ function sandboxArguments(
     ) {
       throw new Error("Trusted storage mount is invalid.");
     }
-    argumentsList.push(
-      "--dir",
-      dirname(target),
-      name === "dependencies" ? "--ro-bind" : "--bind",
+    mounts.push({
       source,
       target,
-    );
+      writable: name !== "dependencies",
+      parents: "direct",
+    });
   }
-  argumentsList.push(
-    "--chdir",
+  return createIsolatedCommand({
+    launcher,
     cwd,
-    "--",
-    process.execPath,
-    "--eval",
-    READINESS_SCRIPT,
-    "--",
-    ...(preparationOnly
-      ? [process.execPath, "--eval", ""]
-      : [command.executable, ...command.arguments]),
-  );
-  return Object.freeze(argumentsList);
+    mounts,
+    command: [
+      process.execPath,
+      "--eval",
+      READINESS_SCRIPT,
+      "--",
+      ...(preparationOnly
+        ? [process.execPath, "--eval", ""]
+        : [command.executable, ...command.arguments]),
+    ],
+  });
 }
 
 export function sandboxTrustedCommand(
@@ -864,12 +762,10 @@ export function sandboxTrustedCommand(
     protectedPaths = [],
     workspacePaths,
     preparationOnly = false,
-    platform = process.platform,
   },
 ) {
   const homePath = environment.HOME;
   if (
-    platform !== "linux" ||
     typeof bubblewrapPath !== "string" ||
     !isAbsolute(bubblewrapPath) ||
     typeof homePath !== "string" ||
@@ -884,18 +780,16 @@ export function sandboxTrustedCommand(
   }
   try {
     return Object.freeze({
-      command: Object.freeze({
-        executable: bubblewrapPath,
-        arguments: sandboxArguments(command, {
-          cwd,
-          environment,
-          homePath,
-          resources,
-          privateStorageRoot,
-          protectedPaths,
-          workspacePaths,
-          preparationOnly,
-        }),
+      command: sandboxArguments(command, {
+        cwd,
+        environment,
+        homePath,
+        launcher: bubblewrapPath,
+        resources,
+        privateStorageRoot,
+        protectedPaths,
+        workspacePaths,
+        preparationOnly,
       }),
       environment: safeEnvironment(environment, resources),
       // This command establishes its own mandatory isolation profile.
