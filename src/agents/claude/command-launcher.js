@@ -991,7 +991,11 @@ export async function createClaudeCommandLauncher({
               bubblewrapBinary: resolvedBubblewrapBinary,
               canonicalCwd,
               canonicalGitDirectories,
-              canonicalTemporaryRoot: temporaryRoot,
+              // Turn masks must lie beneath the TMPDIR Claude receives.
+              canonicalTemporaryRoot:
+                directory === undefined
+                  ? temporaryRoot
+                  : join(directory, "tmp"),
               privateTemporaryRoot: directory ?? temporaryRoot,
               claudeWritablePaths,
               cwd,

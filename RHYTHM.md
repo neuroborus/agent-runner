@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Claude private storage leaves room for bridge sockets.** New Claude
+  allocations used the runner's ambient temporary directory, beneath which the
+  provider `TMPDIR` adds 66 bytes for a four-digit UID. Below the nested
+  private test root that `TMPDIR` alone is 106 bytes, while Claude's shortest
+  bridge socket path needs 119 bytes against 108 bytes of Linux socket-path
+  capacity including the terminator, so corrected turns failed although
+  readiness probes, which never run the bridge, passed. Following Codex's fixed
+  storage parent, new allocations now live beneath canonical `/tmp`, and turn
+  launchers admit empty-directory masks only beneath the allocation's private
+  temporary directory. Recorded roots, including earlier ambient ones, still
+  recover and clean up; no legacy run is revived. The defect predates the Linux
+  platform extraction, which did not touch this path.
+
 - **Linux process mechanisms move behind a root platform boundary.** Process
   facts and the owned-process supervisor lived in the agents capability
   although state, Runner, MCP, trusted validation and update consumed them

@@ -2347,7 +2347,7 @@ test("accepts missing nested directory artifact and state exclusions without cre
       await assert.rejects(stat(missing), { code: "ENOENT" });
   }
   const reservedState = join(
-    await realpath(tmpdir()),
+    await realpath("/tmp"),
     `agent-runner-claude-${process.getuid()}`,
     "absent-exclusion",
     "state",
@@ -3981,9 +3981,6 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
 test("isolates fallback commands without blocking Claude transport", async (t) => {
   const projectPath = await createFallbackProject(t);
   const fakeBubblewrap = await createFakeBubblewrap(t);
-  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
-  await chmod(emptyMaskPath, 0o700);
-  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
   const outsideDirectory = await mkdtemp(
     join(tmpdir(), "agent-runner-claude-outside-"),
@@ -4010,6 +4007,11 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       const access = ["read-only", "workspace-write", "local-commit"][
         turnIndex
       ];
+      // Claude creates its empty-directory masks in the turn's private TMPDIR.
+      const emptyMaskPath = await mkdtemp(
+        join(call.options.env.TMPDIR, "claude-empty-"),
+      );
+      await chmod(emptyMaskPath, 0o700);
       let temporaryPath;
       if (turnIndex === 0) {
         temporaryPath = join(call.options.env.TMPDIR, "claude-fixture");
@@ -4413,11 +4415,9 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       index === 1,
     );
     assert.equal(
-      includesSequence(boundaryArguments, [
-        "--ro-bind",
-        emptyMaskPath,
-        `${projectPath}/.claude`,
-      ]),
+      boundaryArguments.some((argument) =>
+        parse(argument).base.startsWith("claude-empty-"),
+      ),
       false,
     );
     assert.equal(
@@ -4618,15 +4618,16 @@ test("fails closed when bubblewrap rejects direct seccomp setup", async (t) => {
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
   const projectPath = await createFallbackProject(t);
   const fakeBubblewrap = await createFakeBubblewrap(t);
-  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
-  await chmod(emptyMaskPath, 0o700);
+  // Owner-only and empty, but outside every turn's private TMPDIR.
+  const ambientMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
+  await chmod(ambientMaskPath, 0o700);
   const markerDirectory = await mkdtemp(
     join(tmpdir(), "agent-runner-claude-rejected-command-"),
   );
   const outsideDirectory = await mkdtemp(
     join(tmpdir(), "agent-runner-claude-outside-"),
   );
-  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
+  t.after(() => rm(ambientMaskPath, { force: true, recursive: true }));
   t.after(() => rm(markerDirectory, { force: true, recursive: true }));
   t.after(() => rm(outsideDirectory, { force: true, recursive: true }));
   // Claude self-binds its temporary directory after the read-only root.
@@ -4798,9 +4799,16 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
     {
       access: "workspace-write",
       name: "directory-mask-on-file",
-      transform({ argumentsList }) {
+      transform({ argumentsList, emptyMaskPath }) {
         const sourceIndex = argumentsList.indexOf(emptyMaskPath);
         argumentsList[sourceIndex + 1] = `${projectPath}/package.json`;
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "ambient-empty-mask",
+      transform({ argumentsList, emptyMaskPath }) {
+        argumentsList[argumentsList.indexOf(emptyMaskPath)] = ambientMaskPath;
       },
     },
     {
@@ -4890,6 +4898,10 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       const managedSettings = JSON.parse(
         option(call.argumentsList, "--managed-settings"),
       );
+      const emptyMaskPath = await mkdtemp(
+        join(call.options.env.TMPDIR, "claude-empty-"),
+      );
+      await chmod(emptyMaskPath, 0o700);
       const argumentsList = claudeBubblewrapArguments({
         projectPath,
         access: current.access ?? "read-only",
@@ -4900,7 +4912,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         ...call.options.env,
         AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
       };
-      await current.transform({ argumentsList, environment });
+      await current.transform({ argumentsList, environment, emptyMaskPath });
       await executeFile(managedSettings.sandbox.bwrapPath, argumentsList, {
         encoding: "utf8",
         env: environment,
@@ -7750,6 +7762,14 @@ test("keeps missing HOME/config scaffolding outside every project view", async (
             return;
           assert.equal(resource.phase, "allocated");
           assert.equal(resource.commandIdentity, CLAUDE_STORAGE_IDENTITY);
+          // A nested ambient TMPDIR must not lengthen the provider TMPDIR.
+          assert.equal(
+            resource.root.path,
+            join(
+              await realpath("/tmp"),
+              `agent-runner-claude-${process.getuid()}`,
+            ),
+          );
           resourcePath = join(resource.root.path, resource.id);
           assert.ok(!resourcePath.startsWith(directory + "/"));
           assert.equal(call.options.env.HOME, providerHome);
@@ -7758,7 +7778,7 @@ test("keeps missing HOME/config scaffolding outside every project view", async (
             join(providerHome, "missing-config"),
           );
           assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-only");
-          assert.ok(call.options.env.TMPDIR.startsWith(resourcePath + "/"));
+          assert.equal(call.options.env.TMPDIR, join(resourcePath, "tmp"));
           const args = claudeBubblewrapArguments({
             access: accessMode,
             payload: "inspect",
@@ -8363,7 +8383,7 @@ test("retains storage until process retirement and rejects replacement during ow
 test("reports setup failure before launch with bounded not-started evidence", async () => {
   const fixture = createFixture();
   await assert.rejects(
-    fixture.adapter.run(request({ storageForbiddenPaths: [tmpdir()] })),
+    fixture.adapter.run(request({ storageForbiddenPaths: ["/tmp"] })),
     (cause) => {
       const failure = normalizeAdapterFailure("claude", cause);
       assert.equal(failure.code, "ERR_AGENT_ENVIRONMENT_PREPARATION");

@@ -4206,10 +4206,12 @@ workspace, Git metadata, outside paths, or allocation controls, all other
 writable binds must resolve inside the canonical workspace, must not resolve
 inside Git metadata, and are accepted only for workspace-write access.
 Read-only binds must preserve their source path except for Claude's `/dev/null`
-or verified owner-only empty-directory masks beneath the canonical runtime
-temporary root, both limited to strict workspace descendants. Empty-directory
-masks are replaced by private read-only tmpfs mounts rather than exposing their
-host temporary sources.
+or verified owner-only empty-directory masks, both limited to strict workspace
+descendants. Turn masks must lie beneath the allocation's canonical private
+temporary directory that Claude receives as `TMPDIR`; directory-free probes
+use the canonical runtime temporary root. Empty-directory masks are replaced
+by private read-only tmpfs mounts rather than exposing their host temporary
+sources.
 Exact workspace mounts of either kind and Git mounts, including redundant Git
 descendants, are replaced by Runner-owned mounts. Claude's same-path writable
 bind strictly inside the allocation's private temporary directory, overlapping
@@ -4365,9 +4367,16 @@ Commands receive an empty, read-only HOME/config projection with private
 namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
-filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v4` and
-`claude-command-boundary-v11`. Old receipts cannot authorize the new policy.
+filter's temporary files belong to the same allocation. New allocations live
+beneath the fixed platform temporary location without consulting ambient
+temporary variables, as Codex workspace storage does. This keeps the provider
+`TMPDIR` short enough for the Unix sockets Claude binds there: Linux socket
+paths hold at most 108 bytes including the terminator, and a nested ambient
+temporary root left no room for a bridge socket name. Recorded allocation
+roots, including earlier ambient ones, still recover and clean up unchanged.
+Probes exercise the projection launcher too; the contract revisions are
+`claude-isolation-v4` and `claude-command-boundary-v11`. Old receipts cannot
+authorize the new policy.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`
