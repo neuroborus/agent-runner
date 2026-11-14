@@ -1245,8 +1245,8 @@ workspace-write, and local-commit access plus a provider response before
 dependent provider work continues.
 
 The slow `test/agents/claude-native-policy.slow.test.js` suite owns the
-model-free reproduction of the Claude workspace-write native permission policy
-through the installed CLI. Enable it explicitly on the host with
+model-free reproduction of the Claude native permission policy and workspace
+staging through the installed CLI. Enable it explicitly on the host with
 `AGENT_RUNNER_NATIVE_CLAUDE=1 npm run test:slow -- test/agents/claude-native-policy.slow.test.js`.
 It is operator-owned native-platform acceptance: the Runner-trusted executor's
 outer isolation does not provide the nested Claude sandbox required by this test.
@@ -1255,11 +1255,17 @@ acceptance. When enabled, it skips only on non-Linux hosts or when `claude` or
 `bwrap` is absent from `PATH`; unavailable workspace-write isolation and any
 other preflight or protocol failure still fail. Every turn runs through the real
 adapter probe, generated settings, authenticated launcher, and stream
-normalization against an owned Git repository, configuration directory,
-synthetic key, and loopback Messages stub that scripts tool calls and refuses
-every other request. Claude receives only a fixture-owned environment; seeded
-conflicting host provider routing, authentication, header and proxy settings
-must never reach a Claude invocation. Only baseline turns replace the generated
+normalization against an owned Git repository or ordinary directory,
+configuration directory, synthetic key, and loopback Messages stub that scripts
+tool calls and refuses every other request. Scripted Bash requests explicitly
+disable background execution, and each turn is awaited before snapshots.
+Owned-process supervision bounds each turn with a deadline and test
+cancellation; interruption fails independently of any later adapter error.
+Fixture cleanup requires verified retirement of every registered process;
+otherwise it retains the fixture and fails. Claude receives only a
+fixture-owned environment; seeded conflicting host provider routing,
+authentication, header and proxy settings must never reach a Claude invocation.
+Only baseline turns replace the generated
 settings with the superseded workspace policy: a subcommand-rule refusal of
 ordinary inspection must end as terminal unclassified Bash, script-driven
 content work outside Claude's accept-edits fast path must receive a terminal
@@ -1268,7 +1274,22 @@ root-relative rule and reach a classifier decision. Corrected turns must admit
 Git inspection, fast-path filesystem work and script-driven content work without
 a permission denial, deny an absolute Git-metadata `Write` without a classifier
 decision, and admit direct Bash writes to Git `HEAD` and `config` without a
-native denial so each returns a command-sandbox permission error. Claude may
+native denial so each returns a command-sandbox permission error. Neither
+corrected multi-command Git turn may create `.claude` in the workspace.
+Read-only ordinary-directory sources initially lack staging and have either
+synthetic instructions with `.claude/skills` linked to a canonical skill tree,
+or a sparse `.claude` control holding one ordinary file. The directory
+differential removes only `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR` from both
+launch environments. Without retention, a lone `pwd` leaves the source
+unchanged, but `pwd`, source `Read`, then another `pwd` must successfully
+complete all tools and the native turn before the adapter rejects source drift.
+Both control shapes must acquire an empty mode-0700 `.claude/.cc-writes` and
+a changed source/control snapshot. With retention, both control shapes must
+complete unchanged: both Bash commands still execute in the workspace, source
+`Read` succeeds, and source/control snapshots
+and root and `.claude` directory metadata remain unchanged, with no denial or
+unscripted request. Ordinary slow runs skip this differential; only an enabled
+host run proves the mechanism and its prevention for the candidate. Claude may
 still require separate native approval for sensitive Git commands, so the suite
 does not claim that every Git mutation reaches the sandbox; the effective access
 proof exercises those mutations directly. Every case leaves HEAD, refs, index,

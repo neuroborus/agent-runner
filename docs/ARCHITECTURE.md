@@ -4374,7 +4374,16 @@ staging initialization can create `.claude/.cc-writes` there before any sandboxe
 tool starts; a command-only projection cannot contain that earlier effect.
 `--add-dir` declares the real workspace, and fixed system instructions require
 absolute workspace paths for file tools and reading the applicable workspace
-instructions. Native profiles, authentication and session storage stay in their
+instructions. Before each sandboxed command Claude prepares staging under its
+session cwd. Without cwd retention it adopts a command's projected workspace cwd
+inside the declared root, so a later command creates an empty mode-0700
+`.claude/.cc-writes` in the workspace. Launches force
+`CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` in both the isolated process
+environment and inline settings, overriding inherited values, to return Claude
+to its private native startup directory after every command. The installed-CLI
+differential described in `docs/TESTING.md` proves this sequence and its
+prevention; a lone command does not reproduce it.
+Native profiles, authentication and session storage stay in their
 existing locations; continuation and forks still select the exact native session
 ID. Native startup and workspace roots both receive read-only command-preparation
 reservations. Projections discard self-mounts of owned startup content and
@@ -4396,8 +4405,8 @@ paths hold at most 108 bytes including the terminator, and a nested ambient
 temporary root left no room for a bridge socket name. Recorded allocation
 roots, including earlier ambient ones, still recover and clean up unchanged.
 Probes exercise the projection launcher too; the contract revisions are
-`claude-isolation-v4` and `claude-command-boundary-v11`. Old receipts cannot
-authorize the new policy.
+`claude-isolation-v5` and `claude-command-boundary-v12`. These identities bind
+the complete policy including cwd retention; old receipts cannot authorize it.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`

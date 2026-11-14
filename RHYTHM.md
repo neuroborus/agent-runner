@@ -7,6 +7,24 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Claude retains its private native cwd between sandboxed commands.** A
+  read-only audit acquired an empty mode-0700 `.claude/.cc-writes` in its
+  source; the original creating process remains unknown. The qualified
+  installed-CLI differential reproduced staging after `pwd`, source `Read`,
+  and another `pwd` in both linked-skills and sparse controls, while a lone
+  command left the source unchanged. Claude adopts the projected Bash cwd
+  inside its declared workspace root, then prepares later commands there.
+  The earlier hypothesis that `--add-dir` alone creates staging was falsified;
+  removing the declared workspace is not the repair. Launches now force the
+  documented `CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` in both process and
+  settings environments, keeping staging in private native storage while
+  preserving source Read, Bash workspace execution and existing isolation.
+  No source placeholder, ignore exception, baseline rebinding or cleanup
+  hides drift. Fresh `claude-isolation-v5` and `claude-command-boundary-v12`
+  receipts bind the complete policy; incompatible historical receipts remain
+  rejected without renewal. Final integrated-source native acceptance remains
+  a separate operator gate before installation.
+
 - **Capability reports carry structured provenance.** Producer instructions
   already assigned reports to the ordinary Worker `FINALIZE` or the selected
   trusted executor, but a report could not say which executor it described. A

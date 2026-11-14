@@ -170,7 +170,9 @@ Claude owns its tool HOME/config projections, launcher, and temporary
 scaffolding outside project/task trees. Native startup also uses the owned
 allocation so atomic `.claude/.cc-writes` initialization precedes tools without
 changing an audited source. The real workspace remains an explicit tool directory;
-file tools use absolute workspace paths and sandboxed Bash starts there. Missing
+file tools use absolute workspace paths and sandboxed Bash starts there.
+Launches return Claude to its private native startup directory after each
+command so per-command staging stays outside the workspace. Missing
 optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
 provider authentication, profiles, and native sessions retain their own access.
 Both native and fallback policy receipts bind this lifecycle. A receipt from an

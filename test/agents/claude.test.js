@@ -3705,7 +3705,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v4",
+      "claude-isolation-v5",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -4064,7 +4064,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v11",
+      "claude-command-boundary-v12",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -4531,7 +4531,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v11",
+        "claude-command-boundary-v12",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -5065,6 +5065,7 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
     env: {
       ...process.env,
       ANTHROPIC_API_KEY: "provider-token",
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
       CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
       CLAUDE_ENV_FILE: "/tmp/agent-env.sh",
       DISABLE_AUTO_COMPACT: "1",
@@ -5111,6 +5112,7 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
   assert.ok(!turn.argumentsList.includes("--fallback-model"));
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.disableBypassPermissionsMode, "disable");
+  assert.equal(settings.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
   assert.deepEqual(settings.fallbackModel, []);
   assert.deepEqual(settings.attribution, {
     commit: "",
@@ -5152,6 +5154,7 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
   assert.equal(turn.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, undefined);
   assert.equal(turn.options.env.DISABLE_AUTO_COMPACT, undefined);
   assert.equal(turn.options.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
+  assert.equal(turn.options.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
   assert.equal(turn.options.env.CLAUDE_CODE_AUTO_CONNECT_IDE, "false");
   assert.equal(turn.options.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "0");
   assert.equal(turn.options.env.CLAUDE_ENV_FILE, undefined);

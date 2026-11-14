@@ -549,6 +549,7 @@ function isolateProcessEnvironment(value) {
     }
   }
   environment.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS = "1";
+  environment.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
   environment.CLAUDE_CODE_AUTO_CONNECT_IDE = "false";
   environment.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "0";
   return Object.freeze(environment);
@@ -730,6 +731,9 @@ function cliSettings(
     disableBypassPermissionsMode: "disable",
     env: {
       CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
+      // Keep per-command .claude/.cc-writes preparation in the private native
+      // cwd instead of adopting Bash's projected workspace cwd via --add-dir.
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1",
       CLAUDE_CODE_AUTO_CONNECT_IDE: "false",
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
     },
@@ -1493,8 +1497,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v11"
-              : "claude-isolation-v4",
+              ? "claude-command-boundary-v12"
+              : "claude-isolation-v5",
             policies: resolvedPolicies,
             version: version.text,
           }),
