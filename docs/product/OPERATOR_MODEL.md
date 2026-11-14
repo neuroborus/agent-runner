@@ -19,6 +19,11 @@ It grants no writable replay, additional fix budget or approval. Resolve a
 validated environment blocker before resuming; unsafe drift or contamination
 retains its existing stop. See the
 [execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+Polishing applies the same rule to a finding-resolution report in independent
+and combined modes: `resolution_output_invalid` means its one automatic
+read-only restatement was consumed, and resuming that checkpoint authorizes one
+further read-only restatement. See the
+[polishing recovery contract](../../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
 
 ## Local application artifacts
 

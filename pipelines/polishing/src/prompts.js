@@ -193,6 +193,9 @@ For BLOCKED, use only for external environment constraints affecting work not de
 For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.`;
 
+export const RESOLUTION_CORRECTION_INSTRUCTIONS = `Finding-resolution report restatement: the structured report of the finding-resolution turn above was rejected or lost after the runner reconciled its repository effects. This turn is repository-read-only and replaces only that report. It overrides any instruction above to modify content: do not edit files, change the index or Git state, run validation, tests, or the finalization procedure, or repair anything.
+Restate the original turn from current repository content and the runner facts above. Preserve its factual claims and any uncertainty. Return only a FIX or DISPUTE disposition the original work supports; never invent a disposition or acceptance to advance. Return BLOCKED with bounded reason and evidence for an external environment constraint or when the original dispositions cannot be established safely. Satisfy every listed field-and-constraint diagnostic; do not quote a rejected report.`;
+
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider each disputed finding from the current repository evidence and the Worker's evidence.
 
 Do not modify the repository. Withdraw an incorrect finding; uphold a valid one. Return exactly one decision for every dispute with reason and optional evidence.

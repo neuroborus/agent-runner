@@ -522,6 +522,48 @@ test("pipeline pause projections expose only applicable response and resume acti
     [{ type: "resume", action: null }],
   );
 
+  const restatementState = {
+    findings: [{ id: "R1" }],
+    findingOverrides: [],
+    settings: { mode: "independent" },
+  };
+  const exhaustedRestatement = polishingPause(
+    pausedRun(
+      {
+        reason: "resolution_output_invalid",
+        code: "ERR_INVALID_POLISHING_OUTPUT",
+        explanation: "Retained explanation.",
+        evidence: [
+          "Worker field decisions[0].reason violated nonempty-plain-text-up-to-4000-characters.",
+        ],
+        resumeState: "RESOLVE_FINDINGS",
+      },
+      {
+        ...restatementState,
+        resolutionCorrection: { stage: "exhausted", additionalAttempts: 0 },
+      },
+    ),
+  );
+  assert.deepEqual(exhaustedRestatement.evidence, [
+    "Worker field decisions[0].reason violated nonempty-plain-text-up-to-4000-characters.",
+  ]);
+  assert.equal(exhaustedRestatement.resumeState, "RESOLVE_FINDINGS");
+  assert.deepEqual(exhaustedRestatement.nextActions, [
+    { type: "resume", action: null },
+  ]);
+  assert.deepEqual(
+    polishingPause(
+      pausedRun(
+        { reason: "environment_blocked", resumeState: "RESOLVE_FINDINGS" },
+        {
+          ...restatementState,
+          resolutionCorrection: { stage: "blocked", additionalAttempts: 0 },
+        },
+      ),
+    ).nextActions,
+    [{ type: "resume", action: null }],
+  );
+
   assert.deepEqual(
     executionPause(
       pausedRun(

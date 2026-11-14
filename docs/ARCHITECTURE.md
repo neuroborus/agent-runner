@@ -4579,6 +4579,21 @@ commits, or replaces a mode-required gate. The owning
 [execution specification](../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery)
 defines the checkpoint and pause contract.
 
+Polishing owns finding-resolution report recovery in its own workflow and
+contract without importing execution internals. Polishing state version 20 adds
+nullable `resolutionCorrection`; the version-19 migration initializes absence
+without inferring recovery evidence or changing terminal history. In independent
+and combined modes, each original `RESOLVE_FINDINGS` turn reserves the
+checkpoint atomically with its active turn. A returned report first publishes
+the reconciled candidate binding, approval invalidation and any single fix
+charge, keeping its blockers at `RESOLVE_FINDINGS`, before the turn retires.
+Invalid, lost or interrupted reports receive one durably consumed fresh
+read-only restatement; repeated invalid or lost output pauses
+`resolution_output_invalid`, and explicit null resume authorizes exactly one
+further read-only attempt. Lazy mode keeps its existing resolution contract. The
+owning [polishing specification](../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery)
+defines the checkpoint and pause contract.
+
 Plan execution also owns lazy structured-output recovery. Provider and
 deterministic checkpoint failures are reduced to bounded diagnostics, then one
 fresh Worker session receives the complete durable checkpoint request with its

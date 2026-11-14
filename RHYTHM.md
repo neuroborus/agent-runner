@@ -5,6 +5,25 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-14
+
+- **Polishing restates invalid finding-resolution reports read-only.** A
+  rejected finding-resolution reason terminally failed a polishing run after
+  its writable work was already done. The rejected value and its historical
+  cause remain unknown. The demonstrated defects were an undiscoverable reason
+  rule, a rejection without a field diagnostic, and no safe way to recover the
+  report. The reason rule and positional diagnostics landed first. State
+  version 20 now reserves each original independent or combined resolution
+  turn in a strict checkpoint. Its reconciled effects, approval invalidation
+  and single fix charge publish before the report is settled. An invalid, lost
+  or interrupted report gets one fresh, durably consumed read-only restatement
+  that may not edit, validate or invent dispositions. Exhaustion and blocked
+  restatements stop with an explicit null retry for exactly one further
+  read-only attempt. Writable work is never replayed and no allowance is
+  renewed. Lazy mode, legacy checkpoints and historical `FAILED` and `DONE`
+  runs keep their existing contracts, and every convergence, review,
+  finalization and handoff gate is unchanged.
+
 ## 2026-11-13
 
 - **Validation ownership separates development work from reserved checks.**

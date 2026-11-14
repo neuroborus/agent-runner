@@ -207,9 +207,15 @@ for (const mode of ["independent", "lazy"]) {
       runtime: fixture.runtime,
       operatorStop: true,
     });
+    // Independent finding resolution retains its blockers in a ready report
+    // checkpoint; resume restates the report instead of replaying the repair.
     assert.equal(
       reconciled.pipelineState.workflowState,
-      mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+      mode === "lazy" ? "CHECK_AND_FIX" : "RESOLVE_FINDINGS",
+    );
+    assert.equal(
+      reconciled.pipelineState.resolutionCorrection?.stage,
+      mode === "lazy" ? undefined : "ready",
     );
     assert.equal(reconciled.counters.fixRounds, before.counters.fixRounds + 1);
     assert.equal(reconciled.pipelineState.finalizationResult, null);

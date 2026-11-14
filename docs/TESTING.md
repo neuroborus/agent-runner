@@ -217,6 +217,13 @@ null retry through a reopened run store: its bounded candidate-review diagnostic
 and the latest accepted changed and unchanged check/fix summaries in the next
 primary requests and saved state.
 
+Fast polishing `resolution-correction` owns finding-resolution report recovery
+in independent and combined modes: one fresh read-only restatement after an
+invalid, lost or interrupted report, once-only fix charges, operator-stop
+settlement, blocked, product-decision, drift and exhaustion stops, and the
+explicit null retry. `contracts-and-migrations` owns the version-20 checkpoint
+validator, migration and diagnostic allowlist.
+
 Fast `test/git/repository-safety.test.js` owns the read-only snapshot-change
 label normalizer and real-Git `readOnlyChanges` classification;
 `test/state/persistence.test.js` owns durable label validation, including

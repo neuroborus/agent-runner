@@ -1281,6 +1281,7 @@ test("accounts for a content-changing interrupted correction before recovery", a
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1299,17 +1300,28 @@ test("accounts for a content-changing interrupted correction before recovery", a
     },
   });
 
+  // The lost report retains its charged checkpoint and is restated read-only.
   const interruptedRun = await fixture.run();
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.counters.fixRounds, 1);
   assert.equal(interruptedRun.pipelineState.pendingCorrection, true);
+  assert.equal(
+    interruptedRun.pipelineState.resolutionCorrection.stage,
+    "ready",
+  );
 
   await fixture.recover();
   const resumed = await fixture.run();
   assert.equal(resumed.pause.reason, "no_progress");
   assert.equal(resumed.counters.fixRounds, 1);
   assert.equal(resumed.counters.correctionRounds, 1);
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ schema }) => schema === FINDING_RESOLUTION_SCHEMA)
+      .map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
 });
 
 test("invalidates retained finalization after content-changing interrupted terminal resolution", async (t) => {
@@ -1328,6 +1340,7 @@ test("invalidates retained finalization after content-changing interrupted termi
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1349,7 +1362,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   const interruptedRun = await fixture.run();
 
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.pipelineState.finalizationResult, null);
 
   await fixture.recover();
@@ -1363,7 +1376,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   );
 });
 
-test("clears a reconciled correction marker without replaying the turn", async (t) => {
+test("clears a legacy reconciled correction marker without replaying the turn", async (t) => {
   const processLoss = new Error(
     "Process stopped after correction reconciliation.",
   );
@@ -1398,7 +1411,24 @@ test("clears a reconciled correction marker without replaying the turn", async (
     if (processStopped) {
       throw processLoss;
     }
-    const next = await transition(patch, options);
+    const ready = patch.pipelineState.resolutionCorrection?.stage === "ready";
+    // Persist the version-19 shape: reconciliation already entered REVIEW
+    // and no report checkpoint exists for the retained turn marker.
+    const next = await transition(
+      ready
+        ? {
+            ...patch,
+            pipelineState: {
+              ...patch.pipelineState,
+              workflowState: "REVIEW",
+              previousFindings: patch.pipelineState.findings,
+              findings: [],
+              resolutionCorrection: null,
+            },
+          }
+        : patch,
+      options,
+    );
     if (
       next.activeTurn?.phase === "resolve-findings" &&
       next.pipelineState.workflowState === "REVIEW" &&

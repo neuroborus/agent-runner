@@ -392,16 +392,17 @@ test("pauses guidance-changing finding resolution before charging its round", as
   assert.equal(paused.pause.reason, "finalization_skill_invalid");
   assert.equal(paused.pause.code, "ERR_FINALIZATION_GUIDANCE_CHANGED");
   assert.equal(paused.counters.fixRounds, 0);
+  // The unreconciled resolution turn keeps its reservation and blockers.
   assert.deepEqual(
-    paused.pipelineState.previousFindings.map(({ id }) => id),
+    paused.pipelineState.findings.map(({ id }) => id),
     ["R1"],
   );
-  const baseline = paused.pipelineState.repositoryBaseline;
-  const current = await fixture.runtime.git.snapshot({
-    allowedPaths: baseline.allowedPaths,
-    projectPath: baseline.projectPath,
-  });
-  assert.equal(baseline.contentFingerprint, current.contentFingerprint);
+  const correction = paused.pipelineState.resolutionCorrection;
+  assert.equal(correction.stage, "invoking");
+  assert.equal(
+    paused.pipelineState.repositoryBaseline.contentFingerprint,
+    correction.beforeFingerprint,
+  );
 });
 
 test("corrects one invalid lazy candidate check before finalization", async (t) => {

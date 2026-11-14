@@ -122,6 +122,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "reviewReconsideration",
   "additionalFixRounds",
   "findingOverrides",
+  "resolutionCorrection",
 ]);
 const PENDING_EDIT_FIELDS = new Set([
   "schemaVersion",
@@ -281,6 +282,8 @@ const LAZY_CORRECTION_FIELDS = Object.freeze([
   "validationInfrastructureFingerprint",
   "diagnostics",
 ]);
+export const RESOLUTION_OUTPUT_RETRY_EXPLANATION =
+  "The bounded read-only finding-resolution report restatement remains invalid or was lost. Resume this checkpoint to authorize one further read-only restatement; reconciled work and blockers are preserved.";
 export const LAZY_OUTPUT_RETRY_EXPLANATION =
   "The bounded automatic lazy checkpoint correction remains invalid. Retry the same correction after the backend can satisfy the unchanged contract.";
 const EDIT_PAUSE_REASONS = Object.freeze({
@@ -350,6 +353,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
   review_output_invalid: Object.freeze(["REVIEW"]),
   lazy_output_invalid: Object.freeze(["CHECK_AND_FIX", "CLEAN_CONFIRM"]),
+  resolution_output_invalid: Object.freeze(["RESOLVE_FINDINGS"]),
   fix_limit_reached: Object.freeze([
     "POLISH",
     "CHECK_AND_FIX",
@@ -2652,6 +2656,245 @@ export function normalizeResolutionResult(payload, blockers, nonDisputableIds) {
   return Object.freeze({ status: payload.status, decisions });
 }
 
+export const RESOLUTION_CORRECTION_CHECKPOINT =
+  "resolve-findings:read-only:finding-resolution-correction";
+export const INTERRUPTED_RESOLUTION_DIAGNOSTIC = Object.freeze({
+  field: "result",
+  constraint: "interrupted-response",
+});
+const RESOLUTION_CORRECTION_FIELDS = Object.freeze([
+  "schemaVersion",
+  "stage",
+  "access",
+  "blockers",
+  "nonDisputableIds",
+  "budgetExhausted",
+  "beforeFingerprint",
+  "contentChanged",
+  "candidate",
+  "fixRoundsBefore",
+  "fixCharged",
+  "attempts",
+  "additionalAttempts",
+  "diagnostics",
+  "productDecision",
+]);
+// The candidate binds the reconciled snapshot fields compared for workspace
+// control drift, its content, and the established validation infrastructure.
+export const RESOLUTION_CANDIDATE_REPOSITORY_FIELDS = Object.freeze([
+  "projectPath",
+  "head",
+  "branch",
+  "detached",
+  "refsFingerprint",
+  "remoteConfigurationFingerprint",
+  "identityFingerprint",
+  "indexFingerprint",
+  "contentFingerprint",
+]);
+const RESOLUTION_CORRECTION_STAGES = Object.freeze([
+  "invoking",
+  "ready",
+  "correcting",
+  "exhausted",
+  "blocked",
+]);
+const RESOLUTION_DIAGNOSTIC_CONSTRAINTS = new Set([
+  "object",
+  "exact-field-set",
+  "maximum-2-mebibytes",
+  "serializable-json",
+  "resolution-status",
+  "empty-array",
+  "empty-string",
+  "nonempty-plain-text-up-to-4000-characters",
+  "array-up-to-32-items",
+  "nonempty-array-up-to-32-items",
+  "array-up-to-16-items",
+  "fix-or-dispute",
+  "current-blocker-id",
+  "disputable-blocker-only",
+  "every-current-blocker-exactly-once",
+  "semantic-contract",
+]);
+const RESOLUTION_DIAGNOSTIC_FIELD_PATTERN =
+  /^(?:result|status|decisions|reason|question|whyBlocked|options|evidence|options\[(?:[0-9]|1[0-5])\]|evidence\[(?:[0-9]|[12][0-9]|3[01])\]|decisions\[(?:[0-9]|[12][0-9]|3[01])\](?:\.(?:id|decision|reason|evidence(?:\[(?:[0-9]|[12][0-9]|3[01])\])?))?)$/u;
+
+// Durable correction diagnostics admit only source-defined resolution field
+// identities, bounded positions and constraints; anything else is reduced.
+export function resolutionCorrectionDiagnostic(value) {
+  if (
+    isRecord(value) &&
+    value.field === INTERRUPTED_RESOLUTION_DIAGNOSTIC.field &&
+    value.constraint === INTERRUPTED_RESOLUTION_DIAGNOSTIC.constraint
+  ) {
+    return INTERRUPTED_RESOLUTION_DIAGNOSTIC;
+  }
+  return isRecord(value) &&
+    typeof value.field === "string" &&
+    RESOLUTION_DIAGNOSTIC_FIELD_PATTERN.test(value.field) &&
+    RESOLUTION_DIAGNOSTIC_CONSTRAINTS.has(value.constraint)
+    ? Object.freeze({ field: value.field, constraint: value.constraint })
+    : Object.freeze({ field: "result", constraint: "semantic-contract" });
+}
+
+// A pure classifier for the strict normalizer: an empty batch means the
+// report is valid; an invalid one yields only its reduced diagnostic.
+export function classifyResolutionResult(payload, checkpoint) {
+  try {
+    normalizeResolutionResult(
+      payload,
+      checkpoint.blockers,
+      new Set(checkpoint.nonDisputableIds),
+    );
+    return Object.freeze([]);
+  } catch (cause) {
+    if (cause?.code !== INVALID_OUTPUT_CODE) throw cause;
+    return Object.freeze([resolutionCorrectionDiagnostic(cause.diagnostic)]);
+  }
+}
+
+export function resolutionBlockers(state) {
+  return state.finalizationResult?.status === "FAIL"
+    ? state.finalizationResult.issues.map((issue) => ({
+        ...issue,
+        source: "finalization",
+      }))
+    : state.findings.map((finding) => ({ ...finding, source: "review" }));
+}
+
+export function resolutionNonDisputableIds(
+  state,
+  blockers = resolutionBlockers(state),
+) {
+  const blockerIds = new Set(blockers.map(({ id }) => id));
+  return [
+    ...new Set([
+      ...state.findingArbitrations
+        .filter(
+          ({ findingId, direction }) =>
+            blockerIds.has(findingId) && direction === "REVIEWER_CORRECT",
+        )
+        .map(({ findingId }) => findingId),
+      ...Object.entries(state.disputeCounts)
+        .filter(
+          ([findingId, count]) =>
+            blockerIds.has(findingId) &&
+            count >= state.settings.maxDisputesPerFinding,
+        )
+        .map(([findingId]) => findingId),
+    ]),
+  ];
+}
+
+function validResolutionProductDecision(value) {
+  if (
+    !hasExactFields(value, ["decision", "number", "expectedHash", "resultHash"])
+  )
+    return false;
+  try {
+    return (
+      hasExactFields(value.decision, [
+        "question",
+        "options",
+        "whyBlocked",
+        "evidence",
+      ]) &&
+      isDeepStrictEqual(
+        normalizeProductDecision(value.decision),
+        value.decision,
+      ) &&
+      Number.isSafeInteger(value.number) &&
+      value.number >= 1 &&
+      HASH_PATTERN.test(value.expectedHash) &&
+      (value.resultHash === null ||
+        (HASH_PATTERN.test(value.resultHash) &&
+          value.resultHash !== value.expectedHash))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validResolutionCorrection(state) {
+  const value = state.resolutionCorrection;
+  if (value === null) return true;
+  const hash = (entry) => typeof entry === "string" && HASH_PATTERN.test(entry);
+  const count = (entry) => Number.isSafeInteger(entry) && entry >= 0;
+  if (
+    !hasExactFields(value, RESOLUTION_CORRECTION_FIELDS) ||
+    value.schemaVersion !== 1 ||
+    !polishingPolicy(state.settings).independentReview ||
+    !["RESOLVE_FINDINGS", "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+      state.workflowState,
+    ) ||
+    !RESOLUTION_CORRECTION_STAGES.includes(value.stage) ||
+    typeof value.budgetExhausted !== "boolean" ||
+    value.access !==
+      (value.budgetExhausted ? "read-only" : "workspace-write") ||
+    !isDeepStrictEqual(value.blockers, resolutionBlockers(state)) ||
+    !isDeepStrictEqual(
+      value.nonDisputableIds,
+      resolutionNonDisputableIds(state),
+    ) ||
+    !hash(value.beforeFingerprint) ||
+    !count(value.fixRoundsBefore) ||
+    typeof value.fixCharged !== "boolean" ||
+    !count(value.attempts) ||
+    !count(value.additionalAttempts) ||
+    !Number.isSafeInteger(value.additionalAttempts + 1) ||
+    value.attempts !==
+      value.additionalAttempts +
+        (["invoking", "ready"].includes(value.stage) ? 0 : 1) ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS ||
+    value.diagnostics.some(
+      (diagnostic) =>
+        !hasExactFields(diagnostic, ["field", "constraint"]) ||
+        !isDeepStrictEqual(diagnostic, {
+          ...resolutionCorrectionDiagnostic(diagnostic),
+        }),
+    ) ||
+    (["correcting", "exhausted", "blocked"].includes(value.stage) &&
+      value.diagnostics.length === 0) ||
+    (value.productDecision !== null &&
+      (!["ready", "correcting"].includes(value.stage) ||
+        !validResolutionProductDecision(value.productDecision)))
+  ) {
+    return false;
+  }
+  if (value.stage === "invoking") {
+    return (
+      value.contentChanged === null &&
+      value.candidate === null &&
+      !value.fixCharged &&
+      value.attempts === 0 &&
+      value.diagnostics.length === 0 &&
+      // A classified retry keeps the round's content after a charged partial write.
+      (state.repositoryBaseline?.contentFingerprint ===
+        value.beforeFingerprint ||
+        (value.access === "workspace-write" && state.pendingCorrection))
+    );
+  }
+  const candidate = value.candidate;
+  return (
+    typeof value.contentChanged === "boolean" &&
+    hasExactFields(candidate, [
+      ...RESOLUTION_CANDIDATE_REPOSITORY_FIELDS,
+      "validationInfrastructureFingerprint",
+    ]) &&
+    hash(candidate.validationInfrastructureFingerprint) &&
+    RESOLUTION_CANDIDATE_REPOSITORY_FIELDS.every(
+      (field) => candidate[field] === state.repositoryBaseline?.[field],
+    ) &&
+    value.contentChanged ===
+      (candidate.contentFingerprint !== value.beforeFingerprint) &&
+    (!value.fixCharged || value.contentChanged) &&
+    (!value.contentChanged ||
+      (value.access === "workspace-write" && state.pendingCorrection))
+  );
+}
+
 export function normalizeReconsiderationResult(payload, disputes) {
   assertExactFields(
     payload,
@@ -4703,6 +4946,9 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Polishing state has not completed preflight.");
   }
+  if (!validResolutionCorrection(value)) {
+    throw workflowError("Polishing finding-resolution correction is invalid.");
+  }
   return value;
 }
 
@@ -4794,6 +5040,7 @@ export function createPolishingState({
       reviewReconsideration: [],
       additionalFixRounds: 0,
       findingOverrides: [],
+      resolutionCorrection: null,
     }),
   );
 }
@@ -4923,7 +5170,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 19 ||
+    run.pipelineStateVersion !== 20 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5162,6 +5409,42 @@ export function assertRun(run) {
         throw workflowError("Polishing lazy output pause is invalid.");
       }
     }
+    const correction = state.resolutionCorrection;
+    if (
+      run.pause.reason === "resolution_output_invalid" &&
+      (correction?.stage !== "exhausted" ||
+        !hasExactFields(run.pause, [
+          "reason",
+          "code",
+          "explanation",
+          "evidence",
+          "resumeState",
+        ]) ||
+        run.pause.code !== INVALID_OUTPUT_CODE ||
+        run.pause.explanation !== RESOLUTION_OUTPUT_RETRY_EXPLANATION ||
+        !isDeepStrictEqual(
+          run.pause.evidence,
+          correction.diagnostics.map(
+            ({ field, constraint }) =>
+              `Worker field ${field} violated ${constraint}.`,
+          ),
+        ) ||
+        run.pause.resumeState !== "RESOLVE_FINDINGS")
+    ) {
+      throw workflowError("Polishing resolution output pause is invalid.");
+    }
+    if (
+      (run.pause.reason === "environment_blocked" &&
+        correction?.stage === "blocked" &&
+        run.pause.resumeState !== "RESOLVE_FINDINGS") ||
+      (run.pause.reason === "output_exhausted" &&
+        run.pause.checkpoint === RESOLUTION_CORRECTION_CHECKPOINT &&
+        (correction?.stage !== "correcting" ||
+          correction.productDecision !== null ||
+          run.pause.role !== "worker"))
+    ) {
+      throw workflowError("Polishing resolution correction pause is invalid.");
+    }
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
@@ -5184,9 +5467,12 @@ export function assertRun(run) {
       ? PAUSE_RESUME_STATES[run.pause.reason]
       : undefined;
     const requiresResumeState =
-      ["fix_limit_reached", "lazy_output_invalid", "no_progress"].includes(
-        run.pause.reason,
-      ) ||
+      [
+        "fix_limit_reached",
+        "lazy_output_invalid",
+        "no_progress",
+        "resolution_output_invalid",
+      ].includes(run.pause.reason) ||
       (state.preflightComplete &&
         [
           "authentication_required",
@@ -5271,6 +5557,18 @@ export function assertRun(run) {
     throw workflowError("Polishing input hashes are invalid.");
   }
   const counters = normalizedCounters(run.counters);
+  const correction = state.resolutionCorrection;
+  if (
+    correction !== null &&
+    (counters.fixRounds !==
+      correction.fixRoundsBefore + (correction.fixCharged ? 1 : 0) ||
+      (["exhausted", "blocked"].includes(correction.stage) &&
+        state.workflowState === "RESOLVE_FINDINGS"))
+  ) {
+    throw workflowError(
+      "Polishing resolution correction accounting is invalid.",
+    );
+  }
   const fixBudget =
     (state.settings?.maxFixRounds ?? 0) + state.additionalFixRounds;
   const correctionHistory = state.correctionHistory;

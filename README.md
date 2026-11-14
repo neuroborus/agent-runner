@@ -2060,6 +2060,13 @@ one additional read-only retry. It preserves earlier accepted work, blockers and
 fix accounting and still requires every original review and commit/result gate.
 See [writable result recovery](pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
 
+Polishing likewise preserves reconciled finding-resolution work after a
+malformed or lost report in independent and combined modes. One automatic
+read-only report restatement precedes `resolution_output_invalid`; explicit
+resume of that checkpoint authorizes one additional read-only retry without
+writable replay, additional fix budget or approval. See
+[finding-resolution result recovery](pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
+
 Action-free recovery uses the same leased runner path through CLI and MCP.
 CLI `resume --run <run-id> --expected-revision <revision>` can bind an inspected
 revision explicitly. An action-free process-proof failure retains its checkpoint,

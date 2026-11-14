@@ -628,12 +628,12 @@ original native-platform proof of concept nor those later implementations.
 
 Execution preserves candidate work when implementation or finding-resolution
 output fails its contract. Runner attempts one read-only result restatement;
-`writable_output_invalid` then offers explicit resume of that same checkpoint
-for exactly one additional read-only retry. Inspect the bounded diagnostic and
-current `nextActions`, then use `agent-run resume --run <run-id>` or the MCP
-null-action resume at the inspected revision. Do not ask a writable role to
-repeat the effect, edit state or infer a finding disposition. A validated
-`environment_blocked` result still requires resolving its stated blocker before
+`writable_output_invalid` or polishing's `resolution_output_invalid` then offers
+explicit resume of that checkpoint for one more read-only retry. Inspect the
+bounded diagnostic and current `nextActions`, then use
+`agent-run resume --run <run-id>` or the MCP null-action resume at the inspected
+revision. Do not ask a writable role to repeat the effect, edit state or infer a
+finding disposition. Resolve a validated `environment_blocked` blocker before
 resume. Candidate edits, input/configuration drift and read-only contamination
 retain their safety stops.
 All [review, correction and effect gates](product/VALIDATION_AND_REVIEW.md)

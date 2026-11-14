@@ -812,7 +812,8 @@ back after pre-bootstrap selection. Guidance is reverified before bootstrap,
 validation migration, finalization, every bounded correction, and resumed work.
 After a writable turn, the runner rechecks guidance against the safe resulting
 snapshot before reconciling output or charging a correction round. Drift
-persists that snapshot, invalidates stale gate evidence, and consumes no budget.
+persists that snapshot, invalidates stale gate evidence, and consumes no budget,
+except that a finding-resolution checkpoint retains its original baseline.
 Skill-less `PASS`, `FAIL`, and `BLOCKED` results carry no skill path.
 Finalization-generated content changes are permitted without invalidating the
 already accepted semantic candidate. Compute the content fingerprint after the
@@ -1074,6 +1075,105 @@ pause. Additional fix rounds do not reset history. One stagnation arbitration
 may direct further fixes, implementation rework, or Reviewer reconsideration;
 another complete blocked window pauses.
 
+#### Finding-resolution result recovery
+
+In independent and combined modes, every original `RESOLVE_FINDINGS` Worker
+turn, writable or read-only after budget exhaustion, publishes a strict
+`resolutionCorrection` checkpoint atomically with its active turn. It holds the
+validated blockers, non-disputable IDs, budget flag, original access, pre-turn
+content fingerprint, fix accounting, attempts, bounded diagnostics, and an
+optional product-decision intent; never a rejected value, exception text, or
+native output. Lazy mode creates no checkpoint and keeps its existing contract.
+
+A returned report, including a provider structured-output failure, is
+reconciled in one transition before its turn retires: the reconciled baseline;
+a `ready` checkpoint bound to that snapshot's content and Git controls and the
+established validation-infrastructure fingerprint; and, for changed content, the
+single fix charge, `pendingCorrection`, and invalidation of every dependent
+approval. The workflow stays at `RESOLVE_FINDINGS` with its blockers; the
+candidate move waits for settlement. A pure classifier retains only the strict
+normalizer's bounded diagnostic. Availability backoff, inactivity
+reconstruction, authentication, and output exhaustion keep their existing
+reconciliation, charging, and retry contracts and retire the checkpoint with
+their first transition; only an inactivity expiry proven during that invocation
+counts, never retained evidence of an earlier timeout. Terminal failures keep
+their existing failure. Any other recoverable failure lost the report: the same
+transition publishes `ready` with the fixed `result`/`interrupted-response`
+diagnostic, and `backend_unavailable` resumes into the restatement. An
+in-process classified retry reserves again from the round's pre-turn content,
+so an earlier charged partial write still settles as changed content.
+
+One helper settles original and restated reports with the existing routing: a
+required FIX after budget exhaustion pauses `fix_limit_reached`; changed content
+enters the mode's candidate checkpoint with recorded disputes and no further
+charge; an unchanged FIX enters it through the existing gate invalidation and is
+charged once unless already recorded; an unchanged dispute-only report records
+disputes at `RESOLVE_FINDINGS`. An original `BLOCKED` pauses
+`environment_blocked` at the candidate checkpoint when content changed,
+otherwise at `RESOLVE_FINDINGS`. Settlement clears the checkpoint, and
+convergence, review, finalization, terminal confirmation, and handoff are
+unchanged.
+
+An invalid or lost report is restated, never replayed. The runner persists the
+consumed `correcting` attempt, then invokes one fresh read-only Worker session
+at `resolve-findings:read-only:finding-resolution-correction` with the original
+request rebuilt from checkpoint facts, the restatement instructions, and the
+diagnostic batch. It may not edit, stage, validate, test, finalize, or repair;
+it preserves the original claims and uncertainty and returns only supported FIX
+or DISPUTE dispositions. Content, control, or validation-infrastructure drift
+from the candidate binding pauses `unsafe_git_state` before invocation and
+retains the checkpoint; frozen guidance and that binding are verified again
+before a returned report settles. Protected-input drift keeps its existing
+`task_input_changed` or `clarifications_changed` stop, and frozen-guidance
+drift keeps its new-run guidance stop; while a checkpoint exists, both retain
+it with the blockers, bindings, attempts, and counters. Guidance drift found
+while reconciling an unreported original turn retains its `invoking`
+checkpoint and original baseline without charging; an operator stop or a later
+recovery reconciles that turn as an interrupted original. Read-only
+contamination keeps `read_only_agent_mutated_repository`.
+
+Recovery handles a checkpoint before stagnation, budget, and legacy
+interrupted-turn rules. Only an inactivity expiry proven during the reserved
+original keeps its reconstruction contract. Any other ownerless `invoking`
+original may have consumed provider work: it is reconciled with workspace
+changes allowed only for its writable access, charged once, and published as
+`ready` with the fixed `result`/`interrupted-response` diagnostic. Until a
+returned response retires them, the restatement uses the original's unfinished
+availability or inactivity checkpoint, so owner loss never renews either
+allowance; a backoff pending there or at the restatement checkpoint before
+invocation resumes the consumed restatement, and a consumed reconstruction
+pauses `backend_unavailable`, whose explicit resume runs that consumed
+restatement. A diagnostic-free `ready` checkpoint, a valid report whose
+settlement was lost, receives the same diagnostic and is restated. A
+restatement whose turn is still recorded was invoked: unless that attempt's own
+first expiry was proven, it is lost and publishes `exhausted` before its turn
+retires, so retained availability evidence never reauthorizes it. Without a
+pending retry, an uncategorized `correcting` attempt is also lost. Operator
+stops reconcile without invoking an agent: a stopped original becomes `ready`
+at `RESOLVE_FINDINGS`, a stopped invoked restatement is lost in the same way,
+and other stages only verify the binding.
+
+A restated `BLOCKED` keeps the consumed `blocked` checkpoint and pauses
+`environment_blocked` with `RESOLVE_FINDINGS`; this is the supported stop when
+the original dispositions cannot be established. `PRODUCT_DECISION_REQUIRED`
+first persists the validated decision, number, and expected transcript hash.
+The append journals its exact resulting hash before replacement; recovery
+settles a pending intent from that hash before input inspection or role dispatch.
+Settlement first verifies the inputs, the repository, the candidate's
+validation-infrastructure binding, and frozen guidance; drift pauses and retains
+the intent and checkpoint without transcript mutation.
+Checkpoint retirement, counters, transcript hash, and editor authorization
+publish with the existing product-decision suspension.
+
+An invalid or lost restatement publishes `exhausted` with the
+`resolution_output_invalid` pause: `ERR_INVALID_POLISHING_OUTPUT`, a fixed
+explanation, `Worker field <field> violated <constraint>.` evidence, and
+`RESOLVE_FINDINGS`. Availability backoff, the shared inactivity allowance,
+authentication, and output exhaustion retry the same consumed attempt without
+recharging it. An explicit null resume of either checkpoint-bound pause persists
+one more consumed attempt before exactly one further read-only restatement; no
+resume runs writable resolution or renews the automatic allowance.
+
 #### Lazy check/fix and clean confirmation
 
 In lazy mode, polishing enters writable `CHECK_AND_FIX` before finalization and
@@ -1316,9 +1416,11 @@ domains: untracked-content.`; legacy, unclassified, or unknown labels report
 finalization evidence, and grants no approval, staging, or resume.
 `environment_blocked` retains why nondelegated work
 or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHECK_AND_FIX`, or
-`RESOLVE_FINDINGS` retry checkpoint. This read-only projection does not itself
-change the pipeline state version. The runner-owned handoff is represented by
-pipeline state version 5.
+`RESOLVE_FINDINGS` retry checkpoint. `resolution_output_invalid` exposes its
+bounded field-and-constraint evidence, `RESOLVE_FINDINGS`, and only the null
+retry; a blocked finding-resolution restatement offers only the same retry.
+This read-only projection does not itself change the pipeline state version.
+The runner-owned handoff is represented by pipeline state version 5.
 Missing, invalid, or changed frozen guidance exposes only a `start-new-run`
 action with the `resolved-finalization-guidance` requirement; it is not an
 environment-recovery retry.
@@ -1514,6 +1616,19 @@ structured-result byte ceiling.
 Expanded schemas retain strict Claude preflight and existing sandbox restrictions,
 without enabling `allowAllUnixSockets: true` or broader host access.
 
+Pipeline state version 20 adds the nullable `resolutionCorrection` checkpoint
+of finding-resolution result recovery. The version-19 migration only
+initializes it to `null`; it never moves a workflow, changes counters, revives
+`DONE` or `FAILED` runs, or infers a historical rejection. Legacy interrupted
+resolution turns without a checkpoint keep their existing continuation and
+operator-stop contracts. Validation requires independent or combined mode, a
+`RESOLVE_FINDINGS`, `WAITING_FOR_USER`, `FAILED`, or `CANCELED` position,
+blockers equal to the current findings or failed finalization, fix rounds equal
+to the pre-turn count plus the single charge, consistent stage and attempt
+arithmetic, a binding equal to the persisted baseline, matching pauses, and
+allowlisted diagnostics; unknown diagnostics reduce to
+`result`/`semantic-contract`.
+
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the
 same lease rules. A worktree conflict leaves the durable run and incomplete
@@ -1645,6 +1760,10 @@ semantics, and handoff behavior. Cover at least:
 - every supported legacy version migrating through state version 18 to safe
   candidate convergence while preserving paused and terminal runs without
   replaying `HANDOFF`;
+- finding-resolution report restatement in both independent-review modes:
+  invalid and lost reports, interrupted publication, operator stops, blocked
+  and product-decision outcomes, drift, exhaustion, explicit retry, and
+  once-only fix charges;
 - sandbox, IPC, loopback, process-isolation, missing-service, and permission
   blockers for nondelegated work, including fingerprint-aware preservation
   and resume while another command is selected for trusted execution;

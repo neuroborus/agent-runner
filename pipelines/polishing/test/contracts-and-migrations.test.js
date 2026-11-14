@@ -16,6 +16,7 @@ import {
   migratePolishingStateV14,
   migratePolishingStateV16,
   migratePolishingStateV17,
+  migratePolishingStateV19,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -30,6 +31,7 @@ import {
 import {
   assertRun,
   assertSettings,
+  classifyResolutionResult,
   createFinalizationGuidanceDecision,
   MAX_BOOTSTRAP_ITEMS,
   MAX_DURABLE_RUN_BYTES,
@@ -41,6 +43,7 @@ import {
   normalizeFinalizationResult,
   normalizePipelineState,
   normalizeResolutionResult,
+  resolutionCorrectionDiagnostic,
 } from "../src/workflow-contract.js";
 import {
   SETTINGS,
@@ -361,7 +364,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 19);
+  assert.equal(polishingPipeline.stateVersion, 20);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -467,10 +470,12 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 19,
-    pipelineState: migratePolishingStateV17({
-      pipelineState: migratePolishingStateV16({
-        pipelineState: migratePolishingStateV14(legacyPaused),
+    pipelineStateVersion: 20,
+    pipelineState: migratePolishingStateV19({
+      pipelineState: migratePolishingStateV17({
+        pipelineState: migratePolishingStateV16({
+          pipelineState: migratePolishingStateV14(legacyPaused),
+        }),
       }),
     }),
   };
@@ -2016,4 +2021,229 @@ test("finding-resolution reasons follow the strict plain-text contract", () => {
       },
     );
   }
+});
+
+async function exhaustedResolutionRun(t) {
+  const invalid = resolution("FIX", "R1");
+  invalid.decisions[0].reason = "";
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      invalid,
+      invalid,
+    ],
+  });
+  const run = await fixture.run();
+  assert.equal(run.pause.reason, "resolution_output_invalid");
+  return run;
+}
+
+test("version 20 migrates pending and terminal runs without inferring a report checkpoint", async (t) => {
+  const run = await exhaustedResolutionRun(t);
+  const completed = await (await createFixture(t)).run();
+  const pending = {
+    ...run.pipelineState,
+    workflowState: "RESOLVE_FINDINGS",
+    resolutionCorrection: null,
+  };
+  for (const state of [
+    pending,
+    { ...pending, workflowState: "FAILED" },
+    completed.pipelineState,
+  ]) {
+    const legacy = { ...state };
+    delete legacy.resolutionCorrection;
+    const migrated = migratePolishingStateV19({ pipelineState: legacy });
+    assert.deepEqual(migrated, state);
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => normalizePipelineState(migrated));
+  }
+  assert.throws(() => assertRun({ ...completed, pipelineStateVersion: 21 }));
+});
+
+test("finding-resolution correction checkpoints and pauses stay strictly bound", async (t) => {
+  const run = await exhaustedResolutionRun(t);
+  const correction = run.pipelineState.resolutionCorrection;
+  assert.equal(correction.stage, "exhausted");
+  assert.deepEqual(correction.diagnostics, [
+    {
+      field: "decisions[0].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+  ]);
+  assert.doesNotThrow(() => assertRun(run));
+  const withCorrection = (patch, pipelineState = {}) => ({
+    ...run,
+    pipelineState: {
+      ...run.pipelineState,
+      ...pipelineState,
+      resolutionCorrection: { ...correction, ...patch },
+    },
+  });
+  const decision = {
+    decision: {
+      question: "Which neutral variant applies?",
+      options: [],
+      whyBlocked: "Both variants remain valid.",
+      evidence: ["No repository convention selects one."],
+    },
+    number: 1,
+    expectedHash: hash("expected transcript"),
+    resultHash: null,
+  };
+  const correcting = (productDecision) =>
+    withCorrection(
+      { stage: "correcting", productDecision },
+      { workflowState: "RESOLVE_FINDINGS" },
+    ).pipelineState;
+  assert.doesNotThrow(() => normalizePipelineState(correcting(decision)));
+  const invoking = (patch = {}, pipelineState = {}) => ({
+    ...withCorrection(
+      {
+        stage: "invoking",
+        contentChanged: null,
+        candidate: null,
+        attempts: 0,
+        diagnostics: [],
+        ...patch,
+      },
+      { workflowState: "RESOLVE_FINDINGS", ...pipelineState },
+    ),
+    pause: null,
+  });
+  const earlierRound = { beforeFingerprint: hash("earlier round content") };
+  assert.doesNotThrow(() => assertRun(invoking()));
+  // A classified retry keeps the round's content after a charged partial write.
+  assert.doesNotThrow(() =>
+    assertRun(invoking(earlierRound, { pendingCorrection: true })),
+  );
+  for (const invalid of [
+    invoking(earlierRound),
+    invoking({ candidate: correction.candidate }),
+    invoking({ contentChanged: false }),
+    invoking({ diagnostics: correction.diagnostics }),
+    invoking({ attempts: 1, additionalAttempts: 1 }),
+  ]) {
+    assert.throws(() => assertRun(invalid), /resolution correction/u);
+  }
+  const lazy = {
+    ...run.pipelineState,
+    settings: { ...run.pipelineState.settings, mode: "lazy" },
+    backendVersions: { worker: run.pipelineState.backendVersions.worker },
+    reviewerSummary: null,
+    reviewerValidation: null,
+  };
+  assert.doesNotThrow(() =>
+    normalizePipelineState({ ...lazy, resolutionCorrection: null }),
+  );
+  assert.throws(
+    () => normalizePipelineState(lazy),
+    /finding-resolution correction is invalid/u,
+  );
+  for (const invalid of [
+    withCorrection({ schemaVersion: 2 }),
+    withCorrection({ unexpected: true }),
+    withCorrection({ stage: "unknown" }),
+    withCorrection({ stage: "ready" }),
+    withCorrection({ attempts: 2 }),
+    withCorrection({ fixCharged: true }),
+    withCorrection({ contentChanged: true }),
+    withCorrection({ access: "read-only" }),
+    withCorrection({ budgetExhausted: null }),
+    withCorrection({ budgetExhausted: 0 }),
+    withCorrection({ access: "read-only", budgetExhausted: 1 }),
+    withCorrection({ blockers: [] }),
+    withCorrection({ diagnostics: [] }),
+    withCorrection({
+      diagnostics: [{ field: "decisions[0].reason", constraint: "raw value" }],
+    }),
+    withCorrection({ productDecision: decision }),
+    {
+      ...withCorrection({}, { workflowState: "RESOLVE_FINDINGS" }),
+      pause: null,
+    },
+    { ...run, pause: { ...run.pause, evidence: [] } },
+    {
+      ...run,
+      pause: { ...run.pause, resumeState: "REVIEW" },
+    },
+    withCorrection({ stage: "blocked" }, {}),
+  ]) {
+    assert.throws(() => assertRun(invalid), /resolution|correction/u);
+  }
+  for (const productDecision of [
+    { ...decision, number: 0 },
+    { ...decision, resultHash: decision.expectedHash },
+    { ...decision, decision: { ...decision.decision, question: "" } },
+    { ...decision, unexpected: true },
+  ]) {
+    assert.throws(() => normalizePipelineState(correcting(productDecision)));
+  }
+  assert.throws(() =>
+    assertRun({
+      ...withCorrection({ stage: "blocked" }),
+      pause: {
+        reason: "environment_blocked",
+        explanation: "The report cannot be established.",
+        evidence: ["The repository lacks the original disposition."],
+        resumeState: "REVIEW",
+      },
+    }),
+  );
+});
+
+test("finding-resolution correction diagnostics keep only bounded source identities", () => {
+  for (const diagnostic of [
+    { field: "result", constraint: "interrupted-response" },
+    { field: "status", constraint: "resolution-status" },
+    {
+      field: "options[15]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    {
+      field: "decisions[31].evidence[31]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    { field: "decisions", constraint: "every-current-blocker-exactly-once" },
+  ]) {
+    assert.deepEqual(resolutionCorrectionDiagnostic(diagnostic), diagnostic);
+  }
+  for (const diagnostic of [
+    null,
+    {
+      field: "decisions[32].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    {
+      field: "options[16]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    { field: "summary", constraint: "empty-string" },
+    { field: "decisions[0].reason", constraint: "interrupted-response" },
+    { field: "result", constraint: "The provider rejected R7." },
+  ]) {
+    assert.deepEqual(resolutionCorrectionDiagnostic(diagnostic), {
+      field: "result",
+      constraint: "semantic-contract",
+    });
+  }
+  const facts = { blockers: [{ id: "R7" }], nonDisputableIds: [] };
+  const resolved = resolution("FIX", "R7");
+  assert.deepEqual(classifyResolutionResult(resolved, facts), []);
+  resolved.decisions[0].reason = "First line.\nSecond line.";
+  assert.deepEqual(classifyResolutionResult(resolved, facts), [
+    {
+      field: "decisions[0].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+  ]);
 });
