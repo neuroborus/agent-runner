@@ -4962,7 +4962,11 @@ retain their own reporting schemas, saved requests, migration, and pause policy;
 the capability owns normalization, frozen authority matching, and availability.
 Plan execution and polishing independently own reports in each active role's
 bootstrap or validation-migration inventory and inspect their union at every
-writable entry. Cached declaration preflight cannot bypass this gate. Execution
+writable entry. Polishing reports carry a closed `basis`; its union contains
+only `assigned-executor` and legacy basis-less saved reports, without the field,
+while saved `read-only-turn` observations describe the read-only turn rather
+than the assigned executor, stay unproved and are never admitted. Cached
+declaration preflight cannot bypass this gate. Execution
 also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
 before discovery or preparation and checks availability before new staging.
 Polishing state version 14 preserves historical handoff evidence while requiring

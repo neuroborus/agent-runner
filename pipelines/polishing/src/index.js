@@ -1158,7 +1158,7 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 20,
+  stateVersion: 21,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1185,6 +1185,8 @@ export const polishingPipeline = Object.freeze({
     // Preserve existing path/fallback decisions and consumed-effect evidence.
     18: (run) => Object.freeze({ ...run.pipelineState }),
     19: migratePolishingStateV19,
+    // Basis-less saved reports keep the admission they were accepted under.
+    20: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

@@ -10,6 +10,10 @@ const artifact = {
   },
   required: ["url", "sha256"],
 };
+// Provenance keeps read-only observations reviewable without admitting them
+// as needs of the assigned executor. Saved reports may predate it.
+const BASES = ["assigned-executor", "read-only-turn"];
+const basis = { type: "string", enum: BASES };
 export const CAPABILITY_REQUIREMENTS = {
   type: "array",
   maxItems: 256,
@@ -40,8 +44,15 @@ export const CAPABILITY_REQUIREMENTS = {
         maxItems: 16,
         items: { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$" },
       },
+      basis,
     },
-    required: ["command", "commandIdentity", "capabilities", "unsupported"],
+    required: [
+      "command",
+      "commandIdentity",
+      "capabilities",
+      "unsupported",
+      "basis",
+    ],
   },
 };
 export const ENVIRONMENT_BLOCKERS = {
@@ -54,8 +65,9 @@ export const ENVIRONMENT_BLOCKERS = {
       command: text,
       source: { type: "string", enum: ["agent-sandbox", "runner"] },
       evidence: { type: "array", minItems: 1, maxItems: 8, items: text },
+      basis,
     },
-    required: ["command", "source", "evidence"],
+    required: ["command", "source", "evidence", "basis"],
   },
 };
 const exact = (value, keys) =>
@@ -71,8 +83,20 @@ const plain = (value) =>
   value.trim() === value &&
   !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
 const bounded = (value, max) => Array.isArray(value) && value.length <= max;
+const reportFields = (value, keys, legacy) =>
+  exact(value, [...keys, "basis"])
+    ? BASES.includes(value.basis)
+    : legacy && exact(value, keys);
+const admitted = (report) =>
+  !Object.hasOwn(report, "basis") || report.basis === "assigned-executor";
 
-export function validCapabilityReports(value, checks, trustedCommands = []) {
+// Only persisted-state validation may pass legacy for basis-less saved reports.
+export function validCapabilityReports(
+  value,
+  checks,
+  trustedCommands = [],
+  { legacy = false } = {},
+) {
   const commands = new Set(checks.map(({ command }) => command));
   const commandIdentities = new Map(
     trustedCommands.map(({ command, identity }) => [command, identity]),
@@ -84,12 +108,11 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
     return false;
   for (const report of value.capabilityRequirements) {
     if (
-      !exact(report, [
-        "command",
-        "commandIdentity",
-        "capabilities",
-        "unsupported",
-      ]) ||
+      !reportFields(
+        report,
+        ["command", "commandIdentity", "capabilities", "unsupported"],
+        legacy,
+      ) ||
       !commands.has(report.command) ||
       !(
         report.commandIdentity === null ||
@@ -156,7 +179,7 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
   }
   return value.environmentBlockers.every(
     (item) =>
-      exact(item, ["command", "source", "evidence"]) &&
+      reportFields(item, ["command", "source", "evidence"], legacy) &&
       commands.has(item.command) &&
       ["agent-sandbox", "runner"].includes(item.source) &&
       bounded(item.evidence, 8) &&
@@ -165,10 +188,12 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
   );
 }
 
+// Read-only-turn observations stay saved for review but never become needs.
 export function inspectionRequirements(validations) {
   return validations.filter(Boolean).flatMap((value) => [
-    ...value.capabilityRequirements.map(
-      ({ command, commandIdentity, capabilities, unsupported }) => ({
+    ...value.capabilityRequirements
+      .filter(admitted)
+      .map(({ command, commandIdentity, capabilities, unsupported }) => ({
         command,
         commandIdentity,
         unsupported,
@@ -180,11 +205,12 @@ export function inspectionRequirements(validations) {
             ? { artifacts: capabilities.artifacts }
             : {}),
         },
-      }),
-    ),
+      })),
     // Exact delegation permits the root to distinguish agent confinement from
     // runner availability. An unselected command remains a blocker.
-    ...value.environmentBlockers.map(({ command }) => ({ command })),
+    ...value.environmentBlockers
+      .filter(admitted)
+      .map(({ command }) => ({ command })),
   ]);
 }
 

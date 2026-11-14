@@ -984,6 +984,7 @@ test("projected replacement evidence resumes an externally blocked attempt and b
         artifacts: [],
       },
       unsupported: [],
+      basis: "assigned-executor",
     },
   ];
   const requiredChecks = [

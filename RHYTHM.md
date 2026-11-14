@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Capability reports carry structured provenance.** Producer instructions
+  already assigned reports to the ordinary Worker `FINALIZE` or the selected
+  trusted executor, but a report could not say which executor it described. A
+  restriction seen only through a read-only turn's access, such as an
+  unwritable location outside the workspace, therefore had nowhere to go except
+  a need row that reconciliation must keep and admission then enforced against
+  the writable executor. Polishing reports now carry a closed `basis`; only
+  `assigned-executor` rows and legacy basis-less saved rows become
+  requirements, while `read-only-turn` rows stay saved and reviewable. Forcing
+  empty reports, parsing prose, discarding observations, editing frozen reports
+  or relaxing admission were rejected because each either hides real evidence
+  or trusts unstructured text. Polishing state version 21 is an identity
+  migration that keeps saved reports and their admission unchanged.
+
 - **Persisted audit baselines are bounded projections.** After deferred
   capture and both provider-policy records, an audit's first CLARIFY transition
   persisted the complete directory snapshot as its baseline. Snapshots include

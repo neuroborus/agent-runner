@@ -146,6 +146,7 @@ test("delivers check ownership while keeping additive trusted inventories", asyn
       artifacts: [],
     },
     unsupported: [],
+    basis: "assigned-executor",
   };
   const reconciled = {
     ...reconciliationResolved(),

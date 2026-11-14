@@ -439,7 +439,9 @@ no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host
 pass can still produce only a generic isolated nonzero exit result.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
-permissions. Read-only bootstrap and legacy discovery precede writable entry;
+permissions. Polishing admits only `assigned-executor` and legacy saved reports
+without `basis`; `read-only-turn` observations stay saved, unproved and never
+admitted. Read-only bootstrap and legacy discovery precede writable entry;
 missing authority or availability blocks without invoking a writable role. Each
 new writable checkpoint rechecks the saved request under configuration guards,
 cancellation, the execution lease, and durable resource ownership.

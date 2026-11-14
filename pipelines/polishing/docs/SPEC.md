@@ -93,11 +93,16 @@ There are at most 256 reports of each kind per role. Each need names an exact
 inventory command, an optional frozen identity (`commandIdentity`, otherwise
 null), `capabilities` with boolean `scratch`/`cache`, a required boolean
 `sourceProjection` need, up to 32 exact `{url, sha256}` artifacts, and up to 16
-unique `unsupported` identifiers. Needs and blockers describe each command's
-assigned executor and checkpoint, either the ordinary Worker `FINALIZE` turn
-under its existing workspace-write access or Runner-trusted execution of a
-selected command, never the current read-only discovery, migration, or Reviewer
-turn; ordinary safe Worker workspace output needs no report. `sourceProjection`
+unique `unsupported` identifiers. Each need and blocker also carries a closed
+`basis`. `assigned-executor` entries describe the command's assigned executor
+and checkpoint, either the ordinary Worker `FINALIZE` turn under its existing
+workspace-write access or Runner-trusted execution of a selected command, never
+the current read-only discovery, migration, or Reviewer turn. They require
+static task, repository, or declaration evidence, or saved evidence from that
+executor running the exact command at its checkpoint. A restriction seen only
+through the current turn's read-only access may be recorded only as
+`read-only-turn`; it is never upgraded. Ordinary safe Worker workspace output
+needs no report. `sourceProjection`
 is separate frozen authority, not a synonym for workspace-write, and may be true
 only when evidence shows the actual executor must write beside the
 staging-independent source it checks; agents cannot name a projection path or
@@ -107,15 +112,21 @@ and 1–8 bounded single-line evidence strings. Non-READY outcomes use empty arr
 Every capability report must contain at least one scratch, cache,
 source-projection, artifact, or unsupported need. A non-null `commandIdentity`
 must exactly equal the frozen identity supplied for that selected command; the
-field may remain null.
-Zero-need reports, substituted identities, and malformed reports use the
+field may remain null. Both `basis` values keep every structural rule.
+Zero-need reports, substituted identities, missing or unknown `basis`, and
+malformed reports use the
 existing bounded read-only bootstrap correction path. A corrected empty array
 leaves the ordinary inventory command agent-runnable and creates no delegated
 requirement for root inspection.
 
-Accepted reports from every active role remain additive regardless of the
-reconciled or arbitrated summary. Reports cannot grant permissions, omit another
-role's needs, or replace frozen declarations. Before every writable POLISH,
+Accepted reports from every active role remain saved and additive regardless
+of the reconciled or arbitrated summary. Reports cannot grant permissions, omit
+another role's needs, or replace frozen declarations. Root inspection receives
+only `assigned-executor` reports and legacy reports without `basis`, never the
+field itself. `read-only-turn` observations stay unproved for review and never
+become requirements, so their ordinary check stays with Worker `FINALIZE`, where
+an actual failure keeps its existing blocker semantics. Frozen trusted
+declarations remain requirements without any report. Before every writable POLISH,
 CHECK_AND_FIX, RESOLVE_FINDINGS, or FINALIZE invocation, inspect the saved request
 again; cached declaration preflight cannot bypass this gate. Unsatisfied needs
 pause as `environment_blocked` before content or index mutation, preserving the
@@ -165,6 +176,16 @@ recovery marker to `null` while preserving workflow position, session lineage,
 fingerprints, correction accounting, and handoff state. It does not infer a
 native child or reload configuration, and it prevents older readers from
 accepting the expanded durable vocabulary as version 17.
+
+State version 21 requires `basis` on every new provider capability report. The
+version-20 migration is the identity: it never edits saved or frozen reports,
+selections, accounting, or workflow position. Saved reports without `basis`
+stay byte-identical and keep the admission they were accepted under, and null
+provisional reports stay null for the existing discovery barrier. Only
+persisted-state validation accepts a report without `basis`; a recovered
+provider result without it receives bounded correction, never an inferred
+`basis`. The version bump prevents older readers from accepting reports that
+carry `basis`.
 
 ## Combined Review
 

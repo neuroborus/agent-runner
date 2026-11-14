@@ -3602,7 +3602,9 @@ function normalizePersistedValidation(value, name, trustedCommands) {
       value.capabilityRequirements === null &&
       value.environmentBlockers === null
     ) &&
-    !validCapabilityReports(value, value.requiredChecks, trustedCommands)
+    !validCapabilityReports(value, value.requiredChecks, trustedCommands, {
+      legacy: true,
+    })
   )
     throw workflowError("Persisted capability reports are invalid.");
   return value;
@@ -5170,7 +5172,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 20 ||
+    run.pipelineStateVersion !== 21 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

@@ -1658,6 +1658,7 @@ test("replaces failed projected evidence after a content repair", async (t) => {
         artifacts: [],
       },
       unsupported: [],
+      basis: "assigned-executor",
     },
   ];
   const finalization = {
