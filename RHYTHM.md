@@ -13,13 +13,18 @@ remain in the owning documentation.
   restriction seen only through a read-only turn's access, such as an
   unwritable location outside the workspace, therefore had nowhere to go except
   a need row that reconciliation must keep and admission then enforced against
-  the writable executor. Polishing reports now carry a closed `basis`; only
-  `assigned-executor` rows and legacy basis-less saved rows become
-  requirements, while `read-only-turn` rows stay saved and reviewable. Forcing
-  empty reports, parsing prose, discarding observations, editing frozen reports
-  or relaxing admission were rejected because each either hides real evidence
-  or trusts unstructured text. Polishing state version 21 is an identity
-  migration that keeps saved reports and their admission unchanged.
+  the writable executor. Plan-execution and polishing reports now carry a
+  closed `basis`; only `assigned-executor` rows and legacy basis-less saved rows
+  become requirements, while `read-only-turn` rows stay saved and reviewable.
+  Forcing empty reports, parsing prose, discarding observations, editing frozen
+  reports or relaxing admission were rejected because each either hides real
+  evidence or trusts unstructured text. Because a provider cannot repeat an
+  inherited basis-less row byte for byte, plan execution replaces its exact
+  `assigned-executor` copy with the saved bytes before the unchanged
+  deep-equality preservation checks, so resumed revision and catalog work keeps
+  legacy evidence without renewing correction allowances. Polishing state
+  version 21 and plan-execution state version 40 are identity migrations that
+  keep saved reports, unfinished catalogs and their admission unchanged.
 
 - **Persisted audit baselines are bounded projections.** After deferred
   capture and both provider-policy records, an audit's first CLARIFY transition

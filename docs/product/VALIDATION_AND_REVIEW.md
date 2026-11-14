@@ -483,7 +483,7 @@ non-null command identity must match the frozen selected-command identity
 exactly. Zero-need reports, substituted identities, and other invalid reports
 receive bounded contract correction; a corrected empty report array leaves the
 ordinary check agent-runnable rather than turning it into an unselected trusted
-requirement. Polishing reports also carry a closed `basis`: only
+requirement. Reports of both pipelines also carry a closed `basis`: only
 `assigned-executor` reports and legacy saved reports without `basis` become
 additive requirements. A restriction seen only through a read-only turn's access
 is saved as `read-only-turn`, stays unproved, and is never admitted, so its

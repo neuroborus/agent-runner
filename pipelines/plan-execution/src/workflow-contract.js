@@ -1270,7 +1270,7 @@ export function normalizeBootstrapResultCandidate(
   payload,
   role,
   stepCount,
-  { trustedCommands = [], allowEmpty = false } = {},
+  { trustedCommands = [], allowEmpty = false, legacy = false } = {},
 ) {
   assertStepAssessment(payload?.stepAssessment);
   const statuses = [
@@ -1379,7 +1379,11 @@ export function normalizeBootstrapResultCandidate(
     INVALID_OUTPUT_CODE,
     { maxItems: MAX_BOOTSTRAP_ITEMS, scoped: true, stepCount, allowEmpty },
   );
-  if (!validCapabilityReports(payload, requiredChecks, trustedCommands)) {
+  if (
+    !validCapabilityReports(payload, requiredChecks, trustedCommands, {
+      legacy,
+    })
+  ) {
     throw outputError(
       "Capability reports must contain actual needs and match the frozen command inventory.",
       outputConstraint(
@@ -3934,7 +3938,9 @@ function normalizePersistedValidation(
       value.capabilityRequirements === null &&
       value.environmentBlockers === null
     ) &&
-    !validCapabilityReports(value, value.requiredChecks, trustedCommands)
+    !validCapabilityReports(value, value.requiredChecks, trustedCommands, {
+      legacy: true,
+    })
   )
     throw workflowError("Persisted capability reports are invalid.");
   return value;
@@ -6233,7 +6239,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 39 ||
+    run.pipelineStateVersion !== 40 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

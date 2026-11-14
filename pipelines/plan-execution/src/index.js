@@ -1610,7 +1610,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 39,
+  stateVersion: 40,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1675,6 +1675,9 @@ export const planExecutionPipeline = Object.freeze({
     // Do not infer a lost result or manufacture replay authority for old runs.
     37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
     38: migratePlanExecutionStateV38,
+    // Basis-less saved reports, catalogs and pending corrections keep the
+    // admission and bindings they were accepted under.
+    39: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

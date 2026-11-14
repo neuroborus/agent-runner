@@ -4962,10 +4962,12 @@ retain their own reporting schemas, saved requests, migration, and pause policy;
 the capability owns normalization, frozen authority matching, and availability.
 Plan execution and polishing independently own reports in each active role's
 bootstrap or validation-migration inventory and inspect their union at every
-writable entry. Polishing reports carry a closed `basis`; its union contains
-only `assigned-executor` and legacy basis-less saved reports, without the field,
-while saved `read-only-turn` observations describe the read-only turn rather
-than the assigned executor, stay unproved and are never admitted. Cached
+writable entry. Both pipelines' reports carry a closed `basis`; the union
+contains only `assigned-executor` and legacy basis-less saved reports, without
+the field, while saved `read-only-turn` observations describe the read-only turn
+rather than the assigned executor, stay unproved and are never admitted. Plan
+execution canonicalizes a provider's assigned-executor copy of an inherited
+basis-less row to the saved bytes before its preservation checks. Cached
 declaration preflight cannot bypass this gate. Execution
 also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
 before discovery or preparation and checks availability before new staging.

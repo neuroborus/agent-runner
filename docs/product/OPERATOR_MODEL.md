@@ -329,7 +329,7 @@ pauses as `environment_blocked` before writable work. Repairing storage,
 isolation, or dependency availability permits retry of that saved request;
 changing selection or declarations requires a new run. Availability is checked
 again at every writable entry, even within one invocation. Agents cannot grant
-capabilities by reporting a need. Polishing reports name their `basis`: only
+capabilities by reporting a need. Reports name their `basis`: only
 needs of the assigned executor (or legacy saved reports) are admitted, while a
 restriction seen only by a read-only turn is kept as an unproved `read-only-turn`
 observation and leaves the ordinary check with Worker `FINALIZE`. An agent's

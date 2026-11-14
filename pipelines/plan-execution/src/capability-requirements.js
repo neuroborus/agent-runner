@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 // Pipeline-owned report syntax. Authority and availability belong to the root
 // capability; these fields cannot replace a frozen command declaration.
 const text = { type: "string", minLength: 1, maxLength: 4_000 };
@@ -10,6 +12,10 @@ const artifact = {
   },
   required: ["url", "sha256"],
 };
+// Provenance keeps read-only observations reviewable without admitting them
+// as needs of the assigned executor. Saved reports may predate it.
+const BASES = ["assigned-executor", "read-only-turn"];
+const basis = { type: "string", enum: BASES };
 export const CAPABILITY_REQUIREMENTS = {
   type: "array",
   maxItems: 256,
@@ -40,8 +46,15 @@ export const CAPABILITY_REQUIREMENTS = {
         maxItems: 16,
         items: { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$" },
       },
+      basis,
     },
-    required: ["command", "commandIdentity", "capabilities", "unsupported"],
+    required: [
+      "command",
+      "commandIdentity",
+      "capabilities",
+      "unsupported",
+      "basis",
+    ],
   },
 };
 export const ENVIRONMENT_BLOCKERS = {
@@ -54,14 +67,15 @@ export const ENVIRONMENT_BLOCKERS = {
       command: text,
       source: { type: "string", enum: ["agent-sandbox", "runner"] },
       evidence: { type: "array", minItems: 1, maxItems: 8, items: text },
+      basis,
     },
-    required: ["command", "source", "evidence"],
+    required: ["command", "source", "evidence", "basis"],
   },
 };
+const record = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 const exact = (value, keys) =>
-  value !== null &&
-  typeof value === "object" &&
-  !Array.isArray(value) &&
+  record(value) &&
   Object.keys(value).length === keys.length &&
   keys.every((key) => Object.hasOwn(value, key));
 const plain = (value) =>
@@ -71,8 +85,52 @@ const plain = (value) =>
   value.trim() === value &&
   !/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
 const bounded = (value, max) => Array.isArray(value) && value.length <= max;
+const reportFields = (value, keys, legacy) =>
+  exact(value, [...keys, "basis"])
+    ? BASES.includes(value.basis)
+    : legacy && exact(value, keys);
+const admitted = (report) =>
+  !Object.hasOwn(report, "basis") || report.basis === "assigned-executor";
+const REPORTS = ["capabilityRequirements", "environmentBlockers"];
 
-export function validCapabilityReports(value, checks, trustedCommands = []) {
+// A basis-less saved row was admitted as a need of the assigned executor. A
+// provider that must name a basis repeats it only as that exact copy.
+export function legacyEquivalent(saved, report) {
+  if (
+    !record(saved) ||
+    !record(report) ||
+    Object.hasOwn(saved, "basis") ||
+    report.basis !== "assigned-executor"
+  )
+    return false;
+  const copy = { ...report };
+  delete copy.basis;
+  return isDeepStrictEqual(saved, copy);
+}
+
+// Replace each provider copy of an inherited legacy row with the saved bytes, so
+// deep-equality preservation still compares exact saved evidence.
+export function canonicalReports(payload, sources) {
+  const canonical = { ...payload };
+  for (const field of REPORTS) {
+    if (!Array.isArray(payload?.[field])) continue;
+    const saved = sources.flatMap((source) =>
+      Array.isArray(source?.[field]) ? source[field] : [],
+    );
+    canonical[field] = payload[field].map(
+      (report) => saved.find((row) => legacyEquivalent(row, report)) ?? report,
+    );
+  }
+  return canonical;
+}
+
+// Only saved-state and already canonical internal input may pass legacy.
+export function validCapabilityReports(
+  value,
+  checks,
+  trustedCommands = [],
+  { legacy = false } = {},
+) {
   const commands = new Set(checks.map(({ command }) => command));
   const commandIdentities = new Map(
     trustedCommands.map(({ command, identity }) => [command, identity]),
@@ -84,12 +142,11 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
     return false;
   for (const report of value.capabilityRequirements) {
     if (
-      !exact(report, [
-        "command",
-        "commandIdentity",
-        "capabilities",
-        "unsupported",
-      ]) ||
+      !reportFields(
+        report,
+        ["command", "commandIdentity", "capabilities", "unsupported"],
+        legacy,
+      ) ||
       !commands.has(report.command) ||
       !(
         report.commandIdentity === null ||
@@ -156,7 +213,7 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
   }
   return value.environmentBlockers.every(
     (item) =>
-      exact(item, ["command", "source", "evidence"]) &&
+      reportFields(item, ["command", "source", "evidence"], legacy) &&
       commands.has(item.command) &&
       ["agent-sandbox", "runner"].includes(item.source) &&
       bounded(item.evidence, 8) &&
@@ -165,10 +222,12 @@ export function validCapabilityReports(value, checks, trustedCommands = []) {
   );
 }
 
+// Read-only-turn observations stay saved for review but never become needs.
 export function inspectionRequirements(validations) {
   return validations.filter(Boolean).flatMap((value) => [
-    ...value.capabilityRequirements.map(
-      ({ command, commandIdentity, capabilities, unsupported }) => ({
+    ...value.capabilityRequirements
+      .filter(admitted)
+      .map(({ command, commandIdentity, capabilities, unsupported }) => ({
         command,
         commandIdentity,
         unsupported,
@@ -180,11 +239,12 @@ export function inspectionRequirements(validations) {
             ? { artifacts: capabilities.artifacts }
             : {}),
         },
-      }),
-    ),
+      })),
     // Exact delegation permits the root to distinguish agent confinement from
     // runner availability. An unselected command remains a blocker.
-    ...value.environmentBlockers.map(({ command }) => ({ command })),
+    ...value.environmentBlockers
+      .filter(admitted)
+      .map(({ command }) => ({ command })),
   ]);
 }
 

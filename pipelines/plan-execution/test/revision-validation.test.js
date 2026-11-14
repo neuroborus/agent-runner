@@ -94,6 +94,7 @@ const roleInventory = (reviewer = false) => ({
         artifacts: [],
       },
       unsupported: [],
+      basis: "assigned-executor",
     },
   ],
   environmentBlockers: [],

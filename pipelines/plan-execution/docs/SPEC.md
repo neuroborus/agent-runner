@@ -437,6 +437,17 @@ preserving workflow position, session lineage, fingerprints, correction
 accounting, and prepared or consumed effects. It does not infer a native child
 or reload configuration, and it prevents older readers from accepting the
 expanded durable vocabulary as version 25.
+State version 40 requires `basis` on every new provider capability report. The
+version-39 migration is the identity: it never edits saved or frozen reports,
+unfinished bootstrap work including pending correction reports, completed
+provenance, selections, schedules, prepared or consumed effects, budgets, or
+workflow position. Saved reports without `basis` stay byte-identical and keep the
+admission they were accepted under; reloaded work keeps its catalog fingerprint,
+unit IDs and validation-fingerprint bindings until a later catalog change
+regenerates them. Null provisional reports stay null for the existing discovery
+barrier. A recovered provider result without `basis` receives bounded
+correction, never an inferred `basis`. The version bump prevents older readers
+from accepting reports that carry `basis`.
 Discovery does not authorize leaving a safety pause. Interrupted correction
 edits are reconciled and charged before new writable work, without recounting
 them on a later resume.
@@ -635,11 +646,16 @@ each active role's inventory. `capabilityRequirements` permits 256 reports per
 role: `command`, nullable frozen `commandIdentity`, `capabilities` with boolean
 `scratch`, `cache`, and `sourceProjection`, up to 32 exact `{url, sha256}`
 artifacts, and `unsupported` with up to 16 unique lowercase capability
-identifiers. Needs and blockers describe each command's assigned executor and
+identifiers. Each need and blocker also carries a closed `basis`.
+`assigned-executor` entries describe the command's assigned executor and
 checkpoint, either the ordinary Worker `FINALIZE` turn under its existing
 workspace-write access or Runner-trusted execution of a selected command, never
-the current read-only discovery, migration, or Reviewer turn; ordinary safe
-Worker workspace output needs no report. `sourceProjection` is separate frozen
+the current read-only discovery, migration, applicability, or Reviewer turn.
+They require static task, repository, or declaration evidence, or saved evidence
+from that executor running the exact command at its checkpoint. A restriction
+seen only through the current turn's read-only access may be recorded only as
+`read-only-turn`; it is never upgraded. Ordinary safe Worker workspace output
+needs no report. `sourceProjection` is separate frozen
 authority, not a synonym for workspace-write, and may be true only when evidence
 shows the actual executor must write beside the staging-independent source it
 checks; agents cannot name a path or grant authority. `environmentBlockers` permits 256 reports per role:
@@ -648,17 +664,43 @@ evidence strings. Every command must occur in that role's exact inventory;
 existing structured-result byte bounds also apply. Every capability report must
 contain at least one scratch, cache, source-projection, artifact, or unsupported
 need. A non-null `commandIdentity` must exactly equal the frozen identity supplied
-for that selected command; the field may remain null.
+for that selected command; the field may remain null. Both `basis` values keep
+every structural rule.
 Non-READY outcomes carry empty report arrays. Zero-need reports, substituted
-identities, malformed fields or parameters, and invalid references use the
-existing bounded read-only bootstrap correction path. A corrected empty array
+identities, missing or unknown `basis`, malformed fields or parameters, and
+invalid references use the existing bounded read-only bootstrap correction path. A corrected empty array
 leaves the ordinary inventory command agent-runnable and creates no delegated
 requirement for root inspection.
 
+Only saved state and already accepted internal discovery may contain reports
+without `basis`. A provider cannot repeat such an inherited row byte for byte,
+so its exact copy with `basis: "assigned-executor"`, the semantics the row was
+admitted under, is legacy-equivalent. Provider discovery replaces each
+legacy-equivalent copy with the saved row's exact bytes before the existing
+deep-equality preservation rules run. Its sources are the prior revision
+inventory for revision discovery, and during catalog correction the pending
+discovery and its saved correction reports, including a charged report that has
+not yet entered discovery. Every other provider row stays strictly validated, so
+an inherited copy marked `read-only-turn` or otherwise changed fails
+`preserve-prior-revision-requirements` or `preserve-and-complete-catalog`. An
+applicability correction report that deep-equals or is legacy-equivalent to an
+accepted discovery row is not new evidence and fails `new-capability-evidence`.
+The workflow publishes only that canonical discovery, never the raw provider
+payload; an actually changed catalog still receives a new fingerprint and unit
+IDs, clears accepted coverage and keeps the consumed correction attempt.
+Applicability requests carry the same `basis` guidance: catalog correction may
+add `read-only-turn` entries but never upgrades one or changes the basis of an
+accepted entry.
+
 Accepted reports are persisted before inspection. Requirements from Worker and
-Reviewer remain additive regardless of which reconciliation or arbitration
-summary is selected. Reports describe needs; only the frozen runner declarations
-grant authority. Before IMPLEMENT, CHECK_AND_FIX, writable RESOLVE_FINDINGS,
+Reviewer remain saved and additive regardless of which reconciliation or
+arbitration summary is selected. Root inspection receives only
+`assigned-executor` reports and legacy reports without `basis`, never the field
+itself. `read-only-turn` observations stay unproved for review and never become
+requirements, so their ordinary check stays with Worker `FINALIZE`, where an
+actual failure keeps its existing blocker semantics. Frozen trusted declarations
+remain requirements without any report. Reports describe needs; only the frozen
+runner declarations grant authority. Before IMPLEMENT, CHECK_AND_FIX, writable RESOLVE_FINDINGS,
 FINALIZE, and unconsumed COMMIT, the root capability matches those reports and
 selected declarations against the saved inventory and inspects actual runner
 availability. This gate runs on every writable entry and retry independently of

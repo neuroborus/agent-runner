@@ -121,6 +121,7 @@ function discovery(role, independent, trustedValidation) {
           artifacts: [],
         },
         unsupported: [],
+        basis: "assigned-executor",
       },
     ],
   };
