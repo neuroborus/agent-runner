@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Persisted audit baselines are bounded projections.** After deferred
+  capture and both provider-policy records, an audit's first CLARIFY transition
+  persisted the complete directory snapshot as its baseline. Snapshots include
+  every protected control entry, so a Git checkout whose object store held more
+  than 10,000 files exceeded the state collection limit; every normal, MCP or
+  CLI continuation then failed at `checkpoint-continuation` and left the run
+  idle at CLARIFY. New baselines keep scope, fingerprints and the frozen source
+  selection but replace per-entry evidence with a count and an ordered-entry
+  digest that drift guards recompute over the same filtered entries. State
+  limits stay unchanged and protected control paths stay in every guard,
+  because relaxing either would trade the defect for unbounded state or blind
+  drift checks. Audit state version 9 makes older runtimes refuse compact
+  baselines as skew; legacy full baselines keep their exact comparison.
+
 - **Claude private storage leaves room for bridge sockets.** New Claude
   allocations used the runner's ambient temporary directory, beneath which the
   provider `TMPDIR` adds 66 bytes for a four-digit UID. Below the nested

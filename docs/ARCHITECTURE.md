@@ -80,6 +80,12 @@ caller's exact journaled effect paths to differ, while preserving the remainder,
 scope and link proof. Deferred new temporaries can be removed from the current
 remainder only if the original hash proves their absence. These methods grant
 no traversal, write or publication authority and leave capture unchanged.
+`snapshotBaseline` projects a complete snapshot into a bounded durable baseline:
+its scope (`workspacePath`, `outputPaths` and any `inspectionPaths`,
+`inspectionFilesOnly` and `excludePaths`), both fingerprints, `entryCount` and
+`entriesHash`, the ordered-entry digest shared with proofs through private
+`digest.js`. It omits `entries` and `linkResolutions`, so protected control
+trees cannot grow persisted state beyond its limits.
 
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
@@ -213,7 +219,11 @@ commit-authoring criteria and sources use this narrower capture while Git owns
 the repository snapshot and mutation guards.
 `assertUnchanged({before, after})` rejects content or identity drift; explicit
 `allowOutputs: true` permits only declared outputs and newly required parent
-directories, preserving unrelated files and all protected inputs. Filesystem
+directories, preserving unrelated files and all protected inputs. A compact
+`before` baseline is compared against a complete `after` snapshot by
+recomputing the same digest over its entries, the complete equality applied to
+legacy full baselines. Compact baselines reject `allowOutputs` and malformed
+counts, digests, fingerprints or retained link evidence. Filesystem
 injection supports deterministic race tests without Git or providers.
 
 Directory lifecycle protected fingerprints exempt only declared outputs and
@@ -878,7 +888,7 @@ around capture and reconstruction. Directory scope prunes exclusions before
 traversal and never invokes Git. Filesystem declarations bind provider receipts;
 Runner additionally binds Git provenance into snapshot fingerprints and role
 context. Report/finding bindings consume that same snapshot. New report bytes
-and report fingerprints also bind frozen source settings. Audit state version 8
+and report fingerprints also bind frozen source settings. Audit state version 9
 preserves legacy missing settings as whole-directory scope without altering
 evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
@@ -957,6 +967,10 @@ retirement and pauses again. The leased version-7 migration creates intent only
 for a genuine matching legacy exhaustion pause; unrelated absence becomes null.
 No native ID is duplicated and no common-envelope change is required. See the
 [audit recovery contract](../pipelines/audit/docs/SPEC.md#explicit-output-exhaustion-reconstruction).
+Audit state version 9 captures `repositoryBaseline` through
+`runtime.workspace.baseline`, so CLARIFY transitions persist bounded evidence for
+any protected control-tree size. Its identity version-8 migration keeps null and
+legacy full baselines; all guards use the same `assertUnchanged`.
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies
@@ -1741,10 +1755,17 @@ MCP preflight and run creation supply the same normalized selections.
 Missing Git never selects a directory workflow. Directory lifecycles require
 exclusive ownership, use filesystem-only preflight/configuration/artifact
 confinement and expose snapshot/guard operations through `runtime.workspace`.
-They expose no Git effect capability. Canonical enclosing worktrees are found
-from filesystem Git layouts/pointers; a directory inside one shares its exact
-exclusion key with commit workflows. An ordinary directory uses its own key;
-state-owned admission also excludes overlapping parent/child scopes atomically.
+They expose no Git effect capability. Runner `directorySafety` filters declared
+artifacts from inspected snapshots; its `baseline({allowedPaths})` returns the
+compact workspace baseline of that filtered snapshot plus `allowedPaths`,
+`projectPath` and any frozen `sourceSelection`, and `assertUnchanged` accepts
+compact or legacy full baselines. Root `runtimeFor` delegates
+`runtime.workspace.baseline` only for directory workspaces; complete
+`snapshot()` results remain for consumers that read entries. Canonical enclosing
+worktrees are found from filesystem Git layouts/pointers; a directory inside one
+shares its exact exclusion key with commit workflows. An ordinary directory uses
+its own key; state-owned admission also excludes overlapping parent/child scopes
+atomically.
 State placement must be disjoint from the resolved canonical exclusion root
 before provider probing or durable run creation, including a sibling state path
 inside an enclosing repository.
@@ -2454,7 +2475,7 @@ preserve that exact selection. Interrupted selection publication recovers once;
 later capture/reconstruction verifies existing membership rather than reselecting.
 Partial capture supplies no authority. Version-25 preparation and completed
 bindings remain unchanged on migration. The detached token is `1:26`, with
-matching package metadata and audit version 8 compatibility.
+matching package metadata and audit version 9 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration

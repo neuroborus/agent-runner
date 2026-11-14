@@ -516,6 +516,78 @@ test("read-only guards detect content and equal-byte identity drift", async (t) 
   );
 });
 
+test("compact baselines omit per-entry evidence yet detect source and control drift", async (t) => {
+  const f = await fixture(t);
+  const path = join(f.workspacePath, "source.txt");
+  await fs.writeFile(path, "first\n");
+  await executeFile("git", ["init", "--quiet", f.workspacePath]);
+  const service = createWorkspaceService();
+  const inspection = await service.inspect({
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+  });
+  const capture = async () => {
+    const snapshot = await service.snapshot({ inspection });
+    return { snapshot, baseline: service.snapshotBaseline(snapshot) };
+  };
+  const drifted = (before, after) =>
+    assert.throws(
+      () => service.assertUnchanged({ before, after }),
+      unsafe("ERR_WORKSPACE_DRIFT"),
+    );
+  const { snapshot: full, baseline } = await capture();
+  assert.ok(
+    full.entries.some(({ path: entry }) =>
+      entry.startsWith(`${f.workspacePath}/.git/`),
+    ),
+  );
+  assert.equal(baseline.entryCount, full.entries.length);
+  assert.equal(baseline.contentFingerprint, full.contentFingerprint);
+  assert.equal(baseline.identityFingerprint, full.identityFingerprint);
+  for (const field of ["entries", "linkResolutions"])
+    assert.equal(Object.hasOwn(baseline, field), false);
+  service.assertUnchanged({
+    before: baseline,
+    after: (await capture()).snapshot,
+  });
+
+  await fs.writeFile(path, "second\n");
+  const content = await capture();
+  drifted(baseline, content.snapshot);
+  drifted(full, content.snapshot);
+  await fs.writeFile(join(f.workspacePath, "replacement"), "second\n");
+  await fs.rename(join(f.workspacePath, "replacement"), path);
+  const replaced = await capture();
+  assert.equal(
+    replaced.baseline.contentFingerprint,
+    content.baseline.contentFingerprint,
+  );
+  drifted(content.baseline, replaced.snapshot);
+  await fs.writeFile(join(f.workspacePath, ".git", "description"), "changed\n");
+  drifted(replaced.baseline, (await capture()).snapshot);
+
+  const current = await capture();
+  service.assertUnchanged({
+    before: current.baseline,
+    after: current.snapshot,
+  });
+  for (const [before, allowOutputs] of [
+    [{ ...current.baseline, entriesHash: "invalid" }, false],
+    [{ ...current.baseline, entryCount: -1 }, false],
+    [{ ...current.baseline, linkResolutions: [] }, false],
+    [current.baseline, true],
+  ])
+    assert.throws(
+      () =>
+        service.assertUnchanged({
+          before,
+          after: current.snapshot,
+          allowOutputs,
+        }),
+      (error) => unsafe()(error) && error.code !== "ERR_WORKSPACE_DRIFT",
+    );
+});
+
 test("snapshot filenames preserve leading Unicode byte-order marks", async (t) => {
   const f = await fixture(t);
   const path = join(f.workspacePath, "\ufeffsource.txt");

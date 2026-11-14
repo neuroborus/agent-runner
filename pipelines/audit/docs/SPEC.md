@@ -123,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 8 retains the workspace baseline, frozen declarations and their
+State version 9 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -318,6 +318,16 @@ freshness or allowances. Settings, bindings, histories, accepted receipts, pendi
 versions/dispositions and publication bytes remain unchanged. CLI/MCP expose the
 same redacted explanation of explicit fresh-context reconstruction. Common-envelope
 shape and generic adapter output-exhaustion normalization remain unchanged.
+
+Version 9 captures new baselines through the Runner's bounded directory
+baseline. It retains snapshot scope, both fingerprints, the frozen source
+selection and excluded artifact paths, and replaces per-entry evidence with an
+entry count and an ordered-entry digest, so protected control trees of any size
+stay within the unchanged state limits. Drift guards recompute the same complete
+filtered equality, including protected controls. The identity version-8
+migration keeps null and legacy full baselines with their exact comparison and
+changes no bindings, budgets or histories; a version-8 runtime refuses version-9
+state as version skew rather than misreading compact baselines.
 
 For an uncaptured legacy admission, the root leased migration rebinds only the
 preparation's state fingerprint after validating the original binding. Frozen

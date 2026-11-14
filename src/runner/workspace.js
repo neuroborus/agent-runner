@@ -571,6 +571,20 @@ export function directorySafety(
       const { snapshot } = await inspect();
       return inspectedSnapshot(snapshot, allowedPaths);
     },
+    // Persisted baselines stay within state limits for any control-tree size.
+    async baseline({ allowedPaths = [] } = {}) {
+      const { snapshot } = await inspect();
+      const inspected = inspectedSnapshot(snapshot, allowedPaths);
+      return Object.freeze({
+        ...workspace.snapshotBaseline(inspected),
+        allowedPaths,
+        projectPath: inspected.projectPath,
+        ...(inspected.sourceSelection === undefined
+          ? {}
+          : { sourceSelection: inspected.sourceSelection }),
+      });
+    },
+    // Compact and legacy full baselines share the same filtered comparison.
     async assertUnchanged(before) {
       const { snapshot: after } = await inspect();
       workspace.assertUnchanged({

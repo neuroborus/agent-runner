@@ -49,8 +49,9 @@ the admission state fingerprint across cold reload. It preserves all source,
 input, policy, role and accounting declarations and rejects attempted changes,
 including workflow advancement or rebinding without increasing the version.
 The Runner preparation suite's legacy pending-audit case exercises the actual
-audit-version-8 nullable-default migration before capture. These focused cases
-retain the complete slow release gate for persisted/lifecycle changes.
+audit migrations through version 9, including the version-8 nullable default,
+before capture. These focused cases retain the complete slow release gate for
+persisted/lifecycle changes.
 
 Fast `test/runner-preparation.test.js` owns deferred audit activation through
 real state and workspace services: bounded creation/boundary validation,
@@ -65,12 +66,17 @@ and effect-recovery slow suites retain their cross-capability coverage.
 That preparation suite also covers explicit Git selection through held capture,
 pause and cold resume, complete unchanged/ignored-tracked/dirty/deleted/untracked
 membership, scoped provider requests, unchanged Git state and later membership
-drift rejection. Ordinary-directory completion proves opaque exclusions, frozen
-public/report context and deliberate directory-origin issue capture. Its issue
-control-discovery fixture declares an ordinary origin independently of the
-temporary parent's controls; the issue-reporting suite retains real enclosing-Git
-discovery and rejection coverage. A version-25, audit-version-6 pending fixture
-resumes without changing settings or budgets.
+drift rejection. An independent Git-scope case with distinct Auditor and
+Reviewer fixture backends starts through MCP detached acknowledgement, records
+both provider policies, persists a bounded baseline without per-entry evidence
+at the held clarify turn, pauses there and completes from a cold replacement
+runner through the real `runtimeFor` interface without renewed budgets, then
+rejects later membership drift. Ordinary-directory completion proves opaque
+exclusions, frozen public/report context and deliberate directory-origin issue
+capture. Its issue control-discovery fixture declares an ordinary origin
+independently of the temporary parent's controls; the issue-reporting suite
+retains real enclosing-Git discovery and rejection coverage. A version-25,
+audit-version-6 pending fixture resumes without changing settings or budgets.
 Audit publication coverage separately preserves completed legacy report bytes,
 acceptance receipts and histories. Existing workspace/provider suites retain
 control/input/link confinement, corruption and read-only effect denial. CLI,
@@ -376,6 +382,10 @@ report bytes, original reservations and finite budgets. Missing or incomplete
 decisions add no confirmation; only the complete selected gate accepts current
 versions. Lazy Git-scope coverage composes availability and controlled inactivity
 with repeated exhaustion without another source fork or inactive-role work.
+A Git-scope case with more than 10,000 synthetic files beneath the fixture
+control directory reproduces the bounded-baseline regression through deferred
+capture, provider-policy recording and continuation past the first CLARIFY
+transition; snapshots of that tree take seconds each, so it stays in this tier.
 Independent coverage retains finding-Reviewer separation and matching redacted
 CLI status and MCP status/wait explanations, null-action recovery and inert
 completion. Separate failure/cancellation cases retain terminal dispositions
@@ -383,9 +393,9 @@ after exhaustion without new provider work or report publication on cold resume.
 Provider responses, clocks and interruption boundaries are injected;
 these tests use no live provider, sleeps or canonical-journal edits.
 Run `npm run test:slow -- test/runner-audit-recovery.slow.test.js` when changing
-audit recovery, migration, native selection or their public projections. The
-complete slow release gate includes it automatically; it replaces no existing
-or separately selected Runner-trusted check.
+audit recovery, migration, native selection, persisted audit baselines or their
+public projections. The complete slow release gate includes it automatically;
+it replaces no existing or separately selected Runner-trusted check.
 
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
@@ -395,7 +405,9 @@ interrupted reservations, lost-child reconstruction without reforking, rejected
 premature acceptance and both finite run-wide budgets across replacement/resume.
 Fast `test/runner-audit.test.js` owns audit composition with the existing confined
 workspace/clarification services and persisted session contract: authorized
-transcript edits preserve discovery, while source drift blocks it. It also uses
+transcript edits preserve discovery, while source drift blocks it under compact
+and migrated legacy full baselines. Compact directory baselines exempt only
+declared artifacts and reject undeclared exemptions. It also uses
 actual inactivity, availability and disposition policies with in-memory storage
 to cover checkpoint initialization, bounded reconstruction, terminal isolation
 failures, authentication/output pauses and source-fork recovery. Normalized
@@ -782,7 +794,7 @@ bounded runner and per-file timing output.
 | `test/runner-orchestration.slow.test.js`                                  | Root orchestration preserves configuration, sessions, migrations, trusted snapshots, and worktree order                                                   | Runner configuration or source sessions, runtime migration, trusted preflight snapshots, worktree serialization, or root service wiring                                                         |
 | `test/runner-operator-stops.slow.test.js`                                 | Runner stops settle owned processes and raced commit or handoff effects without losing writable content                                                   | Runner operator stops, process settlement or containment, commit or handoff races, execution-storage cleanup, or partial-content resume                                                         |
 | `test/runner-effects.slow.test.js`                                        | Commit effects and polishing finding-resolution checkpoints settle exactly once across interruption, verification, deferred and reconstructed checkpoints | Runner Git/state effect dispatch, commit authorization or verification, deferred settlement, consumed-effect recovery, or polishing finding-resolution checkpoint durability or report recovery |
-| `test/runner-audit-recovery.slow.test.js`                                 | Cold audit reconstruction preserves exact pending verification, provenance and budgets across native replacement and migration                            | Audit output recovery, persisted migration, native selection, availability/inactivity composition or public recovery projections                                                                |
+| `test/runner-audit-recovery.slow.test.js`                                 | Cold audit reconstruction preserves pending verification, provenance, budgets and bounded baselines across replacement and migration                      | Audit output recovery, persisted migration or baselines, native selection, availability/inactivity composition or public recovery projections                                                   |
 | `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                                         | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency                                                                   |
 | `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                                                   | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases                                                          |
 | `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                                         | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events                                                         |
