@@ -1882,6 +1882,8 @@ test("projects native and fallback directory commands onto declared outputs only
         env: {
           ...process.env,
           ANTHROPIC_API_KEY: "provider-token",
+          CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
           AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
           AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
           PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
@@ -1898,6 +1900,13 @@ test("projects native and fallback directory commands onto declared outputs only
             const settings = JSON.parse(
               option(call.argumentsList, "--settings"),
             );
+            for (const name of [
+              "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+              "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            ]) {
+              assert.equal(call.options.env[name], "1");
+              assert.equal(settings.env[name], "1");
+            }
             assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
             assert.ok(
               settings.sandbox.filesystem.denyWrite.includes(directory.source),
@@ -3826,7 +3835,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v5",
+      "claude-isolation-v6",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -4185,7 +4194,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v12",
+      "claude-command-boundary-v13",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -4652,7 +4661,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v12",
+        "claude-command-boundary-v13",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -5179,6 +5188,63 @@ test("preserves resource ownership when cleanup acknowledgement fails", async ()
     },
   });
   assert.equal(resource, null);
+});
+
+test("forces foreground lifecycle controls across Claude policies and access modes", async () => {
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const env = {
+      ...process.env,
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+    };
+    const fixture = createFixture({ env, nativeSandbox });
+    await fixture.adapter.probe();
+    const probes = [...fixture.calls];
+    assert.ok(probes.some(isIsolationProbe));
+    for (const { options } of probes) {
+      assert.equal(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+      assert.equal(options.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
+      assert.equal(options.timeout, 10_000);
+    }
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      await fixture.adapter.run(
+        request({
+          access,
+          ...(access === "local-commit"
+            ? {
+                authorizationId: "foreground-commit",
+                commit: {
+                  expectedHead: EXPECTED_HEAD,
+                  message: "fix(test): retain foreground lifecycle",
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+    const turns = turnCalls(fixture);
+    assert.equal(turns.length, 3);
+    for (const { argumentsList, options } of turns) {
+      const settings = JSON.parse(option(argumentsList, "--settings"));
+      for (const name of [
+        "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+      ]) {
+        assert.equal(options.env[name], "1");
+        assert.equal(settings.env[name], "1");
+        assert.equal(env[name], "0");
+      }
+      assert.equal(options.timeout, undefined);
+      assert.equal(option(argumentsList, "--add-dir"), PROJECT_PATH);
+      assert.notEqual(options.cwd, PROJECT_PATH);
+      assert.equal(settings.sandbox.enabled, true);
+      assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+      assert.equal(
+        settings.sandbox.enableWeakerNestedSandbox,
+        nativeSandbox !== true,
+      );
+    }
+  }
 });
 
 test("runs autonomous read-only turns with isolated tools and an explicit model", async () => {

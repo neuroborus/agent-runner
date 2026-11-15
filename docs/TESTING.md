@@ -1257,7 +1257,7 @@ other preflight or protocol failure still fail. Every turn runs through the real
 adapter probe, generated settings, authenticated launcher, and stream
 normalization against an owned Git repository or ordinary directory,
 configuration directory, synthetic key, and loopback Messages stub that scripts
-tool calls and refuses every other request. Scripted Bash requests explicitly
+tool calls and refuses every other request. Permission and cwd scripts explicitly
 disable background execution, and each turn is awaited before snapshots.
 Owned-process supervision bounds each turn with a deadline and test
 cancellation; interruption fails independently of any later adapter error.
@@ -1301,6 +1301,38 @@ distinguish rule decisions from classifier decisions. Changes to Claude
 permission settings, effective access proofs, or policy identity require a
 separate enabled host run before installation in addition to the complete slow
 gate. Record both results and report any skip explicitly. No live model is used.
+
+The suite also keeps a separate native foreground/background differential.
+Conflicting caller and fixture user settings set
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=0`; only the baseline removes the adapter's
+forced value from both launch surfaces. All other policy settings, including
+private cwd retention and permissions, remain identical. The strict Messages
+stub captures the offered Bash schema and refuses and counts requests beyond
+its bounded script without retaining their payloads. The baseline Bash command
+blocks on an owned FIFO. At the first result the stdout tap must observe no
+effect before releasing the FIFO; the baseline then requires the completed
+effect and actual rejected post-result model traffic or a duplicate result.
+Repaired turns require no background schema option, a successful effect before
+the sole result, and no task-start/progress/notification records. An unsupported
+background request may fail as a tool request or complete synchronously, but
+cannot produce a late effect. A timed-out blocked command must prove it started,
+return a tool error and never complete its effect. No sleep supplies causal
+ordering; deadlines only bound hangs.
+
+Both native fixtures use public owned-process supervision with forwarded
+cancellation and ownership proofs. Pending turns are aborted and awaited, and
+every registered process must report `onProcess(null)` before FIFO or fixture
+removal. Their separate host temporary roots survive the test launcher's scratch
+cleanup on uncertain retirement; uncertainty fails and retains storage. Native
+records remain test-local and public diagnostics stay redacted. These lifecycle
+cases supplement the newer source-shaped cwd and permission differential above;
+they do not replace it or establish the cause of historical protocol failures.
+The enabled suite remains supervisor-owned post-completion acceptance after
+reviewed HANDOFF and the separate operator commit, against exact committed main
+and the installed-package adapter, before global installation and activation.
+It is not a pipeline required check, and ordinary slow skips establish no native
+acceptance. Applicable post-install provider acceptance remains separately
+operator-owned.
 
 Preparation custody regressions extend `test/state/journal-checkpoints.test.js`'s
 real growing/rotating journal fixtures and normalization counters with byte,

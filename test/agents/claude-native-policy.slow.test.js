@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as executeFileCallback } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { closeSync, constants, existsSync, openSync, writeSync } from "node:fs";
 import {
   access,
   lstat,
@@ -15,8 +15,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -289,9 +289,17 @@ function messageEvents(content, stopReason) {
 
 // Answers main-loop requests from the current script and refuses every other
 // request, including auto-mode classifier calls, without a retryable status.
-function createMessagesStub() {
+function createMessagesStub({ strict = false } = {}) {
   // Each request repeats the transcript; tool results are keyed by their call.
-  const state = { steps: [], unscripted: [], toolResults: new Map() };
+  const state = {
+    steps: [],
+    unscripted: [],
+    toolResults: new Map(),
+    mainRequests: 0,
+    unexpectedMain: 0,
+    bashSchemas: [],
+    bashToolIds: new Set(),
+  };
   const server = createServer((request, response) => {
     const chunks = [];
     request.on("data", (chunk) => chunks.push(chunk));
@@ -312,8 +320,16 @@ function createMessagesStub() {
         JSON.stringify(body.system ?? "").includes(
           "Native startup uses a separate private directory",
         );
-      if (!main) {
-        state.unscripted.push({ method: request.method, pathname });
+      const step = main
+        ? state.steps[
+            strict
+              ? state.mainRequests++
+              : body.messages.filter(({ role }) => role === "assistant").length
+          ]
+        : undefined;
+      if (!main || (strict && step === undefined)) {
+        if (main) state.unexpectedMain += 1;
+        else state.unscripted.push({ method: request.method, pathname });
         response.writeHead(400, {
           "content-type": "application/json",
           "x-should-retry": "false",
@@ -326,6 +342,10 @@ function createMessagesStub() {
         );
         return;
       }
+      if (strict)
+        state.bashSchemas.push(
+          body.tools.find(({ name }) => name === "Bash")?.input_schema,
+        );
       for (const message of body.messages)
         if (message.role === "user" && Array.isArray(message.content))
           for (const block of message.content)
@@ -334,21 +354,25 @@ function createMessagesStub() {
                 error: block.is_error === true,
                 content: JSON.stringify(block.content ?? ""),
               });
-      const step =
-        state.steps[
-          body.messages.filter(({ role }) => role === "assistant").length
-        ];
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(
-        step === undefined
-          ? messageEvents([{ type: "text", text: "Done." }], "end_turn")
-          : messageEvents(
-              step.map((value) => ({
-                type: "tool_use",
-                id: `toolu_${randomUUID().replaceAll("-", "")}`,
-                ...value,
-              })),
+        Array.isArray(step)
+          ? messageEvents(
+              step.map((value) => {
+                const block = {
+                  type: "tool_use",
+                  id: `toolu_${randomUUID().replaceAll("-", "")}`,
+                  ...value,
+                };
+                if (strict && block.name === "Bash")
+                  state.bashToolIds.add(block.id);
+                return block;
+              }),
               "tool_use",
+            )
+          : messageEvents(
+              [{ type: "text", text: step?.text ?? "Done." }],
+              "end_turn",
             ),
       );
     });
@@ -388,21 +412,25 @@ test(
       !(await installed("bwrap")),
   },
   async (t) => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "agent-runner-claude-policy-")),
+    // Retain this fixture outside the launcher's transient TMPDIR if owned
+    // process retirement cannot be proved.
+    const root = await mkdtemp(
+      join(await realpath("/tmp"), "agent-runner-claude-policy-"),
     );
     const unretired = new Set();
     t.after(async () => {
       if (unretired.size > 0)
         throw new Error(
-          `Retained ${root}: owned processes ` +
-            `${[...unretired].join(", ")} are not proved retired.`,
+          "Unverified native process retirement; fixture storage retained.",
         );
       await rm(root, { force: true, recursive: true });
     });
     const { server, state } = createMessagesStub();
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise((resolve) => server.close(resolve)));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    });
 
     const home = join(root, "home");
     await mkdir(home);
@@ -633,7 +661,11 @@ test(
         "Permission to use",
         "policy-stub",
       ])
-        assert.equal(publicText.includes(forbidden), false, forbidden);
+        assert.equal(
+          publicText.includes(forbidden),
+          false,
+          "Public diagnostics exposed fixture-private content.",
+        );
       return {
         before,
         error,
@@ -880,5 +912,414 @@ test(
       await assertDirectoryUnchanged(current);
     }
     assert.deepEqual(await readdir(decoy), []);
+  },
+);
+
+test(
+  "compares background exit work with foreground native Claude turns",
+  {
+    skip:
+      process.env.AGENT_RUNNER_NATIVE_CLAUDE !== "1" ||
+      process.platform !== "linux" ||
+      !(await installed("claude")) ||
+      !(await installed("bwrap")),
+  },
+  async (t) => {
+    const marker = `agent-runner-claude-lifecycle-${randomUUID()}`;
+    // The test launcher always removes its TMPDIR. Keep this opt-in fixture
+    // outside that allocation so unverified retirement really retains it.
+    const root = await mkdtemp(join(await realpath("/tmp"), `${marker}-`));
+    const { server, state } = createMessagesStub({ strict: true });
+    let retirementVerified = true;
+    t.after(async () => {
+      server.closeAllConnections();
+      if (server.listening)
+        await new Promise((resolve) => server.close(resolve));
+      assert.equal(
+        retirementVerified,
+        true,
+        "Unverified native process retirement; fixture storage retained.",
+      );
+      await rm(root, { recursive: true, force: true });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const fixtureHome = join(root, "home");
+    const config = join(root, "claude-config");
+    await mkdir(fixtureHome);
+    await mkdir(config);
+    await writeFile(
+      join(config, "settings.json"),
+      JSON.stringify({ env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" } }),
+    );
+    const loopback = `http://127.0.0.1:${server.address().port}`;
+    const providerEnvironment = {
+      ...(process.env.LANG === undefined ? {} : { LANG: process.env.LANG }),
+      PATH: process.env.PATH,
+      HOME: fixtureHome,
+      ...GIT_ENVIRONMENT,
+      ANTHROPIC_API_KEY: SYNTHETIC_KEY,
+      ANTHROPIC_BASE_URL: loopback,
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+      CLAUDE_CONFIG_DIR: config,
+    };
+    gitEnvironment = isolatedGitEnvironment(process.env);
+    const repository = join(root, "repository");
+    await executeFileAsync(
+      "git",
+      ["init", "--quiet", "-b", "main", repository],
+      {
+        env: gitEnvironment,
+      },
+    );
+    await writeFile(join(repository, "tracked.txt"), "Tracked content.\n");
+    await git(repository, "add", "tracked.txt");
+    await git(repository, ...IDENTITY, "commit", "--quiet", "-m", "Initial");
+    const before = await gitState(repository);
+    const gitDigest = await treeDigest(join(repository, ".git"));
+
+    let currentTurn;
+    let baselinePolicy;
+    const execute = (file, argumentsList, options) => {
+      const modelTurn = argumentsList.includes("-p");
+      if (file === "claude") {
+        assert.equal(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+        for (const name of Object.keys(options.env))
+          assert.ok(
+            !/^(?:ANTHROPIC_|CLAUDE_CODE_USE_|AWS_)|PROXY$/iu.test(name) ||
+              name === "ANTHROPIC_API_KEY" ||
+              name === "ANTHROPIC_BASE_URL",
+            name,
+          );
+        if (modelTurn || options.env.ANTHROPIC_API_KEY !== undefined)
+          assert.equal(options.env.ANTHROPIC_API_KEY, SYNTHETIC_KEY);
+        if (modelTurn || options.env.ANTHROPIC_BASE_URL !== undefined)
+          assert.equal(options.env.ANTHROPIC_BASE_URL, loopback);
+      }
+      if (!modelTurn) return realExecute(file, argumentsList, options);
+      const settingsIndex = argumentsList.indexOf("--settings") + 1;
+      assert.ok(settingsIndex > 0);
+      const settings = JSON.parse(argumentsList[settingsIndex]);
+      assert.equal(settings.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+      // Compare all policy settings with the allocation-specific native startup
+      // path rebound to a placeholder.
+      const policy = structuredClone(settings);
+      delete policy.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+      policy.sandbox.filesystem.denyWrite =
+        policy.sandbox.filesystem.denyWrite.map((path) =>
+          path === options.cwd ? "<native-startup>" : path,
+        );
+      if (currentTurn.baseline) baselinePolicy = policy;
+      else assert.deepEqual(policy, baselinePolicy);
+      const rewritten = [...argumentsList];
+      const environment = { ...options.env };
+      if (currentTurn.baseline) {
+        // Only the control turn restores the old background-enabled launch.
+        delete environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+        delete settings.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS;
+        rewritten[settingsIndex] = JSON.stringify(settings);
+      }
+      return executeOwnedProcess(file, rewritten, {
+        ...options,
+        env: environment,
+        onStdout: (chunk) => {
+          currentTurn.observe(chunk);
+          options.onStdout(chunk);
+        },
+      });
+    };
+    const adapter = createClaudeAdapter({
+      env: providerEnvironment,
+      execute,
+      platform: "linux",
+    });
+    assert.equal((await adapter.probe()).workspaceWrite, true);
+
+    async function turn({
+      baseline = false,
+      background = false,
+      blocked = false,
+      timeout,
+    } = {}) {
+      const id = randomUUID();
+      const fifo = join(repository, `release-${id}`);
+      const effect = join(repository, `effect-${id}`);
+      const waiting = join(repository, `waiting-${id}`);
+      await executeFileAsync("mkfifo", [fifo], { env: gitEnvironment });
+      const descriptor = openSync(fifo, constants.O_RDWR);
+      const controller = new AbortController();
+      const processes = [];
+      const records = [];
+      const progress = [];
+      const observations = [];
+      const decoder = new StringDecoder("utf8");
+      let partial = "";
+      let effectAtResult;
+      let settled = false;
+      let execution;
+      let deadline;
+      retirementVerified = false;
+      try {
+        const source =
+          'const fs = require("node:fs"); ' +
+          (blocked
+            ? `const fd = fs.openSync(${JSON.stringify(fifo)}, "r"); ` +
+              `fs.writeFileSync(${JSON.stringify(waiting)}, "Waiting.\\n"); ` +
+              "fs.readSync(fd, Buffer.alloc(1), 0, 1, null); fs.closeSync(fd); "
+            : "") +
+          `fs.writeFileSync(${JSON.stringify(effect)}, "Completed.\\n");`;
+        // Quote shell source, including fixture paths, as a single argument.
+        const command = `node -e '${source.replaceAll("'", "'\\''")}'`;
+        state.steps = [
+          [
+            {
+              name: "Bash",
+              input: {
+                command,
+                description: "Synthetic lifecycle effect",
+                ...(background ? { run_in_background: true } : {}),
+                ...(timeout === undefined ? {} : { timeout }),
+              },
+            },
+          ],
+          STRUCTURED,
+          { text: "Done." },
+          ...(baseline
+            ? Array.from({ length: 4 }, () => ({
+                text: "Background work complete.",
+              }))
+            : []),
+        ];
+        state.mainRequests = 0;
+        state.unexpectedMain = 0;
+        state.unscripted = [];
+        state.toolResults = new Map();
+        state.bashSchemas = [];
+        state.bashToolIds = new Set();
+        currentTurn = {
+          baseline,
+          observe(chunk) {
+            partial += decoder.write(chunk);
+            let newline;
+            while ((newline = partial.indexOf("\n")) >= 0) {
+              const line = partial.slice(0, newline);
+              partial = partial.slice(newline + 1);
+              if (line.trim().length === 0) continue;
+              const record = JSON.parse(line);
+              records.push(record);
+              if (record.type === "result" && effectAtResult === undefined) {
+                effectAtResult = existsSync(effect);
+                // The effect observation precedes release, even within one chunk.
+                assert.equal(writeSync(descriptor, "x"), 1);
+              }
+            }
+          },
+        };
+        deadline = setTimeout(() => controller.abort(), 60_000);
+        execution = adapter
+          .run({
+            access: "workspace-write",
+            cwd: repository,
+            prompt: "Perform the scripted synthetic lifecycle steps.",
+            schema: SCHEMA,
+            signal: AbortSignal.any([t.signal, controller.signal]),
+            onProcess(pid, proof) {
+              if (pid === null) {
+                const process = processes.at(-1);
+                assert.ok(process !== undefined && !process.retired);
+                process.retired = true;
+              } else {
+                processes.push({ pid, retired: false });
+                assert.ok(proof !== undefined);
+              }
+            },
+            onProgress: (value) => progress.push(value),
+            onObservation: (value) => observations.push(value),
+          })
+          .then(
+            (result) => {
+              settled = true;
+              return { result };
+            },
+            (error) => {
+              settled = true;
+              return { error };
+            },
+          );
+        const outcome = await execution;
+        clearTimeout(deadline);
+        assert.equal(
+          controller.signal.aborted || t.signal.aborted,
+          false,
+          "Native turn was interrupted or reached its deadline.",
+        );
+        partial += decoder.end();
+        assert.equal(
+          partial.trim().length,
+          0,
+          "Native stream ended with incomplete JSON.",
+        );
+        assert.ok(
+          processes.length > 0,
+          "Native turn had no owned process registration.",
+        );
+        const firstResult = records.findIndex(({ type }) => type === "result");
+        assert.ok(firstResult >= 0);
+        assert.deepEqual(state.unscripted, []);
+        assert.equal(state.unexpectedMain, 0);
+        assert.equal(nativeDenials(records).length, 0);
+        assert.ok(
+          records
+            .filter(({ type }) => type === "result")
+            .every(
+              ({ permission_denials: denials }) => (denials ?? []).length === 0,
+            ),
+        );
+        assert.ok(state.bashSchemas.length > 0);
+        for (const schema of state.bashSchemas) {
+          assert.equal(schema?.type, "object");
+          assert.equal(
+            Object.hasOwn(schema.properties, "run_in_background"),
+            baseline,
+          );
+        }
+        assert.deepEqual(await gitState(repository), before);
+        assert.equal(await treeDigest(join(repository, ".git")), gitDigest);
+        const publicText = JSON.stringify({
+          error:
+            outcome.error === undefined
+              ? null
+              : {
+                  code: outcome.error.code,
+                  diagnosticClass: outcome.error.diagnosticClass,
+                  failure: outcome.error.failure,
+                  message: outcome.error.message,
+                  recoverable: outcome.error.recoverable,
+                },
+          progress,
+          observations,
+        });
+        for (const forbidden of [
+          root,
+          marker,
+          SYNTHETIC_KEY,
+          command,
+          "readSync",
+          "writeFileSync",
+          ".git",
+          "Permission to use",
+          "policy-stub",
+        ])
+          assert.equal(
+            publicText.includes(forbidden),
+            false,
+            "Public diagnostics exposed fixture-private content.",
+          );
+        const bashResults = records.flatMap((record, index) =>
+          record.type === "user" && Array.isArray(record.message?.content)
+            ? record.message.content
+                .filter(
+                  (block) =>
+                    block.type === "tool_result" &&
+                    state.bashToolIds.has(block.tool_use_id),
+                )
+                .map((block) => ({ error: block.is_error === true, index }))
+            : [],
+        );
+        assert.equal(bashResults.length, 1);
+        assert.ok(bashResults[0].index < firstResult);
+        // A tool error alone cannot prove that the blocked command started.
+        if (blocked)
+          assert.equal(await readFile(waiting, "utf8"), "Waiting.\n");
+        const effectExists = existsSync(effect);
+        if (effectExists)
+          assert.equal(await readFile(effect, "utf8"), "Completed.\n");
+        return {
+          ...outcome,
+          records,
+          firstResult,
+          effectAtResult,
+          effectExists,
+          bashError: bashResults[0].error,
+        };
+      } finally {
+        if (!settled) controller.abort();
+        await execution;
+        clearTimeout(deadline);
+        assert.ok(
+          processes.every(({ retired }) => retired),
+          "Missing onProcess(null); fixture storage retained.",
+        );
+        retirementVerified = true;
+        closeSync(descriptor);
+        await rm(fifo);
+        currentTurn = undefined;
+      }
+    }
+
+    const baseline = await turn({
+      baseline: true,
+      background: true,
+      blocked: true,
+    });
+    assert.equal(baseline.effectAtResult, false);
+    assert.equal(baseline.effectExists, true);
+    assert.ok(
+      baseline.records
+        .slice(baseline.firstResult + 1)
+        .some(({ type }) =>
+          ["assistant", "user", "stream_event", "result"].includes(type),
+        ),
+    );
+    assert.equal(baseline.error?.code, "ERR_CLAUDE_PROTOCOL");
+    assert.ok(
+      [
+        "protocol_assistant_after_result",
+        "protocol_user_after_result",
+        "protocol_stream_event_after_result",
+        "protocol_result_duplicate",
+      ].includes(baseline.error.diagnosticClass),
+    );
+
+    function assertForeground(value) {
+      assert.ok(value.error === undefined, "Foreground native turn failed.");
+      assert.deepEqual(value.result.structured, { ok: true });
+      assert.equal(
+        value.records.filter(({ type }) => type === "result").length,
+        1,
+      );
+      assert.equal(value.records.length, value.firstResult + 1);
+      assert.equal(
+        value.records.some(
+          ({ type, subtype }) =>
+            type === "system" &&
+            ["task_started", "task_progress", "task_notification"].includes(
+              subtype,
+            ),
+        ),
+        false,
+      );
+    }
+    const foreground = await turn();
+    assertForeground(foreground);
+    assert.equal(foreground.bashError, false);
+    assert.equal(foreground.effectAtResult, true);
+    assert.equal(foreground.effectExists, true);
+
+    const requestedBackground = await turn({ background: true });
+    assertForeground(requestedBackground);
+    assert.ok(
+      requestedBackground.bashError || requestedBackground.effectAtResult,
+    );
+    assert.equal(
+      requestedBackground.effectExists,
+      requestedBackground.effectAtResult,
+    );
+
+    const timedOut = await turn({ blocked: true, timeout: 1_000 });
+    assertForeground(timedOut);
+    assert.equal(timedOut.bashError, true);
+    assert.equal(timedOut.effectAtResult, false);
+    assert.equal(timedOut.effectExists, false);
   },
 );

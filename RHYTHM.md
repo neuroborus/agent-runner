@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-14
 
+- **Claude tool work stays in the foreground.** Launches force
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in both the isolated environment and
+  inline settings, defeating conflicting caller and ordinary user/project
+  values without editing settings. This keeps required effects ahead of the
+  result while retaining native managed-policy precedence and strict stream
+  rejection. Unfinished or timed-out checks cannot pass finalization. Fresh
+  `claude-isolation-v6` and `claude-command-boundary-v13` identities bind the
+  complete policy, including private startup cwd and forced cwd retention;
+  older receipts and budgets remain unchanged, so adoption requires a fresh run.
+  A separate installed-CLI differential gates a background effect on an owned
+  FIFO until the first result, then requires the late effect and rejected
+  traffic; repaired turns complete effects first. It retains the newer
+  source-shaped cwd proof, verifies retirement before cleanup, and leaves
+  enabled native acceptance with the supervising operator after handoff and
+  commit. Neither fixture attributes historical failures.
+
 - **Claude post-result diagnostics identify the record family.** The generic
   rejection hid whether assistant, user, or stream-event traffic followed the
   result. The parser now reports a closed class for each family without reading

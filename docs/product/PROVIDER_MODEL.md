@@ -172,11 +172,24 @@ allocation so atomic `.claude/.cc-writes` initialization precedes tools without
 changing an audited source. The real workspace remains an explicit tool directory;
 file tools use absolute workspace paths and sandboxed Bash starts there.
 Launches return Claude to its private native startup directory after each
-command so per-command staging stays outside the workspace. Missing
-optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
+command so per-command staging stays outside the workspace. They also disable
+background tasks in both the process environment and inline CLI settings,
+overriding conflicting caller and ordinary user/project settings without
+editing them. Native managed policy retains precedence; strict post-result
+protocol rejection remains the backstop. A long command may stop at the native
+Bash timeout instead of moving to the background. Required checks must finish
+successfully to qualify finalization; unfinished or timed-out work cannot pass.
+Runner-trusted checks retain their separate execution authority. The
+operator-owned native differential described in [testing](../TESTING.md)
+requires causal late effects and traffic with background execution enabled and
+completed foreground effects before the sole result with the repaired policy.
+It supplements the cwd proof and does not establish a historical failure cause.
+Missing optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
 provider authentication, profiles, and native sessions retain their own access.
-Both native and fallback policy receipts bind this lifecycle. A receipt from an
-older projection policy is incompatible rather than silently replaced.
+Both native and fallback policy receipts bind this complete lifecycle under
+`claude-isolation-v6` and `claude-command-boundary-v13`. Existing runs retain
+their immutable evidence and budgets. A receipt from an older policy is
+incompatible; adopting this policy requires a fresh run.
 
 Allocation is journaled before a turn launches. Normal teardown and owner-loss
 recovery require verified process retirement and identity-checked deletion.
