@@ -370,6 +370,32 @@ test("writable candidate instructions defer checks without suppressing unrelated
   }
 });
 
+test("selected guidance requires controlling references within existing read authority", () => {
+  for (const render of [
+    finalizationBootstrapInstructions,
+    finalizationGuidanceInstructions,
+  ]) {
+    const instructions = render({
+      selection: "file",
+      skillPath: "checks/finalize.md",
+    });
+    assert.match(instructions, /checks\/finalize\.md/u);
+    assert.match(
+      instructions,
+      /mandatory repository references under existing read authority/u,
+    );
+    assert.match(
+      instructions,
+      /references controlling validation commands or gate behavior in validationInfrastructure/u,
+    );
+    assert.match(
+      instructions,
+      /no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback/u,
+    );
+    assert.doesNotMatch(instructions, /Read only that exact/u);
+  }
+});
+
 test("execution discovery and finalization classify infrastructure by responsibility", () => {
   for (const instructions of [
     REPOSITORY_DISCOVERY_INSTRUCTIONS,

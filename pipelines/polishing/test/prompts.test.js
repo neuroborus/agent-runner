@@ -299,6 +299,32 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
   }
 });
 
+test("selected guidance requires controlling references within existing read authority", () => {
+  for (const render of [
+    finalizationBootstrapInstructions,
+    finalizationGuidanceInstructions,
+  ]) {
+    const instructions = render({
+      selection: "file",
+      skillPath: "checks/finalize.md",
+    });
+    assert.match(instructions, /checks\/finalize\.md/u);
+    assert.match(
+      instructions,
+      /mandatory repository references under existing read authority/u,
+    );
+    assert.match(
+      instructions,
+      /references controlling validation commands or gate behavior in validationInfrastructure/u,
+    );
+    assert.match(
+      instructions,
+      /no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback/u,
+    );
+    assert.doesNotMatch(instructions, /Read only that exact/u);
+  }
+});
+
 test("terminal recovery instructions distinguish evidence from content without weakening the gate", () => {
   for (const prompt of [REVIEW_INSTRUCTIONS, CLEAN_CONFIRM_INSTRUCTIONS]) {
     assert.match(prompt, /finalizationFindingIds as the unique subset/u);

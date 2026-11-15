@@ -69,6 +69,24 @@ import {
   trustedValidationSnapshot,
 } from "./support/index.js";
 
+function assertEvidenceDelivery(request) {
+  for (const prompt of [request.prompt, request.recoveryPrompt]) {
+    assert.match(prompt, /Runner owns persisted finalization properties/u);
+    assert.match(prompt, /only the supplied closed schema/u);
+    assert.match(
+      prompt,
+      /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+    );
+    assert.match(prompt, /selected label excluded/u);
+    assert.match(prompt, /Legacy "skill" and fallback/u);
+    assert.match(prompt, /"finalizationGuidance":/u);
+    assert.match(
+      prompt,
+      /Never rerun reserved checks or manage Runner CLI or admission/u,
+    );
+  }
+}
+
 test("uses and persists a configured runner artifact root", async (t) => {
   const fixture = await createFixture(t, {
     artifactRoot: "IGNORED_RUNS",
@@ -119,6 +137,18 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
     ).prompt,
     /No finalization skill guidance is available/u,
   );
+  const finalization = result.pipelineState.finalizationResult;
+  assert.equal(
+    finalization.validationInfrastructureFingerprint,
+    await fixture.runtime.git.validationInfrastructureFingerprint({
+      paths: finalization.validationInfrastructure,
+      projectPath: fixture.projectPath,
+    }),
+  );
+  for (const request of fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  ))
+    assertEvidenceDelivery(request);
 });
 
 test("corrects noncanonical finalization infrastructure before review", async (t) => {
@@ -325,6 +355,12 @@ test("routes corrected finalization PASS and FAIL through the existing gate", as
 
     assert.equal(completed.pipelineState.workflowState, "DONE");
     assert.equal(completed.pipelineState.finalizationResult.status, "PASS");
+    const requests = fixture.calls.worker.filter(
+      ({ schema }) => schema === FINALIZATION_SCHEMA,
+    );
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].access, "read-only");
+    for (const request of requests) assertEvidenceDelivery(request);
     assert.deepEqual(completed.pipelineState.finalizationCorrections, []);
     assert.equal(
       fixture.transitions.filter(
@@ -837,6 +873,7 @@ test("corrects invalid terminal confirmation without retaining rejected values",
       schema.type === "object" && schema.properties?.validationChange,
   );
   assert.equal(reviewCalls.length, 2);
+  for (const request of reviewCalls) assertEvidenceDelivery(request);
   assert.equal(reviewCalls[0].access, "read-only");
   assert.equal(reviewCalls[1].access, "read-only");
   assert.equal(reviewCalls[0].schema, reviewCalls[1].schema);
@@ -2751,6 +2788,25 @@ test("retains finalization evidence after unchanged independent terminal resolut
       .length,
     2,
   );
+  const finalization = completed.pipelineState.finalizationResult;
+  assert.equal(completed.pipelineState.finalizationGuidance.selection, "file");
+  assert.notEqual(
+    await fixture.runtime.git.validationInfrastructureFingerprint({
+      paths: finalization.validationInfrastructure,
+      projectPath: fixture.projectPath,
+    }),
+    finalization.validationInfrastructureFingerprint,
+  );
+  const passed = fixture.transitions.find(
+    ({ options }) =>
+      options.activity?.phase === "finalization" &&
+      options.activity.kind === "passed",
+  );
+  assert.deepEqual(passed.patch.pipelineState.finalizationResult, finalization);
+  for (const request of fixture.calls.reviewer.filter(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  ))
+    assertEvidenceDelivery(request);
 });
 
 test("reruns finalization when retained candidate-review correction scope drifts", async (t) => {

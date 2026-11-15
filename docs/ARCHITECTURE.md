@@ -1655,9 +1655,19 @@ the original relative selection. Both files participate when a repository
 validation file has the same relative path as external guidance.
 Bootstrap and validation migration receive only that label, exact absolute read
 declaration or fallback, never copied procedure content; no additional provider
-checkpoint is introduced. Only that selected label may refer to an external
+checkpoint is introduced. Roles read the exact selected entry and its mandatory
+repository references under existing read authority. References controlling
+validation commands or gate behavior join ordinary validation infrastructure;
+other documents retain responsibility-based classification. Selection grants no
+parent-directory or external sibling access, recursive retrieval, substitution,
+or late fallback. Only that selected label may refer to an external
 file in validation infrastructure. Its identity-bound digest joins the ordinary
-repository-infrastructure digest. Custom directory declarations use the bound
+repository-infrastructure digest: when a `file` selection is in the inventory,
+the owning workflow computes `SHA256(JSON.stringify({infrastructure, finalizationFile}))`,
+where `infrastructure` excludes the selected label and `finalizationFile` is its
+verified identity-bound fingerprint. A raw all-path digest belongs to a different
+domain. Legacy `skill` and fallback decisions retain their existing algorithms.
+Custom directory declarations use the bound
 root for explicitly selected guidance and grant no Git effects. The
 selected skill is part of established validation infrastructure. Execution
 rechecks its exact path and fingerprint before guidance-consuming, correction,
@@ -3483,6 +3493,22 @@ complete catalog and both roles' additive reports. Finalization reserves the ful
 selection and executes only selected entries in the explicit current candidate
 inventory, including justified amendments. The frozen snapshot, vectors, identities,
 and command/configuration fingerprints stay intact.
+
+Both coding pipelines deliver the frozen `finalizationGuidance` decision beside
+the established validation tuple. Their finalization and terminal instructions
+explain the fingerprint domains and Runner-owned persisted additions:
+`fingerprint`, `validationInfrastructureFingerprint`, `trustedCommandFingerprint`,
+`trustedConfigurationFingerprint`, `validationChanged`, execution's `step`, and
+per-check `executor`, `commandIdentity`, `exitCode`, `signal`, and `timedOut`.
+Execution additionally binds confirmation with `validationTupleFingerprint`.
+These are not role output fields. The closed role schemas remain authoritative,
+and Worker check output still contains only `checkId`, `command`, `status`, and
+`evidence`. Fresh, continued, reconstructed, corrective, and evidence-recovery
+requests preserve this contract. Roles independently assess content, complete
+checks, authorized inventory changes and exact evidence bindings; a different
+raw digest alone is no finding, while actual drift or insufficient evidence
+remains blocking. Reviewing evidence never authorizes reserved-check execution
+or Runner CLI/admission management.
 
 The explicit version-22 migration retains historical unscoped evidence under a
 provisional legacy marker. It never infers applicability. Before unfinished

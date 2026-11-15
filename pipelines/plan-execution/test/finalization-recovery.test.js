@@ -163,6 +163,23 @@ for (const mode of ["independent", "lazy"]) {
       ESTABLISHED,
     );
     assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 2);
+    for (const request of [
+      ...calls(fixture, FINALIZATION_SCHEMA),
+      ...calls(fixture, mode === "lazy" ? CLEAN_CONFIRM_SCHEMA : REVIEW_SCHEMA),
+    ]) {
+      for (const prompt of [request.prompt, request.recoveryPrompt]) {
+        assert.match(prompt, /Runner owns persisted finalization properties/u);
+        assert.match(
+          prompt,
+          /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+        );
+        assert.match(prompt, /"finalizationGuidance":/u);
+        assert.match(
+          prompt,
+          /Reject actual mismatches and insufficient evidence/u,
+        );
+      }
+    }
     assert.equal(
       calls(
         fixture,
@@ -419,6 +436,15 @@ test("semantic pending attempt reconstructs after interruption without a native 
     ).length,
     1,
   );
+  const reconstructed = calls(fixture, FINALIZATION_SCHEMA).at(-1);
+  for (const prompt of [reconstructed.prompt, reconstructed.recoveryPrompt]) {
+    assert.match(prompt, /Runner owns persisted finalization properties/u);
+    assert.match(
+      prompt,
+      /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+    );
+    assert.match(prompt, /"finalizationGuidance":/u);
+  }
 });
 
 test("recovery rejects omitted checks and substituted infrastructure through the separate malformed-output correction", async (t) => {

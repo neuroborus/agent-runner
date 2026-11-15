@@ -1744,6 +1744,14 @@ finalization, bounded correction, and resumed work. Drift or later
 unavailability requires a fresh run without consuming a fix or review round;
 `auto` does not rediscover or switch to fallback during the run.
 
+Bootstrap, migration and finalization instructions require reading the exact
+selected entry and its mandatory repository references under existing read
+authority. References controlling validation commands or gate behavior belong
+in ordinary validation infrastructure, with its existing inventory, migration
+and drift rules. Other documents are classified by responsibility. Neither
+the request envelope nor selection grants parent-directory or external sibling
+access, recursive retrieval, substitution or late fallback.
+
 When the selected backend supports a resolved skill natively, it may invoke it
 natively. Otherwise it reads and follows the instructions directly. Exact
 runner-trusted authority and availability remain owned by the frozen trusted
@@ -3226,6 +3234,28 @@ content fingerprint. Step or tuple mismatches fail closed, including on resume.
 Confirmation receives the complete schedule and explicitly evaluates shared
 infrastructure changes against future requirements. Frozen command identities,
 vectors, and command/configuration fingerprints remain unchanged.
+
+Finalization and confirmation requests also carry the persisted
+`finalizationGuidance` decision. Shared instructions explain that Runner adds
+`step`, `fingerprint`, `validationInfrastructureFingerprint`,
+`trustedCommandFingerprint`, `trustedConfigurationFingerprint`, `validationChanged`
+and per-check `executor`, `commandIdentity`, `exitCode`, `signal`, `timedOut`;
+Runner binds terminal confirmation with `validationTupleFingerprint`.
+Roles return only the closed output schemas, never these persisted additions.
+Worker checks still have exactly `checkId`, `command`, `status`, `evidence`.
+
+When selection is `file` and its label is in the inventory, the existing workflow
+fingerprint owner computes `SHA256(JSON.stringify({infrastructure, finalizationFile}))`:
+`infrastructure` is the repository digest excluding the selected label;
+`finalizationFile` is the verified identity-bound selected-file fingerprint.
+Legacy `skill` and fallback algorithms remain unchanged. A different raw
+all-path digest alone cannot justify evidence rejection. Content, complete
+ordered checks, authorized inventory changes and exact content, infrastructure,
+guidance, command and configuration bindings still require independent semantic
+review; genuine mismatches and insufficient evidence remain blocking. Roles
+neither rerun reserved checks nor manage Runner CLI/admission. The same contract
+is delivered in fresh, continued, reconstructed, corrective and evidence-recovery
+requests without changing hashing, schemas or recovery authority.
 
 If that validated record or the runner-owned transition still encounters the
 unexpected `ERR_INVALID_PLAN_EXECUTION_STATE` invariant, retain the last valid

@@ -294,6 +294,11 @@ repository validation files. Automatic discovery does not switch or
 fall back later. Missing, invalid, or changed frozen guidance requires a new
 run rather than consuming correction or review budgets.
 
+Roles must read that exact entry and its mandatory repository references within
+existing read authority. References controlling validation commands or gate
+behavior participate in ordinary infrastructure drift protection. Selection
+does not grant sibling or parent-directory access or recursive retrieval.
+
 In independent mode, the Reviewer first checks the complete candidate without
 attesting finalization. All findings remain blocking until fixed, withdrawn,
 arbitrated, or explicitly overridden for the exact candidate fingerprint.
@@ -328,6 +333,17 @@ binds it to the staging-independent content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. Skipped, weakened,
 replaced, unmatched, or stale evidence fails closed. Host attestations and user
 claims do not satisfy the gate.
+
+Runner adds persisted fingerprints, validation-change state and check-executor
+provenance after role output validation; roles return only their closed schemas.
+Finalization and terminal requests carry the frozen guidance decision and explain
+its fingerprint domain, including reconstruction and correction. Selected `file`
+guidance composes the ordinary infrastructure digest, excluding that selected
+label, with its identity-bound file fingerprint; a raw all-path digest differs
+without implying drift. Legacy and fallback algorithms remain unchanged. This
+explanation preserves independent semantic review of complete checks, authorized
+inventory changes and exact evidence bindings. It neither approves evidence
+automatically nor permits reserved-check execution or Runner management.
 
 Ordinary terminal findings invalidate candidate and confirmation attestations,
 not an otherwise current successful finalization record. A declared fix does not prove

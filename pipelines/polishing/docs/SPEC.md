@@ -345,6 +345,14 @@ their original repository path and fingerprint algorithm; no identity proof is
 inferred and no frozen selection is rediscovered. Consumed commits and completed
 handoffs remain verification-only. New selection adds no model checkpoint.
 
+Bootstrap, migration and finalization instructions require reading the exact
+selected entry and its mandatory repository references under existing read
+authority. References controlling validation commands or gate behavior belong
+in ordinary validation infrastructure under existing inventory, migration and
+drift rules; other documents are classified by responsibility. Selection and
+the request envelope grant no parent-directory or external sibling access,
+recursive retrieval, substitution or late fallback.
+
 `trustedChecks` is an array of unique runner-trusted command aliases and
 defaults to empty. Root and safe project `trustedCommands` catalogs use the same
 exact-vector validator for each alias's inventory command, executable, and
@@ -872,6 +880,28 @@ closed. A bounded environment failure pauses at `FINALIZE`; resume reuses the
 durable command snapshot. The accepted ordered evidence tuple binds both agent
 and runner results to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints.
+
+Finalization and terminal-confirmation requests carry the persisted
+`finalizationGuidance` decision and explain Runner-owned additions:
+`fingerprint`, `validationInfrastructureFingerprint`, `trustedCommandFingerprint`,
+`trustedConfigurationFingerprint`, `validationChanged` and per-check `executor`,
+`commandIdentity`, `exitCode`, `signal`, `timedOut`. These are not role output
+fields; roles return only their closed schemas, with Worker check entries limited
+to `checkId`, `command`, `status`, `evidence`.
+
+When selection is `file` and its label is in the inventory, the existing workflow
+owner computes `SHA256(JSON.stringify({infrastructure, finalizationFile}))`:
+`infrastructure` is the repository digest excluding the selected label;
+`finalizationFile` is the verified identity-bound selected-file fingerprint.
+Legacy `skill` and fallback algorithms remain unchanged. A different raw
+all-path digest alone is no evidence of drift. Roles independently review
+content, complete checks, authorized inventory changes and exact content,
+infrastructure, guidance, command and configuration bindings, rejecting genuine
+mismatches and insufficient evidence. They never rerun reserved checks or manage
+Runner CLI/admission. Fresh, continued, reconstructed, corrective and
+evidence-recovery requests all preserve this contract without new hashing,
+schemas or recovery authority.
+
 Increasing the deadline cannot repair sandbox incompatibility or restore raw
 stdout/stderr. A full repository check may pass on the host while trusted
 isolation fails closed with only a generic exit code; the timeout is not a

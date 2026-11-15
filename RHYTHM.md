@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-15
+
+- **Finalization roles receive the evidence domain and mandatory reading route.**
+  Both coding pipelines deliver the frozen guidance decision with validation
+  tuples and explain Runner-owned persisted fields and the existing selected-file
+  composition. A raw all-path digest difference alone cannot reject correctly
+  bound evidence; independent semantic review and actual drift rejection remain
+  mandatory. Bootstrap and finalization require the selected entry's mandatory
+  repository references under existing read authority, including command and
+  gate owners in ordinary validation infrastructure. No hashing, schemas,
+  permissions or recovery allowances change.
+
 ## 2026-11-14
 
 - **Claude tool work stays in the foreground.** Launches force

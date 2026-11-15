@@ -1655,7 +1655,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const readContext =
       selectedFile === null
         ? ""
-        : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+        : `\nFrozen finalization file: ${selectedFile.path}; its frozen guidance label is ${guidance.skillPath}. Read this exact entry and its mandatory repository references under existing read authority. Selection grants no parent-directory or external sibling access or recursive retrieval.\n`;
     const acknowledgedSessions = new Set();
     const request = {
       onSessionCreated: async (sessionId) => {
@@ -4812,6 +4812,7 @@ ${establishedValidationPrompt(state())}${
     return `Established validation tuple:
 ${JSON.stringify(
   {
+    finalizationGuidance: current.finalizationGuidance,
     requiredChecks: current.requiredChecks,
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:

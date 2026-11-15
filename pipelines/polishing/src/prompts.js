@@ -88,8 +88,13 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 
 const TRUSTED_TIMING_INSTRUCTIONS = `Runner-trusted elapsed evidence measures the admitted attempt including preparation, retirement, cleanup and safety checks, not child runtime alone. Use only the persisted Runner measurement; unavailable legacy/controller timing stays unknown. Never measure a reserved command yourself, invent historical timing or rerun solely for missing telemetry.`;
 
+const FINALIZATION_EVIDENCE_INSTRUCTIONS = `Runner owns persisted finalization properties fingerprint, validationInfrastructureFingerprint, trustedCommandFingerprint, trustedConfigurationFingerprint and validationChanged, and per-check executor, commandIdentity, exitCode, signal and timedOut. These are not additional role output fields: return only the supplied closed schema; Worker checks contain only checkId, command, status and evidence.
+The supplied finalizationGuidance identifies the fingerprint domain. When selection is "file" and its skillPath is included in validationInfrastructure, validationInfrastructureFingerprint is SHA256(JSON.stringify({infrastructure, finalizationFile})): infrastructure is the existing infrastructure digest with that selected label excluded, and finalizationFile is the verified identity-bound selected-file fingerprint. A raw digest over all inventory paths is a different domain; that difference alone is not evidence of drift. Legacy "skill" and fallback decisions retain their existing fingerprint algorithms. Do not recompute or replace Runner bindings.
+Review content, complete ordered checks and direct evidence, task-authorized inventory changes, and exact content, infrastructure, selected-guidance, command and configuration bindings independently. Reject actual mismatches and insufficient evidence; Runner ownership is not semantic approval. Never rerun reserved checks or manage Runner CLI or admission to review or repair evidence.`;
+
 export const FINALIZATION_INSTRUCTIONS = `Run the complete project finalization procedure in this dedicated turn, including project-required formatting or generated output and staging-independent content review. Do not perform unrelated fixes, stage or unstage changes, alter the Git index or other Git metadata, or create a commit.
 ${TRUSTED_TIMING_INSTRUCTIONS}
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Keep the finalization inventory staging-independent. When project finalization guidance includes staging or generic commit preparation, defer staging, staged/index-relative inspection, and staged handoff to the runner-owned HANDOFF; omit alternate-index workarounds and commit preparation because polishing prohibits them. Do not run git add or inspect the staged diff in this turn. Express each applicable content check against HEAD or explicit trees. This phase-owned deferral is neither a validation blocker nor a skipped required check and must not prevent PASS. After candidate convergence and the fingerprint-bound finalization and terminal-confirmation gate pass, HANDOFF alone stages and performs fixed runner-owned staged-handoff hygiene; it never creates a commit.
 Post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not part of this inventory: do not add or run it. PASS covers only the pipeline-owned inventory; list that acceptance in the summary as pending external work with its owner and timing, never as run or passed. This never permits removing or weakening an established check.
@@ -102,11 +107,13 @@ For SKILL_MISSING or SKILL_INVALID, provide the attempted selected guidance labe
 For BLOCKED, use only when required validation cannot run because of sandbox, IPC, loopback, process-isolation, missing-service, permission, or comparable external constraints. Use the selected skillPath or "" when no skill is selected; preserve the complete inventory, report every check as PASS, BLOCKED, or NOT_RUN, set summary, question, and whyBlocked to "", and issues and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set skillPath, summary, and reason to "", and issues, requiredChecks, validationInfrastructure, and checks to []; use the product-decision fields.`;
 
+const FINALIZATION_REFERENCE_INSTRUCTIONS = `Read the exact selected entry and its mandatory repository references under existing read authority. Include the selected entry and references controlling validation commands or gate behavior in validationInfrastructure; classify other documents by their actual responsibility. Selection grants no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback.`;
+
 export function finalizationBootstrapInstructions({ selection, skillPath }) {
   if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
-  return `The frozen finalization skill or Markdown procedure is ${skillPath}. Read only that exact confined Markdown file, do not substitute another path, and include it in validationInfrastructure.`;
+  return `The frozen finalization skill or Markdown procedure is ${skillPath}. ${FINALIZATION_REFERENCE_INSTRUCTIONS}`;
 }
 
 export function finalizationGuidanceInstructions({ skillPath }) {
@@ -115,6 +122,7 @@ export function finalizationGuidanceInstructions({ skillPath }) {
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
   }
   return `The frozen finalization skill or Markdown procedure is ${skillPath}. Validate that exact confined Markdown file before following it; do not substitute another path or fall back to different guidance.
+${FINALIZATION_REFERENCE_INSTRUCTIONS}
 This frozen skill must remain present in validationInfrastructure. If it is missing or invalid, report SKILL_MISSING or SKILL_INVALID; repairing guidance requires a new run.
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
@@ -130,6 +138,7 @@ For FINDINGS, provide one or more findings with stable IDs, repository-relative 
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.`;
 
 const TERMINAL_EVIDENCE_INSTRUCTIONS = `${TRUSTED_TIMING_INSTRUCTIONS}
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that the task does not authorize.
 ${EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS}
 Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.

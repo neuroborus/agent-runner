@@ -64,6 +64,24 @@ import {
   verboseResolutionBatch,
 } from "./support/index.js";
 
+function assertEvidenceDelivery(request) {
+  for (const prompt of [request.prompt, request.recoveryPrompt]) {
+    assert.match(prompt, /Runner owns persisted finalization properties/u);
+    assert.match(prompt, /only the supplied closed schema/u);
+    assert.match(
+      prompt,
+      /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+    );
+    assert.match(prompt, /selected label excluded/u);
+    assert.match(prompt, /Legacy "skill" and fallback/u);
+    assert.match(prompt, /"finalizationGuidance":/u);
+    assert.match(
+      prompt,
+      /Never rerun reserved checks or manage Runner CLI or admission/u,
+    );
+  }
+}
+
 test("finalizes only after a content-changing lazy candidate converges", async (t) => {
   let checkRound = 0;
   const fixture = await createFixture(t, {
@@ -830,6 +848,18 @@ test("runs the dedicated finalization gate without skill guidance", async (t) =>
     ).prompt,
     /No finalization skill guidance is available/u,
   );
+  const finalization = result.pipelineState.finalizationResult;
+  assert.equal(
+    finalization.validationInfrastructureFingerprint,
+    await fixture.runtime.git.validationInfrastructureFingerprint({
+      paths: finalization.validationInfrastructure,
+      projectPath: fixture.projectPath,
+    }),
+  );
+  for (const request of fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  ))
+    assertEvidenceDelivery(request);
 });
 
 test("corrects an invalid finalization inventory into an environment pause", async (t) => {
@@ -923,6 +953,12 @@ test("routes corrected finalization PASS and FAIL through the existing gates", a
 
     assert.equal(completed.pipelineState.workflowState, "DONE");
     assert.equal(completed.pipelineState.finalizationResult.status, "PASS");
+    const requests = fixture.calls.worker.filter(
+      ({ schema }) => schema === FINALIZATION_SCHEMA,
+    );
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].access, "read-only");
+    for (const request of requests) assertEvidenceDelivery(request);
     assert.equal(completed.pipelineState.finalizationCorrection, null);
   });
 
@@ -2037,6 +2073,25 @@ test("retains finalization evidence after unchanged independent terminal resolut
       .length,
     1,
   );
+  const finalization = result.pipelineState.finalizationResult;
+  assert.equal(result.pipelineState.finalizationGuidance.selection, "file");
+  assert.notEqual(
+    await fixture.runtime.git.validationInfrastructureFingerprint({
+      paths: finalization.validationInfrastructure,
+      projectPath: fixture.projectPath,
+    }),
+    finalization.validationInfrastructureFingerprint,
+  );
+  const passed = fixture.transitions.find(
+    ({ options }) =>
+      options.activity?.phase === "finalization" &&
+      options.activity.kind === "passed",
+  );
+  assert.deepEqual(passed.patch.pipelineState.finalizationResult, finalization);
+  for (const request of fixture.calls.reviewer.filter(
+    ({ schema }) => schema === REVIEW_SCHEMA,
+  ))
+    assertEvidenceDelivery(request);
 });
 
 test("reconverges persisted terminal findings before reusing finalization evidence", async (t) => {
@@ -2159,6 +2214,7 @@ test("corrects terminal Reviewer output without rerunning finalization", async (
 
   assert.equal(result.pipelineState.workflowState, "DONE");
   assert.equal(confirmationCalls.length, 2);
+  for (const request of confirmationCalls) assertEvidenceDelivery(request);
   assert.equal(confirmationCalls[1].session, undefined);
   assert.match(
     confirmationCalls[1].prompt,

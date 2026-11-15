@@ -120,7 +120,12 @@ Otherwise, return only the candidate decision and actionable findings using the 
 
 const TRUSTED_TIMING_INSTRUCTIONS = `Runner-trusted elapsed evidence measures the admitted attempt including preparation, retirement, cleanup and safety checks, not child runtime alone. Use only the persisted Runner measurement; unavailable legacy/controller timing stays unknown. Never measure a reserved command yourself, invent historical timing or rerun solely for missing telemetry.`;
 
+const FINALIZATION_EVIDENCE_INSTRUCTIONS = `Runner owns persisted finalization properties step, fingerprint, validationInfrastructureFingerprint, trustedCommandFingerprint, trustedConfigurationFingerprint and validationChanged, and per-check executor, commandIdentity, exitCode, signal and timedOut. Runner also binds terminal confirmation with validationTupleFingerprint. These are not additional role output fields: return only the supplied closed schema; Worker checks contain only checkId, command, status and evidence.
+The supplied finalizationGuidance identifies the fingerprint domain. When selection is "file" and its skillPath is included in validationInfrastructure, validationInfrastructureFingerprint is SHA256(JSON.stringify({infrastructure, finalizationFile})): infrastructure is the existing infrastructure digest with that selected label excluded, and finalizationFile is the verified identity-bound selected-file fingerprint. A raw digest over all inventory paths is a different domain; that difference alone is not evidence of drift. Legacy "skill" and fallback decisions retain their existing fingerprint algorithms. Do not recompute or replace Runner bindings.
+Review content, complete ordered checks and direct evidence, task-authorized inventory changes, and exact content, infrastructure, selected-guidance, command and configuration bindings independently. Reject actual mismatches and insufficient evidence; Runner ownership is not semantic approval. Never rerun reserved checks or manage Runner CLI or admission to review or repair evidence.`;
+
 const TERMINAL_EVIDENCE_INSTRUCTIONS = `${TRUSTED_TIMING_INSTRUCTIONS}
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
 Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
 ${EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS}
 Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
@@ -192,6 +197,7 @@ ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
 const FINALIZATION_RESULT_INSTRUCTIONS = `Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
 Each checks entry has exactly checkId, command, status and evidence. Match checkId and command exactly to requiredChecks at the same position. Each check's evidence array is nonempty, at most 32 items, each concise plain text up to 4000 characters. A Worker PASS may include reserved NOT_RUN placeholders; only Runner replacement can supply their execution evidence.
 Post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not part of this inventory: do not add or run it. PASS covers only the pipeline-owned inventory; list that acceptance in the summary as pending external work with its owner and timing, never as run or passed. This never permits removing or weakening an established check.
 ${TRUSTED_TIMING_INSTRUCTIONS}
@@ -221,6 +227,8 @@ Never stage, inspect an index-relative diff, prepare a commit, create a commit o
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 ${FINALIZATION_RESULT_INSTRUCTIONS}`;
 
+const FINALIZATION_REFERENCE_INSTRUCTIONS = `Read the exact selected entry and its mandatory repository references under existing read authority. Include the selected entry and references controlling validation commands or gate behavior in validationInfrastructure; classify other documents by their actual responsibility. Selection grants no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback.`;
+
 export function finalizationBootstrapInstructions({
   selection,
   skillPath,
@@ -231,7 +239,7 @@ export function finalizationBootstrapInstructions({
   if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
-  return `The frozen finalization skill or Markdown procedure is ${skillPath}. Read only that exact confined Markdown file, do not substitute another path, and include it in validationInfrastructure.`;
+  return `The frozen finalization skill or Markdown procedure is ${skillPath}. ${FINALIZATION_REFERENCE_INSTRUCTIONS}`;
 }
 
 export function finalizationGuidanceInstructions({
@@ -245,6 +253,7 @@ export function finalizationGuidanceInstructions({
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
   }
   return `The frozen finalization skill or Markdown procedure is ${skillPath}. Validate that exact confined Markdown file before following it; do not substitute another path or fall back to different guidance.
+${FINALIZATION_REFERENCE_INSTRUCTIONS}
 This frozen skill must remain present in validationInfrastructure. If it is missing or invalid, report SKILL_MISSING or SKILL_INVALID; repairing guidance requires a new run.
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
