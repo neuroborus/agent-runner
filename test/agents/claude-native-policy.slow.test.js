@@ -394,7 +394,6 @@ function bash(command) {
       input: {
         command,
         description: "Scripted step",
-        run_in_background: false,
       },
     },
   ];

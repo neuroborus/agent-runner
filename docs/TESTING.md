@@ -1257,8 +1257,9 @@ other preflight or protocol failure still fail. Every turn runs through the real
 adapter probe, generated settings, authenticated launcher, and stream
 normalization against an owned Git repository or ordinary directory,
 configuration directory, synthetic key, and loopback Messages stub that scripts
-tool calls and refuses every other request. Permission and cwd scripts explicitly
-disable background execution, and each turn is awaited before snapshots.
+tool calls and refuses every other request. Adapter environment/settings enforce
+foreground execution for permission and cwd scripts, and each turn is awaited
+before snapshots.
 Owned-process supervision bounds each turn with a deadline and test
 cancellation; interruption fails independently of any later adapter error.
 Fixture cleanup requires verified retirement of every registered process;
