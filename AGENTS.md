@@ -38,6 +38,9 @@ contract.
 
 ## Working Agreements
 
+- Use the [delegation skill](.agents/skills/delegation/SKILL.md) for Runner-owned
+  implementation and repair/skill-task supervision; it owns authorship,
+  task-scoped role selection, audit isolation and authorized delivery guidance.
 - Write source code, comments, logs, tests, and repository documentation in English.
 - Keep tracked repository content self-contained. Never copy or encode names,
   paths, identifiers, domain details, or other context from unrelated projects,

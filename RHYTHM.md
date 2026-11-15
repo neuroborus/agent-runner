@@ -7,6 +7,19 @@ remain in the owning documentation.
 
 ## 2026-11-15
 
+- **Runner owns implementation authorship by default.** The discoverable
+  [delegation skill](.agents/skills/delegation/SKILL.md) separates implementation
+  from operator requirements, read-only investigation, supervision and already
+  authorized operations. Unavoidable authorized manual edits require Runner
+  polishing and independent whole-change review. Task-scoped combined roles,
+  the authorized Sol-primary fallback and user-controlled Fable/Sol audit
+  selection preserve explicit task choices and independent defaults. Repair
+  triage, isolated audits, separate operator receipts and immediate authorized
+  readiness notifications preserve existing permission boundaries. Integration
+  follows current target contracts, including foreground execution and the
+  phase-owned finalization evidence and mandatory-reference rules, rather than
+  replacing newer instructions with a reviewed candidate's older tree.
+
 - **Finalization roles receive the evidence domain and mandatory reading route.**
   Both coding pipelines deliver the frozen guidance decision with validation
   tuples and explain Runner-owned persisted fields and the existing selected-file
