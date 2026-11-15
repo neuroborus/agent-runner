@@ -2320,6 +2320,30 @@ inventory, rather than the original applicability alone, selects which frozen
 commands the runner executes. The amendment still requires the existing distinct,
 fingerprint-bound terminal confirmation before becoming active authority.
 
+Each bootstrap role discovers all known applicable checks, including available
+supplemental validators. In finalization, the Worker preserves project-defined
+first, final and relative-order constraints in the declared inventory and ordered
+evidence; amendments position additions accordingly rather than automatically appending
+them, retaining every established identity and exact command. Current-inventory
+reordering never changes original discovery or future assignments. Array order
+proves no physical execution sequence: Worker runs agent-owned checks during
+`FINALIZE` and returns reserved `NOT_RUN` entries; Runner subsequently executes
+their frozen vectors and replaces those entries in inventory positions under
+existing unchanged-content and infrastructure guards. No later Worker turn is
+required; `COMMIT` retains its separate fixed staged hygiene. A separately explicit
+physical sequencing requirement remains binding and uses existing blocking
+outcomes if incompatible with ownership/checkpoints, without new permissions or
+an invented product decision. Independent terminal Reviewer confirmation and
+lazy terminal clean confirmation read the
+actual selected guidance and mandatory references and assess the complete
+resulting procedure, including additions and their positions, even when all
+checks pass. The owning prompt instructions reach fresh, continued,
+reconstructed, corrective and evidence-recovery requests. This semantic
+obligation changes neither bootstrap union nor future assignments, schemas,
+bindings or budgets. It cannot guarantee model compliance or automatically
+repair historical runs; existing evidence-only recovery can correct ordering
+without content changes.
+
 State version 27 replaces the expanded schedule representation. Its leased
 version-26 migration verifies the old schedule against accepted role assignments
 before converting it, preserving all other evidence, amendments, correction

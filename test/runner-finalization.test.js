@@ -42,6 +42,23 @@ function assertEvidenceContract(prompt) {
     /"finalizationGuidance":/u,
   ])
     assert.match(prompt, fact);
+  assert.match(prompt, /project-defined first, final and relative-order/u);
+  assert.match(prompt, /Additions are not automatically appended/u);
+  assert.match(prompt, /declared inventory and ordered evidence/u);
+  assert.match(
+    prompt,
+    /never rewrites original discovery or future assignments/u,
+  );
+  assert.match(prompt, /array order proves no execution sequence/u);
+  assert.match(
+    prompt,
+    /Runner executes their frozen vectors after Worker returns/u,
+  );
+  assert.match(prompt, /Do not invent a later Worker phase/u);
+  assert.match(
+    prompt,
+    /separately explicit physical sequencing requirement remains binding/u,
+  );
 }
 
 async function selectedFixture(
@@ -249,6 +266,12 @@ for (const pipeline of ["execution", "polishing"]) {
         for (const prompt of [request.prompt, request.recoveryPrompt]) {
           assert.ok(prompt.includes(f.guidancePath));
           assert.match(prompt, /mandatory repository references/u);
+          assert.match(prompt, /all known applicable checks during bootstrap/u);
+          assert.match(prompt, /available supplemental validators/u);
+          assert.match(
+            prompt,
+            /project-defined first, final and relative-order/u,
+          );
           assert.match(
             prompt,
             /references controlling validation commands or gate behavior in validationInfrastructure/u,
@@ -267,6 +290,13 @@ for (const pipeline of ["execution", "polishing"]) {
       for (const request of evidenceRequests) {
         assertEvidenceContract(request.prompt);
         assertEvidenceContract(request.recoveryPrompt);
+        if (request.schema !== schemas.FINALIZATION_SCHEMA) {
+          for (const prompt of [request.prompt, request.recoveryPrompt]) {
+            assert.match(prompt, /actual selected finalization guidance/u);
+            assert.match(prompt, /including added checks and their positions/u);
+            assert.match(prompt, /passing checks alone/u);
+          }
+        }
         const tuple = JSON.parse(
           /Established validation tuple:\n([\s\S]*?)\n\n/u.exec(
             request.prompt,

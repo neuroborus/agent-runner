@@ -3510,6 +3510,30 @@ raw digest alone is no finding, while actual drift or insufficient evidence
 remains blocking. Reviewing evidence never authorizes reserved-check execution
 or Runner CLI/admission management.
 
+Each pipeline's prompt module also owns procedure-order guidance, composed into
+bootstrap discovery, finalization and both terminal-confirmation variants.
+Bootstrap discovers known applicable supplemental validators early. Workers
+retain established check identities and exact commands while positioning
+amendments to preserve project-defined first, final and relative-order
+constraints in the declared inventory and ordered evidence. Reordering the
+current inventory never rewrites original discovery or future assignments.
+Inventory order proves no physical execution sequence: Worker completes its
+agent-owned checks and returns reserved `NOT_RUN` placeholders; Runner later
+executes frozen selected vectors and replaces those entries in inventory
+positions under existing unchanged-content and infrastructure guards. No later
+Worker phase is required. Separately explicit physical sequencing requirements
+remain binding; incompatibility with existing ownership/checkpoints uses existing
+blocking outcomes without new permissions or an invented product decision.
+`COMMIT`/`HANDOFF` retains separate fixed staged hygiene.
+Terminal roles read the actual selected guidance and mandatory references and
+assess the complete resulting procedure, including additions;
+passing checks alone cannot establish procedural compliance. The same owners
+feed continued, reconstructed, corrective and evidence-recovery requests.
+This strengthens semantic delivery without parsing project prose, changing the
+first-seen bootstrap union or evidence domains, guaranteeing model compliance,
+or automatically repairing historical runs. Existing bounded evidence-only
+recovery can repair ordering without changing content.
+
 The explicit version-22 migration retains historical unscoped evidence under a
 provisional legacy marker. It never infers applicability. Before unfinished
 work advances, a read-only barrier invalidates active gates and requires scoped

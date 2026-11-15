@@ -902,6 +902,29 @@ Runner CLI/admission. Fresh, continued, reconstructed, corrective and
 evidence-recovery requests all preserve this contract without new hashing,
 schemas or recovery authority.
 
+Each bootstrap role discovers all known applicable checks, including available
+supplemental validators. In finalization, the Worker preserves project-defined
+first, final and relative-order constraints in the declared inventory and ordered
+evidence; amendments position additions accordingly rather than automatically appending
+them, retaining every established identity and exact command. Current-inventory
+reordering never changes original discovery. Array order proves no physical
+execution sequence: Worker runs agent-owned checks during `FINALIZE` and returns
+reserved `NOT_RUN` entries; Runner subsequently executes their frozen vectors
+and replaces those entries in inventory positions under existing unchanged-content
+and infrastructure guards. No later Worker turn is required; `HANDOFF` retains
+its separate fixed staged hygiene. A separately explicit physical sequencing
+requirement remains binding and uses existing blocking outcomes if incompatible
+with ownership/checkpoints, without new permissions or an invented product
+decision. Independent terminal Reviewer confirmation and lazy terminal clean
+confirmation read the
+actual selected guidance and mandatory references and assess the complete
+resulting procedure, including additions and their positions, even when all
+checks pass. The owning prompt instructions reach fresh, continued,
+reconstructed, corrective and evidence-recovery requests. This semantic
+obligation changes neither first-seen bootstrap union nor schemas, bindings or
+budgets. It cannot guarantee model compliance or automatically repair historical
+runs; existing evidence-only recovery can correct ordering without content changes.
+
 Increasing the deadline cannot repair sandbox incompatibility or restore raw
 stdout/stderr. A full repository check may pass on the host while trusted
 isolation fails closed with only a generic exit code; the timeout is not a

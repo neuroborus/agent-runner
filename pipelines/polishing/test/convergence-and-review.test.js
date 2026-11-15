@@ -66,6 +66,12 @@ import {
 
 function assertEvidenceDelivery(request) {
   for (const prompt of [request.prompt, request.recoveryPrompt]) {
+    assert.match(prompt, /project-defined first, final and relative-order/u);
+    assert.match(prompt, /Additions are not automatically appended/u);
+    if (request.schema !== FINALIZATION_SCHEMA) {
+      assert.match(prompt, /actual selected finalization guidance/u);
+      assert.match(prompt, /including added checks and their positions/u);
+    }
     assert.match(prompt, /Runner owns persisted finalization properties/u);
     assert.match(prompt, /only the supplied closed schema/u);
     assert.match(

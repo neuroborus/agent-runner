@@ -284,6 +284,27 @@ before generation and every established non-mutating check, and accepts no
 omission or substitution. A project-required content change is fingerprinted
 after it finishes.
 
+Bootstrap discovers all known applicable checks, including available supplemental
+validators. Workers preserve project-defined first, final and relative-order
+constraints in the declared inventory and ordered evidence: additions are
+not automatically appended. Established identities and exact commands remain
+required. Reordering the current inventory preserves original discovery and
+future assignments. This order is not a global physical timeline: Worker runs
+its agent-owned checks and returns reserved `NOT_RUN` entries; Runner later
+executes frozen vectors and replaces entries in inventory positions under existing
+unchanged-content and infrastructure guards. No later Worker phase is required;
+`COMMIT`/`HANDOFF` keeps separate staged hygiene. Separately explicit physical
+sequencing requirements still bind and use existing blocking outcomes when
+incompatible with ownership/checkpoints, without new permissions or an invented
+product decision. Independent terminal review and lazy terminal clean confirmation
+read the actual selected guidance and mandatory references and assess the complete
+resulting procedure, including added checks and their positions. Passing every
+check does not alone establish procedural compliance. This is a semantic
+obligation delivered in role instructions, not deterministic parsing of project
+prose or a guarantee of model compliance. Existing evidence-only recovery can
+correct ordering without content edits; historical runs are not automatically
+repaired.
+
 Both workflows freeze their effective finalization-guidance path or fallback
 decision before bootstrap. Explicit Markdown procedures resolve from the bound
 infrastructure root; automatic skills remain repository-local. New selections pin

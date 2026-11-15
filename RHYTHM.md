@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-11-15
 
+- **Finalization inventory order preserves execution ownership.** Bootstrap
+  discovers known supplemental validators early; Worker amendments retain exact
+  checks while preserving project-defined first, final and relative order.
+  Both terminal roles assess the complete inventory against actual selected
+  guidance and mandatory references, since passing checks alone cannot establish
+  procedural compliance. The canonical validation reference places supplemental
+  checks before the final HEAD-relative check in inventory and ordered evidence,
+  without changing the frozen entry. This is not a global physical timeline:
+  Worker returns reserved `NOT_RUN` entries and Runner later replaces them in
+  place under unchanged-content/infrastructure guards. No later Worker phase is
+  needed. Separately explicit physical sequencing remains binding and blocks
+  when incompatible with existing ownership and checkpoints. Current-inventory
+  reordering never rewrites original discovery or future assignments.
+  Existing bounded evidence recovery can correct ordering without content edits.
+  Stronger prompt delivery neither guarantees compliance nor repairs old runs;
+  deterministic inventories, bindings, budgets and permissions remain unchanged.
+
 - **Runner owns implementation authorship by default.** The discoverable
   [delegation skill](.agents/skills/delegation/SKILL.md) separates implementation
   from operator requirements, read-only investigation, supervision and already

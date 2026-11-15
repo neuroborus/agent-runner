@@ -444,15 +444,38 @@ test("version-22 discovery survives interruption and preserves consumed-effect v
   assert.doesNotThrow(() => normalizePipelineState(legacyConsumed));
 });
 
-test("confirmed inventory amendments do not change the next persisted step", async (t) => {
+test("confirmed supplemental insertion preserves the final check and next persisted step", async (t) => {
+  const last = { id: "C2", command: "node scripts/final-check.js" };
+  const established = [{ id: "C1", command: fast }, last];
+  const amended = [
+    established[0],
+    { id: "C3", command: "node scripts/supplemental-check.js" },
+    last,
+  ];
+  const result = (requiredChecks) => ({
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: requiredChecks.map(({ id, command }) => ({
+      checkId: id,
+      command,
+      status: "PASS",
+      evidence: ["Controlled check passed."],
+    })),
+  });
   const inventories = [];
   const fixture = await createFixture(t, {
     plan,
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks: established },
+      reconciliationResolved(),
+    ],
+    reviewer: [{ ...bootstrapReady("Reviewer"), requiredChecks: established }],
     workWorker: [
       implementationCompleted(),
-      finalized([fast, reviewerOnly]),
+      result(amended),
       implementationCompleted(),
-      finalized([fast]),
+      result(established),
     ],
     workReviewer: [
       reviewApproved(),
@@ -470,11 +493,14 @@ test("confirmed inventory amendments do not change the next persisted step", asy
   });
   const completed = await fixture.run();
   assert.equal(completed.pipelineState.workflowState, "DONE");
-  assert.deepEqual(inventories, [[fast], [fast]]);
+  assert.deepEqual(inventories, [
+    established.map(({ command }) => command),
+    established.map(({ command }) => command),
+  ]);
   assert.equal(completed.pipelineState.validationAmendment, null);
   assert.ok(
     completed.pipelineState.validationSchedule.steps.every(
-      ({ commandIndexes }) => commandIndexes.length === 1,
+      ({ commandIndexes }) => commandIndexes.length === 2,
     ),
   );
   const accepted = fixture.transitions.find(
@@ -483,9 +509,23 @@ test("confirmed inventory amendments do not change the next persisted step", asy
       patch?.pipelineState?.validationAmendment !== undefined,
   ).patch.pipelineState;
   assert.equal(accepted.validationAmendment.step, 1);
+  assert.deepEqual(accepted.requiredChecks, amended);
+  for (const role of ["workerValidation", "reviewerValidation"]) {
+    assert.deepEqual(
+      accepted[role].requiredChecks.map(({ id, command }) => ({ id, command })),
+      established,
+    );
+  }
   assert.deepEqual(
-    accepted.requiredChecks.map(({ command }) => command),
-    [fast, reviewerOnly],
+    accepted.validationSchedule,
+    completed.pipelineState.validationSchedule,
+  );
+  assert.deepEqual(
+    accepted.finalizationResult.checks.map(({ checkId, command }) => ({
+      id: checkId,
+      command,
+    })),
+    amended,
   );
   for (const amendment of [
     { ...accepted.validationAmendment, step: 2 },
