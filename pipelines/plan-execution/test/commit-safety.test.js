@@ -660,6 +660,214 @@ test("does not renew an unmarked provider rejection", async (t) => {
   );
 });
 
+test("retains staged partial effects across interrupted and reconstructed verification without replay", async (t) => {
+  let interrupt = true;
+  let verifications = 0;
+  const fixture = await createFixture(t, {
+    async onCommitRun(_request, repository) {
+      await repository.stageAll();
+      throw Object.assign(new Error("Staged executor failed."), {
+        code: "ERR_FAKE_STAGED_FAILURE",
+      });
+    },
+    onCommitVerify() {
+      verifications++;
+      if (interrupt) {
+        interrupt = false;
+        throw Object.assign(new Error("Verification interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+  });
+  const interrupted = await fixture.run();
+  const original = JSON.parse(JSON.stringify(interrupted.pipelineState));
+  assert.equal(interrupted.pause.code, "ERR_FAKE_COMMIT_VERIFICATION");
+  assert.equal(original.pendingCommit.status, "consumed");
+  assert.equal(original.pendingCommit.preEffectRejection, null);
+  const calls = fixture.calls.worker.length;
+  const probes = { ...fixture.probeCalls };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 1) interrupt = true;
+    fixture.persistPipelineState(
+      JSON.parse(JSON.stringify(fixture.currentRun.pipelineState)),
+    );
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "commit_failed");
+    assert.equal(
+      paused.pause.code,
+      attempt === 1 ? "ERR_FAKE_COMMIT_VERIFICATION" : "ERR_COMMIT_NOT_CREATED",
+    );
+    assert.deepEqual(paused.pause.changes, ["index"]);
+    assert.deepEqual(
+      paused.pipelineState.pendingCommit,
+      original.pendingCommit,
+    );
+    assert.deepEqual(
+      paused.pipelineState.repositoryBaseline,
+      original.repositoryBaseline,
+    );
+    assert.deepEqual(paused.pipelineState.completedCommits, []);
+    assert.equal(paused.pipelineState.currentStep, 1);
+    assert.equal(fixture.calls.worker.length, calls);
+    assert.deepEqual(fixture.probeCalls, probes);
+  }
+  assert.equal(verifications, 4);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.transitions.some(
+      ({ options }) => options?.activity?.kind === "authorization-retired",
+    ),
+    false,
+  );
+});
+
+test("observed staging contradicts pre-executor proof and cannot retire authorization", async (t) => {
+  const fixture = await createFixture(t, {
+    async onRoleRun(_role, request, _count, repository) {
+      if (request.access === "local-commit") {
+        await repository.stageAll();
+        throw authenticationFailure({ commit: true });
+      }
+    },
+  });
+  attachAuthentication(fixture);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_contract_violated");
+  assert.equal(paused.pause.code, "ERR_COMMIT_CONTRACT_VIOLATED");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+  assert.equal(
+    paused.pipelineState.pendingCommit.preEffectRejection.authentication
+      .commitExecutor,
+    "not_started",
+  );
+  assert.deepEqual(paused.pipelineState.completedCommits, []);
+  const resumed = await fixture.run();
+  assert.deepEqual(
+    resumed.pipelineState.pendingCommit,
+    paused.pipelineState.pendingCommit,
+  );
+  assert.equal(resumed.pause.reason, "commit_contract_violated");
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("real staged executor failure remains verification-only across resume", async (t) => {
+  const fixture = await createRealGitFixture(t, {
+    async onCommitRun(request) {
+      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
+      throw Object.assign(new Error("Post-staging failure."), {
+        code: "ERR_FAKE_STAGED_FAILURE",
+      });
+    },
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  const pending = JSON.parse(
+    JSON.stringify(paused.pipelineState.pendingCommit),
+  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resumed = await fixture.run();
+    assert.equal(resumed.pause.reason, "commit_failed");
+    assert.deepEqual(resumed.pause.changes, ["index"]);
+    assert.deepEqual(resumed.pipelineState.pendingCommit, pending);
+    assert.deepEqual(resumed.pipelineState.completedCommits, []);
+    assert.equal(
+      (
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "rev-parse",
+          "HEAD",
+        ])
+      ).stdout.trim(),
+      pending.authorization.expectedHead,
+    );
+  }
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("staged output exhaustion without pre-executor proof keeps the commit-failed disposition", async (t) => {
+  const fixture = await createFixture(t, {
+    async onCommitRun(_request, repository) {
+      await repository.stageAll();
+      throw outputExhaustion({ commit: true, proof: false });
+    },
+  });
+  attachOutputExhaustion(fixture);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  assert.equal(paused.pipelineState.pendingCommit.preEffectRejection, null);
+  const resumed = await fixture.run();
+  assert.equal(resumed.pause.reason, "commit_failed");
+  assert.deepEqual(
+    resumed.pipelineState.pendingCommit,
+    paused.pipelineState.pendingCommit,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("rejects unsafe unchanged-HEAD effects rather than renewing a pre-effect refusal", async (t) => {
+  for (const effect of [
+    "stage",
+    "changeRefs",
+    "changeIdentity",
+    "changeRemote",
+    "content",
+  ]) {
+    await t.test(effect, async (t) => {
+      const fixture = await createFixture(t, {
+        async onRoleRun(_role, request, _count, repository) {
+          if (request.access === "local-commit") {
+            if (effect === "content")
+              await writeFile(
+                join(request.cwd, "source.js"),
+                "changed again\n",
+              );
+            else repository[effect]();
+            throw Object.assign(new Error("Pre-effect refusal."), {
+              code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+              effectStarted: false,
+            });
+          }
+        },
+      });
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "commit_contract_violated");
+      assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+      assert.deepEqual(paused.pipelineState.completedCommits, []);
+      const resumed = await fixture.run();
+      assert.deepEqual(
+        resumed.pipelineState.pendingCommit,
+        paused.pipelineState.pendingCommit,
+      );
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        1,
+      );
+    });
+  }
+});
+
 test("resumes commit verification without replaying the Worker", async (t) => {
   let verificationUnavailable = true;
   const fixture = await createFixture(t, {

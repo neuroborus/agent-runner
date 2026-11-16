@@ -4118,10 +4118,30 @@ The authorization permits one ordinary local commit only. It does not permit
 `commit --amend`, merge commits, rebases, resets, branch switches, tag creation,
 or any other history/ref mutation.
 
-If no commit is created, pause with `commit_failed`. If the adapter also proved
+If no commit is created, pause with `commit_failed`. Git-owned read-only
+verification accepts unchanged HEAD as `ERR_COMMIT_NOT_CREATED` only with
+unchanged controls and accepted content, and either the unchanged original index
+or exact authorized full staging. Full staging must match complete staged paths,
+blobs and modes, with ordinary stage-zero entries, no hidden/intent-to-add flags
+or resolve-undo state, and unchanged bindings after inspection. Incomplete,
+mismatched or unsafe index effects remain `ERR_COMMIT_CONTRACT_VIOLATED`.
+The missing-commit error's bounded `changes` is `[]` for an untouched index or
+`["index"]` for authorized staging. For staged executor failure, preserve that
+partial-effect evidence in the `commit_failed` pause, retain the consumed
+authorization and original bindings, and leave completion history unchanged.
+Repeated, interrupted or reconstructed resume only verifies: it cannot restage,
+retry readiness or commit, renew authorization, accept different content or
+complete a missing commit. Executor output exhaustion with observed staging
+retains this same `commit_failed` disposition. No historical rejected pause is
+automatically recovered by this classification.
+
+If the adapter also proved
 `effectStarted: false`, persist its bounded rejection metadata before Git
 verification and durably retire the consumed authorization only after that
-verification reports no commit. A non-recoverable policy rejection remains
+verification reports no commit and unchanged controls, content and original
+index. Observed staging contradicts that proof, pauses
+`commit_contract_violated`, and never permits retirement or retry. A
+non-recoverable policy rejection remains
 `commit_failed`; its bounded adapter diagnostic class, when present, is copied
 into that pause, named by the authorization-retired activity, and projected as
 `Adapter diagnostic: <class>.` without commands, paths, output, or native

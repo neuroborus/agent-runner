@@ -600,6 +600,51 @@ export function entriesMatch(left, right) {
   );
 }
 
+export async function isFullStagingAtRoot(
+  context,
+  repositoryPath,
+  fingerprint,
+) {
+  // Content equality alone cannot certify hidden, intent-to-add or resolve-undo
+  // state. Full staging has ordinary stage-zero entries with no semantic flags.
+  // Split-index CE_UPDATE_IN_BASE (0x8000000) is storage bookkeeping only.
+  const debug = await context.runGit(repositoryPath, [
+    "ls-files",
+    "--debug",
+    "-z",
+  ]);
+  let offset = 0;
+  while (offset < debug.stdout.length) {
+    const end = debug.stdout.indexOf(0, offset);
+    if (end === -1) return false;
+    let metadataEnd = end;
+    for (let line = 0; line < 5; line++) {
+      metadataEnd = debug.stdout.indexOf(0x0a, metadataEnd + 1);
+      if (metadataEnd === -1) return false;
+    }
+    const metadata = debug.stdout
+      .subarray(end + 1, metadataEnd + 1)
+      .toString("utf8");
+    if (
+      !/^(?:  [^\n]*\n){4}  size: [^\n]*\tflags: (?:0|8000000)\n$/u.test(
+        metadata,
+      )
+    )
+      return false;
+    offset = metadataEnd + 1;
+  }
+  const undo = await context.runGit(repositoryPath, [
+    "ls-files",
+    "--resolve-undo",
+    "-z",
+  ]);
+  return (
+    undo.stdout.length === 0 &&
+    (await indexContentFingerprintAtRoot(context, repositoryPath, [])) ===
+      fingerprint
+  );
+}
+
 async function inspectContentChangesAtRoot(
   context,
   repositoryPath,

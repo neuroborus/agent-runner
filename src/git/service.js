@@ -16,6 +16,7 @@ import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
   indexContentFingerprintAtRoot,
+  isFullStagingAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
@@ -732,6 +733,8 @@ export function createGitService(options = {}) {
     assertSnapshot,
     authorizationIdFactory,
     contentFingerprintAgainst,
+    isFullStaging: (repositoryPath, fingerprint) =>
+      isFullStagingAtRoot(contentContext, repositoryPath, fingerprint),
     identitySnapshot,
     refsFingerprints,
     runGit,

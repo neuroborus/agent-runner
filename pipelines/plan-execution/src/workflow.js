@@ -8442,6 +8442,7 @@ ${step.subject}`),
       await finishCommitTurn();
       if (
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
+        cause.changes?.includes("index") !== true &&
         pendingCommit.preEffectRejection !== null
       ) {
         if (
@@ -8483,9 +8484,13 @@ ${step.subject}`),
         await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
         return false;
       }
-      const contractViolation = cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      const staged = cause.changes?.includes("index") === true;
+      const contractViolation =
+        cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED" ||
+        (staged && pendingCommit.preEffectRejection !== null);
       const exhausted =
         !contractViolation &&
+        !staged &&
         runtime.outputExhaustion?.eligible(agentError) === true;
       await pause(
         exhausted
@@ -8494,9 +8499,11 @@ ${step.subject}`),
             ? "commit_contract_violated"
             : "commit_failed",
         {
-          code: exhausted
-            ? "ERR_OUTPUT_EXHAUSTED"
-            : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
+          code: contractViolation
+            ? "ERR_COMMIT_CONTRACT_VIOLATED"
+            : exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
           ...(exhausted
             ? {
                 resumeState: "COMMIT",
@@ -9360,6 +9367,14 @@ ${step.subject}`),
     ) {
       return pause("commit_failed", {
         code: diagnosticCode(cause, "ERR_COMMIT_VERIFICATION_FAILED"),
+        // Interrupted observation cannot erase the already recorded staging
+        // effect of this same consumed authorization. This grants no retry.
+        ...(run.pause?.reason === "commit_failed" &&
+        run.pause.changes?.includes("index") &&
+        run.pipelineState.pendingCommit?.authorization.id ===
+          state().pendingCommit.authorization.id
+          ? { changes: ["index"] }
+          : {}),
       });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {

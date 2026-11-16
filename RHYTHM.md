@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-16
 
+- **Staged failure retains its consumed commit authority.** Git verification
+  recognizes unchanged HEAD with exact authorized full staging as a missing
+  commit, distinguishing it from an untouched index through bounded effect
+  evidence. Complete content/mode and semantic-index proof keeps incomplete or
+  hidden effects rejected. Execution preserves staged work and original bindings
+  in `commit_failed`; resume verifies without readiness, restaging or commit
+  replay. Staging contradicting pre-executor refusal proof cannot retire the
+  authorization. Existing successful-commit checks, nested-Git protections and
+  durable versions remain unchanged; historical rejected pauses gain no
+  automatic recovery claim.
+
 - **Historical validation truth has a satisfiable disposition.** Both coding
   pipelines preserve proven noncompliance while allowing authorized containment
   to close its ongoing blocker without cosmetic edits, early acceptance credit

@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { inspectFinalizationFile } from "../../../../src/config/index.js";
+import { createGitService } from "../../../../src/git/index.js";
 
 import { assertExecutionRun as assertRun } from "../../src/bootstrap-progress.js";
 import {
@@ -1339,7 +1340,9 @@ async function createFixture(
     indexFingerprint: hash("fixture-index"),
     refsFingerprint: hash("fixture-refs"),
     remoteConfigurationFingerprint: hash("fixture-remotes"),
+    stagedContentFingerprint: null,
   };
+  const realCommitAuthorizations = new Map();
 
   async function commitMemoryRepository(subject) {
     const parent = memoryRepository.head;
@@ -1368,6 +1371,16 @@ async function createFixture(
     },
     stage(value = "changed-index") {
       memoryRepository.indexFingerprint = hash(value);
+      memoryRepository.stagedContentFingerprint = null;
+    },
+    async stageAll() {
+      memoryRepository.stagedContentFingerprint = await repositoryFingerprint(
+        projectPath,
+        [artifactRoot],
+      );
+      memoryRepository.indexFingerprint = hash(
+        `staged:${memoryRepository.stagedContentFingerprint}`,
+      );
     },
   });
 
@@ -1929,6 +1942,17 @@ async function createFixture(
           error.code = "ERR_COMMIT_GATE_CHANGED";
           throw error;
         }
+        if (repository === "git") {
+          const service = createGitService();
+          realCommitAuthorizations.set(
+            authorization.id,
+            await service.prepareCommit({
+              expectedSnapshot: await service.snapshot({ projectPath }),
+              subject,
+              persistPendingCommit: async () => {},
+            }),
+          );
+        }
         await persistPendingCommit(authorization);
         return authorization;
       },
@@ -1948,8 +1972,45 @@ async function createFixture(
         await onCommitVerify?.(authorization);
         const snapshot = await gitSnapshot();
         if (snapshot.head === authorization.expectedHead) {
+          if (repository === "git") {
+            // Use the real read-only verifier rather than simulating staging
+            // completeness with the fixture's simplified snapshot hashes.
+            await createGitService().verifyCommit(
+              realCommitAuthorizations.get(authorization.id),
+            );
+            assert.fail("Unchanged HEAD cannot verify a commit.");
+          }
+          const changes = [
+            ["branch", "expectedBranch", "branch"],
+            ["refsFingerprint", "expectedRefsFingerprint", "refs"],
+            [
+              "remoteConfigurationFingerprint",
+              "expectedRemoteConfigurationFingerprint",
+              "remote-configuration",
+            ],
+            ["identityFingerprint", "expectedIdentityFingerprint", "identity"],
+            ["contentFingerprint", "expectedContentFingerprint", "content"],
+          ]
+            .filter(
+              ([field, expected]) =>
+                snapshot[field] !== authorization[expected],
+            )
+            .map(([, , change]) => change);
+          const staged =
+            snapshot.indexFingerprint !==
+            authorization.expectedIndexFingerprint;
+          if (
+            staged &&
+            memoryRepository.stagedContentFingerprint !==
+              authorization.expectedContentFingerprint
+          )
+            changes.push("index");
           const error = new Error("Authorized commit was not created.");
-          error.code = "ERR_COMMIT_NOT_CREATED";
+          error.code =
+            changes.length === 0
+              ? "ERR_COMMIT_NOT_CREATED"
+              : "ERR_COMMIT_CONTRACT_VIOLATED";
+          error.changes = changes.length === 0 && staged ? ["index"] : changes;
           throw error;
         }
         const [parent, message] =

@@ -70,6 +70,19 @@ change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses
 instead of being bypassed.
 
+Git-owned read-only verification distinguishes an untouched missing commit from
+exact authorized full staging followed by executor failure. Only unchanged
+controls and accepted content plus complete path, blob, mode and semantic-index
+proof permit the latter classification. Execution retains the staged partial
+effect, original bindings and consumed authorization in `commit_failed`;
+repeated or reconstructed resume verifies only and never restages, retries
+readiness/commit or infers completion. Incomplete, mismatched or hidden staging
+remains a contract violation. Pre-executor refusal proof permits retirement only
+with an unchanged original index as well as controls and content; observed
+staging contradicts that proof and blocks retirement. See the
+[commit recovery contract](../../pipelines/plan-execution/docs/SPEC.md#137-commit).
+This grants no automatic recovery for historical rejected pauses.
+
 Change measurement is read-only and bound to an inspected content fingerprint
 and immutable baseline. It counts the final workspace rather than summing
 staged and unstaged diffs, excludes ignored untracked files, and reports binary

@@ -3494,10 +3494,24 @@ checkpoint, with `none` or `possible` effect evidence, when it proves that its
 isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
 that bounded proof on the consumed authorization before Git verification. After
-Git independently confirms that no commit was created, the pipeline retires the
+Git independently confirms that no commit was created and controls, accepted
+content and the original semantic index are unchanged, the pipeline retires the
 authorization before an eligible later resume can issue a fresh ID. An absent
 marker or executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
+For unchanged HEAD, the Git capability also recognizes exact authorized full
+staging as `ERR_COMMIT_NOT_CREATED` with bounded `changes: ["index"]` evidence.
+Private content helpers verify staged paths, blob bytes and modes against the
+accepted content fingerprint and reject semantic flags and resolve-undo state;
+controls, content and index stability are rechecked without writing. Incomplete,
+mismatched, hidden or unsafe index effects remain contract violations. The
+execution pipeline retains the original consumed authorization, bindings and
+staged effect and pauses `commit_failed`; repeated or reconstructed resume only
+verifies, without readiness, restaging, commit replay or inferred completion.
+Observed staging contradicting a pre-executor refusal is instead a contract
+violation and cannot retire authorization. Existing successful-commit checks,
+nested-repository rejection and durable state versions remain unchanged. This
+does not retroactively recover historical rejected pauses.
 Claude validates the exact boolean readiness shape before its value and emits
 only the finite provider-neutral [readiness diagnostics](product/PROVIDER_MODEL.md#isolation-and-effects).
 Execution carries the class through the consumed rejection and retired
