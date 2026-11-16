@@ -29,19 +29,18 @@ authority or automatic coding checks. `auto` selects no custom coding skill;
 explicit guidance remains frozen. Preserve accepted receipts and outputs on
 recovery; changed inputs or earlier results require revised planning and a new run.
 
-`independent` is the default and recommended mode, using separate primary and
-review roles at higher context and token cost. Choose `lazy` explicitly, never
-automatically to save tokens. It has no independent review: coding pipelines use
-bounded primary check/fix and separate read-only clean confirmations; audit uses
-one read-only Auditor with separate discovery and finding-recheck gates.
+`independent` is the default and recommended mode: separate primary/review roles
+cost more context and tokens. Choose `lazy` explicitly, never automatically to
+save tokens. Without independent review, coding uses bounded primary check/fix and
+separate read-only clean confirmations; audit uses one read-only Auditor with
+separate discovery and finding-recheck gates.
 
-All pipelines support three modes. Combined coding adds primary check/fix and a
-separate read-only clean confirmation before full independent review of the same
-fingerprint. Content repairs restart convergence; self-findings return to fixing.
-Only independent finding resolution may invoke a fresh Arbiter. Unresolved
-bootstrap disagreements and primary or structural exhaustion pause without
-arbitration. Resume preserves mode, evidence and bounded accounting; interrupted
-corrections are charged once.
+Combined coding adds primary check/fix and a separate read-only clean confirmation
+before full independent review of the same fingerprint. Repairs restart convergence;
+self-findings return to fixing. Only independent finding resolution may invoke a
+fresh Arbiter. Unresolved bootstrap disagreements and primary or structural
+exhaustion pause without arbitration. Resume preserves mode, evidence and bounded
+accounting; interrupted corrections are charged once.
 
 Planning stays repository-read-only; Runner writes artifacts. Execution and
 polishing require finalization and distinct read-only terminal confirmation of
@@ -83,16 +82,19 @@ authorize interference with resumable work.
 ## 2. Prepare against the actual base
 
 Read project instructions, owning specifications and code on the intended base.
-Verify required files, symbols, behavior, counts and path lists locally. Recompute
-baselines, checksums, inventories and acceptance assumptions; never copy stale
-measurements. Prefer behavior and invariants to incidental counts.
+Verify required files, symbols, behavior, counts and paths locally. Recompute
+baselines, checksums, inventories and acceptance assumptions; prefer behavior
+and invariants to incidental counts, and never copy stale measurements.
 
-Use pipeline discovery (`agent-run pipelines` or `pipelines_list`) to confirm
-inputs and settings. Reconcile the task, context, plan, and existing
-clarifications before starting. Put requirements and acceptance criteria in
-task inputs or tracked project documentation, with commands clearly identified
-as required checks or background examples. Ambiguous commands in prose can
-produce a different inventory from the one you intended.
+Git-content observation rejects gitlinks and non-ignored embedded repositories
+with `ERR_UNSUPPORTED_GIT_PATH`, without executing nested Git or removing content.
+Directory workflows retain read-only nested worktrees. Follow the
+[Git safety contract](product/SAFETY_MODEL.md#git-ownership).
+
+Use `agent-run pipelines` or `pipelines_list` to confirm inputs/settings. Reconcile
+task, context, plan and clarifications before starting. Put requirements and
+acceptance criteria in task inputs or tracked documentation. Identify commands
+as required checks or background examples; ambiguity can change the inventory.
 
 Commit execution consumes the validated subjects and commit boundaries unchanged;
 custom execution consumes the frozen ordered steps and agreed result criteria.
@@ -118,14 +120,14 @@ finalization and commit gates still apply. It defaults to `true` and accepts
 only booleans. The resolved value is frozen when a run is created, so edit
 configuration before starting a run; it never toggles an existing run.
 
-User-global configuration lives outside installations at the platform locations
-listed in [README](../README.md#configuration). Before starting a new workflow,
-an operator may run `agent-run config migrate --from <legacy-file>` to validate
-and atomically copy legacy settings. Identical destination bytes are a no-op;
-conflicts never overwrite, merge or delete. The source is retained. New reads
-prefer user settings, falling back to installation-local `.agent-runner.json`
-only for absence. Invalid or unreadable user settings fail closed. Never migrate
-the configuration used by an active workflow; resume keeps its frozen snapshot.
+User-global configuration lives outside installations at the
+[platform locations](../README.md#configuration). Before a new workflow, operators
+may use `agent-run config migrate --from <legacy-file>` to validate and atomically
+copy legacy settings, retaining the source. Identical destination bytes are a
+no-op; conflicts never overwrite, merge or delete. Reads prefer user settings,
+falling back to installation-local `.agent-runner.json` only for absence. Invalid
+or unreadable settings fail closed. Never migrate an active workflow's
+configuration; resume keeps its frozen snapshot.
 
 Installed processes and detached continuations keep their immutable payload.
 Root API update activation publishes an active or deferred outcome before
@@ -193,12 +195,11 @@ to survive.
 
 ## 3. Establish executable validation
 
-Before starting, verify each required command in its owning environment and in
-the exact form that will be executed. Its exit status must express the intended
-pass/fail rule. Check availability of dependencies, generated prerequisites,
-services, and any expected baseline failures. A check must detect a regression,
-not merely pass the existing base. Distinguish checks applicable throughout the
-plan from step-specific acceptance criteria.
+Before starting, verify each required command's exact form in its owning
+environment. Its exit status must express the intended pass/fail rule. Check
+dependencies, generated prerequisites, services and expected baseline failures.
+Checks must detect regressions, not merely pass the base. Distinguish plan-wide
+checks from step-specific acceptance criteria.
 
 Establish complete staging-independent inventories: execution bootstrap owns
 one per canonical step (the fast gate plus affected slow checks), and polishing
@@ -341,19 +342,15 @@ agent-run run plan-execution --project /path/to/project --task /path/to/task
 agent-run status --run <run-id>
 ```
 
-Every pipeline starts with read-only `CLARIFY`. The fixed protocol limit is
-three agent question rounds; empty clarification artifacts and authorized
-editor closes without changes consume no round. Exhaustion pauses rather than
-silently extending the dialogue, and the limit is not a configurable workflow
-budget. Answer material questions from
-explicit user context; otherwise obtain the user's decision. An empty
-clarification document and an authorized editor close without changes are
-valid. CLI uses a persisted editor authorization; MCP uses structured pending
-input and never opens an editor. Only the identified authorization permits
-clarification changes. Once clarification closes, inputs are frozen and hashed;
-ordinary follow-up questions are prohibited. A later product decision is an
-exception only when progress is impossible without a genuinely unresolved
-material requirement, not an implementation preference or review finding.
+Read-only `CLARIFY` starts every pipeline, limited to three agent question rounds.
+Empty artifacts and authorized unchanged editor closes are valid and consume no
+round. Exhaustion pauses; the limit is not a configurable workflow budget.
+Answer material questions from explicit user context or obtain the user's decision.
+CLI persists editor authorization; MCP uses structured pending input, never an
+editor. Only the identified authorization permits clarification edits.
+Closure freezes and hashes inputs and prohibits ordinary follow-up questions.
+A later product decision requires an otherwise blocking unresolved material
+requirement, never an implementation preference or review finding.
 
 Retain the run ID and each MCP mutation's original idempotency key. Retry
 uncertain mutations with identical arguments and key; a new key cannot recover

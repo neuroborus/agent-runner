@@ -64,6 +64,31 @@ change measurement, complete source selection, exact source materialization,
 commit verification, and polishing handoff modules without exposing their
 implementation contracts to root consumers.
 
+Git-content observation never invokes Git inside a content-selected nested
+directory. The command boundary disables submodule recursion, and observational
+status/diff commands ignore submodule worktrees. Independently, literal HEAD
+and index metadata reject gitlinks, including unchanged, deleted, ignored,
+index-hidden and allowed paths; an explicit measurement/source baseline is
+checked as well. Suppressing submodule inspection cannot establish cleanliness.
+Metadata-only checks reject `.git` markers and bare `HEAD`/`objects`/`refs`
+layouts in selected source ancestors and directory candidates. Ignored untracked
+trees remain pruned by Git. Descriptor-anchored directory probes never interpret
+nested configuration or follow Git pointers; handle/path identity and metadata
+are rechecked after content reads. A missing marker grants no later execution
+authority. Substitution races fail with `ERR_GIT_SNAPSHOT_RACE`.
+
+Gitlinks and embedded repositories fail closed with bounded
+`ERR_UNSUPPORTED_GIT_PATH` diagnostics in snapshots, content/path fingerprints,
+measurement and source projection/selection. Their rejection also blocks
+post-turn acceptance, preservation, commit verification and polishing handoff;
+it grants no cleanup, recovery or Git authority. Ordinary file/directory
+replacements, unfollowed leaf links, immutable object reads and staging-independent
+content hashes retain their supported behavior. Supported snapshot, selection
+and measurement shapes and fingerprint construction remain unchanged, so no
+durable migration is needed. Historical gitlink measurements, completed
+provenance and consumed effects remain historical evidence; they cannot approve
+a currently unsupported workspace or authorize replay.
+
 The filesystem-only workspace capability lives under `src/workspace/` behind
 `createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
 Private `paths.js`, `scope.js`, `controls.js` and `snapshot.js` own confinement,
@@ -259,8 +284,8 @@ cannot detect newly appearing untracked sources.
 Leaf symlinks remain links and grant no target reads at selection. Routing
 aliases, special files, file/directory replacements, unresolved index entries,
 gitlinks and embedded repositories fail closed rather than becoming recursive
-inspection roots. Submodule traversal is unsupported by this selector; existing
-Git snapshot and measurement gitlink behavior is unchanged. Selection neither
+inspection roots. Git snapshots and measurement also reject gitlinks and
+embedded repository candidates. Selection neither
 initializes Git nor writes source, index, refs, remotes or identity, and grants
 no provider, staging or commit authority. Ordinary-directory consumers remain
 Git-independent. Cancellation interrupts path classification and Git commands;
@@ -289,8 +314,10 @@ LF terminates a line; raw bytes, CR and missing final newlines remain significan
 Text additions and deletions sum to `changedLines`; a NUL in either side's first
 8,000 bytes marks a binary path, reported separately in `binaryPaths` without
 invented line counts. Symlinks contribute their target text without following
-it; gitlinks are listed
-separately in `gitlinkPaths`. The sorted `changedPaths` bind assessed scope
+it. Gitlinks and embedded repositories reject measurement with
+`ERR_UNSUPPORTED_GIT_PATH`; `gitlinkPaths` remains in the result shape as an empty
+array for supported new measurements. Saved nonempty historical measurements
+retain their meaning. The sorted `changedPaths` bind assessed scope
 without reading unrelated files. Content drift rejects the measurement. This
 capability does not stage, invoke agents or validation, assess thresholds, or
 change workflow eligibility.

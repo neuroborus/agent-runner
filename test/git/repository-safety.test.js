@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
+import filesystem, {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -720,46 +722,229 @@ test("content fingerprints reject a gitlink without its own worktree", async (t)
   );
 });
 
-test("content fingerprints keep embedded repositories staging-independent", async (t) => {
-  const { env, repositoryPath, service } = await createFixture(t);
-  const nestedPath = join(repositoryPath, "nested");
-  await mkdir(nestedPath);
-  await runGit(nestedPath, env, "init", "-q", "-b", "main");
-  await writeFile(join(nestedPath, "nested.txt"), "nested\n");
-  await runGit(nestedPath, env, "add", "nested.txt");
+async function nestedRepository(
+  fixture,
+  path = join(fixture.repositoryPath, "nested"),
+) {
+  await mkdir(path);
+  await runGit(path, fixture.env, "init", "-q", "-b", "main");
+  await writeFile(join(path, "nested.txt"), "nested\n");
+  await writeFile(join(path, ".gitattributes"), "*.txt filter=fixture\n");
+  await runGit(path, fixture.env, "add", ".");
   await runGit(
-    nestedPath,
-    env,
+    path,
+    fixture.env,
     "-c",
     "user.name=Fixture User",
     "-c",
     "user.email=fixture@example.com",
     "commit",
     "-qm",
-    "nested",
+    "nested fixture",
   );
-  const beforeStaging = await service.contentFingerprint({
-    projectPath: repositoryPath,
-  });
+  return path;
+}
 
-  await runGit(repositoryPath, env, "add", "nested");
-  const afterStaging = await service.contentFingerprint({
-    projectPath: repositoryPath,
-  });
-  assert.equal(afterStaging, beforeStaging);
-
-  await writeFile(join(nestedPath, "nested.txt"), "changed\n");
-  assert.notEqual(
-    await service.contentFingerprint({ projectPath: repositoryPath }),
-    afterStaging,
+async function nestedFilter(fixture, path, kind) {
+  const script = join(fixture.workspace, "filter.cjs");
+  const marker = join(fixture.workspace, "filter-marker");
+  await writeFile(
+    script,
+    [
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      'fs.writeFileSync(path.join(__dirname, "filter-marker"), "executed\\n");',
+      kind === "clean"
+        ? "process.stdin.pipe(process.stdout);"
+        : "process.exit(1);",
+    ].join("\n"),
   );
+  const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+  await runGit(
+    path,
+    fixture.env,
+    "config",
+    `filter.fixture.${kind}`,
+    `${quote(process.execPath)} ${quote(script)}`,
+  );
+  await runGit(path, fixture.env, "config", "filter.fixture.required", "true");
+  await writeFile(join(path, "nested.txt"), "changed\n");
+  return marker;
+}
 
-  const allowed = await service.snapshot({
-    allowedPaths: [join(nestedPath, "nested.txt")],
-    projectPath: repositoryPath,
+for (const kind of ["clean", "process"]) {
+  test(`observations reject a newly embedded repository without running its ${kind} filter`, async (t) => {
+    const f = await createFixture(t);
+    const { repositoryPath: projectPath, service } = f;
+    const baseline = await service.snapshot({ projectPath });
+    // Represents a new repository created within one writable command after
+    // the baseline's absence scan, before the runner's post-turn observation.
+    const nested = await nestedRepository(f);
+    const marker = await nestedFilter(f, nested, kind);
+    for (const observe of [
+      () => service.contentFingerprint({ projectPath }),
+      () => service.snapshot({ projectPath }),
+      () => service.assertUnchanged(baseline),
+      () =>
+        service.reconcileInterrupted(baseline, { allowWorkspaceChanges: true }),
+      () => service.inspectPath({ projectPath, path: nested }),
+      () =>
+        service.validationInfrastructureFingerprint({
+          projectPath,
+          paths: [nested],
+        }),
+      () =>
+        service.measureChanges({
+          projectPath,
+          baseHead: baseline.head,
+          expectedContentFingerprint: baseline.contentFingerprint,
+        }),
+      () => service.snapshot({ projectPath, allowedPaths: [nested] }),
+    ]) {
+      await assert.rejects(observe(), isGitError("ERR_UNSUPPORTED_GIT_PATH"));
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+    }
   });
-  await writeFile(join(nestedPath, "nested.txt"), "runner change\n");
-  await assert.doesNotReject(service.assertUnchanged(allowed));
+}
+
+test("observations reject empty embedded repositories but preserve ignored trees", async (t) => {
+  const f = await createFixture(t);
+  const projectPath = f.repositoryPath;
+  const baseline = await f.service.snapshot({ projectPath });
+  const nested = join(projectPath, "nested");
+  await mkdir(nested);
+  await runGit(nested, f.env, "init", "-q", "-b", "main");
+  await assert.rejects(
+    f.service.assertUnchanged(baseline),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await rename(nested, join(projectPath, "ignored.txt"));
+  assert.deepEqual(await f.service.snapshot({ projectPath }), baseline);
+});
+
+test("observations reject initialized HEAD and index gitlinks despite ignore settings", async (t) => {
+  const f = await createFixture(t);
+  const { repositoryPath: projectPath, service, env } = f;
+  const nested = await nestedRepository(f);
+  const head = (await runGit(nested, env, "rev-parse", "HEAD")).stdout.trim();
+  await runGit(
+    projectPath,
+    env,
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${head},nested`,
+  );
+  await assert.rejects(
+    service.snapshot({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await runGit(projectPath, env, "commit", "-qm", "add gitlink");
+  await runGit(projectPath, env, "config", "submodule.nested.ignore", "all");
+  await runGit(projectPath, env, "config", "diff.submodule", "diff");
+  const marker = await nestedFilter(f, nested, "clean");
+  await assert.rejects(
+    service.snapshot({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+  // HEAD alone remains unsupported after both index and worktree deletion.
+  await runGit(projectPath, env, "update-index", "--force-remove", "nested");
+  await rm(nested, { recursive: true });
+  await assert.rejects(
+    service.contentFingerprint({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+});
+
+test("observations reject nested control markers in otherwise unchanged tracked directories", async (t) => {
+  const f = await createFixture(t);
+  const { repositoryPath: projectPath, env, service, workspace } = f;
+  const directory = join(projectPath, "directory");
+  await mkdir(directory);
+  await writeFile(join(directory, "child.txt"), "tracked\n");
+  await runGit(projectPath, env, "add", "directory");
+  await runGit(projectPath, env, "commit", "-qm", "add directory");
+  const baseline = await service.snapshot({ projectPath });
+  const metadata = join(workspace, "metadata");
+  await mkdir(metadata);
+  for (const create of [
+    () => writeFile(join(directory, ".git"), `gitdir: ${metadata}\n`),
+    () => symlink(metadata, join(directory, ".git")),
+    async () => {
+      await writeFile(join(directory, "HEAD"), "ref: refs/heads/main\n");
+      await mkdir(join(directory, "objects"));
+      await mkdir(join(directory, "refs"));
+    },
+  ]) {
+    await create();
+    await assert.rejects(
+      service.assertUnchanged(baseline),
+      isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+    );
+    await assert.rejects(
+      service.selectSources({ projectPath }),
+      isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+    );
+    await rm(join(directory, ".git"), { force: true });
+  }
+});
+
+test("observation rejects directory substitution and late Git pointers without following controls", async (t) => {
+  for (const substitution of ["link", "directory", "pointer"]) {
+    const f = await createFixture(t);
+    const { repositoryPath: projectPath, env, service, workspace } = f;
+    const directory = join(projectPath, "directory");
+    const child = join(directory, "child.txt");
+    await mkdir(directory);
+    await writeFile(child, "tracked\n");
+    await runGit(projectPath, env, "add", "directory");
+    await runGit(projectPath, env, "commit", "-qm", "add directory");
+    const baseline = await service.snapshot({ projectPath });
+    await writeFile(child, "changed\n");
+    const outside = await nestedRepository(f, join(workspace, "outside"));
+    const marker = await nestedFilter(f, outside, "process");
+    const nativeOpen = filesystem.open;
+    let changed = false;
+    const mocked = t.mock.method(filesystem, "open", async (path, ...args) => {
+      assert.ok(!String(path).startsWith(outside));
+      const handle = await nativeOpen(path, ...args);
+      try {
+        if (
+          !changed &&
+          path === (substitution === "pointer" ? child : directory)
+        ) {
+          changed = true;
+          if (substitution !== "pointer") {
+            await rename(directory, join(projectPath, "previous"));
+            if (substitution === "link") await symlink(outside, directory);
+            else await rename(outside, directory);
+          } else {
+            await writeFile(
+              join(directory, ".git"),
+              `gitdir: ${join(outside, ".git")}\n`,
+            );
+          }
+        }
+        return handle;
+      } catch (cause) {
+        await handle.close();
+        throw cause;
+      }
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        service.assertUnchanged(baseline),
+        isGitError("ERR_GIT_SNAPSHOT_RACE"),
+      );
+      assert.equal(changed, true);
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+    } finally {
+      mocked.mock.restore();
+      syncBuiltinESMExports();
+    }
+  }
 });
 
 test("read-only guards preserve dirty baselines and constrain allowed paths", async (t) => {

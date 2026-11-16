@@ -76,6 +76,27 @@ staged and unstaged diffs, excludes ignored untracked files, and reports binary
 changes separately. Link targets are never followed to obtain line counts.
 Measurement grants no staging, commit, refinement, or acceptance authority.
 
+Git-content observation rejects HEAD/index gitlinks (including submodules) and
+non-ignored embedded repository candidates with bounded
+`ERR_UNSUPPORTED_GIT_PATH` diagnostics. Unchanged, deleted, index-hidden and
+allowed gitlinks still reject. Status/diff suppress nested worktree inspection;
+independent literal tree/index checks prevent that suppression from hiding a
+material path. Metadata-only source-directory checks reject `.git` markers and
+bare layouts without executing nested Git or reading its configuration. Directory
+bindings are rechecked around content reads; a prior absence observation never
+authorizes later execution. Ignored untracked trees remain outside Git-content
+scope, while ordinary files, confined replacements and leaf links retain their
+content guards.
+
+Rejection blocks snapshot-based acceptance, measurement, projection,
+preservation, commit verification and polishing handoff. It grants no automatic
+removal, input rewrite or effect replay. Supported fingerprints and durable
+shapes stay unchanged; historical measurements, completed provenance and
+consumed effects are preserved without granting current acceptance. Filesystem
+control discovery remains Git-independent: confined `gitdir:`/`commondir` reads,
+bare/control/link checks and supported read-only nested worktrees in directory
+workflows retain their separate contract.
+
 Git-owned source selection enumerates unchanged and ignored tracked worktree
 files as well as non-ignored untracked sources, retaining tracked deletions.
 Ignored untracked trees are pruned instead of recursively inspected. Its frozen

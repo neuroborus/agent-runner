@@ -110,6 +110,8 @@ export function createGitCommandRunner({ env, gitBinary }) {
         [
           "-c",
           "core.fsmonitor=false",
+          "-c",
+          "submodule.recurse=false",
           "-C",
           workingDirectory,
           ...argumentsList,

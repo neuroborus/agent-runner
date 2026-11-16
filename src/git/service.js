@@ -333,7 +333,7 @@ export function createGitService(options = {}) {
         "--raw",
         "--abbrev=64",
         "--ita-invisible-in-index",
-        "--ignore-submodules=none",
+        "--ignore-submodules=all",
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
@@ -474,7 +474,7 @@ export function createGitService(options = {}) {
       "--porcelain=v1",
       "-z",
       "--untracked-files=all",
-      "--ignore-submodules=none",
+      "--ignore-submodules=all",
     ]);
     const { changedPaths, ...content } = await contentChangesAtRoot(
       contentContext,

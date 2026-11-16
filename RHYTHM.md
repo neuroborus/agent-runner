@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-16
+
+- **Git observation rejects nested repositories without executing them.** A
+  changed directory no longer triggers host-side Git under content-selected
+  configuration. Status/diff suppress nested worktree inspection while literal
+  HEAD/index checks independently reject gitlinks, even when unchanged, deleted
+  or allowed. Descriptor-anchored metadata checks reject embedded controls and
+  bare layouts and detect substitution without interpreting nested configuration.
+  This deliberately narrows Git-content compatibility instead of hiding content
+  changes or trusting an earlier absence scan. Ordinary content, confined
+  replacements and staging-independent hashes remain supported; filesystem
+  control discovery and read-only directory workflows retain their Git-independent
+  contract. Durable shapes and supported fingerprints need no migration;
+  historical provenance and consumed effects grant no new acceptance or replay.
+
 ## 2026-11-15
 
 - **Finalization inventory order preserves execution ownership.** Bootstrap

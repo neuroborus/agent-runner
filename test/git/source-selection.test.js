@@ -483,8 +483,10 @@ test("supports unborn worktrees and rejects membership publication races", async
   }
 });
 
-test("source classification propagates traversal cancellation without accepting partial membership", async (t) => {
+test("source selection propagates classification and directory cancellation without accepting partial membership", async (t) => {
   const f = await fixture(t);
+  await f.write("a-source/file.txt");
+  await f.write("b-source/file.txt");
   const abort = new AbortController();
   const reason = new Error("Selection canceled.");
   const native = filesystem.lstat;
@@ -505,6 +507,37 @@ test("source classification propagates traversal cancellation without accepting 
   } finally {
     mocked.mock.restore();
     syncBuiltinESMExports();
+  }
+  for (const pass of [1, 2]) {
+    const controller = new AbortController();
+    const nativeOpen = filesystem.open;
+    const handles = [];
+    const openedAfterAbort = [];
+    let probes = 0;
+    const mock = t.mock.method(filesystem, "open", async (path, ...args) => {
+      if (controller.signal.aborted) openedAfterAbort.push(path);
+      const handle = await nativeOpen(path, ...args);
+      handles.push(handle);
+      if (path === join(f.projectPath, "a-source") && ++probes === pass)
+        controller.abort(reason);
+      return handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        f.service.selectSources({
+          projectPath: f.projectPath,
+          signal: controller.signal,
+        }),
+        (cause) => cause === reason,
+      );
+      assert.equal(probes, pass);
+      assert.deepEqual(openedAfterAbort, []);
+      assert.ok(handles.every((handle) => handle.fd === -1));
+    } finally {
+      mock.mock.restore();
+      syncBuiltinESMExports();
+    }
   }
   const stopped = new AbortController();
   stopped.abort(reason);

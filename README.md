@@ -386,6 +386,16 @@ The separate [`@agent-runner/custom-plan`](packages/custom-plan/README.md)
 package defines criterion-driven `Step N` plans, including analysis-only results.
 Explicit custom authoring and sequential execution are available through CLI/MCP/configuration. Custom completion produces accepted result receipts, including analysis without a file diff; it never stages or commits.
 
+Git-based snapshots, fingerprints, measurement and source selection/projection
+reject HEAD/index gitlinks (including submodules) and non-ignored embedded
+repositories with `ERR_UNSUPPORTED_GIT_PATH`. Deleting a gitlink's worktree or
+excluding its path does not make it supported. Observation never runs Git inside
+these nested candidates; rejection blocks acceptance without changing content
+or granting recovery effects. Ignored untracked trees remain pruned. Ordinary
+content and confined replacements stay supported, as do read-only nested
+worktrees in Git-independent directory workflows. See the
+[Git safety contract](docs/product/SAFETY_MODEL.md#git-ownership).
+
 The diagrams below show the normal gates; the linked specifications own exact
 recovery and finding-resolution rules. `independent` remains the default and
 recommended mode. `lazy` uses only the primary role, with no independent review;
