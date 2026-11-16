@@ -42,6 +42,7 @@ assert.notEqual(
 const execute = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "codex-file-output-acceptance-"));
 const marker = "NATIVE_COMMAND_STARTED";
+const profileName = "agent_runner_directory";
 const reports = [];
 let failed = false;
 try {
@@ -81,12 +82,12 @@ try {
       .join(",");
     const profile = [
       "-c",
-      'default_permissions="agent_runner_directory"',
+      `default_permissions=${JSON.stringify(profileName)}`,
       "-c",
-      `permissions.agent_runner_directory={filesystem={${entries}},network={enabled=false}}`,
+      `permissions.${profileName}={filesystem={${entries}},network={enabled=false}}`,
     ];
     const invoke = (command) =>
-      execute(binary, [...profile, ...command], {
+      execute(binary, command, {
         cwd,
         env,
         timeout: 15_000,
@@ -96,7 +97,12 @@ try {
     const refused = new Set();
     try {
       // Parsing a named profile is recorded separately from enforcing it.
-      await invoke(["app-server", "--strict-config", "--print-startup-config"]);
+      await invoke([
+        ...profile,
+        "app-server",
+        "--strict-config",
+        "--print-startup-config",
+      ]);
       reports.push({ scenario, configuration: "ACCEPTED" });
       stage = "enforcement";
       const script = `
@@ -126,7 +132,11 @@ try {
         result = {
           ...(await invoke([
             "sandbox",
-            "linux",
+            "-C",
+            cwd,
+            "-P",
+            profileName,
+            ...profile,
             "--",
             process.execPath,
             "-e",
