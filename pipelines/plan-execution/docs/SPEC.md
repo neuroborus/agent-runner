@@ -4136,8 +4136,20 @@ If no commit is created, pause with `commit_failed`. Git-owned read-only
 verification accepts unchanged HEAD as `ERR_COMMIT_NOT_CREATED` only with
 unchanged controls and accepted content, and either the unchanged original index
 or exact authorized full staging. Full staging must match complete staged paths,
-blobs and modes, with ordinary stage-zero entries, no hidden/intent-to-add flags
-or resolve-undo state, and unchanged bindings after inspection. Incomplete,
+blobs and modes through the Git capability's shared compatible-domain proof,
+with ordinary stage-zero entries, no hidden/intent-to-add flags or resolve-undo
+state, and unchanged bindings after inspection. The proof reproduces the accepted
+confined worktree fingerprint, rejects hidden changed paths before exact-byte or
+conversion acceptance, and permits unequal regular files only with the same
+complete path/kind/mode/deletion structure and the actual staged check-in object
+ID. Cached stat equality or an unstaged-clean result supplies no conversion proof.
+Only SHA-1 native explicit `text`, `text eol=lf` and `text eol=crlf` are supported
+for unequal bytes; ambiguous/automatic text, filters/LFS, ident and encoding fail
+closed. The [Git hashing boundary](../../../docs/ARCHITECTURE.md) isolates helpers
+and repository discovery and proves scratch separation from worktree and both
+Git-control roots before allocation, rechecking bindings and awaiting owned
+cleanup. Exact stored equality and whole-index semantic checks retain their
+existing meaning, including permitted split-index bookkeeping. Incomplete,
 mismatched or unsafe index effects remain `ERR_COMMIT_CONTRACT_VIOLATED`.
 The missing-commit error's bounded `changes` is `[]` for an untouched index or
 `["index"]` for authorized staging. For staged executor failure, preserve that

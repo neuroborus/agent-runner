@@ -1510,6 +1510,19 @@ or non-ignored untracked remnants, and runs staged-diff whitespace hygiene. The
 pipeline updates its baseline and enters `DONE` only after those postconditions
 pass. It never invokes `local-commit` access or creates a commit.
 
+Completeness uses the Git capability's shared compatible-domain proof: reproduce
+accepted confined worktree content, reject hidden flags across the staged/worktree
+changed-path union, then accept exact stored bytes or matching complete paths,
+kinds, modes and deletion states with helper-free check-in proof for unequal
+regular files. Unchanged hidden paths outside that union are not a blanket
+handoff rejection. Index stat metadata and unstaged-clean status are insufficient.
+Unequal bytes support only SHA-1 and native explicit `text`, `text eol=lf` or
+`text eol=crlf`; automatic/ambiguous text, filters (including LFS), ident and
+encoding remain excluded. The [Git hashing boundary](../../../docs/ARCHITECTURE.md)
+requires external scratch separation from worktree and all Git controls before
+allocation, isolated discovery/configuration, verified bindings and awaited
+owned cleanup. Neither conversion nor recovery grants another staging effect.
+
 ## Safety Guards
 
 The repository baseline records `HEAD`, branch/detached state, local refs,

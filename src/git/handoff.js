@@ -19,7 +19,7 @@ function unique(values) {
 
 export function createGitHandoffService({
   assertSnapshot,
-  indexContentFingerprint,
+  stagedContentMatches,
   runGit,
   snapshot,
 }) {
@@ -78,7 +78,7 @@ export function createGitHandoffService({
         },
       );
     }
-    const [staged, unstaged, untracked, stagedContentFingerprint] =
+    const [staged, unstaged, untracked, stagedContentMatchesExpected] =
       await Promise.all([
         runGit(
           current.projectPath,
@@ -114,13 +114,17 @@ export function createGitHandoffService({
           "--exclude-standard",
           "-z",
         ]),
-        indexContentFingerprint(current.projectPath, current.allowedPaths),
+        stagedContentMatches(
+          current.projectPath,
+          current.allowedPaths,
+          expectedContentFingerprint,
+        ),
       ]);
     const complete =
       staged.exitCode === 1 &&
       unstaged.exitCode === 0 &&
       untracked.stdout.length === 0 &&
-      stagedContentFingerprint === expectedContentFingerprint;
+      stagedContentMatchesExpected;
     if (!complete) {
       return Object.freeze({ complete: false, snapshot: current });
     }

@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-16
 
+- **Staging compares compatible content representations.** Handoff and consumed
+  commit verification share a stat-independent proof, retaining exact equality
+  and allowing only isolated SHA-1 explicit native text conversion for unequal
+  regular files. Complete structure and hidden-path checks precede acceptance.
+  External scratch separation is proved before allocation, including common Git
+  controls, and discovery/configuration isolation prevents helper execution.
+  Automatic/ambiguous text, filters/LFS, ident and encoding remain unsupported
+  for unequal bytes. Verification-only recovery, consumed authority and durable
+  formats stay unchanged; historical foreign failures are not auto-recovered.
+
 - **Codex refuses unsupported existing-file output grants.** The named-profile
   route rejects regular-file and dotfile write roots before preparation or native
   work, retaining exact directory and read-only declarations without parent grants

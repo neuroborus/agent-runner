@@ -3501,8 +3501,8 @@ marker or executor failure keeps the consumed authorization on the verification-
 path, while interrupted verification retains any recorded proof for resume.
 For unchanged HEAD, the Git capability also recognizes exact authorized full
 staging as `ERR_COMMIT_NOT_CREATED` with bounded `changes: ["index"]` evidence.
-Private content helpers verify staged paths, blob bytes and modes against the
-accepted content fingerprint and reject semantic flags and resolve-undo state;
+Private content helpers use the shared compatible-domain staging proof described
+below and reject semantic flags and resolve-undo state;
 controls, content and index stability are rechecked without writing. Incomplete,
 mismatched, hidden or unsafe index effects remain contract violations. The
 execution pipeline retains the original consumed authorization, bindings and
@@ -5157,6 +5157,44 @@ already-complete recovered effect, runs `git add -A` only for the former, and
 verifies unchanged content and Git controls, a nonempty complete staged set,
 no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
 before the pipeline can enter `DONE`.
+
+Both handoff and consumed-commit full-staging verification first reproduce the
+accepted confined worktree fingerprint. The shared matcher rejects hidden flags
+on the union of staged-changed and worktree-changed paths before either branch;
+handoff does not reject unchanged hidden paths outside that union. Execution
+retains its stricter whole-index semantic and resolve-undo guards, including
+permitted split-index bookkeeping. Exact stored-content equality remains valid.
+Otherwise complete paths, kinds, modes and deletion/presence states must match;
+only unequal regular-file bytes can enter conversion proof. Confined race-checked
+reads bind raw bytes, size and mode to the accepted entry, independently of index
+stat metadata or an unstaged-clean result.
+
+Unequal bytes require SHA-1 and exactly one NUL-delimited native `ls-files --eol`
+record for the literal path. Only canonical `attr/` resolutions `text`,
+`text eol=lf` and `text eol=crlf` are supported and forwarded unchanged after
+padding removal. Literal `text=set`, automatic text and unspecified text relying
+on autocrlf are excluded. `check-attr -z --all` rejects any `filter`, `ident` or
+`working-tree-encoding` declaration, even unset or sentinel-like literal values.
+Only absent or alphanumeric `core.autocrlf`, `core.eol` and `core.safecrlf` values
+may be forwarded. Encoding, ident, filters and LFS gain no unequal-byte support.
+
+The private command hasher resolves canonical worktree, per-worktree and common
+Git controls through read-only metadata queries. Before allocation, the existing
+canonical temporary parent must be outside all those roots; ambiguity or an
+unsafe parent fails with `ERR_GIT_UNAVAILABLE`, without a fallback. An owned
+private scratch directory is allocated through the verified parent descriptor;
+canonical bindings and disjointness are rechecked before hashing. Directory and
+absolute parent-ceiling paths cannot contain colon, NUL or newlines. The hasher
+writes one owned attributes file, removes inherited `GIT_*`, disables system and
+global configuration/attributes, sets private HOME/XDG paths and a verified
+repository-discovery ceiling, and invokes `hash-object --stdin --path=candidate`
+without `-w`. Only validated text configuration is forwarded. No target or
+enclosing repository helpers/configuration may be discovered. Successful single-line
+40-hex output must equal the actual staged blob ID; refusal or malformed output
+is a mismatch, while spawn failure remains `ERR_GIT_UNAVAILABLE`. Process closure
+precedes cleanup of only the bound owned allocation. No index refresh, target
+object write or conversion-specific worktree diff is added. Fingerprints, durable
+formats, effect authority and verification-only recovery remain unchanged.
 
 Handoff-owned staging and direct Git inspection commands use a private fixed
 `-c core.hooksPath=/dev/null` prefix, preventing workspace hooks from executing

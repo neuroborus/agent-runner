@@ -88,6 +88,20 @@ staging contradicts that proof and blocks retirement. See the
 [commit recovery contract](../../pipelines/plan-execution/docs/SPEC.md#137-commit).
 This grants no automatic recovery for historical rejected pauses.
 
+Handoff and consumed-commit staging share a compatible-domain content proof.
+Exact stored equality remains supported; unequal regular-file bytes require
+complete structural equality and isolated SHA-1 check-in hashing matching the
+actual staged blob. Only native explicit text line-ending resolutions are in
+scope; automatic/ambiguous conversion, filters/LFS, ident and encoding remain
+excluded. Hidden flags on changed paths reject before either acceptance branch;
+execution keeps its stricter whole-index guards. Index stat caches never prove
+content. Scratch separation from canonical worktree and per-worktree/common Git
+controls is checked before allocation, independently of repository-discovery
+isolation. The private hasher cannot execute repository helpers or write objects,
+and awaits retirement before owned cleanup. See the [Git boundary](../ARCHITECTURE.md)
+for exact supported resolutions and failure rules. This proof changes neither
+one-shot effect authority nor verification-only recovery.
+
 Change measurement is read-only and bound to an inspected content fingerprint
 and immutable baseline. It counts the final workspace rather than summing
 staged and unstaged diffs, excludes ignored untracked files, and reports binary

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 
 import {
+  createCheckinHasher,
   createGitCommandRunner,
   decodeLine,
   decodeUtf8,
@@ -15,11 +16,11 @@ import { createGitCommitService } from "./commit.js";
 import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
-  indexContentFingerprintAtRoot,
   isFullStagingAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
+  stagedContentMatchesAtRoot,
 } from "./content.js";
 import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
@@ -220,7 +221,11 @@ export function createGitService(options = {}) {
     return result.exitCode === 0 ? decodeLine(result.stdout, "Git HEAD") : null;
   }
 
-  const contentContext = Object.freeze({ currentHead, runGit });
+  const contentContext = Object.freeze({
+    currentHead,
+    runGit,
+    hashCheckin: createCheckinHasher({ env, gitBinary, runGit }),
+  });
   const sourceMaterializer = createSourceMaterializer(contentContext);
 
   async function inspectHead(options) {
@@ -742,11 +747,12 @@ export function createGitService(options = {}) {
   });
   const handoffService = createGitHandoffService({
     assertSnapshot,
-    indexContentFingerprint: (repositoryPath, allowedPaths) =>
-      indexContentFingerprintAtRoot(
+    stagedContentMatches: (repositoryPath, allowedPaths, fingerprint) =>
+      stagedContentMatchesAtRoot(
         contentContext,
         repositoryPath,
         allowedPaths,
+        fingerprint,
       ),
     runGit,
     snapshot,

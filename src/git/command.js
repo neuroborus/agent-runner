@@ -1,7 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { constants } from "node:fs";
+import {
+  lstat,
+  mkdtemp,
+  open,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 const REPOSITORY_ENV_OVERRIDES = Object.freeze([
@@ -99,90 +108,271 @@ export function createGitCommandRunner({ env, gitBinary }) {
     argumentsList,
     { allowedExitCodes = [0], extraEnv = {}, signal } = {},
   ) {
-    signal?.throwIfAborted();
-    return new Promise((resolvePromise, rejectPromise) => {
-      const stdout = [];
-      const stderr = [];
-      let outputBytes = 0;
-      let settled = false;
-      const child = spawn(
-        gitBinary,
-        [
-          "-c",
-          "core.fsmonitor=false",
-          "-c",
-          "submodule.recurse=false",
-          "-C",
-          workingDirectory,
-          ...argumentsList,
-        ],
-        {
-          env: { ...gitEnvironment, ...extraEnv },
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
-      const abort = () => child.kill();
-      signal?.addEventListener("abort", abort, { once: true });
-      if (signal?.aborted) abort();
+    return executeGit(
+      { env: { ...gitEnvironment, ...extraEnv }, gitBinary },
+      workingDirectory,
+      argumentsList,
+      { allowedExitCodes, signal },
+    );
+  };
+}
 
-      function fail(error) {
-        if (!settled) {
-          settled = true;
-          rejectPromise(error);
-        }
+async function executeGit(
+  { env, gitBinary },
+  workingDirectory,
+  argumentsList,
+  { allowedExitCodes = [0], signal, stdin } = {},
+) {
+  signal?.throwIfAborted();
+  return new Promise((resolvePromise, rejectPromise) => {
+    const stdout = [];
+    const stderr = [];
+    let outputBytes = 0;
+    let settled = false;
+    let pendingError;
+    let inputFailed = false;
+    const child = spawn(
+      gitBinary,
+      [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "submodule.recurse=false",
+        "-C",
+        workingDirectory,
+        ...argumentsList,
+      ],
+      {
+        env,
+        stdio: [stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      },
+    );
+    const abort = () => child.kill();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+
+    function fail(error) {
+      if (!settled) {
+        settled = true;
+        rejectPromise(error);
       }
+    }
 
-      function collect(chunks) {
-        return (chunk) => {
-          outputBytes += chunk.length;
-          if (outputBytes > MAX_GIT_OUTPUT_BYTES) {
-            child.kill();
-            fail(
-              new GitSafetyError("Git command output exceeds the safe limit.", {
-                code: "ERR_GIT_OUTPUT_TOO_LARGE",
-              }),
-            );
-            return;
-          }
-          chunks.push(chunk);
-        };
-      }
-
-      child.stdout.on("data", collect(stdout));
-      child.stderr.on("data", collect(stderr));
-      child.once("error", (cause) =>
-        fail(
-          new GitSafetyError("Cannot execute Git.", {
-            cause,
-            code: "ERR_GIT_UNAVAILABLE",
-          }),
-        ),
-      );
-      child.once("close", (exitCode) => {
-        signal?.removeEventListener("abort", abort);
-        if (settled) {
-          return;
-        }
-        if (signal?.aborted) {
-          fail(signal.reason);
-          return;
-        }
-        if (!allowedExitCodes.includes(exitCode)) {
-          fail(
-            new GitSafetyError("Git command failed.", {
-              code: "ERR_GIT_COMMAND_FAILED",
-            }),
+    function collect(chunks) {
+      return (chunk) => {
+        outputBytes += chunk.length;
+        if (outputBytes > MAX_GIT_OUTPUT_BYTES) {
+          child.kill();
+          pendingError ??= new GitSafetyError(
+            "Git command output exceeds the safe limit.",
+            {
+              code: "ERR_GIT_OUTPUT_TOO_LARGE",
+            },
           );
           return;
         }
-        settled = true;
-        resolvePromise({
-          exitCode,
-          stderr: Buffer.concat(stderr),
-          stdout: Buffer.concat(stdout),
-        });
+        chunks.push(chunk);
+      };
+    }
+
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.once("error", (cause) => {
+      pendingError = new GitSafetyError("Cannot execute Git.", {
+        cause,
+        code: "ERR_GIT_UNAVAILABLE",
       });
     });
+    if (stdin !== undefined) {
+      child.stdin.on("error", () => {
+        inputFailed = true;
+      });
+      child.stdin.end(stdin);
+    }
+    child.once("close", (exitCode) => {
+      signal?.removeEventListener("abort", abort);
+      if (settled) {
+        return;
+      }
+      if (pendingError) {
+        fail(pendingError);
+        return;
+      }
+      if (signal?.aborted) {
+        fail(signal.reason);
+        return;
+      }
+      if (allowedExitCodes !== null && !allowedExitCodes.includes(exitCode)) {
+        fail(
+          new GitSafetyError("Git command failed.", {
+            code: "ERR_GIT_COMMAND_FAILED",
+          }),
+        );
+        return;
+      }
+      settled = true;
+      resolvePromise({
+        exitCode,
+        stderr: Buffer.concat(stderr),
+        stdout: Buffer.concat(stdout),
+        ...(stdin === undefined ? {} : { inputFailed }),
+      });
+    });
+  });
+}
+
+export function createCheckinHasher({ env, gitBinary, runGit }) {
+  const baseEnvironment = Object.fromEntries(
+    Object.entries(env).filter(([key]) => !key.startsWith("GIT_")),
+  );
+  return async (repositoryPath, content, attributes, configuration) => {
+    let directory;
+    let directoryIdentity;
+    let parentHandle;
+    let allocation;
+    async function binding(path) {
+      const canonical = await realpath(path);
+      const stat = await lstat(canonical, { bigint: true });
+      if (!stat.isDirectory()) throw new Error("Not a directory");
+      return { path: canonical, dev: stat.dev, ino: stat.ino };
+    }
+    async function verify(path, expected) {
+      const current = await binding(path);
+      if (
+        current.path !== expected.path ||
+        current.dev !== expected.dev ||
+        current.ino !== expected.ino
+      )
+        throw new Error("Directory binding changed");
+    }
+    try {
+      if (!["text", "text eol=lf", "text eol=crlf"].includes(attributes))
+        return null;
+      const controlOptions = ["--absolute-git-dir", "--git-common-dir"];
+      async function controlPath(option) {
+        const result = await runGit(repositoryPath, [
+          "rev-parse",
+          "--path-format=absolute",
+          option,
+        ]);
+        const path = decodeLine(result.stdout, "Git control directory");
+        if (!isAbsolute(path)) throw new Error("Relative control directory");
+        return path;
+      }
+      const protectedRoots = [await binding(repositoryPath)];
+      for (const option of controlOptions)
+        protectedRoots.push(await binding(await controlPath(option)));
+      const verifyRoots = async () => {
+        await verify(repositoryPath, protectedRoots[0]);
+        for (let index = 0; index < controlOptions.length; index++)
+          await verify(
+            await controlPath(controlOptions[index]),
+            protectedRoots[index + 1],
+          );
+      };
+      const parentPath = resolve(tmpdir());
+      const parent = await binding(parentPath);
+      const unsafe = (path) =>
+        protectedRoots.some((root) => isWithin(root.path, path));
+      const representable = (path) =>
+        isAbsolute(path) && !/[:\0\r\n]/u.test(path);
+      // Prove separation before allocation, including linked-worktree common controls.
+      if (unsafe(parent.path) || !representable(parent.path))
+        throw new Error("Unsafe scratch parent");
+      parentHandle = await open(
+        parent.path,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      const opened = await parentHandle.stat({ bigint: true });
+      if (opened.dev !== parent.dev || opened.ino !== parent.ino)
+        throw new Error("Scratch parent changed");
+      await verify(parentPath, parent);
+      await verifyRoots();
+      allocation = await mkdtemp(
+        `/proc/self/fd/${parentHandle.fd}/agent-runner-checkin-`,
+      );
+      directory = await realpath(allocation);
+      directoryIdentity = await binding(allocation);
+      if (
+        directoryIdentity.path !== directory ||
+        dirname(directory) !== parent.path ||
+        !representable(directory) ||
+        unsafe(directory) ||
+        protectedRoots.some((root) => isWithin(directory, root.path))
+      )
+        throw new Error("Unsafe scratch directory");
+      const verifyBindings = async () => {
+        await verify(parentPath, parent);
+        await verify(directory, directoryIdentity);
+        await verifyRoots();
+      };
+      await verifyBindings();
+      const attributesPath = join(directory, "attributes");
+      await writeFile(attributesPath, `candidate ${attributes}\n`, {
+        flag: "wx",
+        mode: 0o600,
+      });
+      const isolatedEnv = {
+        ...baseEnvironment,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_ATTR_NOSYSTEM: "1",
+        HOME: directory,
+        XDG_CONFIG_HOME: directory,
+        GIT_CEILING_DIRECTORIES: parent.path,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_OPTIONAL_LOCKS: "0",
+        LC_ALL: "C",
+      };
+      const overrides = ["-c", `core.attributesFile=${attributesPath}`];
+      for (const [key, value] of configuration) {
+        if (
+          !["core.autocrlf", "core.eol", "core.safecrlf"].includes(key) ||
+          !/^[A-Za-z0-9]+$/u.test(value)
+        )
+          return null;
+        overrides.push("-c", `${key}=${value}`);
+      }
+      await verifyBindings();
+      const result = await executeGit(
+        { env: isolatedEnv, gitBinary },
+        directory,
+        [...overrides, "hash-object", "--stdin", "--path=candidate"],
+        { stdin: content, allowedExitCodes: null },
+      );
+      await verifyBindings();
+      return result.exitCode === 0 &&
+        !result.inputFailed &&
+        /^[a-f0-9]{40}\n$/u.test(result.stdout.toString("utf8"))
+        ? result.stdout.toString("utf8").trim()
+        : null;
+    } catch (cause) {
+      if (
+        ["ERR_GIT_UNAVAILABLE", "ERR_GIT_OUTPUT_TOO_LARGE"].includes(
+          cause?.code,
+        )
+      )
+        throw cause;
+      throw new GitSafetyError("Cannot establish isolated Git hashing.", {
+        cause,
+        code: "ERR_GIT_UNAVAILABLE",
+      });
+    } finally {
+      // Never delete a substituted directory or retire scratch before Git closes.
+      try {
+        if (allocation && directoryIdentity) {
+          await verify(allocation, directoryIdentity);
+          await rm(allocation, { recursive: true, force: true });
+        }
+      } catch (cause) {
+        throw new GitSafetyError("Cannot safely retire Git hashing scratch.", {
+          cause,
+          code: "ERR_GIT_UNAVAILABLE",
+        });
+      } finally {
+        await parentHandle?.close();
+      }
+    }
   };
 }
 

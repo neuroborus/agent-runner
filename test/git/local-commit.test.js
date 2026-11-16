@@ -6,6 +6,7 @@ import {
   rename,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -825,4 +826,75 @@ test("rejects branch switches and post-commit index changes", async (t) => {
         error.changes.includes(change),
       ),
   );
+});
+
+test("retains converted full staging in original and reconstructed commit verifiers", async (t) => {
+  const fixture = await createFixture(t);
+  const { repositoryPath, env } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "converted.txt text eol=crlf\n",
+  );
+  await writeFile(join(repositoryPath, "converted.txt"), "before\r\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "configure text fixture");
+  await writeFile(join(repositoryPath, "converted.txt"), "after\r\n");
+  const baseline = await fixture
+    .createService()
+    .snapshot({ projectPath: repositoryPath });
+  const { authorization, service } = await prepareAndConsume(fixture, baseline);
+  await runGit(repositoryPath, env, "add", "-A");
+  const staged = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(
+    (await runGit(repositoryPath, env, "show", ":converted.txt")).stdout,
+    "after\n",
+  );
+  for (const verifier of [service, fixture.createService()]) {
+    await assert.rejects(verifier.verifyCommit(authorization), (error) => {
+      assert.equal(error.code, "ERR_COMMIT_NOT_CREATED");
+      assert.deepEqual(error.changes, ["index"]);
+      return true;
+    });
+  }
+  assert.deepEqual(
+    await service.snapshot({ projectPath: repositoryPath }),
+    staged,
+  );
+  await assert.rejects(
+    service.consumeCommit(authorization, {
+      consumePendingCommit: async () => assert.fail("must not replay"),
+    }),
+    { code: "ERR_COMMIT_AUTHORIZATION_CONSUMED" },
+  );
+});
+
+test("rejects same-size wrong blobs with clean cached stat during consumed verification", async (t) => {
+  const fixture = await createFixture(t);
+  const { repositoryPath, env } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "tracked.txt text eol=crlf\n",
+  );
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "configure text fixture");
+  await runGit(repositoryPath, env, "config", "core.trustctime", "false");
+  await writeFile(join(repositoryPath, "tracked.txt"), "correct\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  const baseline = await fixture
+    .createService()
+    .snapshot({ projectPath: repositoryPath });
+  const { service, authorization } = await prepareAndConsume(fixture, baseline);
+  await writeFile(join(repositoryPath, "tracked.txt"), "mistake\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  await runGit(repositoryPath, env, "add", "-A");
+  await writeFile(join(repositoryPath, "tracked.txt"), "correct\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  assert.equal(
+    (await runGit(repositoryPath, env, "diff", "--name-only")).stdout,
+    "",
+  );
+  for (const verifier of [service, fixture.createService()])
+    await assert.rejects(verifier.verifyCommit(authorization), {
+      code: "ERR_COMMIT_CONTRACT_VIOLATED",
+    });
 });

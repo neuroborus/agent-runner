@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -105,6 +113,13 @@ async function recordedService(fixture) {
       env: { ...fixture.env, HANDOFF_GIT_RECORD: recordPath },
       gitBinary: recorderPath,
     }),
+    async assertNoHashing() {
+      assert.ok(
+        !(await readFile(recordPath, "utf8"))
+          .split("\n")
+          .includes("hash-object"),
+      );
+    },
     async assertNoStaging() {
       const calls = (await readFile(recordPath, "utf8")).trim().split("\n");
       assert.ok(calls.includes("diff"));
@@ -368,4 +383,334 @@ test("does not accept index-hidden content that git add cannot stage", async (t)
     ).stdout.trim(),
     baseline.head,
   );
+});
+
+async function convertedChanges(fixture) {
+  const { repositoryPath, env } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "converted.txt text eol=crlf\n",
+  );
+  await writeFile(join(repositoryPath, "converted.txt"), "before\r\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "configure text fixture");
+  await writeFile(join(repositoryPath, "converted.txt"), "after\r\n");
+  return fixture.service.snapshot({ projectPath: repositoryPath });
+}
+
+test("accepts explicit converted handoff and repeated inspection without staging replay", async (t) => {
+  const fixture = await createFixture(t);
+  const baseline = await convertedChanges(fixture);
+  const staged = await fixture.service.stagePolishingHandoff(
+    handoffOptions(baseline),
+  );
+  assert.equal(staged.contentFingerprint, baseline.contentFingerprint);
+  for (const field of [
+    "head",
+    "refsFingerprint",
+    "identityFingerprint",
+    "remoteConfigurationFingerprint",
+  ])
+    assert.equal(staged[field], baseline[field]);
+  assert.equal(
+    (
+      await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "show",
+        ":converted.txt",
+      )
+    ).stdout,
+    "after\n",
+  );
+  assert.equal(
+    await readFile(join(fixture.repositoryPath, "converted.txt"), "utf8"),
+    "after\r\n",
+  );
+  assert.equal(
+    (await runGit(fixture.repositoryPath, fixture.env, "diff", "--name-only"))
+      .stdout,
+    "",
+  );
+  const recorded = await recordedService(fixture);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.equal(
+      (await recorded.service.inspectPolishingHandoff(handoffOptions(baseline)))
+        .status,
+      "complete",
+    );
+    assert.deepEqual(
+      await recorded.service.stagePolishingHandoff(handoffOptions(baseline)),
+      staged,
+    );
+  }
+  await recorded.assertNoStaging();
+});
+
+test("rejects exact hidden handoff entries even beside converted content", async (t) => {
+  for (const mixed of [false, true]) {
+    await t.test(
+      mixed ? "mixed skip-worktree" : "exact assume-unchanged",
+      async (t) => {
+        const fixture = await createFixture(t);
+        if (mixed) await convertedChanges(fixture);
+        await writeFile(
+          join(fixture.repositoryPath, "tracked.txt"),
+          "updated\n",
+        );
+        const baseline = await fixture.service.snapshot({
+          projectPath: fixture.repositoryPath,
+        });
+        await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-index",
+          mixed ? "--skip-worktree" : "--assume-unchanged",
+          "tracked.txt",
+        );
+        await assert.rejects(
+          fixture.service.inspectPolishingHandoff(handoffOptions(baseline)),
+          { code: "ERR_POLISHING_HANDOFF_CONTAMINATED" },
+        );
+      },
+    );
+  }
+});
+
+test("allows unchanged hidden paths outside the handoff change union", async (t) => {
+  const fixture = await createFixture(t);
+  await runGit(
+    fixture.repositoryPath,
+    fixture.env,
+    "update-index",
+    "--skip-worktree",
+    "tracked.txt",
+  );
+  await writeFile(join(fixture.repositoryPath, "added.txt"), "added\n");
+  const baseline = await fixture.service.snapshot({
+    projectPath: fixture.repositoryPath,
+  });
+  const staged = await fixture.service.stagePolishingHandoff(
+    handoffOptions(baseline),
+  );
+  assert.equal(staged.contentFingerprint, baseline.contentFingerprint);
+});
+
+async function stableTime(fixture, name = "converted.txt") {
+  await runGit(
+    fixture.repositoryPath,
+    fixture.env,
+    "config",
+    "core.trustctime",
+    "false",
+  );
+  await utimes(join(fixture.repositoryPath, name), 946684800, 946684800);
+}
+
+test("rejects same-size wrong converted blobs despite matching cached stat", async (t) => {
+  const fixture = await createFixture(t);
+  await convertedChanges(fixture);
+  await stableTime(fixture);
+  const baseline = await fixture.service.snapshot({
+    projectPath: fixture.repositoryPath,
+  });
+  await writeFile(join(fixture.repositoryPath, "converted.txt"), "other\r\n");
+  await stableTime(fixture);
+  await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+  await writeFile(join(fixture.repositoryPath, "converted.txt"), "after\r\n");
+  await stableTime(fixture);
+  assert.equal(
+    (await runGit(fixture.repositoryPath, fixture.env, "diff", "--name-only"))
+      .stdout,
+    "",
+  );
+  await assert.rejects(
+    fixture.service.inspectPolishingHandoff(handoffOptions(baseline)),
+    { code: "ERR_POLISHING_HANDOFF_CONTAMINATED" },
+  );
+});
+
+test("rejects unsupported attributes and injected conversion lookalikes", async (t) => {
+  for (const attributes of [
+    "text filter=fixture",
+    "text filter=unspecified",
+    "text filter=unset",
+    "text=set",
+    "text=auto",
+    "text filter=fixture injected",
+    "text filter=fixture drift",
+  ]) {
+    await t.test(attributes, async (t) => {
+      const fixture = await createFixture(t);
+      const { repositoryPath, env, workspace } = fixture;
+      const marker = join(workspace, "filter-marker");
+      env.FILTER_MARKER = marker;
+      fixture.service = createGitService({ env });
+      const filter = /filter=(\w+)/u.exec(attributes)?.[1];
+      if (filter) {
+        await runGit(
+          repositoryPath,
+          env,
+          "config",
+          `filter.${filter}.required`,
+          "true",
+        );
+        await runGit(
+          repositoryPath,
+          env,
+          "config",
+          `filter.${filter}.clean`,
+          'printf invoked >> "$FILTER_MARKER"; tr a-z A-Z',
+        );
+      }
+      await runGit(repositoryPath, env, "config", "core.autocrlf", "false");
+      await writeFile(
+        join(repositoryPath, ".gitattributes"),
+        `converted.txt ${attributes.endsWith("drift") ? "text" : attributes.replace(/ injected$/u, "")}\n`,
+      );
+      await writeFile(join(repositoryPath, "converted.txt"), "before\r\n");
+      await runGit(repositoryPath, env, "add", "-A");
+      await runGit(
+        repositoryPath,
+        env,
+        "commit",
+        "-qm",
+        "configure attributes fixture",
+      );
+      await writeFile(join(repositoryPath, "converted.txt"), "after\r\n");
+      await stableTime(fixture);
+      const baseline = await fixture.service.snapshot({
+        projectPath: repositoryPath,
+      });
+      const injected =
+        attributes.endsWith("injected") || attributes === "text=set";
+      // Fixture-owned staging deliberately bypasses the unsupported attribute,
+      // retaining matching stat metadata while injecting the built-in LF blob.
+      if (attributes === "text=set") {
+        const info = join(repositoryPath, ".git", "info", "attributes");
+        await writeFile(info, "converted.txt text\n");
+        await runGit(repositoryPath, env, "add", "-A");
+        await rm(info);
+      } else {
+        await runGit(
+          repositoryPath,
+          env,
+          ...(injected ? ["-c", "filter.fixture.clean=cat"] : []),
+          "add",
+          "-A",
+        );
+      }
+      if (attributes.endsWith("drift"))
+        await writeFile(
+          join(repositoryPath, ".git", "info", "attributes"),
+          "converted.txt filter=fixture text\n",
+        );
+      // Finish fixture observation before measuring helper effects.
+      await fixture.service.snapshot({ projectPath: repositoryPath });
+      await rm(marker, { force: true });
+      await assert.rejects(
+        fixture.service.inspectPolishingHandoff(handoffOptions(baseline)),
+        { code: "ERR_POLISHING_HANDOFF_CONTAMINATED" },
+      );
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+      if (injected)
+        assert.equal(
+          (await runGit(repositoryPath, env, "show", ":converted.txt")).stdout,
+          "after\n",
+        );
+    });
+  }
+});
+
+test("isolates hashing beneath an enclosing repository and rejects unsafe scratch parents", async (t) => {
+  for (const boundary of ["enclosing", "colon", "target", "common"]) {
+    await t.test(boundary, async (t) => {
+      const fixture = await createFixture(t);
+      let { repositoryPath } = fixture;
+      if (boundary === "common") {
+        const linked = join(fixture.workspace, "linked");
+        await runGit(
+          repositoryPath,
+          fixture.env,
+          "worktree",
+          "add",
+          "-qb",
+          "linked",
+          linked,
+        );
+        fixture.repositoryPath = repositoryPath = linked;
+      }
+      const baseline = await convertedChanges(fixture);
+      await runGit(repositoryPath, fixture.env, "add", "-A");
+      const staged = await fixture.service.snapshot({
+        projectPath: repositoryPath,
+      });
+      const parent =
+        boundary === "target"
+          ? join(repositoryPath, "scratch")
+          : boundary === "common"
+            ? join(fixture.workspace, "repository", ".git", "scratch")
+            : join(
+                fixture.workspace,
+                boundary === "colon" ? "scratch:boundary" : "enclosing",
+              );
+      await mkdir(parent);
+      const marker = join(fixture.workspace, "enclosing-marker");
+      if (boundary === "enclosing") {
+        await runGit(parent, fixture.env, "init", "-q");
+        await writeFile(
+          join(parent, ".gitattributes"),
+          "* text filter=fixture\n",
+        );
+        await runGit(
+          parent,
+          fixture.env,
+          "config",
+          "filter.fixture.required",
+          "true",
+        );
+        await runGit(
+          parent,
+          fixture.env,
+          "config",
+          "filter.fixture.clean",
+          `touch '${marker}'; tr a-z A-Z`,
+        );
+      }
+      const before = await readdir(parent);
+      const previous = process.env.TMPDIR;
+      process.env.TMPDIR = parent;
+      try {
+        const recorded = await recordedService(fixture);
+        if (boundary === "enclosing") {
+          assert.equal(
+            (
+              await recorded.service.inspectPolishingHandoff(
+                handoffOptions(baseline),
+              )
+            ).status,
+            "complete",
+          );
+          await assert.rejects(readFile(marker), { code: "ENOENT" });
+        } else {
+          await assert.rejects(
+            recorded.service.inspectPolishingHandoff(handoffOptions(baseline)),
+            { code: "ERR_GIT_UNAVAILABLE" },
+          );
+          await recorded.assertNoHashing();
+        }
+        await recorded.assertNoStaging();
+      } finally {
+        if (previous === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previous;
+      }
+      assert.deepEqual(await readdir(parent), before);
+      if (boundary === "target") await rm(parent, { recursive: true });
+      assert.deepEqual(
+        await fixture.service.snapshot({ projectPath: repositoryPath }),
+        staged,
+      );
+    });
+  }
 });

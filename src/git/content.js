@@ -5,6 +5,7 @@ import { dirname, relative, resolve, sep } from "node:path";
 
 import {
   decodeNullList,
+  decodeUtf8,
   GitSafetyError,
   hashBuffer,
   isWithin,
@@ -517,7 +518,7 @@ async function indexContentEntry(runGit, repositoryPath, path, entry) {
   });
 }
 
-export async function indexContentFingerprintAtRoot(
+async function stagedEntriesAtRoot(
   { currentHead, runGit },
   repositoryPath,
   allowedPaths,
@@ -581,13 +582,120 @@ export async function indexContentFingerprintAtRoot(
       stage: metadata[2],
     });
   }
-  return hashEntries(
-    await Promise.all(
-      changedPaths.map((path) =>
-        indexContentEntry(runGit, repositoryPath, path, entries.get(path)),
-      ),
+  return { changedPaths, entries };
+}
+
+export async function stagedContentMatchesAtRoot(
+  context,
+  repositoryPath,
+  allowedPaths,
+  fingerprint,
+) {
+  const { runGit, hashCheckin } = context;
+  const worktree = await inspectContentChangesAtRoot(
+    context,
+    repositoryPath,
+    allowedPaths,
+  );
+  if (worktree.contentFingerprint !== fingerprint) return false;
+  const { changedPaths, entries } = await stagedEntriesAtRoot(
+    context,
+    repositoryPath,
+    allowedPaths,
+  );
+  const flags = await runGit(repositoryPath, ["ls-files", "-v", "-z"]);
+  const union = new Set([...changedPaths, ...worktree.changedPaths]);
+  if (hiddenIndexPaths(flags.stdout).some((path) => union.has(path)))
+    return false;
+  const staged = await Promise.all(
+    changedPaths.map((path) =>
+      indexContentEntry(runGit, repositoryPath, path, entries.get(path)),
     ),
   );
+  if (hashEntries(staged) === fingerprint) return true;
+  const accepted = new Map(
+    worktree.entries.map((entry) => [entry.path, entry]),
+  );
+  if (accepted.size !== staged.length) return false;
+  let configuration;
+  for (const stored of staged) {
+    const entry = accepted.get(stored.path);
+    if (!entry || entry.kind !== stored.kind || entry.mode !== stored.mode)
+      return false;
+    if (entriesMatch(entry, stored)) continue;
+    if (entry.kind !== "file" || entries.get(entry.path).objectId.length !== 40)
+      return false;
+    const pathspec = literalPathspec(entry.path);
+    const eol = await runGit(repositoryPath, [
+      "ls-files",
+      "--eol",
+      "-z",
+      "--",
+      pathspec,
+    ]);
+    const records = decodeNullList(eol.stdout, "Git line endings");
+    if (records.length !== 1 || eol.stdout.at(-1) !== 0) return false;
+    const match =
+      /^i\/(?:-text|none|lf|crlf|mixed)? +w\/(?:-text|none|lf|crlf|mixed)? +attr\/([^\t]*)\t(.*)$/su.exec(
+        records[0],
+      );
+    const attributes = match?.[1].replace(/ +$/u, "");
+    if (
+      match?.[2] !== entry.path ||
+      !["text", "text eol=lf", "text eol=crlf"].includes(attributes)
+    )
+      return false;
+    // check-attr takes literal filenames, unlike ls-files pathspecs.
+    const result = await runGit(repositoryPath, [
+      "check-attr",
+      "-z",
+      "--all",
+      "--",
+      entry.path,
+    ]);
+    const values = decodeNullList(result.stdout, "Git attributes");
+    if (
+      values.length % 3 !== 0 ||
+      (values.length && result.stdout.at(-1) !== 0)
+    )
+      return false;
+    for (let index = 0; index < values.length; index += 3) {
+      if (
+        values[index] !== entry.path ||
+        ["filter", "ident", "working-tree-encoding"].includes(values[index + 1])
+      )
+        return false;
+    }
+    if (configuration === undefined) {
+      configuration = [];
+      for (const key of ["core.autocrlf", "core.eol", "core.safecrlf"]) {
+        const config = await runGit(
+          repositoryPath,
+          ["config", "--null", "--get", key],
+          { allowedExitCodes: [0, 1] },
+        );
+        if (config.exitCode === 1) continue;
+        const value = decodeUtf8(config.stdout, "Git text configuration");
+        if (!/^[A-Za-z0-9]+\0$/u.test(value)) return false;
+        configuration.push([key, value.slice(0, -1)]);
+      }
+    }
+    const candidate = await contentEntry(context, repositoryPath, entry.path, {
+      missingAllowed: false,
+      includeContent: true,
+    });
+    if (!entriesMatch(candidate, entry)) return false;
+    if (
+      (await hashCheckin(
+        repositoryPath,
+        candidate.content,
+        attributes,
+        configuration,
+      )) !== entries.get(entry.path).objectId
+    )
+      return false;
+  }
+  return true;
 }
 
 export function entriesMatch(left, right) {
@@ -640,8 +748,7 @@ export async function isFullStagingAtRoot(
   ]);
   return (
     undo.stdout.length === 0 &&
-    (await indexContentFingerprintAtRoot(context, repositoryPath, [])) ===
-      fingerprint
+    (await stagedContentMatchesAtRoot(context, repositoryPath, [], fingerprint))
   );
 }
 
