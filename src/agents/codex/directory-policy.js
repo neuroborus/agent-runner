@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -7,6 +8,30 @@ import { deepFreeze, isRecord } from "../adapter-contract.js";
 
 const PROFILE = "agent_runner_directory";
 const CONTRACT = "codex-declared-directory-v1";
+
+// The named-profile route cannot enforce an existing regular-file write root.
+// Never substitute its parent: that would grant undeclared sibling writes.
+export async function assertDirectoryOutputSupport(request, AdapterError) {
+  if (request.access !== "workspace-write" || !request.workspacePolicy) return;
+  for (const path of request.workspacePolicy.outputPaths ?? []) {
+    let stat;
+    try {
+      stat = await lstat(path);
+    } catch (cause) {
+      if (cause.code === "ENOENT") continue;
+      throw directoryPolicyError(AdapterError);
+    }
+    if (stat.isFile())
+      throw new AdapterError(
+        "Codex named-profile access does not support existing regular-file output roots. " +
+          "Use directory outputs or a supported backend in an authorized fresh run.",
+        {
+          code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+          diagnosticClass: "capability_existing_file_output",
+        },
+      );
+  }
+}
 
 // config/read may serialize these optional permission-profile settings as null.
 // Normalize only these unset defaults, never access rules or inherited policy.

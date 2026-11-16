@@ -372,6 +372,20 @@ and refreezing advance the active version. Compatible answers require fresh
 convergence without rewriting earlier receipts or changing frozen input/output
 authority. Unauthorized transcript edits remain input drift.
 
+Before any new preparation, Runner applies backend-owned readiness to every
+active role with eventual workspace-write access, including a custom Worker's
+read-only startup. Codex's named-profile route refuses existing regular-file
+output roots, including dotfiles, before writable implementation or native work.
+Directory outputs and read-only file declarations retain exact permissions;
+syntax remains backend-neutral and parents never gain write authority. Current
+root shapes are rechecked before invocation despite cached capabilities. Pending
+effects and owned process retirement retain their existing recovery order before
+new writes; startup read-only and separate writable receipts, accepted results,
+frozen declarations/source/control bindings and budgets remain unchanged.
+Unsupported shapes use existing unsupported-backend/policy-drift paths with
+bounded CLI/MCP diagnostics. Changing output or backend selection requires an
+authorized fresh run, not a resume override. No durable shape migration is added.
+
 Output-directory preparation journals the exact declared root, its prior state,
 real parent and a unique allocation path in private durable state before
 creation. It pins the empty allocation with a no-follow descriptor before

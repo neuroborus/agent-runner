@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-16
 
+- **Codex refuses unsupported existing-file output grants.** The named-profile
+  route rejects regular-file and dotfile write roots before preparation or native
+  work, retaining exact directory and read-only declarations without parent grants
+  or backend substitution. A small optional descriptor readiness hook covers
+  eventual active writers, including initially read-only custom Workers; current
+  shapes are rechecked outside cached approval. Frozen receipts, recovery,
+  accepted results and consumed authority remain unchanged. The reported native
+  0.167.2 setup failure establishes no blanket version range. Deterministic
+  regressions and a separate explicitly enabled source/private-candidate native
+  acceptance script keep mocked policy proof distinct from operator acceptance.
+
 - **Runner handoff never executes workspace hooks.** Polishing handoff staging
   and direct Git inspection use a fixed invocation-only hook override. Ignored
   hook bytes are outside accepted content, so they cannot safely gain Runner

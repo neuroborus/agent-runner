@@ -4054,8 +4054,27 @@ Execution-option validation remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
 access for directory proofs. Unsupported adapters reject it before provider work.
 
-Codex directory access requires stable CLI 0.164.0 or newer. Its access-specific
-probe inspects bindings and snapshot safety without Git, an artificial repository,
+Codex directory access requires stable CLI 0.164.0 or newer. Its readiness
+rejects existing regular-file output roots on the named-profile route,
+including dotfiles (`capability_existing_file_output`), without extrapolating a
+blanket unsupported version range from the reported 0.167.2 failure. The frozen
+backend descriptor optionally supplies `assertWorkspaceReady({ access,
+workspacePolicy })`; registration rejects a non-function value. Runner calls it
+for active roles whose full role access includes workspace-write before initial
+probes, new output preparation and turns, including initially read-only custom
+Workers. Explicit writable probes and direct Codex probes/requests repeat current
+shape inspection before native work; storage, thread and turn admission recheck
+as well. Cached capability proofs do not approve a substituted file root.
+Read-only authoring/Reviewer roles and lazy inactive roles remain unaffected.
+Read-only recovery probes retain their existing receipt checks; owned process
+retirement and pending effect reconciliation precede new writable work. Refusal
+uses `ERR_UNSUPPORTED_BACKEND` at Runner admission or the existing provider
+capability diagnostic boundary. CLI/MCP errors direct an authorized fresh run
+with supported outputs/backend; frozen selections, receipts, accepted outputs and
+budgets are unchanged. No public or persisted shape changes or migration are
+needed. File declarations remain valid in the shared custom-plan contract.
+
+Its access-specific probe inspects bindings and snapshot safety without Git, an artificial repository,
 or a local-commit executor probe. Frozen policy receipts bind the version,
 access, declared paths and immutable input/control bindings; authorized output
 and state creation do not change a receipt. `declaredWorkspace`

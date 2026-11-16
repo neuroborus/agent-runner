@@ -283,6 +283,29 @@ test("built-in provider registration is static and frozen", () => {
   }
 });
 
+test("optional workspace readiness is validated and retained by descriptors", async () => {
+  const descriptor = PROVIDER_REGISTRY.list()[0];
+  for (const assertWorkspaceReady of [null, true, {}, "ready"])
+    assert.throws(
+      () => createProviderRegistry([{ ...descriptor, assertWorkspaceReady }]),
+      {
+        code: "ERR_INVALID_PROVIDER_REGISTRY",
+      },
+    );
+  const requests = [];
+  const registry = createProviderRegistry([
+    {
+      ...descriptor,
+      id: "fixture",
+      assertWorkspaceReady: (request) => requests.push(request),
+    },
+  ]);
+  const request = { access: "workspace-write" };
+  await registry.get("fixture").assertWorkspaceReady(request);
+  assert.deepEqual(requests, [request]);
+  assert.equal(PROVIDER_REGISTRY.get("claude").assertWorkspaceReady, undefined);
+});
+
 test("client attribution is strict, frozen, and descriptor-driven", () => {
   const custom = normalizeClientAttribution({
     name: "example/agent-runner",

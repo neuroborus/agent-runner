@@ -41,6 +41,27 @@ omitted. Its output roots must already exist as files or directories for exact
 bind mounts; preparation never creates them or grants their parents write access.
 New content can be created inside a declared output directory. Its native and
 restricted-host probes use ordinary directories without Git or commit preparation.
+
+Codex's named-profile route rejects existing regular-file output roots, including
+dotfiles, with `capability_existing_file_output`. The reported native 0.167.2
+file-grant setup failure establishes this route limitation, not a blanket
+unsupported version range. Configuration acceptance alone proves no enforced
+access. Directory outputs and read-only file declarations remain supported;
+file declarations are not rejected by custom-plan syntax or unrelated backends.
+The backend descriptor supplies an optional, function-validated
+`assertWorkspaceReady` capability. Runner applies it to active roles with
+eventual workspace-write access before admission probes and new output
+preparation, including custom execution's initially read-only Worker. It checks
+again before turns and explicit writable probes, outside cached capability
+approval. Codex also checks direct probes/requests before native work, storage
+allocation and thread/turn selection. Current shapes are always reexamined.
+Use supported directory outputs or an authorized fresh run with a supported
+backend; no parent grants, profile replacement or selection changes on resume
+are authorized. Read-only authoring/Reviewer roles and lazy inactive roles retain
+their access semantics. Recovery still retires owned processes and reconciles
+pending effects before admitting new writes. Readiness adds no durable shape,
+receipt, accepted-result, source/control or budget migration.
+
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. Custom authoring uses read-only directory

@@ -2908,6 +2908,70 @@ test("proves declared directory access without Git, commit readiness, or writabl
   assert.equal(old.processes.length, 0);
 });
 
+test("rejects existing file output roots before native work, including cached proofs", async (t) => {
+  for (const name of ["result.md", ".result"]) {
+    const directory = await directoryWorkspace(t, { outputName: name });
+    const fixture = createFixture({ version: "0.167.2" });
+    const options = {
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    };
+    // A valid directory proof cannot approve a later file substitution.
+    assert.equal((await fixture.adapter.probe(options)).workspaceWrite, true);
+    await rm(directory.output, { recursive: true });
+    await writeFile(directory.output, "Preserve this exact file.\n");
+    directory.workspacePolicy.outputPaths.unshift(
+      join(directory.cwd, "missing"),
+    );
+    const cold = createFixture({ version: "0.167.2" });
+    const diagnostic = hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_existing_file_output",
+    );
+    for (const adapter of [fixture.adapter, cold.adapter]) {
+      await assert.rejects(adapter.probe(options), diagnostic);
+      await assert.rejects(
+        adapter.run(
+          request({
+            ...options,
+            cwd: directory.cwd,
+            session: { mode: "continue", id: "saved-child" },
+          }),
+        ),
+        diagnostic,
+      );
+    }
+    assert.equal(cold.executeCalls.length, 0);
+    for (const adapterFixture of [fixture, cold]) {
+      assert.equal(adapterFixture.processes.length, 0);
+      assert.equal(adapterFixture.workspaceStorages.length, 0);
+    }
+    assert.equal(
+      await readFile(directory.output, "utf8"),
+      "Preserve this exact file.\n",
+    );
+    assert.equal(
+      (await cold.adapter.probe({ ...options, access: "read-only" })).readOnly,
+      true,
+    );
+    await assert.rejects(lstat(join(directory.cwd, "missing")), {
+      code: "ENOENT",
+    });
+    const readOnly = createFixture({
+      version: "0.167.2",
+      directoryPermissions: () => directory.permissions("read-only"),
+    });
+    await readOnly.adapter.run(
+      request({
+        ...options,
+        access: "read-only",
+        cwd: directory.cwd,
+      }),
+    );
+    assert.equal(readOnly.processes.length, 1);
+  }
+});
+
 test("preserves directory policy receipts across authorized output, artifact and state creation", async (t) => {
   const directory = await directoryWorkspace(t);
   directory.workspacePolicy.artifactPaths.push(directory.input);

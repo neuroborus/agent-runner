@@ -176,6 +176,15 @@ outputs with a native permission profile; Claude uses authenticated command
 mounts and omits native editing tools for directory turns. Both check protected
 content after every retired attempt, including failures before reconstruction. Directory
 access cannot request a Git commit, and unsupported providers fail closed.
+
+Codex's named-profile route refuses existing regular-file output roots before
+new writable preparation or native work. Backend-owned readiness inspects active
+eventual writers, even when startup access is read-only, and rechecks root shapes
+before invocation despite cached capabilities. Read-only file declarations and
+directory outputs retain exact authority; refusal never widens grants to a parent
+or changes a frozen selection. Existing recovery, access-specific receipts and
+consumed-effect accounting remain authoritative.
+
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 

@@ -81,6 +81,39 @@ function supportedAccess(capabilities) {
   );
 }
 
+export async function assertWorkspaceReadiness(
+  pipeline,
+  roles,
+  providers,
+  workspacePolicy,
+  code = "ERR_UNSUPPORTED_BACKEND",
+) {
+  if (workspacePolicy === undefined) return;
+  for (const [role, configuration] of Object.entries(roles)) {
+    if (
+      !roleAccess(pipeline, role, workspacePolicy).includes("workspace-write")
+    )
+      continue;
+    try {
+      await providers.get(configuration.backend)?.assertWorkspaceReady?.({
+        access: "workspace-write",
+        workspacePolicy,
+      });
+    } catch (cause) {
+      const failure = normalizeAdapterFailure(
+        configuration.backend,
+        cause,
+        providers,
+      );
+      throw new RunnerError(
+        `Backend cannot safely prepare ${pipeline.id}.${role}: ${configuration.backend}. ` +
+          `${failure.message} Use supported output roots or a supported backend in an authorized fresh run.`,
+        { code },
+      );
+    }
+  }
+}
+
 function normalizePolicyReceipt(capabilities) {
   const supported = supportedAccess(capabilities);
   const provided = capabilities.policyReceipt;
@@ -454,6 +487,14 @@ function configuredAdapter(
   );
   const capabilitiesByAccess = new Map();
   const resolveCapabilities = async ({ access } = {}) => {
+    if (access === "workspace-write")
+      await assertWorkspaceReadiness(
+        pipeline,
+        { [role]: configuration },
+        providers,
+        run.workspace?.policy ?? undefined,
+        "ERR_PROVIDER_POLICY_CHANGED",
+      );
     const selectedAccess =
       run.workspace?.policy && pipeline.initialRoleAccess
         ? access
@@ -508,6 +549,13 @@ function configuredAdapter(
     },
     async run(request) {
       if (run.workspace?.policy) {
+        await assertWorkspaceReadiness(
+          pipeline,
+          { [role]: configuration },
+          providers,
+          run.workspace.policy,
+          "ERR_PROVIDER_POLICY_CHANGED",
+        );
         await resolveCapabilities();
         if (pipeline.initialRoleAccess)
           await resolveCapabilities({ access: request.access });
@@ -595,6 +643,7 @@ export async function probeRequiredRoles(
   workspacePolicy,
   onProof,
 ) {
+  await assertWorkspaceReadiness(pipeline, roles, providers, workspacePolicy);
   const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const receipts = Object.fromEntries(
     Object.keys(roles).map((role) => [role, null]),

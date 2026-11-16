@@ -86,6 +86,12 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   writes in Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux,
   without Git or commit readiness. Claude writes through sandboxed Bash to
   existing declared output roots. Explicit custom execution uses these directory permissions; see the [provider contract](docs/product/PROVIDER_MODEL.md).
+  Codex's named-profile route refuses existing regular-file output roots,
+  including dotfiles, before writable preparation or native execution. Use
+  directory outputs or select a supported backend in an authorized fresh run;
+  no parent write grant or automatic backend substitution is applied. Read-only
+  file declarations remain supported. This is a route limitation, not a blanket
+  unsupported Codex version range.
 - The runner lifecycle foundation selects workspace and lease requirements from
   pipeline descriptors before Git inspection. Directory bindings, protected
   inputs and output permissions survive recovery; repository-contained directory

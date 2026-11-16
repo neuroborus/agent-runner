@@ -38,6 +38,33 @@ rediscovery before an untouched legacy effect, and no repair of a partial effect
 These fixtures require no live provider, network, paid service or live-project
 hook execution; they do not replace the full slow gate or operator acceptance.
 
+## Operator-owned Codex file-output acceptance
+
+Existing-file output readiness regressions live in `test/agents/codex.test.js`,
+`test/agents/registry.test.js` and `test/runner-directory.test.js`. Injected native
+effects prove regular/dotfile refusal before work, mixed declarations without
+preparation, read-only preservation, descriptor validation and shape substitution
+after cached approval or pause. They establish no actual native enforcement.
+
+Operator-owned model-free native acceptance is deliberately outside ordinary
+fast/slow coverage and live-provider smoke. After pipeline gates, explicitly run:
+
+```bash
+node scripts/accept-codex-file-outputs.js --enable --candidate=/absolute/private/package --codex=/absolute/configured/cli
+```
+
+The candidate must be a separately installed package. The script uses owned
+temporary ordinary directories and synthetic native settings without credentials
+or model requests. It records named-profile configuration acceptance separately
+from enforcement, requires the expected file-grant setup failure before its
+command marker, verifies directory-write/read-only and protected-metadata/sibling
+controls, and proves source/candidate adapter refusal before any injected native
+inspection, allocation or launch. Missing interfaces, timeouts and failed controls
+are failures, not acceptance; an unrun script remains NOT_RUN. Report failures,
+skips and limits before installation/activation. This negative native witness
+must never become a PASS-required agent check. Neither mocked tests nor CLI
+version/help success grants native acceptance credit.
+
 ## Ordinary gate
 
 Fast `test/state/workspace-preparation.test.js` owns bounded pending admission,

@@ -78,6 +78,7 @@ import {
 } from "./stops.js";
 import {
   defaultAdapters,
+  assertWorkspaceReadiness,
   capabilityAuthorityFingerprint,
   probeRequiredRoles,
   roleAdapters,
@@ -1026,6 +1027,13 @@ export function createRunner(options = {}) {
                   );
                 const current = await runStore.loadRun(run.runId);
                 pipeline.assertOutputPreparation(current, intent);
+                await assertWorkspaceReadiness(
+                  pipeline,
+                  current.roles,
+                  providers,
+                  current.workspace?.policy ?? undefined,
+                  "ERR_PROVIDER_POLICY_CHANGED",
+                );
                 const prepared = await (monitor === undefined
                   ? safety.prepareOutputDirectory(intent)
                   : monitor.invoke(
@@ -1575,6 +1583,12 @@ export function createRunner(options = {}) {
           publish,
         });
       // The complete directory policy is now available to capability probes.
+      await assertWorkspaceReadiness(
+        pipeline,
+        run.roles,
+        providers,
+        run.workspace?.policy ?? undefined,
+      );
       selected = selectedRoleAdapters(pipeline, run, lease);
       baseRuntime = runtimeFor(pipeline, lease, run, selected);
       verifyProviderPolicies = true;
