@@ -207,9 +207,67 @@ acceptance is also left pending. Source observation or overlap alone is not a
 violation; evidence that cannot establish what ran yields neither invented
 command facts nor a confirmed violation, and provides no reserved coverage.
 Reviews preserve honestly reported facts, useful content and pending coverage.
-Dispute reconsideration and arbitration decide an execution allegation by
-evidence of the execution and a coverage allegation by evidence of the claim;
-relabeling or pending final acceptance never makes either incorrect.
+They distinguish the truth of a historical allegation from a consequence still
+actionable under current authority. Authorized containment retains disclosure,
+corrects present misrepresentation or unsafe consequences, gives no early credit
+and preserves every pending check's executor/checkpoint. A timing prohibition
+alone is not irrecoverability. A contained fact is not repeatedly reported as an
+unresolved blocker, and candidate acceptance never requires later-only checks
+first. Existing FIX/summary paths can explain containment without cosmetic edits
+or a false CHANGED report. Reconsideration and arbitration may close an ongoing
+blocker without denying proven historical truth; they never waive explicit task
+policy. The owned rule is delivered again on reconstruction independently of
+native sessions. Existing bounded previous finding
+reports survive candidate convergence and remain available to reconstructed
+requests. Accepted Worker work summaries and accepted finding reports also
+survive in bounded durable context, so containment and later clean confirmations
+cannot erase a disclosure that existed only in a summary or self-finding.
+Accepted FIX and DISPUTE decisions retain normalized reasons and evidence in
+that context, including unchanged containment and reconciled or restated repairs;
+resolved findings stay inactive.
+Accepted Reviewer reconsideration reasons/evidence and finding, stagnation,
+bootstrap or validation-migration Arbiter rationales also survive in that common
+context, including withdrawal, upheld concerns, product-decision outcomes and
+subsequent repairs. A separate
+Arbiter rationale is retained atomically with the authorized pause and survives
+the answer and bootstrap or compatibility re-entry, independently of the question
+and blocking evidence. It does not recreate active ambiguity or a dispute.
+Resolved bootstrap and validation-migration outcomes retain separate rationales
+with acceptance too; they cannot replace the independently established inventory.
+Execution also retains the separate rationale of terminal plan-revision
+arbitration outcomes; their requirement for a revised plan and new run is unchanged.
+Clearing active dispute ledgers or
+advancing a plan step cannot erase a disclosure made only during adjudication;
+these records grant no validation credit, approval or renewed allowance.
+Normalized terminal validation evidence remains historical context even when
+it is the sole disclosure, including after evidence rejection or content repair.
+It survives continued and reconstructed requests without preserving the former
+validation decision or approval; every invalidated gate still requires fresh
+validation and confirmation.
+Lost publication acknowledgements cannot replace accepted history with stale
+failure state; recovery preserves the journaled checkpoint and consumed
+allowances without replaying accepted work.
+Finalization summaries and reported issue/check facts are retained before
+Runner-trusted execution replaces placeholders or blocks. Blocked finalization
+reports also retain their reason, evidence and check facts before retry. Blocked
+implementation/polishing, check/fix and resolution reports retain reasons and
+evidence, including read-only restatement; clearing the pause on retry cannot
+erase a disclosure that appeared solely in the blocked response. This history
+preserves disclosures independently of check credit that a later repair must
+invalidate; it grants no executor authority or coverage from reported statuses.
+Continued requests receive this context too; it grants no check credit, approval
+or renewed allowance. Separate current-findings fields continue to own blockers.
+
+When proven execution leaves a cited task requirement unsatisfiable under frozen
+authority and no corrective disposition is permitted, Worker reports
+`VALIDATION_POLICY_BLOCKED` with execution, requirement and disposition evidence.
+It is not an environment blocker or a generic product question. Both coding
+pipelines reconcile existing effects, then journal a dedicated policy pause
+before accepting gate evidence or launching further trusted checks. Safe work,
+truth, inventories, bindings and consumed allowances survive. Operator assessment
+of a separately authorized task-compatible disposition or cancellation is
+supported; retry, override or a fresh run cannot waive explicit irrecoverability.
+See the owning coding specifications for strict status fields and recovery.
 
 This is semantic instruction, not deterministic parsing of task prose.
 Accepted inventories stay additive, so reconciliation and arbitration never

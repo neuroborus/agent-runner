@@ -86,7 +86,7 @@ test("custom bootstrap derives checks from criteria without a mandatory coding g
 test("custom check/fix status accounts for result-only repairs without rewriting task data", () => {
   const changed = "For CHANGED, use only when you changed repository content;";
   const unchanged =
-    "For UNCHANGED, use only when you found no problem and changed no repository content;";
+    "For UNCHANGED, use only when no actionable problem remains and you changed no repository content;";
   const context = `\n\nTask data: ${changed}\n${unchanged}`;
   const prompt = customExecutionPrompt(CHECK_AND_FIX_INSTRUCTIONS + context);
   const instructions = prompt.slice(0, -context.length);

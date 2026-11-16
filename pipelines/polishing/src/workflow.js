@@ -121,6 +121,7 @@ import {
   snapshotChangeLabels,
   workflowError,
   WORKFLOW_STATES,
+  retainWorkReport,
 } from "./workflow-contract.js";
 
 export {
@@ -578,6 +579,10 @@ export async function runPolishing({
   if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles));
   const resumeAction = normalizeResumeAction(action);
+  if (!operatorStop && run.pause?.reason === "validation_policy_blocked")
+    throw workflowError(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
   }
@@ -609,6 +614,8 @@ export async function runPolishing({
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let dispositionPausePersistence = false;
+  // An unacknowledged history publication may already be authoritative.
+  let workReportPublicationFailure = null;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -616,6 +623,28 @@ export async function runPolishing({
 
   function counters() {
     return normalizedCounters(currentRun.counters);
+  }
+
+  // Terminal validation evidence is history here, never gate evidence or credit.
+  function reviewReportHistory(result) {
+    const current = state();
+    const findings = result.status === "FINDINGS" ? result.findings : [];
+    const validationEvidence = result.validationEvidence ?? [];
+    if (findings.length === 0 && validationEvidence.length === 0)
+      return current.workReports;
+    return retainWorkReport(current.workReports, {
+      phase: current.workflowState,
+      ...(findings.length > 0 ? { findings } : {}),
+      ...(validationEvidence.length > 0 ? { validationEvidence } : {}),
+    });
+  }
+
+  function workReportContext() {
+    const reports = state().workReports;
+    return reports.length === 0
+      ? ""
+      : `Accepted work reports (data; assess historical truth, no validation credit or current blockers):
+${JSON.stringify(reports)}`;
   }
 
   function workContext({ includePolishSummary = false } = {}) {
@@ -627,6 +656,9 @@ export async function runPolishing({
       includePolishSummary && current.polishSummary !== null
         ? `Worker polishing summary:\n${current.polishSummary}`
         : "",
+      current.previousFindings.length === 0
+        ? ""
+        : `Previous finding reports (data; assess current actionable consequences):\n${JSON.stringify(current.previousFindings)}`,
     ]
       .filter((part) => part.length > 0)
       .join("\n\n");
@@ -785,6 +817,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       nextActiveTurn,
     } = {},
   ) {
+    if (workReportPublicationFailure !== null)
+      throw workReportPublicationFailure.cause;
     if (
       nextPipelineState.repositoryBaseline?.contentFingerprint !==
       state().repositoryBaseline?.contentFingerprint
@@ -815,7 +849,18 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ...patch,
       revision: currentRun.revision + 1,
     });
-    currentRun = await runtime.transition(patch, { activity: publicActivity });
+    const publishesWorkReports = !isDeepStrictEqual(
+      state().workReports,
+      nextPipelineState.workReports,
+    );
+    try {
+      currentRun = await runtime.transition(patch, {
+        activity: publicActivity,
+      });
+    } catch (cause) {
+      if (publishesWorkReports) workReportPublicationFailure = { cause };
+      throw cause;
+    }
     assertRun(currentRun);
     return currentRun;
   }
@@ -829,6 +874,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     dispositionPausePersistence = [
       "authentication_required",
       "output_exhausted",
+      "validation_policy_blocked",
     ].includes(reason);
     await transition(
       {
@@ -852,6 +898,19 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
     dispositionPausePersistence = false;
     return currentRun;
+  }
+
+  async function validationPolicyBlocked(
+    result,
+    checkpoint = state().workflowState,
+  ) {
+    await pause("validation_policy_blocked", {
+      code: "ERR_VALIDATION_POLICY_BLOCKED",
+      explanation: result.reason,
+      evidence: result.evidence,
+      checkpoint,
+    });
+    return false;
   }
 
   async function pauseForBootstrapCapacity(role, result) {
@@ -1572,7 +1631,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             `Change-set fingerprint before this turn:\n${turnSnapshot.contentFingerprint}`,
             recoveryContext,
           );
-    const context = durableContext(evidenceContext, checkpointContext);
+    const context = durableContext(
+      durableContext(evidenceContext, checkpointContext),
+      workReportContext(),
+    );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
     // Owner loss never renews either allowance of the lost original.
@@ -1667,7 +1729,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       cwd: currentRun.projectPath,
       prompt:
         session?.mode === "continue" && !resumeSessionContext
-          ? rolePrompt(buildPrompt(""))
+          ? rolePrompt(buildPrompt(workReportContext()))
           : recoveryPrompt + readContext,
       recoveryPrompt: recoveryPrompt + readContext,
       schema,
@@ -2221,7 +2283,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return result.changed || result.action === "proactive-clarification";
   }
 
-  async function productDecision(decision, suspendedState, settlement) {
+  async function productDecision(
+    decision,
+    suspendedState,
+    { settlement, workReport = null } = {},
+  ) {
+    const workReports =
+      workReport === null
+        ? state().workReports
+        : retainWorkReport(state().workReports, workReport);
     const number = settlement?.number ?? counters().productDecisions + 1;
     const transcript = await runtime.clarifications.appendProductDecision({
       artifactRoot: state().repositoryBaseline.projectPath,
@@ -2269,6 +2339,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         },
         nextPipelineState: {
           ...clearedWorkState(state(), { clearBootstrap: bootstrapDecision }),
+          workReports,
           clarificationFrozen: false,
           refreezeRequired: false,
           resolvedSummary: null,
@@ -2849,12 +2920,16 @@ ${evidence}`,
     return true;
   }
 
-  async function completeValidationMigration(actor) {
+  async function completeValidationMigration(actor, workReport = null) {
     const validation = await establishedValidation();
     await transition(
       {
         ...state(),
         ...validation,
+        workReports:
+          workReport === null
+            ? state().workReports
+            : retainWorkReport(state().workReports, workReport),
         pendingBootstrapCorrection: null,
         validationMigrationDisagreement: null,
       },
@@ -2962,7 +3037,13 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
-    return completeValidationMigration("arbiter");
+    return completeValidationMigration("arbiter", {
+      phase: "ARBITRATE_VALIDATION_MIGRATION",
+      arbitration: {
+        direction: arbitration.direction,
+        rationale: arbitration.rationale,
+      },
+    });
   }
 
   async function runValidationMigration() {
@@ -3294,6 +3375,7 @@ ${JSON.stringify(
         },
         findings: contentFindings,
         previousFindings: result.findings,
+        workReports: reviewReportHistory(result),
         pendingDisputes: [],
         reviewReconsideration: [],
         pendingCorrection: false,
@@ -4253,8 +4335,12 @@ The runner will derive validation inventories from the independently accepted ro
     if (result === null) {
       return false;
     }
+    const workReport = {
+      phase: "ARBITRATE_BOOTSTRAP",
+      arbitration: { direction: result.direction, rationale: result.rationale },
+    };
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "BOOTSTRAP");
+      return productDecision(result.decision, "BOOTSTRAP", { workReport });
     }
     await writeContext("context/resolved.md", result.summary);
     const validation = await establishedValidation();
@@ -4264,6 +4350,7 @@ The runner will derive validation inventories from the independently accepted ro
         workflowState: "POLISH",
         resolvedSummary: result.summary,
         ...validation,
+        workReports: retainWorkReport(state().workReports, workReport),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: true,
       },
@@ -4312,15 +4399,26 @@ ${evidence}${
       return false;
     }
     const result = normalizePolishResult(output);
+    if (result.status === "VALIDATION_POLICY_BLOCKED")
+      return validationPolicyBlocked(result);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
     }
     if (result.status === "BLOCKED") {
-      await pause("environment_blocked", {
-        explanation: result.reason,
-        evidence: result.evidence,
-        resumeState: "POLISH",
-      });
+      await pause(
+        "environment_blocked",
+        {
+          explanation: result.reason,
+          evidence: result.evidence,
+          resumeState: "POLISH",
+        },
+        {
+          workReports: retainWorkReport(state().workReports, {
+            phase: "POLISH",
+            ...result,
+          }),
+        },
+      );
       return false;
     }
     await transition(
@@ -4328,6 +4426,10 @@ ${evidence}${
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
         polishSummary: result.summary,
+        workReports: retainWorkReport(state().workReports, {
+          phase: "POLISH",
+          summary: result.summary,
+        }),
         ...clearedCandidateAndTerminalGate(),
         previousFindings:
           current.findings.length === 0
@@ -4403,13 +4505,12 @@ ${establishedValidationPrompt(state())}${
             return null;
           }
           if (!(await verifyFinalizationGuidance())) return null;
-          const result = await validateValidationInventory(
-            normalizeFinalizationRoleOutput(
-              output,
-              state().trustedValidation.commands.map(({ command }) => command),
-            ),
-            context,
+          const result = normalizeFinalizationRoleOutput(
+            output,
+            state().trustedValidation.commands.map(({ command }) => command),
           );
+          if (result.status === "VALIDATION_POLICY_BLOCKED") return result;
+          await validateValidationInventory(result, context);
           if (
             state().finalizationRecovery.required &&
             ![
@@ -4572,8 +4673,22 @@ ${establishedValidationPrompt(state())}${
     if (result === null) {
       return false;
     }
+    if (result.status === "VALIDATION_POLICY_BLOCKED")
+      return validationPolicyBlocked(result);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "BOOTSTRAP");
+    }
+    // Keep normalized Worker facts before replacement, blockage or invalidation.
+    if (["PASS", "FAIL", "BLOCKED"].includes(result.status)) {
+      const workReports = retainWorkReport(state().workReports, {
+        phase: "FINALIZE",
+        summary: result.summary ?? result.reason,
+        ...(result.issues?.length > 0 ? { issues: result.issues } : {}),
+        ...(result.checks.length > 0 ? { checks: result.checks } : {}),
+        ...(result.status === "BLOCKED" ? { evidence: result.evidence } : {}),
+      });
+      if (workReports !== state().workReports)
+        await transition({ ...state(), workReports });
     }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
@@ -5016,7 +5131,11 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         const changed = (await contentFingerprint()) !== beforeFingerprint;
         if (
           (result.status === "CHANGED") !== changed &&
-          !["BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(result.status)
+          ![
+            "BLOCKED",
+            "VALIDATION_POLICY_BLOCKED",
+            "PRODUCT_DECISION_REQUIRED",
+          ].includes(result.status)
         ) {
           throw invalidRoleOutput(
             "Worker check/fix status does not match the repository change.",
@@ -5024,6 +5143,8 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
             { field: "status", constraint: "matches-repository-mutation" },
           );
         }
+        if (result.status === "VALIDATION_POLICY_BLOCKED")
+          return validationPolicyBlocked(result);
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "BOOTSTRAP");
         }
@@ -5035,11 +5156,20 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               pendingLazyCorrection: null,
             });
           }
-          await pause("environment_blocked", {
-            explanation: result.reason,
-            evidence: result.evidence,
-            resumeState: "CHECK_AND_FIX",
-          });
+          await pause(
+            "environment_blocked",
+            {
+              explanation: result.reason,
+              evidence: result.evidence,
+              resumeState: "CHECK_AND_FIX",
+            },
+            {
+              workReports: retainWorkReport(state().workReports, {
+                phase: "CHECK_AND_FIX",
+                ...result,
+              }),
+            },
+          );
           return false;
         }
         if (changed) {
@@ -5049,6 +5179,10 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               availabilityCorrectionCharged: false,
               pendingLazyCorrection: null,
               polishSummary: result.summary,
+              workReports: retainWorkReport(state().workReports, {
+                phase: "CHECK_AND_FIX",
+                summary: result.summary,
+              }),
             },
             {
               publicActivity: activity(
@@ -5073,6 +5207,10 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
             polishSummary: result.summary,
+            workReports: retainWorkReport(state().workReports, {
+              phase: "CHECK_AND_FIX",
+              summary: result.summary,
+            }),
             previousFindings:
               !combinedReview(current.settings) && fixingConfirmationFindings
                 ? current.findings
@@ -5222,6 +5360,10 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
             {
               ...state(),
               workflowState: "CHECK_AND_FIX",
+              workReports: retainWorkReport(current.workReports, {
+                phase: "CLEAN_CONFIRM",
+                findings: result.findings,
+              }),
               pendingLazyCorrection: null,
               ...(combinedReview(current.settings)
                 ? {
@@ -5270,9 +5412,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
             candidateConfirmationFingerprint: confirmedFingerprint,
             primaryFindings: [],
             findings: [],
-            previousFindings: combinedReview(current.settings)
-              ? current.previousFindings
-              : [],
+            previousFindings: current.previousFindings,
             pendingCorrection: combinedReview(current.settings)
               ? current.pendingCorrection
               : false,
@@ -5500,6 +5640,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
           ...state(),
           workflowState: "RESOLVE_FINDINGS",
           candidateReviewResult,
+          workReports: reviewReportHistory(result),
           candidateReviewedFingerprint: reviewedFingerprint,
           findings,
           previousFindings: result.findings,
@@ -5531,13 +5672,14 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
         ...state(),
         ...checkpoint,
         candidateReviewResult,
+        workReports: reviewReportHistory(result),
         candidateReviewedFingerprint: reviewedFingerprint,
         findings: [],
         previousFindings:
           state().pendingDisputes.length === 0
             ? result.status === "FINDINGS"
               ? result.findings
-              : []
+              : state().previousFindings
             : state().previousFindings,
         pendingCorrection: state().pendingCorrection,
         reviewReconsideration: [],
@@ -5684,6 +5826,7 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
               pendingLazyCorrection: null,
               findings: result.findings,
               previousFindings: result.findings,
+              workReports: reviewReportHistory(result),
               correctionHistory: progress.history,
               sameFindingRounds: progress.sameFindingRounds,
               pendingCorrection: true,
@@ -5710,6 +5853,7 @@ ${JSON.stringify(current.previousFindings, null, 2)}${
             reviewResult,
             reviewedFingerprint: confirmedFingerprint,
             cleanConfirmationFingerprint: confirmedFingerprint,
+            workReports: reviewReportHistory(result),
             findings: [],
             previousFindings: [],
             pendingCorrection: false,
@@ -5957,6 +6101,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
           workflowState: "RESOLVE_FINDINGS",
           findings,
           previousFindings: result.findings,
+          workReports: reviewReportHistory(result),
           pendingDisputes: [],
           correctionHistory: progress.history,
           sameFindingRounds: progress.sameFindingRounds,
@@ -5985,6 +6130,7 @@ ${JSON.stringify(priorFindingDecisions(), null, 2)}${
         reviewedFingerprint,
         findings: [],
         previousFindings: result.status === "FINDINGS" ? result.findings : [],
+        workReports: reviewReportHistory(result),
         pendingDisputes: [],
         pendingCorrection: false,
         reviewReconsideration: [],
@@ -6092,6 +6238,10 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
         findings,
         pendingDisputes,
         ...findingDecisions,
+        workReports: retainWorkReport(current.workReports, {
+          phase: "RECONSIDER_DISPUTES",
+          decisions: result.decisions,
+        }),
       },
       {
         publicActivity: activity(
@@ -6141,7 +6291,16 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
     }
     const result = normalizeFindingArbitration(output);
     if (result.direction === "REQUIREMENT_AMBIGUOUS") {
-      return productDecision(result.decision, "BOOTSTRAP");
+      return productDecision(result.decision, "BOOTSTRAP", {
+        workReport: {
+          phase: "ARBITRATE_FINDING",
+          arbitration: {
+            findingId: dispute.findingId,
+            direction: result.direction,
+            rationale: result.rationale,
+          },
+        },
+      });
     }
     const findings =
       result.direction === "WORKER_CORRECT"
@@ -6175,6 +6334,10 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
         findings,
         pendingDisputes,
         ...findingDecisions,
+        workReports: retainWorkReport(current.workReports, {
+          phase: "ARBITRATE_FINDING",
+          arbitration: { findingId: dispute.findingId, ...result },
+        }),
       },
       {
         publicActivity: activity(
@@ -6220,12 +6383,24 @@ ${JSON.stringify(
     }
     const result = normalizeStagnationResult(output, current);
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "BOOTSTRAP");
+      return productDecision(result.decision, "BOOTSTRAP", {
+        workReport: {
+          phase: "ARBITRATE_STAGNATION",
+          arbitration: {
+            direction: result.direction,
+            rationale: result.rationale,
+          },
+        },
+      });
     }
     const direction = {
       direction: result.direction,
       rationale: result.rationale,
     };
+    const workReports = retainWorkReport(current.workReports, {
+      phase: "ARBITRATE_STAGNATION",
+      arbitration: direction,
+    });
     if (result.direction === "REWORK_IMPLEMENTATION") {
       await transition(
         {
@@ -6240,6 +6415,7 @@ ${JSON.stringify(
           stagnationArbitrationUsed: true,
           stagnationDirection: direction,
           reviewReconsideration: [],
+          workReports,
         },
         {
           publicActivity: activity(
@@ -6274,6 +6450,7 @@ ${JSON.stringify(
           stagnationArbitrationUsed: true,
           stagnationDirection: direction,
           reviewReconsideration: result.findingIds,
+          workReports,
         },
         {
           publicActivity: activity(
@@ -6292,6 +6469,7 @@ ${JSON.stringify(
         blockedSinceStagnation: 0,
         stagnationArbitrationUsed: true,
         stagnationDirection: direction,
+        workReports,
       },
       {
         publicActivity: activity(
@@ -6592,6 +6770,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
   ) {
     const checkpoint = state().resolutionCorrection;
     const retire = checkpoint === null ? {} : { resolutionCorrection: null };
+    if (result.status === "VALIDATION_POLICY_BLOCKED")
+      return validationPolicyBlocked(result, "RESOLVE_FINDINGS");
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       if (checkpoint === null) {
         return productDecision(result.decision, "BOOTSTRAP");
@@ -6612,12 +6792,19 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     }
     if (result.status === "BLOCKED") {
       const details = { explanation: result.reason, evidence: result.evidence };
+      const workReports = retainWorkReport(state().workReports, {
+        phase: "RESOLVE_FINDINGS",
+        ...result,
+      });
       if (checkpoint?.stage === "correcting") {
         // The report cannot be established: keep the consumed restatement.
         await pause(
           "environment_blocked",
           { ...details, resumeState: "RESOLVE_FINDINGS" },
-          { resolutionCorrection: { ...checkpoint, stage: "blocked" } },
+          {
+            workReports,
+            resolutionCorrection: { ...checkpoint, stage: "blocked" },
+          },
         );
         return false;
       }
@@ -6630,10 +6817,18 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             ? candidateCheckpoint(current.settings)
             : state().workflowState,
         },
-        { ...(move ? changedResolutionMove(state()) : {}), ...retire },
+        {
+          ...(move ? changedResolutionMove(state()) : {}),
+          ...retire,
+          workReports,
+        },
       );
       return false;
     }
+    const workReports = retainWorkReport(state().workReports, {
+      phase: "RESOLVE_FINDINGS",
+      decisions: result.decisions,
+    });
     const requiresFix = result.decisions.some(
       ({ decision }) => decision === "FIX",
     );
@@ -6679,6 +6874,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
           workflowState: "WAITING_FOR_USER",
           pendingDisputes,
           ...findingDecisions,
+          workReports,
           ...retire,
         },
         {
@@ -6698,13 +6894,13 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       return false;
     }
     if (reconciled) {
-      if (newDisputes.length > 0) {
+      if (newDisputes.length > 0 || workReports !== state().workReports)
         await transition({
           ...state(),
           pendingDisputes,
           ...findingDecisions,
+          workReports,
         });
-      }
       return true;
     }
     if (requiresFix || contentChanged) {
@@ -6728,6 +6924,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
               }),
           pendingDisputes,
           ...findingDecisions,
+          workReports,
           ...retire,
         },
         {
@@ -6751,6 +6948,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
         ...state(),
         pendingDisputes,
         ...findingDecisions,
+        workReports,
         ...retire,
       },
       {
@@ -6776,7 +6974,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       !(await verifyFinalizationGuidance())
     )
       return false;
-    return productDecision(settlement.decision, "BOOTSTRAP", settlement);
+    return productDecision(settlement.decision, "BOOTSTRAP", { settlement });
   }
 
   async function continueResolutionCorrection() {
@@ -7424,6 +7622,8 @@ ${evidence}`,
       );
     }
   } catch (cause) {
+    if (workReportPublicationFailure !== null)
+      throw workReportPublicationFailure.cause;
     if (
       dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(

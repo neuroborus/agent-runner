@@ -10,6 +10,7 @@ import {
 import { join } from "node:path";
 import test from "node:test";
 
+import { HISTORICAL_VALIDATION_INSTRUCTIONS } from "../src/prompts.js";
 import { polishingPipeline } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
@@ -711,8 +712,14 @@ test("keeps a precise lazy diagnostic and accepted summaries through a cold null
   assert.equal(paused.pause.resumeState, "CLEAN_CONFIRM");
   assert.ok(secondCheck.recoveryPrompt.includes(changed.summary));
   assert.equal(
-    secondCheck.recoveryPrompt.includes(polishingCompleted().summary),
+    secondCheck.recoveryPrompt.includes(
+      `Worker polishing summary:\n${polishingCompleted().summary}`,
+    ),
     false,
+  );
+  assert.deepEqual(
+    paused.pipelineState.workReports.map(({ summary }) => summary),
+    [polishingCompleted().summary, changed.summary, unchanged.summary],
   );
   assert.equal(paused.pipelineState.polishSummary, unchanged.summary);
   assert.ok(cleanCalls()[1].prompt.includes(batch));
@@ -1981,8 +1988,8 @@ test("projects candidate and terminal gate activity in order", async (t) => {
   const result = await fixture.run();
   const gateActivity = fixture.transitions
     .map(({ options }) => options.activity)
-    .filter(({ phase }) =>
-      ["review", "finalization", "confirmation"].includes(phase),
+    .filter((event) =>
+      ["review", "finalization", "confirmation"].includes(event?.phase),
     )
     .map(({ actor, phase, kind }) => ({ actor, phase, kind }));
 
@@ -2427,10 +2434,7 @@ test("arbitrates a repeatedly upheld dispute in a fresh read-only turn", async (
     ...reconsiderations,
     fixture.calls.arbiter.at(-1),
   ]) {
-    assert.match(
-      prompt,
-      /Decide each validation-work finding by the allegation it makes/u,
-    );
+    assert.ok(prompt.includes(HISTORICAL_VALIDATION_INSTRUCTIONS));
   }
 
   const recovered = await fixture.recover();
@@ -2888,6 +2892,11 @@ test("uses one bounded stagnation arbitration before continuing fixes", async (t
     "CONTINUE_FIXES",
   );
   assert.equal(fixture.calls.arbiter.at(-1).access, "read-only");
+  for (const prompt of [
+    fixture.calls.arbiter.at(-1).prompt,
+    fixture.calls.arbiter.at(-1).recoveryPrompt,
+  ])
+    assert.ok(prompt.includes(HISTORICAL_VALIDATION_INSTRUCTIONS));
 });
 
 test("requires a new run when polishing changes frozen guidance", async (t) => {
@@ -3033,9 +3042,18 @@ for (const mode of ["independent", "lazy"]) {
               .length,
             2,
           );
+          // Accepted work-report history may repeat earlier reported check
+          // facts as data; instructions and the projection must not.
+          assert.doesNotMatch(
+            prompt.replace(
+              /^Accepted work reports \(data;[^\n]*\n[^\n]*$/mu,
+              "",
+            ),
+            /NOT_RUN|Include every listed command|requiredChecks|validationInfrastructure/u,
+          );
           assert.doesNotMatch(
             prompt,
-            /NOT_RUN|Include every listed command|requiredChecks|validationInfrastructure|private-selection|"executable"|"arguments"/u,
+            /private-selection|"executable"|"arguments"/u,
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));

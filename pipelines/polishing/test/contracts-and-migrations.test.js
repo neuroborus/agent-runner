@@ -364,7 +364,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 21);
+  assert.equal(polishingPipeline.stateVersion, 22);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -470,7 +470,7 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 21,
+    pipelineStateVersion: 22,
     pipelineState: polishingPipeline.migrations[20]({
       pipelineState: migratePolishingStateV19({
         pipelineState: migratePolishingStateV17({
@@ -2069,7 +2069,12 @@ test("version 20 migrates pending and terminal runs without inferring a report c
     assert.ok(Object.isFrozen(migrated));
     assert.doesNotThrow(() => normalizePipelineState(migrated));
   }
-  assert.throws(() => assertRun({ ...completed, pipelineStateVersion: 22 }));
+  assert.throws(() =>
+    assertRun({
+      ...completed,
+      pipelineStateVersion: polishingPipeline.stateVersion + 1,
+    }),
+  );
 });
 
 test("finding-resolution correction checkpoints and pauses stay strictly bound", async (t) => {

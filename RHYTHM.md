@@ -7,6 +7,55 @@ remain in the owning documentation.
 
 ## 2026-11-16
 
+- **Historical validation truth has a satisfiable disposition.** Both coding
+  pipelines preserve proven noncompliance while allowing authorized containment
+  to close its ongoing blocker without cosmetic edits, early acceptance credit
+  or later-only checks behind a candidate gate. Explicit irrecoverability instead
+  produces a narrowly evidenced `VALIDATION_POLICY_BLOCKED` Worker stop, durably
+  paused before gate acceptance or trusted execution, with no waiver by retry or
+  override. Accepted work summaries and finding reports remain bounded
+  durable context through containment, content repairs, continued requests and
+  reconstruction; clearing a blocker cannot erase its disclosure. Finalization
+  summaries and normalized issue/check facts are retained before trusted execution
+  replaces placeholders or blocks, including accepted blocked Worker reports.
+  Later repairs invalidate check credit without losing historical truth; reported
+  statuses grant no execution authority.
+  Accepted FIX/DISPUTE reasons and evidence also survive unchanged containment,
+  reconciled repairs and read-only
+  restatement; otherwise a disclosure made only while resolving a finding would
+  disappear. Accepted blocked implementation/polishing, check/fix and resolution
+  reasons and evidence publish with their pause and survive retry and read-only
+  restatement as history without keeping the former blocker active. Additive
+  migrations preserve old records and consumed allowances without inventing
+  historical reports.
+  Terminal validation evidence is retained independently of findings and gate
+  credit, including evidence rejection, content repair and clean confirmation.
+  Common request composition keeps these facts available through continuation,
+  reconstruction and validation migration without relying on a resolved summary.
+  Reviewer reconsideration decisions and finding/stagnation Arbiter rationales
+  likewise publish as bounded common context, so containment, dispute-history
+  compaction and plan-step resets cannot erase adjudication-only disclosures.
+  Product-decision pauses retain separate Arbiter rationales too; authorized
+  answers and bootstrap re-entry cannot erase rationale-only disclosures or turn
+  them into active ambiguity. Their active ledgers keep their existing independent
+  ownership and budgets. Execution retains terminal plan-revision stagnation
+  rationales too, without changing its new-plan/new-run requirement.
+  Bootstrap and validation-migration arbitration retain their separate rationales
+  with resolved acceptance, authorized product-decision pauses and execution's
+  terminal plan-revision pauses. Otherwise a disclosure made only while
+  establishing context or replacing provisional inventories would disappear.
+  Closed checkpoint directions and nullable pre-step attribution preserve
+  existing arbitration authority without granting gate credit.
+  A lost history-publication acknowledgement propagates without stale replacement
+  transitions; journal recovery preserves the accepted report and checkpoint
+  without replaying work or renewing consumed allowances.
+  The prior instruction composition established a semantic conflict between
+  mandatory reporting and actionable finding closure; an occurrence report with
+  unknown command/transcript establishes neither deterministic deadlock nor
+  model compliance. Model-free fixtures prove request delivery, strict result
+  handling and recovery, not a universal provider behavior. No old run is repaired
+  or resumed automatically.
+
 - **Git observation rejects nested repositories without executing them.** A
   changed directory no longer triggers host-side Git under content-selected
   configuration. Status/diff suppress nested worktree inspection while literal

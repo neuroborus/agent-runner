@@ -47,6 +47,7 @@ const CONSTRAINTS = new Set([
   "empty-string",
   "empty-array",
   "implementation-status",
+  "exactly-three-policy-evidence-items",
   "resolution-status",
   "nonempty-plain-text-up-to-4000-characters",
   "concise-markdown-up-to-20000-characters",

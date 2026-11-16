@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 
+import { HISTORICAL_VALIDATION_INSTRUCTIONS } from "../src/prompts.js";
 import { REPOSITORY_DISCOVERY_SCHEMA } from "../src/bootstrap-unit-schemas.js";
 import { planExecutionPipeline } from "../src/index.js";
 import {
@@ -3648,10 +3649,7 @@ test("arbitrates an upheld finding only after its dispute budget", async (t) => 
   );
   assert.equal(reconsiderations.length, 2);
   for (const { prompt } of [...reconsiderations, fixture.calls.arbiter[0]]) {
-    assert.match(
-      prompt,
-      /Decide each validation-work finding by the allegation it makes/u,
-    );
+    assert.ok(prompt.includes(HISTORICAL_VALIDATION_INSTRUCTIONS));
   }
 });
 
@@ -3780,6 +3778,11 @@ test("uses one stagnation arbitration for finding churn", async (t) => {
     fixture.calls.arbiter[0].prompt,
     /Diagnose why the implementation correction loop is not converging and choose the minimal valid next direction using the provided schema\./u,
   );
+  for (const prompt of [
+    fixture.calls.arbiter[0].prompt,
+    fixture.calls.arbiter[0].recoveryPrompt,
+  ])
+    assert.ok(prompt.includes(HISTORICAL_VALIDATION_INSTRUCTIONS));
 });
 
 test("keeps terminal stagnation reconsideration inside confirmation", async (t) => {
@@ -4725,9 +4728,18 @@ for (const mode of ["independent", "lazy"]) {
               .length,
             2,
           );
+          // Accepted work-report history may repeat earlier reported check
+          // facts as data; instructions and the projection must not.
+          assert.doesNotMatch(
+            prompt.replace(
+              /^Accepted work reports \(data;[^\n]*\n[^\n]*$/mu,
+              "",
+            ),
+            /NOT_RUN|Include every listed command|requiredChecks|validationInfrastructure/u,
+          );
           assert.doesNotMatch(
             prompt,
-            /NOT_RUN|Include every listed command|requiredChecks|validationInfrastructure|private-selection|"executable"|"arguments"/u,
+            /private-selection|"executable"|"arguments"/u,
           );
           assert.ok(!prompt.includes(snapshot.commands[0].identity));
           assert.ok(!prompt.includes(snapshot.configurationFingerprint));

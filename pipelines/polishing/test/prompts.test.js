@@ -246,7 +246,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     DISPUTE_RECONSIDERATION_INSTRUCTIONS,
     FINDING_ARBITRATION_INSTRUCTIONS,
   ]) {
-    assert.match(instructions, /still-pending final acceptance never makes/u);
+    assert.match(instructions, /Uphold proven historical truth/u);
   }
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
   assert.match(

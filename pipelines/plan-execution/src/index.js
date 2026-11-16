@@ -251,6 +251,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The validated plan must be revised and execution must restart in a fresh run.",
   proactive_clarification:
     "Optional proactive execution clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before execution can continue.",
   project_configuration_changed:
@@ -272,6 +274,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "confirmation_output_invalid",
   "bootstrap_inventory_capacity_exhausted",
@@ -308,6 +311,8 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   const readinessConstraint = commitReadinessConstraint(pause.diagnosticClass);
   if (pause.reason === "commit_failed" && readinessConstraint !== null) {
     return `${readinessConstraint} The reviewed candidate is preserved. COMMIT has no readiness-output correction; separately authorized follow-up is required.`;
@@ -616,6 +621,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -1610,7 +1619,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 40,
+  stateVersion: 41,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1678,6 +1687,12 @@ export const planExecutionPipeline = Object.freeze({
     // Basis-less saved reports, catalogs and pending corrections keep the
     // admission and bindings they were accepted under.
     39: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    40: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

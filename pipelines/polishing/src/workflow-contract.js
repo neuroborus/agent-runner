@@ -91,6 +91,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "candidateReviewedFingerprint",
   "candidateConfirmationFingerprint",
   "primaryFindings",
+  "workReports",
   "candidateMigrationPending",
   "cleanConfirmationFingerprint",
   "lazySourceForkConsumed",
@@ -1848,6 +1849,49 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
   return issues;
 }
 
+function normalizeValidationPolicyBlocked(payload) {
+  for (const field of ["summary", "skillPath", "question", "whyBlocked"])
+    if (Object.hasOwn(payload, field) && payload[field] !== "")
+      throw outputError(
+        "Policy stop contains an inactive field.",
+        outputConstraint(field, "empty-string"),
+      );
+  for (const field of [
+    "decisions",
+    "issues",
+    "requiredChecks",
+    "validationInfrastructure",
+    "checks",
+    "options",
+  ])
+    if (Object.hasOwn(payload, field) && !emptyArray(payload[field]))
+      throw outputError(
+        "Policy stop contains an inactive field.",
+        outputConstraint(field, "empty-array"),
+      );
+  const reason = normalizeText(
+    payload.reason,
+    "validation policy blocker",
+    INVALID_OUTPUT_CODE,
+    outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
+  );
+  const evidence = normalizeTextList(
+    payload.evidence,
+    "validation policy evidence",
+    { code: INVALID_OUTPUT_CODE, diagnosticField: "evidence" },
+  );
+  if (evidence.length !== 3)
+    throw outputError(
+      "Policy stop requires execution, requirement and disposition evidence.",
+      outputConstraint("evidence", "exactly-three-policy-evidence-items"),
+    );
+  return Object.freeze({
+    status: "VALIDATION_POLICY_BLOCKED",
+    reason,
+    evidence,
+  });
+}
+
 export function normalizePolishResult(payload) {
   const fields = [
     "status",
@@ -1861,12 +1905,17 @@ export function normalizePolishResult(payload) {
   assertExactFields(payload, fields, "Polishing result", INVALID_OUTPUT_CODE);
   assertStructuredResult(payload);
   if (
-    !["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
-      payload.status,
-    )
+    ![
+      "COMPLETED",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
   ) {
     throw outputError("Worker returned an invalid polishing result.");
   }
+  if (payload.status === "VALIDATION_POLICY_BLOCKED")
+    return normalizeValidationPolicyBlocked(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (payload.summary !== "" || payload.reason !== "") {
       throw outputError("Product decision contains inapplicable fields.");
@@ -1928,15 +1977,21 @@ export function normalizeCheckAndFixResult(payload) {
   assertExactFields(payload, fields, "Check/fix result", INVALID_OUTPUT_CODE);
   assertStructuredResult(payload);
   if (
-    !["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
-      payload.status,
-    )
+    ![
+      "CHANGED",
+      "UNCHANGED",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
   ) {
     throw outputError(
       "Worker returned an invalid check/fix result.",
       outputConstraint("status", "supported-status"),
     );
   }
+  if (payload.status === "VALIDATION_POLICY_BLOCKED")
+    return normalizeValidationPolicyBlocked(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (payload.summary !== "" || payload.reason !== "") {
       throw outputError("Product decision contains inapplicable fields.");
@@ -2090,6 +2145,7 @@ export function normalizeFinalizationResult(
     "SKILL_MISSING",
     "SKILL_INVALID",
     "BLOCKED",
+    "VALIDATION_POLICY_BLOCKED",
     "PRODUCT_DECISION_REQUIRED",
   ];
   if (!statuses.includes(payload.status)) {
@@ -2102,6 +2158,8 @@ export function normalizeFinalizationResult(
   ) {
     throw workflowError("Trusted finalization commands are invalid.");
   }
+  if (payload.status === "VALIDATION_POLICY_BLOCKED")
+    return normalizeValidationPolicyBlocked(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     if (
       payload.skillPath !== "" ||
@@ -2526,15 +2584,20 @@ export function normalizeResolutionResult(payload, blockers, nonDisputableIds) {
   assertStructuredResult(payload);
   if (
     !isRecord(payload) ||
-    !["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(
-      payload.status,
-    )
+    ![
+      "RESOLVED",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ].includes(payload.status)
   ) {
     throw outputError(
       "Worker returned an invalid finding resolution.",
       outputConstraint("status", "resolution-status"),
     );
   }
+  if (payload.status === "VALIDATION_POLICY_BLOCKED")
+    return normalizeValidationPolicyBlocked(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     assertInactiveResolutionFields(
       payload,
@@ -2705,6 +2768,7 @@ const RESOLUTION_DIAGNOSTIC_CONSTRAINTS = new Set([
   "maximum-2-mebibytes",
   "serializable-json",
   "resolution-status",
+  "exactly-three-policy-evidence-items",
   "empty-array",
   "empty-string",
   "nonempty-plain-text-up-to-4000-characters",
@@ -3443,6 +3507,300 @@ function normalizeLazyCorrections(value) {
   return value;
 }
 
+function assertResolutionReport(decisions) {
+  try {
+    if (
+      !Array.isArray(decisions) ||
+      decisions.length === 0 ||
+      decisions.length > MAX_ITEMS ||
+      decisions.some(
+        (decision) =>
+          typeof decision?.id !== "string" ||
+          !/^(?:R|F)[1-9][0-9]{0,8}$/u.test(decision.id),
+      )
+    )
+      throw workflowError("Invalid resolution report decisions.");
+    const result = normalizeResolutionResult(
+      {
+        status: "RESOLVED",
+        decisions,
+        reason: "",
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      },
+      decisions.map((decision) => ({ id: decision?.id })),
+      new Set(),
+    );
+    if (!isDeepStrictEqual(result.decisions, decisions))
+      throw workflowError(
+        "Resolution report must contain normalized decisions.",
+      );
+  } catch {
+    throw workflowError("Invalid resolution report decisions.");
+  }
+}
+
+function assertCheckReport(checks) {
+  try {
+    if (!Array.isArray(checks) || checks.length === 0)
+      throw workflowError("Invalid historical check report.");
+    const requiredChecks = normalizeRequiredChecks(
+      checks.map((check) => ({ id: check?.checkId, command: check?.command })),
+      "ERR_INVALID_POLISHING_STATE",
+    );
+    // Historical NOT_RUN is a reported reservation, never execution authority.
+    const trustedCommands = new Set(
+      checks
+        .filter((check) => check.status === "NOT_RUN")
+        .map((check) => check.command),
+    );
+    const normalized = normalizeCheckResults(
+      checks,
+      requiredChecks,
+      "ERR_INVALID_POLISHING_STATE",
+      { trustedCommands },
+    );
+    if (!isDeepStrictEqual(normalized, checks))
+      throw workflowError("Historical checks must be normalized.");
+  } catch {
+    throw workflowError("Invalid historical check report.");
+  }
+}
+
+function assertReconsiderationReport(decisions) {
+  try {
+    if (
+      !Array.isArray(decisions) ||
+      decisions.length === 0 ||
+      decisions.length > MAX_ITEMS ||
+      decisions.some(
+        (decision) =>
+          typeof decision?.findingId !== "string" ||
+          !REVIEW_FINDING_ID_PATTERN.test(decision.findingId),
+      )
+    )
+      throw workflowError("Invalid reconsideration report decisions.");
+    const result = normalizeReconsiderationResult(
+      {
+        status: "RESOLVED",
+        decisions: decisions.map(({ findingId, ...decision }) => ({
+          id: findingId,
+          ...decision,
+        })),
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      },
+      decisions,
+    );
+    if (!isDeepStrictEqual(result.decisions, decisions))
+      throw workflowError(
+        "Reconsideration report must contain normalized decisions.",
+      );
+  } catch {
+    throw workflowError("Invalid reconsideration report decisions.");
+  }
+}
+
+// Accepted reports are context, never current blockers or validation evidence.
+function normalizeWorkReports(reports) {
+  if (
+    !Array.isArray(reports) ||
+    reports.length > 256 ||
+    Buffer.byteLength(JSON.stringify(reports)) > 2 * 1024 * 1024
+  ) {
+    throw workflowError(
+      "Work report history exceeds its bounded context capacity.",
+    );
+  }
+  for (const report of reports) {
+    if (!isRecord(report)) throw workflowError("Invalid work report history.");
+    if (report.status === "BLOCKED") {
+      assertExactFields(
+        report,
+        ["phase", "status", "reason", "evidence"],
+        "Blocked work report",
+      );
+      if (
+        !["POLISH", "CHECK_AND_FIX", "RESOLVE_FINDINGS"].includes(report.phase)
+      )
+        throw workflowError("Invalid blocked work report checkpoint.");
+      try {
+        const normalized = normalizeCheckAndFixResult({
+          status: "BLOCKED",
+          summary: "",
+          reason: report.reason,
+          evidence: report.evidence,
+          question: "",
+          options: [],
+          whyBlocked: "",
+        });
+        if (
+          !isDeepStrictEqual(normalized, {
+            status: report.status,
+            reason: report.reason,
+            evidence: report.evidence,
+          })
+        )
+          throw workflowError("Blocked work report must be normalized.");
+      } catch {
+        throw workflowError("Invalid blocked work report.");
+      }
+      continue;
+    }
+    const findingReport = ["CLEAN_CONFIRM", "REVIEW", "CONFIRM"].includes(
+      report.phase,
+    );
+    const inventoryArbitration = [
+      "ARBITRATE_BOOTSTRAP",
+      "ARBITRATE_VALIDATION_MIGRATION",
+    ].includes(report.phase);
+    const arbitrationReport =
+      inventoryArbitration ||
+      ["ARBITRATE_FINDING", "ARBITRATE_STAGNATION"].includes(report.phase);
+    // Terminal confirmations may retain validation evidence without findings.
+    const reportFields = ["RESOLVE_FINDINGS", "RECONSIDER_DISPUTES"].includes(
+      report.phase,
+    )
+      ? ["decisions"]
+      : arbitrationReport
+        ? ["arbitration"]
+        : report.phase === "CONFIRM"
+          ? ["findings", "validationEvidence"].filter((field) =>
+              Object.hasOwn(report, field),
+            )
+          : findingReport
+            ? ["findings"]
+            : ["summary"];
+    assertExactFields(
+      report,
+      [
+        "phase",
+        ...reportFields,
+        ...(report.phase === "FINALIZE"
+          ? ["issues", "checks", "evidence"].filter((field) =>
+              Object.hasOwn(report, field),
+            )
+          : []),
+      ],
+      "Work report",
+    );
+    if (
+      ![
+        "POLISH",
+        "CHECK_AND_FIX",
+        "FINALIZE",
+        "CLEAN_CONFIRM",
+        "REVIEW",
+        "CONFIRM",
+        "RESOLVE_FINDINGS",
+        "RECONSIDER_DISPUTES",
+        "ARBITRATE_FINDING",
+        "ARBITRATE_STAGNATION",
+        "ARBITRATE_BOOTSTRAP",
+        "ARBITRATE_VALIDATION_MIGRATION",
+      ].includes(report.phase)
+    ) {
+      throw workflowError("Invalid work report checkpoint.");
+    }
+    if (report.phase === "RESOLVE_FINDINGS") {
+      assertResolutionReport(report.decisions);
+    } else if (report.phase === "RECONSIDER_DISPUTES") {
+      assertReconsiderationReport(report.decisions);
+    } else if (arbitrationReport) {
+      // History admits question outcomes without widening active arbitration authority.
+      const finding = report.phase === "ARBITRATE_FINDING";
+      const arbitration = report.arbitration;
+      assertExactFields(
+        arbitration,
+        [...(finding ? ["findingId"] : []), "direction", "rationale"],
+        "Historical arbitration",
+      );
+      const directions = inventoryArbitration
+        ? [
+            "USE_WORKER",
+            "USE_REVIEWER",
+            "SYNTHESIZE",
+            ...(report.phase === "ARBITRATE_BOOTSTRAP"
+              ? ["PRODUCT_DECISION_REQUIRED"]
+              : []),
+          ]
+        : finding
+          ? ["WORKER_CORRECT", "REVIEWER_CORRECT", "REQUIREMENT_AMBIGUOUS"]
+          : [
+              "CONTINUE_FIXES",
+              "REWORK_IMPLEMENTATION",
+              "RECONSIDER_FINDINGS",
+              "PRODUCT_DECISION_REQUIRED",
+            ];
+      if (
+        (finding &&
+          (typeof arbitration.findingId !== "string" ||
+            !REVIEW_FINDING_ID_PATTERN.test(arbitration.findingId))) ||
+        !directions.includes(arbitration.direction) ||
+        normalizeText(
+          arbitration.rationale,
+          "historical arbitration rationale",
+        ) !== arbitration.rationale
+      )
+        throw workflowError("Invalid normalized historical arbitration.");
+    } else if (findingReport) {
+      if (
+        reportFields.length === 0 ||
+        (Object.hasOwn(report, "findings") &&
+          normalizePersistedFindings(report.findings).length === 0)
+      )
+        throw workflowError("Finding report must be nonempty.");
+      if (Object.hasOwn(report, "validationEvidence")) {
+        const evidence = normalizeTextList(
+          report.validationEvidence,
+          "terminal validation evidence report",
+          { code: "ERR_INVALID_POLISHING_STATE" },
+        );
+        if (!isDeepStrictEqual(evidence, report.validationEvidence))
+          throw workflowError(
+            "Terminal validation evidence must be normalized.",
+          );
+      }
+    } else {
+      normalizeSummary(report.summary, "Worker work summary");
+      if (Object.hasOwn(report, "checks")) assertCheckReport(report.checks);
+      if (Object.hasOwn(report, "evidence")) {
+        const evidence = normalizeTextList(
+          report.evidence,
+          "finalization report evidence",
+          { code: "ERR_INVALID_POLISHING_STATE" },
+        );
+        if (!isDeepStrictEqual(evidence, report.evidence))
+          throw workflowError(
+            "Finalization report evidence must be normalized.",
+          );
+      }
+      if (Object.hasOwn(report, "issues")) {
+        const issues = normalizeFinalizationIssues(
+          report.issues,
+          "ERR_INVALID_POLISHING_STATE",
+        );
+        if (issues.length === 0 || !isDeepStrictEqual(issues, report.issues))
+          throw workflowError(
+            "Finalization report must contain normalized nonempty issues.",
+          );
+      }
+    }
+  }
+  return reports;
+}
+
+export function retainWorkReport(reports, report) {
+  const next = reports.some((previous) => isDeepStrictEqual(previous, report))
+    ? reports
+    : [...reports, report];
+  return normalizeWorkReports(next);
+}
+
 function normalizePersistedFindings(value, name = "Polishing findings") {
   try {
     return normalizeReviewFindings(value, "ERR_INVALID_POLISHING_STATE");
@@ -3957,6 +4315,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing finalization guidance is inconsistent.");
   }
   const policy = polishingPolicy(value.settings);
+  normalizeWorkReports(value.workReports);
   const primaryFindings = normalizePersistedFindings(value.primaryFindings);
   if (
     primaryFindings.length > 0 &&
@@ -5012,6 +5371,7 @@ export function createPolishingState({
       candidateConfirmationFingerprint: null,
       candidateMigrationPending: false,
       primaryFindings: Object.freeze([]),
+      workReports: Object.freeze([]),
       cleanConfirmationFingerprint: null,
       lazySourceForkConsumed: false,
       authenticationSourceForkRecovery: null,
@@ -5172,7 +5532,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 21 ||
+    run.pipelineStateVersion !== 22 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5446,6 +5806,36 @@ export function assertRun(run) {
           run.pause.role !== "worker"))
     ) {
       throw workflowError("Polishing resolution correction pause is invalid.");
+    }
+    if (run.pause?.reason === "validation_policy_blocked") {
+      if (
+        !hasExactFields(run.pause, [
+          "reason",
+          "code",
+          "explanation",
+          "evidence",
+          "checkpoint",
+        ]) ||
+        run.pause.code !== "ERR_VALIDATION_POLICY_BLOCKED" ||
+        !["POLISH", "CHECK_AND_FIX", "RESOLVE_FINDINGS", "FINALIZE"].includes(
+          run.pause.checkpoint,
+        ) ||
+        state.workflowState !== "WAITING_FOR_USER" ||
+        state.pendingEdit !== null ||
+        !state.preflightComplete ||
+        run.activeTurn !== null ||
+        (state.resolutionCorrection !== null &&
+          run.pause.checkpoint !== "RESOLVE_FINDINGS")
+      )
+        throw workflowError("Invalid validation-policy pause.");
+      try {
+        normalizeValidationPolicyBlocked({
+          reason: run.pause.explanation,
+          evidence: run.pause.evidence,
+        });
+      } catch {
+        throw workflowError("Invalid validation-policy pause evidence.");
+      }
     }
     const expectedReason = EDIT_PAUSE_REASONS[state.pendingEdit?.action];
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");

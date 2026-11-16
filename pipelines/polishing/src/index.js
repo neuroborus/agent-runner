@@ -211,6 +211,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   no_progress: "The correction loop reached a bounded no-progress condition.",
   proactive_clarification:
     "Optional proactive polishing clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before polishing can continue.",
   project_configuration_changed:
@@ -230,6 +232,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "bootstrap_inventory_capacity_exhausted",
   "confirmation_output_invalid",
@@ -256,6 +259,8 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   if (
     pause.reason === "internal_failure" &&
     typeof pause.diagnosticClass === "string" &&
@@ -460,6 +465,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -1158,7 +1167,7 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 21,
+  stateVersion: 22,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1187,6 +1196,12 @@ export const polishingPipeline = Object.freeze({
     19: migratePolishingStateV19,
     // Basis-less saved reports keep the admission they were accepted under.
     20: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    21: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

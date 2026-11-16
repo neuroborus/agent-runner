@@ -763,6 +763,12 @@ for (const drift of ["input", "guidance"]) {
 }
 
 test("a blocked restatement survives a cold reload and one explicit retry", async (t) => {
+  const disposition = resolution("FIX", "R1");
+  disposition.decisions[0].reason =
+    "Retain the historical early execution without validation credit.";
+  disposition.decisions[0].evidence = [
+    "All later checks remain assigned to FINALIZE.",
+  ];
   const fixture = await createRealStoreFixture(t, {
     ...terminalFindingFlow("independent", [
       invalidResolution(),
@@ -770,7 +776,7 @@ test("a blocked restatement survives a cold reload and one explicit retry", asyn
         "The original dispositions cannot be established safely.",
         "The repository does not show which blocker the edit addressed.",
       ),
-      resolution("FIX", "R1"),
+      disposition,
     ]),
     onRoleRun: (_role, request, _turn, { projectPath }) =>
       writeRepair(request, projectPath),
@@ -789,6 +795,18 @@ test("a blocked restatement survives a cold reload and one explicit retry", asyn
 
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.counters.fixRounds, 1);
+  // The blocked restatement report is retained too; select the accepted decisions.
+  assert.deepEqual(
+    completed.pipelineState.workReports.find(
+      ({ decisions }) => decisions !== undefined,
+    ).decisions,
+    disposition.decisions,
+  );
+  const terminal = fixture.calls.reviewer.at(-1);
+  assert.ok(terminal.recoveryPrompt.includes(disposition.decisions[0].reason));
+  assert.ok(
+    terminal.recoveryPrompt.includes(disposition.decisions[0].evidence[0]),
+  );
   assert.deepEqual(
     resolutionCalls(fixture).map(({ access }) => access),
     ["workspace-write", "read-only", "read-only"],

@@ -1052,9 +1052,14 @@ async function createFixture(
   let deferredFinalization = null;
   const deferredConfirmation = { worker: null, reviewer: null };
   const isFinalizationResult = (result) =>
-    ["PASS", "FAIL", "SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(
-      result?.status,
-    ) && Object.hasOwn(result, "requiredChecks");
+    [
+      "PASS",
+      "FAIL",
+      "SKILL_MISSING",
+      "SKILL_INVALID",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+    ].includes(result?.status) && Object.hasOwn(result, "requiredChecks");
   const isTerminalReview = (result) =>
     Object.hasOwn(result ?? {}, "validationChange");
   function candidateResult(result, acceptedStatus) {
@@ -1098,9 +1103,13 @@ async function createFixture(
           if (
             role === "worker" &&
             request.schema === CHECK_AND_FIX_SCHEMA &&
-            !["CHANGED", "UNCHANGED", "BLOCKED", "INVALID"].includes(
-              queues.worker[0]?.status,
-            )
+            ![
+              "CHANGED",
+              "UNCHANGED",
+              "BLOCKED",
+              "VALIDATION_POLICY_BLOCKED",
+              "INVALID",
+            ].includes(queues.worker[0]?.status)
           ) {
             structured = checkAndFix();
           } else if (
@@ -1183,7 +1192,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 21,
+      pipelineStateVersion: 22,
       projectPath,
       taskPath,
       roles,
@@ -1206,7 +1215,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 21,
+      pipelineStateVersion: 22,
       projectPath,
       taskPath,
       roles,

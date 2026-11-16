@@ -232,7 +232,12 @@ export const POLISH_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "COMPLETED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     summary: SUMMARY,
     reason: TEXT,
@@ -261,6 +266,7 @@ export const FINALIZATION_SCHEMA = deepFreeze({
         "SKILL_MISSING",
         "SKILL_INVALID",
         "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
         "PRODUCT_DECISION_REQUIRED",
       ],
     },
@@ -354,7 +360,13 @@ export const CHECK_AND_FIX_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "CHANGED",
+        "UNCHANGED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     summary: SUMMARY,
     reason: TEXT,
@@ -432,7 +444,12 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "RESOLVED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     decisions: {
       type: "array",
