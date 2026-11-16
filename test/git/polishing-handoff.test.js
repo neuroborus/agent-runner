@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,6 +19,7 @@ async function runGit(repositoryPath, env, ...argumentsList) {
 
 async function createFixture(t) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-handoff-"));
+  t.after(() => rm(workspace, { force: true, recursive: true }));
   const repositoryPath = join(workspace, "repository");
   const configHome = join(workspace, "config");
   await mkdir(repositoryPath);
@@ -46,16 +47,69 @@ async function createFixture(t) {
     "user.email",
     "handoff@example.test",
   );
-  await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n");
+  await runGit(repositoryPath, env, "config", "core.hooksPath", ".hooks");
+  await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n.hooks/\n");
   await writeFile(join(repositoryPath, "deleted.txt"), "delete me\n");
   await writeFile(join(repositoryPath, "tracked.txt"), "base\n");
   await runGit(repositoryPath, env, "add", "-A");
   await runGit(repositoryPath, env, "commit", "-qm", "initialize fixture");
-  t.after(() => rm(workspace, { force: true, recursive: true }));
   return {
     env,
     repositoryPath,
     service: createGitService({ env }),
+    workspace,
+  };
+}
+
+async function configureHook(fixture) {
+  const { env, repositoryPath, service, workspace } = fixture;
+  const before = await service.snapshot({ projectPath: repositoryPath });
+  const configuration = await readFile(join(repositoryPath, ".git", "config"));
+  const receiptPath = join(workspace, "hook-receipt");
+  env.HANDOFF_HOOK_RECEIPT = receiptPath;
+  await mkdir(join(repositoryPath, ".hooks"));
+  await writeFile(
+    join(repositoryPath, ".hooks", "post-index-change"),
+    '#!/bin/sh\nprintf "%s\\n" invoked >> "$HANDOFF_HOOK_RECEIPT"\n',
+    { mode: 0o755 },
+  );
+  // Recreate the service with the fixture-local receipt binding.
+  fixture.service = createGitService({ env });
+  assert.deepEqual(
+    await fixture.service.snapshot({ projectPath: repositoryPath }),
+    before,
+  );
+  return {
+    receiptPath,
+    async assertUnchanged() {
+      assert.deepEqual(
+        await readFile(join(repositoryPath, ".git", "config")),
+        configuration,
+      );
+      await assert.rejects(readFile(receiptPath), { code: "ENOENT" });
+    },
+  };
+}
+
+async function recordedService(fixture) {
+  const recorderPath = join(fixture.workspace, "record-git");
+  const recordPath = join(fixture.workspace, "git-calls");
+  await writeFile(recordPath, "");
+  await writeFile(
+    recorderPath,
+    '#!/bin/sh\nprintf "%s\\n" "$@" >> "$HANDOFF_GIT_RECORD"\nexec git "$@"\n',
+    { mode: 0o755 },
+  );
+  return {
+    service: createGitService({
+      env: { ...fixture.env, HANDOFF_GIT_RECORD: recordPath },
+      gitBinary: recorderPath,
+    }),
+    async assertNoStaging() {
+      const calls = (await readFile(recordPath, "utf8")).trim().split("\n");
+      assert.ok(calls.includes("diff"));
+      assert.ok(!calls.includes("add"));
+    },
   };
 }
 
@@ -78,6 +132,16 @@ function handoffOptions(snapshot) {
 test("stages the complete finalized polishing handoff without committing", async (t) => {
   const fixture = await createFixture(t);
   const baseline = await prepareChanges(fixture);
+  const hook = await configureHook(fixture);
+
+  await runGit(fixture.repositoryPath, fixture.env, "add", "tracked.txt");
+  assert.equal(await readFile(hook.receiptPath, "utf8"), "invoked\n");
+  await runGit(fixture.repositoryPath, fixture.env, "reset", "-q");
+  await rm(hook.receiptPath);
+  assert.deepEqual(
+    await fixture.service.snapshot({ projectPath: fixture.repositoryPath }),
+    baseline,
+  );
 
   const staged = await fixture.service.stagePolishingHandoff(
     handoffOptions(baseline),
@@ -100,12 +164,12 @@ test("stages the complete finalized polishing handoff without committing", async
         fixture.env,
         "diff",
         "--cached",
-        "--name-only",
+        "--name-status",
       )
     ).stdout
       .trim()
       .split("\n"),
-    ["added.txt", "deleted.txt", "tracked.txt"],
+    ["A\tadded.txt", "D\tdeleted.txt", "M\ttracked.txt"],
   );
   assert.equal(
     (await runGit(fixture.repositoryPath, fixture.env, "diff", "--name-only"))
@@ -136,13 +200,16 @@ test("stages the complete finalized polishing handoff without committing", async
     ).stdout.trim(),
     "1",
   );
+  await hook.assertUnchanged();
 });
 
 test("inspects an untouched polishing handoff without staging it", async (t) => {
   const fixture = await createFixture(t);
   const baseline = await prepareChanges(fixture);
+  const hook = await configureHook(fixture);
+  const recorded = await recordedService(fixture);
 
-  const inspected = await fixture.service.inspectPolishingHandoff(
+  const inspected = await recorded.service.inspectPolishingHandoff(
     handoffOptions(baseline),
   );
 
@@ -160,25 +227,62 @@ test("inspects an untouched polishing handoff without staging it", async (t) => 
     ).stdout,
     "",
   );
+  await recorded.assertNoStaging();
+  await hook.assertUnchanged();
 });
 
 test("accepts an already-complete handoff after runner interruption", async (t) => {
   const fixture = await createFixture(t);
   const baseline = await prepareChanges(fixture);
+  const hook = await configureHook(fixture);
   await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+  assert.equal(await readFile(hook.receiptPath, "utf8"), "invoked\n");
+  await rm(hook.receiptPath);
+  const complete = await fixture.service.snapshot({
+    projectPath: fixture.repositoryPath,
+  });
+  const recorded = await recordedService(fixture);
 
-  const recovered = await fixture.service.stagePolishingHandoff(
+  const inspected = await recorded.service.inspectPolishingHandoff(
+    handoffOptions(baseline),
+  );
+  assert.equal(inspected.status, "complete");
+  const recovered = await recorded.service.stagePolishingHandoff(
     handoffOptions(baseline),
   );
 
   assert.equal(recovered.contentFingerprint, baseline.contentFingerprint);
   assert.notEqual(recovered.indexFingerprint, baseline.indexFingerprint);
+  assert.deepEqual(recovered, complete);
   assert.equal(
     (
       await runGit(fixture.repositoryPath, fixture.env, "rev-parse", "HEAD")
     ).stdout.trim(),
     baseline.head,
   );
+  await recorded.assertNoStaging();
+  await hook.assertUnchanged();
+});
+
+test("keeps an unchanged handoff incomplete without invoking hooks", async (t) => {
+  const fixture = await createFixture(t);
+  const hook = await configureHook(fixture);
+  const baseline = await fixture.service.snapshot({
+    projectPath: fixture.repositoryPath,
+  });
+
+  await assert.rejects(
+    fixture.service.stagePolishingHandoff(handoffOptions(baseline)),
+    (error) =>
+      error instanceof GitSafetyError &&
+      error.code === "ERR_POLISHING_HANDOFF_INCOMPLETE",
+  );
+
+  assert.deepEqual(
+    await fixture.service.snapshot({ projectPath: fixture.repositoryPath }),
+    baseline,
+  );
+  await hook.assertUnchanged();
 });
 
 test("fails closed on an incomplete index change after HANDOFF persistence", async (t) => {

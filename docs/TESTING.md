@@ -24,6 +24,20 @@ Operator-stop slow fixtures retain separate prepared and invoked checkpoints:
 native containment starts from proven unstarted work, while interrupted effects
 resume read-only and keep their consumed accounting.
 
+Fast `test/git/polishing-handoff.test.js` uses isolated real-Git fixtures with
+preconfigured ignored hooks and a harmless `post-index-change` receipt outside
+the repository. Assertions cover ordinary hook activation, unchanged accepted
+fingerprints and configuration, hook-free exact staging of additions,
+modifications and deletions, unchanged/no-op incomplete classification, and
+inspection/completed recovery without `add` through a fixture-local Git recorder.
+Existing authorized commit-hook refusal coverage remains in
+`test/git/local-commit.test.js`. Slow polishing handoff recovery additionally
+covers configured hooks for complete, untouched
+and partial effects: no role/staging replay for complete recovery, validation
+rediscovery before an untouched legacy effect, and no repair of a partial effect.
+These fixtures require no live provider, network, paid service or live-project
+hook execution; they do not replace the full slow gate or operator acceptance.
+
 ## Ordinary gate
 
 Fast `test/state/workspace-preparation.test.js` owns bounded pending admission,
@@ -798,7 +812,7 @@ bounded runner and per-file timing output.
 | `test/state/operator-stops.slow.test.js`                                  | State journals preserve bounded replay, stop publication, leases, ownership transfer, process identity, and races                                         | State actions or journals, publication boundaries, leases, process identity, worktree ownership transfer, or stop concurrency                                                                   |
 | `pipelines/plan-execution/test/legacy-confirmation-recovery.slow.test.js` | Journal-proven legacy confirmation reconciles one real commit through rejection, crash, and lease cases                                                   | Plan-execution legacy confirmation eligibility or proof, journal publication boundaries, verified commit recovery, or execution leases                                                          |
 | `pipelines/plan-execution/test/legacy-migrations.slow.test.js`            | Authentic persisted migration history carries legacy confirmation proof into the current contract                                                         | Persisted plan-execution migration composition involving confirmation proof, inventories, implementation evidence, or historical events                                                         |
-| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Legacy handoff recovery distinguishes a completed real-Git effect from a partial effect                                                                   | Polishing handoff settlement, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                                                                              |
+| `pipelines/polishing/test/handoff-recovery.slow.test.js`                  | Configured-hook legacy recovery verifies complete effects, revalidates untouched effects, and rejects partial effects without repair                      | Polishing handoff settlement, hook isolation, legacy handoff migration, completed-effect reconciliation, or partial-effect failure                                                              |
 
 Run the affected slow coverage once before handing off a change to the listed
 contracts. After the ordinary `npm run check` gate, run the complete

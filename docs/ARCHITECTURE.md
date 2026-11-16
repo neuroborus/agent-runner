@@ -5139,6 +5139,16 @@ verifies unchanged content and Git controls, a nonempty complete staged set,
 no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
 before the pipeline can enter `DONE`.
 
+Handoff-owned staging and direct Git inspection commands use a private fixed
+`-c core.hooksPath=/dev/null` prefix, preventing workspace hooks from executing
+with Runner authority. This invocation-only policy changes no configuration,
+shared Git defaults, provider isolation, or authorized local-commit hooks and
+their failure behavior. Snapshot/content helpers remain observational with
+their existing optional-lock controls; ignored hook bytes stay outside content
+fingerprints. Inspection and stop reconciliation never stage, completed recovery
+never repeats staging, and partial effects still fail closed. Snapshot formats
+and durable versions remain unchanged.
+
 Both pipelines project only exact command text from persisted
 `trustedValidation.commands` into implementation or polishing, lazy or combined
 `CHECK_AND_FIX`, and finding-resolution prompts. The existing snapshot bounds

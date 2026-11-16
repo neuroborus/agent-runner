@@ -11,6 +11,7 @@ const CONTROL_FIELDS = Object.freeze([
   ["identityFingerprint", "identity"],
 ]);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const HANDOFF_GIT_PREFIX = Object.freeze(["-c", "core.hooksPath=/dev/null"]);
 
 function unique(values) {
   return [...new Set(values)];
@@ -82,6 +83,7 @@ export function createGitHandoffService({
         runGit(
           current.projectPath,
           [
+            ...HANDOFF_GIT_PREFIX,
             "diff",
             "--cached",
             "--quiet",
@@ -95,6 +97,7 @@ export function createGitHandoffService({
         runGit(
           current.projectPath,
           [
+            ...HANDOFF_GIT_PREFIX,
             "diff",
             "--quiet",
             "--exit-code",
@@ -105,6 +108,7 @@ export function createGitHandoffService({
           { allowedExitCodes: [0, 1] },
         ),
         runGit(current.projectPath, [
+          ...HANDOFF_GIT_PREFIX,
           "ls-files",
           "--others",
           "--exclude-standard",
@@ -122,7 +126,7 @@ export function createGitHandoffService({
     }
     const whitespace = await runGit(
       current.projectPath,
-      ["diff", "--cached", "--check"],
+      [...HANDOFF_GIT_PREFIX, "diff", "--cached", "--check"],
       { allowedExitCodes: [0, 1, 2] },
     );
     if (whitespace.exitCode !== 0) {
@@ -192,7 +196,11 @@ export function createGitHandoffService({
       return inspected.snapshot;
     }
     const expectedSnapshot = assertSnapshot(options.expectedSnapshot);
-    await runGit(expectedSnapshot.projectPath, ["add", "-A"]);
+    await runGit(expectedSnapshot.projectPath, [
+      ...HANDOFF_GIT_PREFIX,
+      "add",
+      "-A",
+    ]);
     const completed = await inspectComplete(
       expectedSnapshot,
       options.finalizedFingerprint,

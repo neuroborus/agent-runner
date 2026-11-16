@@ -50,7 +50,12 @@ write to a remote.
 
 Polishing never commits and keeps `HEAD` unchanged. Its handoff stages the
 complete finalized and reviewed change set, verifies that nothing accepted was
-left unstaged, and leaves the result for the operator.
+left unstaged, and leaves the result for the operator. Handoff-owned staging and
+direct inspection disable hooks per invocation, so workspace hooks cannot run
+with Runner authority. Configuration and ignored-content fingerprint scope stay
+unchanged. This is specific to handoff: authorized plan-execution commits retain
+their hooks and hook-failure pauses. Complete handoff recovery only verifies the
+effect; partial or contaminated effects remain rejected.
 
 Execution never adopts an external commit as completed plan progress. A current
 planned subject already at HEAD, or external HEAD movement from the saved
@@ -67,8 +72,8 @@ Legacy accepted context is rediscovered before further writable work.
 
 No pipeline may push, mutate a remote ref, call a hosting service to write,
 change a remote, alter Git identity, amend, reset, rebase, stash, switch
-branches, or create tags. A failed hook or unexpected repository state pauses
-instead of being bypassed.
+branches, or create tags. A failed authorized commit hook or unexpected
+repository state pauses instead of being bypassed.
 
 Git-owned read-only verification distinguishes an untouched missing commit from
 exact authorized full staging followed by executor failure. Only unchanged

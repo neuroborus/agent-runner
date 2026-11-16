@@ -1495,6 +1495,14 @@ It then accepts only one of two recovery states: an already-complete verified
 handoff, or the exact unchanged pre-effect state on which it runs `git add -A`.
 An incomplete or contaminated index fails closed.
 
+Handoff-owned staging and direct Git inspection calls disable hooks with the
+fixed invocation prefix `-c core.hooksPath=/dev/null`. The runner never executes
+workspace hooks during handoff or rewrites hook configuration. Shared Git
+defaults, observational snapshot/content helpers and optional-lock controls
+remain unchanged; ignored hook bytes are not added to accepted fingerprints.
+This policy grants no agent index authority and does not alter authorized
+commit hooks in plan execution. Completed recovery remains inspection-only.
+
 Before returning the post-effect snapshot, the Git boundary reverifies content
 and every Git control, requires a nonempty staged diff whose staged content is
 the complete tracked and non-ignored untracked change set, requires no unstaged

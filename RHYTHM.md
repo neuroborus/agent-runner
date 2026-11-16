@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-16
 
+- **Runner handoff never executes workspace hooks.** Polishing handoff staging
+  and direct Git inspection use a fixed invocation-only hook override. Ignored
+  hook bytes are outside accepted content, so they cannot safely gain Runner
+  execution authority. Shared Git defaults, configuration, provider isolation
+  and authorized commit-hook behavior remain unchanged. Intent-before-effect
+  ordering, exact content/control/index proof, verification-only completed
+  recovery and fail-closed partial effects retain their existing contracts and
+  durable formats. Harmless fixture receipts and a forwarding Git recorder
+  cover isolation and recovery without probing hooks in real projects.
+
 - **Staged failure retains its consumed commit authority.** Git verification
   recognizes unchanged HEAD with exact authorized full staging as a missing
   commit, distinguishing it from an untouched index through bounded effect
