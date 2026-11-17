@@ -2512,14 +2512,17 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     );
   }
 
-  function lazyCorrectionScope(phase, current = state()) {
+  function lazyCorrectionScope(
+    phase,
+    current = state(),
+    inspectedValidationFingerprint = current.validationInfrastructureFingerprint,
+  ) {
     return {
       attempt: 1,
       fixRoundCharged: false,
       phase,
       contentFingerprint: current.repositoryBaseline.contentFingerprint,
-      validationInfrastructureFingerprint:
-        current.validationInfrastructureFingerprint,
+      validationInfrastructureFingerprint: inspectedValidationFingerprint,
     };
   }
 
@@ -5320,10 +5323,18 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
       if (!(await verifyFinalizationGuidance())) return false;
       const current = state();
       const correction = current.pendingLazyCorrection;
-      const scope = correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
       const inspectedFingerprint = await contentFingerprint();
       const inspectedValidationFingerprint =
-        current.validationInfrastructureFingerprint;
+        await validationInfrastructureFingerprint(
+          current.validationInfrastructure,
+        );
+      const scope =
+        correction ??
+        lazyCorrectionScope(
+          "CLEAN_CONFIRM",
+          current,
+          inspectedValidationFingerprint,
+        );
       if (
         correction !== null &&
         (correction.contentFingerprint !== inspectedFingerprint ||

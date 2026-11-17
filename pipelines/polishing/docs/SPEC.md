@@ -1487,9 +1487,12 @@ A check/fix correction remains workspace-writable and index-read-only. Safe
 content from an invalid or interrupted turn is reconciled once, stale gate
 evidence is invalidated, and actual fix work is charged once. A candidate
 clean-confirmation correction remains repository-read-only and requires the
-unchanged content and validation-infrastructure fingerprints. A valid
-replacement rejoins only its original route and cannot provide finalization,
-confirmation, review, approval, or handoff evidence early. A repeated invalid
+unchanged content and validation-infrastructure fingerprints. Its
+validation-infrastructure binding is the Runner's live inspection of the
+established inventory before the rejected turn, rechecked before and after the
+correction; drift pauses as `unsafe_git_state`. A valid replacement rejoins
+only its original route and cannot provide finalization, confirmation, review,
+approval, or handoff evidence early. A repeated invalid
 result pauses as `lazy_output_invalid` with bounded redacted diagnostics, the
 exact resume checkpoint, and one explicit null retry. Resume reconstructs the
 pending correction without adding another automatic attempt, replaying an
@@ -1499,7 +1502,12 @@ Independent candidate review and both terminal-confirmation variants own
 separate one-attempt correction records scoped to their candidate or finalized
 fingerprints. Candidate corrections cannot accept validation evidence, and
 terminal corrections cannot themselves provide finalization or reuse a
-candidate approval. Correction-scope drift invalidates the retained
+candidate approval. Candidate-review and candidate clean-confirmation
+corrections bind the Runner's live inspection of the established inventory,
+which may differ from the established fingerprint after an authorized
+infrastructure edit. An accepted terminal validation change replaces the
+established tuple without invalidating or renewing a consumed candidate
+correction. Correction-scope drift invalidates the retained
 finalization record and routes through `FINALIZE`.
 Candidate Reviewer rejections carry the same candidate-review field and
 constraint identities as lazy clean confirmation. Terminal confirmation shares

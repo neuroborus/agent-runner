@@ -89,6 +89,34 @@ function assertEvidenceDelivery(request) {
   }
 }
 
+const INFRASTRUCTURE_MANIFEST = "LOCAL_ARTIFACTS/validation.json";
+const MANIFEST_INFRASTRUCTURE = Object.freeze([
+  ".agents/skills/finalization/SKILL.md",
+  INFRASTRUCTURE_MANIFEST,
+]);
+
+async function prepareManifest(projectPath) {
+  await mkdir(join(projectPath, "LOCAL_ARTIFACTS"), { recursive: true });
+  await writeFile(
+    join(projectPath, INFRASTRUCTURE_MANIFEST),
+    '{"version":1}\n',
+  );
+}
+
+function manifestBootstrap(role) {
+  return {
+    ...bootstrapReady(role),
+    validationInfrastructure: MANIFEST_INFRASTRUCTURE,
+  };
+}
+
+function manifestFinalization() {
+  return {
+    ...finalizationPassed(),
+    validationInfrastructure: MANIFEST_INFRASTRUCTURE,
+  };
+}
+
 test("finalizes only after a content-changing lazy candidate converges", async (t) => {
   let checkRound = 0;
   const fixture = await createFixture(t, {
@@ -607,6 +635,107 @@ test("corrects a lazy candidate confirmation without accepting evidence early", 
     result.pipelineState.cleanConfirmationFingerprint,
     result.pipelineState.finalizedFingerprint,
   );
+});
+
+test("binds a lazy clean-confirmation correction to edited validation infrastructure", async (t) => {
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    prepareProject: prepareManifest,
+    worker: [
+      clarificationReady(),
+      manifestBootstrap("Worker"),
+      polishingCompleted(),
+      checkAndFix(),
+      { ...candidateClean(), unexpected: "field" },
+      candidateClean(),
+      manifestFinalization(),
+      cleanConfirmation("ACCEPTED"),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === POLISH_SCHEMA) {
+        await writeFile(
+          join(projectPath, INFRASTRUCTURE_MANIFEST),
+          '{"version":2}\n',
+        );
+      }
+    },
+  });
+
+  const result = await fixture.run();
+  const { finalizationResult, lazyCorrections } = result.pipelineState;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pause, null);
+  assert.equal(finalizationResult.validationChanged, true);
+  assert.deepEqual(
+    lazyCorrections.map(({ phase, validationInfrastructureFingerprint }) => ({
+      phase,
+      validationInfrastructureFingerprint,
+    })),
+    [
+      {
+        phase: "CLEAN_CONFIRM",
+        validationInfrastructureFingerprint:
+          finalizationResult.validationInfrastructureFingerprint,
+      },
+    ],
+  );
+});
+
+test("rejects validation-infrastructure drift around a lazy clean-confirmation correction", async (t) => {
+  for (const [name, driftCall] of [
+    ["between rejection and correction", 1],
+    ["during the correction turn", 2],
+  ]) {
+    await t.test(name, async (t) => {
+      let cleanCalls = 0;
+      const fixture = await createFixture(t, {
+        mode: "lazy",
+        worker: [
+          clarificationReady(),
+          bootstrapReady("Worker"),
+          polishingCompleted(),
+          checkAndFix(),
+          { ...candidateClean(), unexpected: "field" },
+          candidateClean(),
+        ],
+        async onRoleRun(role, request) {
+          if (
+            role !== "worker" ||
+            request.schema !== CANDIDATE_CLEAN_CONFIRM_SCHEMA
+          ) {
+            return;
+          }
+          cleanCalls += 1;
+          if (cleanCalls === driftCall) {
+            const fingerprint =
+              fixture.runtime.git.validationInfrastructureFingerprint;
+            fixture.runtime.git.validationInfrastructureFingerprint = async (
+              options,
+            ) => {
+              const value = await fingerprint(options);
+              return `${value.slice(0, -1)}${value.endsWith("0") ? "1" : "0"}`;
+            };
+          }
+        },
+      });
+
+      const result = await fixture.run();
+
+      assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(result.pause.reason, "unsafe_git_state");
+      assert.equal(result.pause.code, "ERR_LAZY_CORRECTION_SCOPE_CHANGED");
+      assert.equal(cleanCalls, driftCall);
+      assert.equal(result.pipelineState.pendingLazyCorrection, null);
+      assert.equal(result.pipelineState.finalizationResult, null);
+      assert.equal(
+        fixture.calls.worker.filter(
+          ({ schema }) => schema === FINALIZATION_SCHEMA,
+        ).length,
+        0,
+      );
+    });
+  }
 });
 
 test("pauses a repeated invalid lazy checkpoint and resumes its null retry", async (t) => {
@@ -1979,6 +2108,100 @@ test("corrects candidate Reviewer output before terminal finalization", async (t
     fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
       .length,
     1,
+  );
+});
+
+test("binds candidate review correction to edited validation infrastructure", async (t) => {
+  let bootstrapFingerprint;
+  const fixture = await createFixture(t, {
+    prepareProject: prepareManifest,
+    reviewer: [
+      manifestBootstrap("Reviewer"),
+      { ...candidateApproved(), status: "FINDINGS" },
+      candidateApproved(),
+      reviewApproved("ACCEPTED"),
+    ],
+    worker: [
+      clarificationReady(),
+      manifestBootstrap("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      manifestFinalization(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && request.schema === POLISH_SCHEMA) {
+        bootstrapFingerprint =
+          fixture.currentRun.pipelineState.validationInfrastructureFingerprint;
+        await writeFile(
+          join(projectPath, INFRASTRUCTURE_MANIFEST),
+          '{"version":2}\n',
+        );
+      }
+    },
+  });
+
+  const result = await fixture.run();
+  const { finalizationResult } = result.pipelineState;
+  const { reviewCorrection } = fixture.transitions.find(
+    ({ patch }) => patch.pipelineState?.reviewCorrection != null,
+  ).patch.pipelineState;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === CANDIDATE_REVIEW_SCHEMA,
+    ).length,
+    2,
+  );
+  assert.equal(
+    reviewCorrection.validationInfrastructureFingerprint,
+    finalizationResult.validationInfrastructureFingerprint,
+  );
+  assert.notEqual(
+    reviewCorrection.validationInfrastructureFingerprint,
+    bootstrapFingerprint,
+  );
+});
+
+test("retains a consumed candidate correction across an accepted validation change", async (t) => {
+  let bootstrapFingerprint;
+  const fixture = await createFixture(t, {
+    prepareProject: prepareManifest,
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      { ...candidateApproved(), status: "FINDINGS" },
+      candidateApproved(),
+      reviewApproved("ACCEPTED"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      manifestFinalization(),
+    ],
+    async onRoleRun(role, request) {
+      if (role === "worker" && request.schema === POLISH_SCHEMA) {
+        bootstrapFingerprint =
+          fixture.currentRun.pipelineState.validationInfrastructureFingerprint;
+      }
+    },
+  });
+
+  const result = await fixture.run();
+  const handoff = fixture.transitions.find(
+    ({ patch }) => patch.pipelineState?.workflowState === "HANDOFF",
+  ).patch.pipelineState;
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.equal(result.pipelineState.finalizationResult.validationChanged, true);
+  assert.equal(
+    handoff.reviewCorrection.validationInfrastructureFingerprint,
+    bootstrapFingerprint,
+  );
+  assert.notEqual(
+    handoff.validationInfrastructureFingerprint,
+    bootstrapFingerprint,
   );
 });
 
