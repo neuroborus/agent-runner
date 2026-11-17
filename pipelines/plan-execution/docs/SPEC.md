@@ -913,8 +913,9 @@ finalization execution; the earlier declaration preflight inspects storage and
 isolation without downloading dependencies. A consumed COMMIT is
 verified first, preserving its authorized progress before capabilities are
 checked for subsequent work. If an authorization is prepared but unconsumed,
-an unavailable trusted capability or isolation boundary preserves it in an
-`environment_blocked` pause targeting `COMMIT`. Retry rechecks capabilities
+an unavailable trusted capability or isolation boundary, or a blocked
+required-check capability inspection, preserves it in an `environment_blocked`
+pause targeting `COMMIT`. Retry rechecks capabilities
 before consuming that same authorization; it does not advance commit progress.
 An interrupted safety pause without a resume checkpoint retains its original
 reason; capability inspection cannot replace it with an environment retry.

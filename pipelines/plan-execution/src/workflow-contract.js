@@ -7160,6 +7160,7 @@ export function assertRun(run) {
       [
         "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
         "ERR_TRUSTED_VALIDATION_ISOLATION_UNAVAILABLE",
+        "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
       ].includes(run.pause.code);
     if (
       (state.pendingCommit !== null ||

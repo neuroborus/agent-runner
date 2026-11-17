@@ -1029,6 +1029,25 @@ test("prepared commit authority survives an unavailable capability and resumes o
     );
   }
   fixture.runtime.trustedValidation.preflight = async () => {};
+  const { inspectRequirements } = fixture.runtime.trustedValidation;
+  fixture.runtime.trustedValidation.inspectRequirements = async () => ({
+    status: "BLOCKED",
+    blockers: [{ command: "Required checks", reason: "unavailable" }],
+  });
+  const blocked = await fixture.run(settings);
+  assert.equal(blocked.pause.reason, "environment_blocked");
+  assert.equal(blocked.pause.code, "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE");
+  assert.equal(blocked.pause.resumeState, "COMMIT");
+  assert.deepEqual(blocked.pipelineState.pendingCommit, prepared);
+  assert.deepEqual(blocked.pipelineState.completedCommits, []);
+  assert.equal(Object.values(fixture.calls).flat().length, calls);
+  assert.throws(() =>
+    planExecutionPipeline.workflow.validateRun({
+      ...blocked,
+      pause: { ...blocked.pause, code: "ERR_UNRELATED_FAILURE" },
+    }),
+  );
+  fixture.runtime.trustedValidation.inspectRequirements = inspectRequirements;
   const completed = await fixture.run(settings);
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.completedCommits.length, 1);
