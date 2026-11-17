@@ -5659,8 +5659,6 @@ export function normalizePipelineState(value) {
       (value.candidateReviewedFingerprint ??
         executionContentFingerprint(value)) !==
         reviewCorrection.contentFingerprint ||
-      value.validationInfrastructureFingerprint !==
-        reviewCorrection.validationInfrastructureFingerprint ||
       (pendingReviewCorrection !== null &&
         !["REVIEW", "WAITING_FOR_USER", "FAILED"].includes(
           value.workflowState,

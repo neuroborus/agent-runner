@@ -1037,11 +1037,16 @@ Persist at least:
   records with optional pending attempts, each scoped to its exact content and
   validation-infrastructure fingerprints and containing only attempt number,
   step, and bounded role, phase, contract, field, and constraint diagnostics;
+  a candidate-Reviewer record binds the Runner's live inspection of the
+  established inventory, and an accepted terminal validation change neither
+  invalidates nor renews it;
 - the current step's lazy-checkpoint correction ledger and optional pending
   attempt, scoped to `CHECK_AND_FIX` or `CLEAN_CONFIRM`, candidate content,
   and validation-infrastructure fingerprints and containing only attempt `1`,
   whether actual fix work was already charged, and bounded Worker
-  field-and-constraint diagnostics;
+  field-and-constraint diagnostics; a `CLEAN_CONFIRM` record binds the
+  Runner's live inspection of the established inventory, and an accepted
+  terminal validation change neither invalidates nor renews it;
 - exact per-check finalization evidence and the fingerprint-bound terminal
   validation-change decision;
 - the resolved runner-trusted command snapshot, command/configuration
@@ -1312,7 +1317,10 @@ are never durable or public. A pending `CHECK_AND_FIX` correction remains
 workspace-writable; safe content mutation is reconciled and marked as charged
 once, invalidates the gate, and returns through the same candidate checkpoint
 before the correction resumes. A pending candidate `CLEAN_CONFIRM` correction remains read-only and
-requires both fingerprints to stay unchanged. A still-invalid correction
+requires both fingerprints to stay unchanged. Its validation-infrastructure
+binding is the Runner's live inspection of the established inventory before
+the rejected turn, rechecked before and after the correction; drift pauses as
+`unsafe_git_state`. A still-invalid correction
 pauses at `lazy_output_invalid` with its exact resume checkpoint and an
 explicit null retry. Retry reconstructs the pending attempt without allocating
 another automatic attempt or charging fix work before actual work occurs.
@@ -3812,7 +3820,11 @@ infrastructure or correction-scope drift invalidates the finalization record
 and re-enters `FINALIZE`; content or control drift invalidates all dependent
 evidence and follows the existing safe reconciliation path. A valid replacement
 rejoins the ordinary approval, findings, validation-change, and product-decision
-routes.
+routes. Candidate-review and candidate clean-confirmation corrections bind the
+Runner's live inspection of the established inventory, which may differ from
+the established fingerprint after an authorized infrastructure edit. An
+accepted terminal validation change replaces the established tuple without
+invalidating or renewing a consumed candidate correction.
 
 If a corrected candidate result remains invalid, pause at
 `review_output_invalid` with resume state `REVIEW`. If a corrected terminal

@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-11-17
 
+- **Candidate corrections bind live validation infrastructure.** In polishing
+  and plan execution, candidate-review and candidate clean-confirmation
+  corrections now bind the Runner's live inspection of the established
+  validation inventory. Candidate review already recorded that live value, but
+  persisted state also required it to equal the established fingerprint. An
+  authorized infrastructure edit therefore turned the first invalid candidate
+  Reviewer result into an internal failure, and an accepted terminal
+  validation change broke the final transition while the consumed correction
+  was retained. Lazy and combined clean-confirmation corrections bound the
+  stale established value, so polishing discarded a valid unchanged
+  correction and plan execution missed infrastructure drift around the
+  correction. The persisted equality is removed and one pre-turn live
+  inspection drives the clean-confirmation scope and both of its drift checks.
+  An accepted validation change keeps consumed markers valid; drift still
+  invalidates through the existing routes. Persisted shapes, versions,
+  allowances and authority are unchanged, and no allowance is refunded.
+
 - **Claude's sandbox descriptors stay outside commands.** Claude Code 2.1.326
   passes bubblewrap `--sync-fd` and `--info-fd` sockets: it awaits the end of
   one and reads the first `child-pid` record from the other, keeping its

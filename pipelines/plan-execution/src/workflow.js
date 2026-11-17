@@ -3169,15 +3169,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
   }
 
-  function lazyCorrectionScope(phase, current = state()) {
+  function lazyCorrectionScope(
+    phase,
+    current = state(),
+    inspectedValidationFingerprint = current.validationInfrastructureFingerprint,
+  ) {
     return Object.freeze({
       attempt: 1,
       fixRoundCharged: false,
       step: current.currentStep,
       phase,
       contentFingerprint: executionContentFingerprint(current),
-      validationInfrastructureFingerprint:
-        current.validationInfrastructureFingerprint,
+      validationInfrastructureFingerprint: inspectedValidationFingerprint,
     });
   }
 
@@ -6445,13 +6448,23 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
       if (!(await verifyFinalizationGuidance())) return false;
       const current = state();
       const correction = current.pendingLazyCorrection;
-      const scope = correction ?? lazyCorrectionScope("CLEAN_CONFIRM", current);
       const inspectedFingerprint = await contentFingerprint();
+      const inspectedValidationFingerprint =
+        await validationInfrastructureFingerprint(
+          current.validationInfrastructure,
+        );
+      const scope =
+        correction ??
+        lazyCorrectionScope(
+          "CLEAN_CONFIRM",
+          current,
+          inspectedValidationFingerprint,
+        );
       if (
         correction !== null &&
         (correction.contentFingerprint !== inspectedFingerprint ||
           correction.validationInfrastructureFingerprint !==
-            current.validationInfrastructureFingerprint)
+            inspectedValidationFingerprint)
       ) {
         await transition(
           {
@@ -6515,6 +6528,22 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
           await transition({ ...state(), pendingLazyCorrection: null });
           await pause("unsafe_git_state", {
             code: "ERR_CANDIDATE_CONFIRMATION_FINGERPRINT_CHANGED",
+          });
+          return false;
+        }
+        if (
+          correction !== null &&
+          (await validationInfrastructureFingerprint(
+            current.validationInfrastructure,
+          )) !== inspectedValidationFingerprint
+        ) {
+          await transition({
+            ...state(),
+            ...clearedTerminalGate(),
+            pendingLazyCorrection: null,
+          });
+          await pause("unsafe_git_state", {
+            code: "ERR_LAZY_CORRECTION_SCOPE_CHANGED",
           });
           return false;
         }
