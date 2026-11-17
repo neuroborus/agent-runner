@@ -797,3 +797,48 @@ test("compact directory baselines exempt only their declared artifacts", async (
     code: "ERR_WORKSPACE_DRIFT",
   });
 });
+
+test("directory output baselines project one filtered inspection", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "runner-audit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const taskPath = join(projectPath, "task");
+  await mkdir(taskPath, { recursive: true });
+  await writeFile(join(projectPath, "source.txt"), "Original source\n");
+  await writeFile(join(taskPath, "task.md"), "Audit the complete workspace.\n");
+  const workspace = createWorkspaceService();
+  const binding = await bindWorkspace({
+    selection: auditPipeline.resolveWorkspace({ projectPath, taskPath }),
+    projectPath,
+    taskPath,
+    taskInputs: auditPipeline.taskInputs,
+    configurationPath: null,
+    stateRoot: join(root, "state"),
+    workspace,
+  });
+  let inspections = 0;
+  const safety = directorySafety(binding, {
+    ...workspace,
+    snapshot: (...args) => (inspections++, workspace.snapshot(...args)),
+  });
+  const allowedPaths = binding.policy.artifactPaths;
+  for (const path of allowedPaths) await writeFile(path, "Artifact\n");
+  const { snapshot, baseline } = await safety.outputBaseline({ allowedPaths });
+  assert.equal(inspections, 1);
+  assert.deepEqual(snapshot, await safety.snapshot({ allowedPaths }));
+  assert.equal(
+    snapshot.entries.some(({ path }) => allowedPaths.includes(path)),
+    false,
+  );
+  assert.deepEqual(baseline, {
+    ...workspace.outputBaseline(snapshot),
+    allowedPaths,
+    projectPath,
+  });
+  assert.equal(Object.hasOwn(baseline, "entries"), false);
+  await safety.assertUnchanged(baseline);
+  await assert.rejects(
+    safety.outputBaseline({ allowedPaths: [join(projectPath, "source.txt")] }),
+    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+  );
+});

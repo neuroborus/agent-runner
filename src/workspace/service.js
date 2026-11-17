@@ -22,6 +22,7 @@ import {
   assertBaselineUnchanged,
   assertSnapshotProof,
   isCompactBaseline,
+  outputBaseline,
   snapshotBaseline,
   snapshotProof,
 } from "./proof.js";
@@ -512,6 +513,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     snapshot,
     snapshotInputs,
     snapshotBaseline: (value) => freeze(snapshotBaseline(value)),
+    outputBaseline: (value) => freeze(outputBaseline(value)),
     snapshotProof: (request) => freeze(snapshotProof(request)),
     assertSnapshotProof,
     assertUnchanged,

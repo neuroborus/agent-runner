@@ -120,6 +120,17 @@ its scope (`workspacePath`, `outputPaths` and any `inspectionPaths`,
 `entriesHash`, the ordered-entry digest shared with proofs through private
 `digest.js`. It omits `entries` and `linkResolutions`, so protected control
 trees cannot grow persisted state beyond its limits.
+`outputBaseline` adds output partitions for writable consumers, accepting only
+complete whole-directory snapshots like `snapshotProof`. `remainderCount` and
+`remainderHash` digest every captured entry outside all `outputPaths` roots;
+`outputs` holds one `{path, entry, descendantCount, descendantsHash}` record per
+compacted, sorted output root over its captured strict descendants. Compacted
+capture records no absent output beneath the workspace, so the projection
+derives a missing `entry` only when the nearest captured ancestor inside the
+workspace is a directory. File or link ancestors and uncaptured coverage are
+blockers that fail closed. Derived records exist only in the projection; capture,
+entries, `entryCount`, `entriesHash` and both fingerprints stay as captured.
+Records are bounded by frozen output declarations rather than tree size.
 
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
@@ -257,7 +268,10 @@ directories, preserving unrelated files and all protected inputs. A compact
 `before` baseline is compared against a complete `after` snapshot by
 recomputing the same digest over its entries, the complete equality applied to
 legacy full baselines. Compact baselines reject `allowOutputs` and malformed
-counts, digests, fingerprints or retained link evidence. Filesystem
+counts, digests, fingerprints or retained link evidence. Output partitions, when
+present, require well-formed counts and digests and records whose paths equal
+`outputPaths`; they never grant output changes, which stay with complete
+transient snapshots and the bound protected fingerprint. Filesystem
 injection supports deterministic race tests without Git or providers.
 
 Directory lifecycle protected fingerprints exempt only declared outputs and
@@ -1880,8 +1894,12 @@ They expose no Git effect capability. Runner `directorySafety` filters declared
 artifacts from inspected snapshots; its `baseline({allowedPaths})` returns the
 compact workspace baseline of that filtered snapshot plus `allowedPaths`,
 `projectPath` and any frozen `sourceSelection`, and `assertUnchanged` accepts
-compact or legacy full baselines. Root `runtimeFor` delegates
-`runtime.workspace.baseline` only for directory workspaces; complete
+compact or legacy full baselines. Its `outputBaseline({allowedPaths})` performs
+one bound inspection with the same artifact filter and returns
+`{snapshot, baseline}`: the transient complete filtered snapshot and its
+output-partitioned projection plus `allowedPaths` and `projectPath`. Root
+`runtimeFor` delegates `runtime.workspace.baseline` and
+`runtime.workspace.outputBaseline` only for directory workspaces; complete
 `snapshot()` results remain for consumers that read entries. Canonical enclosing
 worktrees are found from filesystem Git layouts/pointers; a directory inside one
 shares its exact exclusion key with commit workflows. An ordinary directory uses

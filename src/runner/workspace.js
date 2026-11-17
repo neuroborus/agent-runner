@@ -584,6 +584,20 @@ export function directorySafety(
           : { sourceSelection: inspected.sourceSelection }),
       });
     },
+    // Writable consumers persist the bounded projection of the same inspection
+    // whose complete snapshot remains transient for output allowances.
+    async outputBaseline({ allowedPaths = [] } = {}) {
+      const { snapshot } = await inspect();
+      const inspected = inspectedSnapshot(snapshot, allowedPaths);
+      return Object.freeze({
+        snapshot: inspected,
+        baseline: Object.freeze({
+          ...workspace.outputBaseline(inspected),
+          allowedPaths,
+          projectPath: inspected.projectPath,
+        }),
+      });
+    },
     // Compact and legacy full baselines share the same filtered comparison.
     async assertUnchanged(before) {
       const { snapshot: after } = await inspect();

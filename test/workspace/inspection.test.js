@@ -588,6 +588,173 @@ test("compact baselines omit per-entry evidence yet detect source and control dr
     );
 });
 
+test("output baselines partition complete capture and derive only covered missing roots", async (t) => {
+  const f = await fixture(t);
+  const source = join(f.workspacePath, "source.txt");
+  const control = join(f.workspacePath, ".agents", "guide.md");
+  const reports = join(f.workspacePath, "reports");
+  await fs.writeFile(source, "first\n");
+  await fs.mkdir(join(f.workspacePath, ".agents"));
+  await fs.writeFile(control, "protected\n");
+  await fs.mkdir(join(f.workspacePath, "vendor"));
+  const service = createWorkspaceService();
+  const inspection = await service.inspect({
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+    outputPaths: ["reports"],
+  });
+  const capture = async () => {
+    const snapshot = await service.snapshot({ inspection });
+    return { snapshot, baseline: service.outputBaseline(snapshot) };
+  };
+  const partition = ({ remainderCount, remainderHash }) => ({
+    remainderCount,
+    remainderHash,
+  });
+
+  const absent = await capture();
+  const entries = structuredClone(absent.snapshot.entries);
+  assert.equal(
+    entries.some(({ path }) => path === reports),
+    false,
+  );
+  assert.deepEqual(absent.snapshot.entries, entries);
+  const { remainderCount, remainderHash, outputs, ...compact } =
+    absent.baseline;
+  assert.deepEqual(compact, service.snapshotBaseline(absent.snapshot));
+  assert.equal(remainderCount, entries.length);
+  assert.equal(remainderHash, compact.entriesHash);
+  assert.deepEqual(outputs, [
+    {
+      path: reports,
+      entry: {
+        path: reports,
+        kind: "missing",
+        mode: null,
+        size: 0,
+        hash: null,
+      },
+      descendantCount: 0,
+      descendantsHash: outputs[0].descendantsHash,
+    },
+  ]);
+
+  await fs.mkdir(reports);
+  const created = await capture();
+  assert.equal(created.baseline.outputs[0].entry.kind, "directory");
+  assert.equal(created.baseline.outputs[0].descendantCount, 0);
+  assert.equal(
+    created.baseline.outputs[0].descendantsHash,
+    outputs[0].descendantsHash,
+  );
+  assert.deepEqual(partition(created.baseline), partition(absent.baseline));
+  await fs.writeFile(join(reports, "summary.md"), "result\n");
+  const written = await capture();
+  assert.equal(written.baseline.outputs[0].descendantCount, 1);
+  assert.notEqual(written.baseline.entriesHash, created.baseline.entriesHash);
+  assert.deepEqual(partition(written.baseline), partition(absent.baseline));
+
+  await fs.writeFile(source, "second\n");
+  const edited = await capture();
+  assert.notEqual(
+    edited.baseline.remainderHash,
+    written.baseline.remainderHash,
+  );
+  assert.deepEqual(edited.baseline.outputs, written.baseline.outputs);
+  await fs.writeFile(control, "changed\n");
+  const controlled = await capture();
+  assert.notEqual(
+    controlled.baseline.remainderHash,
+    edited.baseline.remainderHash,
+  );
+
+  service.assertUnchanged({
+    before: controlled.baseline,
+    after: controlled.snapshot,
+  });
+  await fs.writeFile(join(reports, "summary.md"), "changed\n");
+  const output = await capture();
+  assert.throws(
+    () =>
+      service.assertUnchanged({
+        before: controlled.baseline,
+        after: output.snapshot,
+      }),
+    unsafe("ERR_WORKSPACE_DRIFT"),
+  );
+  const [record] = output.baseline.outputs;
+  const { outputs: _outputs, ...withoutOutputs } = output.baseline;
+  for (const [before, allowOutputs] of [
+    [output.baseline, true],
+    [{ ...output.baseline, remainderHash: "invalid" }, false],
+    [{ ...output.baseline, remainderCount: -1 }, false],
+    [withoutOutputs, false],
+    [{ ...output.baseline, outputs: [] }, false],
+    [{ ...output.baseline, outputs: [{ ...record, path: source }] }, false],
+    [
+      { ...output.baseline, outputs: [{ ...record, descendantCount: 1.5 }] },
+      false,
+    ],
+    [
+      { ...output.baseline, outputs: [{ ...record, descendantsHash: "" }] },
+      false,
+    ],
+  ])
+    assert.throws(
+      () =>
+        service.assertUnchanged({
+          before,
+          after: output.snapshot,
+          allowOutputs,
+        }),
+      (error) => unsafe()(error) && error.code !== "ERR_WORKSPACE_DRIFT",
+    );
+
+  const nested = await service.inspect({
+    workspacePath: f.workspacePath,
+    stateRoot: f.stateRoot,
+    outputPaths: ["generated/reports"],
+  });
+  service.outputBaseline(await service.snapshot({ inspection: nested }));
+  await fs.writeFile(join(f.workspacePath, "generated"), "blocker\n");
+  await assert.rejects(service.snapshot({ inspection: nested }), unsafe());
+  // The projection itself treats a captured file ancestor as a blocker.
+  const blocked = {
+    ...(await capture()).snapshot,
+    outputPaths: [join(f.workspacePath, "generated", "reports")],
+  };
+  assert.throws(() => service.outputBaseline(blocked), unsafe());
+  const uncovered = {
+    ...blocked,
+    outputPaths: [join(f.workspacePath, "absent")],
+  };
+  service.outputBaseline(uncovered);
+  assert.throws(
+    () =>
+      service.outputBaseline({
+        ...uncovered,
+        entries: uncovered.entries.filter(
+          ({ path }) => path !== f.workspacePath,
+        ),
+      }),
+    unsafe(),
+  );
+
+  for (const scope of [
+    { inspectionPaths: ["source.txt"] },
+    { excludePaths: ["vendor"] },
+  ]) {
+    const scoped = await service.inspect({
+      workspacePath: f.workspacePath,
+      stateRoot: f.stateRoot,
+      ...scope,
+    });
+    const snapshot = await service.snapshot({ inspection: scoped });
+    assert.ok(snapshot.inspectionPaths !== undefined);
+    assert.throws(() => service.outputBaseline(snapshot), unsafe());
+  }
+});
+
 test("snapshot filenames preserve leading Unicode byte-order marks", async (t) => {
   const f = await fixture(t);
   const path = join(f.workspacePath, "\ufeffsource.txt");

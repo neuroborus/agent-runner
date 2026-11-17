@@ -974,6 +974,7 @@ export function createRunner(options = {}) {
         ...(run.workspace?.kind === "directory"
           ? {
               baseline: (...args) => safety.baseline(...args),
+              outputBaseline: (...args) => safety.outputBaseline(...args),
               async reportArtifact(request, options) {
                 await monitor?.check();
                 await checkConfiguration();

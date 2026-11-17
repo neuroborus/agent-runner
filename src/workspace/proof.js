@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 
 import { hashRecords } from "./digest.js";
-import { assertSafe, location, same, within } from "./paths.js";
+import { assertSafe, compactPaths, location, same, within } from "./paths.js";
 
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -16,6 +16,8 @@ const missing = (path) => ({
 
 const isHash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const PARTITION = ["remainderCount", "remainderHash", "outputs"];
 const OPTIONAL_SCOPE = [
   "inspectionPaths",
   "inspectionFilesOnly",
@@ -47,23 +49,93 @@ export function snapshotBaseline(snapshot) {
   };
 }
 
+// Writable baselines partition the same complete capture by declared output
+// root. Absent roots are derived from complete directory coverage only; the
+// projection never changes the captured entries or their fingerprints.
+export function outputBaseline(snapshot) {
+  assertSafe(
+    snapshot?.schemaVersion === 1 &&
+      snapshot.inspectionPaths === undefined &&
+      snapshot.excludePaths === undefined &&
+      Array.isArray(snapshot.entries) &&
+      Array.isArray(snapshot.linkResolutions) &&
+      Array.isArray(snapshot.outputPaths) &&
+      same(compactPaths(snapshot.outputPaths), snapshot.outputPaths),
+    "An output baseline requires a complete workspace snapshot.",
+  );
+  const source = new Map(snapshot.entries.map((entry) => [entry.path, entry]));
+  const roots = snapshot.outputPaths;
+  const descendants = roots.map(() => []);
+  const remainder = [];
+  for (const entry of snapshot.entries) {
+    const index = roots.findIndex((root) => within(root, entry.path));
+    if (index === -1) remainder.push(entry);
+    else if (entry.path !== roots[index]) descendants[index].push(entry);
+  }
+  const outputs = roots.map((path, index) => {
+    let entry = source.get(path);
+    if (entry === undefined) {
+      let ancestor = dirname(path);
+      while (
+        !source.has(ancestor) &&
+        ancestor !== snapshot.workspacePath &&
+        within(snapshot.workspacePath, ancestor)
+      )
+        ancestor = dirname(ancestor);
+      // File/link ancestors and uncaptured coverage are blockers, never absence.
+      assertSafe(
+        within(snapshot.workspacePath, ancestor) &&
+          source.get(ancestor)?.kind === "directory",
+        "Workspace snapshot does not prove the declared output absent.",
+      );
+      entry = missing(path);
+    }
+    return {
+      path,
+      entry,
+      descendantCount: descendants[index].length,
+      descendantsHash: hashRecords(descendants[index]),
+    };
+  });
+  return {
+    ...snapshotBaseline(snapshot),
+    remainderCount: remainder.length,
+    remainderHash: hashRecords(remainder),
+    outputs,
+  };
+}
+
 export const isCompactBaseline = (baseline) =>
   baseline?.schemaVersion === 1 && !Object.hasOwn(baseline, "entries");
 
 // Compact equality is the complete entry equality without output allowances;
 // those would need the per-entry evidence the baseline deliberately omits.
+// Output partitions must be well formed but never grant output changes.
 export function assertBaselineUnchanged({ before, after, allowOutputs }) {
   assertSafe(
     allowOutputs === false &&
       !Object.hasOwn(before, "linkResolutions") &&
-      Number.isSafeInteger(before.entryCount) &&
-      before.entryCount >= 0 &&
+      isCount(before.entryCount) &&
       [
         before.entriesHash,
         before.contentFingerprint,
         before.identityFingerprint,
       ].every(isHash) &&
-      Array.isArray(after.entries),
+      Array.isArray(after.entries) &&
+      (PARTITION.every((field) => !Object.hasOwn(before, field)) ||
+        (isCount(before.remainderCount) &&
+          isHash(before.remainderHash) &&
+          Array.isArray(before.outputs) &&
+          same(
+            before.outputs.map((output) => output?.path),
+            before.outputPaths,
+          ) &&
+          before.outputs.every(
+            (output) =>
+              output.entry?.path === output.path &&
+              isCount(output.descendantCount) &&
+              isHash(output.descendantsHash),
+          ))),
     "A valid compact workspace baseline is required.",
   );
   assertSafe(

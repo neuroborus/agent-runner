@@ -459,7 +459,8 @@ Fast `test/runner-audit.test.js` owns audit composition with the existing confin
 workspace/clarification services and persisted session contract: authorized
 transcript edits preserve discovery, while source drift blocks it under compact
 and migrated legacy full baselines. Compact directory baselines exempt only
-declared artifacts and reject undeclared exemptions. It also uses
+declared artifacts and reject undeclared exemptions; output baselines return the
+filtered snapshot and its projection from one inspection. It also uses
 actual inactivity, availability and disposition policies with in-memory storage
 to cover checkpoint initialization, bounded reconstruction, terminal isolation
 failures, authentication/output pauses and source-fork recovery. Normalized
@@ -610,6 +611,11 @@ Scoped fixtures reject reads of excluded/unselected trees through both ordinary
 and descriptor paths, preserve protected inputs/controls and required link
 dependencies, bind reconstructed selections and routing identities, and cancel
 discovery/file hashing with verified handle closure and bounded anonymous progress.
+Real captures prove compact baselines detect source and control drift and that
+output baselines derive absent roots only from covered directory ancestors,
+reject blocking file ancestors, uncovered roots and selected or excluded
+snapshots, keep remainder digests across output-only changes and reject
+`allowOutputs` or malformed partitions in the compact guard.
 `test/workspace/output-directory.test.js` retains ordinary output preparation and
 scoped output authority independently of source selection.
 Temporary directories and injected filesystem effects need neither Git nor live
