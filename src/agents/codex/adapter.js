@@ -8,6 +8,7 @@ import {
   executeOwnedProcess,
   spawnOwnedProcess,
 } from "../../platform/index.js";
+import { isolateGitEnvironment } from "../../git/index.js";
 import { canReadFiles } from "../file-access.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
@@ -19,7 +20,6 @@ import {
   EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
-  isolateGitEnvironment,
   normalizeClientAttribution,
   sessionName,
   OUTPUT_EXHAUSTED_DISPOSITION,

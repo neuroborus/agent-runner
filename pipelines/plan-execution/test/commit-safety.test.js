@@ -11,6 +11,7 @@ import {
   ClaudeAdapterError,
   normalizeAdapterFailure,
 } from "../../../src/agents/index.js";
+import { isolateGitEnvironment } from "../../../src/git/index.js";
 import {
   attachAuthentication,
   authenticationFailure,
@@ -192,14 +193,13 @@ Implement the second behavior.`;
 test("accepts a verified commit after an interrupted adapter result", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        request.commit.message,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        ["-C", request.cwd, "commit", "-qm", request.commit.message],
+        { env },
+      );
       const error = new Error("Commit result was lost.");
       error.code = "ERR_FAKE_LOCAL_COMMIT_INTERRUPTED";
       error.ambiguous = true;
@@ -221,14 +221,13 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
 test("accounts for a verified commit before retaining configuration drift", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        request.commit.message,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        ["-C", request.cwd, "commit", "-qm", request.commit.message],
+        { env },
+      );
       const error = new Error("Project configuration changed after commit.");
       error.code = "ERR_PROJECT_CONFIGURATION_CHANGED";
       throw error;
@@ -763,7 +762,8 @@ test("observed staging contradicts pre-executor proof and cannot retire authoriz
 test("real staged executor failure remains verification-only across resume", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
       throw Object.assign(new Error("Post-staging failure."), {
         code: "ERR_FAKE_STAGED_FAILURE",
       });
@@ -1122,14 +1122,19 @@ test("never replays a consumed authorization when no commit was created", async 
 test("pauses without rewriting a commit that violates its authorization", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        `${request.commit.message}\n\nCo-authored-by: Other <other@example.com>`,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        [
+          "-C",
+          request.cwd,
+          "commit",
+          "-qm",
+          `${request.commit.message}\n\nCo-authored-by: Other <other@example.com>`,
+        ],
+        { env },
+      );
     },
   });
 

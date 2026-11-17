@@ -12,6 +12,7 @@ import {
   createRunStore,
   parseRunnerConfiguration,
 } from "../../src/index.js";
+import { isolateGitEnvironment } from "../../src/git/index.js";
 
 export const executeFile = promisify(execFile);
 export const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
@@ -238,14 +239,13 @@ export function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
       }
       calls.push(request);
       if (request.access === "local-commit") {
-        await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-        await executeFile("git", [
-          "-C",
-          request.cwd,
-          "commit",
-          "-qm",
-          request.commit.message,
-        ]);
+        const env = isolateGitEnvironment(process.env);
+        await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+        await executeFile(
+          "git",
+          ["-C", request.cwd, "commit", "-qm", request.commit.message],
+          { env },
+        );
         return {
           output: "committed",
           structured: { ready: true },

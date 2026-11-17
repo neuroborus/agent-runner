@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess } from "../../platform/index.js";
+import { isolateGitEnvironment } from "../../git/index.js";
 import { canReadFiles } from "../file-access.js";
 import {
   ADAPTER_FAILURE_CLASS,
@@ -15,7 +16,6 @@ import {
   isDefaultClientAttribution,
   isEnvironment,
   isRecord,
-  isolateGitEnvironment,
   sessionName,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";

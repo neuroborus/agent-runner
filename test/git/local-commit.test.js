@@ -14,7 +14,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createGitService, GitSafetyError } from "../../src/git/index.js";
+import {
+  createGitService,
+  GitSafetyError,
+  isolateGitEnvironment,
+} from "../../src/git/index.js";
+import { createFixtureGitBinary } from "../support/git.js";
 
 const executeFile = promisify(execFile);
 const SUBJECT = "feat(git): create authorized commit";
@@ -80,15 +85,17 @@ async function createFixture(t) {
   await writeFile(join(repositoryPath, "tracked.txt"), "initial\n");
   await runGit(repositoryPath, env, "add", ".gitignore", "tracked.txt");
   await runGit(repositoryPath, env, "commit", "-qm", "chore(test): initialize");
+  t.after(() => rm(workspace, { force: true, recursive: true }));
+  const gitBinary = await createFixtureGitBinary(workspace);
   let nextAuthorization = 0;
-  const createService = () =>
+  const createService = (serviceEnv = env) =>
     createGitService({
-      env,
+      env: serviceEnv,
+      gitBinary,
       authorizationIdFactory: () =>
         `commit-authorization-${(nextAuthorization += 1)}`,
     });
-  t.after(() => rm(workspace, { force: true, recursive: true }));
-  return { createService, env, repositoryPath };
+  return { createService, env, gitBinary, repositoryPath };
 }
 
 async function reviewedSnapshot(fixture, content = "reviewed\n") {
@@ -706,6 +713,74 @@ test("rejects commit identity overrides without a configuration change", async (
       error.changes.includes("commit-identity") &&
       !error.changes.includes("identity"),
   );
+});
+
+test("binds commit identity to the isolated executor environment", async (t) => {
+  for (const isolated of [true, false]) {
+    const fixture = await createFixture(t);
+    const ambientEnv = {
+      ...fixture.env,
+      EMAIL: "ambient@example.test",
+      GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+      GIT_AUTHOR_NAME: "Ambient Author",
+      GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+      GIT_COMMITTER_NAME: "Ambient Committer",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Counted User",
+    };
+    const service = fixture.createService(ambientEnv);
+    await writeFile(join(fixture.repositoryPath, "tracked.txt"), "reviewed\n");
+    const expectedSnapshot = await service.snapshot({
+      projectPath: fixture.repositoryPath,
+    });
+    const authorization = await service.prepareCommit({
+      expectedSnapshot,
+      subject: SUBJECT,
+      persistPendingCommit: async () => {},
+    });
+    await service.consumeCommit(authorization, {
+      consumePendingCommit: async () => {},
+    });
+    const commitEnv = isolated ? isolateGitEnvironment(ambientEnv) : ambientEnv;
+    await executeFile(
+      fixture.gitBinary,
+      [
+        "-C",
+        fixture.repositoryPath,
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-qam",
+        SUBJECT,
+      ],
+      { env: commitEnv },
+    );
+
+    if (isolated) {
+      await service.verifyCommit(authorization);
+      const { stdout } = await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "show",
+        "--no-patch",
+        "--format=%an <%ae>%n%cn <%ce>",
+        "HEAD",
+      );
+      assert.equal(
+        stdout,
+        "Fixture User <fixture@example.com>\nFixture User <fixture@example.com>\n",
+      );
+    } else {
+      await assert.rejects(
+        service.verifyCommit(authorization),
+        (error) =>
+          isGitError("ERR_COMMIT_CONTRACT_VIOLATED")(error) &&
+          error.changes.includes("commit-identity") &&
+          !error.changes.includes("identity"),
+      );
+    }
+  }
 });
 
 test("rejects amended history with the wrong direct parent", async (t) => {

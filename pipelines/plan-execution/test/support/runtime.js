@@ -17,7 +17,10 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { inspectFinalizationFile } from "../../../../src/config/index.js";
-import { createGitService } from "../../../../src/git/index.js";
+import {
+  createGitService,
+  isolateGitEnvironment,
+} from "../../../../src/git/index.js";
 
 import { assertExecutionRun as assertRun } from "../../src/bootstrap-progress.js";
 import {
@@ -1554,14 +1557,15 @@ async function createFixture(
             await request.onCommitExecution?.();
             if (onCommitRun === undefined) {
               if (repository === "git") {
-                await executeFile("git", ["-C", projectPath, "add", "-A"]);
-                await executeFile("git", [
-                  "-C",
-                  projectPath,
-                  "commit",
-                  "-qm",
-                  request.commit.message,
-                ]);
+                const env = isolateGitEnvironment(process.env);
+                await executeFile("git", ["-C", projectPath, "add", "-A"], {
+                  env,
+                });
+                await executeFile(
+                  "git",
+                  ["-C", projectPath, "commit", "-qm", request.commit.message],
+                  { env },
+                );
               } else {
                 await commitMemoryRepository(request.commit.message);
               }

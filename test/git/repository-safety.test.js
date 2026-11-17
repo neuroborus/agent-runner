@@ -22,6 +22,7 @@ import {
   GitSafetyError,
   normalizeReadOnlySnapshotChanges,
 } from "../../src/git/index.js";
+import { createFixtureGitBinary } from "../support/git.js";
 
 const executeFile = promisify(execFile);
 
@@ -107,10 +108,12 @@ async function createFixture(t, { identity = true } = {}) {
     "initial",
   );
   t.after(() => rm(workspace, { force: true, recursive: true }));
+  const gitBinary = await createFixtureGitBinary(workspace);
   return {
     env,
+    gitBinary,
     repositoryPath,
-    service: createGitService({ env }),
+    service: createGitService({ env, gitBinary }),
     workspace,
   };
 }
@@ -319,6 +322,78 @@ test("enforces caller-selected cleanliness and identity requirements", async (t)
     (error) =>
       isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
       error.changes.includes("identity"),
+  );
+});
+
+test("evaluates identity in the isolated commit-executor environment", async (t) => {
+  const configured = await createFixture(t);
+  const clean = await configured.service.snapshot({
+    projectPath: configured.repositoryPath,
+  });
+  const overrideConfiguration = join(
+    configured.workspace,
+    "override.gitconfig",
+  );
+  await writeFile(
+    overrideConfiguration,
+    [
+      "[user]",
+      "\tname = Override User",
+      "\temail = override@example.test",
+      "[author]",
+      "\tname = Override Author",
+      "\temail = override-author@example.test",
+      "[committer]",
+      "\tname = Override Committer",
+      "\temail = override-committer@example.test",
+      "",
+    ].join("\n"),
+  );
+  const ambientIdentity = {
+    GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+    GIT_AUTHOR_NAME: "Ambient Author",
+    GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+    GIT_COMMITTER_NAME: "Ambient Committer",
+  };
+  for (const overrides of [
+    ambientIdentity,
+    { EMAIL: "ambient@example.test", Email: "mixed@example.test" },
+    {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Counted User",
+    },
+    { GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'" },
+    { GIT_CONFIG_GLOBAL: overrideConfiguration },
+  ]) {
+    const snapshot = await createGitService({
+      env: { ...configured.env, ...overrides },
+      gitBinary: configured.gitBinary,
+    }).snapshot({ projectPath: configured.repositoryPath });
+    const family = Object.keys(overrides).join(",");
+    assert.equal(snapshot.identityAvailable, true, family);
+    assert.equal(
+      snapshot.identityFingerprint,
+      clean.identityFingerprint,
+      family,
+    );
+  }
+
+  const missing = await createFixture(t, { identity: false });
+  const ambient = createGitService({
+    env: { ...missing.env, ...ambientIdentity, EMAIL: "ambient@example.test" },
+    gitBinary: missing.gitBinary,
+  });
+  const snapshot = await ambient.snapshot({
+    projectPath: missing.repositoryPath,
+  });
+  assert.equal(snapshot.identityAvailable, false);
+  await assert.rejects(
+    ambient.preflight({
+      projectPath: missing.repositoryPath,
+      requireIdentity: true,
+    }),
+    isGitError("ERR_GIT_IDENTITY_REQUIRED"),
   );
 });
 

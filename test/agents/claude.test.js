@@ -70,6 +70,33 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+
+const AMBIENT_GIT_IDENTITY = Object.freeze({
+  EMAIL: "ambient@example.test",
+  GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+  GIT_AUTHOR_NAME: "Ambient Author",
+  GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+  GIT_COMMITTER_NAME: "Ambient Committer",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_GLOBAL: "/ambient/global.gitconfig",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'",
+  GIT_CONFIG_VALUE_0: "Counted User",
+  HOME: "/ambient/home",
+  XDG_CONFIG_HOME: "/ambient/config",
+});
+
+function assertIsolatedGitIdentity(env) {
+  for (const name of Object.keys(AMBIENT_GIT_IDENTITY)) {
+    if (name !== "HOME" && name !== "XDG_CONFIG_HOME") {
+      assert.equal(env[name], undefined, name);
+    }
+  }
+  assert.equal(env.HOME, AMBIENT_GIT_IDENTITY.HOME);
+  assert.equal(env.XDG_CONFIG_HOME, AMBIENT_GIT_IDENTITY.XDG_CONFIG_HOME);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+}
+
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
@@ -7230,6 +7257,7 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   const fixture = createFixture({
     env: {
       ...process.env,
+      ...AMBIENT_GIT_IDENTITY,
       ANTHROPIC_API_KEY: "provider-token",
       HTTP_PROXY: "http://proxy.invalid",
       LD_PRELOAD: "/tmp/agent.so",
@@ -7295,6 +7323,8 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(commitCall.options.env.LD_PRELOAD, undefined);
   assert.equal(commitCall.options.env.NODE_OPTIONS, undefined);
   assert.equal(commitCall.options.env.SSH_AUTH_SOCK, undefined);
+  assertIsolatedGitIdentity(metadata.options.env);
+  assertIsolatedGitIdentity(commitCall.options.env);
 });
 
 test("classifies readiness refusals before admitting local commit effects", async () => {

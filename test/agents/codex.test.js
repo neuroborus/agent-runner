@@ -44,6 +44,33 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+
+const AMBIENT_GIT_IDENTITY = Object.freeze({
+  EMAIL: "ambient@example.test",
+  GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+  GIT_AUTHOR_NAME: "Ambient Author",
+  GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+  GIT_COMMITTER_NAME: "Ambient Committer",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_GLOBAL: "/ambient/global.gitconfig",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'",
+  GIT_CONFIG_VALUE_0: "Counted User",
+  HOME: "/ambient/home",
+  XDG_CONFIG_HOME: "/ambient/config",
+});
+
+function assertIsolatedGitIdentity(env) {
+  for (const name of Object.keys(AMBIENT_GIT_IDENTITY)) {
+    if (name !== "HOME" && name !== "XDG_CONFIG_HOME") {
+      assert.equal(env[name], undefined, name);
+    }
+  }
+  assert.equal(env.HOME, AMBIENT_GIT_IDENTITY.HOME);
+  assert.equal(env.XDG_CONFIG_HOME, AMBIENT_GIT_IDENTITY.XDG_CONFIG_HOME);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+}
+
 const SESSION_NAMING = Object.freeze({
   runId: "11111111-1111-4111-8111-111111111111",
   project: "sample",
@@ -4468,6 +4495,7 @@ test("rejects unexpected continuation lineage without a fresh fallback", async (
 test("creates an authorized commit through a networkless sandbox", async () => {
   const subject = "feat(branch): document push behavior";
   const fixture = createFixture({
+    env: { ...process.env, ...AMBIENT_GIT_IDENTITY },
     handle({ message }) {
       if (message.method === "turn/start") {
         return {
@@ -4555,6 +4583,8 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     sandboxCalls[1].argumentsList.join(" "),
     /network=\{enabled=false\}/u,
   );
+  assertIsolatedGitIdentity(gitCall.options.env);
+  assertIsolatedGitIdentity(sandboxCalls[1].options.env);
 });
 
 test("allows disclosed read-only Git inspection during local-commit readiness", async () => {

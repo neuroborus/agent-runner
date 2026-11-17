@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-11-17
 
+- **Identity baselines use the commit executors' isolated environment.** The
+  Git capability now owns the environment-isolation rule shared by snapshot
+  identity queries and both provider local-commit executors. The baseline,
+  preflight, authorization and post-commit verification must describe the
+  identity the effect actually uses, so ambient author, committer, `EMAIL` and
+  configuration-source overrides no longer satisfy availability or enter
+  fingerprints. Other Git queries keep their environment. Hosts without such
+  overrides keep byte-identical fingerprints; legacy evidence captured under
+  them fails closed through the existing guards without migration, rebinding,
+  allowance renewal or history rewriting.
+
 - **Polishing gates new-file whitespace before Runner handoff.** Finalization
   proves staging-independent whitespace hygiene for tracked changes and new
   files, including unborn indexed content, through a read-only Git inspection

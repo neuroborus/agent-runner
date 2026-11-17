@@ -22,6 +22,7 @@ import {
   pathsFingerprintAtRoot,
   stagedContentMatchesAtRoot,
 } from "./content.js";
+import { isolateGitEnvironment } from "./environment.js";
 import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
 import { measureChangesAtRoot } from "./measurement.js";
@@ -211,6 +212,11 @@ export function createGitService(options = {}) {
     });
   }
   const runGit = createGitCommandRunner({ env, gitBinary });
+  // Identity queries read the same sources as the isolated commit executors.
+  const runIdentityGit = createGitCommandRunner({
+    env: isolateGitEnvironment(env),
+    gitBinary,
+  });
 
   async function currentHead(repositoryPath, execute = runGit) {
     const result = await execute(
@@ -403,17 +409,17 @@ export function createGitService(options = {}) {
       GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
       GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
     };
-    const author = await runGit(
+    const author = await runIdentityGit(
       repositoryPath,
       ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"],
       { allowedExitCodes: [0, 128], extraEnv: fixedDates },
     );
-    const committer = await runGit(
+    const committer = await runIdentityGit(
       repositoryPath,
       ["-c", "user.useConfigOnly=true", "var", "GIT_COMMITTER_IDENT"],
       { allowedExitCodes: [0, 128], extraEnv: fixedDates },
     );
-    const configuration = await runGit(
+    const configuration = await runIdentityGit(
       repositoryPath,
       ["config", "--null", "--get-regexp", "^user\\.(name|email)$"],
       { allowedExitCodes: [0, 1] },

@@ -58,11 +58,20 @@ capability; its private service composes confined file operations, the
 write-ahead journal, durable actions, execution leases, and state validation.
 
 The Git capability lives under `src/git/` behind its public `index.js`. The
-small index exposes only the service factory and shared safety error; its
-private service composes command execution, content and snapshot inspection,
-change measurement, complete source selection, exact source materialization,
-commit verification, and polishing handoff modules without exposing their
-implementation contracts to root consumers.
+small index exposes only the service factory, the read-only snapshot-change
+normalizer, the shared safety error, and the Git-owned `isolateGitEnvironment`
+rule; its private service composes command execution, content and snapshot
+inspection, change measurement, complete source selection, exact source
+materialization, commit verification, and polishing handoff modules without
+exposing their implementation contracts to root consumers. The isolation rule
+removes `EMAIL` and every case-insensitive `GIT_*` name and disables terminal
+prompts. Snapshot identity queries and both provider local-commit executors
+share it, so identity availability, fingerprints, commit authorization and
+verification follow the configured identity that the executor actually uses.
+Other Git queries keep stripping only repository redirection, and check-in
+hashing keeps its existing dedicated isolation unchanged. Legacy evidence
+captured under ambient identity or configuration-source overrides fails closed
+through the existing identity guards.
 
 Git-content observation never invokes Git inside a content-selected nested
 directory. The command boundary disables submodule recursion, and observational

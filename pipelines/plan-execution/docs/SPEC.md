@@ -2042,6 +2042,10 @@ Before commit-plan implementation work:
   Git-identity fingerprints;
 - verify an existing Git identity can create local commits without changing
   repository, global, or system configuration;
+- evaluate that identity in the constrained commit executor's isolated
+  environment: ambient author, committer and `EMAIL` values and
+  configuration-source overrides neither satisfy availability nor enter the
+  baseline;
 - verify the working tree is clean;
 - verify the execution clarification path is ignored by the target repository;
 - hash the task input files, including task-level clarifications when present;
@@ -2063,6 +2067,10 @@ Before and after every agent turn, compare at least:
 
 Hash remote configuration and Git identity for comparison without persisting
 credential-bearing URLs or personal identity values in runner state or logs.
+The identity fingerprint is evaluated in the same isolated environment as the
+constrained commit executor. Existing baselines or commit authorizations
+captured under ambient identity or configuration-source overrides no longer
+match; they pause through the identity guards and are never silently rebound.
 
 This catches unexpected commits, branch switches, rebases, resets, stashes,
 tag/ref creation, remote renames or URL changes, and similar repository-control

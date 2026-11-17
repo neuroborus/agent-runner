@@ -11,6 +11,7 @@ import {
   createRunStore,
   parseRunnerConfiguration,
 } from "../../../src/index.js";
+import { isolateGitEnvironment } from "../../../src/git/index.js";
 
 const executeFile = promisify(execFile);
 
@@ -124,14 +125,13 @@ export function createBackend(
         };
       calls.push(request);
       if (request.access === "local-commit") {
-        await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-        await executeFile("git", [
-          "-C",
-          request.cwd,
-          "commit",
-          "-qm",
-          request.commit.message,
-        ]);
+        const env = isolateGitEnvironment(process.env);
+        await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+        await executeFile(
+          "git",
+          ["-C", request.cwd, "commit", "-qm", request.commit.message],
+          { env },
+        );
         return {
           output: "committed",
           structured: { ready: true },
