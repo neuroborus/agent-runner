@@ -44,6 +44,7 @@ import {
   normalizePipelineState,
   normalizeResolutionResult,
   resolutionCorrectionDiagnostic,
+  RUNNER_HYGIENE_ISSUE_COMMAND,
 } from "../src/workflow-contract.js";
 import {
   SETTINGS,
@@ -169,6 +170,122 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.requiredChecks[0].command, exactCommand);
   assert.equal(exact.checks[0].command, exactCommand);
   assert.equal(exact.validationInfrastructure[0], exactPath);
+});
+
+test("accepts only runner-owned hygiene failures and exact whitespace handoff stops", async (t) => {
+  let hygieneFailed = true;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "F1"),
+      finalizationPassed(),
+    ],
+    onContentHygiene() {
+      if (!hygieneFailed) return undefined;
+      hygieneFailed = false;
+      return { status: "whitespace", tracked: false, paths: [], omitted: 3 };
+    },
+  });
+  await fixture.run();
+  const failed = fixture.transitions.find(
+    ({ patch }) => patch.pipelineState.finalizationResult?.status === "FAIL",
+  ).patch.pipelineState;
+  const [issue] = failed.finalizationResult.issues;
+  assert.equal(issue.command, RUNNER_HYGIENE_ISSUE_COMMAND);
+  assert.deepEqual(issue.evidence, ["3 more paths have whitespace errors."]);
+  assert.doesNotThrow(() => normalizePipelineState(failed));
+  const agentLabel = {
+    ...failed.finalizationResult,
+    issues: [{ ...issue, command: "npm test" }],
+  };
+  assert.throws(
+    () => normalizePipelineState({ ...failed, finalizationResult: agentLabel }),
+    /finalization result is inconsistent/u,
+  );
+  const passing = finalizationPassed();
+  for (const command of ["npm test", RUNNER_HYGIENE_ISSUE_COMMAND]) {
+    assert.throws(
+      () =>
+        normalizeFinalizationResult({
+          ...finalizationFailed(),
+          issues: [{ ...finalizationFailed().issues[0], command }],
+          checks: passing.checks,
+        }),
+      (error) =>
+        error.diagnostic?.constraint === "fail-status-check-consistency",
+    );
+  }
+
+  const handoff = fixture.transitions.findLast(
+    ({ patch }) => patch.pipelineState.workflowState === "HANDOFF",
+  ).patch.pipelineState;
+  const stopped = (pause, workflowState = "FAILED") => ({
+    ...fixture.currentRun,
+    pipelineState: { ...handoff, workflowState },
+    pause,
+  });
+  for (const [code, evidence] of [
+    ["ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE", "Index effect: none."],
+    [
+      "ERR_POLISHING_HANDOFF_WHITESPACE",
+      "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged.",
+    ],
+  ]) {
+    const run = stopped({ reason: "handoff_whitespace_rejected", code });
+    assert.doesNotThrow(() => assertRun(run));
+    assert.deepEqual(polishingPipeline.projections.pause(run), {
+      reason: "handoff_whitespace_rejected",
+      code,
+      explanation:
+        "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
+      evidence: [evidence],
+      resumeState: null,
+      nextActions: [],
+    });
+  }
+  for (const run of [
+    stopped({
+      reason: "handoff_whitespace_rejected",
+      code: "ERR_POLISHING_HANDOFF_CONTAMINATED",
+    }),
+    stopped({
+      reason: "handoff_whitespace_rejected",
+      code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+      evidence: ["Index effect: none."],
+    }),
+    stopped(
+      {
+        reason: "handoff_whitespace_rejected",
+        code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+      },
+      "WAITING_FOR_USER",
+    ),
+  ]) {
+    assert.throws(() => assertRun(run), /handoff whitespace disposition/u);
+  }
+  const legacy = stopped({
+    reason: "internal_failure",
+    code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+  });
+  assert.doesNotThrow(() => assertRun(legacy));
+  assert.deepEqual(polishingPipeline.projections.pause(legacy), {
+    reason: "internal_failure",
+    code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+    explanation: "Polishing failed.",
+    evidence: [],
+    resumeState: null,
+    nextActions: [],
+  });
 });
 
 test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {

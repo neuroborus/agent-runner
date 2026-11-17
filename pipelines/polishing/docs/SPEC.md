@@ -1018,6 +1018,29 @@ durable command snapshot. The accepted ordered evidence tuple binds both agent
 and runner results to the same content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints.
 
+When agent and runner results otherwise pass, the Runner also proves
+staging-independent whitespace hygiene through the Git capability before
+accepting `PASS`. The inspection is bound to the persisted controls and index
+and to the computed finalization content fingerprint. It runs hook-free
+`git diff --check` against `HEAD` for tracked content, skipped in an unborn
+repository, and checks every non-ignored untracked regular file, plus every
+indexed regular file when `HEAD` is unborn, with
+`git diff --no-index --check` against `/dev/null`. The repository-relative
+operand stays literal so repository whitespace configuration, attributes and
+check-in conversion apply; a root path named exactly `-` is passed as `./-`
+because Git reads a bare `-` as stdin. Allowed artifact paths are excluded;
+directories, nested repositories and symlinks are left to the staged check. The
+inspection writes neither the index nor objects. Snapshots before and after
+must match every Git control, the content and the index; drift pauses as
+`unsafe_git_state` with `ERR_POLISHING_HANDOFF_CONTAMINATED`. A hygiene failure
+appends one runner-owned issue with the next free `F<n>` ID, command
+`Runner staging-independent whitespace hygiene`, a fixed problem and bounded
+evidence: an optional tracked-change line, up to 30 new-file paths and an
+omitted-path count. It then takes the ordinary `FAIL` route to Worker
+resolution and renewed mode-specific convergence. A persisted `FAIL` whose
+checks all pass is valid only with that issue; agent `FAIL` output still
+requires a failed check.
+
 Finalization and terminal-confirmation requests carry the persisted
 `finalizationGuidance` decision and explain Runner-owned additions:
 `fingerprint`, `validationInfrastructureFingerprint`, `trustedCommandFingerprint`,
@@ -1507,6 +1530,9 @@ content fingerprint to equal both recorded fingerprints and verifies the
 expected index, `HEAD`, branch/detached state, refs, remotes, and Git identity.
 It then accepts only one of two recovery states: an already-complete verified
 handoff, or the exact unchanged pre-effect state on which it runs `git add -A`.
+Immediately before that add it repeats the staging-independent hygiene
+inspection with full control, content and index rebinding; whitespace rejects
+with `ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE` and no index write.
 An incomplete or contaminated index fails closed.
 
 Handoff-owned staging and direct Git inspection calls disable hooks with the
@@ -1523,6 +1549,20 @@ the complete tracked and non-ignored untracked change set, requires no unstaged
 or non-ignored untracked remnants, and runs staged-diff whitespace hygiene. The
 pipeline updates its baseline and enters `DONE` only after those postconditions
 pass. It never invokes `local-commit` access or creates a commit.
+
+A whitespace rejection at `HANDOFF` is terminal. This covers the pre-effect
+`ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE` and the late
+`ERR_POLISHING_HANDOFF_WHITESPACE`, which means complete Runner staging exists
+and failed staged hygiene. The run enters `FAILED` with exactly
+`{ reason: "handoff_whitespace_rejected", code }` and otherwise unchanged state.
+Because handoff recovery is inspection-only, nothing is reset, unstaged,
+restaged or replayed and no role checkpoint reopens; an interrupted `HANDOFF`
+re-inspects and reaches the same disposition without staging. The shared
+CLI/MCP projection explains that the run cannot resume and states the index
+effect: none, or retained Runner staging. The operator repairs the whitespace
+and starts a new polishing run. Contamination, incompleteness and other causes
+keep `internal_failure`; legacy `internal_failure` whitespace histories remain
+valid and project unchanged.
 
 Completeness uses the Git capability's shared compatible-domain proof: reproduce
 accepted confined worktree content, reject hidden flags across the staged/worktree
@@ -1553,9 +1593,10 @@ refs, remotes, and identity. Mutation pauses without automatic rollback.
 Writable Worker turns may change safe repository content only. The runner
 rejects index drift as well as any `HEAD`, branch, ref, remote-configuration,
 or Git-identity change. The persisted `HANDOFF` transition is the only
-polishing owner allowed to stage. No role may push, mutate a remote ref, use a
-hosting API to write, alter a remote, change Git identity, create a commit,
-amend, reset,
+polishing owner allowed to stage; its pre-add and late staged whitespace checks
+never reset or restage, and a rejection is terminal. No role may push, mutate a
+remote ref, use a hosting API to write, alter a remote, change Git identity,
+create a commit, amend, reset,
 rebase, stash, switch branches, or create tags. `HEAD` must remain unchanged for
 the entire run.
 
@@ -1610,7 +1651,9 @@ Writable partial changes advance the baseline only after the unchanged-index
 and Git-control checks pass. They invalidate candidate, finalization, and
 confirmation evidence and charge actual correction work once. A request racing
 `HANDOFF` performs inspection only: a fully staged accepted result is accounted
-as completed, an untouched handoff remains pending, and an ambiguous index
+as completed, a fully staged result that fails the late staged hygiene check
+takes the terminal `handoff_whitespace_rejected` disposition, an untouched
+handoff remains pending, and an ambiguous index
 retains a safety blocker. Stop reconciliation never stages or commits; resume
 never restages an already verified handoff.
 

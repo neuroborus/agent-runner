@@ -701,6 +701,12 @@ accepted content, performs fixed staged hygiene, and creates the exact planned
 commit. Polishing's runner-owned `HANDOFF` effect alone stages and verifies the
 complete accepted change set without committing.
 
+Polishing finalization also proves staging-independent whitespace hygiene for
+tracked changes and new files. A failure returns to ordinary Worker repair and
+renewed review before any index effect. A staged-hygiene rejection at `HANDOFF`
+is terminal: it preserves any index effect, resets or restages nothing, and the
+operator repairs the whitespace in a new polishing run.
+
 The content and validation fingerprints must remain unchanged from the
 accepted gate through the effect. Recovery verifies a pending or possibly
 completed effect before deciding what remains; it never reruns an ambiguous

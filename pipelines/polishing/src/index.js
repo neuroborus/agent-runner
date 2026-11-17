@@ -205,6 +205,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   review_output_invalid:
     "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
+  handoff_whitespace_rejected:
+    "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
   internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
     "The configured repository-local artifact path is not ignored.",
@@ -288,6 +290,13 @@ function publicEvidence(run, readOnlySnapshotChanges) {
   ) {
     const { field, constraint } = finalizationDiagnostic(pause.diagnostic);
     return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
+  if (pause.reason === "handoff_whitespace_rejected") {
+    return Object.freeze([
+      pause.code === "ERR_POLISHING_HANDOFF_WHITESPACE"
+        ? "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged."
+        : "Index effect: none.",
+    ]);
   }
   if (pause.reason === "read_only_agent_mutated_repository") {
     return Object.freeze([

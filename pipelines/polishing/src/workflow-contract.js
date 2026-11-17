@@ -227,6 +227,14 @@ const ADAPTER_FAILURE_FIELDS = Object.freeze([
   ...FAILURE_FIELDS,
   "diagnosticClass",
 ]);
+// Runner-owned FINALIZE hygiene issue; the only source of a persisted FAIL
+// whose checks all pass.
+export const RUNNER_HYGIENE_ISSUE_COMMAND =
+  "Runner staging-independent whitespace hygiene";
+export const HANDOFF_WHITESPACE_CODES = Object.freeze([
+  "ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE",
+  "ERR_POLISHING_HANDOFF_WHITESPACE",
+]);
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
 export const MAX_ITEMS = 32;
@@ -1955,6 +1963,32 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
     );
   }
   return issues;
+}
+
+// Builds the bounded runner issue for a staging-independent hygiene failure.
+export function runnerHygieneIssue(id, { tracked, paths, omitted }) {
+  const evidence = tracked
+    ? ["Tracked changes relative to HEAD have whitespace errors."]
+    : [];
+  let unlisted = omitted;
+  for (const path of paths) {
+    const line = `New file has whitespace errors: ${path}`;
+    let normalized;
+    try {
+      normalized = normalizeText(line, "hygiene evidence");
+    } catch {}
+    if (normalized === line) evidence.push(line);
+    else unlisted += 1;
+  }
+  if (unlisted > 0)
+    evidence.push(`${unlisted} more paths have whitespace errors.`);
+  return Object.freeze({
+    id,
+    command: RUNNER_HYGIENE_ISSUE_COMMAND,
+    problem:
+      "Finalized content fails Runner whitespace hygiene and cannot be staged; repair the reported whitespace.",
+    evidence: Object.freeze(evidence),
+  });
 }
 
 function normalizeValidationPolicyBlocked(payload) {
@@ -4072,7 +4106,9 @@ function normalizePersistedFinalization(value) {
     !HASH_PATTERN.test(value.trustedConfigurationFingerprint) ||
     (value.status === "PASS" &&
       checks.some(({ status }) => status !== "PASS")) ||
-    (value.status === "FAIL" && !checks.some(({ status }) => status === "FAIL"))
+    (value.status === "FAIL" &&
+      !checks.some(({ status }) => status === "FAIL") &&
+      !issues.some(({ command }) => command === RUNNER_HYGIENE_ISSUE_COMMAND))
   ) {
     throw workflowError("Polishing finalization result is inconsistent.");
   }
@@ -5872,6 +5908,16 @@ export function assertRun(run) {
       ))
   ) {
     throw workflowError("Polishing adapter diagnostic is invalid.");
+  }
+  if (
+    run.pause?.reason === "handoff_whitespace_rejected" &&
+    (state.workflowState !== "FAILED" ||
+      !hasExactFields(run.pause, FAILURE_FIELDS) ||
+      !HANDOFF_WHITESPACE_CODES.includes(run.pause.code) ||
+      state.finalizedFingerprint === null ||
+      state.reviewedFingerprint !== state.finalizedFingerprint)
+  ) {
+    throw workflowError("Polishing handoff whitespace disposition is invalid.");
   }
   if (
     run.pause?.reason === "finalization_evidence_rejected" &&

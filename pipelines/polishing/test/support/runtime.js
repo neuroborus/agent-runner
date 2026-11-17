@@ -916,6 +916,7 @@ async function createFixture(
     interactive = false,
     mode = "independent",
     modeSettings = {},
+    onContentHygiene,
     onEdit,
     onRoleRun,
     onTrustedValidation,
@@ -1298,6 +1299,21 @@ async function createFixture(
           allowedPaths,
         })
       ).contentFingerprint;
+    },
+    async inspectContentHygiene(options) {
+      const current = await memorySnapshot({
+        allowedPaths: options.expectedSnapshot.allowedPaths,
+      });
+      if (
+        current.contentFingerprint !== options.contentFingerprint ||
+        current.indexFingerprint !== options.expectedSnapshot.indexFingerprint
+      ) {
+        throw memoryGitError(
+          "Repository controls or content changed before hygiene inspection.",
+          "ERR_POLISHING_HANDOFF_CONTAMINATED",
+        );
+      }
+      return (await onContentHygiene?.(options)) ?? { status: "clean" };
     },
     async inspectPath({ path }) {
       const requestedPath = resolve(projectPath, path);

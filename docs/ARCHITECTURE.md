@@ -5160,12 +5160,20 @@ applicable tracked content checks use `HEAD` or explicit trees, and established
 checks are input only to `FINALIZE`. Once candidate convergence has completed
 and finalization plus the distinct mode-specific terminal confirmation bind the
 same staging-independent content and validation-infrastructure fingerprints,
-the pipeline persists `HANDOFF`.
+the pipeline persists `HANDOFF`. Before accepting `PASS`, `FINALIZE` also runs
+the Git capability's read-only `inspectContentHygiene`. It checks tracked
+content against `HEAD` and each non-ignored untracked regular file, or each
+indexed one in an unborn repository, against `/dev/null` with literal operands.
+Before and after snapshots bind every control, the content and the index. A
+failure becomes a runner-owned finalization issue on the ordinary repair path.
 The root Git boundary then accepts either an unchanged pre-effect state or an
-already-complete recovered effect, runs `git add -A` only for the former, and
-verifies unchanged content and Git controls, a nonempty complete staged set,
-no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
-before the pipeline can enter `DONE`.
+already-complete recovered effect, repeats that hygiene inspection and runs
+`git add -A` only for the former, and verifies unchanged content and Git
+controls, a nonempty complete staged set, no unstaged or non-ignored untracked
+remnants, and staged whitespace hygiene before the pipeline can enter `DONE`.
+A pre-add or staged whitespace rejection makes the run terminal `FAILED` with
+`handoff_whitespace_rejected`. The pipeline keeps any index effect and never
+resets, restages or reopens a role checkpoint.
 
 Both handoff and consumed-commit full-staging verification first reproduce the
 accepted confined worktree fingerprint. The shared matcher rejects hidden flags

@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-17
+
+- **Polishing gates new-file whitespace before Runner handoff.** Finalization
+  proves staging-independent whitespace hygiene for tracked changes and new
+  files, including unborn indexed content, through a read-only Git inspection
+  bound to unchanged controls, content and index. Detecting the defect before
+  any index effect keeps content repair in the ordinary finding loop with
+  renewed convergence in every mode. The handoff repeats the check before
+  staging; a pre-add or late staged rejection is terminal because `HANDOFF`
+  recovery is inspection-only and must never reset, restage or replay effects.
+  Legacy failure histories and durable versions remain unchanged.
+
 ## 2026-11-16
 
 - **Staging compares compatible content representations.** Handoff and consumed

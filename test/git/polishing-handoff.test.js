@@ -25,7 +25,7 @@ async function runGit(repositoryPath, env, ...argumentsList) {
   });
 }
 
-async function createFixture(t) {
+async function createFixture(t, { unborn = false } = {}) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-handoff-"));
   t.after(() => rm(workspace, { force: true, recursive: true }));
   const repositoryPath = join(workspace, "repository");
@@ -59,8 +59,10 @@ async function createFixture(t) {
   await writeFile(join(repositoryPath, ".gitignore"), "ignored.txt\n.hooks/\n");
   await writeFile(join(repositoryPath, "deleted.txt"), "delete me\n");
   await writeFile(join(repositoryPath, "tracked.txt"), "base\n");
-  await runGit(repositoryPath, env, "add", "-A");
-  await runGit(repositoryPath, env, "commit", "-qm", "initialize fixture");
+  if (!unborn) {
+    await runGit(repositoryPath, env, "add", "-A");
+    await runGit(repositoryPath, env, "commit", "-qm", "initialize fixture");
+  }
   return {
     env,
     repositoryPath,
@@ -99,20 +101,33 @@ async function configureHook(fixture) {
   };
 }
 
-async function recordedService(fixture) {
+async function recordedService(fixture, drift) {
   const recorderPath = join(fixture.workspace, "record-git");
   const recordPath = join(fixture.workspace, "git-calls");
   await writeFile(recordPath, "");
+  // An optional drift command runs before each new-file hygiene check.
   await writeFile(
     recorderPath,
-    '#!/bin/sh\nprintf "%s\\n" "$@" >> "$HANDOFF_GIT_RECORD"\nexec git "$@"\n',
+    '#!/bin/sh\nprintf "%s\\n" "$@" >> "$HANDOFF_GIT_RECORD"\ncase " $* " in *" --no-index "*) [ -z "$HANDOFF_GIT_DRIFT" ] || sh -c "$HANDOFF_GIT_DRIFT" ;; esac\nexec git "$@"\n',
     { mode: 0o755 },
   );
+  const calls = async () =>
+    (await readFile(recordPath, "utf8")).trim().split("\n");
   return {
+    calls,
     service: createGitService({
-      env: { ...fixture.env, HANDOFF_GIT_RECORD: recordPath },
+      env: {
+        ...fixture.env,
+        HANDOFF_GIT_RECORD: recordPath,
+        ...(drift === undefined ? {} : { HANDOFF_GIT_DRIFT: drift }),
+      },
       gitBinary: recorderPath,
     }),
+    async assertNoIndexWrites() {
+      const recorded = await calls();
+      for (const command of ["add", "update-index", "reset", "hash-object"])
+        assert.ok(!recorded.includes(command), command);
+    },
     async assertNoHashing() {
       assert.ok(
         !(await readFile(recordPath, "utf8"))
@@ -326,19 +341,262 @@ test("fails closed on an incomplete index change after HANDOFF persistence", asy
   );
 });
 
+function hygieneOptions(snapshot) {
+  return {
+    expectedSnapshot: snapshot,
+    contentFingerprint: snapshot.contentFingerprint,
+  };
+}
+
+async function stagedState(fixture) {
+  return (
+    await runGit(
+      fixture.repositoryPath,
+      fixture.env,
+      "ls-files",
+      "--stage",
+      "-z",
+    )
+  ).stdout;
+}
+
+test("reports new-file whitespace without staging, hashing or hooks", async (t) => {
+  const fixture = await createFixture(t);
+  await prepareChanges(fixture);
+  await writeFile(join(fixture.repositoryPath, "new.txt"), "trailing  \n");
+  // A bare "-" operand would read stdin rather than this root file.
+  await writeFile(join(fixture.repositoryPath, "-"), "trailing  \n");
+  const hook = await configureHook(fixture);
+  const baseline = await fixture.service.snapshot({
+    projectPath: fixture.repositoryPath,
+  });
+  const recorded = await recordedService(fixture);
+
+  assert.deepEqual(
+    await recorded.service.inspectContentHygiene(hygieneOptions(baseline)),
+    {
+      status: "whitespace",
+      tracked: false,
+      paths: ["-", "new.txt"],
+      omitted: 0,
+    },
+  );
+  assert.deepEqual(
+    await fixture.service.snapshot({ projectPath: fixture.repositoryPath }),
+    baseline,
+  );
+  await recorded.assertNoIndexWrites();
+  await hook.assertUnchanged();
+});
+
+test("applies attributes and check-in conversion to new-file operands", async (t) => {
+  const fixture = await createFixture(t);
+  const { repositoryPath } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "generated/** -whitespace\nconverted.txt text eol=crlf\n",
+  );
+  await mkdir(join(repositoryPath, "generated"));
+  await mkdir(join(repositoryPath, "other"));
+  await writeFile(join(repositoryPath, "generated", "out.txt"), "spaced  \n");
+  await writeFile(join(repositoryPath, "other", "out.txt"), "spaced  \n");
+  await writeFile(join(repositoryPath, "converted.txt"), "line\r\n");
+  await writeFile(join(repositoryPath, "raw.txt"), "line\r\n");
+  const baseline = await fixture.service.snapshot({
+    projectPath: repositoryPath,
+  });
+
+  assert.deepEqual(
+    await fixture.service.inspectContentHygiene(hygieneOptions(baseline)),
+    {
+      status: "whitespace",
+      tracked: false,
+      paths: ["other/out.txt", "raw.txt"],
+      omitted: 0,
+    },
+  );
+});
+
+test("excludes only exact allowed paths from tracked hygiene", async (t) => {
+  const fixture = await createFixture(t);
+  const { env, repositoryPath, service } = fixture;
+  await mkdir(join(repositoryPath, "dir"));
+  await writeFile(join(repositoryPath, "dir", "file.txt"), "base\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "add nested fixture");
+  await writeFile(join(repositoryPath, "dir", "file.txt"), "spaced  \n");
+  const inspect = async (allowedPaths) =>
+    service.inspectContentHygiene(
+      hygieneOptions(
+        await service.snapshot({ allowedPaths, projectPath: repositoryPath }),
+      ),
+    );
+
+  assert.deepEqual(await inspect(["dir"]), {
+    status: "whitespace",
+    tracked: true,
+    paths: [],
+    omitted: 0,
+  });
+  assert.deepEqual(await inspect(["dir/file.txt"]), { status: "clean" });
+});
+
+test("keeps excluded descendants of a replaced tracked file out of hygiene", async (t) => {
+  const fixture = await createFixture(t);
+  const { env, repositoryPath, service } = fixture;
+  await writeFile(join(repositoryPath, "dir"), "base\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "add replaced fixture");
+  await rm(join(repositoryPath, "dir"));
+  await mkdir(join(repositoryPath, "dir"));
+  await writeFile(join(repositoryPath, "dir", "allowed.txt"), "allowed  \n");
+  await writeFile(join(repositoryPath, "dir", "control.txt"), "control\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  const inspect = async () =>
+    service.inspectContentHygiene(
+      hygieneOptions(
+        await service.snapshot({
+          allowedPaths: ["dir/allowed.txt"],
+          projectPath: repositoryPath,
+        }),
+      ),
+    );
+
+  assert.deepEqual(await inspect(), { status: "clean" });
+  await writeFile(join(repositoryPath, "dir", "control.txt"), "control  \n");
+  assert.deepEqual(await inspect(), {
+    status: "whitespace",
+    tracked: true,
+    paths: [],
+    omitted: 0,
+  });
+});
+
+test("inspects unborn indexed and untracked content without HEAD or objects", async (t) => {
+  const fixture = await createFixture(t, { unborn: true });
+  const { env, repositoryPath } = fixture;
+  const objects = async () =>
+    (
+      await readdir(join(repositoryPath, ".git", "objects"), {
+        recursive: true,
+      })
+    ).sort();
+  const clean = await fixture.service.snapshot({ projectPath: repositoryPath });
+  assert.equal(clean.head, null);
+  assert.deepEqual(
+    await fixture.service.inspectContentHygiene(hygieneOptions(clean)),
+    { status: "clean" },
+  );
+
+  await writeFile(join(repositoryPath, "indexed.txt"), "indexed  \n");
+  await runGit(repositoryPath, env, "add", "indexed.txt");
+  await writeFile(join(repositoryPath, "initial.txt"), "initial  \n");
+  const baseline = await fixture.service.snapshot({
+    projectPath: repositoryPath,
+  });
+  const before = await objects();
+  const recorded = await recordedService(fixture);
+
+  assert.deepEqual(
+    await recorded.service.inspectContentHygiene(hygieneOptions(baseline)),
+    {
+      status: "whitespace",
+      tracked: false,
+      paths: ["indexed.txt", "initial.txt"],
+      omitted: 0,
+    },
+  );
+  assert.deepEqual(await objects(), before);
+  assert.deepEqual(
+    await fixture.service.snapshot({ projectPath: repositoryPath }),
+    baseline,
+  );
+  await recorded.assertNoIndexWrites();
+
+  // An indexed path whose parent became a regular file has no content.
+  await mkdir(join(repositoryPath, "dir"));
+  await writeFile(join(repositoryPath, "dir", "file.txt"), "nested  \n");
+  await runGit(repositoryPath, env, "add", "dir/file.txt");
+  await rm(join(repositoryPath, "dir"), { recursive: true });
+  await writeFile(join(repositoryPath, "dir"), "replaced  \n");
+  const replaced = await fixture.service.snapshot({
+    projectPath: repositoryPath,
+  });
+  const beforeReplaced = await objects();
+  const replacedRecord = await recordedService(fixture);
+
+  assert.deepEqual(
+    await replacedRecord.service.inspectContentHygiene(
+      hygieneOptions(replaced),
+    ),
+    {
+      status: "whitespace",
+      tracked: false,
+      paths: ["dir", "indexed.txt", "initial.txt"],
+      omitted: 0,
+    },
+  );
+  assert.deepEqual(await objects(), beforeReplaced);
+  await replacedRecord.assertNoIndexWrites();
+});
+
+test("rejects untouched handoff whitespace before any index effect", async (t) => {
+  for (const path of ["tracked.txt", "new.txt"]) {
+    await t.test(path, async (t) => {
+      const fixture = await createFixture(t);
+      await writeFile(join(fixture.repositoryPath, path), "trailing   \n");
+      const baseline = await fixture.service.snapshot({
+        projectPath: fixture.repositoryPath,
+      });
+      const recorded = await recordedService(fixture);
+
+      if (path === "tracked.txt")
+        assert.equal(
+          (
+            await recorded.service.inspectContentHygiene(
+              hygieneOptions(baseline),
+            )
+          ).tracked,
+          true,
+        );
+      await assert.rejects(
+        recorded.service.stagePolishingHandoff(handoffOptions(baseline)),
+        { code: "ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE" },
+      );
+      assert.deepEqual(
+        await fixture.service.snapshot({
+          projectPath: fixture.repositoryPath,
+        }),
+        baseline,
+      );
+      await recorded.assertNoIndexWrites();
+    });
+  }
+});
+
 test("rejects staged whitespace errors after the runner effect", async (t) => {
   const fixture = await createFixture(t);
   await writeFile(join(fixture.repositoryPath, "tracked.txt"), "trailing   \n");
   const baseline = await fixture.service.snapshot({
     projectPath: fixture.repositoryPath,
   });
+  // Fixture-owned staging stands in for an interrupted Runner effect.
+  await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+  const staged = await stagedState(fixture);
+  const recorded = await recordedService(fixture);
 
-  await assert.rejects(
-    fixture.service.stagePolishingHandoff(handoffOptions(baseline)),
-    (error) =>
-      error instanceof GitSafetyError &&
-      error.code === "ERR_POLISHING_HANDOFF_WHITESPACE",
-  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(
+      recorded.service.inspectPolishingHandoff(handoffOptions(baseline)),
+      { code: "ERR_POLISHING_HANDOFF_WHITESPACE" },
+    );
+    await assert.rejects(
+      recorded.service.stagePolishingHandoff(handoffOptions(baseline)),
+      { code: "ERR_POLISHING_HANDOFF_WHITESPACE" },
+    );
+  }
+  await recorded.assertNoIndexWrites();
+  assert.equal(await stagedState(fixture), staged);
   assert.match(
     (
       await runGit(
@@ -351,6 +609,54 @@ test("rejects staged whitespace errors after the runner effect", async (t) => {
     ).stdout,
     /^tracked\.txt$/mu,
   );
+});
+
+test("keeps drift during hygiene inspection distinct from whitespace", async (t) => {
+  for (const [name, drift, change] of [
+    ["content", (path) => `printf drift >> '${path}/new.txt'`, "content"],
+    [
+      "control",
+      (path) => `git -C '${path}' update-ref refs/heads/drift HEAD`,
+      "refs",
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const fixture = await createFixture(t);
+      await writeFile(join(fixture.repositoryPath, "new.txt"), "trailing  \n");
+      const baseline = await fixture.service.snapshot({
+        projectPath: fixture.repositoryPath,
+      });
+      const staged = await stagedState(fixture);
+      const recorded = await recordedService(
+        fixture,
+        drift(fixture.repositoryPath),
+      );
+      const contaminated = (error) =>
+        error instanceof GitSafetyError &&
+        error.code === "ERR_POLISHING_HANDOFF_CONTAMINATED" &&
+        error.changes.includes(change);
+
+      await assert.rejects(
+        recorded.service.inspectContentHygiene(hygieneOptions(baseline)),
+        contaminated,
+      );
+      if (name === "control") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-ref",
+          "-d",
+          "refs/heads/drift",
+        );
+        await assert.rejects(
+          recorded.service.stagePolishingHandoff(handoffOptions(baseline)),
+          contaminated,
+        );
+        await recorded.assertNoIndexWrites();
+        assert.equal(await stagedState(fixture), staged);
+      }
+    });
+  }
 });
 
 test("does not accept index-hidden content that git add cannot stage", async (t) => {

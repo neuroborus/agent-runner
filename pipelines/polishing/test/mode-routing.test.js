@@ -15,6 +15,7 @@ import {
 import { getPipeline } from "../../../src/index.js";
 import { polishingPipeline } from "../src/index.js";
 import { runPolishing } from "../src/workflow.js";
+import { RUNNER_HYGIENE_ISSUE_COMMAND } from "../src/workflow-contract.js";
 import {
   CHECK_AND_FIX_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
@@ -374,6 +375,110 @@ for (const mode of ["independent", "lazy"]) {
     assert.equal(result.pipelineState.reviewedFingerprint, null);
     assert.equal(result.pipelineState.reviewResult, null);
     assert.deepEqual(staging, []);
+  });
+}
+
+for (const mode of ["independent", "lazy", "combined"]) {
+  test(`${mode} runner hygiene failure re-converges repaired content before handoff`, async (t) => {
+    const primary =
+      mode === "independent" ? [] : [checkAndFix(), candidateClean()];
+    let whitespace = true;
+    let failed;
+    const phases = [];
+    const fixture = await createFixture(t, {
+      mode,
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        ...(mode === "lazy" ? [] : [reconciliationResolved()]),
+        polishingCompleted(),
+        ...primary,
+        finalizationPassed(),
+        resolution("FIX", "F1"),
+        ...primary,
+        finalizationPassed(),
+        ...(mode === "lazy" ? [cleanConfirmation()] : []),
+      ],
+      reviewer:
+        mode === "lazy"
+          ? []
+          : [
+              bootstrapReady("Reviewer"),
+              candidateApproved(),
+              candidateApproved(),
+              reviewApproved(),
+            ],
+      onContentHygiene: () =>
+        whitespace
+          ? {
+              status: "whitespace",
+              tracked: true,
+              paths: ["new.txt"],
+              omitted: 0,
+            }
+          : undefined,
+      async onRoleRun(role, request) {
+        phases.push(`${role}:${fixture.currentRun.activeTurn.phase}`);
+        if (request.schema === FINDING_RESOLUTION_SCHEMA) {
+          failed = fixture.currentRun.pipelineState;
+          whitespace = false;
+          await writeFile(join(fixture.projectPath, "new.txt"), "repaired\n");
+        }
+      },
+    });
+    const staged = [];
+    const stage = fixture.runtime.git.stagePolishingHandoff;
+    fixture.runtime.git.stagePolishingHandoff = (options) => {
+      staged.push(options.finalizedFingerprint);
+      return stage.call(fixture.runtime.git, options);
+    };
+
+    const result = await fixture.run();
+
+    assert.equal(failed.workflowState, "RESOLVE_FINDINGS");
+    assert.equal(failed.finalizedFingerprint, null);
+    assert.equal(failed.reviewedFingerprint, null);
+    assert.equal(failed.finalizationResult.status, "FAIL");
+    assert.ok(
+      failed.finalizationResult.checks.every(({ status }) => status === "PASS"),
+    );
+    assert.deepEqual(failed.finalizationResult.issues, [
+      {
+        id: "F1",
+        command: RUNNER_HYGIENE_ISSUE_COMMAND,
+        problem:
+          "Finalized content fails Runner whitespace hygiene and cannot be staged; repair the reported whitespace.",
+        evidence: [
+          "Tracked changes relative to HEAD have whitespace errors.",
+          "New file has whitespace errors: new.txt",
+        ],
+      },
+    ]);
+    assert.equal(result.pipelineState.workflowState, "DONE");
+    assert.deepEqual(staged, [result.pipelineState.finalizedFingerprint]);
+    assert.notEqual(staged[0], failed.finalizationResult.fingerprint);
+    const repair = phases.indexOf("worker:resolve-findings");
+    assert.deepEqual(
+      phases.slice(repair + 1),
+      {
+        independent: ["reviewer:review", "worker:finalize", "reviewer:confirm"],
+        lazy: [
+          "worker:check-and-fix",
+          "worker:clean-confirm",
+          "worker:finalize",
+          "worker:confirm",
+        ],
+        combined: [
+          "worker:check-and-fix",
+          "worker:clean-confirm",
+          "reviewer:review",
+          "worker:finalize",
+          "reviewer:confirm",
+        ],
+      }[mode],
+    );
+    assert.equal(result.pipelineState.settings.mode, mode);
+    assert.equal(fixture.calls.arbiter.length, 0);
   });
 }
 

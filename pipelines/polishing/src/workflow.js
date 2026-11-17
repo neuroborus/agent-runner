@@ -77,6 +77,7 @@ import {
   createPolishingState,
   finalizationFeedbackFindings,
   finalizationDiagnostic,
+  HANDOFF_WHITESPACE_CODES,
   findingFingerprint,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   CONVENTIONAL_FINALIZATION_SKILL_PATHS,
@@ -115,6 +116,7 @@ import {
   RESOLUTION_CORRECTION_CHECKPOINT,
   RESOLUTION_OUTPUT_RETRY_EXPLANATION,
   resolutionBlockers,
+  runnerHygieneIssue,
   resolutionCorrectionDiagnostic,
   resolutionNonDisputableIds,
   sha256,
@@ -3649,7 +3651,12 @@ ${JSON.stringify(
       finalizedFingerprint: current.finalizedFingerprint,
       reviewedFingerprint: current.reviewedFingerprint,
     };
-    const inspected = await runtime.git.inspectPolishingHandoff(handoffOptions);
+    let inspected;
+    try {
+      inspected = await runtime.git.inspectPolishingHandoff(handoffOptions);
+    } catch (cause) {
+      return rejectHandoffWhitespace(cause);
+    }
     if (inspected.status === "untouched" && verificationOnly) return false;
     if (
       inspected.status === "untouched" &&
@@ -3657,10 +3664,15 @@ ${JSON.stringify(
         !(await ensureCheckRequirements()))
     )
       return false;
-    const repositoryBaseline =
-      inspected.status === "complete"
-        ? inspected.snapshot
-        : await runtime.git.stagePolishingHandoff(handoffOptions);
+    let repositoryBaseline = inspected.snapshot;
+    if (inspected.status !== "complete") {
+      try {
+        repositoryBaseline =
+          await runtime.git.stagePolishingHandoff(handoffOptions);
+      } catch (cause) {
+        return rejectHandoffWhitespace(cause);
+      }
+    }
     await transition(
       {
         ...current,
@@ -3686,13 +3698,37 @@ ${JSON.stringify(
     return true;
   }
 
+  // Handoff recovery is inspection-only, so a whitespace rejection is terminal:
+  // nothing is reset, unstaged, restaged or routed back to a role checkpoint.
+  async function rejectHandoffWhitespace(cause) {
+    if (!HANDOFF_WHITESPACE_CODES.includes(cause?.code)) throw cause;
+    await transition(
+      { ...state(), workflowState: "FAILED" },
+      {
+        pause: { reason: "handoff_whitespace_rejected", code: cause.code },
+        publicActivity: activity(
+          "runner",
+          "handoff",
+          "whitespace-rejected",
+          `Polishing handoff rejected finalized content whitespace: ${cause.code}.`,
+        ),
+      },
+    );
+    return false;
+  }
+
   async function reconcileLegacyHandoff() {
     const current = state();
-    const inspected = await runtime.git.inspectPolishingHandoff({
-      expectedSnapshot: current.repositoryBaseline,
-      finalizedFingerprint: current.finalizedFingerprint,
-      reviewedFingerprint: current.reviewedFingerprint,
-    });
+    let inspected;
+    try {
+      inspected = await runtime.git.inspectPolishingHandoff({
+        expectedSnapshot: current.repositoryBaseline,
+        finalizedFingerprint: current.finalizedFingerprint,
+        reviewedFingerprint: current.reviewedFingerprint,
+      });
+    } catch (cause) {
+      return rejectHandoffWhitespace(cause);
+    }
     if (inspected.status === "complete") {
       await transition(
         {
@@ -4848,6 +4884,25 @@ ${establishedValidationPrompt(state())}${
           problem: "A runner-trusted validation command failed.",
           evidence: executed.evidence,
         });
+      }
+    }
+    if (issues.length === 0) {
+      let hygiene;
+      try {
+        hygiene = await runtime.git.inspectContentHygiene({
+          expectedSnapshot: state().repositoryBaseline,
+          contentFingerprint: fingerprint,
+        });
+      } catch (cause) {
+        if (cause?.code !== "ERR_POLISHING_HANDOFF_CONTAMINATED") throw cause;
+        await pause("unsafe_git_state", { code: cause.code });
+        return false;
+      }
+      if (hygiene.status === "whitespace") {
+        while (issueIds.has(`F${nextIssue}`)) {
+          nextIssue += 1;
+        }
+        issues.push(runnerHygieneIssue(`F${nextIssue}`, hygiene));
       }
     }
     const finalStatus = issues.length === 0 ? "PASS" : "FAIL";
