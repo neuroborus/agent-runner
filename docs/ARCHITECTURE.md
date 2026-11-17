@@ -6219,7 +6219,14 @@ publication matches the complete custom header to
 that frozen catalog and source/output selection. Authoring state version 7
 migrates legacy runs to commit-only defaults without changing authority or
 progress. Unchanged default commit inputs preserve existing session-context and
-pending source-fork recovery keys.
+pending source-fork recovery keys. Authoring state version 8 captures custom
+`repositoryBaseline` through `runtime.workspace.baseline` with exactly the
+clarification and plan artifact exemptions, so preflight persists bounded
+evidence for any directory size. The run contract accepts the legacy full
+snapshot under its existing checks or the closed compact form; unknown, scope
+and link-resolution fields fail closed. The identity version-7 migration keeps
+legacy full baselines and their exact comparison, all guards use the same
+`assertUnchanged`, and a version-7 runtime refuses compact baselines as skew.
 
 Plan execution's private `step-policy.js` consumes both deterministic contracts
 and isolates parsing, step/criterion context, workspace inspection, initial

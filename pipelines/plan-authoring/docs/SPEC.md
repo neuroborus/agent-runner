@@ -330,6 +330,15 @@ Default commit inputs retain their existing session-context keys, including
 pending source-fork recovery bindings; adding selection metadata cannot refork
 the source or invalidate an unfinished checkpoint.
 
+Pipeline state version 8 persists new custom baselines in the closed compact
+form: schema version, workspace and project paths equal to the run project,
+empty output paths, a non-negative entry count, the entry digest, both
+fingerprints and exactly the clarification and plan artifact exemptions. Any
+unknown, scope or link-resolution field fails closed. The identity version-7
+migration rewrites no state; legacy full baselines keep their representation
+and exact comparison, and a version-7 runtime refuses compact baselines as
+skew. Authoring never refreshes its baseline, so no capacity limit remains.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -753,7 +762,11 @@ persisted hashes of `task.md`, optional `context.md`, and accepted
 `clarifications.md`. Unauthorized drift pauses and invalidates dependent drafts
 and reviews. Preserve the preflight repository snapshot as the run baseline,
 compare it before and after every agent turn and around the final write, and
-also wrap each turn in its own full snapshot check. Any other repository
+also wrap each turn in its own full snapshot check. Custom runs persist the
+bounded read-only projection of a complete directory inspection: entry count,
+ordered entry digest and fingerprints with the exact artifact exemptions, never
+a per-entry array, so baseline size stays independent of the workspace tree.
+Every comparison still inspects the complete directory. Any other repository
 mutation pauses instead of advancing. Before creating any repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked, including custom authoring. Ordinary-directory

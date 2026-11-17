@@ -543,7 +543,9 @@ defaults from Git subdirectories in authoring and execution.
 Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
 configured selection before Git, read-only provider declarations, frozen criteria
 and source bindings, source-drift recovery, repository-local clarification ignore
-requirements, artifact-only publication and non-Git commit rejection.
+requirements, artifact-only publication and non-Git commit rejection. Its
+configured case asserts that preflight persists the compact baseline with
+exactly the artifact exemptions and no entries or link resolutions.
 It also covers configuration/artifact collisions without byte replacement,
 protected control destinations and canonical repository-root configuration
 lookup when commit authoring starts from a subdirectory, while explicit,
@@ -558,6 +560,9 @@ Pipeline-owned `workflow.test.js` covers all three
 custom authoring gates, missing criteria, declaration correction and legacy
 commit defaults with fake effects. Its regressions cover canonical criterion
 publication, aggregate serialized declaration budgets before freezing, and correctable canonical draft expansion.
+Directory-baseline cases reject unknown, scope, link-resolution and malformed
+compact fields, resume a legacy full baseline through its unchanged guards with
+and without drift, and keep the identity version-7 migration lossless.
 
 Fast `test/runner-custom-execution.test.js` uses lightweight transitions and
 workspace effects for sequential analysis/output execution in all three modes,

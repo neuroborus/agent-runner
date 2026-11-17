@@ -79,6 +79,17 @@ const PENDING_EDIT_FIELDS = new Set([
 ]);
 const FINDING_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const COMPACT_DIRECTORY_BASELINE_FIELDS = Object.freeze([
+  "schemaVersion",
+  "workspacePath",
+  "outputPaths",
+  "entryCount",
+  "entriesHash",
+  "contentFingerprint",
+  "identityFingerprint",
+  "allowedPaths",
+  "projectPath",
+]);
 const MAX_TEXT_LENGTH = 4_000;
 const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
@@ -1310,7 +1321,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 7 ||
+    run.pipelineStateVersion !== 8 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1421,10 +1432,33 @@ export function assertRun(run) {
   if (!custom && run.workspace?.kind === "directory")
     throw workflowError("Commit authoring requires Git workspace semantics.");
   if (pipelineState.repositoryBaseline !== null && custom) {
+    const baseline = pipelineState.repositoryBaseline;
+    // Legacy full snapshots keep their checks; compact baselines are closed.
     if (
-      pipelineState.repositoryBaseline.schemaVersion !== 1 ||
-      pipelineState.repositoryBaseline.workspacePath !== run.projectPath ||
-      !Array.isArray(pipelineState.repositoryBaseline.entries)
+      Object.hasOwn(baseline, "entries")
+        ? baseline.schemaVersion !== 1 ||
+          baseline.workspacePath !== run.projectPath ||
+          !Array.isArray(baseline.entries)
+        : !hasExactFields(baseline, COMPACT_DIRECTORY_BASELINE_FIELDS) ||
+          baseline.schemaVersion !== 1 ||
+          baseline.workspacePath !== run.projectPath ||
+          baseline.projectPath !== run.projectPath ||
+          !Array.isArray(baseline.outputPaths) ||
+          baseline.outputPaths.length !== 0 ||
+          !Number.isSafeInteger(baseline.entryCount) ||
+          baseline.entryCount < 0 ||
+          [
+            baseline.entriesHash,
+            baseline.contentFingerprint,
+            baseline.identityFingerprint,
+          ].some(
+            (value) => typeof value !== "string" || !HASH_PATTERN.test(value),
+          ) ||
+          !Array.isArray(baseline.allowedPaths) ||
+          baseline.allowedPaths.length !== 2 ||
+          baseline.allowedPaths[0] !==
+            join(run.taskPath, "clarifications.md") ||
+          baseline.allowedPaths[1] !== join(run.taskPath, "plan.md")
     )
       throw workflowError("Plan-authoring directory baseline is invalid.");
   }
@@ -1729,7 +1763,7 @@ export function assertRuntime(runtime, activeRoles = ROLES, directory = false) {
     }
   }
   for (const name of directory
-    ? ["assertUnchanged", "snapshot"]
+    ? ["assertUnchanged", "baseline", "snapshot"]
     : ["assertUnchanged", "preflight", "snapshot"]) {
     if (
       typeof (directory ? runtime.workspace : runtime.git)[name] !== "function"

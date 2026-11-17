@@ -1264,7 +1264,7 @@ ${JSON.stringify(
       });
     let preflight = custom
       ? {
-          snapshot: await safety.snapshot({
+          snapshot: await safety.baseline({
             allowedPaths: [clarificationPath, planPath],
           }),
         }
