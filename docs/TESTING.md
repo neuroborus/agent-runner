@@ -1316,6 +1316,34 @@ owner-only temporary self-bind follows the private `/tmp` and `/run` mounts
 while no other allocation path is bound, and that the descriptor bind keeps
 the validated directory when the path is substituted afterward; a substituted
 symlink and a regular file at that destination exit before bubblewrap starts.
+A separate authenticated producer stand-in runs both generated launchers
+against controlled bubblewrap with Claude's end and info sockets as descriptors
+5 and 6. Bubblewrap must receive only the info socket, as descriptor 3 natively and after the filter
+and retained bind descriptors under the fallback, with no `--sync-fd`; its
+record must reach the producer, and the end must arrive only after bubblewrap
+has exited. Killing the launcher while bubblewrap still runs must still close
+the end descriptor. The still-running bubblewrap is registered before that
+kill and, even after a failure, signaled only under its recorded identity;
+after its standard error ends, its process state must show it exiting or gone
+before the launcher and fixtures are removed; uncertain retirement retains
+those fixtures. Producer completion and stderr EOF waits have deadlines. The
+supervisor also records producer and launcher identities, and kills all verified
+owners before awaiting their shared stderr during failure cleanup. An injected
+event regression proves bounded stalled-producer and EOF failure while retaining
+unverified owners. Older programs omitting both options still run without
+forwarding any socket. A closed, standard, non-canonical, swapped, shared,
+repeated or unpaired descriptor, an unsupported descriptor option, a regular file, the launcher's own Node control channel or
+an unrelated process's live control channel relayed as the info descriptor,
+a relay of both endpoints whose peers belong to an enclosing supervisor
+without the producer proof, a proof-bearing process that does not match the
+configured producer file, a copied foreign interpreter running the pinned script,
+an interpreter evaluating code with that script path as ordinary argument data,
+and a pair beside a control channel or another
+inherited socket must exit before bubblewrap starts while the producer descriptors end. Named,
+listening and non-Unix sockets fail through the same socket-table rule; they
+are not constructed because host socket policy may forbid it.
+Running the pinned shebang script through its pinned interpreter must still
+pass the producer gate, covering both direct and `/usr/bin/env` shebangs.
 Two bounded capability-gated Linux process regressions exercise the installed
 bubblewrap direct-filter boundary without a model request, sleep, retry loop,
 or slow-tier promotion. In the first, read-only and workspace-write fallback
@@ -1361,6 +1389,19 @@ a permission denial, deny an absolute Git-metadata `Write` without a classifier
 decision, and admit direct Bash writes to Git `HEAD` and `config` without a
 native denial so each returns a command-sandbox permission error. Neither
 corrected multi-command Git turn may create `.claude` in the workspace.
+A further Git workspace-write Bash command uses a descriptor witness that
+reports sockets in both the executed Node command and its parent shell. A
+test-only metadata tap in the generated launcher records the authenticated
+producer socket identities and original stdio before projection returns,
+without changing arguments, forwarding, or isolation. The command must hold no
+nonstandard socket. No producer socket may reach the shell; any remaining
+shell socket must match captured launcher stdio, accounting for saved stdio
+without attributing its origin to IPC. The exact encoded native tool result
+is retained and decoded for assertions. A separate model-free child with a
+deliberately inherited socket at descriptor 9 must trip the same witness;
+this diagnostic negative control grants no native-policy acceptance credit.
+Claude 2.1.326 or newer must actually exercise a producer pair in that turn;
+legacy producers without IPC options remain supported by the tap.
 Read-only ordinary-directory sources initially lack staging and have either
 synthetic instructions with `.claude/skills` linked to a canonical skill tree,
 or a sparse `.claude` control holding one ordinary file. The directory
@@ -1374,7 +1415,22 @@ complete unchanged: both Bash commands still execute in the workspace, source
 `Read` succeeds, and source/control snapshots
 and root and `.claude` directory metadata remain unchanged, with no denial or
 unscripted request. Ordinary slow runs skip this differential; only an enabled
-host run proves the mechanism and its prevention for the candidate. Claude may
+host run proves the mechanism and its prevention for the candidate.
+A retained-cwd workspace-write turn over a sparse control with one existing
+declared `out` output root must advertise `workspaceWrite` and admit a scripted
+Bash write of `out/result.md` without a denial or unscripted request, while
+Bash writes to `source.txt` and `.claude/notes.md` each return a command-sandbox
+permission error. A sibling write under namespace-private `/tmp` may succeed
+inside scratch or return a permission error; the host sibling must remain
+absent in either case. Its snapshot must be unchanged
+outside declared outputs, root and `.claude` directory metadata unchanged, and
+no `.claude/.cc-writes` created. This proves the launcher's output-only
+directory write authority through the installed CLI. It is operator-only
+acceptance: run it against the candidate, and as a read-only differential
+against the previous implementation. Accept that differential only when the
+previous implementation fails specifically at the declared-directory writer
+and the repaired implementation passes; an earlier policy or IPC failure does
+not establish the directory repair. Claude may
 still require separate native approval for sensitive Git commands, so the suite
 does not claim that every Git mutation reaches the sandbox; the effective access
 proof exercises those mutations directly. Every case leaves HEAD, refs, index,

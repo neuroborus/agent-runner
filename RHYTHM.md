@@ -7,6 +7,48 @@ remain in the owning documentation.
 
 ## 2026-11-17
 
+- **Claude's sandbox descriptors stay outside commands.** Claude Code 2.1.326
+  passes bubblewrap `--sync-fd` and `--info-fd` sockets: it awaits the end of
+  one and reads the first `child-pid` record from the other, keeping its
+  write-denied placeholders until the sandbox has ended. The shared projection
+  rejected both as unsupported arguments, so every sandboxed command from that
+  version failed under both isolation policies. Forwarding them unchanged would
+  leave the end socket open in the fallback's PID-1 command, and a
+  descriptor's own metadata cannot prove its peer. The projection accepts each
+  option once,
+  only for an inherited unnamed, connected Unix stream socket distinct from
+  standard I/O and the other role. Socket shape alone cannot show ownership, so
+  both roles must arrive together as the launcher's only inherited sockets
+  beyond standard I/O, with no runtime control channel. The kernel socket table
+  read through `ss` must show the nearest ancestor holding either peer holding
+  both, carrying the invocation's private shell proof, and matching the pinned
+  configured executable, or both the shebang interpreter executable and script
+  in its first argument. A foreign executable naming the script or a script
+  path passed as eval data cannot authenticate the process. An
+  interpreter or inherited environment alone cannot authenticate an enclosing
+  supervisor's control peers through a relay. Claude's distinct producer slots also bind the end and
+  info roles. Both launchers keep the
+  end descriptor until bubblewrap has exited and pass only the info descriptor,
+  after the seccomp filter and bind descriptors, for bubblewrap to write and
+  close before the command starts. Command authority is unchanged and receipts
+  already bind the CLI version, so policy identities, persisted state and
+  versions are unchanged; adopting another CLI version still requires a fresh
+  run. Real native acceptance on the current CLI remains operator-owned.
+
+- **Declared-directory writes need no workspace grant.** Claude prepares a
+  declared directory read-only, and the authenticated launchers take write
+  authority only from validated declared outputs at the exact read-only
+  reservation. The projection still applied the Git workspace-write proof to
+  directories, so a correct directory program was rejected unless it also
+  carried a redundant whole-workspace bind; a fast fixture always added that
+  bind and hid the defect. The grant-plus-reservation proof now applies only to
+  Git workspaces. Directory writes and native commands require the reservation,
+  and a whole-workspace bind still grants nothing. This corrects a modeled
+  Source rejection only; attributing any native failure to it needs the
+  operator's real-CLI old/new differential. The authorized meaning, policy
+  identity, directory receipts, persisted state and versions are unchanged, so
+  paused runs resume only under existing compatibility rules.
+
 - **Both custom pipelines persist bounded directory baselines.** Custom
   authoring and execution previously saved every captured entry, so ordinary
   large workspaces failed preflight on the generic state array limit. Authoring

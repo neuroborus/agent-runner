@@ -6,6 +6,7 @@ import {
   mkdtemp,
   mkdir,
   lstat,
+  open,
   readdir,
   readFile,
   realpath,
@@ -263,6 +264,8 @@ function launcherSource({
   proof,
   unsetEnvironmentNames,
   directoryPolicy,
+  socketStatisticsBinary,
+  producerIdentity,
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
@@ -317,9 +320,10 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-${projectionSource({ access, cwd, providerCwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp") })}
+${projectionSource({ access, cwd, providerCwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp"), socketStatisticsBinary, producerIdentity })}
+const producerDescriptors = {};
 let sourceArguments;
-try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
+try { sourceArguments = projectArguments(process.argv.slice(2), producerDescriptors); } catch { process.exit(125); }
 const validatedArguments = [];
 const presentUnsetEnvironmentNames = [];
 const environmentOperations = new Set();
@@ -808,6 +812,10 @@ const missingUnsetArguments = [...protectedEnvironmentNames]
   .flatMap((name) => ["--unsetenv", name]);
 const filterDescriptor = createSeccompDescriptor();
 if (filterDescriptor === undefined) fail();
+// Claude's info descriptor follows the filter and bind descriptors; its end
+// descriptor stays here, open until bubblewrap has exited.
+const infoDescriptors =
+  producerDescriptors.info === undefined ? [] : [producerDescriptors.info];
 let result;
 try {
   result = spawnSync(
@@ -818,6 +826,9 @@ try {
       ...${JSON.stringify(toolHomeArguments(home, proof))},
       "--seccomp",
       "3",
+      ...(infoDescriptors.length === 0
+        ? []
+        : ["--info-fd", String(4 + temporaryBindDescriptors.length)]),
       ...missingUnsetArguments,
       "--chdir",
       cwd,
@@ -834,6 +845,7 @@ try {
         "inherit",
         filterDescriptor,
         ...temporaryBindDescriptors,
+        ...infoDescriptors,
       ],
     },
   );
@@ -841,7 +853,11 @@ try {
   result = undefined;
 }
 if (
-  ![filterDescriptor, ...temporaryBindDescriptors]
+  ![
+    filterDescriptor,
+    ...temporaryBindDescriptors,
+    ...Object.values(producerDescriptors),
+  ]
     .map(closeDescriptor)
     .every(Boolean)
 ) process.exit(125);
@@ -863,6 +879,7 @@ export async function createClaudeCommandLauncher({
   cwd,
   providerCwd,
   environment,
+  producerBinary,
   gitDirectories,
   unsetEnvironmentNames,
   directoryPolicy,
@@ -947,6 +964,63 @@ export async function createClaudeCommandLauncher({
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
     }
+    // Only a producer that passes sandbox descriptors needs the socket table;
+    // without a safe one those descriptors fail closed.
+    let socketStatisticsBinary = await resolveExecutable(
+      "ss",
+      environment,
+    ).catch(() => null);
+    if (
+      socketStatisticsBinary !== null &&
+      protectedRoots.some((path) => containsPath(path, socketStatisticsBinary))
+    )
+      socketStatisticsBinary = null;
+    // Missing executables still permit legacy programs without IPC options.
+    // Descriptor-bearing programs additionally need this exact producer file.
+    const producerIdentity = await (async () => {
+      if (producerBinary === undefined) return null;
+      const path = await resolveExecutable(producerBinary, environment);
+      if (protectedRoots.some((root) => containsPath(root, path))) return null;
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const metadata = await file.stat({ bigint: true });
+        const header = Buffer.alloc(256);
+        const { bytesRead } = await file.read(header, 0, header.length, 0);
+        const script = header.subarray(0, 2).toString() === "#!";
+        let interpreter = null;
+        if (script) {
+          const line = header.subarray(0, bytesRead).toString().split("\n")[0];
+          const shebang =
+            /^#![ \t]*(\/[^ \t]+?)(?:[ \t]+([^ \t]+))?[ \t]*$/u.exec(line);
+          if (shebang === null) return null;
+          let executable = await resolveExecutable(shebang[1], environment);
+          // env replaces itself with its command. Pin that executable rather
+          // than env; ambiguous arguments cannot establish a script binding.
+          if (shebang[2] !== undefined) {
+            if (
+              executable !== (await realpath("/usr/bin/env")) ||
+              shebang[2].startsWith("-") ||
+              shebang[2].includes("=")
+            )
+              return null;
+            executable = await resolveExecutable(shebang[2], environment);
+          }
+          if (protectedRoots.some((root) => containsPath(root, executable)))
+            return null;
+          const current = await stat(executable, { bigint: true });
+          interpreter = { dev: String(current.dev), ino: String(current.ino) };
+        }
+        return {
+          path,
+          dev: String(metadata.dev),
+          ino: String(metadata.ino),
+          script,
+          interpreter,
+        };
+      } finally {
+        await file.close();
+      }
+    })().catch(() => null);
     launcherDirectory =
       directory === undefined
         ? await mkdtemp(join(temporaryRoot, "agent-runner-claude-command-"))
@@ -985,6 +1059,8 @@ export async function createClaudeCommandLauncher({
               claudeWritablePaths,
               gitDirectories,
               privateDirectory: join(directory ?? launcherDirectory, "tmp"),
+              socketStatisticsBinary,
+              producerIdentity,
             })
           : launcherSource({
               access,
@@ -1010,6 +1086,8 @@ export async function createClaudeCommandLauncher({
               proof,
               unsetEnvironmentNames,
               directoryPolicy,
+              socketStatisticsBinary,
+              producerIdentity,
             }),
         { mode: 0o500 },
       ),

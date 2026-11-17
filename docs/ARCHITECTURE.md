@@ -4171,7 +4171,9 @@ Directory turns replace Git metadata preparation with workspace-service inspecti
 of all declared reads and discovered filesystem controls. Claude's mount
 preparation stays read-only with no configured writable paths. Both authenticated
 launchers keep the workspace read-only and bind only declared existing output
-roots writable. Missing output roots fail closed rather than being materialized
+roots writable; a write turn needs the exact read-only preparation reservation,
+and a whole-workspace grant adds no write access.
+Missing output roots fail closed rather than being materialized
 or widening access to their parents; new descendants can be created inside an
 existing output directory. Mount identities come from a fresh filesystem-owned
 snapshot after storage allocation. Both launchers recheck canonical paths,
@@ -4487,7 +4489,54 @@ by a private workspace mask.
 Duplicate environment operations, assignments to `ARGV0`, credentials, or the
 launcher token, writable roots, unsupported options, malformed namespace
 arguments, malformed option arity or ordering, and extra payload arguments exit
-before any child starts.
+before bubblewrap or the command starts.
+
+Current Claude versions also pass `--sync-fd` and `--info-fd`: a descriptor
+whose end Claude awaits before it removes its write-denied placeholders, and
+one from which it reads bubblewrap's first `child-pid` record to wait for or
+kill the sandbox. The shared projection used by both launchers accepts each
+option at most once, anywhere before `--`, only with a canonical descriptor
+number naming Claude's producer-assigned slot (`5` for end, `6` for info) and
+an inherited unnamed, connected, non-listening Unix stream socket that is
+neither standard I/O nor the other role's socket.
+Socket shape alone cannot prove that Claude owns a descriptor. The launcher
+token authenticates the invocation, and both roles must arrive together and
+account for every inherited socket beyond standard I/O, with no Node control
+channel in the launcher. The current producer's other inherited descriptors
+are files, so its own pair passes this census; a producer that adds another
+socket fails closed. The launcher then reads the kernel's Unix socket table
+through `ss`, resolved from the turn's `PATH` at launcher creation and never
+from a protected root, to find each role's peer socket. Walking the launcher's
+ancestors, the first process that holds either peer must hold both and carry
+the invocation's exact private shell proof in its launch environment. That
+process must also match the configured Claude executable's pinned device/inode;
+a shebang CLI requires both the pinned interpreter executable and the pinned
+script as its first argument, verifying both current identities. Direct
+interpreter shebangs and `/usr/bin/env` with one command are resolved at launcher
+creation; unsupported argument forms fail closed for descriptor-bearing programs.
+A foreign executable naming the script or a script path supplied as ordinary
+data after `--eval` cannot authenticate that process.
+The interpreter or inherited environment alone cannot authenticate a supervisor.
+Claude keeps the other end of each pair it creates, even when a shell sits
+between it and the launcher. An enclosing supervisor's unrelated control peers
+cannot acquire producer provenance through a relay, and the fixed slots prevent
+role substitution. A foreign peer or an ancestor without those bindings fails.
+Without a usable `ss` or producer identity, either
+option fails closed; a producer that passes neither needs none. Closed, forged,
+malformed, repeated, shared, unpaired, file, named, listening, control-channel,
+foreign-peer and non-Unix descriptors, a pair beside another inherited socket,
+and every other bubblewrap descriptor option, exit before bubblewrap starts.
+Neither descriptor reaches the command. Both launchers remove both options
+and keep the end descriptor, never reading or writing it, until bubblewrap has
+exited. They pass only the info descriptor to bubblewrap: as child descriptor
+`3` under native policy, and after the seccomp filter and any retained bind
+descriptors under the fallback. Bubblewrap writes the record from outside the
+sandbox and closes the descriptor in its child before the command starts. Both launchers
+close both descriptors after bubblewrap returns; refusal or interruption closes
+them at launcher exit, so Claude observes the end either way. A producer that
+passes neither option keeps its unchanged program. Accepting this producer form
+changes no command authority, so the policy identities below are unchanged;
+receipts already bind the CLI version that emits it.
 
 After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
@@ -4553,8 +4602,10 @@ existing descendant masks. Claude prepares its filesystem arguments with an
 explicit read-only project reservation and no extra configured write paths;
 this prevents it from registering absent project targets for creation or later
 cleanup. The authenticated launcher replaces only that exact reservation with
-the runner-authorized workspace access. Writable access requires both the
-original workspace bind and the preparation reservation.
+the runner-authorized workspace access. Git writable access requires both the
+original workspace bind and the preparation reservation. Declared-directory
+writable and native access requires the reservation and derives writes only
+from validated declared outputs; a whole-workspace bind grants nothing.
 
 Because the reservation covers workspace Git metadata, selected `readPaths`
 inputs, and Claude's built-in shell, tool, and settings controls (`.gitconfig`,

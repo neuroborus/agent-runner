@@ -1812,6 +1812,7 @@ export function createClaudeAdapter(options = {}) {
           providerCwd,
           directory: storage.directory,
           environment: baseEnvironment,
+          producerBinary: claudeBinary,
           gitDirectories,
           directoryPolicy: await request.directoryBoundary?.bindMounts(),
           isolationPolicy,

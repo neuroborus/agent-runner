@@ -120,6 +120,7 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   depending on the selected role backends
 - Linux with usable user and PID namespaces and system-installed `bubblewrap`
   for owned execution and trusted validation, plus `socat` for the Claude backend
+  and iproute2 `ss` for Claude versions that pass sandbox descriptors
 
 Claude does not require host `CAP_SYS_ADMIN`. It prefers its full native
 sandbox and may automatically use a restricted-host composition only when an

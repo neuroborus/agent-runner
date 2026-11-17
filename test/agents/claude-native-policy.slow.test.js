@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile as executeFileCallback } from "node:child_process";
+import { execFile as executeFileCallback, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, openSync, writeSync } from "node:fs";
 import {
   access,
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -80,6 +81,58 @@ const CONTENT_WORK =
 // Script-driven content work has no native fast path.
 const SCRIPT_WORK =
   "node -e \"require('node:fs').copyFileSync('tracked.txt', 'script-copy.txt')\"";
+// Observe both the executed command and its shell. Shells may retain a
+// close-on-exec duplicate of their original stdio after redirecting output;
+// compare its identity with launcher-entry stdio rather than guessing its fd.
+const SOCKET_WITNESS = [
+  "const fs = require('node:fs');",
+  "const stat = fs.readFileSync('/proc/self/stat', 'utf8');",
+  "const shell = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1];",
+  "const sockets = function (pid) {",
+  "return fs.readdirSync('/proc/' + pid + '/fd').flatMap(function (fd) {",
+  "if (Number(fd) < 3) return [];",
+  "let link; try { link = fs.readlinkSync('/proc/' + pid + '/fd/' + fd); }",
+  "catch (error) { if (error.code === 'ENOENT') return []; throw error; }",
+  "return link.startsWith('socket:') ? [{ fd: Number(fd), link: link }] : []; }); };",
+  "fs.writeSync(1, JSON.stringify({ command: sockets('self'), shell: sockets(shell) }) + '\\n');",
+].join(" ");
+const INHERITED_SOCKETS = `node -e "${SOCKET_WITNESS}"`;
+
+// Tool results retain their exact encoded representation in the fixture. Decode
+// only at assertion sites, accepting the protocol's string or text-block form.
+function toolText({ content }) {
+  const value = JSON.parse(content);
+  if (typeof value === "string") return value;
+  assert.ok(Array.isArray(value));
+  assert.ok(
+    value.every(
+      (block) => block.type === "text" && typeof block.text === "string",
+    ),
+  );
+  return value.map(({ text }) => text).join("\n");
+}
+
+function assertSocketWitness(witness, records) {
+  assert.deepEqual(
+    witness.command,
+    [],
+    "Nonstandard socket reached the command.",
+  );
+  const producerSockets = new Set(records.flatMap(({ producer }) => producer));
+  const standardSockets = new Set(records.flatMap(({ stdio }) => stdio));
+  for (const { link } of witness.shell) {
+    assert.equal(
+      producerSockets.has(link),
+      false,
+      "Producer socket reached the shell.",
+    );
+    assert.ok(
+      standardSockets.has(link),
+      "Unaccounted socket reached the shell.",
+    );
+  }
+}
+
 const MAINTAINED_CWD = "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR";
 const TURN_TIMEOUT_MS = 180_000;
 const IDENTITY = [
@@ -478,6 +531,7 @@ test(
     let baseline = false;
     let cwdAdoption = false;
     let nativeOutput = [];
+    let descriptorCapture;
     function owned(options) {
       if (options.onProcess === undefined) return options;
       let pid;
@@ -493,13 +547,31 @@ test(
         },
       };
     }
-    const execute = (file, argumentsList, requested) => {
+    const execute = async (file, argumentsList, requested) => {
       const options = owned(requested);
       if (file === "claude")
         assertProviderEnvironment(options.env, argumentsList.includes("-p"));
       const settingsIndex = argumentsList.indexOf("--settings") + 1;
       if (!argumentsList.includes("-p") || settingsIndex === 0)
         return realExecute(file, argumentsList, options);
+      if (descriptorCapture !== undefined) {
+        // Observe the authenticated launcher's actual input sockets and stdio.
+        // This test-only tap changes neither its vector nor descriptor handling.
+        const launcher = join(options.env.PATH.split(delimiter)[0], "bwrap");
+        const source = await readFile(launcher, "utf8");
+        const marker = "      return normalized;";
+        assert.equal(source.split(marker).length, 2);
+        const tap = `      fs.appendFileSync(${JSON.stringify(descriptorCapture)}, JSON.stringify({
+          producer: (typeof descriptors === "undefined" ? [] : Object.values(descriptors)).map((fd) => fs.readlinkSync("/proc/self/fd/" + fd)),
+          stdio: [0, 1, 2].map((fd) => fs.readlinkSync("/proc/self/fd/" + fd)),
+        }) + "\\n");\n`;
+        await chmod(launcher, 0o700);
+        try {
+          await writeFile(launcher, source.replace(marker, tap + marker));
+        } finally {
+          await chmod(launcher, 0o500);
+        }
+      }
       // Native records stay test-local evidence of which decision applied.
       const turnOptions = {
         ...options,
@@ -544,7 +616,14 @@ test(
     let repositoryCount = 0;
     async function turn(
       script,
-      { prior = false, adoptCwd = false, control } = {},
+      {
+        prior = false,
+        adoptCwd = false,
+        control,
+        access: directoryAccess = "read-only",
+        output = false,
+        inspectSockets = false,
+      } = {},
     ) {
       repositoryCount += 1;
       const base = join(root, `case-${repositoryCount}`);
@@ -578,13 +657,15 @@ test(
         gitDigest = await treeDigest(join(repository, ".git"));
       } else {
         await createDirectorySource(repository, control);
+        const outputRoot = join(repository, "out");
+        if (output) await mkdir(outputRoot);
         workspacePolicy = {
           kind: "directory",
           workspacePath: repository,
           stateRoot: join(base, "state"),
           inputPaths: [],
           sourcePaths: [],
-          outputPaths: [],
+          outputPaths: output ? [outputRoot] : [],
         };
         const { kind: _kind, ...declarations } = workspacePolicy;
         inspection = await workspace.inspect(declarations);
@@ -593,15 +674,25 @@ test(
           [repository, join(repository, ".claude")].map(directoryMetadata),
         );
         const directoryCapabilities = await adapter.probe({
-          access: "read-only",
+          access: directoryAccess,
           workspacePolicy,
         });
-        assert.equal(directoryCapabilities.readOnly, true);
+        assert.equal(
+          directoryCapabilities.readOnly,
+          directoryAccess === "read-only",
+        );
+        assert.equal(
+          directoryCapabilities.workspaceWrite,
+          directoryAccess === "workspace-write",
+        );
       }
       state.steps = [...script({ repository }), STRUCTURED];
       state.unscripted = [];
       state.toolResults = new Map();
       nativeOutput = [];
+      descriptorCapture = inspectSockets
+        ? join(base, "producer-sockets.jsonl")
+        : undefined;
       baseline = prior;
       cwdAdoption = adoptCwd;
       const progress = [];
@@ -614,7 +705,7 @@ test(
       let error;
       try {
         result = await adapter.run({
-          access: control === undefined ? "workspace-write" : "read-only",
+          access: control === undefined ? "workspace-write" : directoryAccess,
           cwd: repository,
           prompt: "Perform the requested repository steps.",
           schema: SCHEMA,
@@ -674,6 +765,13 @@ test(
         repository,
         result,
         snapshot,
+        descriptorRecords:
+          descriptorCapture === undefined
+            ? []
+            : (await readFile(descriptorCapture, "utf8"))
+                .trim()
+                .split("\n")
+                .map((line) => JSON.parse(line)),
         records: Buffer.concat(nativeOutput)
           .toString("utf8")
           .split("\n")
@@ -692,10 +790,14 @@ test(
     async function assertGitUnchanged({ before, repository }) {
       assert.deepEqual(await gitState(repository), before);
     }
-    async function assertDirectoryUnchanged(value) {
+    async function assertDirectoryUnchanged(
+      value,
+      { allowOutputs = false } = {},
+    ) {
       workspace.assertUnchanged({
         before: value.snapshot,
         after: await workspace.snapshot({ inspection: value.inspection }),
+        allowOutputs,
       });
       assert.deepEqual(
         await Promise.all(
@@ -789,6 +891,71 @@ test(
     await assert.rejects(lstat(join(corrected.repository, ".claude")), {
       code: "ENOENT",
     });
+
+    // The same witness must detect an intentionally inherited extra socket.
+    // This is a model-free diagnostic control, not native acceptance evidence.
+    const leakControl = spawnSync(process.execPath, ["-e", SOCKET_WITNESS], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe", ...Array(6).fill("ignore"), "pipe"],
+    });
+    assert.equal(leakControl.error, undefined);
+    assert.equal(leakControl.status, 0);
+    const leaked = JSON.parse(leakControl.stdout);
+    assert.deepEqual(
+      leaked.command.map(({ fd }) => fd),
+      [9],
+    );
+    assert.throws(
+      () => assertSocketWitness(leaked, []),
+      /Nonstandard socket reached the command/u,
+    );
+    // Even a socket listed as stdio must be rejected if it is also identified
+    // as a producer channel; a shell-only leak cannot hide behind an alias.
+    const link = leaked.command[0].link;
+    assert.throws(
+      () =>
+        assertSocketWitness({ command: [], shell: leaked.command }, [
+          { producer: [link], stdio: [link] },
+        ]),
+      /Producer socket reached the shell/u,
+    );
+
+    // Producer channels must be absent from both the executed command and
+    // shell. Any remaining shell socket must match original launcher stdio;
+    // pre-existing saved stdio is not attributed to the new IPC support.
+    const descriptors = await turn(() => [bash(INHERITED_SOCKETS)], {
+      inspectSockets: true,
+    });
+    assert.equal(descriptors.error, undefined);
+    assert.deepEqual(descriptors.result.structured, { ok: true });
+    assert.deepEqual(descriptors.unscripted, []);
+    assert.equal(nativeDenials(descriptors.records).length, 0);
+    assert.equal(descriptors.toolResults.length, 1);
+    assert.equal(descriptors.toolResults[0].error, false);
+    const witness = JSON.parse(toolText(descriptors.toolResults[0]));
+    assert.ok(descriptors.descriptorRecords.length > 0);
+    assert.ok(
+      descriptors.descriptorRecords.every(({ producer }) =>
+        [0, 2].includes(producer.length),
+      ),
+    );
+    const [major, minor, patch] = capabilities.version
+      .split(/[.+-]/u)
+      .slice(0, 3)
+      .map(Number);
+    if (
+      major > 2 ||
+      (major === 2 && (minor > 1 || (minor === 1 && patch >= 326)))
+    ) {
+      assert.ok(
+        descriptors.descriptorRecords.some(
+          ({ producer }) => producer.length === 2,
+        ),
+        "The IPC-capable CLI did not exercise its producer channels.",
+      );
+    }
+    assertSocketWitness(witness, descriptors.descriptorRecords);
+    await assertGitUnchanged(descriptors);
 
     // The first and only tool request reaches the absolute Git-path rule.
     // A loopback endpoint leaves auto mode without its server-side check, so
@@ -910,6 +1077,61 @@ test(
       assertInspectionCompleted(current);
       await assertDirectoryUnchanged(current);
     }
+
+    // Claude prepares a declared directory read-only; the authenticated
+    // launcher grants only the declared output at its reservation.
+    const writeCommand = (path) =>
+      bash(`node -e "require('node:fs').writeFileSync('${path}', 'Written.')"`);
+    const declared = await turn(
+      () =>
+        [
+          "out/result.md",
+          "source.txt",
+          ".claude/notes.md",
+          "../outside.txt",
+        ].map(writeCommand),
+      { control: "sparse", access: "workspace-write", output: true },
+    );
+    assert.equal(
+      declared.error,
+      undefined,
+      "Declared-directory writer did not complete.",
+    );
+    assert.deepEqual(declared.result.structured, { ok: true });
+    assert.deepEqual(declared.unscripted, []);
+    assert.equal(nativeDenials(declared.records).length, 0);
+    assert.equal(declared.toolResults.length, 4);
+    assert.equal(
+      declared.toolResults[0].error,
+      false,
+      "Declared-directory output write failed.",
+    );
+    assert.ok(
+      declared.toolResults
+        .slice(1, 3)
+        .every(
+          (result) =>
+            result.error && /EROFS|EACCES|EPERM/u.test(toolText(result)),
+        ),
+    );
+    // /tmp is namespace-private scratch: a sibling can be writable there
+    // without reaching the host. A denial is also valid; host absence below
+    // is the required isolation witness in either case.
+    const scratch = declared.toolResults[3];
+    if (scratch.error) assert.match(toolText(scratch), /EROFS|EACCES|EPERM/u);
+    assert.equal(
+      await readFile(join(declared.repository, "out", "result.md"), "utf8"),
+      "Written.",
+    );
+    await assert.rejects(
+      access(join(declared.repository, "..", "outside.txt")),
+      { code: "ENOENT" },
+    );
+    await assert.rejects(
+      lstat(join(declared.repository, ".claude", ".cc-writes")),
+      { code: "ENOENT" },
+    );
+    await assertDirectoryUnchanged(declared, { allowOutputs: true });
     assert.deepEqual(await readdir(decoy), []);
   },
 );

@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile as executeFileCallback, spawnSync } from "node:child_process";
+import {
+  execFile as executeFileCallback,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { EventEmitter } from "node:events";
+import { closeSync, constants, openSync, readFileSync } from "node:fs";
 import {
   access,
   chmod,
+  copyFile,
   link,
   mkdir,
   mkdtemp,
@@ -460,7 +466,7 @@ function claudeBubblewrapArguments({
   return argumentsList;
 }
 
-async function createFakeBubblewrap(t) {
+async function createFakeBubblewrap(t, beforeRemove = () => {}) {
   const directory = await mkdtemp(
     join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
   );
@@ -489,6 +495,21 @@ async function createFakeBubblewrap(t) {
         `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
         `process.exit(12);\n` +
         `const args = process.argv.slice(2);\n` +
+        // Record every non-standard socket received and, like bubblewrap,
+        // write the child-pid record to the info descriptor and close it.
+        `if (process.env.AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS) {\n` +
+        `  const { closeSync, readdirSync, readlinkSync } = require("node:fs");\n` +
+        `  const sockets = readdirSync("/proc/self/fd").filter((fd) => {\n` +
+        `    try { return Number(fd) > 2 && readlinkSync("/proc/self/fd/" + fd).startsWith("socket:"); } catch { return false; }\n` +
+        `  });\n` +
+        `  const info = args.includes("--info-fd") ? args[args.indexOf("--info-fd") + 1] : null;\n` +
+        `  appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS, JSON.stringify({ info, sockets }) + "\\n");\n` +
+        `  if (info !== null) {\n` +
+        `    writeSync(Number(info), '{\\n    "child-pid": ' + process.pid + "\\n}\\n");\n` +
+        `    closeSync(Number(info));\n` +
+        `    if (process.env.AGENT_RUNNER_FAKE_BWRAP_HOLD === "1") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n` +
+        `  }\n` +
+        `}\n` +
         `if (process.env.AGENT_RUNNER_FAKE_BWRAP_MATERIALIZE) {\n` +
         `  for (let i = 0; i < args.indexOf("--"); i++) {\n` +
         `    if (args[i] !== "--ro-bind" || args[i+1] === args[i+2]) continue;\n` +
@@ -546,7 +567,10 @@ async function createFakeBubblewrap(t) {
     ),
     writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
   ]);
-  t.after(() => rm(directory, { force: true, recursive: true }));
+  t.after(async () => {
+    beforeRemove();
+    await rm(directory, { force: true, recursive: true });
+  });
   return { bindLogPath, directory, filterLogPath, helperLogPath, logPath };
 }
 
@@ -1565,7 +1589,9 @@ async function scopedDirectoryWorkspace(t) {
   return { ...directory, selectedFile, excluded, unselected };
 }
 
-function directoryCommandArguments(directory, access, native) {
+// Claude prepares a declared directory read-only for every access: the
+// workspace appears only as the exact reservation, never as a write grant.
+function directoryCommandArguments(directory, native) {
   return [
     "--new-session",
     "--die-with-parent",
@@ -1575,9 +1601,6 @@ function directoryCommandArguments(directory, access, native) {
     "--ro-bind",
     "/",
     "/",
-    ...(access === "workspace-write"
-      ? ["--bind", directory.cwd, directory.cwd]
-      : []),
     "--ro-bind",
     directory.cwd,
     directory.cwd,
@@ -1938,7 +1961,7 @@ test("projects native and fallback directory commands onto declared outputs only
             assert.ok(
               settings.sandbox.filesystem.denyWrite.includes(directory.source),
             );
-            const args = directoryCommandArguments(directory, access, native);
+            const args = directoryCommandArguments(directory, native);
             // Claude's own temporary bind stays inside the private allocation.
             const privateWrite = join(call.options.env.TMPDIR, "claude-temp");
             privateWrites.push(privateWrite);
@@ -1955,6 +1978,8 @@ test("projects native and fallback directory commands onto declared outputs only
                 encoding: "utf8",
                 timeout: 10_000,
               });
+            // Write access comes from the declared outputs at the reservation,
+            // never from a whole-workspace grant.
             await runLauncher(args);
             for (const forbidden of [
               directory.input,
@@ -1974,6 +1999,16 @@ test("projects native and fallback directory commands onto declared outputs only
               await assert.rejects(runLauncher(forged), { code: 125 });
             }
             if (access === "workspace-write") {
+              // A missing reservation, even replaced by a whole-workspace
+              // grant, is refused before bubblewrap starts.
+              const log = await readFile(fake.logPath, "utf8");
+              const reservation = args.indexOf(directory.cwd) - 1;
+              for (const unreserved of [
+                args.toSpliced(reservation, 3),
+                args.toSpliced(reservation, 1, "--bind"),
+              ])
+                await assert.rejects(runLauncher(unreserved), { code: 125 });
+              assert.equal(await readFile(fake.logPath, "utf8"), log);
               const held = join(directory.root, "original-output");
               await rename(directory.output, held);
               await mkdir(directory.output);
@@ -2151,11 +2186,7 @@ test("isolates native initialization before directory commands and retains it un
             directory.source,
           ])
             assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
-          const args = directoryCommandArguments(
-            directory,
-            "read-only",
-            native,
-          );
+          const args = directoryCommandArguments(directory, native);
           if (native) {
             const mask = args.indexOf("/dev/null") - 1;
             args.splice(mask, 3);
@@ -2315,11 +2346,7 @@ test("rejects unsafe directory outputs during storage allocation and launcher ad
           try {
             await executeFile(
               call.commandLauncherPath,
-              directoryCommandArguments(
-                directory,
-                "workspace-write",
-                nativeSandbox === true,
-              ),
+              directoryCommandArguments(directory, nativeSandbox === true),
               { env: call.options.env, timeout: 10_000 },
             );
           } catch (cause) {
@@ -7798,6 +7825,624 @@ test(
           "Unchanged.\n",
         );
       } finally {
+        await launcher.remove();
+      }
+    }
+  },
+);
+
+// Linux sets this process flag irrevocably before an exiting process closes
+// its descriptors, and keeps it while the process remains a zombie.
+const PROCESS_EXITING = 0x4;
+
+// Reads a process's start time and whether it is exiting, or nothing once it
+// has been reaped.
+function processStatus(pid) {
+  let stat;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return undefined;
+    throw cause;
+  }
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return {
+    exiting: (Number(fields[6]) & PROCESS_EXITING) !== 0,
+    start: fields[19],
+  };
+}
+
+async function sandboxDeadline(promise, description) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(description)), 10_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function retireSandboxProcesses(owned) {
+  // Kill every verified owner before awaiting shared stderr: a leaked socket
+  // must not prevent retirement of another process that still holds it.
+  for (const { pid, start } of owned) {
+    if (start !== undefined && processStatus(pid)?.start === start) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") throw cause;
+      }
+    }
+  }
+  for (const owner of owned) {
+    await sandboxDeadline(owner.errorEnd, "Sandbox stderr did not close.");
+    const current = processStatus(owner.pid);
+    assert.ok(
+      current === undefined ||
+        (owner.start !== undefined && current.start !== owner.start) ||
+        current.exiting,
+    );
+    owned.delete(owner);
+  }
+}
+
+// Runs in a separate authenticated producer, so the supervising test's live
+// control channel cannot acquire producer provenance by sharing its ancestry.
+function sandboxProducer(path, argumentsList, { info, extra, hold, relay }) {
+  const child = spawn(path, argumentsList, {
+    env: process.env,
+    stdio: [
+      "ignore",
+      "ignore",
+      2,
+      "ignore",
+      "ignore",
+      relay ? 5 : "pipe",
+      relay ? 3 : (info ?? "pipe"),
+      ...extra,
+    ],
+  });
+  process.send({
+    type: "launcher",
+    pid: child.pid,
+    start: processStatus(child.pid)?.start,
+  });
+  const streamEnd = (stream) =>
+    stream === null
+      ? Promise.resolve()
+      : new Promise((done) => {
+          stream.once("end", done);
+          stream.resume();
+        });
+  for (const stream of child.stdio.slice(7)) stream?.resume();
+  let record = "";
+  let childPid;
+  child.stdio[6]?.on("data", (chunk) => {
+    const known = childPid !== undefined;
+    record += chunk;
+    childPid = Number(/"child-pid":\s*(\d+)\D/u.exec(record)?.[1]);
+    if (Number.isNaN(childPid)) childPid = undefined;
+    else if (hold && !known) {
+      // Registration precedes the kill; stderr is shared with bubblewrap and
+      // the supervisor awaits its end after retiring this recorded identity.
+      process.send(
+        { type: "held", pid: childPid, start: processStatus(childPid)?.start },
+        () => child.kill("SIGKILL"),
+      );
+    }
+  });
+  const exit = new Promise((done, reject) => {
+    child.once("error", reject);
+    child.once("exit", (status, signal) => done({ status, signal }));
+  });
+  Promise.all([
+    streamEnd(child.stdio[5]).then(() => {
+      if (childPid === undefined) return false;
+      const current = processStatus(childPid);
+      return current !== undefined && !current.exiting;
+    }),
+    streamEnd(child.stdio[6]),
+    exit,
+  ])
+    .then(([bubblewrapOutlivedEnd, , result]) => {
+      process.send(
+        { type: "result", ...result, bubblewrapOutlivedEnd, childPid, record },
+        () => process.disconnect(),
+      );
+    })
+    .catch(() => process.exit(1));
+}
+
+function sandboxProducerSource() {
+  return `
+      const { spawn } = require("node:child_process");
+      const { readFileSync } = require("node:fs");
+      const PROCESS_EXITING = ${PROCESS_EXITING};
+      ${processStatus.toString()}
+      (${sandboxProducer.toString()})(...JSON.parse(process.argv.at(-1)));
+    `;
+}
+
+async function runSandboxProducer(
+  path,
+  argumentsList,
+  {
+    env,
+    info,
+    extra = [],
+    onHeld,
+    relay = false,
+    script,
+    evalArgument,
+    binary = process.execPath,
+    owned,
+  },
+) {
+  const processes = [];
+  try {
+    return await sandboxDeadline(
+      new Promise((resolve, reject) => {
+        const child = spawn(
+          binary,
+          [
+            ...(script !== undefined
+              ? [script]
+              : evalArgument !== undefined
+                ? [`--eval=${sandboxProducerSource()}`, evalArgument]
+                : ["-e", sandboxProducerSource()]),
+            JSON.stringify([
+              path,
+              argumentsList,
+              {
+                info: typeof info === "number" ? 7 : info,
+                extra,
+                hold: onHeld !== undefined,
+                relay,
+              },
+            ]),
+          ],
+          {
+            env,
+            stdio: [
+              "ignore",
+              "ignore",
+              "pipe",
+              "ipc",
+              "ignore",
+              relay ? "pipe" : "ignore",
+              "ignore",
+              typeof info === "number" ? info : "ignore",
+            ],
+          },
+        );
+        child.once("error", reject);
+        const errorEnd = new Promise((done) => {
+          child.stderr.once("end", done);
+          child.stderr.resume();
+        });
+        const track = (record) => {
+          const owner = { ...record, errorEnd };
+          processes.push(owner);
+          owned.add(owner);
+        };
+        track({ pid: child.pid, start: processStatus(child.pid)?.start });
+        child.stdio[5]?.resume();
+        let result;
+        let controlRecord = "";
+        child.on("message", (message) => {
+          if (message.type === "launcher") track(message);
+          else if (message.type === "held") onHeld({ ...message, errorEnd });
+          else if (message.type === "result") result = message;
+          else controlRecord += JSON.stringify(message);
+        });
+        // Exit can precede the final IPC delivery. Await that channel's closure,
+        // but not stderr: a deliberately held bubblewrap still owns stderr until
+        // the supervisor receives this result and retires it.
+        Promise.all([
+          new Promise((done) =>
+            child.once("exit", (status, signal) => done({ status, signal })),
+          ),
+          new Promise((done) => child.once("disconnect", done)),
+        ]).then(([exit]) => {
+          if (
+            exit.status !== 0 ||
+            exit.signal !== null ||
+            result === undefined
+          ) {
+            reject(new Error("Sandbox producer did not retire normally."));
+          } else {
+            resolve({ ...result, record: result.record + controlRecord });
+          }
+        }, reject);
+      }),
+      "Sandbox producer did not complete before its deadline.",
+    );
+  } finally {
+    for (const owner of processes) {
+      const current = processStatus(owner.pid);
+      if (
+        current === undefined ||
+        (owner.start !== undefined && current.start !== owner.start) ||
+        current.exiting
+      ) {
+        owned.delete(owner);
+      }
+    }
+  }
+}
+
+test("bounds stalled sandbox producer and cleanup waits without releasing live owners", async () => {
+  const child = new EventEmitter();
+  child.pid = 101;
+  child.stderr = new EventEmitter();
+  child.stderr.resume = () => {};
+  child.stdio = [];
+  const states = new Map(
+    [101, 102, 103].map((pid) => [pid, { start: String(pid), exiting: false }]),
+  );
+  const timers = new Set();
+  const signaled = [];
+  const owned = new Set();
+  const helpers = runInNewContext(
+    `
+        ${sandboxDeadline.toString()}
+        ${retireSandboxProcesses.toString()}
+        ${runSandboxProducer.toString()}
+        ({ runSandboxProducer, retireSandboxProcesses });
+      `,
+    {
+      assert,
+      process: {
+        execPath: process.execPath,
+        kill(pid, signal) {
+          assert.equal(signal, "SIGKILL");
+          signaled.push(pid);
+          states.get(pid).exiting = true;
+          if ([...states.values()].every(({ exiting }) => exiting)) {
+            child.stderr.emit("end");
+          }
+        },
+      },
+      processStatus: (pid) => states.get(pid),
+      sandboxProducerSource: () => "",
+      spawn: () => child,
+      setTimeout(callback) {
+        timers.add(callback);
+        return callback;
+      },
+      clearTimeout: (callback) => timers.delete(callback),
+    },
+  );
+  const pending = helpers.runSandboxProducer("launcher", [], {
+    env: {},
+    owned,
+    onHeld: (owner) => owned.add(owner),
+  });
+  child.emit("message", { type: "launcher", pid: 102, start: "102" });
+  child.emit("message", { type: "held", pid: 103, start: "103" });
+  assert.equal(owned.size, 3);
+  states.get(102).exiting = true;
+  // A leaked sync socket prevents the producer result after launcher exit.
+  assert.equal(timers.size, 1);
+  [...timers][0]();
+  await assert.rejects(pending, /Sandbox producer did not complete/u);
+  assert.equal(owned.size, 2);
+  const retirement = helpers.retireSandboxProcesses(owned);
+  assert.deepEqual(signaled, [101, 103]);
+  await retirement;
+  assert.equal(owned.size, 0);
+  assert.equal(timers.size, 0);
+
+  // Unproven EOF is also bounded, and retains the owner/fixture guard.
+  owned.add({ pid: 103, start: "103", errorEnd: new Promise(() => {}) });
+  const uncertain = helpers.retireSandboxProcesses(owned);
+  assert.equal(timers.size, 1);
+  [...timers][0]();
+  await assert.rejects(uncertain, /Sandbox stderr did not close/u);
+  assert.equal(owned.size, 1);
+  assert.equal(timers.size, 0);
+});
+
+test(
+  "passes only Claude's sandbox info descriptor to bubblewrap under both policies",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    // Track the producer and launcher as well as a held bubblewrap. A deadline
+    // can interrupt any of their waits; fixtures require verified retirement.
+    const held = new Set();
+    const retireHeld = () => retireSandboxProcesses(held);
+    const runProducer = (path, argumentsList, options) =>
+      runSandboxProducer(path, argumentsList, { ...options, owned: held });
+    const assertRetired = () =>
+      assert.equal(
+        held.size,
+        0,
+        "Unverified retirement; IPC fixtures retained.",
+      );
+    // An unrelated live control channel, which a producer could relay as its
+    // info descriptor while the launcher itself has no control channel.
+    const control = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      },
+    );
+    const controlEnd = new Promise((done) => {
+      control.once("exit", done);
+      control.once("error", done);
+    });
+    t.after(async () => {
+      try {
+        await retireHeld();
+      } finally {
+        control.kill("SIGKILL");
+        await sandboxDeadline(controlEnd, "Control process did not retire.");
+      }
+    });
+    const fake = await createFakeBubblewrap(t, assertRetired);
+    const foreignInterpreter = join(fake.directory, "foreign-node");
+    await copyFile(
+      process.execPath,
+      foreignInterpreter,
+      constants.COPYFILE_FICLONE,
+    );
+    await chmod(foreignInterpreter, 0o700);
+    const descriptorLog = join(fake.directory, "descriptors.jsonl");
+    const projectPath = await realpath(
+      await mkdtemp(join(tmpdir(), "agent-runner-claude-ipc-project-")),
+    );
+    t.after(async () => {
+      assertRetired();
+      await rm(projectPath, { force: true, recursive: true });
+    });
+    const gitDirectory = join(projectPath, ".git");
+    await mkdir(gitDirectory);
+    const file = openSync(join(fake.directory, "package.json"), "r");
+    t.after(() => closeSync(file));
+    const records = async (path) =>
+      (await readFile(path, "utf8").catch(() => ""))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    const ipc = ["--sync-fd", "5", "--info-fd", "6"];
+    for (const isolationPolicy of ["native", "runner-boundary"]) {
+      const directory = await realpath(
+        await mkdtemp(join(tmpdir(), "agent-runner-claude-ipc-")),
+      );
+      t.after(async () => {
+        assertRetired();
+        await rm(directory, { force: true, recursive: true });
+      });
+      const providerCwd = join(directory, "native");
+      const temporaryPath = join(directory, "tmp", "claude-fixture");
+      await mkdir(temporaryPath, { mode: 0o700, recursive: true });
+      await mkdir(providerCwd, { mode: 0o700 });
+      const launcherOptions = {
+        access: "read-only",
+        bubblewrapBinary: join(fake.directory, "bwrap"),
+        cwd: projectPath,
+        providerCwd,
+        directory,
+        environment: process.env,
+        producerBinary: process.execPath,
+        gitDirectories: [gitDirectory],
+        isolationPolicy,
+        unsetEnvironmentNames: [],
+      };
+      const launcher = await createClaudeCommandLauncher(launcherOptions);
+      try {
+        const env = launcher.environment({
+          PATH: process.env.PATH,
+          AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS: descriptorLog,
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          ...(isolationPolicy === "native"
+            ? { AGENT_RUNNER_FAKE_BWRAP_NATIVE: "1" }
+            : {}),
+        });
+        // Claude's producer order puts both descriptors after the session flags.
+        const program = (descriptors) => [
+          "--new-session",
+          "--die-with-parent",
+          ...descriptors,
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--tmpfs",
+          "/tmp",
+          "--bind",
+          temporaryPath,
+          temporaryPath,
+          "--ro-bind",
+          projectPath,
+          projectPath,
+          "--ro-bind",
+          gitDirectory,
+          gitDirectory,
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--bind",
+          "/proc",
+          "/proc",
+          "--",
+          launcher.shell,
+          "-c",
+          "true",
+        ];
+
+        // The info descriptor follows the filter and the retained bind
+        // descriptor; the end descriptor stays open until bubblewrap has exited.
+        const transferred = isolationPolicy === "native" ? "3" : "5";
+        const accepted = await runProducer(launcher.path, program(ipc), {
+          env,
+        });
+        assert.deepEqual(
+          [accepted.status, accepted.signal],
+          [0, null],
+          isolationPolicy,
+        );
+        assert.equal(
+          accepted.record,
+          `{\n    "child-pid": ${accepted.childPid}\n}\n`,
+        );
+        assert.equal(accepted.bubblewrapOutlivedEnd, false);
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: transferred,
+          sockets: [transferred],
+        });
+        const args = (await records(fake.logPath)).at(-1);
+        assert.equal(args.includes("--sync-fd"), false);
+        assert.ok(includesSequence(args, ["--info-fd", transferred]));
+        if (isolationPolicy === "runner-boundary") {
+          assert.ok(includesSequence(args, ["--seccomp", "3"]));
+          assert.ok(includesSequence(args, ["--bind-fd", "4", temporaryPath]));
+        }
+
+        // Aborting the launcher releases the end descriptor even while
+        // bubblewrap still runs, since bubblewrap never received it.
+        const interrupted = await runProducer(launcher.path, program(ipc), {
+          env: { ...env, AGENT_RUNNER_FAKE_BWRAP_HOLD: "1" },
+          onHeld: (bubblewrap) => held.add(bubblewrap),
+        });
+        assert.equal(held.size, 1);
+        assert.equal(interrupted.signal, "SIGKILL");
+        assert.equal(interrupted.bubblewrapOutlivedEnd, true);
+        await retireHeld();
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: transferred,
+          sockets: [transferred],
+        });
+
+        // Older producers omit both options; no descriptor is then forwarded.
+        const legacy = await runProducer(launcher.path, program([]), {
+          env,
+        });
+        assert.deepEqual([legacy.status, legacy.record], [0, ""]);
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: null,
+          sockets: [],
+        });
+
+        // Forged, standard, malformed, shared, repeated, unpaired, unsupported
+        // and file descriptors are refused before bubblewrap starts, as is a
+        // pair beside a control channel or another inherited socket, or one
+        // naming the launcher's or a relayed unrelated control channel, whose
+        // peer the producer does not hold; the producer still sees its
+        // descriptors end.
+        const started = (await records(descriptorLog)).length;
+        for (const [descriptors, info, extra = []] of [
+          [["--info-fd", "900"]],
+          [["--info-fd", "2"]],
+          [["--info-fd", "06"]],
+          [["--sync-fd", "5", "--info-fd", "5"]],
+          [["--sync-fd", "6", "--info-fd", "5"]],
+          [["--info-fd", "6", "--info-fd", "6"]],
+          [["--sync-fd", "5"], "ignore"],
+          [["--json-status-fd", "6"]],
+          [["--info-fd", "6"], file],
+          [ipc, "ipc"],
+          [ipc, control.channel.fd],
+          [ipc, undefined, ["ipc"]],
+          [ipc, undefined, ["pipe"]],
+        ]) {
+          const refused = await runProducer(
+            launcher.path,
+            program(descriptors),
+            { env, info, extra },
+          );
+          assert.deepEqual(
+            [refused.status, refused.record],
+            [125, ""],
+            [...descriptors, info, ...extra].join(" "),
+          );
+        }
+        // Both peers belong to the enclosing supervisor, whose IPC control
+        // endpoint is relayed beside its sync socket through the authenticated
+        // producer. Shape, census and a common ancestor alone accept this.
+        const relayed = await runProducer(launcher.path, program(ipc), {
+          env,
+          relay: true,
+        });
+        assert.deepEqual([relayed.status, relayed.record], [125, ""]);
+        // A process with the right private proof still cannot impersonate the
+        // configured CLI (including a configured shebang script).
+        const otherDirectory = await mkdtemp(
+          join(tmpdir(), "agent-runner-claude-producer-"),
+        );
+        t.after(async () => {
+          assertRetired();
+          await rm(otherDirectory, { force: true, recursive: true });
+        });
+        const otherTemporary = join(otherDirectory, "tmp", "claude-fixture");
+        await mkdir(otherTemporary, { recursive: true, mode: 0o700 });
+        const producerScript = join(otherDirectory, "producer.cjs");
+        const interpreter =
+          isolationPolicy === "native"
+            ? process.execPath
+            : `/usr/bin/env ${process.execPath}`;
+        await writeFile(
+          producerScript,
+          `#!${interpreter}\n${sandboxProducerSource()}`,
+          { mode: 0o700 },
+        );
+        const other = await createClaudeCommandLauncher({
+          ...launcherOptions,
+          directory: otherDirectory,
+          producerBinary: producerScript,
+        });
+        try {
+          const otherProgram = program(ipc).map((value) =>
+            value === temporaryPath
+              ? otherTemporary
+              : value === launcher.shell
+                ? other.shell
+                : value,
+          );
+          const otherEnvironment = other.environment(env);
+          for (const evalArgument of [undefined, producerScript]) {
+            const refused = await runProducer(other.path, otherProgram, {
+              env: otherEnvironment,
+              evalArgument,
+            });
+            assert.deepEqual([refused.status, refused.record], [125, ""]);
+          }
+          // The correct script in argv[1] cannot authenticate a different
+          // executable, even when it runs that script and holds both peers.
+          const impersonated = await runProducer(other.path, otherProgram, {
+            env: otherEnvironment,
+            script: producerScript,
+            binary: foreignInterpreter,
+          });
+          assert.deepEqual(
+            [impersonated.status, impersonated.record],
+            [125, ""],
+          );
+          assert.equal((await records(descriptorLog)).length, started);
+          // The same pinned script is accepted when it actually runs as the
+          // interpreter's script, rather than appearing as an eval argument.
+          const scripted = await runProducer(other.path, otherProgram, {
+            env: otherEnvironment,
+            script: producerScript,
+          });
+          assert.deepEqual([scripted.status, scripted.signal], [0, null]);
+          assert.equal(
+            scripted.record,
+            `{\n    "child-pid": ${scripted.childPid}\n}\n`,
+          );
+        } finally {
+          await retireHeld();
+          await other.remove();
+        }
+      } finally {
+        await retireHeld();
         await launcher.remove();
       }
     }

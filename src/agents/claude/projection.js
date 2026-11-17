@@ -104,8 +104,11 @@ const CLAUDE_CONTROL_ENTRIES = [...FILES, ...DIRECTORIES]
 // preparation reservation with the runner's requested access; preserve all
 // existing descendant masks and reject any absent project mount target.
 // The reservation also makes Claude omit workspace Git, selected-input and
-// built-in control protections, so a Git workspace-write program is
-// normalized as a whole before it reaches bubblewrap.
+// built-in control protections, so a Git workspace-write program needs both
+// the workspace grant and the reservation and is normalized as a whole before
+// it reaches bubblewrap. A writable or native declared-directory program needs
+// only the reservation: a whole-workspace grant stays read-only, and writes
+// come solely from the validated declared outputs.
 export function projectionSource({
   access,
   cwd,
@@ -117,9 +120,11 @@ export function projectionSource({
   claudeWritablePaths = [],
   gitDirectories = [],
   privateDirectory,
+  socketStatisticsBinary = null,
+  producerIdentity = null,
 }) {
   return `
-function projectArguments(args) {
+function projectArguments(args, descriptors) {
   const fs = require("node:fs");
   const path = require("node:path");
   const cwd = ${JSON.stringify(cwd)};
@@ -316,6 +321,105 @@ function projectArguments(args) {
     }
     return [...before, ...workspace, ...after].flatMap(({ operation, values }) => [operation, ...values]);
   };
+  // Claude may pass bubblewrap one descriptor whose end it awaits as the end
+  // of the sandbox and one from which it reads bubblewrap's child pid. Accept
+  // each once and only as an inherited unnamed, connected Unix stream socket
+  // distinct from standard I/O and the other role, so a closed, forged, file,
+  // listening, named or network descriptor fails closed. Neither descriptor
+  // ever reaches the command: the launcher keeps the end descriptor and passes
+  // only the info descriptor, which bubblewrap writes and closes before the
+  // command starts.
+  const producerDescriptor = (value) => {
+    if (!/^[1-9][0-9]{0,5}$/.test(value) || Number(value) < 3) throw new Error("invalid sandbox descriptor");
+    const descriptor = Number(value);
+    const metadata = fs.fstatSync(descriptor, { bigint: true });
+    const inode = String(metadata.ino);
+    const socket = fs.readFileSync("/proc/self/net/unix", "utf8").split("\\n").slice(1)
+      .map((line) => line.trim().split(/\\s+/))
+      .find((fields) => fields[6] === inode);
+    if (!metadata.isSocket() || fs.readlinkSync("/proc/self/fd/" + descriptor) !== "socket:[" + inode + "]" ||
+      socket?.length !== 7 || socket[3] !== "00000000" || socket[4] !== "0001" || socket[5] !== "03") throw new Error("unsupported sandbox descriptor");
+    for (const other of [0, 1, 2, ...Object.values(descriptors)]) {
+      let current;
+      try {
+        current = fs.fstatSync(other, { bigint: true });
+      } catch (cause) {
+        if (cause?.code === "EBADF") continue;
+        throw cause;
+      }
+      if (current.dev === metadata.dev && current.ino === metadata.ino) throw new Error("shared sandbox descriptor");
+    }
+    return descriptor;
+  };
+  // Socket shape alone cannot show that the producer owns a descriptor. The
+  // launcher token authenticates the invocation, and Claude passes both roles
+  // together as its only inherited sockets beyond standard I/O, so a missing
+  // role, a runtime control channel or any other inherited socket fails. The
+  // kernel socket table then names each role's peer. The nearest ancestor
+  // holding either peer must hold both and carry this launch's shell proof.
+  // An enclosing supervisor can own unrelated control peers too; ancestry
+  // alone must not authenticate those as the producer's sandbox channels.
+  const producerOwnership = () => {
+    const owned = Object.values(descriptors);
+    const producer = ${JSON.stringify(producerIdentity)};
+    if (owned.length !== 2 || process.channel !== undefined || producer === null) throw new Error("unowned sandbox descriptor");
+    const links = (pid) => fs.readdirSync("/proc/" + pid + "/fd").flatMap((name) => {
+      try {
+        return [[Number(name), fs.readlinkSync("/proc/" + pid + "/fd/" + name)]];
+      } catch (cause) {
+        if (cause?.code === "ENOENT") return [];
+        throw cause;
+      }
+    });
+    for (const [descriptor, link] of links("self")) {
+      if (descriptor > 2 && !owned.includes(descriptor) && link.startsWith("socket:")) throw new Error("unowned sandbox descriptor");
+    }
+    const statistics = ${JSON.stringify(socketStatisticsBinary)};
+    if (statistics === null) throw new Error("unowned sandbox descriptor");
+    const listing = require("node:child_process").spawnSync(statistics, ["-x", "-a", "-n", "-H"], {
+      encoding: "utf8", env: { LC_ALL: "C" }, maxBuffer: 64 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"], timeout: 10000,
+    });
+    if (listing.error || listing.signal || listing.status !== 0) throw new Error("unowned sandbox descriptor");
+    const rows = listing.stdout.split("\\n").map((line) => line.trim().split(/\\s+/));
+    // An unnamed socket's row has exactly eight fields; a path containing
+    // spaces adds fields, so it can never match another socket's inode.
+    const peers = owned.map((descriptor) => {
+      const inode = String(fs.fstatSync(descriptor, { bigint: true }).ino);
+      const matches = rows.filter((fields) => fields.length === 8 && fields[4] === "*" && fields[5] === inode);
+      if (matches.length !== 1 || matches[0][0] !== "u_str" || matches[0][1] !== "ESTAB" || matches[0][6] !== "*" ||
+        !/^[1-9][0-9]*$/.test(matches[0][7])) throw new Error("unowned sandbox descriptor");
+      return "socket:[" + matches[0][7] + "]";
+    });
+    const visited = new Set();
+    for (let pid = process.ppid; pid > 0 && !visited.has(pid);) {
+      visited.add(pid);
+      const held = new Set(links(pid).map(([, link]) => link));
+      const holding = peers.filter((peer) => held.has(peer)).length;
+      if (holding === peers.length) {
+        const environment = fs.readFileSync("/proc/" + pid + "/environ", "utf8").split("\\0");
+        if (!environment.includes(${JSON.stringify(`${CLAUDE_COMMAND_SHELL_PROOF}=${proof}`)})) break;
+        const sameIdentity = (name, identity) => {
+          const metadata = fs.statSync(name, { bigint: true });
+          return String(metadata.dev) === identity.dev && String(metadata.ino) === identity.ino;
+        };
+        // Native CLIs bind directly to the kernel executable. A shebang CLI
+        // also binds its interpreter and first script argument to pinned files;
+        // neither a foreign executable nor a path passed as eval data suffices.
+        const matches = producer.script
+          ? sameIdentity("/proc/" + pid + "/exe", producer.interpreter) &&
+            fs.readFileSync("/proc/" + pid + "/cmdline", "utf8").split("\\0").slice(1, 2)
+              .some((name) => path.isAbsolute(name) && fs.realpathSync(name) === producer.path && sameIdentity(name, producer))
+          : sameIdentity("/proc/" + pid + "/exe", producer);
+        if (!matches) break;
+        return;
+      }
+      if (holding > 0) break;
+      const stat = fs.readFileSync("/proc/" + pid + "/stat", "utf8");
+      pid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    }
+    throw new Error("unowned sandbox descriptor");
+  };
   if (directory !== null) {
     for (const binding of directory.bindings) {
       const current = fs.lstatSync(binding.path, { bigint: true });
@@ -331,12 +435,14 @@ function projectArguments(args) {
     "--ro-bind": 2, "--bind": 2, "--setenv": 2, "--unsetenv": 1,
     "--tmpfs": 1, "--dev": 1, "--proc": 1, "--dir": 1,
     "--chdir": 1, "--cap-drop": 1, "--remount-ro": 1,
+    "--sync-fd": 1, "--info-fd": 1,
   };
   for (let i = 0; i < args.length;) {
     const operation = args[i++];
     if (operation === "--") {
-      if (writable && (!workspaceGranted || !preparationReserved)) throw new Error("missing workspace preparation proof");
-      if (directory !== null && ${JSON.stringify(injectHome)} && !preparationReserved) throw new Error("missing directory preparation proof");
+      if (Object.keys(descriptors).length > 0) producerOwnership();
+      if (writable && directory === null && (!workspaceGranted || !preparationReserved)) throw new Error("missing workspace preparation proof");
+      if (directory !== null && (writable || ${JSON.stringify(injectHome)}) && !preparationReserved) throw new Error("missing directory preparation proof");
       const normalized = writable && directory === null ? normalizeWorkspace(projected) : projected;
       if (${JSON.stringify(injectHome)}) normalized.push(...${JSON.stringify(toolHomeArguments(home, proof))});
       if (${JSON.stringify(injectHome)} && providerCwd !== cwd) normalized.push("--chdir", cwd);
@@ -347,6 +453,15 @@ function projectArguments(args) {
     if (size === undefined || i + size > args.length) throw new Error("unsupported sandbox arguments");
     const values = args.slice(i, i + size);
     i += size;
+    if (operation === "--sync-fd" || operation === "--info-fd") {
+      const role = operation === "--sync-fd" ? "sync" : "info";
+      if (Object.hasOwn(descriptors, role)) throw new Error("repeated sandbox descriptor");
+      // Claude's producer assigns these distinct stdio slots before spawning
+      // its shell. Peer ownership cannot distinguish a swapped role.
+      if (values[0] !== (role === "sync" ? "5" : "6")) throw new Error("unsupported sandbox descriptor role");
+      descriptors[role] = producerDescriptor(values[0]);
+      continue;
+    }
     let destination;
     if (["--bind", "--ro-bind"].includes(operation)) {
       if (values.some((value) => !path.isAbsolute(value) || path.resolve(value) !== value)) throw new Error("invalid mount path");
@@ -423,16 +538,28 @@ export function nativeLauncherSource({
   claudeWritablePaths,
   gitDirectories,
   privateDirectory,
+  socketStatisticsBinary,
+  producerIdentity,
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
+const { closeSync } = require("node:fs");
 if (process.env[${JSON.stringify(tokenName)}] !== ${JSON.stringify(token)}) process.exit(125);
-${projectionSource({ access, cwd, providerCwd, home, proof, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory })}
+${projectionSource({ access, cwd, providerCwd, home, proof, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory, socketStatisticsBinary, producerIdentity })}
 try {
-  const args = projectArguments(process.argv.slice(2));
+  const descriptors = {};
+  const args = projectArguments(process.argv.slice(2), descriptors);
   const env = { ...process.env };
   for (const name of ${JSON.stringify([tokenName, ...unsetEnvironmentNames])}) delete env[name];
-  const result = spawnSync(${JSON.stringify(bubblewrapBinary)}, args, { env, stdio: "inherit" });
+  // Child descriptor 3 carries only the info descriptor. The end descriptor
+  // stays here, open until bubblewrap has exited.
+  const info = descriptors.info === undefined ? [] : [descriptors.info];
+  const result = spawnSync(
+    ${JSON.stringify(bubblewrapBinary)},
+    [...(info.length === 0 ? [] : ["--info-fd", "3"]), ...args],
+    { env, stdio: ["inherit", "inherit", "inherit", ...info] },
+  );
+  for (const descriptor of Object.values(descriptors)) closeSync(descriptor);
   process.exit(result.error || result.signal ? 125 : result.status ?? 125);
 } catch { process.exit(125); }
 `;
