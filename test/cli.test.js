@@ -1412,7 +1412,14 @@ test("status explains a terminal forbidden-delegation diagnostic", async () => {
 });
 
 test("status renders input and fresh-run pause actions", async () => {
-  for (const { pause, state, expected, alsoExpected, notExpected } of [
+  for (const {
+    pipelineId,
+    pause,
+    state,
+    expected,
+    alsoExpected,
+    notExpected,
+  } of [
     {
       pause: {
         reason: "clarification_answers_required",
@@ -1454,6 +1461,20 @@ test("status renders input and fresh-run pause actions", async () => {
       alsoExpected: /The frozen finalization guidance changed/u,
     },
     {
+      pipelineId: "polishing",
+      pause: {
+        reason: "finalization_skill_invalid",
+        code: "ERR_FINALIZATION_GUIDANCE_CHANGED",
+        explanation:
+          "The frozen finalization guidance changed. Start a new run.",
+        evidence: ["The selected repository skill no longer matches."],
+      },
+      state: {},
+      expected:
+        /Repair the reported finalization guidance and start a fresh polishing run\./u,
+      notExpected: /plan-execution run/u,
+    },
+    {
       pause: {
         reason: "no_progress",
         resumeState: "RESOLVE_FINDINGS",
@@ -1484,7 +1505,7 @@ test("status renders input and fresh-run pause actions", async () => {
     },
   ]) {
     const stdout = createSink();
-    const result = commandResult({ state: "WAITING_FOR_USER" });
+    const result = commandResult({ pipelineId, state: "WAITING_FOR_USER" });
     result.run.pause = pause;
     Object.assign(result.run.pipelineState, state);
     assert.equal(

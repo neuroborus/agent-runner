@@ -2014,12 +2014,23 @@ transcript, trusted-process-output, or detached-log data.
 Public next actions are concrete descriptor-owned operations. `respond`
 identifies the exact pending request; `resume` carries either the validated
 null retry or one valid extra-round or finding-override payload; and
-`start-new-run` identifies a `revised-plan`, `uncontaminated-worktree`, or
-`resolved-finalization-blockers` requirement. The last applies when correction
-has stopped with unresolved finalization failures and no validated retry
-applies; it requires resolving the reported blockers, restoring a clean
-baseline, and preparing a plan for the remaining work before starting a fresh
-execution run. A submitted input awaiting detached continuation exposes no
+`start-new-run` identifies a `revised-plan`, `uncontaminated-worktree`,
+`resolved-finalization-blockers`, `resolved-commit-readiness`, or
+`resolved-finalization-guidance` requirement. `resolved-finalization-blockers`
+applies when correction has stopped with unresolved finalization failures and
+no validated retry applies; it requires resolving the reported blockers,
+restoring a clean baseline, and preparing a plan for the remaining work before
+starting a fresh execution run. Only plan execution projects
+`resolved-commit-readiness`, after a retired `COMMIT` authorization for a
+provider-neutral readiness refusal with no pending commit; it preserves the
+reviewed candidate for separately authorized follow-up and has no same-run
+`COMMIT` retry or resume. Plan execution and polishing project
+`resolved-finalization-guidance` when frozen finalization guidance is missing,
+invalid, or changed; it requires repairing that guidance before a fresh run of
+the same pipeline and is not an environment-recovery retry. The owning
+[plan-execution](../pipelines/plan-execution/docs/SPEC.md) and
+[polishing](../pipelines/polishing/docs/SPEC.md) specifications define the
+exact conditions. A submitted input awaiting detached continuation exposes no
 second action. Plan revision never projects resume of the stale run, and a
 read-only repository mutation never projects acceptance of contaminated or
 hybrid changes. This is a read-only projection of existing durable state and
