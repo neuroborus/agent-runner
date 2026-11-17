@@ -76,6 +76,7 @@ import {
   createFinalizationGuidanceDecision,
   createPolishingState,
   finalizationFeedbackFindings,
+  finalizationDiagnostic,
   findingFingerprint,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   CONVENTIONAL_FINALIZATION_SKILL_PATHS,
@@ -254,6 +255,11 @@ function contextKeyFor(role, checkpoint, context) {
 }
 
 function outputDiagnostic(cause, context) {
+  if (context.contract === "finalization")
+    return Object.freeze({
+      ...context,
+      ...finalizationDiagnostic(cause?.diagnostic),
+    });
   const field = cause?.diagnostic?.field;
   const constraint = cause?.diagnostic?.constraint;
   const candidate = Object.freeze({ ...context, field, constraint });
@@ -381,7 +387,16 @@ function invalidRoleOutput(message, context, diagnostic) {
 }
 
 function persistedOutputDiagnostic(value) {
-  return isOutputDiagnostic(value) ? Object.freeze({ ...value }) : undefined;
+  return isOutputDiagnostic(value)
+    ? value.role === "worker" &&
+      value.phase === "finalization" &&
+      value.contract === "finalization"
+      ? Object.freeze({
+          ...finalizationOutputContext(),
+          ...finalizationDiagnostic(value),
+        })
+      : Object.freeze({ ...value })
+    : undefined;
 }
 
 function normalizeRoleOutput(normalize, output, context) {
@@ -2461,7 +2476,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       correction.contentFingerprint === fingerprint &&
       correction.guidance === guidance &&
       correctionMatchesContext(correction, context)
-      ? correction
+      ? { ...correction, ...finalizationDiagnostic(correction) }
       : undefined;
   }
 
@@ -4629,19 +4644,20 @@ ${establishedValidationPrompt(state())}${
           }
           return result;
         } catch (cause) {
-          if (
-            cause?.code !== "ERR_INVALID_POLISHING_OUTPUT" ||
-            !isOutputDiagnostic(cause.diagnostic)
-          ) {
-            throw cause;
-          }
+          if (cause?.code !== "ERR_INVALID_POLISHING_OUTPUT") throw cause;
+          const failure = invalidRoleOutput(
+            "Structured finalization result violates its contract.",
+            context,
+            cause.diagnostic,
+          );
+          if (!isOutputDiagnostic(cause.diagnostic)) throw failure;
           fingerprint = await contentFingerprint();
           if (
             finalizationCorrectionAttempt(context, fingerprint) !== undefined
           ) {
-            throw cause;
+            throw failure;
           }
-          const diagnostic = outputDiagnostic(cause, context);
+          const diagnostic = failure.diagnostic;
           const correction = {
             attempt: 1,
             guidance: guidanceScope,

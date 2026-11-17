@@ -461,14 +461,21 @@ separate code-fix or semantic-evidence budgets.
 
 Finalization diagnostics identify the violated schema field and fixed constraint,
 using trusted list positions rather than rejected values or proposed identities.
-Independent violations form one bounded batch; invalid inventories do not create
-speculative downstream identity findings. Terminal CLI/MCP failure evidence
+Plan execution groups independent violations into one bounded batch; invalid
+inventories do not create speculative downstream identity findings. Terminal CLI/MCP failure evidence
 retains the validated first diagnostic without granting retry authority. Missing
 provider field information and historical failures remain unknown. Candidate
 review and candidate clean confirmation in both coding pipelines identify their
 first rejected field and constraint the same way. See the
 [execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
 for exact validation and correction rules.
+
+Polishing retains its first violated field through its single read-only
+correction and exposes the latest rejected replacement's recognized diagnostic
+on terminal failure. Unknown diagnostic-like values reduce to a generic
+semantic-contract diagnostic; this neither renews correction allowance nor
+changes acceptance. The [polishing contract](../../pipelines/polishing/docs/SPEC.md#finalize)
+owns these rules.
 
 Two automatic semantic retries per execution step or polishing run are durable
 and separate from malformed-output and code-fix budgets. Pending retries survive

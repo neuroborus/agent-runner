@@ -250,8 +250,8 @@ test("rejects mixed failed and blocked finalization before persistence", async (
       role: "worker",
       phase: "finalization",
       contract: "finalization",
-      field: "result",
-      constraint: "semantic-contract",
+      field: "checks",
+      constraint: "fail-status-check-consistency",
     });
     return true;
   });

@@ -1086,6 +1086,14 @@ that reports a legitimate failure remains `FAIL`.
 If deterministic normalization rejects the first Worker finalization result
 for the current content fingerprint, persist the version-7 bounded diagnostic
 and publish one `finalization-correction` activity without rejected content.
+Recognized rejections identify the first violated field and source-defined
+constraint, including status/issue/check consistency, inactive and unavailable
+fields, complete ordered check identities and exact commands, selected trusted
+`NOT_RUN` ownership, and bounded shape, text and evidence requirements. Fields
+use fixed names and bounded list positions, never rejected IDs, values or keys.
+Normalization preserves these diagnostics through correction feedback and
+terminal errors; arbitrary exception prose is never parsed for a diagnosis.
+Unknown diagnostic-like identities reduce to `result / semantic-contract`.
 Reconstruct the complete request from durable inputs and ask the Worker for one
 complete replacement with the same finalization schema in a fresh-session,
 read-only turn. The correction may re-execute corrected staging-independent
@@ -1098,7 +1106,13 @@ corrected availability or product-decision result uses its existing route;
 corrected `BLOCKED`, `PASS`, and `FAIL` results rejoin the existing environment,
 fingerprint, trusted-validation, review, and handoff gates. A repeated invalid
 result for the same content fails closed without retaining either rejected
-result. Content changes clear the consumed scope and permit one correction for
+result. Shared CLI/MCP pause evidence projects only recognized finalization
+diagnostics from the latest rejected replacement, independently of the first
+consumed correction record, and offers no resume action for this terminal
+failure. Legacy valid diagnostic shapes remain loadable; reconstruction reduces
+unknown identities before including them in a corrective request, without
+renewing its allowance or reviving terminal history.
+Content changes clear the consumed scope and permit one correction for
 the new fingerprint. This attempt is independent of the bootstrap and
 validation-migration correction ledger.
 

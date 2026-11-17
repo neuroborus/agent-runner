@@ -21,6 +21,7 @@ import {
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   createFinalizationRecovery,
   finalizationFeedbackFindings,
+  finalizationDiagnostic,
   findingFingerprint,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
@@ -278,6 +279,16 @@ function publicExplanation(pause, fallback) {
 
 function publicEvidence(run, readOnlySnapshotChanges) {
   const pause = run.pause;
+  if (
+    pause.reason === "internal_failure" &&
+    pause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+    pause.diagnostic?.role === "worker" &&
+    pause.diagnostic?.phase === "finalization" &&
+    pause.diagnostic?.contract === "finalization"
+  ) {
+    const { field, constraint } = finalizationDiagnostic(pause.diagnostic);
+    return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
   if (pause.reason === "read_only_agent_mutated_repository") {
     return Object.freeze([
       snapshotChangeEvidence(

@@ -3926,6 +3926,15 @@ transcripts never enter state or public activity. Interrupted correction
 recovery remains read-only and does not require a native session. `HANDOFF`
 remains the sole Git-index owner for both Codex and Claude turns.
 
+Recognized semantic finalization rejections retain source-defined field and
+constraint diagnostics through normalization, durable feedback and terminal
+failure. The polishing descriptor projects the latest terminal violation into
+shared CLI/MCP pause evidence without resume authority. Unknown diagnostic-like
+identities reduce to a generic semantic-contract diagnostic before corrective
+requests or projection; accepted legacy shapes and terminal history remain
+unchanged. The [polishing specification](../pipelines/polishing/docs/SPEC.md#finalize)
+owns the exact rejection and correction rules.
+
 Polishing state version 8 adds the resolved mode, the fingerprint accepted by
 lazy clean confirmation, and the one-time lazy source-fork marker. Its
 version-7 migration selects `independent` without moving active or terminal

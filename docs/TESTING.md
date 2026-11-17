@@ -270,6 +270,17 @@ null retry through a reopened run store: its bounded candidate-review diagnostic
 and the latest accepted changed and unchanged check/fix summaries in the next
 primary requests and saved state.
 
+Fast polishing `finalization-diagnostics.test.js` owns valid controls and bounded
+field/constraint rejection details, ordered check identities, exact commands,
+trusted placeholders, status consistency, evidence and inactive fields. It
+composes combined correction reconstruction, unchanged budgets and fingerprint
+scope, latest-violation terminal CLI/MCP evidence, and redaction of unknown
+diagnostic-like inputs. Existing `recovery` and `convergence-and-review` retain
+interruption during correction, content-scope reset and read-only mutation
+coverage. These focused model-free development tests do not replace the
+Runner-owned fast, complete slow and distinct package-install FINALIZE checks
+or subsequent operator-owned native and installed acceptance.
+
 Fast polishing `resolution-correction` owns finding-resolution report recovery
 in independent and combined modes: one fresh read-only restatement after an
 invalid, lost or interrupted report, once-only fix charges, operator-stop

@@ -790,6 +790,75 @@ export function isOutputDiagnostic(value) {
   );
 }
 
+const FINALIZATION_DIAGNOSTIC_CONSTRAINTS = new Set([
+  "object",
+  "exact-field-set",
+  "maximum-2-mebibytes",
+  "serializable-json",
+  "semantic-contract",
+  "finalization-status",
+  "empty-string",
+  "empty-array",
+  "empty-for-unavailable-finalization",
+  "selected-finalization-guidance",
+  "resolved-finalization-skill",
+  "includes-frozen-finalization-guidance",
+  "includes-runner-trusted-commands",
+  "preserves-established-checks",
+  "preserves-established-infrastructure",
+  "existing-canonical-repository-file",
+  "array-up-to-32-items",
+  "nonempty-array-up-to-32-items",
+  "array-up-to-16-items",
+  "array-up-to-512-items",
+  "nonempty-array-up-to-512-items",
+  "exactly-three-policy-evidence-items",
+  "unique-ids",
+  "unique-ids-and-commands",
+  "unique-paths",
+  "required-check-id",
+  "finalization-issue-id",
+  "complete-ordered-check-results",
+  "required-check-id-in-order",
+  "check-result-status",
+  "runner-trusted-check-not-run",
+  "agent-executed-check-status",
+  "required-check-command",
+  "staging-independent-validation-command",
+  "empty-when-pass",
+  "nonempty-when-fail",
+  "pass-status-check-consistency",
+  "fail-status-check-consistency",
+  "blocked-status-check-consistency",
+  "nonempty-plain-text-up-to-4000-characters",
+  "concise-markdown-up-to-20000-characters",
+  "repository-relative-path-up-to-4000-characters",
+  "exact-repository-relative-path-up-to-4000-characters",
+  "exact-single-line-command-up-to-4000-characters",
+]);
+const FINALIZATION_DIAGNOSTIC_FIELD_PATTERNS = [
+  /^(?:result|status|skillPath|summary|reason|question|whyBlocked|options|evidence|issues|checks|requiredChecks|validationInfrastructure)$/u,
+  /^options\[(?:[0-9]|1[0-5])\]$/u,
+  /^evidence\[(?:[0-9]|[12][0-9]|3[01])\]$/u,
+  /^issues\[(?:[0-9]|[12][0-9]|3[01])\](?:\.(?:id|command|problem|evidence(?:\[(?:[0-9]|[12][0-9]|3[01])\])?))?$/u,
+  /^requiredChecks\[(?:[0-9]|[1-9][0-9]|[1-4][0-9]{2}|50[0-9]|51[01])\](?:\.(?:id|command))?$/u,
+  /^checks\[(?:[0-9]|[1-9][0-9]|[1-4][0-9]{2}|50[0-9]|51[01])\](?:\.(?:checkId|command|status|evidence(?:\[(?:[0-9]|[12][0-9]|3[01])\])?))?$/u,
+  /^validationInfrastructure\[(?:[0-9]|[1-9][0-9]|[1-4][0-9]{2}|50[0-9]|51[01])\]$/u,
+];
+
+// Retain legacy diagnostic shapes, but reduce unrecognized identities before
+// corrective requests, errors or public projections can expose them.
+export function finalizationDiagnostic(value) {
+  return isRecord(value) &&
+    typeof value.field === "string" &&
+    FINALIZATION_DIAGNOSTIC_FIELD_PATTERNS.some((pattern) =>
+      pattern.test(value.field),
+    ) &&
+    FINALIZATION_DIAGNOSTIC_CONSTRAINTS.has(value.constraint)
+    ? outputConstraint(value.field, value.constraint)
+    : outputConstraint("result", "semantic-contract");
+}
+
 function hasExactFields(value, fields) {
   return (
     isRecord(value) &&
@@ -1683,34 +1752,50 @@ function normalizeCheckResults(
   { trustedCommands = new Set() } = {},
 ) {
   if (!Array.isArray(value) || value.length !== requiredChecks.length) {
-    throw workflowError("Finalization check evidence is incomplete.", code);
+    throw workflowError(
+      "Finalization check evidence is incomplete.",
+      code,
+      outputConstraint("checks", "complete-ordered-check-results"),
+    );
   }
   return Object.freeze(
     value.map((result, index) => {
       const required = requiredChecks[index];
-      if (
-        !isRecord(result) ||
-        result.checkId !== required.id ||
-        !["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status) ||
-        (trustedCommands.has(required.command)
-          ? result.status !== "NOT_RUN"
-          : result.status === "NOT_RUN")
-      ) {
+      const field = `checks[${index}]`;
+      const reject = (name, constraint) => {
         throw workflowError(
           "Finalization check evidence was substituted.",
           code,
+          outputConstraint(name, constraint),
         );
-      }
+      };
+      if (!isRecord(result)) reject(field, "object");
+      if (result.checkId !== required.id)
+        reject(`${field}.checkId`, "required-check-id-in-order");
+      if (!["PASS", "FAIL", "BLOCKED", "NOT_RUN"].includes(result.status))
+        reject(`${field}.status`, "check-result-status");
+      if (
+        trustedCommands.has(required.command)
+          ? result.status !== "NOT_RUN"
+          : result.status === "NOT_RUN"
+      )
+        reject(
+          `${field}.status`,
+          trustedCommands.has(required.command)
+            ? "runner-trusted-check-not-run"
+            : "agent-executed-check-status",
+        );
       const command = normalizeExactCommand(
         result.command,
-        `finalization check ${result.checkId} command`,
+        "finalization check command",
         code,
+        outputConstraint(
+          `${field}.command`,
+          "exact-single-line-command-up-to-4000-characters",
+        ),
       );
       if (command !== required.command) {
-        throw workflowError(
-          "Finalization check evidence was substituted.",
-          code,
-        );
+        reject(`${field}.command`, "required-check-command");
       }
       return Object.freeze({
         checkId: result.checkId,
@@ -1718,8 +1803,8 @@ function normalizeCheckResults(
         status: result.status,
         evidence: normalizeTextList(
           result.evidence,
-          `finalization check ${result.checkId} evidence`,
-          { code },
+          "finalization check evidence",
+          { code, diagnosticField: `${field}.evidence` },
         ),
       });
     }),
@@ -1810,41 +1895,64 @@ function normalizeFinalizationIssues(value, code = INVALID_OUTPUT_CODE) {
     throw workflowError(
       "Finalization issues have an invalid number of items.",
       code,
+      outputConstraint("issues", "array-up-to-32-items"),
     );
   }
   const issues = Object.freeze(
-    value.map((issue) => {
-      if (!isRecord(issue) || !FINALIZATION_ISSUE_ID_PATTERN.test(issue.id)) {
-        throw workflowError("Finalization issue has an invalid ID.", code);
-      }
-      assertExactFields(
-        issue,
-        ["id", "command", "problem", "evidence"],
-        `finalization issue ${issue.id}`,
-        code,
-      );
+    value.map((issue, index) => {
+      const field = `issues[${index}]`;
+      if (!isRecord(issue))
+        throw workflowError(
+          "Finalization issue has an invalid ID.",
+          code,
+          outputConstraint(field, "object"),
+        );
+      if (!FINALIZATION_ISSUE_ID_PATTERN.test(issue.id))
+        throw workflowError(
+          "Finalization issue has an invalid ID.",
+          code,
+          outputConstraint(`${field}.id`, "finalization-issue-id"),
+        );
+      if (!hasExactFields(issue, ["id", "command", "problem", "evidence"]))
+        throw workflowError(
+          "Finalization issue has invalid fields.",
+          code,
+          outputConstraint(field, "exact-field-set"),
+        );
       return Object.freeze({
         id: issue.id,
         command: normalizeText(
           issue.command,
-          `finalization issue ${issue.id} command`,
+          "finalization issue command",
           code,
+          outputConstraint(
+            `${field}.command`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
         problem: normalizeText(
           issue.problem,
-          `finalization issue ${issue.id} problem`,
+          "finalization issue problem",
           code,
+          outputConstraint(
+            `${field}.problem`,
+            "nonempty-plain-text-up-to-4000-characters",
+          ),
         ),
         evidence: normalizeTextList(
           issue.evidence,
-          `finalization issue ${issue.id} evidence`,
-          { code },
+          "finalization issue evidence",
+          { code, diagnosticField: `${field}.evidence` },
         ),
       });
     }),
   );
   if (new Set(issues.map(({ id }) => id)).size !== issues.length) {
-    throw workflowError("Finalization issue IDs must be unique.", code);
+    throw workflowError(
+      "Finalization issue IDs must be unique.",
+      code,
+      outputConstraint("issues", "unique-ids"),
+    );
   }
   return issues;
 }
@@ -2132,12 +2240,7 @@ export function normalizeFinalizationResult(
     "whyBlocked",
     "evidence",
   ];
-  assertExactFields(
-    payload,
-    fields,
-    "Finalization result",
-    INVALID_OUTPUT_CODE,
-  );
+  assertExactOutputFields(payload, fields);
   assertStructuredResult(payload);
   const statuses = [
     "PASS",
@@ -2149,7 +2252,10 @@ export function normalizeFinalizationResult(
     "PRODUCT_DECISION_REQUIRED",
   ];
   if (!statuses.includes(payload.status)) {
-    throw outputError("Worker returned an invalid finalization result.");
+    throw outputError(
+      "Worker returned an invalid finalization result.",
+      outputConstraint("status", "finalization-status"),
+    );
   }
   const trustedCommandSet = new Set(trustedCommands);
   if (
@@ -2160,37 +2266,49 @@ export function normalizeFinalizationResult(
   }
   if (payload.status === "VALIDATION_POLICY_BLOCKED")
     return normalizeValidationPolicyBlocked(payload);
+  const inactive = (strings, arrays) => {
+    for (const field of strings)
+      if (payload[field] !== "")
+        throw outputError(
+          "Finalization result contains inapplicable fields.",
+          outputConstraint(field, "empty-string"),
+        );
+    for (const field of arrays)
+      if (!emptyArray(payload[field]))
+        throw outputError(
+          "Finalization result contains inapplicable fields.",
+          outputConstraint(field, "empty-array"),
+        );
+  };
+  const skillPath = () =>
+    payload.skillPath === ""
+      ? null
+      : normalizeRelativePath(
+          payload.skillPath,
+          "finalization skill path",
+          INVALID_OUTPUT_CODE,
+          outputConstraint(
+            "skillPath",
+            "repository-relative-path-up-to-4000-characters",
+          ),
+        );
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
-    if (
-      payload.skillPath !== "" ||
-      payload.summary !== "" ||
-      !emptyArray(payload.issues) ||
-      !emptyArray(payload.requiredChecks) ||
-      !emptyArray(payload.validationInfrastructure) ||
-      !emptyArray(payload.checks) ||
-      payload.reason !== ""
-    ) {
-      throw outputError("Product decision contains inapplicable fields.");
-    }
+    inactive(
+      ["skillPath", "summary", "reason"],
+      ["issues", "requiredChecks", "validationInfrastructure", "checks"],
+    );
     return Object.freeze({
       status: payload.status,
       decision: normalizeProductDecision(payload),
     });
   }
   if (["SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(payload.status)) {
-    if (
-      payload.summary !== "" ||
-      !emptyArray(payload.issues) ||
-      payload.question !== "" ||
-      payload.whyBlocked !== "" ||
-      !emptyArray(payload.options)
-    ) {
-      throw outputError(
-        "Unavailable finalization contains inapplicable fields.",
-      );
-    }
+    inactive(["summary", "question", "whyBlocked"], ["issues", "options"]);
     if (payload.status === "SKILL_INVALID" && payload.skillPath === "") {
-      throw outputError("Finalization skill path is inapplicable.");
+      throw outputError(
+        "Finalization skill path is inapplicable.",
+        outputConstraint("skillPath", "selected-finalization-guidance"),
+      );
     }
     const requiredChecks = normalizePhaseSafeRequiredChecks(
       payload.requiredChecks,
@@ -2218,6 +2336,14 @@ export function normalizeFinalizationResult(
     ) {
       throw outputError(
         "Unavailable finalization contains validation evidence.",
+        outputConstraint(
+          requiredChecks.length !== 0
+            ? "requiredChecks"
+            : validationInfrastructure.length !== 0
+              ? "validationInfrastructure"
+              : "checks",
+          "empty-for-unavailable-finalization",
+        ),
       );
     }
     if (
@@ -2225,22 +2351,28 @@ export function normalizeFinalizationResult(
       (!checks.some(({ status }) => status === "BLOCKED") ||
         checks.some(({ status }) => status === "FAIL"))
     ) {
-      throw outputError("Blocked finalization has invalid check evidence.");
+      throw outputError(
+        "Blocked finalization has invalid check evidence.",
+        outputConstraint("checks", "blocked-status-check-consistency"),
+      );
     }
     const evidence =
       payload.status === "BLOCKED"
-        ? normalizeTextList(payload.evidence, "finalization blocker evidence")
-        : normalizeOptionalEvidence(payload.evidence, "finalization evidence");
+        ? normalizeTextList(payload.evidence, "finalization blocker evidence", {
+            diagnosticField: "evidence",
+          })
+        : normalizeTextList(payload.evidence, "finalization evidence", {
+            allowEmpty: true,
+            diagnosticField: "evidence",
+          });
     return Object.freeze({
       status: payload.status,
-      skillPath:
-        payload.skillPath === ""
-          ? null
-          : normalizeRelativePath(payload.skillPath, "finalization skill path"),
+      skillPath: skillPath(),
       reason: normalizeText(
         payload.reason,
         "finalization blocker",
         INVALID_OUTPUT_CODE,
+        outputConstraint("reason", "nonempty-plain-text-up-to-4000-characters"),
       ),
       evidence,
       requiredChecks,
@@ -2248,9 +2380,7 @@ export function normalizeFinalizationResult(
       checks,
     });
   }
-  if (payload.reason !== "" || !emptyDecision(payload)) {
-    throw outputError("Finalization result contains inapplicable fields.");
-  }
+  inactive(["reason", "question", "whyBlocked"], ["options", "evidence"]);
   const issues = normalizeFinalizationIssues(payload.issues);
   const requiredChecks = normalizePhaseSafeRequiredChecks(
     payload.requiredChecks,
@@ -2268,7 +2398,17 @@ export function normalizeFinalizationResult(
   );
   if (
     (payload.status === "PASS" && issues.length !== 0) ||
-    (payload.status === "FAIL" && issues.length === 0) ||
+    (payload.status === "FAIL" && issues.length === 0)
+  ) {
+    throw outputError(
+      "Finalization status does not match its issues.",
+      outputConstraint(
+        "issues",
+        payload.status === "PASS" ? "empty-when-pass" : "nonempty-when-fail",
+      ),
+    );
+  }
+  if (
     (payload.status === "PASS" &&
       checks.some(
         ({ command, status }) =>
@@ -2279,18 +2419,24 @@ export function normalizeFinalizationResult(
       (!checks.some(({ status }) => status === "FAIL") ||
         checks.some(({ status }) => status === "BLOCKED")))
   ) {
-    throw outputError("Finalization status does not match its issues.");
+    throw outputError(
+      "Finalization status does not match its checks.",
+      outputConstraint(
+        "checks",
+        payload.status === "PASS"
+          ? "pass-status-check-consistency"
+          : "fail-status-check-consistency",
+      ),
+    );
   }
   return Object.freeze({
     status: payload.status,
-    skillPath:
-      payload.skillPath === ""
-        ? null
-        : normalizeRelativePath(payload.skillPath, "finalization skill path"),
+    skillPath: skillPath(),
     summary: normalizeSummary(
       payload.summary,
       "finalization summary",
       INVALID_OUTPUT_CODE,
+      outputConstraint("summary", "concise-markdown-up-to-20000-characters"),
     ),
     issues,
     requiredChecks,
