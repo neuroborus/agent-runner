@@ -7,6 +7,31 @@ remain in the owning documentation.
 
 ## 2026-11-17
 
+- **Terminal review credits Runner's serial trusted-check order.** Plan
+  execution and polishing already execute one finalization's selected trusted
+  checks one at a time in inventory order after Worker returns, each attempt
+  retiring before the next, and persist no partial record when a pass stops.
+  The procedure-order instructions still said that array order proves no
+  execution sequence, without exception. Terminal roles therefore rejected the
+  order of Runner entries as unproven, and identical successful reruns consumed
+  the bounded evidence-rejection allowance until the run paused. The owning
+  instructions and documents now state that serial guarantee: within one
+  persisted record, entries with Runner-owned `executor` `runner` establish
+  their relative order after that `FINALIZE` turn's agent-owned work.
+  Agent-owned and legacy entries establish no Runner order. Terminal roles may
+  not reject evidence solely for missing telemetry or for that established
+  order. Insufficient proof of a mandatory sequence is never approved and keeps
+  the bounded evidence-rejection stop. A proven, uncorrectable violation keeps
+  the `VALIDATION_POLICY_BLOCKED` route. No witness, field, schema, outcome,
+  state version or setting is added, and no allowance is refunded.
+  Already-stopped runs need no migration. After operator-owned activation, a
+  run paused as `finalization_evidence_rejected` may continue through the
+  existing explicit null retry or unchanged independent-mode overrides. The
+  retry grants exactly one attempt that reruns complete finalization without
+  reusing the rejected evidence. Terminal runs stay closed, policy pauses
+  accept no retry or override, and other pauses keep their own recovery.
+  Processes pinned to an older payload keep the old prompts until restarted.
+
 - **Candidate corrections bind live validation infrastructure.** In polishing
   and plan execution, candidate-review and candidate clean-confirmation
   corrections now bind the Runner's live inspection of the established

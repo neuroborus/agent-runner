@@ -454,6 +454,30 @@ test("check ownership survives commit and custom execution adaptation", () => {
     assert.match(prompt, /operator or another owner is not an omission/u);
     assert.match(prompt, /reject a finalization that adds it/u);
     assert.match(prompt, /missing genuine pipeline-owned check/u);
+    assert.match(
+      prompt,
+      /Never make an evidence-only rejection solely for missing timing telemetry or for relative order between Runner-attributed entries/u,
+    );
+    assert.match(
+      prompt,
+      /does not prove it violated, the requirement stays binding: never approve it/u,
+    );
+    assert.match(
+      prompt,
+      /keeps the ordinary-finding route to VALIDATION_POLICY_BLOCKED, never an evidence-only rejection/u,
+    );
+  }
+  for (const prompt of [
+    ...adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS),
+    ...adapted(FINALIZATION_INSTRUCTIONS),
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(
+      prompt,
+      /entries whose Runner-owned executor is "runner" therefore establish their relative physical order, after that FINALIZE turn's agent-owned work/u,
+    );
+    assert.match(prompt, /legacy entries establish no Runner order/u);
   }
   for (const prompt of [
     ...adapted(IMPLEMENTATION_INSTRUCTIONS),

@@ -59,6 +59,15 @@ function assertEvidenceContract(prompt) {
     prompt,
     /separately explicit physical sequencing requirement remains binding/u,
   );
+  assert.match(prompt, /Runner's serial executor is the only exception/u);
+  assert.match(
+    prompt,
+    /within one persisted finalization record, entries whose Runner-owned executor is "runner" therefore establish their relative physical order, after that FINALIZE turn's agent-owned work/iu,
+  );
+  assert.match(
+    prompt,
+    /such as an agent-owned check required after a Runner-trusted one, use the existing blocking outcome/u,
+  );
 }
 
 async function selectedFixture(

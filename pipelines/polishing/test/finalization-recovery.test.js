@@ -340,6 +340,11 @@ for (const mode of ["independent", "lazy", "combined"]) {
           prompt,
           /separately explicit physical sequencing requirement remains binding/u,
         );
+        assert.match(prompt, /Runner's serial executor is the only exception/u);
+        assert.match(
+          prompt,
+          /such as an agent-owned check required after a Runner-trusted one, use the existing blocking outcome/u,
+        );
       }
     }
     const rejectedState = rejectionTransitions(fixture)[0].patch.pipelineState;

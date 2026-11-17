@@ -362,25 +362,44 @@ function trustedValidationSnapshot(
   command = "npm run test:service",
   capabilities = {},
 ) {
-  const vector = {
-    alias,
-    command,
-    executable: "npm",
-    arguments: ["run", "test:service"],
-    capabilities,
-  };
-  const identity = hash(JSON.stringify(vector));
-  const commands = [{ ...vector, identity }];
-  const schemaVersion = capabilities.sourceProjection === true ? 4 : 3;
+  // An array first argument lists complete vectors in configuration order.
+  const vectors = Array.isArray(alias)
+    ? alias.map((vector) => ({
+        alias: vector.alias,
+        command: vector.command,
+        executable: vector.executable,
+        arguments: vector.arguments,
+        capabilities: vector.capabilities ?? {},
+      }))
+    : [
+        {
+          alias,
+          command,
+          executable: "npm",
+          arguments: ["run", "test:service"],
+          capabilities,
+        },
+      ];
+  const commands = vectors.map((vector) => ({
+    ...vector,
+    identity: hash(JSON.stringify(vector)),
+  }));
+  const schemaVersion = vectors.some(
+    ({ capabilities: value }) => value.sourceProjection === true,
+  )
+    ? 4
+    : 3;
   return Object.freeze({
     schemaVersion,
     timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
-    commandFingerprint: hash(JSON.stringify([identity])),
+    commandFingerprint: hash(
+      JSON.stringify(commands.map(({ identity }) => identity)),
+    ),
     configurationFingerprint: hash(
       JSON.stringify({
         schemaVersion,
-        commands: [vector],
+        commands: vectors,
         timeoutMs: 3_600_000,
       }),
     ),

@@ -2530,11 +2530,23 @@ proves no physical execution sequence: Worker runs agent-owned checks during
 `FINALIZE` and returns reserved `NOT_RUN` entries; Runner subsequently executes
 their frozen vectors and replaces those entries in inventory positions under
 existing unchanged-content and infrastructure guards. No later Worker turn is
-required; `COMMIT` retains its separate fixed staged hygiene. A separately explicit
-physical sequencing requirement remains binding and uses existing blocking
-outcomes if incompatible with ownership/checkpoints, without new permissions or
-an invented product decision. Independent terminal Reviewer confirmation and
-lazy terminal clean confirmation read the
+required; `COMMIT` retains its separate fixed staged hygiene. The only exception
+is Runner's serial loop, identical for commit and custom execution: it awaits
+one selected entry at a time in inventory order, each attempt retires before the
+next starts under unchanged bindings, and no stop persists partial finalization
+evidence. Within one persisted record, entries whose Runner-owned `executor` is
+`runner` therefore establish their relative physical order after that
+`FINALIZE` turn's agent-owned work; agent-owned and legacy entries establish no
+Runner order. A separately explicit physical sequencing requirement remains
+binding and uses existing blocking outcomes if incompatible with
+ownership/checkpoints, without new permissions or an invented product decision.
+Terminal roles never reject evidence for order this guarantee establishes or
+for missing telemetry. Insufficient proof that a mandatory sequence was met is
+never approved: evidence-only rejection uses the bounded recovery and
+[exhaustion pause](#132-candidate-convergence-and-finalization) below, while
+proven uncorrectable violation keeps the
+[policy stop](#historical-validation-noncompliance). Independent terminal
+Reviewer confirmation and lazy terminal clean confirmation read the
 actual selected guidance and mandatory references and assess the complete
 resulting procedure, including additions and their positions, even when all
 checks pass. The owning prompt instructions reach fresh, continued,
@@ -3441,7 +3453,8 @@ The existing check evidence list retains timing through persistence/reload and
 the terminal confirmation's exact validation tuple. No schema migration is
 needed; authentic unmeasured receipts remain valid with timing unknown. Worker
 placeholders stay `NOT_RUN`; finalization and terminal roles never estimate
-Runner duration or rerun solely for missing legacy/controller telemetry.
+Runner duration or rerun or reject evidence solely for missing legacy/controller
+telemetry.
 
 Before either the passing or failing finalization transition is attempted, one
 pipeline-owned deterministic contract constructs and validates the exact

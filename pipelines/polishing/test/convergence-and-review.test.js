@@ -10,6 +10,7 @@ import {
 import { join } from "node:path";
 import test from "node:test";
 
+import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
 import { HISTORICAL_VALIDATION_INSTRUCTIONS } from "../src/prompts.js";
 import { polishingPipeline } from "../src/index.js";
 import {
@@ -1783,6 +1784,133 @@ test("resumes and completes runner-trusted polishing validation", async (t) => {
     ).prompt,
     /return NOT_RUN/u,
   );
+});
+
+// Scripted role outcomes prove serial execution, persisted attribution and
+// terminal evidence delivery, not real-model compliance.
+test("delivers Runner-attributed serial trusted order to terminal review without a rerun", async (t) => {
+  const trustedValidation = trustedValidationSnapshot(
+    ["first", "second"].map((name) => ({
+      alias: `${name}-check`,
+      command: `npm run check:${name}`,
+      executable: "npm",
+      arguments: ["run", `check:${name}`],
+    })),
+  );
+  const aliases = trustedValidation.commands.map(({ alias }) => alias);
+  const requiredChecks = trustedValidation.commands.map(
+    ({ command }, index) => ({ id: `C${index + 1}`, command }),
+  );
+  const finalization = {
+    ...finalizationPassed(),
+    requiredChecks,
+    checks: requiredChecks.map(({ id, command }) => ({
+      checkId: id,
+      command,
+      status: "NOT_RUN",
+      evidence: ["Reserved for the runner-trusted executor."],
+    })),
+  };
+  const bootstrap = (role) => ({ ...bootstrapReady(role), requiredChecks });
+  const events = [];
+  const reviews = [];
+  let service;
+  let executions = 0;
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, trustedChecks: aliases },
+    trustedValidation,
+    reviewer: [bootstrap("Reviewer"), candidateApproved(), reviewApproved()],
+    worker: [
+      clarificationReady(),
+      bootstrap("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalization,
+    ],
+    async prepareProject(projectPath) {
+      await writeFile(
+        join(projectPath, ".agents/skills/finalization/SKILL.md"),
+        "# Finalization\n\nRun the first check (C1) before the second check (C2).\n",
+      );
+    },
+    onRoleRun(_role, request) {
+      if (request.schema === FINALIZATION_SCHEMA) events.push("worker-turn");
+      if (request.schema === REVIEW_SCHEMA) reviews.push(request);
+    },
+    async onTrustedValidation(request) {
+      executions++;
+      return service.execute(request);
+    },
+  });
+  let active = 0;
+  service = createTrustedValidationService({
+    git: fixture.runtime.git,
+    sandboxCommand: (command, { environment }) => ({ command, environment }),
+    async runCommand(command) {
+      assert.equal(active++, 0);
+      events.push(`start ${command.alias}`);
+      await new Promise(setImmediate);
+      events.push(`end ${command.alias}`);
+      active--;
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+      };
+    },
+  });
+
+  const result = await fixture.run();
+
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.deepEqual(events, [
+    "worker-turn",
+    "start first-check",
+    "end first-check",
+    "start second-check",
+    "end second-check",
+  ]);
+  const saved = result.pipelineState.finalizationResult;
+  assert.deepEqual(
+    saved.checks.map(({ executor, commandIdentity }) => ({
+      executor,
+      commandIdentity,
+    })),
+    trustedValidation.commands.map(({ identity }) => ({
+      executor: "runner",
+      commandIdentity: identity,
+    })),
+  );
+  assert.equal(executions, 2);
+  assert.equal(
+    fixture.calls.worker.filter(({ schema }) => schema === FINALIZATION_SCHEMA)
+      .length,
+    1,
+  );
+  assert.equal(reviews.length, 1);
+  assert.equal(
+    fixture.transitions.filter(
+      ({ options }) => options.activity?.kind === "evidence-rejected",
+    ).length,
+    0,
+  );
+  for (const prompt of [reviews[0].prompt, reviews[0].recoveryPrompt]) {
+    assert.match(
+      prompt,
+      /entries whose Runner-owned executor is "runner" therefore establish their relative physical order/u,
+    );
+    assert.match(
+      prompt,
+      /Never make an evidence-only rejection solely for missing timing telemetry or for relative order between Runner-attributed entries/u,
+    );
+    assert.match(
+      prompt,
+      /keeps the ordinary-finding route to VALIDATION_POLICY_BLOCKED, never an evidence-only rejection/u,
+    );
+  }
+  assert.ok(reviews[0].prompt.includes(JSON.stringify(saved, null, 2)));
 });
 
 test("rejects non-allowlisted polishing finalization placeholders", () => {

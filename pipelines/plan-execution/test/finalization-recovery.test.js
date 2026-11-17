@@ -13,6 +13,7 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
   REVIEW_SCHEMA,
 } from "../src/schemas.js";
 import {
@@ -285,6 +286,11 @@ for (const mode of ["independent", "lazy", "combined"]) {
         assert.match(
           prompt,
           /separately explicit physical sequencing requirement remains binding/u,
+        );
+        assert.match(prompt, /Runner's serial executor is the only exception/u);
+        assert.match(
+          prompt,
+          /such as an agent-owned check required after a Runner-trusted one, use the existing blocking outcome/u,
         );
       }
     }
@@ -568,6 +574,162 @@ for (const mode of ["independent", "lazy"]) {
     );
   });
 }
+
+const SEQUENCE_RULES = [
+  /Never make an evidence-only rejection solely for missing timing telemetry/u,
+  /insufficient to show that a mandatory explicit sequencing requirement was met, but does not prove it violated, the requirement stays binding: never approve it/u,
+  /keeps the ordinary-finding route to VALIDATION_POLICY_BLOCKED, never an evidence-only rejection/u,
+];
+
+// Agent-owned C1 must physically precede agent-owned C3; Runner owns C2.
+async function sequenceFixture(t, { evidence, rejections, work, acceptance }) {
+  const trusted = trustedValidationSnapshot();
+  const requiredChecks = [
+    { id: "C1", command: "node scripts/first-check.js" },
+    { id: "C2", command: trusted.commands[0].command },
+    { id: "C3", command: "node scripts/final-check.js" },
+  ];
+  const result = {
+    ...finalized(),
+    requiredChecks,
+    checks: requiredChecks.map(({ id, command }) => ({
+      checkId: id,
+      command,
+      status: id === "C2" ? "NOT_RUN" : "PASS",
+      evidence: [id === "C2" ? "Reserved for Runner execution." : evidence[id]],
+    })),
+  };
+  let executions = 0;
+  const fixture = await recoveryFixture(t, {
+    mode: "independent",
+    requiredChecks,
+    trustedValidation: trusted,
+    modeSettings: { trustedChecks: [trusted.commands[0].alias] },
+    initialFinalization: result,
+    replacements: rejections.slice(1).map(() => result),
+    rejections,
+    work,
+    acceptance,
+    onTrustedValidation(options) {
+      executions++;
+      return {
+        ...options.bindings,
+        status: "PASS",
+        commandIdentity: options.commandIdentity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: ["Controlled Runner check passed after Worker return."],
+      };
+    },
+    async prepareProject(path) {
+      await mkdir(join(path, "docs"));
+      await writeFile(join(path, "docs/OPERATOR_GUIDE.md"), "Guidance.\n");
+      await writeFile(
+        join(path, ".agents/skills/finalization/SKILL.md"),
+        "# Finalization\n\nRun C1 physically before C3.\n",
+      );
+      await writeFile(
+        join(path, "task/task.md"),
+        "Implement the requested behavior. Running C3 before C1 makes the run ineligible for acceptance; no later check can correct it.\n",
+      );
+    },
+  });
+  const paused = await fixture.run({
+    trustedChecks: [trusted.commands[0].alias],
+  });
+  const terminals = calls(fixture, REVIEW_SCHEMA);
+  assert.ok(terminals.length > 0);
+  for (const request of terminals)
+    for (const prompt of [request.prompt, request.recoveryPrompt])
+      for (const rule of SEQUENCE_RULES) assert.match(prompt, rule);
+  assert.equal(paused.pipelineState.completedCommits.length, 0);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    0,
+  );
+  return { executions: () => executions, fixture, paused };
+}
+
+// Scripted outcomes prove delivery and the existing stop routing, not model
+// compliance.
+test("independent unknown mandatory sequence is never approved and stops after bounded evidence rejection", async (t) => {
+  const rejection = insufficientEvidence();
+  rejection.findings[0] = {
+    ...rejection.findings[0],
+    problem: "Persisted evidence does not show that C1 ran before C3.",
+    reason:
+      "The finalization guidance requires C1 before C3; the order is unknown, not proven violated.",
+    suggestedAction:
+      "Rerun complete finalization with direct evidence of the required C1-before-C3 order.",
+  };
+  rejection.validationEvidence = [
+    "The required C1-before-C3 order is unproven.",
+  ];
+  const { executions, fixture, paused } = await sequenceFixture(t, {
+    evidence: { C1: "The check passed.", C3: "The check passed." },
+    rejections: [rejection, rejection, rejection],
+    work: [],
+  });
+  assert.equal(paused.pause.reason, "finalization_evidence_rejected");
+  assert.equal(paused.pause.resumeState, "FINALIZE");
+  assert.equal(paused.pipelineState.finalizationRecovery.attempts, 2);
+  assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 3);
+  assert.equal(executions(), 3);
+  assert.equal(rejectionTransitions(fixture).length, 3);
+  assert.deepEqual(planExecutionPipeline.projections.pause(paused).evidence, [
+    "Finalization evidence finding R1 remains unresolved.",
+  ]);
+  assert.deepEqual(planExecutionPipeline.projections.status(paused).findings, [
+    { id: "R1", summary: rejection.findings[0].problem },
+  ]);
+});
+
+test("independent proven uncorrectable sequence violation keeps the policy stop", async (t) => {
+  const finding = reviewFindings("R1");
+  finding.findings[0] = {
+    ...finding.findings[0],
+    file: ".agents/skills/finalization/SKILL.md",
+    problem: "The retained report proves C3 ran before C1.",
+    reason:
+      "The task makes that order irrecoverable; no corrective disposition is permitted.",
+    suggestedAction:
+      "Return VALIDATION_POLICY_BLOCKED with its three evidence entries.",
+  };
+  const policyStop = {
+    status: "VALIDATION_POLICY_BLOCKED",
+    decisions: [],
+    reason: "The frozen task makes the proven execution order irrecoverable.",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [
+      "The retained FINALIZE report discloses that C3 ran before C1.",
+      "Task: running C3 before C1 makes the run ineligible for acceptance.",
+      "The task states that no later check can correct that order.",
+    ],
+  };
+  const { executions, fixture, paused } = await sequenceFixture(t, {
+    evidence: {
+      C1: "The check passed after C3 had already run.",
+      C3: "The check passed before C1 ran.",
+    },
+    rejections: [],
+    work: [policyStop],
+    acceptance: finding,
+  });
+  assert.equal(paused.pause.reason, "validation_policy_blocked");
+  assert.equal(paused.pause.checkpoint, "RESOLVE_FINDINGS");
+  assert.equal(rejectionTransitions(fixture).length, 0);
+  assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 1);
+  assert.equal(executions(), 1);
+  assert.equal(fixture.calls.worker.at(-1).schema, FINDING_RESOLUTION_SCHEMA);
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(paused).evidence,
+    policyStop.evidence,
+  );
+});
 
 test("semantic pending attempt survives provider unavailability without recounting", async (t) => {
   let unavailable = false;

@@ -1906,6 +1906,12 @@ test("preserves version-4 consumed commit authority for verification", async (t)
   assert.equal(migrated.pendingCommit.status, "consumed");
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.finalizationResult.status, "PASS");
+  // Legacy entries stay agent-attributed and establish no Runner order.
+  assert.ok(migrated.finalizationResult.checks.length > 0);
+  for (const check of migrated.finalizationResult.checks) {
+    assert.equal(check.executor, "agent");
+    assert.equal(check.commandIdentity, null);
+  }
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() =>
     normalizePipelineState(

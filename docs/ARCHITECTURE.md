@@ -3675,9 +3675,23 @@ Inventory order proves no physical execution sequence: Worker completes its
 agent-owned checks and returns reserved `NOT_RUN` placeholders; Runner later
 executes frozen selected vectors and replaces those entries in inventory
 positions under existing unchanged-content and infrastructure guards. No later
-Worker phase is required. Separately explicit physical sequencing requirements
-remain binding; incompatibility with existing ownership/checkpoints uses existing
+Worker phase is required. The only order exception is a controller fact: each
+pipeline's workflow is the sole producer of `executor: "runner"` entries and,
+after Worker returns, awaits one selected trusted execution at a time in
+inventory order. Each attempt resolves only after verified retirement and
+cleanup, infrastructure is rechecked before the next attempt, a failure does
+not skip later entries, and a pause, block, guard failure or crash persists no
+partial finalization evidence. Within one persisted record, Runner-attributed
+entries therefore establish their relative physical order after that
+`FINALIZE` turn's agent-owned work. No witness, hash, schema field or state
+version records this; legacy migrated entries stay agent-attributed and
+order-unknown. Separately explicit physical sequencing requirements remain
+binding; incompatibility with existing ownership/checkpoints uses existing
 blocking outcomes without new permissions or an invented product decision.
+Terminal roles never reject evidence solely for absent telemetry or for
+established Runner order; insufficient proof of a mandatory sequence uses
+bounded evidence rejection, while proven uncorrectable violation keeps the
+`VALIDATION_POLICY_BLOCKED` route.
 `COMMIT`/`HANDOFF` retains separate fixed staged hygiene.
 Terminal roles read the actual selected guidance and mandatory references and
 assess the complete resulting procedure, including additions;

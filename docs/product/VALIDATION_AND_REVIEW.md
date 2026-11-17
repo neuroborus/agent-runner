@@ -347,15 +347,38 @@ validators. Workers preserve project-defined first, final and relative-order
 constraints in the declared inventory and ordered evidence: additions are
 not automatically appended. Established identities and exact commands remain
 required. Reordering the current inventory preserves original discovery and
-future assignments. This order is not a global physical timeline: Worker runs
-its agent-owned checks and returns reserved `NOT_RUN` entries; Runner later
-executes frozen vectors and replaces entries in inventory positions under existing
-unchanged-content and infrastructure guards. No later Worker phase is required;
-`COMMIT`/`HANDOFF` keeps separate staged hygiene. Separately explicit physical
-sequencing requirements still bind and use existing blocking outcomes when
-incompatible with ownership/checkpoints, without new permissions or an invented
-product decision. Independent terminal review and lazy terminal clean confirmation
-read the actual selected guidance and mandatory references and assess the complete
+future assignments. Inventory and agent-reported evidence order are not a
+global physical timeline: Worker runs its agent-owned checks and returns
+reserved `NOT_RUN` entries; Runner later executes frozen vectors and replaces
+entries in inventory positions under existing unchanged-content and
+infrastructure guards. No later Worker phase is required; `COMMIT`/`HANDOFF`
+keeps separate staged hygiene.
+
+Runner's own serial executor is the only exception to that rule. After Worker
+returns, Runner executes one finalization's selected entries one at a time in
+inventory order; each admitted attempt completes and retires before the next starts under
+the same bound content, infrastructure, command and configuration fingerprints,
+and a pause, block, guard failure or interruption persists no partial
+finalization evidence. Within one persisted finalization record, entries whose
+Runner-owned `executor` is `runner` therefore establish their relative physical
+order, after that `FINALIZE` turn's agent-owned work. The guarantee covers only
+Runner-attributed entries and does not change how agent-owned checks are
+assessed; legacy agent-attributed entries establish no Runner order, and unknown
+order stays unknown. Terminal roles never make an evidence-only rejection for
+order that this guarantee already establishes.
+
+Separately explicit physical sequencing requirements still bind. When
+incompatible with ownership/checkpoints, such as an agent-owned check required
+after a Runner-trusted one, they use existing blocking outcomes without new
+permissions, a waived check or an invented product decision. When persisted
+evidence is insufficient to show a mandatory sequence was met but does not
+prove it violated, terminal roles reject the evidence; its existing bounded
+recovery ends in the `finalization_evidence_rejected` pause. Proven execution
+that violated it with no permitted corrective disposition keeps the
+`VALIDATION_POLICY_BLOCKED` route above. None of these routes is approval.
+
+Independent terminal review and lazy terminal clean confirmation read the
+actual selected guidance and mandatory references and assess the complete
 resulting procedure, including added checks and their positions. Passing every
 check does not alone establish procedural compliance. This is a semantic
 obligation delivered in role instructions, not deterministic parsing of project
@@ -623,7 +646,8 @@ check measurement. Cancellation or uncertain cleanup produces no completed
 receipt. The existing evidence lists carry timing unchanged through persistence
 and terminal confirmation in execution and polishing. Legacy or older-controller
 receipts without timing remain timing-unknown; never ask an agent to measure a
-Runner-owned command, fabricate a duration or rerun only for absent telemetry.
+Runner-owned command, fabricate a duration, or rerun or reject evidence only
+for absent telemetry.
 Report actual outcomes and available measurements against the advisory
 60-second ordinary-gate target; exceeding that target alone is not check failure.
 
