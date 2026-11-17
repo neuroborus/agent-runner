@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { spawnOwnedProcess } from "../agents/index.js";
+import { spawnOwnedProcess } from "../platform/index.js";
 import { deepFreeze, MAX_WORKSPACE_PREPARATION_BYTES } from "../state/index.js";
 import { WorkspaceSafetyError } from "../workspace/index.js";
 import { RunnerError, rejectUnknownFields } from "./input.js";
@@ -571,6 +571,34 @@ export function directorySafety(
       const { snapshot } = await inspect();
       return inspectedSnapshot(snapshot, allowedPaths);
     },
+    // Persisted baselines stay within state limits for any control-tree size.
+    async baseline({ allowedPaths = [] } = {}) {
+      const { snapshot } = await inspect();
+      const inspected = inspectedSnapshot(snapshot, allowedPaths);
+      return Object.freeze({
+        ...workspace.snapshotBaseline(inspected),
+        allowedPaths,
+        projectPath: inspected.projectPath,
+        ...(inspected.sourceSelection === undefined
+          ? {}
+          : { sourceSelection: inspected.sourceSelection }),
+      });
+    },
+    // Writable consumers persist the bounded projection of the same inspection
+    // whose complete snapshot remains transient for output allowances.
+    async outputBaseline({ allowedPaths = [] } = {}) {
+      const { snapshot } = await inspect();
+      const inspected = inspectedSnapshot(snapshot, allowedPaths);
+      return Object.freeze({
+        snapshot: inspected,
+        baseline: Object.freeze({
+          ...workspace.outputBaseline(inspected),
+          allowedPaths,
+          projectPath: inspected.projectPath,
+        }),
+      });
+    },
+    // Compact and legacy full baselines share the same filtered comparison.
     async assertUnchanged(before) {
       const { snapshot: after } = await inspect();
       workspace.assertUnchanged({

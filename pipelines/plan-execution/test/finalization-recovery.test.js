@@ -31,12 +31,14 @@ import {
   finalizationPassed,
   implementationCompleted,
   implementationProductDecision,
+  matchesSchemaSubset,
   reconciliationResolved,
   resolution,
   reviewApproved,
   reviewFindings,
   terminalConfirmation,
   terminalLazyConfirmation,
+  trustedValidationSnapshot,
 } from "./support/index.js";
 
 const ESTABLISHED = [
@@ -100,28 +102,35 @@ async function recoveryFixture(
     replacements = [finalized()],
     rejections = [rejected()],
     work = [],
+    requiredChecks = finalizationPassed().requiredChecks,
+    acceptance = mode === "lazy" ? cleanConfirmation() : reviewApproved(),
     ...options
   } = {},
 ) {
   const terminal =
     mode === "lazy" ? terminalLazyConfirmation : terminalConfirmation;
-  const confirms = [
-    ...rejections.map(terminal),
-    terminal(mode === "lazy" ? cleanConfirmation() : reviewApproved()),
-  ];
+  const confirms = [...rejections.map(terminal), terminal(acceptance)];
   return createFixture(t, {
     mode,
     worker: [
       clarificationReady(),
-      { ...bootstrapReady("Worker"), validationInfrastructure: ESTABLISHED },
+      {
+        ...bootstrapReady("Worker"),
+        requiredChecks,
+        validationInfrastructure: ESTABLISHED,
+      },
       ...(mode === "lazy" ? [] : [reconciliationResolved()]),
     ],
     reviewer: [
-      { ...bootstrapReady("Reviewer"), validationInfrastructure: ESTABLISHED },
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks,
+        validationInfrastructure: ESTABLISHED,
+      },
     ],
     workWorker: [
       implementationCompleted(),
-      ...(mode === "lazy" ? [checkAndFix()] : []),
+      ...(mode === "independent" ? [] : [checkAndFix()]),
       initialFinalization,
       ...work,
       ...replacements,
@@ -152,6 +161,209 @@ function rejectionTransitions(fixture) {
   );
 }
 
+for (const mode of ["independent", "lazy", "combined"]) {
+  test(`${mode} recovers inventory order while Runner executes after Worker return`, async (t) => {
+    const trusted = trustedValidationSnapshot();
+    const command = trusted.commands[0];
+    const first = { id: "C1", command: "node scripts/first-check.js" };
+    const reserved = { id: "C2", command: command.command };
+    const last = { id: "C3", command: "node scripts/final-check.js" };
+    const extra = { id: "C4", command: "node scripts/supplemental-check.js" };
+    const established = [first, reserved, last];
+    const amended = [first, reserved, extra, last];
+    const result = (requiredChecks) => ({
+      ...finalized(),
+      requiredChecks,
+      checks: requiredChecks.map(({ id, command: text }) => ({
+        checkId: id,
+        command: text,
+        status: text === command.command ? "NOT_RUN" : "PASS",
+        evidence: [
+          text === command.command
+            ? "Reserved for Runner execution."
+            : "Controlled agent check passed.",
+        ],
+      })),
+    });
+    const rejection = rejected();
+    rejection.findings[0] = {
+      ...rejection.findings[0],
+      problem: "The supplement follows the final check in the inventory.",
+      reason: "Passing checks do not satisfy the declared inventory ordering.",
+      suggestedAction:
+        "Rerun finalization with the supplement before the final inventory entry; preserve execution ownership and content.",
+    };
+    rejection.validationEvidence = [
+      "The declared inventory violates project ordering.",
+    ];
+    const events = [];
+    const executions = [];
+    const fixture = await recoveryFixture(t, {
+      mode,
+      requiredChecks: established,
+      trustedValidation: trusted,
+      modeSettings: { trustedChecks: [command.alias] },
+      initialFinalization: result([...established, extra]),
+      replacements: [result(amended)],
+      rejections: [rejection],
+      acceptance:
+        mode === "lazy"
+          ? cleanConfirmation("ACCEPTED")
+          : reviewApproved("ACCEPTED"),
+      onTrustedValidation(options) {
+        assert.equal(events.at(-1), "worker-return");
+        events.push("runner-execution");
+        assert.deepEqual(options.snapshot, trusted);
+        assert.equal(options.commandIdentity, command.identity);
+        executions.push(options);
+        return {
+          ...options.bindings,
+          status: "PASS",
+          commandIdentity: options.commandIdentity,
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          evidence: ["Controlled Runner check passed after Worker return."],
+        };
+      },
+      async prepareProject(path) {
+        await mkdir(join(path, "docs"));
+        await writeFile(join(path, "package.json"), "{}\n");
+        await writeFile(
+          join(path, "docs/OPERATOR_GUIDE.md"),
+          "Declare first-check first and final-check last in inventory and ordered evidence. Worker reports reserved checks NOT_RUN; Runner executes them after Worker return.\n",
+        );
+        await writeFile(
+          join(path, ".agents/skills/finalization/SKILL.md"),
+          "# Finalization\n\nRead mandatory repository reference docs/OPERATOR_GUIDE.md for the procedure.\n",
+        );
+      },
+    });
+    const workerRun = fixture.runtime.adapters.worker.run;
+    fixture.runtime.adapters.worker.run = async (request) => {
+      const response = await workerRun(request);
+      if (request.schema === FINALIZATION_SCHEMA) {
+        assert.equal(response.structured.checks[1].status, "NOT_RUN");
+        events.push("worker-return");
+      }
+      return response;
+    };
+    // Scripted outcomes prove composition and ownership, not model compliance
+    // or real check execution.
+    const completed = await fixture.run({
+      mode,
+      trustedChecks: [command.alias],
+    });
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.deepEqual(events, [
+      "worker-return",
+      "runner-execution",
+      "worker-return",
+      "runner-execution",
+    ]);
+    const terminals = calls(
+      fixture,
+      mode === "lazy" ? CLEAN_CONFIRM_SCHEMA : REVIEW_SCHEMA,
+    );
+    const finalizations = calls(fixture, FINALIZATION_SCHEMA);
+    assert.equal(terminals.length, 2);
+    assert.equal(finalizations.length, 2);
+    assert.ok(
+      finalizations.every((request) => fixture.calls.worker.includes(request)),
+    );
+    assert.ok(
+      terminals.every((request) =>
+        fixture.calls[mode === "lazy" ? "worker" : "reviewer"].includes(
+          request,
+        ),
+      ),
+    );
+    for (const request of [...finalizations, ...terminals]) {
+      for (const prompt of [request.prompt, request.recoveryPrompt]) {
+        assert.match(prompt, /declared inventory and ordered evidence/u);
+        assert.match(prompt, /array order proves no execution sequence/u);
+        assert.match(
+          prompt,
+          /separately explicit physical sequencing requirement remains binding/u,
+        );
+      }
+    }
+    const rejectedState = rejectionTransitions(fixture)[0].patch.pipelineState;
+    assert.deepEqual(
+      completed.counters,
+      rejectionTransitions(fixture)[0].patch.counters,
+    );
+    assert.equal(
+      calls(fixture, CANDIDATE_REVIEW_SCHEMA).length,
+      mode === "lazy" ? 0 : 1,
+    );
+    assert.equal(
+      calls(fixture, CANDIDATE_CLEAN_CONFIRM_SCHEMA).length,
+      mode === "independent" ? 0 : 1,
+    );
+    assert.equal(
+      calls(fixture, CHECK_AND_FIX_SCHEMA).length,
+      mode === "independent" ? 0 : 1,
+    );
+    const state = completed.pipelineState;
+    const evidence = state.finalizationResult;
+    assert.equal(
+      state.finalizedFingerprint,
+      rejectedState.finalizationRecovery.feedback.contentFingerprint,
+    );
+    assert.deepEqual(state.requiredChecks, amended);
+    assert.deepEqual(
+      state.workerValidation.requiredChecks.map(({ id, command }) => ({
+        id,
+        command,
+      })),
+      established,
+    );
+    assert.deepEqual(
+      evidence.checks.map(({ checkId, command }) => ({ id: checkId, command })),
+      amended,
+    );
+    assert.deepEqual(
+      evidence.checks.map(({ executor }) => executor),
+      ["agent", "runner", "agent", "agent"],
+    );
+    assert.ok(evidence.checks.every(({ status }) => status === "PASS"));
+    assert.equal(evidence.checks[1].commandIdentity, command.identity);
+    assert.deepEqual(evidence.checks[1].evidence, [
+      "Controlled Runner check passed after Worker return.",
+    ]);
+    assert.deepEqual(evidence.checks.at(-1).evidence, [
+      "Controlled agent check passed.",
+    ]);
+    assert.equal(executions.length, 2);
+    for (const execution of executions) {
+      assert.deepEqual(execution.bindings, {
+        contentFingerprint: evidence.fingerprint,
+        validationInfrastructureFingerprint:
+          evidence.validationInfrastructureFingerprint,
+        commandFingerprint: evidence.trustedCommandFingerprint,
+        configurationFingerprint: evidence.trustedConfigurationFingerprint,
+      });
+    }
+    assert.equal(state.reviewResult.validationChange, "ACCEPTED");
+    for (const change of [
+      (candidate) => {
+        candidate.finalizationResult.checks.at(-1).executor = "runner";
+      },
+      (candidate) => {
+        candidate.finalizationResult.checks[1].commandIdentity = "f".repeat(64);
+      },
+      (candidate) => {
+        candidate.finalizationResult.fingerprint = "f".repeat(64);
+      },
+    ]) {
+      const stale = structuredClone(completed);
+      change(stale.pipelineState);
+      assert.throws(() => planExecutionPipeline.workflow.validateRun(stale));
+    }
+  });
+}
+
 for (const mode of ["independent", "lazy"]) {
   test(`${mode} corrects the exact no-edit infrastructure rejection without candidate or code-fix cycles`, async (t) => {
     const fixture = await recoveryFixture(t, { mode });
@@ -162,6 +374,23 @@ for (const mode of ["independent", "lazy"]) {
       ESTABLISHED,
     );
     assert.equal(calls(fixture, FINALIZATION_SCHEMA).length, 2);
+    for (const request of [
+      ...calls(fixture, FINALIZATION_SCHEMA),
+      ...calls(fixture, mode === "lazy" ? CLEAN_CONFIRM_SCHEMA : REVIEW_SCHEMA),
+    ]) {
+      for (const prompt of [request.prompt, request.recoveryPrompt]) {
+        assert.match(prompt, /Runner owns persisted finalization properties/u);
+        assert.match(
+          prompt,
+          /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+        );
+        assert.match(prompt, /"finalizationGuidance":/u);
+        assert.match(
+          prompt,
+          /Reject actual mismatches and insufficient evidence/u,
+        );
+      }
+    }
     assert.equal(
       calls(
         fixture,
@@ -418,6 +647,17 @@ test("semantic pending attempt reconstructs after interruption without a native 
     ).length,
     1,
   );
+  const reconstructed = calls(fixture, FINALIZATION_SCHEMA).at(-1);
+  for (const prompt of [reconstructed.prompt, reconstructed.recoveryPrompt]) {
+    assert.match(prompt, /project-defined first, final and relative-order/u);
+    assert.match(prompt, /Additions are not automatically appended/u);
+    assert.match(prompt, /Runner owns persisted finalization properties/u);
+    assert.match(
+      prompt,
+      /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
+    );
+    assert.match(prompt, /"finalizationGuidance":/u);
+  }
 });
 
 test("recovery rejects omitted checks and substituted infrastructure through the separate malformed-output correction", async (t) => {
@@ -442,6 +682,13 @@ test("recovery rejects omitted checks and substituted infrastructure through the
   assert.equal(finalizations.length, 3);
   assert.equal(finalizations[2].access, "read-only");
   assert.match(finalizations[2].prompt, /preserves-established-checks/u);
+  for (const prompt of [
+    finalizations[2].prompt,
+    finalizations[2].recoveryPrompt,
+  ]) {
+    assert.match(prompt, /project-defined first, final and relative-order/u);
+    assert.match(prompt, /Additions are not automatically appended/u);
+  }
   assert.match(
     finalizations[2].prompt,
     /preserves-established-infrastructure/u,
@@ -496,6 +743,131 @@ test("terminal evidence classification is structured, bounded, and absent from c
       finalizationFindingIds: [],
     }),
   );
+});
+
+test("candidate-review rejections carry bounded source-defined diagnostics", () => {
+  const sentinel = "sentinel-value";
+  const finding = (fields = {}) => ({
+    id: "R1",
+    file: "source.js",
+    problem: `Problem ${sentinel}.`,
+    reason: "Reason.",
+    suggestedAction: "Fix it.",
+    ...fields,
+  });
+  const result = (status, fields = {}) => ({
+    status,
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+    ...fields,
+  });
+  const decision = { whyBlocked: "Blocked.", evidence: ["Evidence."] };
+  const text = "nonempty-plain-text-up-to-4000-characters";
+  for (const clean of [true, false]) {
+    const accepted = clean ? "CLEAN" : "APPROVED";
+    const schema = clean
+      ? CANDIDATE_CLEAN_CONFIRM_SCHEMA
+      : CANDIDATE_REVIEW_SCHEMA;
+    const semantic = [
+      [
+        result(accepted, { findings: [finding()] }),
+        "findings",
+        clean ? "empty-when-clean" : "empty-when-approved",
+      ],
+      [result("FINDINGS"), "findings", "nonempty-when-findings"],
+      [
+        result(accepted, { question: sentinel }),
+        "question",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { evidence: [sentinel] }),
+        "evidence",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { options: [sentinel], whyBlocked: sentinel }),
+        "whyBlocked",
+        "empty-for-review",
+      ],
+      [
+        result("PRODUCT_DECISION_REQUIRED", {
+          ...decision,
+          question: "Choose?",
+          findings: [finding()],
+        }),
+        "findings",
+        "empty-for-product-decision",
+      ],
+      [result("PRODUCT_DECISION_REQUIRED", decision), "question", text],
+      [
+        result("FINDINGS", { findings: [finding({ file: `/${sentinel}` })] }),
+        "findings[0].file",
+        "repository-relative-path-up-to-4000-characters",
+      ],
+      [
+        result("FINDINGS", { findings: [finding({ suggestedAction: "" })] }),
+        "findings[0].suggestedAction",
+        text,
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding(), finding({ file: "other.js" })],
+        }),
+        "findings",
+        "unique-ids",
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding({ file: "other.js" }), finding({ id: "R3" })],
+        }),
+        "findings[1].id",
+        "stable-finding-id",
+      ],
+    ];
+    const structural = [
+      [{ ...result(accepted), extra: sentinel }, "result", "exact-field-set"],
+      [result(sentinel), "status", "supported-status"],
+      [result("FINDINGS", { findings: [sentinel] }), "findings[0]", "object"],
+      [
+        result("FINDINGS", { findings: [finding({ id: sentinel })] }),
+        "findings[0].id",
+        "review-finding-id",
+      ],
+    ];
+    for (const [cases, schemaValid] of [
+      [semantic, true],
+      [structural, false],
+    ]) {
+      for (const [payload, field, constraint] of cases) {
+        assert.equal(matchesSchemaSubset(schema, payload), schemaValid);
+        assert.throws(
+          () =>
+            normalizeCandidateReviewResult(payload, [finding({ id: "R2" })], {
+              clean,
+            }),
+          (error) => {
+            assert.equal(error.code, "ERR_INVALID_PLAN_EXECUTION_OUTPUT");
+            assert.deepEqual({ ...error.diagnostic }, { field, constraint });
+            assert.equal(
+              JSON.stringify(error.diagnostic).includes(sentinel),
+              false,
+            );
+            return true;
+          },
+        );
+      }
+    }
+    const valid = result("FINDINGS", { findings: [finding()] });
+    assert.equal(matchesSchemaSubset(schema, valid), true);
+    assert.deepEqual(normalizeCandidateReviewResult(valid, [], { clean }), {
+      status: "FINDINGS",
+      findings: [finding()],
+    });
+  }
 });
 
 test("version 14 migration initializes only recovery metadata and validates its durable bounds", async (t) => {

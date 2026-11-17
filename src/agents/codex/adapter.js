@@ -4,7 +4,11 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
+import {
+  executeOwnedProcess,
+  spawnOwnedProcess,
+} from "../../platform/index.js";
+import { isolateGitEnvironment } from "../../git/index.js";
 import { canReadFiles } from "../file-access.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
@@ -16,7 +20,6 @@ import {
   EFFORT_DIAGNOSTIC_CLASS,
   isEnvironment,
   isRecord,
-  isolateGitEnvironment,
   normalizeClientAttribution,
   sessionName,
   OUTPUT_EXHAUSTED_DISPOSITION,
@@ -34,6 +37,7 @@ import {
 import { assertCodexSchema } from "./schema.js";
 import {
   assertDirectoryConfiguration,
+  assertDirectoryOutputSupport,
   assertDirectorySelection,
   directoryPermissionArguments,
   directoryPolicyError,
@@ -45,6 +49,10 @@ import {
 } from "./workspace-storage.js";
 
 export const CODEX_BACKEND_ID = "codex";
+
+export function assertCodexWorkspaceReady(request) {
+  return assertDirectoryOutputSupport(request, CodexAdapterError);
+}
 
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
@@ -58,6 +66,7 @@ const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const CAPABILITY_DIAGNOSTICS = Object.freeze({
   declaredWorkspace: "capability_declared_workspace",
+  existingFileOutput: "capability_existing_file_output",
   autonomousWrite: "capability_autonomous_write",
   gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
@@ -890,6 +899,7 @@ async function validateModel(
 }
 
 async function selectThread(client, request, fresh) {
+  await assertCodexWorkspaceReady(request);
   const options = threadOptions(request);
   if (fresh || request.session === undefined) {
     const result = await client.request("thread/start", {
@@ -1270,6 +1280,7 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
 }
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {
+  await assertCodexWorkspaceReady(request);
   let response;
   try {
     response = await client.request(
@@ -1834,6 +1845,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function probeCapabilities(options) {
+    await assertCodexWorkspaceReady(options);
     const { capabilities, startupConfig } = await (options.access !==
       undefined && options.access !== "local-commit"
       ? (accessProbePromise ??= inspectCapabilities(false))
@@ -2093,10 +2105,12 @@ export function createCodexAdapter(options = {}) {
   ) {
     settlement.directoryVerified = false;
     request.signal?.throwIfAborted();
+    await assertCodexWorkspaceReady(request);
     const workspaceStorage = await prepareWorkspaceStorage(request);
     let processRetired = true;
     let attemptFailed = false;
     try {
+      await assertCodexWorkspaceReady(request);
       await request.directoryBoundary?.verify();
       const attemptRequest =
         request.directoryBoundary === undefined
@@ -2278,6 +2292,7 @@ export function createCodexAdapter(options = {}) {
 
   async function run(value) {
     const normalized = normalizeRequest(value);
+    await assertCodexWorkspaceReady(normalized);
     if (
       normalized.sessionNaming !== undefined &&
       normalized.onSessionCreated === undefined

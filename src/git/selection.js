@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { decodeNullList, GitSafetyError, hashBuffer } from "./command.js";
 import { safeRelativePath } from "./materialization.js";
+import { inspectContentDirectories } from "./nested.js";
 
 const OBJECT_ID = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 
@@ -45,7 +46,7 @@ function trackedPaths(value, index) {
       );
     }
     // Never turn a gitlink (or a sparse directory entry) into a recursive
-    // filesystem root. Existing Git snapshot/gitlink behavior stays separate.
+    // filesystem root. Git content observations reject these entries as well.
     if (
       !["100644", "100755", "120000"].includes(mode) ||
       (!index && middle !== "blob") ||
@@ -160,6 +161,11 @@ export async function selectSourcesAtRoot(
     const before = await membership(context, projectPath);
     const paths = [...before.trackedPaths, ...before.untrackedPaths].sort();
     const tracked = new Set(before.trackedPaths);
+    const verifyDirectories = await inspectContentDirectories(
+      projectPath,
+      paths,
+      context.signal,
+    );
     const kinds = await sourceKinds(
       projectPath,
       paths,
@@ -176,6 +182,7 @@ export async function selectSourcesAtRoot(
     );
     if (paths.some((path) => kinds.get(path) !== currentKinds.get(path)))
       throw changed();
+    await verifyDirectories();
     const selection = {
       projectPath,
       ...before,

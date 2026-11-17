@@ -13,10 +13,17 @@ root CLI/runtime ──static registry──▶ pipeline workspaces
 
 The root runner imports registered pipelines. Pipelines do not import the root
 application; the runner supplies state, event, agent, and Git services through a
-runtime context. Plan authoring and execution consume
+runtime context. The registry stores each descriptor as one frozen composed copy
+whose pause projection receives frozen root capabilities, currently only the
+Git-owned read-only snapshot-change normalizer; a direct uncomposed projection
+has no capability and fails closed. Plan authoring and execution consume
 `@agent-runner/commit-plan`; polishing has no shared-package dependency, and
 pipelines never depend on each other. Do not declare an internal runtime
 dependency before an actual import needs it.
+
+Inside the root, `src/platform/` is the lowest capability: it imports only
+Node built-ins and its own siblings, and every other root capability may consume
+its index.
 
 ## Root Runner Ownership
 
@@ -51,11 +58,45 @@ capability; its private service composes confined file operations, the
 write-ahead journal, durable actions, execution leases, and state validation.
 
 The Git capability lives under `src/git/` behind its public `index.js`. The
-small index exposes only the service factory and shared safety error; its
-private service composes command execution, content and snapshot inspection,
-change measurement, complete source selection, exact source materialization,
-commit verification, and polishing handoff modules without exposing their
-implementation contracts to root consumers.
+small index exposes only the service factory, the read-only snapshot-change
+normalizer, the shared safety error, and the Git-owned `isolateGitEnvironment`
+rule; its private service composes command execution, content and snapshot
+inspection, change measurement, complete source selection, exact source
+materialization, commit verification, and polishing handoff modules without
+exposing their implementation contracts to root consumers. The isolation rule
+removes `EMAIL` and every case-insensitive `GIT_*` name and disables terminal
+prompts. Snapshot identity queries and both provider local-commit executors
+share it, so identity availability, fingerprints, commit authorization and
+verification follow the configured identity that the executor actually uses.
+Other Git queries keep stripping only repository redirection, and check-in
+hashing keeps its existing dedicated isolation unchanged. Legacy evidence
+captured under ambient identity or configuration-source overrides fails closed
+through the existing identity guards.
+
+Git-content observation never invokes Git inside a content-selected nested
+directory. The command boundary disables submodule recursion, and observational
+status/diff commands ignore submodule worktrees. Independently, literal HEAD
+and index metadata reject gitlinks, including unchanged, deleted, ignored,
+index-hidden and allowed paths; an explicit measurement/source baseline is
+checked as well. Suppressing submodule inspection cannot establish cleanliness.
+Metadata-only checks reject `.git` markers and bare `HEAD`/`objects`/`refs`
+layouts in selected source ancestors and directory candidates. Ignored untracked
+trees remain pruned by Git. Descriptor-anchored directory probes never interpret
+nested configuration or follow Git pointers; handle/path identity and metadata
+are rechecked after content reads. A missing marker grants no later execution
+authority. Substitution races fail with `ERR_GIT_SNAPSHOT_RACE`.
+
+Gitlinks and embedded repositories fail closed with bounded
+`ERR_UNSUPPORTED_GIT_PATH` diagnostics in snapshots, content/path fingerprints,
+measurement and source projection/selection. Their rejection also blocks
+post-turn acceptance, preservation, commit verification and polishing handoff;
+it grants no cleanup, recovery or Git authority. Ordinary file/directory
+replacements, unfollowed leaf links, immutable object reads and staging-independent
+content hashes retain their supported behavior. Supported snapshot, selection
+and measurement shapes and fingerprint construction remain unchanged, so no
+durable migration is needed. Historical gitlink measurements, completed
+provenance and consumed effects remain historical evidence; they cannot approve
+a currently unsupported workspace or authorize replay.
 
 The filesystem-only workspace capability lives under `src/workspace/` behind
 `createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
@@ -73,6 +114,23 @@ caller's exact journaled effect paths to differ, while preserving the remainder,
 scope and link proof. Deferred new temporaries can be removed from the current
 remainder only if the original hash proves their absence. These methods grant
 no traversal, write or publication authority and leave capture unchanged.
+`snapshotBaseline` projects a complete snapshot into a bounded durable baseline:
+its scope (`workspacePath`, `outputPaths` and any `inspectionPaths`,
+`inspectionFilesOnly` and `excludePaths`), both fingerprints, `entryCount` and
+`entriesHash`, the ordered-entry digest shared with proofs through private
+`digest.js`. It omits `entries` and `linkResolutions`, so protected control
+trees cannot grow persisted state beyond its limits.
+`outputBaseline` adds output partitions for writable consumers, accepting only
+complete whole-directory snapshots like `snapshotProof`. `remainderCount` and
+`remainderHash` digest every captured entry outside all `outputPaths` roots;
+`outputs` holds one `{path, entry, descendantCount, descendantsHash}` record per
+compacted, sorted output root over its captured strict descendants. Compacted
+capture records no absent output beneath the workspace, so the projection
+derives a missing `entry` only when the nearest captured ancestor inside the
+workspace is a directory. File or link ancestors and uncaptured coverage are
+blockers that fail closed. Derived records exist only in the projection; capture,
+entries, `entryCount`, `entriesHash` and both fingerprints stay as captured.
+Records are bounded by frozen output declarations rather than tree size.
 
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
@@ -206,7 +264,14 @@ commit-authoring criteria and sources use this narrower capture while Git owns
 the repository snapshot and mutation guards.
 `assertUnchanged({before, after})` rejects content or identity drift; explicit
 `allowOutputs: true` permits only declared outputs and newly required parent
-directories, preserving unrelated files and all protected inputs. Filesystem
+directories, preserving unrelated files and all protected inputs. A compact
+`before` baseline is compared against a complete `after` snapshot by
+recomputing the same digest over its entries, the complete equality applied to
+legacy full baselines. Compact baselines reject `allowOutputs` and malformed
+counts, digests, fingerprints or retained link evidence. Output partitions, when
+present, require well-formed counts and digests and records whose paths equal
+`outputPaths`; they never grant output changes, which stay with complete
+transient snapshots and the bound protected fingerprint. Filesystem
 injection supports deterministic race tests without Git or providers.
 
 Directory lifecycle protected fingerprints exempt only declared outputs and
@@ -242,8 +307,8 @@ cannot detect newly appearing untracked sources.
 Leaf symlinks remain links and grant no target reads at selection. Routing
 aliases, special files, file/directory replacements, unresolved index entries,
 gitlinks and embedded repositories fail closed rather than becoming recursive
-inspection roots. Submodule traversal is unsupported by this selector; existing
-Git snapshot and measurement gitlink behavior is unchanged. Selection neither
+inspection roots. Git snapshots and measurement also reject gitlinks and
+embedded repository candidates. Selection neither
 initializes Git nor writes source, index, refs, remotes or identity, and grants
 no provider, staging or commit authority. Ordinary-directory consumers remain
 Git-independent. Cancellation interrupts path classification and Git commands;
@@ -272,8 +337,10 @@ LF terminates a line; raw bytes, CR and missing final newlines remain significan
 Text additions and deletions sum to `changedLines`; a NUL in either side's first
 8,000 bytes marks a binary path, reported separately in `binaryPaths` without
 invented line counts. Symlinks contribute their target text without following
-it; gitlinks are listed
-separately in `gitlinkPaths`. The sorted `changedPaths` bind assessed scope
+it. Gitlinks and embedded repositories reject measurement with
+`ERR_UNSUPPORTED_GIT_PATH`; `gitlinkPaths` remains in the result shape as an empty
+array for supported new measurements. Saved nonempty historical measurements
+retain their meaning. The sorted `changedPaths` bind assessed scope
 without reading unrelated files. Content drift rejects the measurement. This
 capability does not stage, invoke agents or validation, assess thresholds, or
 change workflow eligibility.
@@ -359,8 +426,11 @@ effects and stop recovery remain ahead of preparation for new writable work.
 The trusted-validation capability lives under `src/trusted-validation/` behind
 its public `index.js`. The index exposes only the contracts consumed by the
 root runtime and capability tests; private service and execution modules keep
-snapshot validation, exact command vectors, sandboxing, bounded evidence, and
-repository mutation guards within the capability.
+snapshot validation, exact command vectors, sandbox policy, bounded evidence, and
+repository mutation guards within the capability. Trusted validation owns
+exposure, storage, environment, and authorization policy and passes an ordered
+mount program to the platform boundary, which owns launcher discovery and
+verification and renders the fixed Linux isolation profile.
 
 Execution's private `commit-size-assessment.js` owns safe threshold arithmetic,
 fingerprint-bound atomic/split decisions and a three-attempt original-step
@@ -579,6 +649,20 @@ activity. Neither adapter maps client attribution into native session names,
 commit attribution, or undocumented environment variables, and bounded
 failures retain none of its values. Provider-visible origin identity does not
 promise a distinct provider dashboard category.
+
+The root `src/platform/index.js` is the one native-platform boundary. It
+statically selects the only implementation, Linux, and exposes three groups:
+process facts (`readProcessIdentity`, `readProcessNamespace`), owned processes
+(launch, execution, retirement, session inspection and the protected launcher)
+and trusted-command isolation (system paths, launcher resolution and
+verification, and the fixed bubblewrap profile), plus the process-group
+availability fact. Each capability keeps its own host guard, so other hosts fail
+closed: process facts are unverifiable, owned launches fail with
+`ERR_EXECUTION_PROCESS_UNVERIFIABLE` and isolated commands are rejected before
+launch. No other operating system is claimed.
+Importing the index has no side effects, and every consumer shares its single
+active-process registry. `runtime/bootstrap.js` and `runtime/admission.js`
+stay standard-library-only and keep their own checks outside it.
 
 ## Pipeline Ownership
 
@@ -854,7 +938,7 @@ around capture and reconstruction. Directory scope prunes exclusions before
 traversal and never invokes Git. Filesystem declarations bind provider receipts;
 Runner additionally binds Git provenance into snapshot fingerprints and role
 context. Report/finding bindings consume that same snapshot. New report bytes
-and report fingerprints also bind frozen source settings. Audit state version 8
+and report fingerprints also bind frozen source settings. Audit state version 9
 preserves legacy missing settings as whole-directory scope without altering
 evidence or historical report bytes. The discovery
 lifecycle uses injected workspace, clarification, adapter, session and durable
@@ -933,6 +1017,10 @@ retirement and pauses again. The leased version-7 migration creates intent only
 for a genuine matching legacy exhaustion pause; unrelated absence becomes null.
 No native ID is duplicated and no common-envelope change is required. See the
 [audit recovery contract](../pipelines/audit/docs/SPEC.md#explicit-output-exhaustion-reconstruction).
+Audit state version 9 captures `repositoryBaseline` through
+`runtime.workspace.baseline`, so CLARIFY transitions persist bounded evidence for
+any protected control-tree size. Its identity version-8 migration keeps null and
+legacy full baselines; all guards use the same `assertUnchanged`.
 The public lifecycle projects confirmed findings only from current exact accepted
 versions, retaining pending candidates and hypotheses as unverified. It persists a
 rendered-content intent, invokes the Runner workspace artifact publisher, verifies
@@ -951,6 +1039,81 @@ filename and requires ignored, untracked repository-local paths. It grants no
 source, index, Git, retrieval or automatic issue authority. Critical findings do
 not block successful completion. Conflicting partial temporaries remain preserved.
 See the [audit specification](../pipelines/audit/docs/SPEC.md).
+
+### Historical validation policy stops
+
+Both coding pipeline owners distinguish historical validation truth from current
+actionable consequences in their composed role instructions. Their contract
+versions 41 (plan execution) and 22 (polishing) add a narrowly evidenced
+`VALIDATION_POLICY_BLOCKED` Worker result at writable work, check/fix,
+finding-resolution and finalization checkpoints. Existing bounded reason/evidence
+fields carry execution proof, the governing requirement and the absence of a
+permitted corrective disposition; inactive fields cannot carry approval or check
+evidence. Strict normalizers validate structure, not arbitrary task prose. Existing bounded
+previous finding reports remain reconstruction context after candidate convergence.
+Pipeline-owned `workReports` additionally retain accepted Worker work summaries,
+including finalization summaries and optional normalized issue/check reports before
+Runner-trusted replacement or blockage, and accepted finding reports and normalized accepted
+FIX/DISPUTE decisions with their reasons
+and evidence. Reports retain their original phase (and execution step), separately
+from current blockers and gate evidence. Terminal `CONFIRM` reports also retain
+nonempty normalized `validationEvidence`, with or without findings, on evidence
+rejection, content findings and clean acceptance. They publish with the accepting
+transition and survive interruption and repair without retaining a validation
+decision, approval or fingerprint. Their strict closed shapes,
+256-report/2-MiB bounds and additive legacy defaults are owned by each pipeline;
+no task-prose parser is introduced. Reports accompany continued as well as
+complete/reconstructed requests, including validation migration independently
+of resolved summaries, and survive content repairs without granting
+validation credit or renewing allowances. Finalization check reports retain the
+Worker's normalized facts even after trusted receipts replace placeholders;
+blocked finalization retains its reason, evidence and check reports before
+pausing. Legacy summary/issue-only reports remain valid without inferred facts.
+Accepted blocked implementation/polishing, check/fix and resolution results
+retain normalized status, reason and evidence atomically with their environment
+pause. Retry and read-only restatement preserve this context after clearing or
+replacing the pause, without converting the former blocker into an active
+finding or validation credit.
+Accepted Reviewer reconsideration decisions and finding/stagnation Arbiter
+rationales also publish in common history with their accepting transitions,
+including finding `REQUIREMENT_AMBIGUOUS` and stagnation
+`PRODUCT_DECISION_REQUIRED` outcomes. The authorized pause retains normalized
+rationale/direction and the original finding ID where applicable, while question
+persistence and editor authorization keep their existing owners. Answer/resume
+and bootstrap or compatibility re-entry preserve these facts without restoring
+an active ambiguity or widening active arbitration ledgers.
+Execution's terminal plan-revision stagnation outcome retains its separate
+rationale in the same history without granting resume authority.
+Bootstrap and validation-migration arbitration retain their separate normalized
+direction/rationale in closed historical records too. Resolved outcomes publish
+with context/inventory acceptance; bootstrap product decisions and execution
+plan-revision outcomes publish with their existing authorized or terminal pause.
+Execution bootstrap reports have a null step, migration reports a positive
+current step or null when none is active; all other history keeps positive
+steps. Checkpoint-specific direction bounds remain unchanged, including no
+product-decision outcome during validation migration. This history neither
+selects inventories nor grants gate evidence or an active dispute.
+Continued and reconstructed Worker requests retain disclosures appearing only
+in these results, independently of active dispute ledgers and plan-step resets.
+Existing normalization and history limits apply; adjudication history grants
+neither gate evidence nor fresh authority.
+When a history-changing publication loses its acknowledgement, both pipelines
+propagate the failure and prohibit further transitions from their stale local
+snapshot. Journal recovery retains the authoritative reports and checkpoint,
+including bindings, counters and consumed allowances, without replaying accepted
+work.
+
+After existing effect reconciliation, the pipeline uses the root's existing
+write-ahead transition/atomic replacement to persist a dedicated
+`validation_policy_blocked` pause with code, explanation, three evidence entries
+and originating checkpoint. No new gate is accepted and no further trusted
+validation launches. Public CLI/MCP projection shares the owning descriptor;
+resume and finding overrides cannot waive frozen policy. Cancellation retains
+ordinary ownership reconciliation and work preservation. Legacy pipeline
+migrations preserve records without manufacturing policy-stop proof. Existing
+writable report correction can restate a supported stop read-only without effect
+replay or renewed allowances. See
+[validation and review](product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
 
 ## Structured Result Headroom
 
@@ -1617,9 +1780,19 @@ the original relative selection. Both files participate when a repository
 validation file has the same relative path as external guidance.
 Bootstrap and validation migration receive only that label, exact absolute read
 declaration or fallback, never copied procedure content; no additional provider
-checkpoint is introduced. Only that selected label may refer to an external
+checkpoint is introduced. Roles read the exact selected entry and its mandatory
+repository references under existing read authority. References controlling
+validation commands or gate behavior join ordinary validation infrastructure;
+other documents retain responsibility-based classification. Selection grants no
+parent-directory or external sibling access, recursive retrieval, substitution,
+or late fallback. Only that selected label may refer to an external
 file in validation infrastructure. Its identity-bound digest joins the ordinary
-repository-infrastructure digest. Custom directory declarations use the bound
+repository-infrastructure digest: when a `file` selection is in the inventory,
+the owning workflow computes `SHA256(JSON.stringify({infrastructure, finalizationFile}))`,
+where `infrastructure` excludes the selected label and `finalizationFile` is its
+verified identity-bound fingerprint. A raw all-path digest belongs to a different
+domain. Legacy `skill` and fallback decisions retain their existing algorithms.
+Custom directory declarations use the bound
 root for explicitly selected guidance and grant no Git effects. The
 selected skill is part of established validation infrastructure. Execution
 rechecks its exact path and fingerprint before guidance-consuming, correction,
@@ -1717,10 +1890,21 @@ MCP preflight and run creation supply the same normalized selections.
 Missing Git never selects a directory workflow. Directory lifecycles require
 exclusive ownership, use filesystem-only preflight/configuration/artifact
 confinement and expose snapshot/guard operations through `runtime.workspace`.
-They expose no Git effect capability. Canonical enclosing worktrees are found
-from filesystem Git layouts/pointers; a directory inside one shares its exact
-exclusion key with commit workflows. An ordinary directory uses its own key;
-state-owned admission also excludes overlapping parent/child scopes atomically.
+They expose no Git effect capability. Runner `directorySafety` filters declared
+artifacts from inspected snapshots; its `baseline({allowedPaths})` returns the
+compact workspace baseline of that filtered snapshot plus `allowedPaths`,
+`projectPath` and any frozen `sourceSelection`, and `assertUnchanged` accepts
+compact or legacy full baselines. Its `outputBaseline({allowedPaths})` performs
+one bound inspection with the same artifact filter and returns
+`{snapshot, baseline}`: the transient complete filtered snapshot and its
+output-partitioned projection plus `allowedPaths` and `projectPath`. Root
+`runtimeFor` delegates `runtime.workspace.baseline` and
+`runtime.workspace.outputBaseline` only for directory workspaces; complete
+`snapshot()` results remain for consumers that read entries. Canonical enclosing
+worktrees are found from filesystem Git layouts/pointers; a directory inside one
+shares its exact exclusion key with commit workflows. An ordinary directory uses
+its own key; state-owned admission also excludes overlapping parent/child scopes
+atomically.
 State placement must be disjoint from the resolved canonical exclusion root
 before provider probing or durable run creation, including a sibling state path
 inside an enclosing repository.
@@ -1817,6 +2001,10 @@ saved logical checkpoint, and one null resume action. Provider-native
 diagnostics never participate in that projection.
 plan-execution finalization-backed `no_progress` exposes only the active
 finalization issue IDs and never their commands, problems, evidence, or paths.
+`read_only_agent_mutated_repository` projects exactly one evidence line,
+`Changed snapshot domains: <labels>.` from the composed Git normalizer, or
+`Changed snapshot domains: unavailable.` for absent, malformed, unknown, custom,
+directory, or legacy diagnostics; its persisted evidence and causes never cross.
 Plan execution also projects `finalization_transition_invalid` as a resumable
 `FINALIZE` checkpoint with a fixed bounded diagnostic when an unexpected
 runner-owned finalization invariant rejects advancement. The retained state
@@ -2426,7 +2614,7 @@ preserve that exact selection. Interrupted selection publication recovers once;
 later capture/reconstruction verifies existing membership rather than reselecting.
 Partial capture supplies no authority. Version-25 preparation and completed
 bindings remain unchanged on migration. The detached token is `1:26`, with
-matching package metadata and audit version 8 compatibility.
+matching package metadata and audit version 9 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration
@@ -3122,7 +3310,7 @@ records with or without those optional proofs use the same ownership policy.
 Before a provider or trusted command can execute, a private supervisor waits on
 a separate inherited Node IPC channel while the runner journals its host PID,
 hostname, boot/start identity, matching launch cutoff and PID namespace identity.
-The shared agents boundary owns the
+The platform boundary owns the
 closed `ordinary` and `native-sandbox-provider` supervision modes. Ordinary
 processes launch this supervisor as PID 1 in a private Linux namespace using
 system-protected bubblewrap. Provider launches use that mode only when a cached,
@@ -3281,6 +3469,13 @@ Otherwise it reconstructs the preserved logical role from frozen configuration
 and session lineage only after reacquiring any required worktree lease.
 Invalidated content returns through the pipeline's
 candidate gate before further finalization. Cancellation cannot resume.
+A settled pause rejects further pauses but accepts a fresh cancellation at its
+current revision; the old pause's inspected revision grants no authority, and
+deferred timing keeps its existing eligibility. Until reconciliation the pending
+cancellation coexists with the preserved `operator_paused` checkpoint; the
+plan-authoring, plan-execution, polishing, and init validators accept exactly
+that combination. Reconciliation unwraps the checkpoint, retires owned work, and
+wraps the underlying state once as `operator_canceled` without provider probes.
 Cancellation superseding a pause during reconciliation changes only the final
 outcome; verification never replays an effect or counts its progress twice.
 Authorized clarification edits remain pending; stop reconciliation checks Git
@@ -3326,10 +3521,24 @@ checkpoint, with `none` or `possible` effect evidence, when it proves that its
 isolated commit executor was never invoked. The boundary derives
 `effectStarted: false` from that validated record. The pipeline durably records
 that bounded proof on the consumed authorization before Git verification. After
-Git independently confirms that no commit was created, the pipeline retires the
+Git independently confirms that no commit was created and controls, accepted
+content and the original semantic index are unchanged, the pipeline retires the
 authorization before an eligible later resume can issue a fresh ID. An absent
 marker or executor failure keeps the consumed authorization on the verification-only
 path, while interrupted verification retains any recorded proof for resume.
+For unchanged HEAD, the Git capability also recognizes exact authorized full
+staging as `ERR_COMMIT_NOT_CREATED` with bounded `changes: ["index"]` evidence.
+Private content helpers use the shared compatible-domain staging proof described
+below and reject semantic flags and resolve-undo state;
+controls, content and index stability are rechecked without writing. Incomplete,
+mismatched, hidden or unsafe index effects remain contract violations. The
+execution pipeline retains the original consumed authorization, bindings and
+staged effect and pauses `commit_failed`; repeated or reconstructed resume only
+verifies, without readiness, restaging, commit replay or inferred completion.
+Observed staging contradicting a pre-executor refusal is instead a contract
+violation and cannot retire authorization. Existing successful-commit checks,
+nested-repository rejection and durable state versions remain unchanged. This
+does not retroactively recover historical rejected pauses.
 Claude validates the exact boolean readiness shape before its value and emits
 only the finite provider-neutral [readiness diagnostics](product/PROVIDER_MODEL.md#isolation-and-effects).
 Execution carries the class through the consumed rejection and retired
@@ -3427,6 +3636,46 @@ complete catalog and both roles' additive reports. Finalization reserves the ful
 selection and executes only selected entries in the explicit current candidate
 inventory, including justified amendments. The frozen snapshot, vectors, identities,
 and command/configuration fingerprints stay intact.
+
+Both coding pipelines deliver the frozen `finalizationGuidance` decision beside
+the established validation tuple. Their finalization and terminal instructions
+explain the fingerprint domains and Runner-owned persisted additions:
+`fingerprint`, `validationInfrastructureFingerprint`, `trustedCommandFingerprint`,
+`trustedConfigurationFingerprint`, `validationChanged`, execution's `step`, and
+per-check `executor`, `commandIdentity`, `exitCode`, `signal`, and `timedOut`.
+Execution additionally binds confirmation with `validationTupleFingerprint`.
+These are not role output fields. The closed role schemas remain authoritative,
+and Worker check output still contains only `checkId`, `command`, `status`, and
+`evidence`. Fresh, continued, reconstructed, corrective, and evidence-recovery
+requests preserve this contract. Roles independently assess content, complete
+checks, authorized inventory changes and exact evidence bindings; a different
+raw digest alone is no finding, while actual drift or insufficient evidence
+remains blocking. Reviewing evidence never authorizes reserved-check execution
+or Runner CLI/admission management.
+
+Each pipeline's prompt module also owns procedure-order guidance, composed into
+bootstrap discovery, finalization and both terminal-confirmation variants.
+Bootstrap discovers known applicable supplemental validators early. Workers
+retain established check identities and exact commands while positioning
+amendments to preserve project-defined first, final and relative-order
+constraints in the declared inventory and ordered evidence. Reordering the
+current inventory never rewrites original discovery or future assignments.
+Inventory order proves no physical execution sequence: Worker completes its
+agent-owned checks and returns reserved `NOT_RUN` placeholders; Runner later
+executes frozen selected vectors and replaces those entries in inventory
+positions under existing unchanged-content and infrastructure guards. No later
+Worker phase is required. Separately explicit physical sequencing requirements
+remain binding; incompatibility with existing ownership/checkpoints uses existing
+blocking outcomes without new permissions or an invented product decision.
+`COMMIT`/`HANDOFF` retains separate fixed staged hygiene.
+Terminal roles read the actual selected guidance and mandatory references and
+assess the complete resulting procedure, including additions;
+passing checks alone cannot establish procedural compliance. The same owners
+feed continued, reconstructed, corrective and evidence-recovery requests.
+This strengthens semantic delivery without parsing project prose, changing the
+first-seen bootstrap union or evidence domains, guaranteeing model compliance,
+or automatically repairing historical runs. Existing bounded evidence-only
+recovery can repair ordering without changing content.
 
 The explicit version-22 migration retains historical unscoped evidence under a
 provisional legacy marker. It never infers applicability. Before unfinished
@@ -3704,6 +3953,15 @@ transcripts never enter state or public activity. Interrupted correction
 recovery remains read-only and does not require a native session. `HANDOFF`
 remains the sole Git-index owner for both Codex and Claude turns.
 
+Recognized semantic finalization rejections retain source-defined field and
+constraint diagnostics through normalization, durable feedback and terminal
+failure. The polishing descriptor projects the latest terminal violation into
+shared CLI/MCP pause evidence without resume authority. Unknown diagnostic-like
+identities reduce to a generic semantic-contract diagnostic before corrective
+requests or projection; accepted legacy shapes and terminal history remain
+unchanged. The [polishing specification](../pipelines/polishing/docs/SPEC.md#finalize)
+owns the exact rejection and correction rules.
+
 Polishing state version 8 adds the resolved mode, the fingerprint accepted by
 lazy clean confirmation, and the one-time lazy source-fork marker. Its
 version-7 migration selects `independent` without moving active or terminal
@@ -3832,8 +4090,27 @@ Execution-option validation remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
 access for directory proofs. Unsupported adapters reject it before provider work.
 
-Codex directory access requires stable CLI 0.164.0 or newer. Its access-specific
-probe inspects bindings and snapshot safety without Git, an artificial repository,
+Codex directory access requires stable CLI 0.164.0 or newer. Its readiness
+rejects existing regular-file output roots on the named-profile route,
+including dotfiles (`capability_existing_file_output`), without extrapolating a
+blanket unsupported version range from the reported 0.167.2 failure. The frozen
+backend descriptor optionally supplies `assertWorkspaceReady({ access,
+workspacePolicy })`; registration rejects a non-function value. Runner calls it
+for active roles whose full role access includes workspace-write before initial
+probes, new output preparation and turns, including initially read-only custom
+Workers. Explicit writable probes and direct Codex probes/requests repeat current
+shape inspection before native work; storage, thread and turn admission recheck
+as well. Cached capability proofs do not approve a substituted file root.
+Read-only authoring/Reviewer roles and lazy inactive roles remain unaffected.
+Read-only recovery probes retain their existing receipt checks; owned process
+retirement and pending effect reconciliation precede new writable work. Refusal
+uses `ERR_UNSUPPORTED_BACKEND` at Runner admission or the existing provider
+capability diagnostic boundary. CLI/MCP errors direct an authorized fresh run
+with supported outputs/backend; frozen selections, receipts, accepted outputs and
+budgets are unchanged. No public or persisted shape changes or migration are
+needed. File declarations remain valid in the shared custom-plan contract.
+
+Its access-specific probe inspects bindings and snapshot safety without Git, an artificial repository,
 or a local-commit executor probe. Frozen policy receipts bind the version,
 access, declared paths and immutable input/control bindings; authorized output
 and state creation do not change a receipt. `declaredWorkspace`
@@ -4035,8 +4312,22 @@ permission failures and uncertain killed-process outcomes retain precedence.
 A `system/init` after the result must match the session already established by
 the earlier init or the result: a matching init is idempotent metadata, a
 conflicting init rejects, and the stream is still consumed to EOF. Another
-result or a post-result assistant, user, or stream-event record still rejects,
-and other trailing system records keep their existing handling.
+result rejects as `protocol_result_duplicate`. Post-result assistant, user, and
+stream-event records reject as `protocol_assistant_after_result`,
+`protocol_user_after_result`, and `protocol_stream_event_after_result`,
+respectively, without reading their payload fields. Existing session guards and
+first-violation precedence remain unchanged; other trailing system records keep
+their existing handling.
+Before the result, a session-matched `system/permission_denied` event with a
+valid `tool_use_id` records only its tool name and a closed
+`decision_reason_code`; an absent, unrecognized or non-string code, or an
+`agent_id`, records an unknown reason, a repeated id records a conflict, and
+more than 16,384 ids make every reason unknown without failing the stream. Free
+text such as `decision_reason`, `message` and `uuid` is never read. The frozen
+`permissionReason` lookup answers only after `finish()`, and only when the
+stream has no protocol violation or identity uncertainty, its lineage-checked
+session equals both the final result's and the caller's session, and the entry
+is unique, unconflicted, known and for the same tool name.
 Each protocol guard attaches a terminal `protocol_*` diagnostic class from one
 private stream table for the first predicate it proved violated: invalid JSON,
 record, or UTF-8; line, stream, or tracking bounds; a missing, duplicate, or
@@ -4047,6 +4338,10 @@ success envelope is classified as success; any other non-error payload is only
 an invalid error result. Exceptions from progress callbacks or the shared
 progress bound and write-after-finish remain unattributed. The classes change
 no acceptance, retry, cleanup, or local-commit effect proof.
+The historical `protocol_record_after_result` class remains registered for
+persisted diagnosis and recovery, but the parser no longer emits it. Only closed
+classes cross public or durable boundaries; rejected native records and
+transcripts are never retained there.
 Owned process capture delivers bounded stdout chunks without bypassing durable
 registration, containment, cancellation, retirement, or storage cleanup.
 
@@ -4133,8 +4428,14 @@ the canonical host `bwrap` executable from the unchanged environment before the
 turn instead of resolving it through a potentially workspace-writable path. The
 launcher file is non-writable.
 Its owner-only allocation is outside the project, task, and state trees, and
-command namespaces cannot write the allocation. The adapter retains directory
-authority for teardown.
+command namespaces cannot write the allocation except for an existing,
+validated, owner-only directory Claude selects strictly inside its private
+temporary directory. In every access mode commands may use that directory for
+shell bookkeeping, its exported TMPDIR and the cwd receipt the parent reads, and
+for scratch writes. The launcher executable and token, the provider cwd, and
+other allocation content stay hidden, and the tool HOME remains the read-only
+projection with private namespace-local scratch directories. The adapter
+retains directory authority for teardown.
 The authenticated launcher accepts one closed Claude bubblewrap grammar: the
 session and parent-lifetime flags; unique environment removals or non-protected
 assignments; network unsharing, optionally followed by same-path proxy-bridge
@@ -4149,19 +4450,31 @@ removed. The
 launcher translates the required user-unshare argument into exactly one
 bubblewrap user namespace. Claude's fixed
 incidental write binds for its temporary, npm-log, and debug paths are
-recognized exactly but discarded rather than exposing their host paths. All
-other writable binds must resolve inside the canonical workspace, must not
-resolve inside Git metadata, and are accepted only for workspace-write access.
+recognized exactly but discarded rather than exposing their host paths.
+Except for the private temporary self-bind below, which grants no write to the
+workspace, Git metadata, outside paths, or allocation controls, all other
+writable binds must resolve inside the canonical workspace, must not resolve
+inside Git metadata, and are accepted only for workspace-write access.
 Read-only binds must preserve their source path except for Claude's `/dev/null`
-or verified owner-only empty-directory masks beneath the canonical runtime
-temporary root, both limited to strict workspace descendants. Empty-directory
-masks are replaced by private read-only tmpfs mounts rather than exposing their
-host temporary sources.
+or verified owner-only empty-directory masks, both limited to strict workspace
+descendants. Turn masks must lie beneath the allocation's canonical private
+temporary directory that Claude receives as `TMPDIR`; directory-free probes
+use the canonical runtime temporary root. Empty-directory masks are replaced
+by private read-only tmpfs mounts rather than exposing their host temporary
+sources.
 Exact workspace mounts of either kind and Git mounts, including redundant Git
-descendants, are replaced by Runner-owned mounts. Claude's own mounts strictly
-inside `/tmp`, `/run`, or the hidden allocation, without overlapping the
-workspace or Git metadata, are discarded because the launcher's private mounts
-replace those trees. Other same-path read-only workspace descendants and masks
+descendants, are replaced by Runner-owned mounts. Claude's same-path writable
+bind strictly inside the allocation's private temporary directory, overlapping
+neither the workspace nor Git metadata, is retained after the private tmpfs
+mounts when it names an existing canonical non-symlink directory owned by the
+current user beneath that canonical owner-only directory; any other existing
+target fails closed and a missing one is discarded. The launcher opens that
+directory without following symlinks, verifies the descriptor's owner, kind and
+canonical path, and binds the pinned descriptor with `--bind-fd`, so later path
+substitution cannot redirect the mount. Claude's other mounts
+strictly inside `/tmp`, `/run`, or the hidden allocation, without overlapping
+the workspace or Git metadata, are discarded because the launcher's private
+mounts replace those trees. Other same-path read-only workspace descendants and masks
 preserve Claude's command-protection policy for every access; outside the
 workspace, Claude may also mask an existing file with `/dev/null`. Every
 remaining read-only bind must not overlap the writable workspace or any part of
@@ -4179,7 +4492,7 @@ before any child starts.
 After validation the launcher drops Claude's host `/proc` bind and strengthens
 the same invocation with PID-1 behavior, an empty capability set, private
 procfs, private `/tmp` and `/run`, a private `/tmp/claude`, a hidden launcher
-path, the exact workspace authority, read-only resolved Git metadata, missing
+path, the retained private temporary self-bind, the exact workspace authority, read-only resolved Git metadata, missing
 protected-environment removals, and the requested working directory. A private
 Claude module serializes a classic seccomp BPF for little-endian x64 or arm64.
 The program validates `seccomp_data.arch`, kills an architecture mismatch,
@@ -4290,7 +4603,32 @@ staging initialization can create `.claude/.cc-writes` there before any sandboxe
 tool starts; a command-only projection cannot contain that earlier effect.
 `--add-dir` declares the real workspace, and fixed system instructions require
 absolute workspace paths for file tools and reading the applicable workspace
-instructions. Native profiles, authentication and session storage stay in their
+instructions. Before each sandboxed command Claude prepares staging under its
+session cwd. Without cwd retention it adopts a command's projected workspace cwd
+inside the declared root, so a later command creates an empty mode-0700
+`.claude/.cc-writes` in the workspace. Launches force
+`CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR=1` in both the isolated process
+environment and inline settings, overriding inherited values, to return Claude
+to its private native startup directory after every command. The installed-CLI
+differential described in `docs/TESTING.md` proves this sequence and its
+prevention; a lone command does not reproduce it.
+Launches also force `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in both the
+isolated process environment and inline settings so tool work completes in
+the foreground before the result. Conflicting inherited values are discarded;
+inline settings override ordinary user/project settings without editing them.
+Native managed-policy precedence remains intact, and strict stream rejection
+remains the backstop for post-result traffic or duplicate results. Long commands
+may stop at the native Bash timeout instead of becoming background tasks.
+Unfinished or timed-out required checks cannot pass finalization; a result alone
+does not establish completion. Runner-trusted execution retains its separate
+authority. The operator-owned native differential in `docs/TESTING.md` compares
+the same policy with background execution enabled, releasing an owned FIFO only
+after the first result and requiring actual late effects and rejected traffic.
+Repaired turns require successful effects before the sole result; unsupported
+background and started-but-timed-out requests cannot create late effects. This
+proof supplements the source-shaped cwd differential and does not identify the
+cause of historical protocol failures.
+Native profiles, authentication and session storage stay in their
 existing locations; continuation and forks still select the exact native session
 ID. Native startup and workspace roots both receive read-only command-preparation
 reservations. Projections discard self-mounts of owned startup content and
@@ -4304,9 +4642,18 @@ Commands receive an empty, read-only HOME/config projection with private
 namespace-local temporary, cache, and runtime directories. The real provider
 HOME, authentication environment, selected config directory, and session store
 remain separate and unchanged. Provider temporary scaffolding and the fallback
-filter's temporary files belong to the same allocation. Probes exercise the
-projection launcher too; the contract revisions are `claude-isolation-v4` and
-`claude-command-boundary-v10`. Old receipts cannot authorize the new policy.
+filter's temporary files belong to the same allocation. New allocations live
+beneath the fixed platform temporary location without consulting ambient
+temporary variables, as Codex workspace storage does. This keeps the provider
+`TMPDIR` short enough for the Unix sockets Claude binds there: Linux socket
+paths hold at most 108 bytes including the terminator, and a nested ambient
+temporary root left no room for a bridge socket name. Recorded allocation
+roots, including earlier ambient ones, still recover and clean up unchanged.
+Probes exercise the projection launcher too; the contract revisions are
+`claude-isolation-v6` and `claude-command-boundary-v13`. These identities bind
+the complete policy including cwd retention and foreground lifecycle enforcement;
+old receipts cannot authorize it. Existing runs retain immutable receipts and
+budgets; adopting the new policy requires a fresh run rather than rebinding evidence.
 
 Before a turn launches, the adapter journals allocation intent and then the
 private directory's device/inode identity through the optional `onResource`
@@ -4363,9 +4710,21 @@ denials that would reject compound inspection, while retaining collaboration,
 editing, and web restrictions. Autonomous Bash is available only inside the
 proved sandbox, which denies workspace and Git-metadata writes, closes command
 network and Unix-socket access, and forbids unsandboxed fallback.
-Workspace-write turns retain their separate `auto` permission policy,
-background classifier, broader content tools, and existing command denials
-while denying Git-directory writes and `git add`. Codex repository workspace-write
+Git workspace-write turns share that envelope, adding only the Edit and Write
+tools and the launcher-granted workspace write; no Git-subcommand rule rejects
+ordinary inspection before sandbox auto-allow. Under every access policy the
+sandbox enforces, and the effective access proof shows, that one compound Git
+inspection succeeds while index, branch, tag, remote, configuration,
+identity-bearing commit and push mutations fail, outside writes stay denied,
+and network and Unix-socket access stay closed. File tools run outside that
+sandbox, so their Git-metadata denials name each resolved absolute protected
+directory in Claude's `//` rule form; a root-relative rule would resolve against
+the native startup directory. A protected path containing a rule, glob or
+control character fails with the workspace-policy error before launch.
+Declared-directory turns keep their Git-subcommand denials. The policy identity
+serializes these settings and the path-independent rule template, so a receipt
+pinned under the prior policy fails closed on resume or reconstruction without
+migration. Codex repository workspace-write
 isolation likewise exposes safe content
 writes without Git-metadata writes. Codex protects project-root `.agents` as
 provider metadata by default, so a workspace-write turn adds it as an explicit
@@ -4527,6 +4886,21 @@ commits, or replaces a mode-required gate. The owning
 [execution specification](../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery)
 defines the checkpoint and pause contract.
 
+Polishing owns finding-resolution report recovery in its own workflow and
+contract without importing execution internals. Polishing state version 20 adds
+nullable `resolutionCorrection`; the version-19 migration initializes absence
+without inferring recovery evidence or changing terminal history. In independent
+and combined modes, each original `RESOLVE_FINDINGS` turn reserves the
+checkpoint atomically with its active turn. A returned report first publishes
+the reconciled candidate binding, approval invalidation and any single fix
+charge, keeping its blockers at `RESOLVE_FINDINGS`, before the turn retires.
+Invalid, lost or interrupted reports receive one durably consumed fresh
+read-only restatement; repeated invalid or lost output pauses
+`resolution_output_invalid`, and explicit null resume authorizes exactly one
+further read-only attempt. Lazy mode keeps its existing resolution contract. The
+owning [polishing specification](../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery)
+defines the checkpoint and pause contract.
+
 Plan execution also owns lazy structured-output recovery. Provider and
 deterministic checkpoint failures are reduced to bounded diagnostics, then one
 fresh Worker session receives the complete durable checkpoint request with its
@@ -4562,13 +4936,35 @@ Claude turn failures use a finite adapter-owned diagnostic allowlist. Structured
 take precedence over bounded message matching. The adapter discards denied tool
 input, native result text, raw standard error, and process causes; only its
 fixed code, fixed message, allowlisted class, and safety fields cross the
-boundary. Authentication remains terminal. A denial that identifies an
-unexposed tool or a Bash command outside the narrow positive repository-
-inspection allowlist is also terminal. Only an expected non-Bash tool or a
-positively recognized safe Bash inspection may be a recoverable capability or
-configuration failure. Structured provider recovery accepts only explicit
-transient HTTP statuses; non-transient client statuses and an `api_error`
-without a transient status fail closed with a fixed request-rejected error.
+boundary. Authentication remains terminal. A denial of an unexposed tool or of a
+Bash command outside the narrow positive repository-inspection allowlist is
+terminal and classified only as an unexposed tool or unclassified Bash whose
+refusal cause is unknown. The allowlist matches whole single commands whose
+tokens are separated by exactly one space, including the `HEAD`-relative
+`git diff --check HEAD` content check; see the [provider permission classes](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+The shared request contract accepts an optional diagnostic-only
+`requiredCheckCommands` array of at most 512 non-empty commands of at most
+4,000 characters without NUL, matching the pipelines' aggregate validation
+capacity, and stores a frozen copy. Polishing and plan-execution role requests
+pass the established persisted inventory commands unchanged; it never enters
+prompts, native arguments, settings, storage, events or failure records, and
+Codex ignores it. Claude labels a denied non-safe Bash command
+`permission_bash_required_check` only on exact string equality with one of
+them; that terminal class ranks below unexposed, unclassified Bash and malformed
+entries and above the capability fallback.
+On both completed and failed exits, the permission path passes the stream and
+the result session to classification. When every denial in the batch carries a
+valid, unique `tool_use_id` and every non-safe Bash denial has the same code
+from the bound stream lookup, the batch is the terminal
+`permission_reason_<code>` class, which replaces unclassified Bash and outranks
+the required-check label but never an unexposed or malformed entry. A missing,
+invalid or repeated id, or any missing, unknown, conflicting, mixed or unbound
+reason, keeps the operation classes.
+Only an expected non-Bash tool or a positively recognized safe Bash inspection
+may be a recoverable capability or configuration failure. Structured provider
+recovery accepts only explicit transient HTTP statuses; non-transient client
+statuses and an `api_error` without a transient status fail closed with a fixed
+request-rejected error.
 
 The shared failure record optionally carries `availabilityReason`, restricted to
 `transport_unavailable`, `temporarily_overloaded`, `model_busy`, and
@@ -4791,12 +5187,68 @@ applicable tracked content checks use `HEAD` or explicit trees, and established
 checks are input only to `FINALIZE`. Once candidate convergence has completed
 and finalization plus the distinct mode-specific terminal confirmation bind the
 same staging-independent content and validation-infrastructure fingerprints,
-the pipeline persists `HANDOFF`.
+the pipeline persists `HANDOFF`. Before accepting `PASS`, `FINALIZE` also runs
+the Git capability's read-only `inspectContentHygiene`. It checks tracked
+content against `HEAD` and each non-ignored untracked regular file, or each
+indexed one in an unborn repository, against `/dev/null` with literal operands.
+Before and after snapshots bind every control, the content and the index. A
+failure becomes a runner-owned finalization issue on the ordinary repair path.
 The root Git boundary then accepts either an unchanged pre-effect state or an
-already-complete recovered effect, runs `git add -A` only for the former, and
-verifies unchanged content and Git controls, a nonempty complete staged set,
-no unstaged or non-ignored untracked remnants, and staged whitespace hygiene
-before the pipeline can enter `DONE`.
+already-complete recovered effect, repeats that hygiene inspection and runs
+`git add -A` only for the former, and verifies unchanged content and Git
+controls, a nonempty complete staged set, no unstaged or non-ignored untracked
+remnants, and staged whitespace hygiene before the pipeline can enter `DONE`.
+A pre-add or staged whitespace rejection makes the run terminal `FAILED` with
+`handoff_whitespace_rejected`. The pipeline keeps any index effect and never
+resets, restages or reopens a role checkpoint.
+
+Both handoff and consumed-commit full-staging verification first reproduce the
+accepted confined worktree fingerprint. The shared matcher rejects hidden flags
+on the union of staged-changed and worktree-changed paths before either branch;
+handoff does not reject unchanged hidden paths outside that union. Execution
+retains its stricter whole-index semantic and resolve-undo guards, including
+permitted split-index bookkeeping. Exact stored-content equality remains valid.
+Otherwise complete paths, kinds, modes and deletion/presence states must match;
+only unequal regular-file bytes can enter conversion proof. Confined race-checked
+reads bind raw bytes, size and mode to the accepted entry, independently of index
+stat metadata or an unstaged-clean result.
+
+Unequal bytes require SHA-1 and exactly one NUL-delimited native `ls-files --eol`
+record for the literal path. Only canonical `attr/` resolutions `text`,
+`text eol=lf` and `text eol=crlf` are supported and forwarded unchanged after
+padding removal. Literal `text=set`, automatic text and unspecified text relying
+on autocrlf are excluded. `check-attr -z --all` rejects any `filter`, `ident` or
+`working-tree-encoding` declaration, even unset or sentinel-like literal values.
+Only absent or alphanumeric `core.autocrlf`, `core.eol` and `core.safecrlf` values
+may be forwarded. Encoding, ident, filters and LFS gain no unequal-byte support.
+
+The private command hasher resolves canonical worktree, per-worktree and common
+Git controls through read-only metadata queries. Before allocation, the existing
+canonical temporary parent must be outside all those roots; ambiguity or an
+unsafe parent fails with `ERR_GIT_UNAVAILABLE`, without a fallback. An owned
+private scratch directory is allocated through the verified parent descriptor;
+canonical bindings and disjointness are rechecked before hashing. Directory and
+absolute parent-ceiling paths cannot contain colon, NUL or newlines. The hasher
+writes one owned attributes file, removes inherited `GIT_*`, disables system and
+global configuration/attributes, sets private HOME/XDG paths and a verified
+repository-discovery ceiling, and invokes `hash-object --stdin --path=candidate`
+without `-w`. Only validated text configuration is forwarded. No target or
+enclosing repository helpers/configuration may be discovered. Successful single-line
+40-hex output must equal the actual staged blob ID; refusal or malformed output
+is a mismatch, while spawn failure remains `ERR_GIT_UNAVAILABLE`. Process closure
+precedes cleanup of only the bound owned allocation. No index refresh, target
+object write or conversion-specific worktree diff is added. Fingerprints, durable
+formats, effect authority and verification-only recovery remain unchanged.
+
+Handoff-owned staging and direct Git inspection commands use a private fixed
+`-c core.hooksPath=/dev/null` prefix, preventing workspace hooks from executing
+with Runner authority. This invocation-only policy changes no configuration,
+shared Git defaults, provider isolation, or authorized local-commit hooks and
+their failure behavior. Snapshot/content helpers remain observational with
+their existing optional-lock controls; ignored hook bytes stay outside content
+fingerprints. Inspection and stop reconciliation never stage, completed recovery
+never repeats staging, and partial effects still fail closed. Snapshot formats
+and durable versions remain unchanged.
 
 Both pipelines project only exact command text from persisted
 `trustedValidation.commands` into implementation or polishing, lazy or combined
@@ -4822,7 +5274,13 @@ retain their own reporting schemas, saved requests, migration, and pause policy;
 the capability owns normalization, frozen authority matching, and availability.
 Plan execution and polishing independently own reports in each active role's
 bootstrap or validation-migration inventory and inspect their union at every
-writable entry. Cached declaration preflight cannot bypass this gate. Execution
+writable entry. Both pipelines' reports carry a closed `basis`; the union
+contains only `assigned-executor` and legacy basis-less saved reports, without
+the field, while saved `read-only-turn` observations describe the read-only turn
+rather than the assigned executor, stay unproved and are never admitted. Plan
+execution canonicalizes a provider's assigned-executor copy of an inherited
+basis-less row to the saved bytes before its preservation checks. Cached
+declaration preflight cannot bypass this gate. Execution
 also checks unconsumed COMMIT; polishing inspects completed HANDOFF settlement
 before discovery or preparation and checks availability before new staging.
 Polishing state version 14 preserves historical handoff evidence while requiring
@@ -5761,7 +6219,14 @@ publication matches the complete custom header to
 that frozen catalog and source/output selection. Authoring state version 7
 migrates legacy runs to commit-only defaults without changing authority or
 progress. Unchanged default commit inputs preserve existing session-context and
-pending source-fork recovery keys.
+pending source-fork recovery keys. Authoring state version 8 captures custom
+`repositoryBaseline` through `runtime.workspace.baseline` with exactly the
+clarification and plan artifact exemptions, so preflight persists bounded
+evidence for any directory size. The run contract accepts the legacy full
+snapshot under its existing checks or the closed compact form; unknown, scope
+and link-resolution fields fail closed. The identity version-7 migration keeps
+legacy full baselines and their exact comparison, all guards use the same
+`assertUnchanged`, and a version-7 runtime refuses compact baselines as skew.
 
 Plan execution's private `step-policy.js` consumes both deterministic contracts
 and isolates parsing, step/criterion context, workspace inspection, initial
@@ -5796,7 +6261,13 @@ without copying or replacing an arriving directory. Existing roots need no move.
 The directory descriptor stays open through identity verification and parent
 synchronization. The execution workflow atomically saves the prepared identity
 with a baseline allowing only that exact empty-root creation; intervening output
-edits cannot be adopted. No workspace siblings or parents are created, and provider
+edits cannot be adopted. `custom-workspace.js` obtains both forms from one
+`runtime.workspace.outputBaseline` inspection and compares only scope and
+filtered-entry evidence: equal entry, remainder and output records for an
+existing root, or an equal remainder and other records while the root's
+missing record becomes the prepared empty directory. The artifact-sensitive
+identity fingerprint is never compared, so an authorized clarification edit
+cannot block preparation. No workspace siblings or parents are created, and provider
 mount authority stays unchanged. The runner returns refreshed state after
 process retirement so the identity transition retains revision checking.
 Cancellation is checked immediately before allocation and publication. Lost
@@ -5830,6 +6301,19 @@ Missing directory roots require explicit trailing-slash declarations. Existing
 file outputs grant no parent write. Legacy and commit execution retain their
 Git effects, exact subjects, nonempty initial implementation and one-shot recovery.
 
+Execution state version 42 persists new custom `repositoryBaseline` values as the
+closed output-partitioned projection, adding `outputBaseline` to the custom
+workspace methods. The facade fixes each run's representation from its persisted
+baseline: a legacy full snapshot stays full, and null or compact selects compact.
+Complete snapshots stay transient for runner output allowances, the custom-result
+checkpoint, content and validation-infrastructure fingerprints, so receipts and
+their formulas are unchanged. The run contract accepts the legacy full shape
+under its existing checks or the closed compact shape. The identity version-41
+migration rewrites no state; a version-41 runtime refuses compact baselines as
+skew. A legacy baseline that would exceed the 10,000-entry state capacity raises
+`ERR_CUSTOM_BASELINE_CAPACITY`, mapped to the public `plan_revision_required`
+pause instead of an internal state-limit failure.
+
 ## Global Safety Policy
 
 Every pipeline inherits non-negotiable runner controls:
@@ -5841,3 +6325,16 @@ Every pipeline inherits non-negotiable runner controls:
 - no repository-local clarification artifact outside an already ignored path;
 - state outside target and task repositories;
 - explicit pause on unsafe or unrecoverable state.
+
+The Git capability alone defines the read-only snapshot change domains, in
+comparison order: `head`, `branch`, `refs`, `tracked-content`,
+`untracked-content`, `index`, `remote-configuration`, and `identity`. Its pure
+normalizer accepts only one to eight unique known labels and returns them in
+canonical order, otherwise `null`; the service's `readOnlyChanges(cause)`
+applies it only to `ERR_READ_ONLY_REPOSITORY_CHANGED` and runs no Git command.
+Polishing and plan execution persist the result as the optional
+`pause.snapshotChanges` of `read_only_agent_mutated_repository` only when their
+safety facade offers that accessor. Root pause validation, including pauses
+retained by operator stops, rejects any value the normalizer would change, and
+pipeline validation accepts it only on that reason and code. Absent labels mean
+the diagnosis is unavailable, so state versions are unchanged.

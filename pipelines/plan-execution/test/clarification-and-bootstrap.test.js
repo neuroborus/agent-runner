@@ -3,6 +3,8 @@ import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createGitService } from "../../../src/git/index.js";
+import { getPipeline } from "../../../src/index.js";
 import {
   createPlanExecutionState,
   migratePlanExecutionStateV9,
@@ -1502,22 +1504,75 @@ test("pauses when the repository changes between bootstrap turns", async (t) => 
   assert.equal(fixture.calls.reviewer.length, 0);
 });
 
-test("invalidates bootstrap after a read-only role mutates the repository", async (t) => {
-  const fixture = await createFixture(t, {
-    onRoleRun: async (role) => {
-      if (role === "reviewer") {
-        await writeFile(join(fixture.projectPath, "source.js"), "mutated\n");
+for (const [name, changes, evidence] of [
+  ["known", ["tracked-content"], "tracked-content"],
+  ["unclassified", undefined, "unavailable"],
+  ["unreadable", null, "unavailable"],
+]) {
+  test(`invalidates bootstrap after a read-only role mutates the repository with ${name} domains`, async (t) => {
+    const fixture = await createFixture(t, {
+      onRoleRun: async (role) => {
+        if (role === "reviewer") {
+          await writeFile(join(fixture.projectPath, "source.js"), "mutated\n");
+        }
+      },
+    });
+    const { assertUnchanged } = fixture.runtime.git;
+    fixture.runtime.git.assertUnchanged = async (snapshot) => {
+      try {
+        return await assertUnchanged(snapshot);
+      } catch (cause) {
+        if (changes === undefined) delete cause.changes;
+        if (changes === null)
+          Object.defineProperty(cause, "changes", {
+            get() {
+              throw new Error("Hostile diagnostic access.");
+            },
+          });
+        throw cause;
       }
-    },
+    };
+    fixture.runtime.git.readOnlyChanges = createGitService().readOnlyChanges;
+
+    const result = await fixture.run();
+
+    assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(result.pause, {
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      ...(changes == null ? {} : { snapshotChanges: changes }),
+    });
+    assert.doesNotThrow(() =>
+      planExecutionPipeline.workflow.validateRun(result),
+    );
+    for (const pause of [
+      { ...result.pause, snapshotChanges: null },
+      { ...result.pause, snapshotChanges: ["head", "head"] },
+      { ...result.pause, code: "ERR_OTHER", snapshotChanges: ["head"] },
+    ]) {
+      assert.throws(
+        () => planExecutionPipeline.workflow.validateRun({ ...result, pause }),
+        /snapshot change diagnostics are invalid/u,
+      );
+    }
+    const projected = getPipeline("plan-execution").projections.pause(result);
+    assert.deepEqual(projected.evidence, [
+      `Changed snapshot domains: ${evidence}.`,
+    ]);
+    assert.deepEqual(projected.nextActions, [
+      { type: "start-new-run", requirement: "uncontaminated-worktree" },
+    ]);
+    assert.equal(
+      fixture.transitions.at(-1).options.activity.message,
+      `Repository changed during a read-only plan-execution turn. Changed snapshot domains: ${evidence}.`,
+    );
+    assert.equal(result.pipelineState.workerSummary, null);
+    assert.equal(result.pipelineState.reviewerSummary, null);
+    assert.equal(result.pipelineState.reviewedFingerprint, null);
+    assert.equal(result.pipelineState.pendingCommit, null);
+    assert.deepEqual(result.pipelineState.completedCommits, []);
   });
-
-  const result = await fixture.run();
-
-  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
-  assert.equal(result.pipelineState.workerSummary, null);
-  assert.equal(result.pipelineState.reviewerSummary, null);
-});
+}
 
 test("detects an ignored transcript mutation during a read-only turn", async (t) => {
   const fixture = await createFixture(t, {

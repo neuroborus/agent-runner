@@ -86,6 +86,12 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   writes in Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux,
   without Git or commit readiness. Claude writes through sandboxed Bash to
   existing declared output roots. Explicit custom execution uses these directory permissions; see the [provider contract](docs/product/PROVIDER_MODEL.md).
+  Codex's named-profile route refuses existing regular-file output roots,
+  including dotfiles, before writable preparation or native execution. Use
+  directory outputs or select a supported backend in an authorized fresh run;
+  no parent write grant or automatic backend substitution is applied. Read-only
+  file declarations remain supported. This is a route limitation, not a blanket
+  unsupported Codex version range.
 - The runner lifecycle foundation selects workspace and lease requirements from
   pipeline descriptors before Git inspection. Directory bindings, protected
   inputs and output permissions survive recovery; repository-contained directory
@@ -385,6 +391,16 @@ change set.
 The separate [`@agent-runner/custom-plan`](packages/custom-plan/README.md)
 package defines criterion-driven `Step N` plans, including analysis-only results.
 Explicit custom authoring and sequential execution are available through CLI/MCP/configuration. Custom completion produces accepted result receipts, including analysis without a file diff; it never stages or commits.
+
+Git-based snapshots, fingerprints, measurement and source selection/projection
+reject HEAD/index gitlinks (including submodules) and non-ignored embedded
+repositories with `ERR_UNSUPPORTED_GIT_PATH`. Deleting a gitlink's worktree or
+excluding its path does not make it supported. Observation never runs Git inside
+these nested candidates; rejection blocks acceptance without changing content
+or granting recovery effects. Ignored untracked trees remain pruned. Ordinary
+content and confined replacements stay supported, as do read-only nested
+worktrees in Git-independent directory workflows. See the
+[Git safety contract](docs/product/SAFETY_MODEL.md#git-ownership).
 
 The diagrams below show the normal gates; the linked specifications own exact
 recovery and finding-resolution rules. `independent` remains the default and
@@ -2060,6 +2076,13 @@ one additional read-only retry. It preserves earlier accepted work, blockers and
 fix accounting and still requires every original review and commit/result gate.
 See [writable result recovery](pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
 
+Polishing likewise preserves reconciled finding-resolution work after a
+malformed or lost report in independent and combined modes. One automatic
+read-only report restatement precedes `resolution_output_invalid`; explicit
+resume of that checkpoint authorizes one additional read-only retry without
+writable replay, additional fix budget or approval. See
+[finding-resolution result recovery](pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
+
 Action-free recovery uses the same leased runner path through CLI and MCP.
 CLI `resume --run <run-id> --expected-revision <revision>` can bind an inspected
 revision explicitly. An action-free process-proof failure retains its checkpoint,
@@ -2338,6 +2361,10 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── index.js
 │   │   └── service.js
 │   ├── pipeline-registry.js
+│   ├── platform/
+│   │   ├── index.js
+│   │   ├── linux-owned-process.js
+│   │   └── linux-process.js
 │   ├── runner/
 │   │   ├── index.js
 │   │   ├── input.js

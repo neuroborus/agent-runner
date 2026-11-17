@@ -16,9 +16,10 @@ import {
   readProcessChildren,
   readProcessIdentity,
   readProcessNamespace,
-} from "./process-containment.js";
+} from "./linux-process.js";
 
-const BUBBLEWRAP_CANDIDATES = Object.freeze([
+// Private to the platform: shared by supervision and isolation launchers.
+export const BUBBLEWRAP_CANDIDATES = Object.freeze([
   "/usr/bin/bwrap",
   "/bin/bwrap",
   "/usr/local/bin/bwrap",

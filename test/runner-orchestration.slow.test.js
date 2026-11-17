@@ -16,7 +16,7 @@ import {
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
-import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
+import { inspectOwnedSessionProcesses } from "../src/platform/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { createStateJournal } from "../src/state/journal.js";
 import {

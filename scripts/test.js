@@ -17,7 +17,7 @@ import { claimTestAttribution } from "../src/trusted-validation/index.js";
 import { temporaryRoots } from "./test-storage.js";
 
 const CONTAINMENT_TESTS = new Set([
-  "test/agents/owned-process.test.js",
+  "test/platform/owned-process.test.js",
   "test/trusted-validation.test.js",
 ]);
 

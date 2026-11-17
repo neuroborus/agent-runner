@@ -258,7 +258,7 @@ test("combined pending revisions survive exhaustion, legacy cold migration and i
   assert.equal(f.calls.length, turns);
   const replacement = f.open();
   const saved = await replacement.store.loadRun(legacyRunId);
-  assert.equal(saved.pipelineStateVersion, 8);
+  assert.equal(saved.pipelineStateVersion, 9);
   assert.equal(saved.pause, null);
   assert.deepEqual(saved.pipelineState.outputRecovery, outputRecovery);
   assert.deepEqual(frozen(saved), frozen(waiting));
@@ -386,9 +386,36 @@ test("combined pending revisions survive exhaustion, legacy cold migration and i
   assert.ok(
     history.events.some(
       ({ state, activity }) =>
-        state.pipelineStateVersion === 8 && activity?.kind === "migrated",
+        state.pipelineStateVersion === 9 && activity?.kind === "migrated",
     ),
   );
+});
+
+// Regression: a protected Git control tree larger than the state collection
+// limit made the first CLARIFY baseline transition unpersistable. Snapshots of
+// this tree take seconds each, so the reproduction belongs to the slow tier.
+test("Git audit with a large control tree persists a bounded baseline through continuation", async (t) => {
+  const f = await fixture(t, "lazy", "git");
+  const objects = join(f.projectPath, ".git", "objects", "synthetic");
+  await mkdir(objects, { recursive: true });
+  for (let index = 0; index < 10_050; index += 1)
+    await writeFile(join(objects, String(index).padStart(5, "0")), "");
+  const { run } = await f.open().runner.create(f.input);
+  assert.notEqual(run.workspacePreparation, null);
+  // The clarify turn follows the formerly rejected baseline transition.
+  f.outputs.push(outputExhaustion());
+  await f.open().runner.resume({ runId: run.runId });
+  const saved = await f.open().store.loadRun(run.runId);
+  assert.equal(saved.pause.reason, "output_exhausted");
+  assert.equal(saved.pause.resumeState, "CLARIFY");
+  assert.equal(f.calls.length, 1);
+  assert.equal(saved.workspacePreparation, null);
+  assert.deepEqual(Object.keys(saved.providerPolicies), ["auditor"]);
+  const baseline = saved.pipelineState.repositoryBaseline;
+  assert.ok(baseline.entryCount > 10_050);
+  for (const field of ["entries", "linkResolutions"])
+    assert.equal(Object.hasOwn(baseline, field), false);
+  assert.deepEqual(baseline.sourceSelection, saved.workspace.sourceSelection);
 });
 
 test("lazy acknowledged replacement survives cold response loss, availability, inactivity and repeated exhaustion", async (t) => {

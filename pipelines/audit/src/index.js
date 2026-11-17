@@ -39,7 +39,7 @@ const LAZY_ROLES = Object.freeze(["auditor"]);
 
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 8,
+  stateVersion: 9,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -73,6 +73,9 @@ export const auditPipeline = Object.freeze({
     // including the input fingerprint of any pending preparation.
     6: ({ pipelineState }) => ({ ...pipelineState }),
     7: migrateOutputRecovery,
+    // Legacy full baselines keep their exact comparison; new runs persist a
+    // compact baseline that a version-8 runtime must refuse as skew.
+    8: ({ pipelineState }) => ({ ...pipelineState }),
   }),
   roles: ROLES,
   resolveActiveRoles: (settings) =>

@@ -158,6 +158,7 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
     assert.match(instructions, /input only to the dedicated FINALIZE/u);
     assert.match(instructions, /runner derives the final required-check/u);
     assert.match(instructions, /Do not propose, select, or repeat commands/u);
+    assert.match(instructions, /pending external work with its owner/u);
     assert.doesNotMatch(instructions, /provide .*requiredChecks/iu);
   }
   for (const schema of [
@@ -241,6 +242,12 @@ test("polishing prompts preserve role and product-decision boundaries", () => {
   assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /For BLOCKED/u);
   assert.match(DISPUTE_RECONSIDERATION_INSTRUCTIONS, /Withdraw/u);
   assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /WORKER_CORRECT/u);
+  for (const instructions of [
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+  ]) {
+    assert.match(instructions, /Uphold proven historical truth/u);
+  }
   assert.match(STAGNATION_INSTRUCTIONS, /cannot approve/u);
   assert.match(
     finalizationBootstrapInstructions({
@@ -292,6 +299,32 @@ test("polishing schemas are strict, bounded, and deeply frozen", () => {
   }
 });
 
+test("selected guidance requires controlling references within existing read authority", () => {
+  for (const render of [
+    finalizationBootstrapInstructions,
+    finalizationGuidanceInstructions,
+  ]) {
+    const instructions = render({
+      selection: "file",
+      skillPath: "checks/finalize.md",
+    });
+    assert.match(instructions, /checks\/finalize\.md/u);
+    assert.match(
+      instructions,
+      /mandatory repository references under existing read authority/u,
+    );
+    assert.match(
+      instructions,
+      /references controlling validation commands or gate behavior in validationInfrastructure/u,
+    );
+    assert.match(
+      instructions,
+      /no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback/u,
+    );
+    assert.doesNotMatch(instructions, /Read only that exact/u);
+  }
+});
+
 test("terminal recovery instructions distinguish evidence from content without weakening the gate", () => {
   for (const prompt of [REVIEW_INSTRUCTIONS, CLEAN_CONFIRM_INSTRUCTIONS]) {
     assert.match(prompt, /finalizationFindingIds as the unique subset/u);
@@ -300,6 +333,12 @@ test("terminal recovery instructions distinguish evidence from content without w
     assert.match(
       prompt,
       /Evidence rejection is valid even when inventories are unchanged/u,
+    );
+    assert.match(prompt, /operator or another owner is not an omission/u);
+    assert.match(prompt, /missing genuine pipeline-owned check/u);
+    assert.match(
+      prompt,
+      /Source observation or overlap alone is not a violation/u,
     );
   }
   for (const schema of [REVIEW_SCHEMA, CLEAN_CONFIRM_SCHEMA]) {
@@ -346,6 +385,7 @@ test("writable candidate instructions defer checks without suppressing unrelated
       instructions,
       /work not delegated to a selected runner-trusted command/u,
     );
+    assert.match(instructions, /never as reserved-check coverage/u);
     assert.doesNotMatch(
       instructions,
       /NOT_RUN|requiredChecks|validationInfrastructure/u,

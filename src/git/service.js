@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 
 import {
+  createCheckinHasher,
   createGitCommandRunner,
   decodeLine,
   decodeUtf8,
@@ -15,11 +16,13 @@ import { createGitCommitService } from "./commit.js";
 import {
   contentChangesAtRoot,
   contentFingerprintsAtRoot,
-  indexContentFingerprintAtRoot,
+  isFullStagingAtRoot,
   inspectPathAtRoot,
   normalizeAllowedPaths,
   pathsFingerprintAtRoot,
+  stagedContentMatchesAtRoot,
 } from "./content.js";
+import { isolateGitEnvironment } from "./environment.js";
 import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
 import { measureChangesAtRoot } from "./measurement.js";
@@ -39,6 +42,11 @@ const SNAPSHOT_COMPARISONS = Object.freeze([
   ["remoteConfigurationFingerprint", "remote-configuration"],
   ["identityFingerprint", "identity"],
 ]);
+// The only canonical read-only snapshot change-domain labels, in comparison
+// order. Diagnostics may name these labels but never the compared values.
+const READ_ONLY_SNAPSHOT_CHANGES = Object.freeze(
+  SNAPSHOT_COMPARISONS.map(([, change]) => change),
+);
 const SNAPSHOT_FINGERPRINT_FIELDS = Object.freeze([
   "contentFingerprint",
   ...SNAPSHOT_COMPARISONS.slice(2).map(([field]) => field),
@@ -55,6 +63,46 @@ const INTERRUPTED_CONTROL_COMPARISONS = Object.freeze([
 ]);
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+
+// Total and pure: return the known labels in canonical order, or null for
+// anything malformed, unknown, duplicated, empty, oversized, or unreadable.
+// Elements are read once by index, so custom iterators are never invoked.
+export function normalizeReadOnlySnapshotChanges(value) {
+  try {
+    if (!Array.isArray(value)) return null;
+    const { length } = value;
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 1 ||
+      length > READ_ONLY_SNAPSHOT_CHANGES.length
+    ) {
+      return null;
+    }
+    const labels = new Set();
+    for (let index = 0; index < length; index += 1) {
+      const label = value[index];
+      if (!READ_ONLY_SNAPSHOT_CHANGES.includes(label) || labels.has(label)) {
+        return null;
+      }
+      labels.add(label);
+    }
+    return Object.freeze(
+      READ_ONLY_SNAPSHOT_CHANGES.filter((label) => labels.has(label)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function readOnlyChanges(cause) {
+  try {
+    return cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED"
+      ? normalizeReadOnlySnapshotChanges(cause.changes)
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -164,6 +212,11 @@ export function createGitService(options = {}) {
     });
   }
   const runGit = createGitCommandRunner({ env, gitBinary });
+  // Identity queries read the same sources as the isolated commit executors.
+  const runIdentityGit = createGitCommandRunner({
+    env: isolateGitEnvironment(env),
+    gitBinary,
+  });
 
   async function currentHead(repositoryPath, execute = runGit) {
     const result = await execute(
@@ -174,7 +227,11 @@ export function createGitService(options = {}) {
     return result.exitCode === 0 ? decodeLine(result.stdout, "Git HEAD") : null;
   }
 
-  const contentContext = Object.freeze({ currentHead, runGit });
+  const contentContext = Object.freeze({
+    currentHead,
+    runGit,
+    hashCheckin: createCheckinHasher({ env, gitBinary, runGit }),
+  });
   const sourceMaterializer = createSourceMaterializer(contentContext);
 
   async function inspectHead(options) {
@@ -288,7 +345,7 @@ export function createGitService(options = {}) {
         "--raw",
         "--abbrev=64",
         "--ita-invisible-in-index",
-        "--ignore-submodules=none",
+        "--ignore-submodules=all",
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
@@ -352,17 +409,17 @@ export function createGitService(options = {}) {
       GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
       GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
     };
-    const author = await runGit(
+    const author = await runIdentityGit(
       repositoryPath,
       ["-c", "user.useConfigOnly=true", "var", "GIT_AUTHOR_IDENT"],
       { allowedExitCodes: [0, 128], extraEnv: fixedDates },
     );
-    const committer = await runGit(
+    const committer = await runIdentityGit(
       repositoryPath,
       ["-c", "user.useConfigOnly=true", "var", "GIT_COMMITTER_IDENT"],
       { allowedExitCodes: [0, 128], extraEnv: fixedDates },
     );
-    const configuration = await runGit(
+    const configuration = await runIdentityGit(
       repositoryPath,
       ["config", "--null", "--get-regexp", "^user\\.(name|email)$"],
       { allowedExitCodes: [0, 1] },
@@ -429,7 +486,7 @@ export function createGitService(options = {}) {
       "--porcelain=v1",
       "-z",
       "--untracked-files=all",
-      "--ignore-submodules=none",
+      "--ignore-submodules=all",
     ]);
     const { changedPaths, ...content } = await contentChangesAtRoot(
       contentContext,
@@ -687,6 +744,8 @@ export function createGitService(options = {}) {
     assertSnapshot,
     authorizationIdFactory,
     contentFingerprintAgainst,
+    isFullStaging: (repositoryPath, fingerprint) =>
+      isFullStagingAtRoot(contentContext, repositoryPath, fingerprint),
     identitySnapshot,
     refsFingerprints,
     runGit,
@@ -694,11 +753,12 @@ export function createGitService(options = {}) {
   });
   const handoffService = createGitHandoffService({
     assertSnapshot,
-    indexContentFingerprint: (repositoryPath, allowedPaths) =>
-      indexContentFingerprintAtRoot(
+    stagedContentMatches: (repositoryPath, allowedPaths, fingerprint) =>
+      stagedContentMatchesAtRoot(
         contentContext,
         repositoryPath,
         allowedPaths,
+        fingerprint,
       ),
     runGit,
     snapshot,
@@ -718,6 +778,7 @@ export function createGitService(options = {}) {
     contentFingerprint,
     inspectPath,
     preflight,
+    readOnlyChanges,
     reconcileInterrupted,
     inspectHead,
     materializeSource,

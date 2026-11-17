@@ -132,18 +132,25 @@ export async function runBoundedBootstrap({
               );
             return candidate;
           }
+          const pending = state().bootstrapProgress[role].work;
           const candidate = normalizeRepositoryDiscovery(output.result, scope, {
             deferredDiagnostics: true,
+            inherited:
+              pending === null
+                ? []
+                : [pending.discovery, pending.catalogCorrection],
           });
-          const discovery = candidate.result;
-          // Validate preservation before publishing corrected discovery.
-          if (state().bootstrapProgress[role].work !== null)
-            correctBootstrapCatalog(
-              scope,
-              state().bootstrapProgress[role].work,
-              discovery,
-            );
-          return candidate;
+          // Validate preservation and publish only canonical corrected discovery.
+          return pending === null
+            ? candidate
+            : {
+                ...candidate,
+                result: correctBootstrapCatalog(
+                  scope,
+                  pending,
+                  candidate.result,
+                ).discovery,
+              };
         },
       });
       if (result === null || result.status !== undefined) return result;

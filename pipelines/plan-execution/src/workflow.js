@@ -171,7 +171,10 @@ import {
   normalizeStagnationResult,
   normalizedCounters,
   sha256,
+  snapshotChangeEvidence,
+  snapshotChangeLabels,
   workflowError,
+  retainWorkReport,
 } from "./workflow-contract.js";
 
 export {
@@ -342,6 +345,14 @@ function contextKeyFor(role, checkpoint, context) {
     throw workflowError("Plan-execution session checkpoint is invalid.");
   }
   return sha256(`${role}\0${checkpoint}\0${context}`);
+}
+
+// Only the Git facade classifies its own guard failure; custom facades and
+// foreign causes stay unavailable without Git inspection.
+function readOnlySnapshotChanges(safety, cause) {
+  return typeof safety?.readOnlyChanges === "function"
+    ? snapshotChangeLabels(safety.readOnlyChanges(cause))
+    : null;
 }
 
 function diagnosticCode(cause, fallback) {
@@ -731,9 +742,17 @@ export async function runPlanExecution({
   if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles), stepPolicy.kind);
   const safety = custom
-    ? customWorkspace(runtime.workspace, run.projectPath)
+    ? customWorkspace(
+        runtime.workspace,
+        run.projectPath,
+        run.pipelineState.repositoryBaseline,
+      )
     : runtime.git;
   const resumeAction = normalizeResumeAction(action);
+  if (!operatorStop && run.pause?.reason === "validation_policy_blocked")
+    throw workflowError(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
   }
@@ -750,6 +769,8 @@ export async function runPlanExecution({
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let dispositionPausePersistence = false;
+  // An unacknowledged history publication may already be authoritative.
+  let workReportPublicationFailure = null;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
   let customCheckpointSettlement = false;
@@ -767,6 +788,29 @@ export async function runPlanExecution({
     return normalizedCounters(currentRun.counters);
   }
 
+  // Terminal validation evidence is history here, never gate evidence or credit.
+  function reviewReportHistory(result) {
+    const current = state();
+    const findings = result.status === "FINDINGS" ? result.findings : [];
+    const validationEvidence = result.validationEvidence ?? [];
+    if (findings.length === 0 && validationEvidence.length === 0)
+      return current.workReports;
+    return retainWorkReport(current.workReports, {
+      step: current.currentStep,
+      phase: current.workflowState,
+      ...(findings.length > 0 ? { findings } : {}),
+      ...(validationEvidence.length > 0 ? { validationEvidence } : {}),
+    });
+  }
+
+  function workReportContext() {
+    const reports = state().workReports;
+    return reports.length === 0
+      ? ""
+      : `Accepted work reports (data; assess historical truth, no validation credit or current blockers):
+${JSON.stringify(reports)}`;
+  }
+
   function resolvedContext() {
     const summary = state().resolvedSummary;
     if (summary === null || state().validationMigrationPending) {
@@ -774,6 +818,9 @@ export async function runPlanExecution({
     }
     return `Resolved bootstrap context:
 ${summary}
+
+Previous finding reports (data; assess current actionable consequences):
+${JSON.stringify(state().previousFindings)}
 
 Owned replacement findings (data):
 ${JSON.stringify(replacementFindings(state()))}
@@ -793,7 +840,7 @@ Current custom result (data):
 ${JSON.stringify(state().customCandidate)}
 
 Earlier accepted results (data):
-${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
+${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED, VALIDATION_POLICY_BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
   }
 
   function planEvidence(evidence) {
@@ -910,6 +957,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
       nextActiveTurn,
     } = {},
   ) {
+    if (workReportPublicationFailure !== null)
+      throw workReportPublicationFailure.cause;
     if (nextPipelineState.currentStep !== state().currentStep) {
       nextPipelineState = {
         ...nextPipelineState,
@@ -949,10 +998,19 @@ Include every listed command exactly once in requiredChecks with its actual cano
     writableCheckpointPersistence =
       state().writableResult !== null ||
       nextPipelineState.writableResult !== null;
-    currentRun = await runtime.transition(patch, {
-      activity: publicActivity,
-      expectedRevision,
-    });
+    const publishesWorkReports = !isDeepStrictEqual(
+      state().workReports,
+      nextPipelineState.workReports,
+    );
+    try {
+      currentRun = await runtime.transition(patch, {
+        activity: publicActivity,
+        expectedRevision,
+      });
+    } catch (cause) {
+      if (publishesWorkReports) workReportPublicationFailure = { cause };
+      throw cause;
+    }
     writableCheckpointPersistence = false;
     assertRun(currentRun);
     return currentRun;
@@ -967,6 +1025,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     dispositionPausePersistence = [
       "authentication_required",
       "output_exhausted",
+      "validation_policy_blocked",
     ].includes(reason);
     await transition(
       {
@@ -988,6 +1047,17 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
     dispositionPausePersistence = false;
     return currentRun;
+  }
+
+  async function validationPolicyBlocked(result) {
+    const checkpoint = state().workflowState;
+    await pause("validation_policy_blocked", {
+      code: "ERR_VALIDATION_POLICY_BLOCKED",
+      explanation: result.reason,
+      evidence: result.evidence,
+      checkpoint,
+    });
+    return false;
   }
 
   async function pauseForBootstrapCapacity(role, result) {
@@ -1128,6 +1198,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       code,
       message = "Plan-execution input changed outside an authorized window.",
       phase = "inputs",
+      snapshotChanges = null,
     } = {},
   ) {
     const current = state();
@@ -1195,7 +1266,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
           fixRounds: 0,
           correctionRounds: 0,
         },
-        pause: { reason, ...(code === undefined ? {} : { code }) },
+        pause: {
+          reason,
+          ...(code === undefined ? {} : { code }),
+          ...(snapshotChanges === null ? {} : { snapshotChanges }),
+        },
         publicActivity: activity("runner", phase, "changed", message),
       },
     );
@@ -1961,8 +2036,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ? await replacements.preservedContext()
         : "";
     const context = durableContext(
-      focusedContext === undefined ? evidenceContext : focusedContext(evidence),
-      recoveryContext,
+      durableContext(
+        focusedContext === undefined
+          ? evidenceContext
+          : focusedContext(evidence),
+        recoveryContext,
+      ),
+      workReportContext(),
     );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     // Narrative review has no accepted result yet. Rebuild its read-only
@@ -2105,7 +2185,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const readContext =
       selectedFile === null
         ? ""
-        : `\nFrozen finalization file: ${selectedFile.path}. For finalization guidance, read this exact file; its frozen guidance label is ${guidance.skillPath}. Selection grants no parent-directory access.\n`;
+        : `\nFrozen finalization file: ${selectedFile.path}; its frozen guidance label is ${guidance.skillPath}. Read this exact entry and its mandatory repository references under existing read authority. Selection grants no parent-directory or external sibling access or recursive retrieval.\n`;
     const acknowledgedSessions = new Set();
     const request = {
       onSessionCreated: async (sessionId) => {
@@ -2117,12 +2197,20 @@ Include every listed command exactly once in requiredChecks with its actual cano
       cwd: currentRun.projectPath,
       prompt:
         session?.mode === "continue" && !resumeSessionContext
-          ? rolePrompt(promptFor(""))
+          ? rolePrompt(promptFor(workReportContext()))
           : recoveryPrompt + readContext,
       recoveryPrompt: recoveryPrompt + readContext,
       schema: custom ? customTurnSchema(schema, resultTurn) : schema,
       ...executionPreferences,
       ...(session === undefined ? {} : { session }),
+      // Diagnostic-only: lets the adapter label denials of exact inventory commands.
+      ...(Array.isArray(state().requiredChecks)
+        ? {
+            requiredCheckCommands: state().requiredChecks.map(
+              ({ command }) => command,
+            ),
+          }
+        : {}),
     };
     resumeSessionContext = false;
     let response;
@@ -2745,8 +2833,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
   async function productDecision(
     decision,
     suspendedState,
-    { preserveLineage = false } = {},
+    { preserveLineage = false, workReport = null } = {},
   ) {
+    const workReports =
+      workReport === null
+        ? state().workReports
+        : retainWorkReport(state().workReports, workReport);
     const settlement = state().writableResult?.productDecision;
     const count = settlement?.number ?? counters().productDecisions + 1;
     const inputFingerprint = validationEvidenceFingerprint(currentRun.hashes);
@@ -2803,6 +2895,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         },
         nextPipelineState: {
           ...current,
+          workReports,
           writableResult: null,
           replacementExecution: suspendReplacementInputs(
             current,
@@ -2897,11 +2990,14 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
   }
 
-  async function pauseForPlanRevision(result) {
-    return pause("plan_revision_required", {
-      explanation: result.reason,
-      evidence: result.evidence,
-    });
+  async function pauseForPlanRevision(result, workReport = null) {
+    return pause(
+      "plan_revision_required",
+      { explanation: result.reason, evidence: result.evidence },
+      workReport === null
+        ? {}
+        : { workReports: retainWorkReport(state().workReports, workReport) },
+    );
   }
 
   async function writeContext(path, content) {
@@ -3799,6 +3895,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     actor,
     summary,
     bootstrapArbitrationUsed,
+    workReport = null,
   ) {
     const validation = await establishedValidation();
     await writeContext("context/resolved.md", summary);
@@ -3806,6 +3903,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       {
         ...state(),
         ...validation,
+        workReports:
+          workReport === null
+            ? state().workReports
+            : retainWorkReport(state().workReports, workReport),
         finalizationCorrections: state().validationScopeLegacy
           ? state().finalizationCorrections
           : [],
@@ -3899,11 +4000,24 @@ ${JSON.stringify(
     if (arbitration === null) {
       return false;
     }
+    const workReport = {
+      step: state().currentStep,
+      phase: "ARBITRATE_VALIDATION_MIGRATION",
+      arbitration: {
+        direction: arbitration.direction,
+        rationale: arbitration.rationale,
+      },
+    };
     if (arbitration.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(arbitration);
+      await pauseForPlanRevision(arbitration, workReport);
       return false;
     }
-    return completeValidationMigration("arbiter", arbitration.summary, true);
+    return completeValidationMigration(
+      "arbiter",
+      arbitration.summary,
+      true,
+      workReport,
+    );
   }
 
   async function runValidationMigration() {
@@ -4259,6 +4373,7 @@ ${JSON.stringify(
         },
         findings: contentFindings,
         previousFindings: result.findings,
+        workReports: reviewReportHistory(result),
         pendingDisputes:
           pure || !executionPolicy(current.settings).independentReview
             ? []
@@ -4652,11 +4767,16 @@ The runner will derive validation inventories from the independently accepted ro
     if (result === null) {
       return false;
     }
+    const workReport = {
+      step: null,
+      phase: "ARBITRATE_BOOTSTRAP",
+      arbitration: { direction: result.direction, rationale: result.rationale },
+    };
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "BOOTSTRAP");
+      return productDecision(result.decision, "BOOTSTRAP", { workReport });
     }
     if (result.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
+      await pauseForPlanRevision(result, workReport);
       return false;
     }
     await writeContext("context/resolved.md", result.summary);
@@ -4667,6 +4787,7 @@ The runner will derive validation inventories from the independently accepted ro
         workflowState: "IMPLEMENT",
         resolvedSummary: result.summary,
         ...validation,
+        workReports: retainWorkReport(state().workReports, workReport),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: true,
         currentStep: 1,
@@ -5165,6 +5286,8 @@ ${plannedStepContext(step)}${
       return false;
     if ((await contentFingerprint()) !== checkpoint.candidateFingerprint)
       return pauseWritableResultDrift();
+    if (result.status === "VALIDATION_POLICY_BLOCKED")
+      return validationPolicyBlocked(result);
     if (result.status === "BLOCKED") {
       const retain =
         checkpoint.attempts > 0 || (checkpoint.rework && checkpoint.fixCharged);
@@ -5194,6 +5317,11 @@ ${plannedStepContext(step)}${
               }
             : {}),
           writableResult: retain ? { ...checkpoint, stage: "blocked" } : null,
+          workReports: retainWorkReport(state().workReports, {
+            step: state().currentStep,
+            phase: checkpoint.phase,
+            ...result,
+          }),
         },
       );
       return false;
@@ -5393,6 +5521,11 @@ ${plannedStepContext(step)}${
         ...state(),
         workflowState: candidateCheckpoint(state().settings),
         writableResult: null,
+        workReports: retainWorkReport(current.workReports, {
+          step: current.currentStep,
+          phase: "IMPLEMENT",
+          summary: result.summary,
+        }),
         ...(custom ? { customCandidate } : {}),
         stepImplementation: custom ? null : { ...evidence, accepted: true },
         implementationDirection: null,
@@ -5491,6 +5624,7 @@ ${
             state().trustedValidation.commands.map(({ command }) => command),
             custom,
           );
+          if (result.status === "VALIDATION_POLICY_BLOCKED") return result;
           if (
             result.requiredChecks &&
             validationCatalog({
@@ -5687,8 +5821,23 @@ ${
     if (result === null) {
       return false;
     }
+    if (result.status === "VALIDATION_POLICY_BLOCKED")
+      return validationPolicyBlocked(result);
     if (result.status === "PRODUCT_DECISION_REQUIRED") {
       return productDecision(result.decision, "IMPLEMENT");
+    }
+    // Keep normalized Worker facts before replacement, blockage or invalidation.
+    if (["PASS", "FAIL", "BLOCKED"].includes(result.status)) {
+      const workReports = retainWorkReport(state().workReports, {
+        step: state().currentStep,
+        phase: "FINALIZE",
+        summary: result.summary ?? result.reason,
+        ...(result.issues?.length > 0 ? { issues: result.issues } : {}),
+        ...(result.checks.length > 0 ? { checks: result.checks } : {}),
+        ...(result.status === "BLOCKED" ? { evidence: result.evidence } : {}),
+      });
+      if (workReports !== state().workReports)
+        await transition({ ...state(), workReports });
     }
     if (result.status === "BLOCKED") {
       await pause("environment_blocked", {
@@ -5940,6 +6089,7 @@ ${
 ${JSON.stringify(
   {
     step: current.currentStep,
+    finalizationGuidance: current.finalizationGuidance,
     requiredChecks: current.requiredChecks,
     validationInfrastructure: current.validationInfrastructure,
     validationInfrastructureFingerprint:
@@ -6146,7 +6296,11 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
         const changed = (await contentFingerprint()) !== beforeFingerprint;
         if (
           (result.status === "CHANGED") !== changed &&
-          !["BLOCKED", "PRODUCT_DECISION_REQUIRED"].includes(result.status)
+          ![
+            "BLOCKED",
+            "VALIDATION_POLICY_BLOCKED",
+            "PRODUCT_DECISION_REQUIRED",
+          ].includes(result.status)
         ) {
           throw invalidRoleOutput(
             "Worker check/fix status does not match the repository change.",
@@ -6154,6 +6308,8 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
             { field: "status", constraint: "matches-repository-mutation" },
           );
         }
+        if (result.status === "VALIDATION_POLICY_BLOCKED")
+          return validationPolicyBlocked(result);
         if (result.status === "PRODUCT_DECISION_REQUIRED") {
           return productDecision(result.decision, "IMPLEMENT");
         }
@@ -6178,13 +6334,28 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               pendingCorrection: true,
             });
           }
-          await pause("environment_blocked", {
-            explanation: result.reason,
-            evidence: result.evidence,
-            resumeState: "CHECK_AND_FIX",
-          });
+          await pause(
+            "environment_blocked",
+            {
+              explanation: result.reason,
+              evidence: result.evidence,
+              resumeState: "CHECK_AND_FIX",
+            },
+            {
+              workReports: retainWorkReport(state().workReports, {
+                step: current.currentStep,
+                phase: "CHECK_AND_FIX",
+                ...result,
+              }),
+            },
+          );
           return false;
         }
+        const workReports = retainWorkReport(current.workReports, {
+          step: current.currentStep,
+          phase: "CHECK_AND_FIX",
+          summary: result.summary,
+        });
         if (changed) {
           const nextCounters =
             alreadyCharged || counters().fixRounds > fixRoundsBeforeTurn
@@ -6196,6 +6367,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               availabilityCorrectionCharged: false,
               ...clearedCandidateAndTerminalGate(),
               workflowState: "CHECK_AND_FIX",
+              workReports,
               previousFindings:
                 current.findings.length === 0
                   ? current.previousFindings
@@ -6225,6 +6397,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
             ...state(),
             availabilityCorrectionCharged: false,
             workflowState: "CLEAN_CONFIRM",
+            workReports,
             ...clearedCandidateAndConfirmationGate(current),
             pendingLazyCorrection: null,
             previousFindings:
@@ -6366,6 +6539,11 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
             {
               ...state(),
               workflowState: "CHECK_AND_FIX",
+              workReports: retainWorkReport(current.workReports, {
+                step: current.currentStep,
+                phase: "CLEAN_CONFIRM",
+                findings: result.findings,
+              }),
               pendingLazyCorrection: null,
               ...(combinedReview(current.settings)
                 ? {
@@ -6418,9 +6596,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
             candidateConfirmationFingerprint: confirmedFingerprint,
             primaryFindings: [],
             findings: [],
-            previousFindings: combinedReview(current.settings)
-              ? current.previousFindings
-              : [],
+            previousFindings: current.previousFindings,
             pendingCorrection: current.pendingCorrection,
           },
           {
@@ -6577,6 +6753,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
               pendingLazyCorrection: null,
               findings: result.findings,
               previousFindings: result.findings,
+              workReports: reviewReportHistory(result),
               correctionHistory: progress.history,
               sameFindingRounds: progress.sameFindingRounds,
               pendingCorrection: false,
@@ -6603,6 +6780,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
             reviewResult,
             reviewedFingerprint: confirmedFingerprint,
             cleanConfirmationFingerprint: confirmedFingerprint,
+            workReports: reviewReportHistory(result),
             findings: [],
             previousFindings: [],
             pendingCorrection: false,
@@ -6893,6 +7071,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           ...state(),
           workflowState: "RESOLVE_FINDINGS",
           candidateReviewResult,
+          workReports: reviewReportHistory(result),
           candidateReviewedFingerprint: reviewedFingerprint,
           findings,
           previousFindings: result.findings,
@@ -6929,13 +7108,14 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         ...state(),
         ...checkpoint,
         candidateReviewResult,
+        workReports: reviewReportHistory(result),
         candidateReviewedFingerprint: reviewedFingerprint,
         findings: [],
         previousFindings:
           state().pendingDisputes.length === 0
             ? result.status === "FINDINGS"
               ? result.findings
-              : []
+              : state().previousFindings
             : state().previousFindings,
         pendingDisputes: state().pendingDisputes,
         pendingCorrection: state().pendingCorrection,
@@ -7199,6 +7379,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
           workflowState: "RESOLVE_FINDINGS",
           findings,
           previousFindings: result.findings,
+          workReports: reviewReportHistory(result),
           pendingDisputes,
           correctionHistory: correction.history,
           sameFindingRounds: correction.sameFindingRounds,
@@ -7230,6 +7411,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
         reviewedFingerprint,
         findings: [],
         previousFindings: result.status === "FINDINGS" ? result.findings : [],
+        workReports: reviewReportHistory(result),
         pendingDisputes: [],
         pendingCorrection: false,
         reviewerStep: current.currentStep,
@@ -7329,6 +7511,11 @@ ${JSON.stringify(current.pendingDisputes, null, 2)}`,
         findings,
         pendingDisputes,
         disputeHistory: history,
+        workReports: retainWorkReport(current.workReports, {
+          step: current.currentStep,
+          phase: "RECONSIDER_DISPUTES",
+          decisions: result.decisions,
+        }),
       },
       {
         publicActivity: activity(
@@ -7374,7 +7561,17 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
       return false;
     }
     if (result.direction === "REQUIREMENT_AMBIGUOUS") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "IMPLEMENT", {
+        workReport: {
+          step: current.currentStep,
+          phase: "ARBITRATE_FINDING",
+          arbitration: {
+            findingId: dispute.findingId,
+            direction: result.direction,
+            rationale: result.rationale,
+          },
+        },
+      });
     }
     const findings =
       result.direction === "WORKER_CORRECT"
@@ -7402,6 +7599,11 @@ ${JSON.stringify(priorFindingDecisions([dispute.findingId]), null, 2)}`,
             rationale: result.rationale,
           },
         ].slice(-MAX_DIAGNOSTIC_ITEMS),
+        workReports: retainWorkReport(current.workReports, {
+          step: current.currentStep,
+          phase: "ARBITRATE_FINDING",
+          arbitration: { findingId: dispute.findingId, ...result },
+        }),
       },
       {
         publicActivity: activity(
@@ -7448,19 +7650,41 @@ ${JSON.stringify(
       return false;
     }
     if (result.direction === "PRODUCT_DECISION_REQUIRED") {
-      return productDecision(result.decision, "IMPLEMENT");
+      return productDecision(result.decision, "IMPLEMENT", {
+        workReport: {
+          step: current.currentStep,
+          phase: "ARBITRATE_STAGNATION",
+          arbitration: {
+            direction: result.direction,
+            rationale: result.rationale,
+          },
+        },
+      });
     }
     if (result.direction === "PLAN_REVISION_REQUIRED") {
-      await pauseForPlanRevision(result);
+      await pauseForPlanRevision(result, {
+        step: current.currentStep,
+        phase: "ARBITRATE_STAGNATION",
+        arbitration: {
+          direction: result.direction,
+          rationale: result.rationale,
+        },
+      });
       return false;
     }
     const direction = {
       direction: result.direction,
       rationale: result.rationale,
     };
+    const workReports = retainWorkReport(current.workReports, {
+      step: current.currentStep,
+      phase: "ARBITRATE_STAGNATION",
+      arbitration: direction,
+    });
     if (result.direction === "REWORK_IMPLEMENTATION") {
       const nextState = {
         ...state(),
+        workReports,
         implementationDirection: direction,
         ...clearedCandidateAndTerminalGate(),
         previousFindings:
@@ -7532,6 +7756,7 @@ ${JSON.stringify(
           stagnationArbitrationUsed: true,
           stagnationDirection: direction,
           reviewReconsideration: result.findingIds,
+          workReports,
         },
         {
           publicActivity: activity(
@@ -7550,6 +7775,7 @@ ${JSON.stringify(
         blockedSinceStagnation: 0,
         stagnationArbitrationUsed: true,
         stagnationDirection: direction,
+        workReports,
       },
       {
         publicActivity: activity(
@@ -7686,6 +7912,11 @@ ${JSON.stringify(
 
   async function acceptResolutionResult(result, customCandidate) {
     const current = state();
+    const workReports = retainWorkReport(current.workReports, {
+      step: current.currentStep,
+      phase: "RESOLVE_FINDINGS",
+      decisions: result.decisions,
+    });
     const checkpoint = current.writableResult;
     const budgetExhausted = checkpoint.budgetExhausted;
     const fixRoundAlreadyCounted =
@@ -7710,6 +7941,7 @@ ${JSON.stringify(
         {
           ...state(),
           writableResult: null,
+          workReports,
           ...(custom ? { customCandidate } : {}),
           workflowState: "WAITING_FOR_USER",
           pendingDisputes: disputes,
@@ -7761,6 +7993,7 @@ ${JSON.stringify(
         {
           ...state(),
           writableResult: null,
+          workReports,
           ...(custom ? { customCandidate } : {}),
           ...(changed || current.finalizationResult?.status !== "PASS"
             ? clearedCandidateAndTerminalGate()
@@ -7804,6 +8037,7 @@ ${JSON.stringify(
       {
         ...state(),
         writableResult: null,
+        workReports,
         ...(custom ? { customCandidate } : {}),
         pendingDisputes: disputes,
         disputeCounts,
@@ -7827,8 +8061,11 @@ ${JSON.stringify(
         ...runtime,
         workspace: {
           ...runtime.workspace,
+          // Ledger receipts keep their complete-entry formulas.
           snapshot: () =>
-            safety.snapshot({ allowedPaths: [state().clarificationPath] }),
+            safety.completeSnapshot({
+              allowedPaths: [state().clarificationPath],
+            }),
         },
         async transition(patch, options) {
           const preparation = patch.pipelineState.customResults.preparation;
@@ -8212,6 +8449,7 @@ ${step.subject}`),
       await finishCommitTurn();
       if (
         cause.code === "ERR_COMMIT_NOT_CREATED" &&
+        cause.changes?.includes("index") !== true &&
         pendingCommit.preEffectRejection !== null
       ) {
         if (
@@ -8253,9 +8491,13 @@ ${step.subject}`),
         await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
         return false;
       }
-      const contractViolation = cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      const staged = cause.changes?.includes("index") === true;
+      const contractViolation =
+        cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED" ||
+        (staged && pendingCommit.preEffectRejection !== null);
       const exhausted =
         !contractViolation &&
+        !staged &&
         runtime.outputExhaustion?.eligible(agentError) === true;
       await pause(
         exhausted
@@ -8264,9 +8506,11 @@ ${step.subject}`),
             ? "commit_contract_violated"
             : "commit_failed",
         {
-          code: exhausted
-            ? "ERR_OUTPUT_EXHAUSTED"
-            : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
+          code: contractViolation
+            ? "ERR_COMMIT_CONTRACT_VIOLATED"
+            : exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
           ...(exhausted
             ? {
                 resumeState: "COMMIT",
@@ -9038,6 +9282,8 @@ ${step.subject}`),
       );
     }
   } catch (cause) {
+    if (workReportPublicationFailure !== null)
+      throw workReportPublicationFailure.cause;
     if (
       dispositionPausePersistence ||
       [
@@ -9069,6 +9315,16 @@ ${step.subject}`),
           "Frozen custom inputs or earlier accepted outputs changed. Preserve the work, revise the plan and start a new run.",
         evidence: [
           "Custom acceptance bindings no longer match the inspected workspace.",
+        ],
+      });
+    }
+    if (custom && cause?.code === "ERR_CUSTOM_BASELINE_CAPACITY") {
+      return pause("plan_revision_required", {
+        code: cause.code,
+        explanation:
+          "The legacy full custom baseline exceeds the 10,000-entry state capacity. Preserve the work and start a fresh custom run for the remaining steps.",
+        evidence: [
+          "The workspace no longer fits this run's legacy baseline representation.",
         ],
       });
     }
@@ -9128,13 +9384,23 @@ ${step.subject}`),
     ) {
       return pause("commit_failed", {
         code: diagnosticCode(cause, "ERR_COMMIT_VERIFICATION_FAILED"),
+        // Interrupted observation cannot erase the already recorded staging
+        // effect of this same consumed authorization. This grants no retry.
+        ...(run.pause?.reason === "commit_failed" &&
+        run.pause.changes?.includes("index") &&
+        run.pipelineState.pendingCommit?.authorization.id ===
+          state().pendingCommit.authorization.id
+          ? { changes: ["index"] }
+          : {}),
       });
     }
     if (cause?.code === "ERR_READ_ONLY_REPOSITORY_CHANGED") {
+      const snapshotChanges = readOnlySnapshotChanges(safety, cause);
       return invalidateInputs("read_only_agent_mutated_repository", {
         code: cause.code,
         phase: "repository",
-        message: "Repository changed during a read-only plan-execution turn.",
+        message: `Repository changed during a read-only plan-execution turn. ${snapshotChangeEvidence(snapshotChanges)}`,
+        snapshotChanges,
       });
     }
     if (

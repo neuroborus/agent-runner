@@ -19,6 +19,7 @@ const REQUEST_FIELDS = Object.freeze([
   "readPaths",
   "prompt",
   "recoveryPrompt",
+  "requiredCheckCommands",
   "schema",
   "session",
   "sessionNaming",
@@ -53,6 +54,9 @@ const MAX_WORKSPACE_PATHS = 256;
 const MAX_INSPECTION_PATHS = 10_000;
 const MAX_DIRECTORY_STORAGE_PATHS =
   3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
+// Two disjoint maximum role inventories, matching pipeline validation capacity.
+const MAX_REQUIRED_CHECK_COMMANDS = 512;
+const MAX_REQUIRED_CHECK_COMMAND_LENGTH = 4_000;
 const EFFORT_VALUES = new Set([
   "current",
   "low",
@@ -222,18 +226,6 @@ export function isEnvironment(value) {
 function isFilesystemRoot(value) {
   const normalized = resolve(value);
   return dirname(normalized) === normalized;
-}
-
-export function isolateGitEnvironment(value) {
-  const environment = { ...value };
-  for (const name of Object.keys(environment)) {
-    const normalizedName = name.toUpperCase();
-    if (normalizedName === "EMAIL" || normalizedName.startsWith("GIT_")) {
-      delete environment[name];
-    }
-  }
-  environment.GIT_TERMINAL_PROMPT = "0";
-  return Object.freeze(environment);
 }
 
 export function deepFreeze(value) {
@@ -714,6 +706,24 @@ export function createAdapterContract({
     return value;
   }
 
+  // Diagnostic-only inventory; never forwarded to prompts, arguments, or records.
+  function normalizeRequiredCheckCommands(value) {
+    if (
+      !Array.isArray(value) ||
+      value.length > MAX_REQUIRED_CHECK_COMMANDS ||
+      Array.from(value).some(
+        (command) =>
+          typeof command !== "string" ||
+          command.length === 0 ||
+          [...command].length > MAX_REQUIRED_CHECK_COMMAND_LENGTH ||
+          command.includes("\0"),
+      )
+    ) {
+      throw optionsError("Required-check commands are invalid.");
+    }
+    return Object.freeze([...value]);
+  }
+
   function normalizeCommit(value) {
     assertFields(value, COMMIT_FIELDS, `${backendName} commit constraint`);
     if (
@@ -972,6 +982,13 @@ export function createAdapterContract({
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.requiredCheckCommands === undefined
+        ? {}
+        : {
+            requiredCheckCommands: normalizeRequiredCheckCommands(
+              value.requiredCheckCommands,
+            ),
+          }),
       ...(value.sessionNaming === undefined
         ? {}
         : {

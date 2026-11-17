@@ -58,12 +58,12 @@ import {
   isOutputDiagnostic,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
 } from "./workflow-contract.js";
 
 export {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
@@ -251,6 +251,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The validated plan must be revised and execution must restart in a fresh run.",
   proactive_clarification:
     "Optional proactive execution clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before execution can continue.",
   project_configuration_changed:
@@ -272,6 +274,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "confirmation_output_invalid",
   "bootstrap_inventory_capacity_exhausted",
@@ -308,6 +311,8 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   const readinessConstraint = commitReadinessConstraint(pause.diagnosticClass);
   if (pause.reason === "commit_failed" && readinessConstraint !== null) {
     return `${readinessConstraint} The reviewed candidate is preserved. COMMIT has no readiness-output correction; separately authorized follow-up is required.`;
@@ -354,7 +359,16 @@ function publicFinalizationIssueIds(run) {
   return Object.freeze(ids);
 }
 
-function publicEvidence(pause, finalizationIssueIds) {
+function publicEvidence(pause, finalizationIssueIds, readOnlySnapshotChanges) {
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (
     pause.reason === "commit_failed" &&
     commitReadinessConstraint(pause.diagnosticClass) !== null
@@ -430,7 +444,9 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+// The root registry injects the Git-owned label normalizer; a direct
+// uncomposed call has none and reports the diagnosis as unavailable.
+function projectPause(run, { readOnlySnapshotChanges } = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -561,7 +577,11 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run.pause, finalizationIssueIds),
+    evidence: publicEvidence(
+      run.pause,
+      finalizationIssueIds,
+      readOnlySnapshotChanges,
+    ),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -601,6 +621,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -1595,7 +1619,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 39,
+  stateVersion: 42,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1660,6 +1684,18 @@ export const planExecutionPipeline = Object.freeze({
     // Do not infer a lost result or manufacture replay authority for old runs.
     37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
     38: migratePlanExecutionStateV38,
+    // Basis-less saved reports, catalogs and pending corrections keep the
+    // admission and bindings they were accepted under.
+    39: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    40: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
+    // Legacy full baselines keep their exact comparison; new custom runs
+    // persist a compact baseline that a version-41 runtime must refuse as skew.
+    41: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

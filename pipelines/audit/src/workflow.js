@@ -640,7 +640,7 @@ export async function runAuditDiscovery({
     await save(
       {
         ...state(),
-        repositoryBaseline: await runtime.workspace.snapshot({
+        repositoryBaseline: await runtime.workspace.baseline({
           allowedPaths: [
             transcript.transcriptPath,
             ...reportPaths(run.taskPath),

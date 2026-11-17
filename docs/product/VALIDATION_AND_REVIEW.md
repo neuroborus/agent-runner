@@ -172,6 +172,113 @@ deterministic rules. Reconciliation may resolve summaries, but cannot add, selec
 checks. Only independent mode permits bootstrap arbitration; unresolved combined
 bootstrap disagreements remain blocking.
 
+Coding-pipeline roles determine each obligation's owner and checkpoint before
+cataloguing checks. A pipeline inventory contains only checks owned by that
+pipeline's finalization: ordinary Worker `FINALIZE` checks and selected
+Runner-trusted commands, which keep their frozen identities and capabilities
+although Runner executes them on the host. Acceptance that the task or
+clarifications explicitly assign to the supervising operator or another owner
+after the run completes remains mandatory external work: summaries keep it
+pending with its owner and timing, the pipeline never runs or attests it, and
+`DONE` never claims it succeeded. An operator-owned witness expected to fail
+never becomes a PASS-required command, while negative assertions inside
+in-scope tests stay required. A task's command list does not drop other
+genuine requirements from conventions or applicable skills; neither a label
+nor the executing host decides ownership. Bootstrap, correction, validation
+migration, catalog correction, reconciliation, arbitration, finalization and
+terminal confirmation carry the same rule.
+
+Explicit owner and timing assignments bind the validation work itself, not
+only inventories. Roles classify work by its actual purpose, scope and evidence
+against explicit task authority, never by its label. Executing a check reserved
+for another owner or a later checkpoint, its full equivalent, or a subset that
+the task or clarifications explicitly reserve is reserved work under any name or
+entrypoint. Source reading or inspection and focused development tests that the
+task and phase permit stay development work even when they overlap a reserved
+check; overlap is neither a violation nor completion, the reserved check still
+runs in full under its owner, and explicit task restrictions on development
+work still apply. Implementation or polishing, check-and-fix and finding
+resolution neither run nor claim reserved work, report development work only as
+development evidence and keep reserved checks pending with their owner and
+timing. Candidate, self and terminal review report a finding when evidence
+shows that reserved work actually ran early or under another owner, or that
+development evidence is claimed as reserved coverage, even when final
+acceptance is also left pending. Source observation or overlap alone is not a
+violation; evidence that cannot establish what ran yields neither invented
+command facts nor a confirmed violation, and provides no reserved coverage.
+Reviews preserve honestly reported facts, useful content and pending coverage.
+They distinguish the truth of a historical allegation from a consequence still
+actionable under current authority. Authorized containment retains disclosure,
+corrects present misrepresentation or unsafe consequences, gives no early credit
+and preserves every pending check's executor/checkpoint. A timing prohibition
+alone is not irrecoverability. A contained fact is not repeatedly reported as an
+unresolved blocker, and candidate acceptance never requires later-only checks
+first. Existing FIX/summary paths can explain containment without cosmetic edits
+or a false CHANGED report. Reconsideration and arbitration may close an ongoing
+blocker without denying proven historical truth; they never waive explicit task
+policy. The owned rule is delivered again on reconstruction independently of
+native sessions. Existing bounded previous finding
+reports survive candidate convergence and remain available to reconstructed
+requests. Accepted Worker work summaries and accepted finding reports also
+survive in bounded durable context, so containment and later clean confirmations
+cannot erase a disclosure that existed only in a summary or self-finding.
+Accepted FIX and DISPUTE decisions retain normalized reasons and evidence in
+that context, including unchanged containment and reconciled or restated repairs;
+resolved findings stay inactive.
+Accepted Reviewer reconsideration reasons/evidence and finding, stagnation,
+bootstrap or validation-migration Arbiter rationales also survive in that common
+context, including withdrawal, upheld concerns, product-decision outcomes and
+subsequent repairs. A separate
+Arbiter rationale is retained atomically with the authorized pause and survives
+the answer and bootstrap or compatibility re-entry, independently of the question
+and blocking evidence. It does not recreate active ambiguity or a dispute.
+Resolved bootstrap and validation-migration outcomes retain separate rationales
+with acceptance too; they cannot replace the independently established inventory.
+Execution also retains the separate rationale of terminal plan-revision
+arbitration outcomes; their requirement for a revised plan and new run is unchanged.
+Clearing active dispute ledgers or
+advancing a plan step cannot erase a disclosure made only during adjudication;
+these records grant no validation credit, approval or renewed allowance.
+Normalized terminal validation evidence remains historical context even when
+it is the sole disclosure, including after evidence rejection or content repair.
+It survives continued and reconstructed requests without preserving the former
+validation decision or approval; every invalidated gate still requires fresh
+validation and confirmation.
+Lost publication acknowledgements cannot replace accepted history with stale
+failure state; recovery preserves the journaled checkpoint and consumed
+allowances without replaying accepted work.
+Finalization summaries and reported issue/check facts are retained before
+Runner-trusted execution replaces placeholders or blocks. Blocked finalization
+reports also retain their reason, evidence and check facts before retry. Blocked
+implementation/polishing, check/fix and resolution reports retain reasons and
+evidence, including read-only restatement; clearing the pause on retry cannot
+erase a disclosure that appeared solely in the blocked response. This history
+preserves disclosures independently of check credit that a later repair must
+invalidate; it grants no executor authority or coverage from reported statuses.
+Continued requests receive this context too; it grants no check credit, approval
+or renewed allowance. Separate current-findings fields continue to own blockers.
+
+When proven execution leaves a cited task requirement unsatisfiable under frozen
+authority and no corrective disposition is permitted, Worker reports
+`VALIDATION_POLICY_BLOCKED` with execution, requirement and disposition evidence.
+It is not an environment blocker or a generic product question. Both coding
+pipelines reconcile existing effects, then journal a dedicated policy pause
+before accepting gate evidence or launching further trusted checks. Safe work,
+truth, inventories, bindings and consumed allowances survive. Operator assessment
+of a separately authorized task-compatible disposition or cancellation is
+supported; retry, override or a fresh run cannot waive explicit irrecoverability.
+See the owning coding specifications for strict status fields and recovery.
+
+This is semantic instruction, not deterministic parsing of task prose.
+Accepted inventories stay additive, so reconciliation and arbitration never
+remove a misclassified command. Deterministic validators check command
+structure, capability reports and matching evidence, not ownership: a valid
+operator-owned command that the roles misclassify can be accepted, executed and
+pass. Prompts likewise do not enforce arbitrary command effects or owner
+prose. Only an ownership violation that a role actually reports, such as a
+candidate-review or terminal-confirmation finding, blocks through the existing
+gates.
+
 Execution inventories are scoped to canonical plan steps. Every active role
 discovers a complete procedure for every step. Commit steps require the ordinary
 fast gate and only slow checks whose documented guarantees that step affects;
@@ -235,6 +342,27 @@ before generation and every established non-mutating check, and accepts no
 omission or substitution. A project-required content change is fingerprinted
 after it finishes.
 
+Bootstrap discovers all known applicable checks, including available supplemental
+validators. Workers preserve project-defined first, final and relative-order
+constraints in the declared inventory and ordered evidence: additions are
+not automatically appended. Established identities and exact commands remain
+required. Reordering the current inventory preserves original discovery and
+future assignments. This order is not a global physical timeline: Worker runs
+its agent-owned checks and returns reserved `NOT_RUN` entries; Runner later
+executes frozen vectors and replaces entries in inventory positions under existing
+unchanged-content and infrastructure guards. No later Worker phase is required;
+`COMMIT`/`HANDOFF` keeps separate staged hygiene. Separately explicit physical
+sequencing requirements still bind and use existing blocking outcomes when
+incompatible with ownership/checkpoints, without new permissions or an invented
+product decision. Independent terminal review and lazy terminal clean confirmation
+read the actual selected guidance and mandatory references and assess the complete
+resulting procedure, including added checks and their positions. Passing every
+check does not alone establish procedural compliance. This is a semantic
+obligation delivered in role instructions, not deterministic parsing of project
+prose or a guarantee of model compliance. Existing evidence-only recovery can
+correct ordering without content edits; historical runs are not automatically
+repaired.
+
 Both workflows freeze their effective finalization-guidance path or fallback
 decision before bootstrap. Explicit Markdown procedures resolve from the bound
 infrastructure root; automatic skills remain repository-local. New selections pin
@@ -244,6 +372,11 @@ the run. External guidance has a distinct inventory identity so it cannot shadow
 repository validation files. Automatic discovery does not switch or
 fall back later. Missing, invalid, or changed frozen guidance requires a new
 run rather than consuming correction or review budgets.
+
+Roles must read that exact entry and its mandatory repository references within
+existing read authority. References controlling validation commands or gate
+behavior participate in ordinary infrastructure drift protection. Selection
+does not grant sibling or parent-directory access or recursive retrieval.
 
 In independent mode, the Reviewer first checks the complete candidate without
 attesting finalization. All findings remain blocking until fixed, withdrawn,
@@ -259,6 +392,9 @@ turns converge before finalization. A passing finalization enters a distinct
 read-only terminal clean confirmation over the exact validation evidence. Only
 a clean result over unchanged fingerprints advances; ordinary findings return directly
 to the next check-and-fix pass and the same fingerprint-bound reuse decision.
+In lazy and combined polishing, each accepted check-and-fix report becomes the
+Worker summary that later turns receive. It is context only: confirmation and
+review still decide whether the report and content are acceptable.
 
 ## Evidence and fingerprints
 
@@ -276,6 +412,17 @@ binds it to the staging-independent content, validation-infrastructure,
 ordered-command, and trusted-configuration fingerprints. Skipped, weakened,
 replaced, unmatched, or stale evidence fails closed. Host attestations and user
 claims do not satisfy the gate.
+
+Runner adds persisted fingerprints, validation-change state and check-executor
+provenance after role output validation; roles return only their closed schemas.
+Finalization and terminal requests carry the frozen guidance decision and explain
+its fingerprint domain, including reconstruction and correction. Selected `file`
+guidance composes the ordinary infrastructure digest, excluding that selected
+label, with its identity-bound file fingerprint; a raw all-path digest differs
+without implying drift. Legacy and fallback algorithms remain unchanged. This
+explanation preserves independent semantic review of complete checks, authorized
+inventory changes and exact evidence bindings. It neither approves evidence
+automatically nor permits reserved-check execution or Runner management.
 
 Ordinary terminal findings invalidate candidate and confirmation attestations,
 not an otherwise current successful finalization record. A declared fix does not prove
@@ -314,12 +461,21 @@ separate code-fix or semantic-evidence budgets.
 
 Finalization diagnostics identify the violated schema field and fixed constraint,
 using trusted list positions rather than rejected values or proposed identities.
-Independent violations form one bounded batch; invalid inventories do not create
-speculative downstream identity findings. Terminal CLI/MCP failure evidence
+Plan execution groups independent violations into one bounded batch; invalid
+inventories do not create speculative downstream identity findings. Terminal CLI/MCP failure evidence
 retains the validated first diagnostic without granting retry authority. Missing
-provider field information and historical failures remain unknown. See the
+provider field information and historical failures remain unknown. Candidate
+review and candidate clean confirmation in both coding pipelines identify their
+first rejected field and constraint the same way. See the
 [execution contract](../../pipelines/plan-execution/docs/SPEC.md#132-candidate-convergence-and-finalization)
 for exact validation and correction rules.
+
+Polishing retains its first violated field through its single read-only
+correction and exposes the latest rejected replacement's recognized diagnostic
+on terminal failure. Unknown diagnostic-like values reduce to a generic
+semantic-contract diagnostic; this neither renews correction allowance nor
+changes acceptance. The [polishing contract](../../pipelines/polishing/docs/SPEC.md#finalize)
+owns these rules.
 
 Two automatic semantic retries per execution step or polishing run are durable
 and separate from malformed-output and code-fix budgets. Pending retries survive
@@ -429,7 +585,11 @@ non-null command identity must match the frozen selected-command identity
 exactly. Zero-need reports, substituted identities, and other invalid reports
 receive bounded contract correction; a corrected empty report array leaves the
 ordinary check agent-runnable rather than turning it into an unselected trusted
-requirement.
+requirement. Reports of both pipelines also carry a closed `basis`: only
+`assigned-executor` reports and legacy saved reports without `basis` become
+additive requirements. A restriction seen only through a read-only turn's access
+is saved as `read-only-turn`, stays unproved, and is never admitted, so its
+ordinary check stays with Worker `FINALIZE`.
 Valid needs without trusted selection, sufficient frozen authority, runner
 support, or actual availability pause before any writable checkpoint, with no
 content or index mutation. Every writable entry and resume rechecks the saved
@@ -540,6 +700,12 @@ preparation. Plan execution's constrained `COMMIT` effect alone stages the
 accepted content, performs fixed staged hygiene, and creates the exact planned
 commit. Polishing's runner-owned `HANDOFF` effect alone stages and verifies the
 complete accepted change set without committing.
+
+Polishing finalization also proves staging-independent whitespace hygiene for
+tracked changes and new files. A failure returns to ordinary Worker repair and
+renewed review before any index effect. A staged-hygiene rejection at `HANDOFF`
+is terminal: it preserves any index effect, resets or restages nothing, and the
+operator repairs the whitespace in a new polishing run.
 
 The content and validation fingerprints must remain unchanged from the
 accepted gate through the effect. Recovery verifies a pending or possibly

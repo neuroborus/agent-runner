@@ -4,11 +4,9 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
-  inspectOwnedSessionProcesses,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminalAdapterDiagnostic,
-  terminateOwnedProcess,
 } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
@@ -26,6 +24,10 @@ import {
   getPipeline as registeredPipeline,
   resolveStopBoundary,
 } from "../pipeline-registry.js";
+import {
+  inspectOwnedSessionProcesses,
+  terminateOwnedProcess,
+} from "../platform/index.js";
 import { createWorkspaceService } from "../workspace/index.js";
 import { createRuntimeAdmission } from "../runtime/index.js";
 import {
@@ -76,6 +78,7 @@ import {
 } from "./stops.js";
 import {
   defaultAdapters,
+  assertWorkspaceReadiness,
   capabilityAuthorityFingerprint,
   probeRequiredRoles,
   roleAdapters,
@@ -970,6 +973,8 @@ export function createRunner(options = {}) {
         inspectPath: (...args) => safety.inspectPath(...args),
         ...(run.workspace?.kind === "directory"
           ? {
+              baseline: (...args) => safety.baseline(...args),
+              outputBaseline: (...args) => safety.outputBaseline(...args),
               async reportArtifact(request, options) {
                 await monitor?.check();
                 await checkConfiguration();
@@ -1023,6 +1028,13 @@ export function createRunner(options = {}) {
                   );
                 const current = await runStore.loadRun(run.runId);
                 pipeline.assertOutputPreparation(current, intent);
+                await assertWorkspaceReadiness(
+                  pipeline,
+                  current.roles,
+                  providers,
+                  current.workspace?.policy ?? undefined,
+                  "ERR_PROVIDER_POLICY_CHANGED",
+                );
                 const prepared = await (monitor === undefined
                   ? safety.prepareOutputDirectory(intent)
                   : monitor.invoke(
@@ -1572,6 +1584,12 @@ export function createRunner(options = {}) {
           publish,
         });
       // The complete directory policy is now available to capability probes.
+      await assertWorkspaceReadiness(
+        pipeline,
+        run.roles,
+        providers,
+        run.workspace?.policy ?? undefined,
+      );
       selected = selectedRoleAdapters(pipeline, run, lease);
       baseRuntime = runtimeFor(pipeline, lease, run, selected);
       verifyProviderPolicies = true;

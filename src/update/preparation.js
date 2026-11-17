@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { readProcessNamespace } from "../agents/index.js";
+import { readProcessNamespace } from "../platform/index.js";
 import {
   assertPublicationMetadata,
   CONFIG_SCHEMA_VERSION,

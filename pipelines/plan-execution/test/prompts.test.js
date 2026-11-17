@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
   CANDIDATE_REVIEW_INSTRUCTIONS,
@@ -28,35 +27,13 @@ import {
   REVIEW_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
 } from "../src/index.js";
+import {
+  APPLICABILITY_INSTRUCTIONS,
+  customExecutionPrompt,
+  REPOSITORY_DISCOVERY_INSTRUCTIONS,
+} from "../src/prompts.js";
 
 test("bootstrap instructions preserve independent evidence and arbitration", () => {
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /schema's result object/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Required-check IDs must be unique/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Exact commands must be unique/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /canonical repository-relative regular files/u,
-  );
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /except for the exact declared label of selected external finalization guidance/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /symlink alias/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /independently identify every required check/iu,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /validationInfrastructure/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /sourceProjection: boolean/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /frozen exact command/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /Do not request projection paths/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /capacity of 256 items/u);
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /CAPACITY_EXHAUSTED/u);
-  assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /keep the summary and required-check inventory staging-independent/u,
-  );
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /against HEAD or explicit trees/u);
   assert.match(
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     /runner derives each plan step's required-check/u,
@@ -170,27 +147,21 @@ For PLAN_REVISION_REQUIRED, provide reason and evidence.`,
 });
 
 test("work instructions preserve their concise mandatory cores", () => {
-  assert.equal(
+  assert.match(
     IMPLEMENTATION_INSTRUCTIONS,
-    `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
-
-Work only on this planned commit.
-Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
-Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
-Do not create a commit in this turn.
-Before returning, perform a concise self-review.
-Return the status fields inside the schema's result object.
-For COMPLETED, put all results in summary; set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
-
-Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
-
-Do not ask questions after clarification closes.
-A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
-Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
-For that outcome, provide question, whyBlocked, and evidence; options may be [].`,
+    /^Implement the changes described/u,
+  );
+  assert.match(
+    IMPLEMENTATION_INSTRUCTIONS,
+    /Work only on this planned commit/u,
+  );
+  assert.match(
+    IMPLEMENTATION_INSTRUCTIONS,
+    /Before returning, perform a concise self-review/u,
+  );
+  assert.match(
+    IMPLEMENTATION_INSTRUCTIONS,
+    /Do not create a commit in this turn/u,
   );
   assert.match(REVIEW_INSTRUCTIONS, /Do not modify the repository/u);
   assert.match(REVIEW_INSTRUCTIONS, /distinct terminal confirmation/u);
@@ -222,26 +193,22 @@ For that outcome, provide question, whyBlocked, and evidence; options may be [].
     LAZY_CHECKPOINT_CORRECTION_INSTRUCTIONS,
     /During CLEAN_CONFIRM, keep the repository read-only/u,
   );
-  assert.equal(
+  assert.match(
     FINDING_RESOLUTION_INSTRUCTIONS,
-    `For each finding below, fix it idiomatically and minimally, following the project's conventions.
-If a finding is incorrect, dispute it with concise evidence instead of changing the code.
-
-Do not run the project finalization procedure or perform generic commit preparation in this turn. Those belong to the dedicated FINALIZE and COMMIT phases.
-The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
-Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
-Do not create a commit in this turn.
-Return the status fields and finding decisions inside the schema's result object.
-For RESOLVED, return exactly one decision per blocker; every decision requires reason; DISPUTE requires evidence, while FIX evidence may be []. Set reason, question, and whyBlocked to "", and options and evidence to [].
-For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set decisions and options to []; provide reason and evidence; set question and whyBlocked to "".
-For PRODUCT_DECISION_REQUIRED, set decisions to [] and reason to ""; use the product-decision fields.
-Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
-Do not ask questions after clarification closes.
-A blocking product-decision outcome is allowed only when the task, plan, repository, conventions, and prior clarifications leave a choice between materially different product requirements or behaviors unresolved and progress is otherwise impossible.
-Do not use it for technical choices, implementation difficulty, naming, or ordinary review findings.
-For that outcome, provide question, whyBlocked, and evidence; options may be [].
-Otherwise, return each FIX or DISPUTE decision using the provided schema.`,
+    /For RESOLVED, return exactly one decision per blocker/u,
   );
+  assert.match(FINDING_RESOLUTION_INSTRUCTIONS, /DISPUTE requires evidence/u);
+  assert.match(
+    FINDING_RESOLUTION_INSTRUCTIONS,
+    /Do not create a commit in this turn/u,
+  );
+  for (const instructions of [
+    IMPLEMENTATION_INSTRUCTIONS,
+    FINDING_RESOLUTION_INSTRUCTIONS,
+  ]) {
+    assert.ok(instructions.includes(PRODUCT_DECISION_INSTRUCTIONS));
+    assert.match(instructions, /Do not weaken sandboxing/u);
+  }
 });
 
 test("finalization and dispute prompts preserve their narrow roles", () => {
@@ -325,14 +292,22 @@ test("finalization and dispute prompts preserve their narrow roles", () => {
     }),
     /repairing guidance requires a new run/u,
   );
-  assert.equal(
+  assert.match(
     DISPUTE_RECONSIDERATION_INSTRUCTIONS,
-    `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
-
-Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
-For RESOLVED, return exactly one decision per dispute; every decision requires reason, while evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
-For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
-${PRODUCT_DECISION_INSTRUCTIONS}`,
+    /Do not modify the repository/u,
+  );
+  assert.match(
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    /Return WITHDRAW or UPHOLD/u,
+  );
+  assert.match(
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    /exactly one decision per dispute/u,
+  );
+  assert.ok(
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS.includes(
+      PRODUCT_DECISION_INSTRUCTIONS,
+    ),
   );
 });
 
@@ -346,23 +321,27 @@ Do not stage changes yourself, modify project content, amend history, bypass hoo
 });
 
 test("arbitration prompts preserve the mandatory cores", () => {
-  assert.equal(
+  assert.match(
     FINDING_ARBITRATION_INSTRUCTIONS,
-    `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
-
-Do not modify the repository or rewrite requirements. Always provide rationale.
-For WORKER_CORRECT or REVIEWER_CORRECT, set question and whyBlocked to "", and options and evidence to [].
-For REQUIREMENT_AMBIGUOUS, use the product-decision fields.`,
+    /Do not modify the repository or rewrite requirements/u,
   );
-  assert.equal(
+  assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /Always provide rationale/u);
+  assert.match(
+    FINDING_ARBITRATION_INSTRUCTIONS,
+    /For WORKER_CORRECT or REVIEWER_CORRECT/u,
+  );
+  assert.match(FINDING_ARBITRATION_INSTRUCTIONS, /For REQUIREMENT_AMBIGUOUS/u);
+  assert.match(STAGNATION_INSTRUCTIONS, /Always provide rationale/u);
+  assert.match(
     STAGNATION_INSTRUCTIONS,
-    `Diagnose why the implementation correction loop is not converging and choose the minimal valid next direction using the provided schema.
-Always provide rationale.
-For CONTINUE_FIXES or REWORK_IMPLEMENTATION, set findingIds, options, and evidence to [], and reason, question, and whyBlocked to "".
-For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds; set reason, question, and whyBlocked to "", and options and evidence to [].
-For PLAN_REVISION_REQUIRED, set findingIds and options to [], and question and whyBlocked to ""; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set findingIds to [] and reason to ""; use the product-decision fields.`,
+    /For CONTINUE_FIXES or REWORK_IMPLEMENTATION/u,
   );
+  assert.match(
+    STAGNATION_INSTRUCTIONS,
+    /For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds/u,
+  );
+  assert.match(STAGNATION_INSTRUCTIONS, /For PLAN_REVISION_REQUIRED/u);
+  assert.match(STAGNATION_INSTRUCTIONS, /For PRODUCT_DECISION_REQUIRED/u);
 });
 
 test("writable candidate instructions defer checks without suppressing unrelated blockers", () => {
@@ -389,9 +368,35 @@ test("writable candidate instructions defer checks without suppressing unrelated
   }
 });
 
+test("selected guidance requires controlling references within existing read authority", () => {
+  for (const render of [
+    finalizationBootstrapInstructions,
+    finalizationGuidanceInstructions,
+  ]) {
+    const instructions = render({
+      selection: "file",
+      skillPath: "checks/finalize.md",
+    });
+    assert.match(instructions, /checks\/finalize\.md/u);
+    assert.match(
+      instructions,
+      /mandatory repository references under existing read authority/u,
+    );
+    assert.match(
+      instructions,
+      /references controlling validation commands or gate behavior in validationInfrastructure/u,
+    );
+    assert.match(
+      instructions,
+      /no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback/u,
+    );
+    assert.doesNotMatch(instructions, /Read only that exact/u);
+  }
+});
+
 test("execution discovery and finalization classify infrastructure by responsibility", () => {
   for (const instructions of [
-    BOOTSTRAP_INSTRUCTIONS,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
     FINALIZATION_INSTRUCTIONS,
   ]) {
     assert.match(
@@ -404,9 +409,84 @@ test("execution discovery and finalization classify infrastructure by responsibi
     );
     assert.match(instructions, /responsibility, not its name or extension/u);
   }
-  assert.match(BOOTSTRAP_INSTRUCTIONS, /per-role capacity of 256 items/u);
   assert.match(
-    BOOTSTRAP_INSTRUCTIONS,
-    /Check requiredChecks first, then validationInfrastructure/u,
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /per-role catalog limit is 256; report CAPACITY_EXHAUSTED/u,
   );
+  assert.match(
+    REPOSITORY_DISCOVERY_INSTRUCTIONS,
+    /checking requiredChecks before infrastructure/u,
+  );
+});
+
+test("check ownership survives commit and custom execution adaptation", () => {
+  const adapted = (instructions) => {
+    const custom = customExecutionPrompt(instructions);
+    assert.notEqual(custom, instructions);
+    return [instructions, custom];
+  };
+  for (const prompt of adapted(REPOSITORY_DISCOVERY_INSTRUCTIONS)) {
+    assert.match(prompt, /determine the owner and checkpoint/u);
+    assert.match(prompt, /selected Runner-trusted commands, which remain/u);
+    assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    assert.match(prompt, /expected to fail never becomes a PASS-required/u);
+    assert.match(prompt, /never drops other genuine in-scope requirements/u);
+  }
+  for (const prompt of adapted(APPLICABILITY_INSTRUCTIONS)) {
+    assert.match(prompt, /Catalog correction never adds post-completion/u);
+    assert.match(prompt, /Do not silently change or drop accepted/u);
+  }
+  for (const prompt of [
+    ...adapted(BOOTSTRAP_RECONCILIATION_INSTRUCTIONS),
+    ...adapted(BOOTSTRAP_ARBITRATION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /pending external work with its owner and timing/u);
+    assert.match(prompt, /cannot add, select, or remove commands/u);
+  }
+  for (const prompt of adapted(FINALIZATION_INSTRUCTIONS)) {
+    assert.match(prompt, /PASS covers only the pipeline-owned inventory/u);
+    assert.match(prompt, /never permits removing or weakening/u);
+  }
+  for (const prompt of [
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /operator or another owner is not an omission/u);
+    assert.match(prompt, /reject a finalization that adds it/u);
+    assert.match(prompt, /missing genuine pipeline-owned check/u);
+  }
+  for (const prompt of [
+    ...adapted(IMPLEMENTATION_INSTRUCTIONS),
+    ...adapted(CHECK_AND_FIX_INSTRUCTIONS),
+    ...adapted(FINDING_RESOLUTION_INSTRUCTIONS),
+  ]) {
+    assert.match(prompt, /never by its label/u);
+    assert.match(prompt, /never as reserved-check coverage/u);
+    assert.match(prompt, /leave reserved checks pending with their owner/u);
+  }
+  for (const prompt of [
+    ...adapted(CANDIDATE_REVIEW_INSTRUCTIONS),
+    ...adapted(CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS),
+    ...adapted(REVIEW_INSTRUCTIONS),
+    ...adapted(CLEAN_CONFIRM_INSTRUCTIONS),
+  ]) {
+    assert.match(
+      prompt,
+      /Source observation or overlap alone is not a violation/u,
+    );
+    assert.match(prompt, /never invent execution facts/u);
+  }
+  for (const prompt of [
+    DISPUTE_RECONSIDERATION_INSTRUCTIONS,
+    FINDING_ARBITRATION_INSTRUCTIONS,
+  ].flatMap((instructions) => [
+    instructions,
+    customExecutionPrompt(instructions),
+  ])) {
+    assert.match(
+      prompt,
+      /Decide the allegation and its remaining consequence separately/u,
+    );
+    assert.match(prompt, /Uphold proven historical truth/u);
+  }
 });

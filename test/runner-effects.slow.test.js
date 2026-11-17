@@ -249,6 +249,159 @@ test("durable writable-result recovery preserves an accepted commit and candidat
     "3",
   );
 });
+
+test("durable finding-resolution recovery restates a lost writable report without replay", async (t) => {
+  const fixture = await operatorFixture(t, "polishing");
+  const git = (...args) =>
+    executeFile("git", ["-C", fixture.projectPath, ...args]);
+  const initialHead = (await git("rev-parse", "HEAD")).stdout.trim();
+  const snapshot = join(fixture.workspace, "captured-state");
+  const original = createRunStore({ stateRoot: fixture.stateRoot });
+  const adapter = createExecutionAdapter();
+  const run = adapter.run.bind(adapter);
+  const decision = (reason) => ({
+    status: "RESOLVED",
+    decisions: [{ id: "R1", decision: "FIX", reason, evidence: [] }],
+    reason: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  });
+  let runId;
+  let terminalReviews = 0;
+  let writes = 0;
+  let restatements = 0;
+  adapter.run = async (request) => {
+    const respond = (result) => ({
+      structured:
+        request.schema?.properties?.result?.anyOf === undefined
+          ? result
+          : { result },
+      sessionId: `resolution-${writes}-${restatements}`,
+    });
+    if (
+      request.prompt.includes("Confirm the finalized change set") &&
+      ++terminalReviews === 1
+    )
+      return respond({
+        status: "FINDINGS",
+        findings: [
+          {
+            id: "R1",
+            file: "source.js",
+            problem: "The change lacks a required repair.",
+            reason: "The repair keeps the change complete.",
+            suggestedAction: "Add the repair.",
+          },
+        ],
+        validationChange: "UNCHANGED",
+        validationEvidence: [],
+        finalizationFindingIds: [],
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      });
+    if (!request.prompt.includes("Resolve every current blocker"))
+      return run(request);
+    if (request.access === "read-only") {
+      restatements++;
+      return respond(
+        decision(
+          restatements === 1
+            ? "First line PRIVATE_RESTATED_VALUE.\nSecond line."
+            : "Added the repair.",
+        ),
+      );
+    }
+    assert.equal(request.access, "workspace-write");
+    writes++;
+    await writeFile(
+      join(fixture.projectPath, "repair.txt"),
+      "repaired candidate bytes\n",
+    );
+    const stopped = new Promise((resolve, reject) =>
+      request.signal.addEventListener(
+        "abort",
+        () => reject(request.signal.reason),
+        { once: true },
+      ),
+    );
+    // Attach rejection handling before the stop can abort this call.
+    stopped.catch(() => {});
+    // Capture the journal while the writable original is still in progress.
+    await cp(fixture.stateRoot, snapshot, { recursive: true });
+    await removeCopiedLeases(snapshot);
+    await original.requestOperatorStop({
+      runId,
+      kind: "pause_requested",
+      expectedRevision: (await original.loadRun(runId)).revision,
+      idempotencyKey: "resolution-capture",
+    });
+    return stopped;
+  };
+  const adapters = { codex: adapter };
+  const runner = runnerFor(fixture, adapters, { runStore: original });
+  runId = (
+    await runner.create({
+      pipelineId: "polishing",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    })
+  ).run.runId;
+  const stopped = (await runner.resume({ runId, action: null })).run;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.equal(writes, 1);
+  assert.equal(restatements, 0);
+
+  await rm(fixture.stateRoot, { recursive: true, force: true });
+  await cp(snapshot, fixture.stateRoot, { recursive: true });
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+  });
+  const restored = await store.loadRun(runId);
+  assert.equal(restored.pipelineState.workflowState, "RESOLVE_FINDINGS");
+  assert.notEqual(restored.activeTurn, null);
+  assert.equal(await store.runIsLeased(runId), false);
+  assert.equal(restored.pipelineState.resolutionCorrection.stage, "invoking");
+  assert.equal(restored.counters.fixRounds, 0);
+  const reconstructed = runnerFor(fixture, adapters, { runStore: store });
+  const paused = (await reconstructed.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.reason, "resolution_output_invalid");
+  assert.equal(writes, 1);
+  assert.equal(restatements, 1);
+  const saved = await store.loadRun(runId);
+  assert.equal(saved.pipelineState.resolutionCorrection.attempts, 1);
+  assert.equal(saved.counters.fixRounds, 1);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "repaired candidate bytes\n",
+  );
+  assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_RESTATED_VALUE/u);
+
+  const done = (
+    await reconstructed.resume({
+      runId,
+      action: null,
+      expectedRevision: saved.revision,
+    })
+  ).run;
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.equal(done.pipelineState.resolutionCorrection, null);
+  assert.equal(done.counters.fixRounds, 1);
+  assert.equal(writes, 1);
+  assert.equal(restatements, 2);
+  assert.equal((await git("rev-parse", "HEAD")).stdout.trim(), initialHead);
+  assert.equal(
+    (await git("diff", "--cached", "--name-only")).stdout,
+    "feature.js\nrepair.txt\nsource.js\n",
+  );
+  assert.equal((await git("diff", "--name-only")).stdout, "");
+});
+
 const checkpointWorkspaces = [];
 let oneStepCheckpoint;
 let twoStepCheckpoint;

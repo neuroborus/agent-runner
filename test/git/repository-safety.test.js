@@ -1,26 +1,41 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import {
+import filesystem, {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createGitService, GitSafetyError } from "../../src/git/index.js";
+import {
+  createGitService,
+  GitSafetyError,
+  normalizeReadOnlySnapshotChanges,
+} from "../../src/git/index.js";
+import { createFixtureGitBinary } from "../support/git.js";
 
 const executeFile = promisify(execFile);
 
 function isGitError(code) {
   return (error) => error instanceof GitSafetyError && error.code === code;
+}
+
+function readOnlyChangesAre(service, expected) {
+  return (error) => {
+    assert.ok(isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error));
+    assert.deepEqual(service.readOnlyChanges(error), expected);
+    return true;
+  };
 }
 
 async function runGit(repositoryPath, env, ...argumentsList) {
@@ -93,10 +108,12 @@ async function createFixture(t, { identity = true } = {}) {
     "initial",
   );
   t.after(() => rm(workspace, { force: true, recursive: true }));
+  const gitBinary = await createFixtureGitBinary(workspace);
   return {
     env,
+    gitBinary,
     repositoryPath,
-    service: createGitService({ env }),
+    service: createGitService({ env, gitBinary }),
     workspace,
   };
 }
@@ -305,6 +322,78 @@ test("enforces caller-selected cleanliness and identity requirements", async (t)
     (error) =>
       isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
       error.changes.includes("identity"),
+  );
+});
+
+test("evaluates identity in the isolated commit-executor environment", async (t) => {
+  const configured = await createFixture(t);
+  const clean = await configured.service.snapshot({
+    projectPath: configured.repositoryPath,
+  });
+  const overrideConfiguration = join(
+    configured.workspace,
+    "override.gitconfig",
+  );
+  await writeFile(
+    overrideConfiguration,
+    [
+      "[user]",
+      "\tname = Override User",
+      "\temail = override@example.test",
+      "[author]",
+      "\tname = Override Author",
+      "\temail = override-author@example.test",
+      "[committer]",
+      "\tname = Override Committer",
+      "\temail = override-committer@example.test",
+      "",
+    ].join("\n"),
+  );
+  const ambientIdentity = {
+    GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+    GIT_AUTHOR_NAME: "Ambient Author",
+    GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+    GIT_COMMITTER_NAME: "Ambient Committer",
+  };
+  for (const overrides of [
+    ambientIdentity,
+    { EMAIL: "ambient@example.test", Email: "mixed@example.test" },
+    {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Counted User",
+    },
+    { GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'" },
+    { GIT_CONFIG_GLOBAL: overrideConfiguration },
+  ]) {
+    const snapshot = await createGitService({
+      env: { ...configured.env, ...overrides },
+      gitBinary: configured.gitBinary,
+    }).snapshot({ projectPath: configured.repositoryPath });
+    const family = Object.keys(overrides).join(",");
+    assert.equal(snapshot.identityAvailable, true, family);
+    assert.equal(
+      snapshot.identityFingerprint,
+      clean.identityFingerprint,
+      family,
+    );
+  }
+
+  const missing = await createFixture(t, { identity: false });
+  const ambient = createGitService({
+    env: { ...missing.env, ...ambientIdentity, EMAIL: "ambient@example.test" },
+    gitBinary: missing.gitBinary,
+  });
+  const snapshot = await ambient.snapshot({
+    projectPath: missing.repositoryPath,
+  });
+  assert.equal(snapshot.identityAvailable, false);
+  await assert.rejects(
+    ambient.preflight({
+      projectPath: missing.repositoryPath,
+      requireIdentity: true,
+    }),
+    isGitError("ERR_GIT_IDENTITY_REQUIRED"),
   );
 });
 
@@ -708,46 +797,229 @@ test("content fingerprints reject a gitlink without its own worktree", async (t)
   );
 });
 
-test("content fingerprints keep embedded repositories staging-independent", async (t) => {
-  const { env, repositoryPath, service } = await createFixture(t);
-  const nestedPath = join(repositoryPath, "nested");
-  await mkdir(nestedPath);
-  await runGit(nestedPath, env, "init", "-q", "-b", "main");
-  await writeFile(join(nestedPath, "nested.txt"), "nested\n");
-  await runGit(nestedPath, env, "add", "nested.txt");
+async function nestedRepository(
+  fixture,
+  path = join(fixture.repositoryPath, "nested"),
+) {
+  await mkdir(path);
+  await runGit(path, fixture.env, "init", "-q", "-b", "main");
+  await writeFile(join(path, "nested.txt"), "nested\n");
+  await writeFile(join(path, ".gitattributes"), "*.txt filter=fixture\n");
+  await runGit(path, fixture.env, "add", ".");
   await runGit(
-    nestedPath,
-    env,
+    path,
+    fixture.env,
     "-c",
     "user.name=Fixture User",
     "-c",
     "user.email=fixture@example.com",
     "commit",
     "-qm",
-    "nested",
+    "nested fixture",
   );
-  const beforeStaging = await service.contentFingerprint({
-    projectPath: repositoryPath,
-  });
+  return path;
+}
 
-  await runGit(repositoryPath, env, "add", "nested");
-  const afterStaging = await service.contentFingerprint({
-    projectPath: repositoryPath,
-  });
-  assert.equal(afterStaging, beforeStaging);
-
-  await writeFile(join(nestedPath, "nested.txt"), "changed\n");
-  assert.notEqual(
-    await service.contentFingerprint({ projectPath: repositoryPath }),
-    afterStaging,
+async function nestedFilter(fixture, path, kind) {
+  const script = join(fixture.workspace, "filter.cjs");
+  const marker = join(fixture.workspace, "filter-marker");
+  await writeFile(
+    script,
+    [
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      'fs.writeFileSync(path.join(__dirname, "filter-marker"), "executed\\n");',
+      kind === "clean"
+        ? "process.stdin.pipe(process.stdout);"
+        : "process.exit(1);",
+    ].join("\n"),
   );
+  const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+  await runGit(
+    path,
+    fixture.env,
+    "config",
+    `filter.fixture.${kind}`,
+    `${quote(process.execPath)} ${quote(script)}`,
+  );
+  await runGit(path, fixture.env, "config", "filter.fixture.required", "true");
+  await writeFile(join(path, "nested.txt"), "changed\n");
+  return marker;
+}
 
-  const allowed = await service.snapshot({
-    allowedPaths: [join(nestedPath, "nested.txt")],
-    projectPath: repositoryPath,
+for (const kind of ["clean", "process"]) {
+  test(`observations reject a newly embedded repository without running its ${kind} filter`, async (t) => {
+    const f = await createFixture(t);
+    const { repositoryPath: projectPath, service } = f;
+    const baseline = await service.snapshot({ projectPath });
+    // Represents a new repository created within one writable command after
+    // the baseline's absence scan, before the runner's post-turn observation.
+    const nested = await nestedRepository(f);
+    const marker = await nestedFilter(f, nested, kind);
+    for (const observe of [
+      () => service.contentFingerprint({ projectPath }),
+      () => service.snapshot({ projectPath }),
+      () => service.assertUnchanged(baseline),
+      () =>
+        service.reconcileInterrupted(baseline, { allowWorkspaceChanges: true }),
+      () => service.inspectPath({ projectPath, path: nested }),
+      () =>
+        service.validationInfrastructureFingerprint({
+          projectPath,
+          paths: [nested],
+        }),
+      () =>
+        service.measureChanges({
+          projectPath,
+          baseHead: baseline.head,
+          expectedContentFingerprint: baseline.contentFingerprint,
+        }),
+      () => service.snapshot({ projectPath, allowedPaths: [nested] }),
+    ]) {
+      await assert.rejects(observe(), isGitError("ERR_UNSUPPORTED_GIT_PATH"));
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+    }
   });
-  await writeFile(join(nestedPath, "nested.txt"), "runner change\n");
-  await assert.doesNotReject(service.assertUnchanged(allowed));
+}
+
+test("observations reject empty embedded repositories but preserve ignored trees", async (t) => {
+  const f = await createFixture(t);
+  const projectPath = f.repositoryPath;
+  const baseline = await f.service.snapshot({ projectPath });
+  const nested = join(projectPath, "nested");
+  await mkdir(nested);
+  await runGit(nested, f.env, "init", "-q", "-b", "main");
+  await assert.rejects(
+    f.service.assertUnchanged(baseline),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await rename(nested, join(projectPath, "ignored.txt"));
+  assert.deepEqual(await f.service.snapshot({ projectPath }), baseline);
+});
+
+test("observations reject initialized HEAD and index gitlinks despite ignore settings", async (t) => {
+  const f = await createFixture(t);
+  const { repositoryPath: projectPath, service, env } = f;
+  const nested = await nestedRepository(f);
+  const head = (await runGit(nested, env, "rev-parse", "HEAD")).stdout.trim();
+  await runGit(
+    projectPath,
+    env,
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `160000,${head},nested`,
+  );
+  await assert.rejects(
+    service.snapshot({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await runGit(projectPath, env, "commit", "-qm", "add gitlink");
+  await runGit(projectPath, env, "config", "submodule.nested.ignore", "all");
+  await runGit(projectPath, env, "config", "diff.submodule", "diff");
+  const marker = await nestedFilter(f, nested, "clean");
+  await assert.rejects(
+    service.snapshot({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+  await assert.rejects(readFile(marker), { code: "ENOENT" });
+  // HEAD alone remains unsupported after both index and worktree deletion.
+  await runGit(projectPath, env, "update-index", "--force-remove", "nested");
+  await rm(nested, { recursive: true });
+  await assert.rejects(
+    service.contentFingerprint({ projectPath }),
+    isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+  );
+});
+
+test("observations reject nested control markers in otherwise unchanged tracked directories", async (t) => {
+  const f = await createFixture(t);
+  const { repositoryPath: projectPath, env, service, workspace } = f;
+  const directory = join(projectPath, "directory");
+  await mkdir(directory);
+  await writeFile(join(directory, "child.txt"), "tracked\n");
+  await runGit(projectPath, env, "add", "directory");
+  await runGit(projectPath, env, "commit", "-qm", "add directory");
+  const baseline = await service.snapshot({ projectPath });
+  const metadata = join(workspace, "metadata");
+  await mkdir(metadata);
+  for (const create of [
+    () => writeFile(join(directory, ".git"), `gitdir: ${metadata}\n`),
+    () => symlink(metadata, join(directory, ".git")),
+    async () => {
+      await writeFile(join(directory, "HEAD"), "ref: refs/heads/main\n");
+      await mkdir(join(directory, "objects"));
+      await mkdir(join(directory, "refs"));
+    },
+  ]) {
+    await create();
+    await assert.rejects(
+      service.assertUnchanged(baseline),
+      isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+    );
+    await assert.rejects(
+      service.selectSources({ projectPath }),
+      isGitError("ERR_UNSUPPORTED_GIT_PATH"),
+    );
+    await rm(join(directory, ".git"), { force: true });
+  }
+});
+
+test("observation rejects directory substitution and late Git pointers without following controls", async (t) => {
+  for (const substitution of ["link", "directory", "pointer"]) {
+    const f = await createFixture(t);
+    const { repositoryPath: projectPath, env, service, workspace } = f;
+    const directory = join(projectPath, "directory");
+    const child = join(directory, "child.txt");
+    await mkdir(directory);
+    await writeFile(child, "tracked\n");
+    await runGit(projectPath, env, "add", "directory");
+    await runGit(projectPath, env, "commit", "-qm", "add directory");
+    const baseline = await service.snapshot({ projectPath });
+    await writeFile(child, "changed\n");
+    const outside = await nestedRepository(f, join(workspace, "outside"));
+    const marker = await nestedFilter(f, outside, "process");
+    const nativeOpen = filesystem.open;
+    let changed = false;
+    const mocked = t.mock.method(filesystem, "open", async (path, ...args) => {
+      assert.ok(!String(path).startsWith(outside));
+      const handle = await nativeOpen(path, ...args);
+      try {
+        if (
+          !changed &&
+          path === (substitution === "pointer" ? child : directory)
+        ) {
+          changed = true;
+          if (substitution !== "pointer") {
+            await rename(directory, join(projectPath, "previous"));
+            if (substitution === "link") await symlink(outside, directory);
+            else await rename(outside, directory);
+          } else {
+            await writeFile(
+              join(directory, ".git"),
+              `gitdir: ${join(outside, ".git")}\n`,
+            );
+          }
+        }
+        return handle;
+      } catch (cause) {
+        await handle.close();
+        throw cause;
+      }
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        service.assertUnchanged(baseline),
+        isGitError("ERR_GIT_SNAPSHOT_RACE"),
+      );
+      assert.equal(changed, true);
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+    } finally {
+      mocked.mock.restore();
+      syncBuiltinESMExports();
+    }
+  }
 });
 
 test("read-only guards preserve dirty baselines and constrain allowed paths", async (t) => {
@@ -760,9 +1032,7 @@ test("read-only guards preserve dirty baselines and constrain allowed paths", as
   await writeFile(join(dirty.repositoryPath, "other.txt"), "mutation\n");
   await assert.rejects(
     dirty.service.assertUnchanged(dirtyBaseline),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("untracked-content"),
+    readOnlyChangesAre(dirty.service, ["untracked-content"]),
   );
 
   const allowed = await createFixture(t);
@@ -775,9 +1045,7 @@ test("read-only guards preserve dirty baselines and constrain allowed paths", as
   await runGit(allowed.repositoryPath, allowed.env, "add", "tracked.txt");
   await assert.rejects(
     allowed.service.assertUnchanged(allowedBaseline),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("index"),
+    readOnlyChangesAre(allowed.service, ["index"]),
   );
 });
 
@@ -883,9 +1151,7 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   await runGit(repositoryPath, env, "tag", "unexpected-tag");
   await assert.rejects(
     service.assertUnchanged(beforeRef),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("refs"),
+    readOnlyChangesAre(service, ["refs"]),
   );
 
   await runGit(
@@ -909,9 +1175,7 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   assert.doesNotMatch(JSON.stringify(afterRemote), new RegExp(credential, "u"));
   await assert.rejects(
     service.assertUnchanged(beforeRemote),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("remote-configuration"),
+    readOnlyChangesAre(service, ["remote-configuration"]),
   );
 
   await runGit(
@@ -945,10 +1209,94 @@ test("snapshots detect refs, remote configuration, and identity without exposing
   await runGit(repositoryPath, env, "config", "user.name", "Changed Identity");
   await assert.rejects(
     service.assertUnchanged(beforeIdentity),
-    (error) =>
-      isGitError("ERR_READ_ONLY_REPOSITORY_CHANGED")(error) &&
-      error.changes.includes("identity"),
+    readOnlyChangesAre(service, ["identity"]),
   );
+});
+
+test("read-only change labels accept only known snapshot domains", () => {
+  const labels = [
+    "head",
+    "branch",
+    "refs",
+    "tracked-content",
+    "untracked-content",
+    "index",
+    "remote-configuration",
+    "identity",
+  ];
+  const all = normalizeReadOnlySnapshotChanges([...labels].reverse());
+  assert.deepEqual(all, labels);
+  assert.ok(Object.isFrozen(all));
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(["index", "head"]), [
+    "head",
+    "index",
+  ]);
+  for (const value of [
+    undefined,
+    null,
+    "head",
+    { 0: "head", length: 1 },
+    [],
+    ["unknown-domain"],
+    ["head", "unknown-domain"],
+    ["head", "head"],
+    [...labels, "head"],
+    [1],
+    [null],
+    ["head\nrefs"],
+    ["HEAD"],
+    ["refs/heads/main"],
+    ["/tmp/project/index"],
+  ]) {
+    assert.equal(normalizeReadOnlySnapshotChanges(value), null);
+  }
+  const throwing = () => {
+    throw new Error("Hostile diagnostic access.");
+  };
+  const iterated = ["head"];
+  iterated[Symbol.iterator] = function* () {
+    yield "head";
+    yield "index";
+  };
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(iterated), ["head"]);
+  const throwingIterator = ["head"];
+  throwingIterator[Symbol.iterator] = throwing;
+  assert.deepEqual(normalizeReadOnlySnapshotChanges(throwingIterator), [
+    "head",
+  ]);
+  const throwingElement = ["head"];
+  Object.defineProperty(throwingElement, 0, { get: throwing });
+  for (const value of [
+    throwingElement,
+    new Proxy(["head"], { get: throwing }),
+    new Proxy(["head"], {
+      get: (target, key) => (key === "length" ? -1 : target[key]),
+    }),
+  ]) {
+    assert.equal(normalizeReadOnlySnapshotChanges(value), null);
+  }
+
+  const service = createGitService();
+  const cause = new GitSafetyError("Read-only repository snapshot changed.", {
+    changes: ["index", "head"],
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  });
+  assert.deepEqual(service.readOnlyChanges(cause), ["head", "index"]);
+  for (const value of [
+    undefined,
+    null,
+    { code: "ERR_READ_ONLY_REPOSITORY_CHANGED" },
+    { code: "ERR_READ_ONLY_REPOSITORY_CHANGED", changes: ["unknown-domain"] },
+    { code: "ERR_INTERRUPTED_REPOSITORY_CONTROL_CHANGED", changes: ["head"] },
+    Object.defineProperty(
+      { code: "ERR_READ_ONLY_REPOSITORY_CHANGED" },
+      "changes",
+      { get: throwing },
+    ),
+    Object.defineProperty({}, "code", { get: throwing }),
+  ]) {
+    assert.equal(service.readOnlyChanges(value), null);
+  }
 });
 
 test("validation-infrastructure fingerprints accept 512 paths without widening other path lists", async (t) => {

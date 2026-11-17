@@ -3,7 +3,7 @@ import { join, isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { lstat } from "node:fs/promises";
 
-import { readProcessNamespace } from "../agents/index.js";
+import { readProcessNamespace } from "../platform/index.js";
 
 import { atomicWriteFile, readOptionalText } from "./files.js";
 import { createMutationBoundary } from "./mutation.js";

@@ -175,7 +175,7 @@ test("counts repeated and reordered lines with byte-exact line endings", async (
   assert.equal(endings.deletions, 1);
 });
 
-test("reports embedded repository changes without inventing text lines", async (t) => {
+test("rejects embedded repository measurements instead of accepting gitlink counts", async (t) => {
   const f = await fixture(t);
   const nestedPath = join(f.projectPath, "nested");
   await mkdir(nestedPath);
@@ -193,12 +193,18 @@ test("reports embedded repository changes without inventing text lines", async (
     "-qm",
     "nested fixture",
   );
-  const result = await f.measure();
-  assert.equal(result.changedLines, 0);
-  assert.deepEqual(result.binaryPaths, []);
-  assert.deepEqual(result.gitlinkPaths, ["nested"]);
+  const options = {
+    projectPath: f.projectPath,
+    baseHead: f.baseHead,
+    expectedContentFingerprint: "0".repeat(64),
+  };
+  await assert.rejects(f.service.measureChanges(options), {
+    code: "ERR_UNSUPPORTED_GIT_PATH",
+  });
   await f.git("add", "nested");
-  assert.deepEqual(await f.measure(), result);
+  await assert.rejects(f.service.measureChanges(options), {
+    code: "ERR_UNSUPPORTED_GIT_PATH",
+  });
 });
 
 test("returns deterministic threshold inputs, including an unborn baseline", async (t) => {

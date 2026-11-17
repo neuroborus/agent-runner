@@ -8,6 +8,7 @@ import {
   isAdapterDiagnosticClass,
   normalizeClientAttribution,
 } from "../agents/index.js";
+import { normalizeReadOnlySnapshotChanges } from "../git/index.js";
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
@@ -344,6 +345,12 @@ function normalizePause(value) {
     !isAdapterDiagnosticClass(pause.diagnosticClass)
   ) {
     fail("run.pause.diagnosticClass is invalid.");
+  }
+  if (Object.hasOwn(pause, "snapshotChanges")) {
+    const labels = normalizeReadOnlySnapshotChanges(pause.snapshotChanges);
+    if (labels === null || !isDeepStrictEqual(labels, pause.snapshotChanges)) {
+      fail("run.pause.snapshotChanges is invalid.");
+    }
   }
   const hasRequest = Object.hasOwn(pause, "inputRequest");
   const hasResponse = Object.hasOwn(pause, "inputResponse");

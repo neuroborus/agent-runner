@@ -2,12 +2,34 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { serializeCommitPlan } from "@agent-runner/commit-plan";
 
 import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
 import {
   migratePlanExecutionStateV17,
   migratePlanExecutionStateV24,
+  planExecutionPipeline,
 } from "../src/index.js";
+import {
+  APPLICABILITY_BATCH_SCHEMA,
+  REPOSITORY_DISCOVERY_SCHEMA,
+} from "../src/bootstrap-unit-schemas.js";
+import {
+  bootstrapScopeFor,
+  normalizeExecutionState,
+} from "../src/bootstrap-progress.js";
+import {
+  acceptBootstrapBatch,
+  consumeBootstrapCorrection,
+  correctBootstrapCatalog,
+  createBootstrapScope,
+  createBootstrapWork,
+  normalizeBootstrapWork,
+  normalizeRepositoryDiscovery,
+} from "../src/bootstrap-units.js";
+import { inspectionRequirements } from "../src/capability-requirements.js";
+import { FINALIZATION_SCHEMA } from "../src/schemas.js";
+import { validationEvidenceFingerprint } from "../src/validation-schedule.js";
 import {
   normalizeBootstrapResult,
   normalizePipelineState,
@@ -41,6 +63,7 @@ const requirement = (target = command) => ({
     artifacts: [],
   },
   unsupported: [],
+  basis: "assigned-executor",
 });
 const emptyRequirement = (target = command) => ({
   command: target,
@@ -52,6 +75,7 @@ const emptyRequirement = (target = command) => ({
     artifacts: [],
   },
   unsupported: [],
+  basis: "assigned-executor",
 });
 const blocked = (target = command) => ({
   status: "BLOCKED",
@@ -69,6 +93,41 @@ const bootstrapTurns = (mode, worker = bootstrapReady("Worker")) => [
   worker,
   ...(mode === "lazy" ? [] : [reconciliationResolved()]),
 ];
+const ordinaryChecks = [
+  { id: "C1", command },
+  { id: "C2", command: "npm run lint" },
+  { id: "C3", command: "npm run docs:check" },
+];
+const ordinaryFinalization = () => ({
+  ...finalizationPassed(),
+  requiredChecks: ordinaryChecks,
+  checks: ordinaryChecks.map(({ id, command: target }) => ({
+    checkId: id,
+    command: target,
+    status: "PASS",
+    evidence: ["Passed"],
+  })),
+});
+const cacheReport = (basis, target = ordinaryChecks[2].command) => ({
+  command: target,
+  commandIdentity: null,
+  capabilities: {
+    scratch: false,
+    cache: true,
+    sourceProjection: false,
+    artifacts: [],
+  },
+  unsupported: [],
+  basis,
+});
+const withoutBasis = (report) => {
+  const copy = structuredClone(report);
+  delete copy.basis;
+  return copy;
+};
+const constraint = (expected) => (cause) =>
+  cause.code === "ERR_INVALID_PLAN_EXECUTION_OUTPUT" &&
+  cause.diagnostic?.constraint === expected;
 function legacy(run) {
   const pipelineState = structuredClone(run.pipelineState);
   for (const role of ["worker", "reviewer"]) {
@@ -138,7 +197,12 @@ test("capability reports reject empty needs, mismatched identities, and malforme
       {
         ...result,
         environmentBlockers: [
-          { command, source: "host", evidence: ["Unavailable"] },
+          {
+            command,
+            source: "host",
+            evidence: ["Unavailable"],
+            basis: "assigned-executor",
+          },
         ],
       },
       "worker",
@@ -367,6 +431,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
           command: target,
           source: "agent-sandbox",
           evidence: ["Agent cannot access isolation."],
+          basis: "assigned-executor",
         },
       ],
     };
@@ -508,6 +573,7 @@ test("reconciliation and arbitration preserve Reviewer-only blocker reports", as
     command,
     source: "agent-sandbox",
     evidence: ["Not delegated."],
+    basis: "assigned-executor",
   };
   const fixture = await createFixture(t, {
     worker: [
@@ -629,6 +695,7 @@ test("reports cannot add authority to frozen selected commands", async (t) => {
             command,
             source: "agent-sandbox",
             evidence: ["Another command is confined."],
+            basis: "assigned-executor",
           },
         ],
       },
@@ -757,3 +824,614 @@ for (const mode of ["lazy", "combined"]) {
     assert.equal((await fixture.run()).counters.fixRounds, 1);
   });
 }
+
+test("plan-execution reports require a closed basis that keeps every structural rule", () => {
+  const base = bootstrapReady("Worker");
+  const observed = { ...requirement(), basis: "read-only-turn" };
+  const blocker = {
+    command,
+    source: "agent-sandbox",
+    evidence: ["Unavailable"],
+    basis: "read-only-turn",
+  };
+  for (const reports of [
+    { capabilityRequirements: [withoutBasis(requirement())] },
+    { capabilityRequirements: [{ ...requirement(), basis: "reviewer-turn" }] },
+    { environmentBlockers: [withoutBasis(blocker)] },
+    { environmentBlockers: [{ ...blocker, basis: null }] },
+    {
+      capabilityRequirements: [
+        { ...emptyRequirement(), basis: "read-only-turn" },
+      ],
+    },
+    {
+      capabilityRequirements: [
+        { ...observed, command: "node outside-inventory" },
+      ],
+    },
+    {
+      capabilityRequirements: [
+        { ...observed, commandIdentity: "a".repeat(64) },
+      ],
+    },
+    { environmentBlockers: [{ ...blocker, evidence: [] }] },
+  ])
+    assert.throws(
+      () => normalizeBootstrapResult({ ...base, ...reports }, "worker"),
+      constraint("exact-command-capability-reports"),
+    );
+  const accepted = normalizeBootstrapResult(
+    {
+      ...base,
+      capabilityRequirements: [observed],
+      environmentBlockers: [blocker],
+    },
+    "worker",
+  );
+  assert.deepEqual(accepted.capabilityRequirements, [observed]);
+  assert.deepEqual(accepted.environmentBlockers, [blocker]);
+  const savedRows = {
+    ...base,
+    capabilityRequirements: [withoutBasis(requirement())],
+    environmentBlockers: [withoutBasis(blocker)],
+  };
+  assert.doesNotThrow(() =>
+    normalizeBootstrapResult(savedRows, "worker", 1, { legacy: true }),
+  );
+  for (const schema of [
+    REPOSITORY_DISCOVERY_SCHEMA.properties.result.anyOf[0],
+    APPLICABILITY_BATCH_SCHEMA.properties.result.anyOf[1],
+  ])
+    for (const field of ["capabilityRequirements", "environmentBlockers"]) {
+      const items = schema.properties[field].items;
+      assert.ok(items.required.includes("basis"));
+      assert.deepEqual(items.properties.basis.enum, [
+        "assigned-executor",
+        "read-only-turn",
+      ]);
+    }
+
+  // Admission forwards assigned-executor and legacy rows, never the basis.
+  assert.deepEqual(
+    inspectionRequirements([
+      {
+        capabilityRequirements: [
+          cacheReport("read-only-turn"),
+          cacheReport("assigned-executor", command),
+          withoutBasis(cacheReport("assigned-executor")),
+        ],
+        environmentBlockers: [
+          blocker,
+          { ...blocker, command: "npm run lint", basis: "assigned-executor" },
+          withoutBasis({ ...blocker, command: "npm run docs:check" }),
+        ],
+      },
+    ]),
+    [
+      {
+        command,
+        commandIdentity: null,
+        unsupported: [],
+        capabilities: { cache: true },
+      },
+      {
+        command: "npm run docs:check",
+        commandIdentity: null,
+        unsupported: [],
+        capabilities: { cache: true },
+      },
+      { command: "npm run lint" },
+      { command: "npm run docs:check" },
+    ],
+  );
+});
+
+test("provider discovery without a basis receives the existing bounded correction", async (t) => {
+  const inspections = [];
+  const fixture = await createFixture(t, {
+    mode: "lazy",
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        capabilityRequirements: [withoutBasis(requirement())],
+      },
+      bootstrapReady("Worker"),
+    ],
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      finalizationPassed(),
+    ],
+    onRequirementInspection(input) {
+      inspections.push(structuredClone(input));
+      return ready;
+    },
+  });
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    completed.pipelineState.bootstrapCorrections.map(
+      ({ diagnostics }) => diagnostics[0].constraint,
+    ),
+    ["exact-command-capability-reports"],
+  );
+  assert.ok(inspections.every(({ requirements }) => requirements.length === 0));
+});
+
+async function reviewerCacheFixture(t, basis, requests) {
+  const root = createTrustedValidationService();
+  return createFixture(t, {
+    mode: "combined",
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks: ordinaryChecks },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks: ordinaryChecks,
+        capabilityRequirements: [cacheReport(basis)],
+      },
+    ],
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      ordinaryFinalization(),
+    ],
+    onRequirementInspection(input) {
+      requests.push(structuredClone(input));
+      return root.inspectRequirements(input);
+    },
+  });
+}
+
+test("combined execution keeps a read-only-turn observation without requiring it in Worker FINALIZE", async (t) => {
+  const requests = [];
+  const fixture = await reviewerCacheFixture(t, "read-only-turn", requests);
+  const done = await fixture.run();
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    done.pipelineState.workerValidation.capabilityRequirements,
+    [],
+  );
+  assert.deepEqual(
+    done.pipelineState.reviewerValidation.capabilityRequirements,
+    [cacheReport("read-only-turn")],
+  );
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(({ requirements }) => requirements.length === 0));
+  assert.deepEqual(
+    done.pipelineState.finalizationResult.checks.map(
+      ({ checkId, executor }) => [checkId, executor],
+    ),
+    ordinaryChecks.map(({ id }) => [id, "agent"]),
+  );
+  const finalization = Object.values(fixture.calls)
+    .flat()
+    .filter(({ schema }) => schema === FINALIZATION_SCHEMA);
+  assert.equal(finalization.length, 1);
+  assert.equal(finalization[0].access, "workspace-write");
+});
+
+test("combined execution blocks a genuine assigned-executor need before writable work", async (t) => {
+  const requests = [];
+  const fixture = await reviewerCacheFixture(t, "assigned-executor", requests);
+  const before = await fixture.runtime.git.snapshot();
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.match(paused.pause.evidence[0], /not-selected/u);
+  assert.deepEqual(requests[0].requirements, [
+    {
+      command: ordinaryChecks[2].command,
+      commandIdentity: null,
+      unsupported: [],
+      capabilities: { cache: true },
+    },
+  ]);
+  assert.equal(writes(fixture).length, 0);
+  assert.deepEqual(paused.pipelineState.completedCommits, []);
+  const after = await fixture.runtime.git.snapshot();
+  assert.equal(after.contentFingerprint, before.contentFingerprint);
+  assert.equal(after.indexFingerprint, before.indexFingerprint);
+});
+
+test("legacy validation migration does not admit a read-only-turn observation", async (t) => {
+  const root = createTrustedValidationService();
+  let migrating = false;
+  const requests = [];
+  const fixture = await createFixture(t, {
+    worker: bootstrapTurns("independent"),
+    workWorker: [
+      implementationBlocked(),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      implementationCompleted(),
+      finalizationPassed(),
+    ],
+    workReviewer: [
+      {
+        ...bootstrapReady("Migrating Reviewer"),
+        capabilityRequirements: [cacheReport("read-only-turn", command)],
+      },
+    ],
+    onRequirementInspection(input) {
+      if (migrating) requests.push(structuredClone(input));
+      return root.inspectRequirements(input);
+    },
+  });
+  const paused = await fixture.run();
+  fixture.persistPipelineState(legacy(paused));
+  migrating = true;
+  const done = await fixture.run();
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    done.pipelineState.reviewerValidation.capabilityRequirements,
+    [cacheReport("read-only-turn", command)],
+  );
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(({ requirements }) => requirements.length === 0));
+});
+
+test("version-39 migration keeps saved reports and their admission unchanged", async (t) => {
+  const completed = await (await createFixture(t)).run();
+  const validation = {
+    ...completed.pipelineState.workerValidation,
+    capabilityRequirements: [withoutBasis(requirement())],
+    environmentBlockers: [
+      { command, source: "agent-sandbox", evidence: ["Not delegated."] },
+    ],
+  };
+  const saved = { ...completed.pipelineState, workerValidation: validation };
+  const provisional = legacy(completed);
+  for (const state of [saved, provisional]) {
+    const bytes = JSON.stringify(state);
+    const migrated = planExecutionPipeline.migrations[39]({
+      pipelineState: state,
+    });
+    assert.equal(JSON.stringify(migrated), bytes);
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => normalizePipelineState(migrated));
+  }
+  for (const role of ["worker", "reviewer"])
+    assert.equal(provisional[`${role}Validation`].capabilityRequirements, null);
+  const migrated = planExecutionPipeline.migrations[39]({
+    pipelineState: saved,
+  });
+  const request = inspectionRequirements([
+    saved.workerValidation,
+    saved.reviewerValidation,
+  ]);
+  assert.deepEqual(
+    inspectionRequirements([
+      migrated.workerValidation,
+      migrated.reviewerValidation,
+    ]),
+    request,
+  );
+  assert.deepEqual(request, [
+    {
+      command,
+      commandIdentity: null,
+      unsupported: [],
+      capabilities: { scratch: true },
+    },
+    { command },
+  ]);
+});
+
+test("applicability requests carry the basis guidance, including their reconstruction", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.run();
+  assert.ok(fixture.applicabilityCalls.length > 0);
+  for (const request of fixture.applicabilityCalls)
+    for (const prompt of [request.prompt, request.recoveryPrompt]) {
+      assert.match(prompt, /basis "read-only-turn"/u);
+      assert.match(prompt, /Never upgrade such an observation/u);
+      assert.match(prompt, /never changes the basis of an accepted entry/u);
+    }
+});
+
+const stop = Object.assign(new Error("Interrupted durable checkpoint."), {
+  code: "ERR_RUN_REVISION_CHANGED",
+});
+const supplied = (request) =>
+  JSON.parse(
+    /Applicability request \(data\):\n([^\n]+)/u.exec(request.prompt)[1],
+  );
+const correctionBatch = (request, capabilityRequirements) => ({
+  result: {
+    status: "CATALOG_CORRECTION_REQUIRED",
+    unitId: supplied(request).unitId,
+    assignments: [],
+    missingCommands: [],
+    missingInfrastructure: [],
+    capabilityRequirements,
+    environmentBlockers: [],
+  },
+});
+// Simulate the saved bytes of a version-39 run: stored reports lack a basis and
+// the unfinished catalog is self-consistent with those exact bytes.
+function legacyBootstrap(state, pending) {
+  const legacyState = structuredClone(state);
+  const progress = legacyState.bootstrapProgress.worker;
+  if (pending) {
+    progress.work.catalogCorrection.capabilityRequirements =
+      progress.work.catalogCorrection.capabilityRequirements.map(withoutBasis);
+    return legacyState;
+  }
+  const { binding, discovery, limits, correctionAttempt } = progress.work;
+  progress.work = JSON.parse(
+    JSON.stringify(
+      createBootstrapWork(
+        bootstrapScopeFor(
+          legacyState,
+          "worker",
+          binding.inputFingerprint,
+          binding.infrastructureFingerprint,
+        ),
+        {
+          ...discovery,
+          capabilityRequirements:
+            discovery.capabilityRequirements.map(withoutBasis),
+        },
+        limits,
+        correctionAttempt,
+      ),
+    ),
+  );
+  return legacyState;
+}
+
+for (const pending of [false, true]) {
+  test(`version-39 ${pending ? "pending correction" : "catalog"} rows survive canonical catalog replacement`, async (t) => {
+    const observed = cacheReport("read-only-turn", command);
+    const legacyRow = withoutBasis(requirement());
+    const requests = [];
+    let captured;
+    let published;
+    let reloaded = false;
+    let reported = false;
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      worker: [
+        clarificationReady(),
+        {
+          ...bootstrapReady("Worker"),
+          capabilityRequirements: pending ? [] : [requirement()],
+        },
+        {
+          ...bootstrapReady("Corrected Worker"),
+          capabilityRequirements: pending
+            ? [requirement()]
+            : [requirement(), observed],
+        },
+      ],
+      workWorker: [
+        implementationCompleted(),
+        checkAndFix(),
+        finalizationPassed(),
+      ],
+      onRoleRun(role, request) {
+        if (request.schema !== APPLICABILITY_BATCH_SCHEMA || reported) return;
+        if (!pending && !reloaded) return;
+        reported = true;
+        if (!pending) {
+          const work =
+            fixture.currentRun.pipelineState.bootstrapProgress.worker.work;
+          assert.equal(
+            supplied(request).catalogFingerprint,
+            work.catalogFingerprint,
+          );
+          assert.equal(supplied(request).unitId, work.units[0].id);
+        }
+        return correctionBatch(request, [pending ? requirement() : observed]);
+      },
+      onTransition(run) {
+        const work = run.pipelineState.bootstrapProgress.worker.work;
+        if (!captured && work !== null) {
+          if (
+            pending
+              ? work.pendingCorrection === "catalog"
+              : work.accepted.length === 0 && work.catalogCorrection === null
+          ) {
+            captured = structuredClone(run.pipelineState);
+            throw stop;
+          }
+        }
+        if (
+          reloaded &&
+          !published &&
+          work?.catalogCorrection === null &&
+          work.correctionAttempt === 1
+        )
+          published = structuredClone(run.pipelineState);
+      },
+      onRequirementInspection(input) {
+        requests.push(structuredClone(input));
+        return ready;
+      },
+    });
+    await assert.rejects(fixture.run(), (cause) => cause === stop);
+    const saved = legacyBootstrap(captured, pending);
+    const bytes = JSON.stringify(saved);
+    const migrated = planExecutionPipeline.migrations[39]({
+      pipelineState: saved,
+    });
+    assert.equal(JSON.stringify(migrated), bytes);
+    assert.doesNotThrow(() => normalizeExecutionState(migrated));
+    const legacyWork = saved.bootstrapProgress.worker.work;
+    fixture.persistPipelineState(migrated, { pause: null });
+    reloaded = true;
+
+    const done = await fixture.run();
+    assert.equal(done.pipelineState.workflowState, "DONE");
+    assert.equal(done.pipelineState.bootstrapCorrections.length, 1);
+    const work = published.bootstrapProgress.worker.work;
+    assert.deepEqual(
+      work.discovery.capabilityRequirements,
+      pending ? [legacyRow] : [legacyRow, observed],
+    );
+    assert.equal(work.correctionAttempt, 1);
+    assert.equal(work.pendingCorrection, null);
+    assert.deepEqual(work.accepted, []);
+    assert.notEqual(work.catalogFingerprint, legacyWork.catalogFingerprint);
+    assert.notEqual(work.units[0].id, legacyWork.units[0].id);
+    assert.doesNotThrow(() => normalizeExecutionState(published));
+    assert.deepEqual(
+      done.pipelineState.workerValidation.capabilityRequirements,
+      work.discovery.capabilityRequirements,
+    );
+    // The legacy need stays admitted; the read-only observation never is.
+    assert.ok(requests.length > 0);
+    for (const { requirements } of requests)
+      assert.deepEqual(requirements, [
+        {
+          command,
+          commandIdentity: null,
+          unsupported: [],
+          capabilities: { scratch: true },
+        },
+      ]);
+  });
+}
+
+test("inherited basis-less rows are canonicalized only as exact assigned-executor copies", () => {
+  const hash = (character) => character.repeat(64);
+  const subject = "feat(sample): add part 1";
+  const limits = { maxSteps: 2, maxBytes: 100_000 };
+  const scope = (overrides = {}) =>
+    createBootstrapScope({
+      canonicalPlan: serializeCommitPlan({
+        steps: [{ number: 1, subject, body: "Implement part 1." }],
+      }),
+      role: "worker",
+      inputFingerprint: hash("a"),
+      repositoryFingerprint: hash("b"),
+      infrastructureFingerprint: hash("c"),
+      position: { step: 1, subject },
+      ...overrides,
+    });
+  const discovery = (capabilityRequirements, environmentBlockers = []) => ({
+    stepAssessment: {
+      step: 1,
+      subject,
+      disposition: "CURRENT",
+      evidence: ["The selected step is pending."],
+    },
+    summary: "The validation script owns the check.",
+    requiredChecks: [{ id: "C1", command }],
+    validationInfrastructure: ["package.json"],
+    capabilityRequirements,
+    environmentBlockers,
+  });
+  const legacyRow = withoutBasis(requirement());
+  const observed = { ...requirement(), basis: "read-only-turn" };
+  const fresh = cacheReport("assigned-executor", command);
+  const blocker = {
+    command,
+    source: "runner",
+    evidence: ["The executable is unavailable."],
+    basis: "assigned-executor",
+  };
+
+  // Revision discovery repeats a prior basis-less row as an exact copy.
+  const previousValidation = {
+    requiredChecks: [{ id: "C1", command, steps: [1] }],
+    validationInfrastructure: ["package.json"],
+    capabilityRequirements: [legacyRow],
+    environmentBlockers: [withoutBasis(blocker)],
+  };
+  const revision = scope({ previousValidation });
+  const accepted = normalizeRepositoryDiscovery(
+    discovery([requirement(), fresh], [blocker]),
+    revision,
+    { inherited: [] },
+  );
+  assert.deepEqual(accepted.capabilityRequirements, [legacyRow, fresh]);
+  assert.deepEqual(accepted.environmentBlockers, [withoutBasis(blocker)]);
+  const revisionWork = createBootstrapWork(revision, accepted, limits, 0);
+  assert.deepEqual(revisionWork.discovery.capabilityRequirements[0], legacyRow);
+  assert.equal(
+    revisionWork.binding.validationFingerprint,
+    validationEvidenceFingerprint(previousValidation),
+  );
+  assert.throws(
+    () =>
+      normalizeRepositoryDiscovery(discovery([observed], [blocker]), revision, {
+        inherited: [],
+      }),
+    constraint("preserve-prior-revision-requirements"),
+  );
+  assert.throws(
+    () =>
+      normalizeRepositoryDiscovery(
+        discovery([legacyRow], [blocker]),
+        revision,
+        { inherited: [] },
+      ),
+    constraint("exact-command-capability-reports"),
+  );
+
+  // Catalog continuation keeps the saved discovery bytes.
+  const base = scope();
+  let work = createBootstrapWork(base, discovery([legacyRow]), limits, 0);
+  const correction = (reports) => ({
+    status: "CATALOG_CORRECTION_REQUIRED",
+    unitId: work.units[0].id,
+    assignments: [],
+    missingCommands: [],
+    missingInfrastructure: [],
+    capabilityRequirements: reports,
+    environmentBlockers: [],
+  });
+  assert.throws(
+    () => acceptBootstrapBatch(base, work, correction([requirement()])),
+    constraint("new-capability-evidence"),
+  );
+  work = consumeBootstrapCorrection(
+    base,
+    acceptBootstrapBatch(base, work, correction([observed])),
+  );
+  const replace = (pendingWork, reports) =>
+    correctBootstrapCatalog(
+      base,
+      pendingWork,
+      normalizeRepositoryDiscovery(discovery(reports), base, {
+        inherited: [pendingWork.discovery, pendingWork.catalogCorrection],
+      }),
+    );
+  assert.deepEqual(
+    replace(work, [requirement(), observed]).discovery.capabilityRequirements,
+    [legacyRow, observed],
+  );
+  assert.throws(
+    () =>
+      replace(work, [{ ...requirement(), basis: "read-only-turn" }, observed]),
+    constraint("preserve-and-complete-catalog"),
+  );
+
+  // A charged saved correction may hold a basis-less row not yet in discovery.
+  let charged = createBootstrapWork(base, discovery([]), limits, 0);
+  charged = JSON.parse(
+    JSON.stringify(
+      acceptBootstrapBatch(base, charged, {
+        ...correction([requirement()]),
+        unitId: charged.units[0].id,
+      }),
+    ),
+  );
+  charged.catalogCorrection.capabilityRequirements = [legacyRow];
+  charged = consumeBootstrapCorrection(
+    base,
+    normalizeBootstrapWork(charged, base, 0),
+  );
+  const replacement = replace(charged, [requirement()]);
+  assert.deepEqual(replacement.discovery.capabilityRequirements, [legacyRow]);
+  assert.equal(replacement.correctionAttempt, 1);
+  assert.throws(
+    () => consumeBootstrapCorrection(base, replacement),
+    constraint("role-correction-exhausted"),
+  );
+});

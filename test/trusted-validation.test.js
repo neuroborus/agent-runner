@@ -21,7 +21,7 @@ import {
   readProcessIdentity,
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
-} from "../src/agents/index.js";
+} from "../src/platform/index.js";
 import { createGitService } from "../src/git/index.js";
 import {
   createTrustedValidationService,

@@ -45,7 +45,7 @@ import {
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 import { createStopMonitor } from "../../src/runner/stops.js";
 import { inspectTrustedRequirements } from "../../src/runner/trusted-requirements.js";
 import {

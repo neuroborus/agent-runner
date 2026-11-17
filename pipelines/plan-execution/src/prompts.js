@@ -27,37 +27,48 @@ For PLAN_REVISION_REQUIRED, provide reason and evidence.`;
 
 const VALIDATION_INFRASTRUCTURE_INSTRUCTIONS = `Validation infrastructure means files that own validation commands, discovery, runners, configuration, or mandatory finalization guidance. Exclude ordinary source, individual tests, fixtures, and generated output merely consumed by checks. Classify by the file's responsibility, not its name or extension.`;
 
-const CAPABILITY_EXECUTOR_INSTRUCTIONS = `Describe needs and blockers for each command's actual future executor at its assigned checkpoint: the ordinary Worker FINALIZE turn under its existing declared workspace-write access, or Runner-trusted execution of a selected frozen exact command; never describe the current read-only discovery, migration, or Reviewer turn. An ordinary agent-executed command that writes only safe workspace output under that existing Worker access needs no report: no scratch, cache, projection, or unsupported need. Selected trusted commands remain reserved from agent execution; report every capability their trusted executor actually requires. sourceProjection is separate frozen authority, not a synonym for workspace-write; set it to true only when supported evidence shows the actual executor must write beside the staging-independent source the command validates. Report a genuine command-specific blocker, including a nondelegated one, only with evidence; never run an unpermitted probe or claim that no blockers exist without evidence.`;
+const PROCEDURE_ORDER_INSTRUCTIONS = `Preserve project-defined first, final and relative-order constraints in the declared inventory and ordered evidence, including current-inventory reordering and amendments. Additions are not automatically appended: position supplemental checks where project inventory constraints require them, retaining every established check identity, exact command and obligation. Reordering the current inventory never rewrites original discovery or future assignments. Inventory and evidence order are not a global physical command timeline and array order proves no execution sequence. Preserve each check's existing executor and checkpoint: Worker runs agent-owned checks in FINALIZE and reports reserved checks NOT_RUN; Runner executes their frozen vectors after Worker returns and replaces placeholders in inventory positions under unchanged-content and infrastructure guards. Do not invent a later Worker phase. A separately explicit physical sequencing requirement remains binding; if incompatible with existing ownership/checkpoints, use the existing blocking outcome without silently reinterpreting it, granting permissions or inventing a product decision.`;
 
-export const BOOTSTRAP_INSTRUCTIONS = `Study the repository, task, validated plan, clarifications, project instructions, relevant finalization guidance, other relevant skills, project checks, tests, and Git history independently and without modifying the repository.
-Return the following fields inside the schema's result object. Provide a concise bootstrap summary covering the task, relevant architecture and files, invariants, planned commits, risks, and the complete project finalization procedure. Independently identify every required check as a stable C-prefixed ID, exact command, and steps array of applicable canonical plan step numbers, plus every repository-relative file that controls those checks, package scripts, test discovery, test runners, or validation configuration.
-Each check's steps must be a nonempty ascending list without duplicates or references outside the canonical plan. Independently provide a complete procedure for every plan step: the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects. Include all selected trusted commands in the complete catalog, with their actual step applicability; selection alone does not make a check applicable to every step. Do not execute future-step checks during earlier finalization. The runner preserves each role's accepted assignments and derives stable Worker-first per-step inventories, unioning applicability of identical commands. Reconciliation and arbitration cannot discard or reassign requirements.
-${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
-Cover every substantive validation requirement, but keep the summary and required-check inventory staging-independent. Do not require staging, a staged handoff, index mutation or inspection, an implicit worktree-versus-index assertion, an alternate index, or commit-message drafting. Generic commit preparation belongs only to COMMIT. Express an applicable content check against HEAD or explicit trees instead of the index.
-Required-check IDs must be unique. Exact commands must be unique, single-line, and already normalized without leading or trailing whitespace. Validation-infrastructure paths must be unique, existing, canonical repository-relative regular files, except for the exact declared label of selected external finalization guidance when supplied; never return a symlink or a path through a symlink, including a symlink alias of a canonical path.
-Each inventory field has a per-role capacity of ${MAX_BOOTSTRAP_ITEMS} items. If the complete requiredChecks or validationInfrastructure inventory would exceed that capacity, do not truncate it or invent a placeholder. Check requiredChecks first, then validationInfrastructure, and return CAPACITY_EXHAUSTED for the first over-capacity field with capacityField set to its exact field name and capacityLimit set to ${MAX_BOOTSTRAP_ITEMS}.
-Report capabilityRequirements and environmentBlockers as bounded arrays (up to 256 each), tied to exact commands in your requiredChecks inventory; use [] when none. Each capability requirement must identify at least one actual need: scratch, cache, a writable source projection, one or more artifacts, or one or more unsupported capabilities. Omit the report instead of returning an entry with no needs. Each requirement has command, commandIdentity (the supplied frozen identity or null), capabilities {scratch: boolean, cache: boolean, sourceProjection: boolean, artifacts: [{url, sha256}]}, and unsupported (up to 16 short capability identifiers). ${CAPABILITY_EXECUTOR_INSTRUCTIONS} Any non-null identity must exactly match the selected command's frozen identity; never invent or substitute one. Artifact URLs and SHA-256 must match the canonical HTTPS declaration contract; at most 32 artifacts per report. Do not request projection paths, credentials, or broader authority. Each environment blocker has command, source ("agent-sandbox" or "runner"), and evidence (1–8 concise single-line strings). Report missing runner selection or authority as needs, not as permission to grant them. The runner preserves every role's reports, evaluates the frozen declarations and actual availability, and pauses before writable work when unsatisfied. An agent-sandbox limitation is resolved only for that exact delegated command when runner inspection succeeds; a limitation of another command remains blocking. Do not execute required checks during discovery. Set both arrays to [] for every non-READY outcome.
-For READY, provide summary, requiredChecks, and validationInfrastructure; set capacityField, reason, question, and whyBlocked to "", capacityLimit to 0, and options and evidence to [].
-For CAPACITY_EXHAUSTED, set summary, reason, question, and whyBlocked to "", requiredChecks, validationInfrastructure, options, and evidence to [], and provide capacityField and capacityLimit as described above.
-For PLAN_REVISION_REQUIRED, set summary, capacityField, question, and whyBlocked to "", capacityLimit to 0, and requiredChecks, validationInfrastructure, and options to []; provide reason and evidence.
-For PRODUCT_DECISION_REQUIRED, set summary, capacityField, and reason to "", capacityLimit to 0, and requiredChecks and validationInfrastructure to []; use the product-decision fields.`;
+const CHECK_OWNERSHIP_INSTRUCTIONS = `Before putting any command in requiredChecks, determine the owner and checkpoint that the task, clarifications, repository instructions, and applicable skills assign to each validation obligation. requiredChecks contains only checks owned by this pipeline's finalization: ordinary checks run by the Worker FINALIZE turn, and selected Runner-trusted commands, which remain pipeline-owned with their frozen identities and capabilities even though Runner executes them on the host. A check that the task or clarifications explicitly assign to the supervising operator or another owner only after this run completes is mandatory external acceptance, not a pipeline check: record its owner, timing, and pending status in the summary, never run it, and never report it as run or passed. An operator-owned witness expected to fail never becomes a PASS-required command; negative assertions inside in-scope test commands remain required. A task's command list never drops other genuine in-scope requirements from repository conventions or applicable skills. Neither a label alone nor the machine that physically runs a check decides ownership; resolve a genuine conflict only through the existing bounded outcomes.`;
+
+const EXTERNAL_ACCEPTANCE_SUMMARY_INSTRUCTIONS = `Keep post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner in the resolved summary as pending external work with its owner and timing; it is never a pipeline check, and this turn still cannot add, select, or remove commands, paths, or reports.`;
+
+const VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS = `Owner and timing assignments that the task or clarifications make explicit bind validation work for the whole run. Classify the work by its actual purpose, scope, and evidence against explicit task authority, never by its label. Executing a check reserved for another owner or a later checkpoint, its full equivalent, or a subset that the task or clarifications explicitly reserve is reserved work under any name or entrypoint; that never transfers its owner or permits early execution. Reading or inspecting source and focused development tests that the task and phase permit stay development work even when they overlap a reserved check: overlap is neither a violation nor completion, and the reserved check still runs in full under its owner. Explicit task restrictions on development work still apply.`;
+
+export const HISTORICAL_VALIDATION_INSTRUCTIONS = `Separate proven historical validation noncompliance from consequences still actionable under frozen task authority. Preserve the disclosure and useful safe content; correct present misrepresentation or unsafe consequences, give historical execution no acceptance credit, and retain every pending check with its original executor and checkpoint. A timing prohibition alone does not establish irrecoverability. Never imply the execution was allowed or undone, suppress proven facts, require cosmetic edits, or require later-only checks before candidate acceptance. Unknown execution evidence establishes no confirmed violation; permitted development work and overlap remain distinct.
+When current authority permits this containment and no actionable consequence remains, close the ongoing blocker through existing summary and resolution paths while retaining the proven allegation as history. FIX may describe this disposition without a content edit; UNCHANGED reports unchanged content after containment. Never report CHANGED without actual change. Preserve accepted resolution reasons and evidence as historical context, independently of native sessions; reconstruction must retain this rule.
+If proven execution instead leaves a cited task requirement unsatisfiable with no permitted corrective disposition, including explicit irrecoverability, Worker must return VALIDATION_POLICY_BLOCKED. Timing alone, uncertainty, technical difficulty, environment constraints and merely pending later checks do not qualify. Reviewers and self-confirmers return an ordinary finding directing Worker to that truthful stop, never an impossible content repair or an evidence-only finalization rejection. Self-findings still go directly to fixing; only independent disputes may use fresh arbitration at existing permitted gates. No disposition waives explicit policy or grants premature FINALIZE credit.`;
+
+const VALIDATION_WORK_REVIEW_INSTRUCTIONS = `${VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS} ${HISTORICAL_VALIDATION_INSTRUCTIONS} Report proven early or wrong-owner execution and false reserved-coverage claims. Distinguish the historical allegation from its current actionable consequences: do not repeat a contained historical fact as an unresolved blocker. Source observation or overlap alone is not a violation; never invent execution facts.`;
+
+const VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS = `${VALIDATION_WORK_REVIEW_INSTRUCTIONS} Decide the allegation and its remaining consequence separately. Uphold proven historical truth; WITHDRAW or WORKER_CORRECT may close the ongoing blocker after authorized containment without declaring that truth false. Explain both in the existing reason/rationale and evidence. UPHOLD or REVIEWER_CORRECT applies to remaining actionable consequences or an unsatisfiable explicit policy, directing Worker to VALIDATION_POLICY_BLOCKED when required. Unsupported inference or permitted development work does not establish prohibited execution.`;
+
+const VALIDATION_POLICY_RESULT_INSTRUCTIONS = `${HISTORICAL_VALIDATION_INSTRUCTIONS}
+For VALIDATION_POLICY_BLOCKED, provide a bounded reason and exactly three nonempty plain-text evidence entries in order: proof of actual execution; the cited governing task requirement; why no corrective disposition is permitted under frozen authority. Set every other field to its inactive empty string or array (customResult, when present, to null). This is no approval, check evidence, environment blocker or product question.`;
+
+const EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS = `Leaving out post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not an omission. Reject evidence or summaries claiming that such acceptance ran or passed, and reject a finalization that adds it to the inventory. A missing genuine pipeline-owned check remains an omission. ${VALIDATION_WORK_REVIEW_INSTRUCTIONS}`;
+
+const CAPABILITY_EXECUTOR_INSTRUCTIONS = `Give every need and blocker a basis. Use basis "assigned-executor" only to describe the command's actual future executor at its assigned checkpoint: the ordinary Worker FINALIZE turn under its existing declared workspace-write access, or Runner-trusted execution of a selected frozen exact command; an assigned-executor entry never describes the current read-only discovery, migration, applicability, or Reviewer turn and requires static task, repository, or declaration evidence, or saved evidence from that assigned executor running the exact command at its checkpoint. A restriction seen only through this turn's read-only access, such as an unwritable log, cache, or home location outside the workspace, may be recorded only with basis "read-only-turn": it is kept for review, never becomes a requirement, and leaves the ordinary check with Worker FINALIZE. Never upgrade such an observation to "assigned-executor". An ordinary agent-executed command that writes only safe workspace output under that existing Worker access needs no report: no scratch, cache, projection, or unsupported need. Selected trusted commands remain reserved from agent execution; report every capability their trusted executor actually requires. sourceProjection is separate frozen authority, not a synonym for workspace-write; set it to true only when supported evidence shows the actual executor must write beside the staging-independent source the command validates. Report a genuine command-specific blocker, including a nondelegated one, only with evidence; never run an unpermitted probe or claim that no blockers exist without evidence.`;
 
 export const REPOSITORY_DISCOVERY_INSTRUCTIONS = `Study the repository, task, complete validated plan, clarifications, project instructions, relevant skills, checks, tests, and Git history independently and without modifying the repository.
 Provide a concise bootstrap summary covering architecture, relevant files, invariants, planned commits, risks, and the complete staging-independent finalization procedure. This discovery is a repository catalog, not a plan applicability matrix. Return the six discovery fields inside result: stepAssessment, summary, requiredChecks, validationInfrastructure, capabilityRequirements, environmentBlockers. Each required check has only id and exact command, without steps. Later focused batches assign applicability.
+Discover all known applicable checks during bootstrap, including available supplemental validators, rather than deferring foreseeable additions to finalization. ${PROCEDURE_ORDER_INSTRUCTIONS}
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 Keep commands unique, normalized, single-line and staging-independent. Use existing canonical regular repository files for infrastructure, plus the exact declared label of selected external finalization guidance when supplied. Include every frozen runner-trusted command. Do not execute required checks, modify content or Git state, or perform commit preparation. Staging, index-relative inspection, and commit-message drafting belong only to COMMIT.
-Report exact-command capability needs and environment blockers using the supplied schema and frozen command identities, or [] when none. ${CAPABILITY_EXECUTOR_INSTRUCTIONS} Never invent authority, omit requirements, truncate inventories, or persist provider messages. The per-role catalog limit is ${MAX_BOOTSTRAP_ITEMS}; report CAPACITY_EXHAUSTED using the exceptional schema if exceeded, checking requiredChecks before infrastructure.
+${CHECK_OWNERSHIP_INSTRUCTIONS}
+Report exact-command capability needs and environment blockers using the supplied schema and frozen command identities, or [] when none. ${CAPABILITY_EXECUTOR_INSTRUCTIONS} Repeat each supplied accepted entry exactly with its basis; repeat one saved without a basis with basis "assigned-executor". Never invent authority, omit requirements, truncate inventories, or persist provider messages. The per-role catalog limit is ${MAX_BOOTSTRAP_ITEMS}; report CAPACITY_EXHAUSTED using the exceptional schema if exceeded, checking requiredChecks before infrastructure.
 For an incompatible plan or an unresolved material product decision, use the corresponding exceptional result schema with empty inventories and summary; technical choices are not product decisions.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
 export const APPLICABILITY_INSTRUCTIONS = `Assess only the supplied contiguous canonical plan range against your own accepted repository discovery. Keep the repository and Git state read-only. Do not execute checks, perform finalization, or prepare a commit.
 Return READY with the exact unitId and catalog-order assignments of checkId to ascending canonical steps within this unit. Every step must have its complete applicable procedure: the ordinary fast gate and only slow checks whose documented guarantees that step affects. A selected trusted command is not automatically applicable to every step. Omit a check assignment only when it applies to no step in this range. The complete plan must eventually assign every discovered check.
-If commands, infrastructure, capability needs, or environment blockers are missing from discovery, return CATALOG_CORRECTION_REQUIRED, no assignments, and only new requirements. Do not silently change or drop accepted requirements. READY has empty correction arrays. Use frozen input files if needed; normally continue from accepted discovery without repeating broad repository discovery. Return only the supplied schema's result object.`;
+If commands, infrastructure, capability needs, or environment blockers are missing from discovery, return CATALOG_CORRECTION_REQUIRED, no assignments, and only new requirements. Do not silently change or drop accepted requirements. ${CAPABILITY_EXECUTOR_INSTRUCTIONS} Catalog correction may add "read-only-turn" entries, but never upgrades one and never changes the basis of an accepted entry. Catalog correction never adds post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner. READY has empty correction arrays. Use frozen input files if needed; normally continue from accepted discovery without repeating broad repository discovery. Return only the supplied schema's result object.`;
 
 export const BOOTSTRAP_RECONCILIATION_INSTRUCTIONS = `Reconcile the independent Worker and Reviewer bootstrap summaries using the task, validated plan, repository, and evidence.
 Do not force agreement or modify the repository. Return the following fields inside the schema's result object, with a concise resolved summary or the remaining material disagreement.
 Keep every resolved summary staging-independent. Staging, staged handoff, index-relative checks, alternate-index workarounds, and commit-message drafting belong only to COMMIT; established checks are input only to the dedicated FINALIZE gate.
 The runner derives each plan step's required-check inventory and the shared validation infrastructure from independently accepted role evidence. Reconciliation and arbitration cannot discard or reassign accepted check applicability. Do not propose, select, or repeat commands or repository paths. Every accepted role capability requirement and environment blocker is retained independently of this summary; reconciliation or arbitration cannot omit them or replace frozen authority.
+${EXTERNAL_ACCEPTANCE_SUMMARY_INSTRUCTIONS}
 For RESOLVED, provide summary; set disagreement, reason, question, and whyBlocked to "", and options and evidence to [].
 For DISAGREEMENT, provide disagreement and evidence; set summary, reason, question, and whyBlocked to "", and options to [].
 For PLAN_REVISION_REQUIRED, provide reason and evidence; set summary, disagreement, question, and whyBlocked to "", and options to [].
@@ -71,6 +82,7 @@ Always provide rationale.
 Choose USE_WORKER or USE_REVIEWER only when that summary is correct, and SYNTHESIZE when the evidence supports a combined summary.
 Keep the selected or synthesized summary staging-independent. Staging, staged handoff, index-relative checks, alternate-index workarounds, and commit-message drafting belong only to COMMIT; established checks are input only to the dedicated FINALIZE gate.
 The runner derives each plan step's required-check inventory and the shared validation infrastructure from independently accepted role evidence. Reconciliation and arbitration cannot discard or reassign accepted check applicability. Do not propose, select, or repeat commands or repository paths. Every accepted role capability requirement and environment blocker is retained independently of this summary; reconciliation or arbitration cannot omit them or replace frozen authority.
+${EXTERNAL_ACCEPTANCE_SUMMARY_INSTRUCTIONS}
 For USE_WORKER, USE_REVIEWER, or SYNTHESIZE, provide summary; set reason, question, and whyBlocked to "", and options and evidence to [].
 For PLAN_REVISION_REQUIRED, set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.`;
@@ -86,7 +98,8 @@ Diagnostic fields identify schema names and zero-based positions, never rejected
 Correct every violation in the identified diagnostic batch using current repository evidence. Re-execute only corrected staging-independent checks as needed to produce complete direct evidence. Do not execute a rejected command, run staging-dependent validation, repeat or quote the rejected result, ask an ordinary clarification question, or modify repository content, staging, history, refs, remotes, or Git identity. Preserve the exceptional PRODUCT_DECISION_REQUIRED outcome and its required product-decision fields when its existing criteria are met. A second correction is available only for a wholly new diagnostic batch; a repeated diagnostic or another invalid result after that finite allowance fails closed.`;
 
 const PREFINALIZATION_VALIDATION_INSTRUCTIONS = `The established required-check inventory is input only to the dedicated FINALIZE gate. Do not execute or attest it in this turn.
-Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.`;
+Selected runner-trusted commands must never execute inside an agent turn. Their agent-sandbox limitations must not cause BLOCKED or prevent applicable content repairs and semantic review; the runner executes their persisted exact vectors during FINALIZE.
+${VALIDATION_WORK_OWNERSHIP_INSTRUCTIONS} ${VALIDATION_POLICY_RESULT_INSTRUCTIONS} Do not run reserved work in this turn or claim that it ran. Report development work only as development evidence, never as reserved-check coverage, and leave reserved checks pending with their owner and timing. The reservations above and selected commands' capabilities are unchanged.`;
 
 export const IMPLEMENTATION_INSTRUCTIONS = `Implement the changes described in the following planned commit. Keep the implementation idiomatic and minimal, and follow the project's conventions.
 
@@ -108,6 +121,7 @@ export const CANDIDATE_REVIEW_INSTRUCTIONS = `Review the changes and verify that
 
 Do not modify the repository.
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT.
+${VALIDATION_WORK_REVIEW_INSTRUCTIONS}
 For APPROVED, set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
@@ -116,13 +130,22 @@ Otherwise, return only the candidate decision and actionable findings using the 
 
 const TRUSTED_TIMING_INSTRUCTIONS = `Runner-trusted elapsed evidence measures the admitted attempt including preparation, retirement, cleanup and safety checks, not child runtime alone. Use only the persisted Runner measurement; unavailable legacy/controller timing stays unknown. Never measure a reserved command yourself, invent historical timing or rerun solely for missing telemetry.`;
 
+const FINALIZATION_EVIDENCE_INSTRUCTIONS = `Runner owns persisted finalization properties step, fingerprint, validationInfrastructureFingerprint, trustedCommandFingerprint, trustedConfigurationFingerprint and validationChanged, and per-check executor, commandIdentity, exitCode, signal and timedOut. Runner also binds terminal confirmation with validationTupleFingerprint. These are not additional role output fields: return only the supplied closed schema; Worker checks contain only checkId, command, status and evidence.
+The supplied finalizationGuidance identifies the fingerprint domain. When selection is "file" and its skillPath is included in validationInfrastructure, validationInfrastructureFingerprint is SHA256(JSON.stringify({infrastructure, finalizationFile})): infrastructure is the existing infrastructure digest with that selected label excluded, and finalizationFile is the verified identity-bound selected-file fingerprint. A raw digest over all inventory paths is a different domain; that difference alone is not evidence of drift. Legacy "skill" and fallback decisions retain their existing fingerprint algorithms. Do not recompute or replace Runner bindings.
+Review content, complete ordered checks and direct evidence, task-authorized inventory changes, and exact content, infrastructure, selected-guidance, command and configuration bindings independently. Reject actual mismatches and insufficient evidence; Runner ownership is not semantic approval. Never rerun reserved checks or manage Runner CLI or admission to review or repair evidence.`;
+
+const TERMINAL_EVIDENCE_INSTRUCTIONS = `${TRUSTED_TIMING_INSTRUCTIONS}
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
+Read the actual selected finalization guidance and its mandatory references under existing read authority, or applicable repository guidance when none is selected. Assess the resulting complete procedure, including added checks and their positions, against that guidance. Reject ordering violations; passing checks alone do not establish procedural compliance. ${PROCEDURE_ORDER_INSTRUCTIONS}
+Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
+${EXTERNAL_ACCEPTANCE_CONFIRMATION_INSTRUCTIONS}
+Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
+Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.`;
+
 export const REVIEW_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
 
 Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence, not candidate review or generic commit preparation.
-${TRUSTED_TIMING_INSTRUCTIONS}
-Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
-Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
-Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+${TERMINAL_EVIDENCE_INSTRUCTIONS}
 For APPROVED, set finalizationFindingIds to []; set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
@@ -135,7 +158,7 @@ Self-confirmation findings require fixing and cannot be disputed or arbitrated. 
 Review the complete current result as a semantic candidate. Do not run the project finalization procedure, attest finalization evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT. Do not create a commit.
 ${PREFINALIZATION_VALIDATION_INSTRUCTIONS}
 For CHANGED, use only when you changed repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
-For UNCHANGED, use only when you found no problem and changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
+For UNCHANGED, use only when no actionable problem remains and you changed no repository content; provide summary and set reason, question, and whyBlocked to "", and options and evidence to [].
 For BLOCKED, use only for external environment constraints affecting work not delegated to a selected runner-trusted command. Set summary, question, and whyBlocked to "", and options to []; provide reason and evidence.
 For PRODUCT_DECISION_REQUIRED, set summary and reason to ""; use the product-decision fields.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -144,8 +167,9 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS = `Review the candidate changes and verify that they are correct, idiomatic, minimal, and consistent with the project's conventions.
 
 This primary confirmation does not replace independent candidate review when the selected mode requires it.
-Do not modify the repository. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
+Do not modify the repository. Return CLEAN only when no actionable problem remains; otherwise return concrete findings without editing the content.
 Do not run or attest project finalization, validate terminal evidence, or perform generic commit preparation; those remain owned by FINALIZE, CONFIRM, and COMMIT.
+${VALIDATION_WORK_REVIEW_INSTRUCTIONS}
 For CLEAN, set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings to []; use the product-decision fields.
@@ -153,11 +177,8 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 
 export const CLEAN_CONFIRM_INSTRUCTIONS = `Confirm the finalized changes are correct, idiomatic, minimal, consistent with the project's conventions, and ready for the authorized commit.
 
-Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence. Return CLEAN only when there are no problems; otherwise return concrete findings without editing the content.
-${TRUSTED_TIMING_INSTRUCTIONS}
-Verify the exact required-check evidence and reject omissions, skips, substitutions, weakening, fingerprint mismatch, or validation-infrastructure changes that this planned commit does not authorize.
-Return finalizationFindingIds as the unique subset of finding IDs concerning only finalization evidence and requiring no repository edit. It must be empty unless validationChange is REJECTED. Split mixed evidence and content concerns into separate findings; content findings must never appear in this subset. Pure evidence rejection reruns the complete finalization procedure; content findings follow ordinary repair.
-Use validationChange UNCHANGED when no inventory or infrastructure change occurred and validation evidence is sufficient, ACCEPTED with validationEvidence when an authorized change remains complete, or REJECTED with validationEvidence and a finding when evidence is insufficient or a change is evasive or unauthorized. Evidence rejection is valid even when inventories are unchanged.
+Do not modify the repository. This is the distinct terminal confirmation over the finalized content and evidence. Return CLEAN only when no actionable problem remains; otherwise return concrete findings without editing the content.
+${TERMINAL_EVIDENCE_INSTRUCTIONS}
 For CLEAN, set finalizationFindingIds to []; set question and whyBlocked to "", and findings, options, and evidence to [].
 For FINDINGS, provide one or more findings with unique stable R-prefixed numeric IDs, a repository-relative file, and populated problem, reason, and suggestedAction fields; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findings, finalizationFindingIds, and validationEvidence to [], and validationChange to UNCHANGED; use the product-decision fields.
@@ -186,8 +207,12 @@ Do not weaken sandboxing or grant network or host temporary-directory access to 
 ${PRODUCT_DECISION_INSTRUCTIONS}
 Otherwise, return each FIX or DISPUTE decision using the provided schema.`;
 
-const FINALIZATION_RESULT_INSTRUCTIONS = `Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+const FINALIZATION_RESULT_INSTRUCTIONS = `${VALIDATION_POLICY_RESULT_INSTRUCTIONS}
+Use PASS only after every agent-executed required check succeeds without being skipped, excluded, substituted, replaced, or weakened. Return the complete requiredChecks and validationInfrastructure actually used, and exactly one ordered checks entry for every required check with bounded direct evidence. Return NOT_RUN only for a command explicitly listed as runner-trusted in the turn context; the runner executes that persisted vector before it accepts the gate. Do not use any other host-reported or user-attested results.
+${PROCEDURE_ORDER_INSTRUCTIONS}
+${FINALIZATION_EVIDENCE_INSTRUCTIONS}
 Each checks entry has exactly checkId, command, status and evidence. Match checkId and command exactly to requiredChecks at the same position. Each check's evidence array is nonempty, at most 32 items, each concise plain text up to 4000 characters. A Worker PASS may include reserved NOT_RUN placeholders; only Runner replacement can supply their execution evidence.
+Post-completion acceptance that the task or clarifications explicitly assign to the supervising operator or another owner is not part of this inventory: do not add or run it. PASS covers only the pipeline-owned inventory; list that acceptance in the summary as pending external work with its owner and timing, never as run or passed. This never permits removing or weakening an established check.
 ${TRUSTED_TIMING_INSTRUCTIONS}
 Changes to package scripts, test discovery, test runners, validation configuration, the check inventory, or its infrastructure paths are allowed only when this planned commit requires them; never make them merely to evade an environmental blocker.
 Do not weaken sandboxing or grant network or host temporary-directory access to make validation pass.
@@ -215,6 +240,8 @@ Never stage, inspect an index-relative diff, prepare a commit, create a commit o
 ${VALIDATION_INFRASTRUCTURE_INSTRUCTIONS}
 ${FINALIZATION_RESULT_INSTRUCTIONS}`;
 
+const FINALIZATION_REFERENCE_INSTRUCTIONS = `Read the exact selected entry and its mandatory repository references under existing read authority. Include the selected entry and references controlling validation commands or gate behavior in validationInfrastructure; classify other documents by their actual responsibility. Selection grants no parent-directory or external sibling access, recursive retrieval, substitution, or late fallback.`;
+
 export function finalizationBootstrapInstructions({
   selection,
   skillPath,
@@ -225,7 +252,7 @@ export function finalizationBootstrapInstructions({
   if (selection === "fallback") {
     return "No finalization skill guidance is selected. Derive the complete finalization gate from repository instructions and project-defined checks; do not skip validation.";
   }
-  return `The frozen finalization skill or Markdown procedure is ${skillPath}. Read only that exact confined Markdown file, do not substitute another path, and include it in validationInfrastructure.`;
+  return `The frozen finalization skill or Markdown procedure is ${skillPath}. ${FINALIZATION_REFERENCE_INSTRUCTIONS}`;
 }
 
 export function finalizationGuidanceInstructions({
@@ -239,6 +266,7 @@ export function finalizationGuidanceInstructions({
 For PASS, FAIL, or BLOCKED, set skillPath to "". Do not use SKILL_MISSING or SKILL_INVALID when no skill is selected.`;
   }
   return `The frozen finalization skill or Markdown procedure is ${skillPath}. Validate that exact confined Markdown file before following it; do not substitute another path or fall back to different guidance.
+${FINALIZATION_REFERENCE_INSTRUCTIONS}
 This frozen skill must remain present in validationInfrastructure. If it is missing or invalid, report SKILL_MISSING or SKILL_INVALID; repairing guidance requires a new run.
 For PASS, FAIL, SKILL_MISSING, SKILL_INVALID, or BLOCKED, set skillPath to ${JSON.stringify(skillPath)}.`;
 }
@@ -250,6 +278,7 @@ Do not stage changes yourself, modify project content, amend history, bypass hoo
 export const DISPUTE_RECONSIDERATION_INSTRUCTIONS = `Reconsider the disputed findings against the task, plan, repository, diff, and Worker evidence.
 
 Do not modify the repository. Return WITHDRAW or UPHOLD with a concise reason for every disputed finding using the provided schema.
+${VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS}
 For RESOLVED, return exactly one decision per dispute; every decision requires reason, while evidence may be []. Set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set decisions to []; use the product-decision fields.
 ${PRODUCT_DECISION_INSTRUCTIONS}`;
@@ -257,10 +286,12 @@ ${PRODUCT_DECISION_INSTRUCTIONS}`;
 export const FINDING_ARBITRATION_INSTRUCTIONS = `Resolve the disputed finding from the task, plan, repository, diff, and evidence, choosing the correct outcome using the provided schema.
 
 Do not modify the repository or rewrite requirements. Always provide rationale.
+${VALIDATION_WORK_ADJUDICATION_INSTRUCTIONS}
 For WORKER_CORRECT or REVIEWER_CORRECT, set question and whyBlocked to "", and options and evidence to [].
 For REQUIREMENT_AMBIGUOUS, use the product-decision fields.`;
 
 export const STAGNATION_INSTRUCTIONS = `Diagnose why the implementation correction loop is not converging and choose the minimal valid next direction using the provided schema.
+${HISTORICAL_VALIDATION_INSTRUCTIONS}
 Always provide rationale.
 For CONTINUE_FIXES or REWORK_IMPLEMENTATION, set findingIds, options, and evidence to [], and reason, question, and whyBlocked to "".
 For RECONSIDER_FINDINGS, provide one or more unique current Reviewer findingIds; set reason, question, and whyBlocked to "", and options and evidence to [].
@@ -275,7 +306,6 @@ export function customExecutionPrompt(prompt) {
     PLAN_COMPATIBILITY_INSTRUCTIONS,
     REPOSITORY_DISCOVERY_INSTRUCTIONS,
     APPLICABILITY_INSTRUCTIONS,
-    BOOTSTRAP_INSTRUCTIONS,
     BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
     BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
     BOOTSTRAP_CORRECTION_INSTRUCTIONS,
@@ -298,10 +328,6 @@ export function customExecutionPrompt(prompt) {
       ? CUSTOM_FINALIZATION_INSTRUCTIONS
       : base
           .replace(
-            "the repository's ordinary fast gate for each step plus only slow checks whose documented guarantees that exact step affects",
-            "only checks required by that step's agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
-          )
-          .replace(
             "the ordinary fast gate and only slow checks whose documented guarantees that step affects",
             "only checks required by the agreed criteria and explicitly selected coding requirements; semantic-only steps may have no executable checks",
           )
@@ -310,20 +336,12 @@ export function customExecutionPrompt(prompt) {
             "Staging and commit preparation are forbidden throughout custom execution.",
           )
           .replace(
-            "Generic commit preparation belongs only to COMMIT.",
-            "No custom phase permits generic commit preparation.",
-          )
-          .replace(
-            "Express an applicable content check against HEAD or explicit trees instead of the index.",
-            "Validate the inspected custom inputs and outputs without staging or requiring Git.",
-          )
-          .replace(
             "For CHANGED, use only when you changed repository content;",
             "For CHANGED, use only when you changed workspace content or result data;",
           )
           .replace(
-            "For UNCHANGED, use only when you found no problem and changed no repository content;",
-            "For UNCHANGED, use only when you found no problem and changed neither workspace content nor result data;",
+            "For UNCHANGED, use only when no actionable problem remains and you changed no repository content;",
+            "For UNCHANGED, use only when no actionable problem remains and you changed neither workspace content nor result data;",
           )
           .replaceAll(", and Git history", "")
           .replaceAll("planned commit", "planned step")
@@ -333,7 +351,8 @@ export function customExecutionPrompt(prompt) {
 }
 
 export const WRITABLE_RESULT_RESTATEMENT_INSTRUCTIONS = `Restate the result of the retired Worker turn using the exact advertised schema.
+${VALIDATION_POLICY_RESULT_INSTRUCTIONS}
 Selected runner-trusted commands must never execute inside an agent turn. Their sandbox limitations must not cause BLOCKED; use BLOCKED only for external environment constraints affecting work not delegated to a selected runner-trusted command.
 This is a read-only result correction, not another implementation or finding-resolution effect. Do not modify, stage, commit, finalize, execute validation commands, or replay any work. Inspect the preserved candidate and original turn facts below. The original task and plan are context, not authorization to implement them again.
-Return only claims supported by inspected unchanged content and the original blockers. Never invent a FIX or DISPUTE disposition, withdraw a blocker, or infer completion from a malformed or missing response. If the result cannot be established safely, return BLOCKED with the missing proof. Preserve a current environment blocker or genuinely required product decision. Keep custom criterion evidence separate from the status envelope.
+Return only claims supported by inspected unchanged content and the original blockers. Never invent a FIX, DISPUTE or containment disposition or infer completion from a malformed or missing response. If the result cannot be established safely, return BLOCKED with the missing proof. Preserve a current environment blocker or genuinely required product decision. Keep custom criterion evidence separate from the status envelope.
 A valid result still requires every original convergence, review, finalization, confirmation and effect gate. Do not run the required-check inventory; it belongs to FINALIZE. Rejected responses are unavailable and must not be reconstructed from provider-private storage.`;

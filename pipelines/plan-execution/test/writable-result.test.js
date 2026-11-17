@@ -816,12 +816,18 @@ test("malformed resolution retains original blockers and charges its mutation on
     ...resolution({ id: "R1", decision: "FIX" }),
     evidence: ["PRIVATE_REJECTED_VALUE"],
   };
+  const disposition = resolution({ id: "R1", decision: "FIX" });
+  disposition.decisions[0].reason =
+    "Retain the historical early execution without validation credit.";
+  disposition.decisions[0].evidence = [
+    "All later checks remain assigned to FINALIZE.",
+  ];
   const fixture = await createFixture(t, {
     workReviewer: [reviewFindings("R1"), reviewApproved()],
     workWorker: [
       implementationCompleted(),
       badResolution,
-      resolution({ id: "R1", decision: "FIX" }),
+      disposition,
       finalizationPassed(),
     ],
     async onRoleRun(_role, request) {
@@ -835,6 +841,17 @@ test("malformed resolution retains original blockers and charges its mutation on
   const done = await fixture.run();
   assert.equal(done.pipelineState.workflowState, "DONE");
   assert.equal(done.counters.fixRounds, 1);
+  assert.deepEqual(
+    done.pipelineState.workReports.find(
+      ({ phase }) => phase === "RESOLVE_FINDINGS",
+    ).decisions,
+    disposition.decisions,
+  );
+  const terminal = fixture.calls.reviewer.at(-1);
+  assert.ok(terminal.recoveryPrompt.includes(disposition.decisions[0].reason));
+  assert.ok(
+    terminal.recoveryPrompt.includes(disposition.decisions[0].evidence[0]),
+  );
   assert.deepEqual(
     resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
     ["workspace-write", "read-only"],

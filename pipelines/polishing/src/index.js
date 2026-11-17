@@ -21,11 +21,13 @@ import {
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   createFinalizationRecovery,
   finalizationFeedbackFindings,
+  finalizationDiagnostic,
   findingFingerprint,
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
 } from "./workflow-contract.js";
 
 export {
@@ -51,6 +53,7 @@ export {
   NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  RESOLUTION_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -145,6 +148,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "finalization_cannot_pass",
   "finalization_evidence_rejected",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
@@ -196,9 +200,13 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The bounded automatic terminal-confirmation correction remains invalid.",
   lazy_output_invalid:
     "The bounded automatic lazy checkpoint correction remains invalid.",
+  resolution_output_invalid:
+    "The bounded read-only finding-resolution report restatement remains invalid.",
   review_output_invalid:
     "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
+  handoff_whitespace_rejected:
+    "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
   internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
     "The configured repository-local artifact path is not ignored.",
@@ -206,6 +214,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   no_progress: "The correction loop reached a bounded no-progress condition.",
   proactive_clarification:
     "Optional proactive polishing clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before polishing can continue.",
   project_configuration_changed:
@@ -225,6 +235,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "bootstrap_inventory_capacity_exhausted",
   "confirmation_output_invalid",
@@ -233,6 +244,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 
@@ -250,6 +262,8 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   if (
     pause.reason === "internal_failure" &&
     typeof pause.diagnosticClass === "string" &&
@@ -265,8 +279,34 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(run) {
+function publicEvidence(run, readOnlySnapshotChanges) {
   const pause = run.pause;
+  if (
+    pause.reason === "internal_failure" &&
+    pause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+    pause.diagnostic?.role === "worker" &&
+    pause.diagnostic?.phase === "finalization" &&
+    pause.diagnostic?.contract === "finalization"
+  ) {
+    const { field, constraint } = finalizationDiagnostic(pause.diagnostic);
+    return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
+  if (pause.reason === "handoff_whitespace_rejected") {
+    return Object.freeze([
+      pause.code === "ERR_POLISHING_HANDOFF_WHITESPACE"
+        ? "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged."
+        : "Index effect: none.",
+    ]);
+  }
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (pause.reason === "output_exhausted") {
     return Object.freeze([
       `Suspended role: ${pause.role}.`,
@@ -318,7 +358,9 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+// The root registry injects the Git-owned label normalizer; a direct
+// uncomposed call has none and reports the diagnosis as unavailable.
+function projectPause(run, { readOnlySnapshotChanges } = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -412,7 +454,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run),
+    evidence: publicEvidence(run, readOnlySnapshotChanges),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -443,6 +485,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -479,6 +525,24 @@ function validateResumeAction(run, action) {
     )
       return;
     throw new Error("Semantic finalization retry is not applicable.");
+  }
+  const correction = state.resolutionCorrection;
+  if (
+    run.pause?.reason === "resolution_output_invalid" ||
+    (run.pause?.reason === "environment_blocked" &&
+      correction?.stage === "blocked")
+  ) {
+    if (
+      action === null &&
+      run.pause.resumeState === "RESOLVE_FINDINGS" &&
+      correction?.stage ===
+        (run.pause.reason === "environment_blocked"
+          ? "blocked"
+          : "exhausted") &&
+      Number.isSafeInteger(correction.additionalAttempts + 2)
+    )
+      return;
+    throw new Error("Finding-resolution restatement retry is not applicable.");
   }
   if (state.candidateMigrationPending && action === null) {
     return;
@@ -1113,9 +1177,17 @@ export function migratePolishingStateV17(run) {
   });
 }
 
+export function migratePolishingStateV19(run) {
+  // Shape-only: historical rejections and lost reports are never inferred.
+  return Object.freeze({
+    ...run.pipelineState,
+    resolutionCorrection: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 19,
+  stateVersion: 22,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1141,6 +1213,15 @@ export const polishingPipeline = Object.freeze({
     17: migratePolishingStateV17,
     // Preserve existing path/fallback decisions and consumed-effect evidence.
     18: (run) => Object.freeze({ ...run.pipelineState }),
+    19: migratePolishingStateV19,
+    // Basis-less saved reports keep the admission they were accepted under.
+    20: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    21: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

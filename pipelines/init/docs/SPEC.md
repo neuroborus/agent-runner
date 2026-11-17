@@ -550,7 +550,9 @@ Completed setup is verification-only. Failure or cancellation preserves resource
 and publication records; setup never stages, commits or launches another pipeline.
 Operator pause/cancellation validates the preserved suspended checkpoint,
 including a reserved proposal turn or pending clarification editor. Resume of a
-pause restores that checkpoint; cancellation is terminal. Root safety blockers
+pause restores that checkpoint; cancellation is terminal. A settled pause also
+accepts a pending fresh cancellation at its current revision, which reconciliation
+wraps once around the restored checkpoint. Root safety blockers
 retain reserved read-only bindings without granting continuation through drift.
 
 CLI status and MCP status/wait expose placement, exact reusable selector,

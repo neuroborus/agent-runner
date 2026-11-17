@@ -121,7 +121,11 @@ export function createStopService({
             "ERR_RUN_TERMINAL",
           );
         }
-        if (current.pause?.reason === "operator_paused") {
+        // A settled pause accepts only a fresh cancellation at its revision.
+        if (
+          current.pause?.reason === "operator_paused" &&
+          kind === "pause_requested"
+        ) {
           reject(
             "An operator pause is already effective; retry its original request.",
             "ERR_STOP_PENDING",

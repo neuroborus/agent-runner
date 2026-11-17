@@ -330,6 +330,15 @@ Default commit inputs retain their existing session-context keys, including
 pending source-fork recovery bindings; adding selection metadata cannot refork
 the source or invalidate an unfinished checkpoint.
 
+Pipeline state version 8 persists new custom baselines in the closed compact
+form: schema version, workspace and project paths equal to the run project,
+empty output paths, a non-negative entry count, the entry digest, both
+fingerprints and exactly the clarification and plan artifact exemptions. Any
+unknown, scope or link-resolution field fails closed. The identity version-7
+migration rewrites no state; legacy full baselines keep their representation
+and exact comparison, and a version-7 runtime refuses compact baselines as
+skew. Authoring never refreshes its baseline, so no capacity limit remains.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -365,7 +374,10 @@ position, logical turn, and preceding pause. Resuming an already paused
 checkpoint restores its blockers and pending editor authorization without
 consuming them. Session reconstruction uses frozen roles, mode, settings, and
 source lineage; an interrupted role does not refork its source. `CANCELED` is
-terminal and inspectable, and every resume path rejects it.
+terminal and inspectable, and every resume path rejects it. A settled pause
+accepts only a fresh cancellation at its current revision; until reconciliation
+validation accepts that pending cancellation over the preserved pause checkpoint,
+which reconciliation wraps once as `operator_canceled` without provider work.
 
 Every planning turn remains repository-read-only. Stop reconciliation requires
 an unchanged baseline and preserves the durable draft and declared artifacts.
@@ -602,8 +614,10 @@ unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. A normalized
 `authentication_required` disposition enters the fixed durable
 reauthentication pause after that guard; other authentication evidence,
-forbidden-operation permission denials, protocol failures, and isolation
-failures remain terminal. Denied input and native provider text are discarded.
+unexposed-tool and unclassified-Bash permission denials whose refusal cause is
+unknown, legacy `permission_forbidden_operation` records, protocol failures,
+and isolation failures remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)). Denied input and native provider text are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
@@ -748,7 +762,11 @@ persisted hashes of `task.md`, optional `context.md`, and accepted
 `clarifications.md`. Unauthorized drift pauses and invalidates dependent drafts
 and reviews. Preserve the preflight repository snapshot as the run baseline,
 compare it before and after every agent turn and around the final write, and
-also wrap each turn in its own full snapshot check. Any other repository
+also wrap each turn in its own full snapshot check. Custom runs persist the
+bounded read-only projection of a complete directory inspection: entry count,
+ordered entry digest and fingerprints with the exact artifact exemptions, never
+a per-entry array, so baseline size stays independent of the workspace tree.
+Every comparison still inspects the complete directory. Any other repository
 mutation pauses instead of advancing. Before creating any repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked, including custom authoring. Ordinary-directory
@@ -823,8 +841,8 @@ No large turn implementation moves into the policy module.
   including input drift, read-only mutation rejection, fresh recovery context,
   and retained activity until reconciliation.
 - Cover finite redacted Claude classification, durable reconstruction of a
-  failed read-only request, and terminal authentication and forbidden-operation
-  boundaries without retaining native provider text.
+  failed read-only request, and terminal authentication, unexposed-tool, and
+  unclassified-Bash permission boundaries without retaining native provider text.
 - Cover redacted terminal adapter diagnostics, including forbidden delegated
   turns, through durable state and the shared CLI/MCP pause projection.
 

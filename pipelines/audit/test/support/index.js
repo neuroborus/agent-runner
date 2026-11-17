@@ -141,6 +141,7 @@ export function fixture(
         return { path, contentHash: artifactHash };
       },
       snapshot: async () => ({ contentFingerprint: HASH }),
+      baseline: async () => ({ contentFingerprint: HASH }),
       assertUnchanged: async () => {
         if (changed) throw new Error("Workspace changed");
       },

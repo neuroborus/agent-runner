@@ -646,6 +646,10 @@ async function createFixture(
 
   if (planKind === "custom") {
     const gitSafety = runtime.git;
+    const ignoredPaths = (allowedPaths) => [
+      "task/clarifications.md",
+      ...allowedPaths.map((path) => relative(projectPath, path)),
+    ];
     runtime.workspace = {
       kind: "directory",
       async snapshot(options) {
@@ -655,7 +659,33 @@ async function createFixture(
           entries: [],
         };
       },
-      assertUnchanged: (snapshot) => gitSafety.assertUnchanged(snapshot),
+      async baseline({ allowedPaths = [] } = {}) {
+        const fingerprint = await repositoryFingerprint(
+          projectPath,
+          ignoredPaths(allowedPaths),
+        );
+        const baseline = {
+          schemaVersion: 1,
+          workspacePath: projectPath,
+          outputPaths: [],
+          entryCount: 0,
+          entriesHash: fingerprint,
+          contentFingerprint: fingerprint,
+          identityFingerprint: fingerprint,
+          allowedPaths,
+          projectPath,
+        };
+        return (await onPreflight?.(baseline)) ?? baseline;
+      },
+      assertUnchanged: (baseline) =>
+        gitSafety.assertUnchanged(
+          Object.hasOwn(baseline, "entries")
+            ? baseline
+            : {
+                fingerprint: baseline.entriesHash,
+                ignoredPaths: ignoredPaths(baseline.allowedPaths),
+              },
+        ),
     };
     runtime.git = new Proxy(
       {},
@@ -785,7 +815,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 7);
+  assert.equal(planAuthoringPipeline.stateVersion, 8);
   const currentState = createPlanAuthoringState();
   const legacyAuthenticationState = { ...currentState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
@@ -3547,6 +3577,119 @@ test("legacy authoring gains only explicit commit defaults and no custom authori
     }).settings,
     null,
   );
+});
+
+test("custom authoring persists a closed compact baseline and rejects malformed evidence", async (t) => {
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [{ ...ready(), criteria: CUSTOM_CRITERIA }, draft(CUSTOM_PLAN)],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  const baseline = result.pipelineState.repositoryBaseline;
+  assert.equal(Object.hasOwn(baseline, "entries"), false);
+  assert.deepEqual(baseline.allowedPaths, [
+    fixture.clarificationPath,
+    fixture.planPath,
+  ]);
+  const validate = (repositoryBaseline) =>
+    planAuthoringPipeline.workflow.validateRun({
+      ...result,
+      pipelineState: { ...result.pipelineState, repositoryBaseline },
+    });
+  validate(baseline);
+  const missingFingerprint = { ...baseline };
+  delete missingFingerprint.contentFingerprint;
+  for (const invalid of [
+    { ...baseline, unexpected: true },
+    { ...baseline, linkResolutions: [] },
+    { ...baseline, inspectionPaths: [fixture.projectPath] },
+    { ...baseline, excludePaths: [] },
+    { ...baseline, schemaVersion: 2 },
+    { ...baseline, workspacePath: fixture.taskPath },
+    { ...baseline, projectPath: fixture.taskPath },
+    { ...baseline, outputPaths: [join(fixture.projectPath, "reports")] },
+    { ...baseline, entryCount: -1 },
+    { ...baseline, entryCount: 1.5 },
+    { ...baseline, entriesHash: "0".repeat(63) },
+    { ...baseline, identityFingerprint: [baseline.identityFingerprint] },
+    missingFingerprint,
+    { ...baseline, allowedPaths: [...baseline.allowedPaths].reverse() },
+    { ...baseline, allowedPaths: [fixture.clarificationPath] },
+  ])
+    assert.throws(
+      () => validate(invalid),
+      /Plan-authoring directory baseline is invalid/u,
+    );
+});
+
+test("custom authoring resumes a legacy full baseline through its unchanged guards", async (t) => {
+  for (const drift of [false, true]) {
+    await t.test(drift ? "drift" : "unchanged", async (t) => {
+      let interrupt = true;
+      const fixture = await createFixture(t, {
+        planKind: "custom",
+        planner: [
+          { ...ready(), criteria: CUSTOM_CRITERIA },
+          draft(CUSTOM_PLAN),
+        ],
+        onPreflight: ({ allowedPaths }) =>
+          fixture.runtime.workspace.snapshot({ allowedPaths }),
+        onRoleRun(role) {
+          if (role === "reviewer" && interrupt) {
+            interrupt = false;
+            const error = new Error("Provider interrupted.");
+            error.recoverable = true;
+            throw error;
+          }
+        },
+      });
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "backend_unavailable");
+      const legacy = paused.pipelineState.repositoryBaseline;
+      assert.ok(Array.isArray(legacy.entries));
+      planAuthoringPipeline.workflow.validateRun(paused);
+      Object.assign(fixture.currentRun, {
+        activeTurn: { role: "reviewer", phase: "review" },
+        pause: null,
+        pipelineState: { ...paused.pipelineState, workflowState: "REVIEW" },
+      });
+      if (drift)
+        await writeFile(join(fixture.projectPath, "unexpected.txt"), "drift\n");
+
+      const resumed = await fixture.run();
+      assert.deepEqual(resumed.pipelineState.repositoryBaseline, legacy);
+      if (drift) {
+        assert.equal(resumed.pause.reason, "read_only_mutation");
+        assert.equal(fixture.calls.reviewer.length, 1);
+      } else {
+        assert.equal(resumed.pipelineState.workflowState, "DONE");
+        assert.equal(await readFile(fixture.planPath, "utf8"), CUSTOM_PLAN);
+      }
+    });
+  }
+});
+
+test("version seven migration preserves state and legacy baselines", () => {
+  const state = {
+    ...createPlanAuthoringState({
+      settings: { ...PLAN_DEFAULTS, planKind: "custom" },
+    }),
+    preflightComplete: true,
+    repositoryBaseline: {
+      schemaVersion: 1,
+      workspacePath: "/workspace",
+      entries: [],
+    },
+  };
+  const before = structuredClone(state);
+  const migrated = planAuthoringPipeline.migrations[7]({
+    pipelineState: state,
+  });
+  assert.deepEqual(migrated, before);
+  assert.notEqual(migrated, state);
+  assert.ok(Object.isFrozen(migrated));
+  assert.deepEqual(state, before);
 });
 
 test("the selected authoring kind rejects the other artifact format without coercion", async (t) => {

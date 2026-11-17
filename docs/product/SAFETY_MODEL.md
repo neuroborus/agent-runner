@@ -20,7 +20,9 @@ Each role turn receives the narrowest access required by its phase:
 
 The runner snapshots content, index state, `HEAD`, branch or detached context,
 local refs, remotes, and Git identity around turns. Read-only mutation is a
-safety failure. Writable turns still reject index, history, ref, remote, or
+safety failure. Its contamination stop names only the fixed changed snapshot
+domains when Git classified them, never their values, and otherwise reports
+them as unavailable. Writable turns still reject index, history, ref, remote, or
 identity changes. The runner never discards unexpected user work
 automatically.
 
@@ -48,7 +50,12 @@ write to a remote.
 
 Polishing never commits and keeps `HEAD` unchanged. Its handoff stages the
 complete finalized and reviewed change set, verifies that nothing accepted was
-left unstaged, and leaves the result for the operator.
+left unstaged, and leaves the result for the operator. Handoff-owned staging and
+direct inspection disable hooks per invocation, so workspace hooks cannot run
+with Runner authority. Configuration and ignored-content fingerprint scope stay
+unchanged. This is specific to handoff: authorized plan-execution commits retain
+their hooks and hook-failure pauses. Complete handoff recovery only verifies the
+effect; partial or contaminated effects remain rejected.
 
 Execution never adopts an external commit as completed plan progress. A current
 planned subject already at HEAD, or external HEAD movement from the saved
@@ -65,14 +72,62 @@ Legacy accepted context is rediscovered before further writable work.
 
 No pipeline may push, mutate a remote ref, call a hosting service to write,
 change a remote, alter Git identity, amend, reset, rebase, stash, switch
-branches, or create tags. A failed hook or unexpected repository state pauses
-instead of being bypassed.
+branches, or create tags. A failed authorized commit hook or unexpected
+repository state pauses instead of being bypassed.
+
+Git-owned read-only verification distinguishes an untouched missing commit from
+exact authorized full staging followed by executor failure. Only unchanged
+controls and accepted content plus complete path, blob, mode and semantic-index
+proof permit the latter classification. Execution retains the staged partial
+effect, original bindings and consumed authorization in `commit_failed`;
+repeated or reconstructed resume verifies only and never restages, retries
+readiness/commit or infers completion. Incomplete, mismatched or hidden staging
+remains a contract violation. Pre-executor refusal proof permits retirement only
+with an unchanged original index as well as controls and content; observed
+staging contradicts that proof and blocks retirement. See the
+[commit recovery contract](../../pipelines/plan-execution/docs/SPEC.md#137-commit).
+This grants no automatic recovery for historical rejected pauses.
+
+Handoff and consumed-commit staging share a compatible-domain content proof.
+Exact stored equality remains supported; unequal regular-file bytes require
+complete structural equality and isolated SHA-1 check-in hashing matching the
+actual staged blob. Only native explicit text line-ending resolutions are in
+scope; automatic/ambiguous conversion, filters/LFS, ident and encoding remain
+excluded. Hidden flags on changed paths reject before either acceptance branch;
+execution keeps its stricter whole-index guards. Index stat caches never prove
+content. Scratch separation from canonical worktree and per-worktree/common Git
+controls is checked before allocation, independently of repository-discovery
+isolation. The private hasher cannot execute repository helpers or write objects,
+and awaits retirement before owned cleanup. See the [Git boundary](../ARCHITECTURE.md)
+for exact supported resolutions and failure rules. This proof changes neither
+one-shot effect authority nor verification-only recovery.
 
 Change measurement is read-only and bound to an inspected content fingerprint
 and immutable baseline. It counts the final workspace rather than summing
 staged and unstaged diffs, excludes ignored untracked files, and reports binary
 changes separately. Link targets are never followed to obtain line counts.
 Measurement grants no staging, commit, refinement, or acceptance authority.
+
+Git-content observation rejects HEAD/index gitlinks (including submodules) and
+non-ignored embedded repository candidates with bounded
+`ERR_UNSUPPORTED_GIT_PATH` diagnostics. Unchanged, deleted, index-hidden and
+allowed gitlinks still reject. Status/diff suppress nested worktree inspection;
+independent literal tree/index checks prevent that suppression from hiding a
+material path. Metadata-only source-directory checks reject `.git` markers and
+bare layouts without executing nested Git or reading its configuration. Directory
+bindings are rechecked around content reads; a prior absence observation never
+authorizes later execution. Ignored untracked trees remain outside Git-content
+scope, while ordinary files, confined replacements and leaf links retain their
+content guards.
+
+Rejection blocks snapshot-based acceptance, measurement, projection,
+preservation, commit verification and polishing handoff. It grants no automatic
+removal, input rewrite or effect replay. Supported fingerprints and durable
+shapes stay unchanged; historical measurements, completed provenance and
+consumed effects are preserved without granting current acceptance. Filesystem
+control discovery remains Git-independent: confined `gitdir:`/`commondir` reads,
+bare/control/link checks and supported read-only nested worktrees in directory
+workflows retain their separate contract.
 
 Git-owned source selection enumerates unchanged and ignored tracked worktree
 files as well as non-ignored untracked sources, retaining tracked deletions.
@@ -135,6 +190,15 @@ outputs with a native permission profile; Claude uses authenticated command
 mounts and omits native editing tools for directory turns. Both check protected
 content after every retired attempt, including failures before reconstruction. Directory
 access cannot request a Git commit, and unsupported providers fail closed.
+
+Codex's named-profile route refuses existing regular-file output roots before
+new writable preparation or native work. Backend-owned readiness inspects active
+eventual writers, even when startup access is read-only, and rechecks root shapes
+before invocation despite cached capabilities. Read-only file declarations and
+directory outputs retain exact authority; refusal never widens grants to a parent
+or changes a frozen selection. Existing recovery, access-specific receipts and
+consumed-effect accounting remain authoritative.
+
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 
@@ -437,7 +501,9 @@ no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host
 pass can still produce only a generic isolated nonzero exit result.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
-permissions. Read-only bootstrap and legacy discovery precede writable entry;
+permissions. Both pipelines admit only `assigned-executor` and legacy saved
+reports without `basis`; `read-only-turn` observations stay saved, unproved and
+never admitted. Read-only bootstrap and legacy discovery precede writable entry;
 missing authority or availability blocks without invoking a writable role. Each
 new writable checkpoint rechecks the saved request under configuration guards,
 cancellation, the execution lease, and durable resource ownership.
@@ -688,9 +754,11 @@ Claude bubblewrap grammar, rejects malformed or weakened input before spawning,
 and strengthens the validated invocation into one user, PID, mount, and network
 boundary with private `/proc`, `/tmp`, and `/run`, a read-only host root,
 access-specific workspace writes, and read-only Git metadata. Its launcher file
-is non-writable and its private allocation is outside command write authority;
-it pins canonical host `bwrap` rather than resolving it through a
-workspace-writable path. The
+is non-writable and its private allocation is outside command write authority,
+except for a validated owner-only directory Claude selects inside the private
+temporary directory; launcher controls stay hidden (see the
+[architecture contract](../ARCHITECTURE.md)). It pins canonical host `bwrap`
+rather than resolving it through a workspace-writable path. The
 launcher verifies an exact owner-read-only x64 or arm64 Runner seccomp filter,
 unlinks the verified resource, passes its sealed descriptor to bubblewrap, and
 executes bubblewrap directly once with the single validated user namespace.
@@ -715,8 +783,15 @@ They do not rely on broad shell-command denials that can misclassify compound
 inspection; collaboration, editing, and web restrictions remain explicit, and
 the sandbox continues to deny repository content writes, Git and remote
 mutation, credentials, process escape, network access, and host Unix sockets.
-Workspace-write turns retain their existing command denials and
-autonomous-write restrictions. Claude prepares every command against a
+Git workspace-write turns share that autonomous Bash envelope with the added
+Edit and Write tools; the proved sandbox, not a Git-subcommand rule, denies Git
+index, ref, tag, remote, configuration and identity changes, outside writes,
+network and Unix sockets under every access policy, while ordinary compound Git
+inspection succeeds. File-tool Git-metadata denials bind each resolved absolute
+protected directory, and a protected path with rule, glob or control
+characters fails before launch. Declared-directory turns keep their
+Git-subcommand denials, and receipts pinned under a prior policy fail closed.
+Claude prepares every command against a
 read-only workspace reservation; each turn makes both the spawning-parent
 policy and `PATH` select the authenticated launcher, which alone replaces that
 reservation with the authorized workspace access. Sandboxed commands can then

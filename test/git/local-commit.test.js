@@ -6,6 +6,7 @@ import {
   rename,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { createGitService, GitSafetyError } from "../../src/git/index.js";
+import {
+  createGitService,
+  GitSafetyError,
+  isolateGitEnvironment,
+} from "../../src/git/index.js";
+import { createFixtureGitBinary } from "../support/git.js";
 
 const executeFile = promisify(execFile);
 const SUBJECT = "feat(git): create authorized commit";
@@ -79,15 +85,17 @@ async function createFixture(t) {
   await writeFile(join(repositoryPath, "tracked.txt"), "initial\n");
   await runGit(repositoryPath, env, "add", ".gitignore", "tracked.txt");
   await runGit(repositoryPath, env, "commit", "-qm", "chore(test): initialize");
+  t.after(() => rm(workspace, { force: true, recursive: true }));
+  const gitBinary = await createFixtureGitBinary(workspace);
   let nextAuthorization = 0;
-  const createService = () =>
+  const createService = (serviceEnv = env) =>
     createGitService({
-      env,
+      env: serviceEnv,
+      gitBinary,
       authorizationIdFactory: () =>
         `commit-authorization-${(nextAuthorization += 1)}`,
     });
-  t.after(() => rm(workspace, { force: true, recursive: true }));
-  return { createService, env, repositoryPath };
+  return { createService, env, gitBinary, repositoryPath };
 }
 
 async function reviewedSnapshot(fixture, content = "reviewed\n") {
@@ -289,10 +297,11 @@ test("validates the gate before issuing and consuming authorization", async (t) 
   await service.consumeCommit(authorization, {
     consumePendingCommit: async () => {},
   });
-  await assert.rejects(
-    service.verifyCommit(authorization),
-    isGitError("ERR_COMMIT_NOT_CREATED"),
-  );
+  await assert.rejects(service.verifyCommit(authorization), (error) => {
+    assert.ok(isGitError("ERR_COMMIT_NOT_CREATED")(error));
+    assert.deepEqual(error.changes, []);
+    return true;
+  });
 });
 
 test("does not consume authorization when durable consumption fails", async (t) => {
@@ -318,6 +327,296 @@ test("does not consume authorization when durable consumption fails", async (t) 
       consumePendingCommit: async () => {},
     }),
   );
+});
+
+test("retains exact full staging after hygiene or hook refusal without a commit", async (t) => {
+  for (const failure of ["hygiene", "hook"]) {
+    await t.test(failure, async (t) => {
+      const fixture = await createFixture(t);
+      const expectedSnapshot = await reviewedSnapshot(
+        fixture,
+        failure === "hygiene" ? "reviewed  \n" : "reviewed\n",
+      );
+      if (failure === "hook") {
+        await writeFile(
+          join(fixture.repositoryPath, ".git", "hooks", "pre-commit"),
+          "#!/bin/sh\nexit 1\n",
+          { mode: 0o755 },
+        );
+      }
+      const { authorization, service } = await prepareAndConsume(
+        fixture,
+        expectedSnapshot,
+      );
+      await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+      await assert.rejects(
+        runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          ...(failure === "hygiene"
+            ? ["diff", "--cached", "--check"]
+            : ["commit", "-qm", SUBJECT]),
+        ),
+      );
+      const staged = await service.snapshot({
+        projectPath: fixture.repositoryPath,
+      });
+      assert.equal(staged.head, expectedSnapshot.head);
+      assert.notEqual(
+        staged.indexFingerprint,
+        expectedSnapshot.indexFingerprint,
+      );
+      for (const verifier of [service, fixture.createService()]) {
+        await assert.rejects(verifier.verifyCommit(authorization), (error) => {
+          assert.ok(isGitError("ERR_COMMIT_NOT_CREATED")(error));
+          assert.deepEqual(error.changes, ["index"]);
+          return true;
+        });
+      }
+      assert.deepEqual(
+        await service.snapshot({ projectPath: fixture.repositoryPath }),
+        staged,
+      );
+      await assert.rejects(
+        service.consumeCommit(authorization, {
+          consumePendingCommit: async () => assert.fail("must not replay"),
+        }),
+        isGitError("ERR_COMMIT_AUTHORIZATION_CONSUMED"),
+      );
+    });
+  }
+});
+
+test("recognizes full staging of deletions, executable files and leaf links", async (t) => {
+  const fixture = await createFixture(t);
+  await rm(join(fixture.repositoryPath, "tracked.txt"));
+  await writeFile(join(fixture.repositoryPath, "script.sh"), "exit 0\n", {
+    mode: 0o755,
+  });
+  await symlink("script.sh", join(fixture.repositoryPath, "link"));
+  const expectedSnapshot = await fixture
+    .createService()
+    .snapshot({ projectPath: fixture.repositoryPath });
+  const { authorization, service } = await prepareAndConsume(
+    fixture,
+    expectedSnapshot,
+  );
+  await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+  await assert.rejects(
+    service.verifyCommit(authorization),
+    (error) =>
+      isGitError("ERR_COMMIT_NOT_CREATED")(error) &&
+      error.changes.includes("index"),
+  );
+});
+
+test("recognizes full staging with split-index bookkeeping", async (t) => {
+  const fixture = await createFixture(t);
+  await runGit(
+    fixture.repositoryPath,
+    fixture.env,
+    "config",
+    "splitIndex.maxPercentChange",
+    "100",
+  );
+  await runGit(
+    fixture.repositoryPath,
+    fixture.env,
+    "update-index",
+    "--split-index",
+  );
+  const expectedSnapshot = await reviewedSnapshot(fixture);
+  const { authorization, service } = await prepareAndConsume(
+    fixture,
+    expectedSnapshot,
+  );
+  await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+  await assert.rejects(service.verifyCommit(authorization), (error) => {
+    assert.ok(isGitError("ERR_COMMIT_NOT_CREATED")(error));
+    assert.deepEqual(error.changes, ["index"]);
+    return true;
+  });
+});
+
+test("rejects incomplete, mismatched and semantic index effects without a commit", async (t) => {
+  for (const effect of [
+    "incomplete",
+    "blob",
+    "mode",
+    "ignored",
+    "assume-unchanged",
+    "skip-worktree",
+    "intent-to-add",
+    "resolve-undo",
+  ]) {
+    await t.test(effect, async (t) => {
+      const fixture = await createFixture(t);
+      const expectedSnapshot = await reviewedSnapshot(fixture);
+      const { authorization, service } = await prepareAndConsume(
+        fixture,
+        expectedSnapshot,
+      );
+      await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "add",
+        ...(effect === "incomplete" ? ["tracked.txt"] : ["-A"]),
+      );
+      if (effect === "blob") {
+        await writeFile(
+          join(fixture.repositoryPath, "tracked.txt"),
+          "different\n",
+        );
+        await runGit(fixture.repositoryPath, fixture.env, "add", "tracked.txt");
+        await writeFile(
+          join(fixture.repositoryPath, "tracked.txt"),
+          "reviewed\n",
+        );
+      } else if (effect === "mode") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-index",
+          "--chmod=+x",
+          "tracked.txt",
+        );
+      } else if (effect === "ignored") {
+        await writeFile(join(fixture.repositoryPath, "ignored.txt"), "extra\n");
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "add",
+          "-f",
+          "ignored.txt",
+        );
+      } else if (["assume-unchanged", "skip-worktree"].includes(effect)) {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-index",
+          `--${effect}`,
+          "tracked.txt",
+        );
+      } else if (effect === "intent-to-add") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "reset",
+          "-q",
+          "HEAD",
+          "--",
+          "untracked.txt",
+        );
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "add",
+          "-N",
+          "untracked.txt",
+        );
+      } else if (effect === "resolve-undo") {
+        const blob = (
+          await runGit(
+            fixture.repositoryPath,
+            fixture.env,
+            "rev-parse",
+            "HEAD:tracked.txt",
+          )
+        ).stdout.trim();
+        const updating = executeFile(
+          "git",
+          ["-C", fixture.repositoryPath, "update-index", "--index-info"],
+          {
+            env: fixture.env,
+          },
+        );
+        updating.child.stdin.end(
+          `0 ${blob}\ttracked.txt\n` +
+            [1, 2, 3]
+              .map((stage) => `100644 ${blob} ${stage}\ttracked.txt\n`)
+              .join(""),
+        );
+        await updating;
+        // Resolve a controlled conflict; Git retains its semantic undo record.
+        await runGit(fixture.repositoryPath, fixture.env, "add", "tracked.txt");
+      }
+      await assert.rejects(
+        service.verifyCommit(authorization),
+        (error) =>
+          isGitError("ERR_COMMIT_CONTRACT_VIOLATED")(error) &&
+          error.changes.includes("index"),
+      );
+    });
+  }
+});
+
+test("rejects content and control drift after staging without a commit", async (t) => {
+  for (const effect of [
+    "content",
+    "branch",
+    "refs",
+    "remote-configuration",
+    "identity",
+  ]) {
+    await t.test(effect, async (t) => {
+      const fixture = await createFixture(t);
+      const expectedSnapshot = await reviewedSnapshot(fixture);
+      const { authorization, service } = await prepareAndConsume(
+        fixture,
+        expectedSnapshot,
+      );
+      await runGit(fixture.repositoryPath, fixture.env, "add", "-A");
+      if (effect === "content") {
+        await writeFile(join(fixture.repositoryPath, "tracked.txt"), "drift\n");
+      } else if (effect === "branch") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "symbolic-ref",
+          "HEAD",
+          "refs/heads/other",
+        );
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-ref",
+          "refs/heads/other",
+          expectedSnapshot.head,
+        );
+      } else if (effect === "refs") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "update-ref",
+          "refs/heads/other",
+          expectedSnapshot.head,
+        );
+      } else if (effect === "remote-configuration") {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "remote",
+          "add",
+          "origin",
+          "https://example.test/repository.git",
+        );
+      } else {
+        await runGit(
+          fixture.repositoryPath,
+          fixture.env,
+          "config",
+          "user.name",
+          "Changed User",
+        );
+      }
+      await assert.rejects(
+        service.verifyCommit(authorization),
+        (error) =>
+          isGitError("ERR_COMMIT_CONTRACT_VIOLATED")(error) &&
+          error.changes.includes(effect),
+      );
+    });
+  }
 });
 
 test("rejects commit bodies and co-author trailers case-insensitively", async (t) => {
@@ -414,6 +713,74 @@ test("rejects commit identity overrides without a configuration change", async (
       error.changes.includes("commit-identity") &&
       !error.changes.includes("identity"),
   );
+});
+
+test("binds commit identity to the isolated executor environment", async (t) => {
+  for (const isolated of [true, false]) {
+    const fixture = await createFixture(t);
+    const ambientEnv = {
+      ...fixture.env,
+      EMAIL: "ambient@example.test",
+      GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+      GIT_AUTHOR_NAME: "Ambient Author",
+      GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+      GIT_COMMITTER_NAME: "Ambient Committer",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Counted User",
+    };
+    const service = fixture.createService(ambientEnv);
+    await writeFile(join(fixture.repositoryPath, "tracked.txt"), "reviewed\n");
+    const expectedSnapshot = await service.snapshot({
+      projectPath: fixture.repositoryPath,
+    });
+    const authorization = await service.prepareCommit({
+      expectedSnapshot,
+      subject: SUBJECT,
+      persistPendingCommit: async () => {},
+    });
+    await service.consumeCommit(authorization, {
+      consumePendingCommit: async () => {},
+    });
+    const commitEnv = isolated ? isolateGitEnvironment(ambientEnv) : ambientEnv;
+    await executeFile(
+      fixture.gitBinary,
+      [
+        "-C",
+        fixture.repositoryPath,
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-qam",
+        SUBJECT,
+      ],
+      { env: commitEnv },
+    );
+
+    if (isolated) {
+      await service.verifyCommit(authorization);
+      const { stdout } = await runGit(
+        fixture.repositoryPath,
+        fixture.env,
+        "show",
+        "--no-patch",
+        "--format=%an <%ae>%n%cn <%ce>",
+        "HEAD",
+      );
+      assert.equal(
+        stdout,
+        "Fixture User <fixture@example.com>\nFixture User <fixture@example.com>\n",
+      );
+    } else {
+      await assert.rejects(
+        service.verifyCommit(authorization),
+        (error) =>
+          isGitError("ERR_COMMIT_CONTRACT_VIOLATED")(error) &&
+          error.changes.includes("commit-identity") &&
+          !error.changes.includes("identity"),
+      );
+    }
+  }
 });
 
 test("rejects amended history with the wrong direct parent", async (t) => {
@@ -534,4 +901,75 @@ test("rejects branch switches and post-commit index changes", async (t) => {
         error.changes.includes(change),
       ),
   );
+});
+
+test("retains converted full staging in original and reconstructed commit verifiers", async (t) => {
+  const fixture = await createFixture(t);
+  const { repositoryPath, env } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "converted.txt text eol=crlf\n",
+  );
+  await writeFile(join(repositoryPath, "converted.txt"), "before\r\n");
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "configure text fixture");
+  await writeFile(join(repositoryPath, "converted.txt"), "after\r\n");
+  const baseline = await fixture
+    .createService()
+    .snapshot({ projectPath: repositoryPath });
+  const { authorization, service } = await prepareAndConsume(fixture, baseline);
+  await runGit(repositoryPath, env, "add", "-A");
+  const staged = await service.snapshot({ projectPath: repositoryPath });
+  assert.equal(
+    (await runGit(repositoryPath, env, "show", ":converted.txt")).stdout,
+    "after\n",
+  );
+  for (const verifier of [service, fixture.createService()]) {
+    await assert.rejects(verifier.verifyCommit(authorization), (error) => {
+      assert.equal(error.code, "ERR_COMMIT_NOT_CREATED");
+      assert.deepEqual(error.changes, ["index"]);
+      return true;
+    });
+  }
+  assert.deepEqual(
+    await service.snapshot({ projectPath: repositoryPath }),
+    staged,
+  );
+  await assert.rejects(
+    service.consumeCommit(authorization, {
+      consumePendingCommit: async () => assert.fail("must not replay"),
+    }),
+    { code: "ERR_COMMIT_AUTHORIZATION_CONSUMED" },
+  );
+});
+
+test("rejects same-size wrong blobs with clean cached stat during consumed verification", async (t) => {
+  const fixture = await createFixture(t);
+  const { repositoryPath, env } = fixture;
+  await writeFile(
+    join(repositoryPath, ".gitattributes"),
+    "tracked.txt text eol=crlf\n",
+  );
+  await runGit(repositoryPath, env, "add", "-A");
+  await runGit(repositoryPath, env, "commit", "-qm", "configure text fixture");
+  await runGit(repositoryPath, env, "config", "core.trustctime", "false");
+  await writeFile(join(repositoryPath, "tracked.txt"), "correct\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  const baseline = await fixture
+    .createService()
+    .snapshot({ projectPath: repositoryPath });
+  const { service, authorization } = await prepareAndConsume(fixture, baseline);
+  await writeFile(join(repositoryPath, "tracked.txt"), "mistake\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  await runGit(repositoryPath, env, "add", "-A");
+  await writeFile(join(repositoryPath, "tracked.txt"), "correct\r\n");
+  await utimes(join(repositoryPath, "tracked.txt"), 946684800, 946684800);
+  assert.equal(
+    (await runGit(repositoryPath, env, "diff", "--name-only")).stdout,
+    "",
+  );
+  for (const verifier of [service, fixture.createService()])
+    await assert.rejects(verifier.verifyCommit(authorization), {
+      code: "ERR_COMMIT_CONTRACT_VIOLATED",
+    });
 });

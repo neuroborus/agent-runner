@@ -206,6 +206,7 @@ export function createGitCommitService({
   assertSnapshot,
   authorizationIdFactory = randomUUID,
   contentFingerprintAgainst,
+  isFullStaging,
   identitySnapshot,
   refsFingerprints,
   runGit,
@@ -466,12 +467,31 @@ export function createGitCommitService({
       ) {
         changes.push("content");
       }
-      if (current.indexFingerprint !== normalized.expectedIndexFingerprint) {
-        changes.push("index");
+      const indexChanged =
+        current.indexFingerprint !== normalized.expectedIndexFingerprint;
+      if (indexChanged) {
+        if (
+          changes.length === 0 &&
+          (await isFullStaging(
+            current.projectPath,
+            normalized.expectedContentFingerprint,
+          ))
+        ) {
+          const verified = await inspectGate(normalized);
+          changes.push(
+            ...verified.changes.filter((change) => change !== "index"),
+          );
+          if (verified.current.indexFingerprint !== current.indexFingerprint) {
+            changes.push("index");
+          }
+        } else {
+          changes.push("index");
+        }
       }
       if (changes.length === 0) {
         throw new GitSafetyError("Authorized commit was not created.", {
           code: "ERR_COMMIT_NOT_CREATED",
+          changes: indexChanged ? ["index"] : [],
         });
       }
     } else if (current.head !== null) {

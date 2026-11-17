@@ -4,12 +4,17 @@ import { lstat, open, readlink, realpath } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 
 import {
-  decodeLine,
   decodeNullList,
+  decodeUtf8,
   GitSafetyError,
   hashBuffer,
   isWithin,
 } from "./command.js";
+import {
+  inspectContentDirectories,
+  supportedTrackedPaths,
+  unsupportedNestedRepository,
+} from "./nested.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
@@ -46,6 +51,15 @@ export async function pathsFingerprintAtRoot(
   const relativePaths = [
     ...new Set(locations.map(({ relativePath }) => relativePath)),
   ].sort();
+  const trackedPaths = await supportedTrackedPaths(
+    context,
+    repositoryPath,
+    await context.currentHead(repositoryPath),
+  );
+  const verify = await inspectContentDirectories(repositoryPath, [
+    ...trackedPaths,
+    ...relativePaths,
+  ]);
   const entries = await Promise.all(
     relativePaths.map((path) =>
       contentEntry(context, repositoryPath, path, {
@@ -54,10 +68,9 @@ export async function pathsFingerprintAtRoot(
       }),
     ),
   );
+  await verify();
   return hashEntries(entries);
 }
-
-const EMPTY_CONTENT_FINGERPRINT = hashEntries([]);
 
 function literalPathspec(relativePath) {
   return `:(top,literal)${relativePath}`;
@@ -181,24 +194,6 @@ async function hashRegularFile(filePath, includeContent = false) {
   }
 }
 
-async function indexTracksGitlink(runGit, repositoryPath, path) {
-  const result = await runGit(repositoryPath, [
-    "ls-files",
-    "--stage",
-    "-z",
-    "--",
-    literalPathspec(path),
-  ]);
-  return decodeNullList(result.stdout, "Git index entries").some((entry) => {
-    const separator = entry.indexOf("\t");
-    return (
-      entry.startsWith("160000 ") &&
-      separator !== -1 &&
-      entry.slice(separator + 1) === path
-    );
-  });
-}
-
 async function contentParentIsSafe(
   repositoryPath,
   absolutePath,
@@ -231,25 +226,6 @@ async function contentParentIsSafe(
       code: "ERR_UNSUPPORTED_GIT_PATH",
     },
   );
-}
-
-async function directoryReplacement(
-  runGit,
-  repositoryPath,
-  path,
-  missingAllowed,
-  cause,
-) {
-  if (
-    missingAllowed &&
-    !(await indexTracksGitlink(runGit, repositoryPath, path))
-  ) {
-    return deletedEntry(path);
-  }
-  throw new GitSafetyError("Changed repository path is not a file.", {
-    cause,
-    code: "ERR_UNSUPPORTED_GIT_PATH",
-  });
 }
 
 export async function normalizeRepositoryPath(repositoryPath, requestedPath) {
@@ -334,7 +310,7 @@ export async function inspectPathAtRoot(
     "--porcelain=v1",
     "-z",
     "--untracked-files=all",
-    "--ignore-submodules=none",
+    "--ignore-submodules=all",
     "--",
     pathspec,
   ]);
@@ -419,9 +395,8 @@ export async function contentEntry(
   context,
   repositoryPath,
   path,
-  { allowedPaths, missingAllowed, includeContent = false },
+  { missingAllowed, includeContent = false },
 ) {
-  const { runGit } = context;
   const absolutePath = resolve(repositoryPath, ...path.split("/"));
   if (
     !(await contentParentIsSafe(repositoryPath, absolutePath, {
@@ -447,60 +422,14 @@ export async function contentEntry(
   });
   if (file !== null) return file;
   if (metadata.isDirectory()) {
-    let gitlinkRoot;
-    try {
-      const rootResult = await runGit(absolutePath, [
-        "rev-parse",
-        "--show-toplevel",
-      ]);
-      gitlinkRoot = await realpath(
-        decodeLine(rootResult.stdout, "Gitlink root"),
-      );
-    } catch (cause) {
-      return directoryReplacement(
-        runGit,
-        repositoryPath,
-        path,
-        missingAllowed,
-        cause,
-      );
-    }
-    if (gitlinkRoot !== absolutePath) {
-      return directoryReplacement(
-        runGit,
-        repositoryPath,
-        path,
-        missingAllowed,
-        new GitSafetyError("Gitlink root does not match its path.", {
-          code: "ERR_UNSUPPORTED_GIT_PATH",
-        }),
-      );
-    }
-    const result = await runGit(absolutePath, [
-      "rev-parse",
-      "--verify",
-      "HEAD",
+    // Ordinary file/directory replacement: children are enumerated separately.
+    // A directory is never a reason to invoke Git under content-selected config.
+    const verify = await inspectContentDirectories(repositoryPath, [
+      `${path}/`,
     ]);
-    const objectId = decodeLine(result.stdout, "Gitlink HEAD");
-    const prefix = `${path}/`;
-    const content = await contentFingerprintsAtRoot(
-      context,
-      absolutePath,
-      allowedPaths
-        .filter((allowedPath) => allowedPath.startsWith(prefix))
-        .map((allowedPath) => allowedPath.slice(prefix.length)),
-    );
-    const after = await lstat(absolutePath, { bigint: true });
-    if (!after.isDirectory() || metadataChanged(metadata, after)) {
-      throw snapshotRace();
-    }
-    return Object.freeze({
-      hash: hashBuffer(`${objectId}\0${content.contentFingerprint}`),
-      kind: "gitlink",
-      mode: "160000",
-      path,
-      size: objectId.length,
-    });
+    await verify();
+    if (missingAllowed) return deletedEntry(path);
+    throw unsupportedNestedRepository();
   }
   throw new GitSafetyError("Changed repository path has unsupported type.", {
     code: "ERR_UNSUPPORTED_GIT_PATH",
@@ -541,13 +470,7 @@ export async function headContentEntry(
     });
   }
   if (type === "commit" && mode === "160000") {
-    return Object.freeze({
-      hash: hashBuffer(`${objectId}\0${EMPTY_CONTENT_FINGERPRINT}`),
-      kind: "gitlink",
-      mode,
-      path,
-      size: objectId.length,
-    });
+    throw unsupportedNestedRepository();
   }
   // A worktree file can replace a baseline directory; its children are deletions.
   if (type === "tree" && mode === "040000") return null;
@@ -578,13 +501,7 @@ async function indexContentEntry(runGit, repositoryPath, path, entry) {
     });
   }
   if (mode === "160000") {
-    return Object.freeze({
-      hash: hashBuffer(`${objectId}\0${EMPTY_CONTENT_FINGERPRINT}`),
-      kind: "gitlink",
-      mode,
-      path,
-      size: objectId.length,
-    });
+    throw unsupportedNestedRepository();
   }
   if (!["100644", "100755", "120000"].includes(mode)) {
     throw new GitSafetyError("Git index entry has unsupported type.", {
@@ -601,13 +518,14 @@ async function indexContentEntry(runGit, repositoryPath, path, entry) {
   });
 }
 
-export async function indexContentFingerprintAtRoot(
+async function stagedEntriesAtRoot(
   { currentHead, runGit },
   repositoryPath,
   allowedPaths,
 ) {
   const excludedPaths = new Set(allowedPaths);
   const head = await currentHead(repositoryPath);
+  await supportedTrackedPaths({ runGit }, repositoryPath, head);
   const changedResult =
     head === null
       ? await runGit(repositoryPath, ["ls-files", "--cached", "-z"])
@@ -619,7 +537,7 @@ export async function indexContentFingerprintAtRoot(
           "--no-ext-diff",
           "--no-textconv",
           "--no-renames",
-          "--ignore-submodules=none",
+          "--ignore-submodules=all",
           "-z",
           head,
           "--",
@@ -664,13 +582,120 @@ export async function indexContentFingerprintAtRoot(
       stage: metadata[2],
     });
   }
-  return hashEntries(
-    await Promise.all(
-      changedPaths.map((path) =>
-        indexContentEntry(runGit, repositoryPath, path, entries.get(path)),
-      ),
+  return { changedPaths, entries };
+}
+
+export async function stagedContentMatchesAtRoot(
+  context,
+  repositoryPath,
+  allowedPaths,
+  fingerprint,
+) {
+  const { runGit, hashCheckin } = context;
+  const worktree = await inspectContentChangesAtRoot(
+    context,
+    repositoryPath,
+    allowedPaths,
+  );
+  if (worktree.contentFingerprint !== fingerprint) return false;
+  const { changedPaths, entries } = await stagedEntriesAtRoot(
+    context,
+    repositoryPath,
+    allowedPaths,
+  );
+  const flags = await runGit(repositoryPath, ["ls-files", "-v", "-z"]);
+  const union = new Set([...changedPaths, ...worktree.changedPaths]);
+  if (hiddenIndexPaths(flags.stdout).some((path) => union.has(path)))
+    return false;
+  const staged = await Promise.all(
+    changedPaths.map((path) =>
+      indexContentEntry(runGit, repositoryPath, path, entries.get(path)),
     ),
   );
+  if (hashEntries(staged) === fingerprint) return true;
+  const accepted = new Map(
+    worktree.entries.map((entry) => [entry.path, entry]),
+  );
+  if (accepted.size !== staged.length) return false;
+  let configuration;
+  for (const stored of staged) {
+    const entry = accepted.get(stored.path);
+    if (!entry || entry.kind !== stored.kind || entry.mode !== stored.mode)
+      return false;
+    if (entriesMatch(entry, stored)) continue;
+    if (entry.kind !== "file" || entries.get(entry.path).objectId.length !== 40)
+      return false;
+    const pathspec = literalPathspec(entry.path);
+    const eol = await runGit(repositoryPath, [
+      "ls-files",
+      "--eol",
+      "-z",
+      "--",
+      pathspec,
+    ]);
+    const records = decodeNullList(eol.stdout, "Git line endings");
+    if (records.length !== 1 || eol.stdout.at(-1) !== 0) return false;
+    const match =
+      /^i\/(?:-text|none|lf|crlf|mixed)? +w\/(?:-text|none|lf|crlf|mixed)? +attr\/([^\t]*)\t(.*)$/su.exec(
+        records[0],
+      );
+    const attributes = match?.[1].replace(/ +$/u, "");
+    if (
+      match?.[2] !== entry.path ||
+      !["text", "text eol=lf", "text eol=crlf"].includes(attributes)
+    )
+      return false;
+    // check-attr takes literal filenames, unlike ls-files pathspecs.
+    const result = await runGit(repositoryPath, [
+      "check-attr",
+      "-z",
+      "--all",
+      "--",
+      entry.path,
+    ]);
+    const values = decodeNullList(result.stdout, "Git attributes");
+    if (
+      values.length % 3 !== 0 ||
+      (values.length && result.stdout.at(-1) !== 0)
+    )
+      return false;
+    for (let index = 0; index < values.length; index += 3) {
+      if (
+        values[index] !== entry.path ||
+        ["filter", "ident", "working-tree-encoding"].includes(values[index + 1])
+      )
+        return false;
+    }
+    if (configuration === undefined) {
+      configuration = [];
+      for (const key of ["core.autocrlf", "core.eol", "core.safecrlf"]) {
+        const config = await runGit(
+          repositoryPath,
+          ["config", "--null", "--get", key],
+          { allowedExitCodes: [0, 1] },
+        );
+        if (config.exitCode === 1) continue;
+        const value = decodeUtf8(config.stdout, "Git text configuration");
+        if (!/^[A-Za-z0-9]+\0$/u.test(value)) return false;
+        configuration.push([key, value.slice(0, -1)]);
+      }
+    }
+    const candidate = await contentEntry(context, repositoryPath, entry.path, {
+      missingAllowed: false,
+      includeContent: true,
+    });
+    if (!entriesMatch(candidate, entry)) return false;
+    if (
+      (await hashCheckin(
+        repositoryPath,
+        candidate.content,
+        attributes,
+        configuration,
+      )) !== entries.get(entry.path).objectId
+    )
+      return false;
+  }
+  return true;
 }
 
 export function entriesMatch(left, right) {
@@ -683,6 +708,50 @@ export function entriesMatch(left, right) {
   );
 }
 
+export async function isFullStagingAtRoot(
+  context,
+  repositoryPath,
+  fingerprint,
+) {
+  // Content equality alone cannot certify hidden, intent-to-add or resolve-undo
+  // state. Full staging has ordinary stage-zero entries with no semantic flags.
+  // Split-index CE_UPDATE_IN_BASE (0x8000000) is storage bookkeeping only.
+  const debug = await context.runGit(repositoryPath, [
+    "ls-files",
+    "--debug",
+    "-z",
+  ]);
+  let offset = 0;
+  while (offset < debug.stdout.length) {
+    const end = debug.stdout.indexOf(0, offset);
+    if (end === -1) return false;
+    let metadataEnd = end;
+    for (let line = 0; line < 5; line++) {
+      metadataEnd = debug.stdout.indexOf(0x0a, metadataEnd + 1);
+      if (metadataEnd === -1) return false;
+    }
+    const metadata = debug.stdout
+      .subarray(end + 1, metadataEnd + 1)
+      .toString("utf8");
+    if (
+      !/^(?:  [^\n]*\n){4}  size: [^\n]*\tflags: (?:0|8000000)\n$/u.test(
+        metadata,
+      )
+    )
+      return false;
+    offset = metadataEnd + 1;
+  }
+  const undo = await context.runGit(repositoryPath, [
+    "ls-files",
+    "--resolve-undo",
+    "-z",
+  ]);
+  return (
+    undo.stdout.length === 0 &&
+    (await stagedContentMatchesAtRoot(context, repositoryPath, [], fingerprint))
+  );
+}
+
 async function inspectContentChangesAtRoot(
   context,
   repositoryPath,
@@ -691,8 +760,18 @@ async function inspectContentChangesAtRoot(
 ) {
   const { currentHead, runGit } = context;
   const excludedPaths = new Set(allowedPaths);
-  const head =
-    baseHead === undefined ? await currentHead(repositoryPath) : baseHead;
+  const current = await currentHead(repositoryPath);
+  const head = baseHead === undefined ? current : baseHead;
+  const sourcePaths = await supportedTrackedPaths(
+    context,
+    repositoryPath,
+    head,
+  );
+  if (current !== head) {
+    sourcePaths.push(
+      ...(await supportedTrackedPaths(context, repositoryPath, current)),
+    );
+  }
   const trackedResult =
     head === null
       ? await runGit(repositoryPath, ["ls-files", "--cached", "-z"])
@@ -703,7 +782,7 @@ async function inspectContentChangesAtRoot(
           "--no-ext-diff",
           "--no-textconv",
           "--no-renames",
-          "--ignore-submodules=none",
+          "--ignore-submodules=all",
           "-z",
           head,
           "--",
@@ -713,6 +792,10 @@ async function inspectContentChangesAtRoot(
     "--others",
     "--exclude-standard",
     "-z",
+  ]);
+  const verifyDirectories = await inspectContentDirectories(repositoryPath, [
+    ...sourcePaths,
+    ...decodeNullList(untrackedResult.stdout, "Untracked Git paths"),
   ]);
   const indexResult = await runGit(repositoryPath, ["ls-files", "-v", "-z"]);
   const trackedPaths = new Set(
@@ -772,6 +855,7 @@ async function inspectContentChangesAtRoot(
   for (const entry of [...trackedEntries, ...untrackedEntries]) {
     combinedEntries.set(entry.path, entry);
   }
+  await verifyDirectories();
   return Object.freeze({
     changedPaths: Object.freeze(
       [...new Set([...trackedPaths, ...untrackedPaths])].sort(),

@@ -575,6 +575,106 @@ test("retains existing pause requirements by reference to the exact suspended st
   });
 });
 
+test("a settled pause accepts only a fresh cancellation at its current revision", async (t) => {
+  const f = await fixture(
+    t,
+    {},
+    { workflowState: "WAITING_FOR_USER", pendingEdit: { action: "answer" } },
+  );
+  const baseline = await f.store.transitionRun(f.lease, {
+    pause: { reason: "clarification_answers_required", resumeState: "CLARIFY" },
+  });
+  const pauseInput = { ...f.input, expectedRevision: baseline.revision };
+  const paused = await complete(
+    f,
+    await f.store.requestOperatorStop(pauseInput),
+  );
+  const pauseReceipt = await f.store.requestOperatorStop(pauseInput);
+  const cancel = {
+    ...f.input,
+    kind: "cancel_requested",
+    expectedRevision: paused.revision,
+    idempotencyKey: "cancel-settled",
+  };
+  for (const [input, code] of [
+    [{ ...pauseInput, idempotencyKey: "repeat-pause" }, "ERR_STOP_PENDING"],
+    [
+      { ...cancel, expectedRevision: baseline.revision, idempotencyKey: "old" },
+      "ERR_STALE_RUN_REVISION",
+    ],
+    [
+      { ...cancel, timing: "after-current-commit", idempotencyKey: "later" },
+      "ERR_STOP_BOUNDARY_UNSUPPORTED",
+    ],
+  ]) {
+    await assert.rejects(f.store.requestOperatorStop(input), { code });
+    assert.deepEqual(await f.store.loadRun(f.input.runId), paused);
+  }
+
+  const receipt = await f.store.requestOperatorStop(cancel);
+  const pending = await f.store.loadRun(f.input.runId);
+  const events = (await readFile(join(f.directoryPath, "events.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.equal(events.at(-1).activity.kind, "cancel-requested");
+  assert.deepEqual(events.at(-1).state, pending);
+  assert.equal(receipt.revision, paused.revision + 1);
+  for (const field of ["pipelineState", "pause", "activeTurn", "hashes"])
+    assert.deepEqual(pending[field], paused[field]);
+  assert.deepEqual(pending.stopRequest.checkpoint, {
+    revision: paused.revision,
+    workflowState: "WAITING_FOR_USER",
+    activeTurn: null,
+    resumeAction: null,
+  });
+  assert.deepEqual(await f.store.requestOperatorStop(cancel), receipt);
+  assert.deepEqual(await f.store.requestOperatorStop(pauseInput), pauseReceipt);
+
+  // The envelope rejects nesting the retained operator pause.
+  await assert.rejects(
+    f.store.completeOperatorStop(f.lease, {
+      requestId: receipt.requestId,
+      patch: {
+        pipelineState: { ...pending.pipelineState, workflowState: "CANCELED" },
+        pause: {
+          reason: "operator_canceled",
+          resumeAction: null,
+          operatorResume: {
+            workflowState: "WAITING_FOR_USER",
+            pause: pending.pause,
+            activeTurn: null,
+          },
+        },
+      },
+    }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  assert.deepEqual(await f.store.loadRun(f.input.runId), pending);
+
+  const canceled = await complete(f, receipt);
+  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+  assert.deepEqual(canceled.pause.operatorResume, paused.pause.operatorResume);
+  assert.deepEqual(
+    canceled.pipelineState.pendingEdit,
+    baseline.pipelineState.pendingEdit,
+  );
+  assert.deepEqual(await f.store.requestOperatorStop(cancel), receipt);
+  assert.deepEqual(await f.store.requestOperatorStop(pauseInput), pauseReceipt);
+  await assert.rejects(
+    f.store.requestOperatorStop({
+      ...cancel,
+      expectedRevision: canceled.revision,
+      idempotencyKey: "after-cancel",
+    }),
+    { code: "ERR_RUN_TERMINAL" },
+  );
+  await assert.rejects(
+    f.store.transitionRun(f.lease, { counters: { rounds: 1 } }),
+    { code: "ERR_RUN_CANCELED" },
+  );
+});
+
 test("recovers accepted requests at every journal publication boundary", async (t) => {
   for (const [kind, timing, boundary] of [
     ["pause_requested", "immediate", "event-appended"],

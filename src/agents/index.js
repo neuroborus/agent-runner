@@ -131,17 +131,6 @@ export {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
 export {
-  assertOwnedProcessLauncherProtected,
-  inspectOwnedSessionProcesses,
-  resolveOwnedProcessLauncher,
-  spawnOwnedProcess,
-  terminateOwnedProcess,
-} from "./owned-process.js";
-export {
-  readProcessIdentity,
-  readProcessNamespace,
-} from "./process-containment.js";
-export {
   createProviderRegistry,
   PROVIDER_REGISTRY,
   ProviderRegistryError,

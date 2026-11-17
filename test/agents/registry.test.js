@@ -79,23 +79,44 @@ test("terminal diagnosis requires a normalized boundary and registry evidence", 
 
 test("boundary messages compose only validated codes and registered classes", () => {
   const marker = "PRIVATE_NATIVE_FRAME";
-  const classified = normalizeAdapterFailure(
-    "claude",
-    new ClaudeAdapterError(marker, {
-      cause: new Error(marker),
+  const protocolClasses = [
+    "protocol_result_duplicate",
+    "protocol_assistant_after_result",
+    "protocol_user_after_result",
+    "protocol_stream_event_after_result",
+    "protocol_record_after_result",
+  ];
+  const classified = protocolClasses.map((diagnosticClass) =>
+    normalizeAdapterFailure(
+      "claude",
+      new ClaudeAdapterError(marker, {
+        cause: new Error(marker),
+        code: "ERR_CLAUDE_PROTOCOL",
+        diagnosticClass,
+        recoverable: true,
+      }),
+    ),
+  );
+  for (const [index, diagnosticClass] of protocolClasses.entries()) {
+    const boundary = classified[index];
+    assert.equal(boundary.diagnosticClass, diagnosticClass);
+    assert.equal(
+      boundary.message,
+      `Agent backend turn failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+    );
+    assert.deepEqual(boundary.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+    });
+    assert.equal(boundary.recoverable, false);
+    assert.deepEqual(terminalAdapterDiagnostic(boundary), {
       code: "ERR_CLAUDE_PROTOCOL",
-      diagnosticClass: "protocol_result_duplicate",
-    }),
-  );
-  assert.equal(classified.diagnosticClass, "protocol_result_duplicate");
-  assert.equal(
-    classified.message,
-    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_result_duplicate).",
-  );
-  assert.deepEqual(terminalAdapterDiagnostic(classified), {
-    code: "ERR_CLAUDE_PROTOCOL",
-    diagnosticClass: "protocol_result_duplicate",
-  });
+      diagnosticClass,
+    });
+  }
   const hostile = normalizeAdapterFailure(
     "claude",
     Object.assign(new Error(marker, { cause: new Error(marker) }), {
@@ -122,7 +143,7 @@ test("boundary messages compose only validated codes and registered classes", ()
     normalizeAdapterFailure("claude", new Error(marker)).message,
     "Agent backend turn failed.",
   );
-  for (const boundary of [classified, hostile, unclassified])
+  for (const boundary of [...classified, hostile, unclassified])
     assert.doesNotMatch(
       `${boundary.message}\n${JSON.stringify(boundary)}`,
       new RegExp(marker, "iu"),
@@ -260,6 +281,29 @@ test("built-in provider registration is static and frozen", () => {
     });
     assert.equal(descriptor.failures.classes.has("new_class"), false);
   }
+});
+
+test("optional workspace readiness is validated and retained by descriptors", async () => {
+  const descriptor = PROVIDER_REGISTRY.list()[0];
+  for (const assertWorkspaceReady of [null, true, {}, "ready"])
+    assert.throws(
+      () => createProviderRegistry([{ ...descriptor, assertWorkspaceReady }]),
+      {
+        code: "ERR_INVALID_PROVIDER_REGISTRY",
+      },
+    );
+  const requests = [];
+  const registry = createProviderRegistry([
+    {
+      ...descriptor,
+      id: "fixture",
+      assertWorkspaceReady: (request) => requests.push(request),
+    },
+  ]);
+  const request = { access: "workspace-write" };
+  await registry.get("fixture").assertWorkspaceReady(request);
+  assert.deepEqual(requests, [request]);
+  assert.equal(PROVIDER_REGISTRY.get("claude").assertWorkspaceReady, undefined);
 });
 
 test("client attribution is strict, frozen, and descriptor-driven", () => {
@@ -449,6 +493,54 @@ test("registry retains only declared readiness diagnostics and validated effect 
   assert.doesNotMatch(
     JSON.stringify(unknown),
     /PRIVATE_READINESS|commit_readiness_unknown/u,
+  );
+});
+
+test("registry keeps every non-capability permission class terminal and redacted", () => {
+  for (const diagnosticClass of [
+    "permission_tool_unexposed",
+    "permission_bash_unclassified",
+    "permission_bash_required_check",
+    "permission_reason_auto_mode_stop_no_verdict",
+    "permission_forbidden_operation",
+  ]) {
+    assert.ok(
+      PROVIDER_REGISTRY.get("claude").failures.classes.has(diagnosticClass),
+    );
+    const normalized = normalizeAdapterFailure(
+      "claude",
+      Object.assign(
+        new ClaudeAdapterError("PRIVATE_DENIAL_MESSAGE", {
+          code: "ERR_CLAUDE_PERMISSION_DENIED",
+          diagnosticClass,
+          recoverable: true,
+          cause: new Error("PRIVATE_DENIAL_CAUSE"),
+        }),
+        { permission_denials: [{ tool_name: "PRIVATE_DENIAL_TOOL" }] },
+      ),
+    );
+    assert.equal(normalized.diagnosticClass, diagnosticClass);
+    assert.equal(normalized.recoverable, false);
+    assert.deepEqual(normalized.failure, {
+      failureClass: diagnosticClass,
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+    });
+    assert.doesNotMatch(JSON.stringify(normalized), /PRIVATE_DENIAL/u);
+  }
+  const hostile = normalizeAdapterFailure(
+    "claude",
+    new ClaudeAdapterError("PRIVATE_DENIAL_MESSAGE", {
+      code: "ERR_CLAUDE_PERMISSION_DENIED",
+      diagnosticClass: "permission_private_hostile",
+    }),
+  );
+  assert.equal(hostile.diagnosticClass, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(hostile),
+    /PRIVATE_DENIAL|permission_private_hostile/u,
   );
 });
 

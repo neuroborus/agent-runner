@@ -47,6 +47,7 @@ import {
   migratePolishingStateV14,
   migratePolishingStateV16,
   migratePolishingStateV17,
+  migratePolishingStateV19,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -280,13 +281,76 @@ function migrateVersionOneState(state) {
   const versionFourteen = migratePolishingStateV13({
     pipelineState: versionThirteen,
   });
-  return migratePolishingStateV17({
-    pipelineState: migratePolishingStateV16({
-      pipelineState: migratePolishingStateV14({
-        pipelineState: versionFourteen,
+  return migratePolishingStateV19({
+    pipelineState: migratePolishingStateV17({
+      pipelineState: migratePolishingStateV16({
+        pipelineState: migratePolishingStateV14({
+          pipelineState: versionFourteen,
+        }),
       }),
     }),
   });
+}
+
+function matchesSchemaSubset(schema, value) {
+  const objectValue =
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (schema.type === "string" && typeof value !== "string") {
+    return false;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return false;
+  }
+  if (schema.type === "object" && !objectValue) {
+    return false;
+  }
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (
+      (schema.minLength !== undefined && length < schema.minLength) ||
+      (schema.maxLength !== undefined && length > schema.maxLength) ||
+      (schema.pattern !== undefined &&
+        !new RegExp(schema.pattern, "u").test(value))
+    ) {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) {
+    if (
+      (schema.minItems !== undefined && value.length < schema.minItems) ||
+      (schema.maxItems !== undefined && value.length > schema.maxItems) ||
+      (schema.items !== undefined &&
+        value.some((item) => !matchesSchemaSubset(schema.items, item)))
+    ) {
+      return false;
+    }
+  }
+  if (objectValue) {
+    if (
+      schema.required?.some((field) => !Object.hasOwn(value, field)) ||
+      (schema.additionalProperties === false &&
+        Object.keys(value).some(
+          (field) => !Object.hasOwn(schema.properties, field),
+        )) ||
+      Object.entries(schema.properties ?? {}).some(
+        ([field, propertySchema]) =>
+          Object.hasOwn(value, field) &&
+          !matchesSchemaSubset(propertySchema, value[field]),
+      )
+    ) {
+      return false;
+    }
+  }
+  if (
+    schema.anyOf !== undefined &&
+    !schema.anyOf.some((branch) => matchesSchemaSubset(branch, value))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function hash(value) {
@@ -852,6 +916,7 @@ async function createFixture(
     interactive = false,
     mode = "independent",
     modeSettings = {},
+    onContentHygiene,
     onEdit,
     onRoleRun,
     onTrustedValidation,
@@ -988,9 +1053,14 @@ async function createFixture(
   let deferredFinalization = null;
   const deferredConfirmation = { worker: null, reviewer: null };
   const isFinalizationResult = (result) =>
-    ["PASS", "FAIL", "SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(
-      result?.status,
-    ) && Object.hasOwn(result, "requiredChecks");
+    [
+      "PASS",
+      "FAIL",
+      "SKILL_MISSING",
+      "SKILL_INVALID",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+    ].includes(result?.status) && Object.hasOwn(result, "requiredChecks");
   const isTerminalReview = (result) =>
     Object.hasOwn(result ?? {}, "validationChange");
   function candidateResult(result, acceptedStatus) {
@@ -1034,9 +1104,13 @@ async function createFixture(
           if (
             role === "worker" &&
             request.schema === CHECK_AND_FIX_SCHEMA &&
-            !["CHANGED", "UNCHANGED", "BLOCKED", "INVALID"].includes(
-              queues.worker[0]?.status,
-            )
+            ![
+              "CHANGED",
+              "UNCHANGED",
+              "BLOCKED",
+              "VALIDATION_POLICY_BLOCKED",
+              "INVALID",
+            ].includes(queues.worker[0]?.status)
           ) {
             structured = checkAndFix();
           } else if (
@@ -1119,7 +1193,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 19,
+      pipelineStateVersion: 22,
       projectPath,
       taskPath,
       roles,
@@ -1142,7 +1216,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 19,
+      pipelineStateVersion: 22,
       projectPath,
       taskPath,
       roles,
@@ -1225,6 +1299,21 @@ async function createFixture(
           allowedPaths,
         })
       ).contentFingerprint;
+    },
+    async inspectContentHygiene(options) {
+      const current = await memorySnapshot({
+        allowedPaths: options.expectedSnapshot.allowedPaths,
+      });
+      if (
+        current.contentFingerprint !== options.contentFingerprint ||
+        current.indexFingerprint !== options.expectedSnapshot.indexFingerprint
+      ) {
+        throw memoryGitError(
+          "Repository controls or content changed before hygiene inspection.",
+          "ERR_POLISHING_HANDOFF_CONTAMINATED",
+        );
+      }
+      return (await onContentHygiene?.(options)) ?? { status: "clean" };
     },
     async inspectPath({ path }) {
       const requestedPath = resolve(projectPath, path);
@@ -1663,6 +1752,7 @@ export {
   findingArbitration,
   hash,
   invalidProductionFinalization,
+  matchesSchemaSubset,
   migrateVersionOneState,
   polishingBlocked,
   polishingCompleted,

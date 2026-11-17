@@ -23,6 +23,11 @@ function deepFreeze(value) {
 }
 
 const TEXT = { type: "string", maxLength: MAX_TEXT_LENGTH };
+const NONEMPTY_PLAIN_TEXT = {
+  ...TEXT,
+  minLength: 1,
+  pattern: "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$",
+};
 const SUMMARY = { type: "string", maxLength: MAX_SUMMARY_LENGTH };
 const TEXT_LIST = { type: "array", maxItems: MAX_ITEMS, items: TEXT };
 const REQUIRED_CHECK = {
@@ -227,7 +232,12 @@ export const POLISH_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "COMPLETED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     summary: SUMMARY,
     reason: TEXT,
@@ -256,6 +266,7 @@ export const FINALIZATION_SCHEMA = deepFreeze({
         "SKILL_MISSING",
         "SKILL_INVALID",
         "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
         "PRODUCT_DECISION_REQUIRED",
       ],
     },
@@ -349,7 +360,13 @@ export const CHECK_AND_FIX_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "CHANGED",
+        "UNCHANGED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     summary: SUMMARY,
     reason: TEXT,
@@ -427,7 +444,12 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "RESOLVED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     decisions: {
       type: "array",
@@ -437,7 +459,7 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
         properties: {
           id: { type: "string", pattern: "^[FR][1-9][0-9]{0,8}$" },
           decision: { type: "string", enum: ["FIX", "DISPUTE"] },
-          reason: TEXT,
+          reason: NONEMPTY_PLAIN_TEXT,
           evidence: TEXT_LIST,
         },
         required: ["id", "decision", "reason", "evidence"],

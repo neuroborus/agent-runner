@@ -44,6 +44,33 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+
+const AMBIENT_GIT_IDENTITY = Object.freeze({
+  EMAIL: "ambient@example.test",
+  GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+  GIT_AUTHOR_NAME: "Ambient Author",
+  GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+  GIT_COMMITTER_NAME: "Ambient Committer",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_GLOBAL: "/ambient/global.gitconfig",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'",
+  GIT_CONFIG_VALUE_0: "Counted User",
+  HOME: "/ambient/home",
+  XDG_CONFIG_HOME: "/ambient/config",
+});
+
+function assertIsolatedGitIdentity(env) {
+  for (const name of Object.keys(AMBIENT_GIT_IDENTITY)) {
+    if (name !== "HOME" && name !== "XDG_CONFIG_HOME") {
+      assert.equal(env[name], undefined, name);
+    }
+  }
+  assert.equal(env.HOME, AMBIENT_GIT_IDENTITY.HOME);
+  assert.equal(env.XDG_CONFIG_HOME, AMBIENT_GIT_IDENTITY.XDG_CONFIG_HOME);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+}
+
 const SESSION_NAMING = Object.freeze({
   runId: "11111111-1111-4111-8111-111111111111",
   project: "sample",
@@ -930,6 +957,34 @@ test("accepts one exact finalization read and rejects broader declarations befor
   assert.equal(fixture.processes.length, 0);
   await fixture.adapter.run(request({ readPaths: [path] }));
   assert.equal(fixture.processes.length, 1);
+});
+
+test("accepts a bounded required-check inventory without using it", async () => {
+  const fixture = createFixture();
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `${String(index).padStart(3, "0")}${"x".repeat(3_997)}`,
+  );
+  for (const requiredCheckCommands of [
+    [...inventory, "extra"],
+    "npm test",
+    [""],
+    ["a\0b"],
+    ["x".repeat(4_001)],
+    [1],
+    [, "npm test"],
+  ])
+    await assert.rejects(
+      fixture.adapter.run(request({ requiredCheckCommands })),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  assert.equal(fixture.processes.length, 0);
+  await fixture.adapter.run(request({ requiredCheckCommands: inventory }));
+  assert.equal(fixture.processes.length, 1);
+  assert.doesNotMatch(
+    JSON.stringify([fixture.executeCalls, fixture.processes]),
+    /x{3997}/u,
+  );
 });
 
 test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
@@ -2880,6 +2935,70 @@ test("proves declared directory access without Git, commit readiness, or writabl
   assert.equal(old.processes.length, 0);
 });
 
+test("rejects existing file output roots before native work, including cached proofs", async (t) => {
+  for (const name of ["result.md", ".result"]) {
+    const directory = await directoryWorkspace(t, { outputName: name });
+    const fixture = createFixture({ version: "0.167.2" });
+    const options = {
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    };
+    // A valid directory proof cannot approve a later file substitution.
+    assert.equal((await fixture.adapter.probe(options)).workspaceWrite, true);
+    await rm(directory.output, { recursive: true });
+    await writeFile(directory.output, "Preserve this exact file.\n");
+    directory.workspacePolicy.outputPaths.unshift(
+      join(directory.cwd, "missing"),
+    );
+    const cold = createFixture({ version: "0.167.2" });
+    const diagnostic = hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_existing_file_output",
+    );
+    for (const adapter of [fixture.adapter, cold.adapter]) {
+      await assert.rejects(adapter.probe(options), diagnostic);
+      await assert.rejects(
+        adapter.run(
+          request({
+            ...options,
+            cwd: directory.cwd,
+            session: { mode: "continue", id: "saved-child" },
+          }),
+        ),
+        diagnostic,
+      );
+    }
+    assert.equal(cold.executeCalls.length, 0);
+    for (const adapterFixture of [fixture, cold]) {
+      assert.equal(adapterFixture.processes.length, 0);
+      assert.equal(adapterFixture.workspaceStorages.length, 0);
+    }
+    assert.equal(
+      await readFile(directory.output, "utf8"),
+      "Preserve this exact file.\n",
+    );
+    assert.equal(
+      (await cold.adapter.probe({ ...options, access: "read-only" })).readOnly,
+      true,
+    );
+    await assert.rejects(lstat(join(directory.cwd, "missing")), {
+      code: "ENOENT",
+    });
+    const readOnly = createFixture({
+      version: "0.167.2",
+      directoryPermissions: () => directory.permissions("read-only"),
+    });
+    await readOnly.adapter.run(
+      request({
+        ...options,
+        access: "read-only",
+        cwd: directory.cwd,
+      }),
+    );
+    assert.equal(readOnly.processes.length, 1);
+  }
+});
+
 test("preserves directory policy receipts across authorized output, artifact and state creation", async (t) => {
   const directory = await directoryWorkspace(t);
   directory.workspacePolicy.artifactPaths.push(directory.input);
@@ -4376,6 +4495,7 @@ test("rejects unexpected continuation lineage without a fresh fallback", async (
 test("creates an authorized commit through a networkless sandbox", async () => {
   const subject = "feat(branch): document push behavior";
   const fixture = createFixture({
+    env: { ...process.env, ...AMBIENT_GIT_IDENTITY },
     handle({ message }) {
       if (message.method === "turn/start") {
         return {
@@ -4463,6 +4583,8 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     sandboxCalls[1].argumentsList.join(" "),
     /network=\{enabled=false\}/u,
   );
+  assertIsolatedGitIdentity(gitCall.options.env);
+  assertIsolatedGitIdentity(sandboxCalls[1].options.env);
 });
 
 test("allows disclosed read-only Git inspection during local-commit readiness", async () => {

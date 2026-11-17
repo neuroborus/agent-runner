@@ -369,7 +369,7 @@ export function migratePlanAuthoringStateV6(run) {
 
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 7,
+  stateVersion: 8,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
@@ -377,6 +377,9 @@ export const planAuthoringPipeline = Object.freeze({
     4: migratePlanAuthoringStateV4,
     5: migratePlanAuthoringStateV5,
     6: migratePlanAuthoringStateV6,
+    // Legacy full baselines keep their exact comparison; new custom runs
+    // persist a compact baseline that a version-7 runtime must refuse as skew.
+    7: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

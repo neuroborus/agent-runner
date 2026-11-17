@@ -81,7 +81,7 @@ const CUSTOM = Object.freeze({
     arbiter: READ_ONLY,
   }),
   runtimeMethods: Object.freeze([]),
-  workspaceMethods: INSPECTION_METHODS,
+  workspaceMethods: Object.freeze([...INSPECTION_METHODS, "outputBaseline"]),
   terminalState: "ACCEPT",
   stepContext(source, step) {
     const plan = parseCustomPlan(source);
