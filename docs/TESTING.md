@@ -587,6 +587,15 @@ composition and accepted-result recovery without Git, plus a durable lazy
 candidate-review diagnostic through its cold null retry; run it when changing public
 custom selection, directory role probing, custom orchestration, settlement, or
 candidate-review correction diagnostics and recovery.
+One shared owned fixture writes 10,050 empty dependency-like `vendor/` files and
+a small `.agents/` control file before creation. Real authoring and execution
+pass preflight above the state array limit with compact baselines. Step 1
+prepares the absent output root and writes the declared output; its accepted
+receipt carries the output fingerprint and its baseline record the prepared
+identity with descendant evidence. An interrupted resume after a `vendor/` edit
+stops with the existing drift pause, no new provider turn and preserved
+receipts. Snapshots of that tree take seconds, so it stays slow; run it when
+changing custom baseline representations.
 Its slow invocation is `npm run test:slow -- test/runner-custom-execution.slow.test.js`.
 Fast recovery cases cover compatible authorized decisions before acceptance and
 after an earlier receipt, fresh gates for the new clarification version, and

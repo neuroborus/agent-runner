@@ -47,6 +47,8 @@ export async function customExecutionFixture(
     contained = false,
     finalization = "auto",
     missingOutputRoot = false,
+    outputStep = 2,
+    vendorFiles = 0,
     afterOutputPreparation,
     syntheticEntries = () => [],
     writablePolicy = () => "fixture",
@@ -60,6 +62,8 @@ export async function customExecutionFixture(
     : join(root, "workspace");
   const taskPath = join(root, "task");
   const output = join(projectPath, "reports", "summary.md");
+  // A missing output root is declared as a directory for authoring and execution.
+  const outputDeclaration = missingOutputRoot ? "reports/" : "reports";
   await mkdir(missingOutputRoot ? projectPath : join(projectPath, "reports"), {
     recursive: true,
   });
@@ -88,6 +92,22 @@ export async function customExecutionFixture(
     );
   }
   await writeFile(join(projectPath, "source.md"), "Supplied evidence.\n");
+  if (vendorFiles > 0) {
+    // One ordinary dependency-like tree plus a small control file, written
+    // before creation and shared by every inspection of the run.
+    await mkdir(join(projectPath, ".agents"));
+    await writeFile(join(projectPath, ".agents", "notes.md"), "Notes.\n");
+    const packages = Array.from({ length: 50 }, (_, index) =>
+      join(projectPath, "vendor", `package-${index}`),
+    );
+    await Promise.all(
+      packages.map(async (directory, index) => {
+        await mkdir(directory, { recursive: true });
+        for (let file = index; file < vendorFiles; file += packages.length)
+          await writeFile(join(directory, `module-${file}.js`), "");
+      }),
+    );
+  }
   await writeFile(
     join(taskPath, "task.md"),
     `Analyze the evidence, then write a summary. Agreed result criterion: ${criteria[0].condition}\n`,
@@ -96,7 +116,7 @@ export async function customExecutionFixture(
     kind: "custom",
     criteria,
     inputs: ["source.md", "https://example.invalid/reference"],
-    outputs: [missingOutputRoot ? "reports/" : "reports"],
+    outputs: [outputDeclaration],
     steps: [1, 2].map((number) => ({
       number,
       title: number === 1 ? "Analyze evidence" : "Write summary",
@@ -114,6 +134,7 @@ export async function customExecutionFixture(
   const probes = [];
   const trustedCalls = [];
   let runId;
+  let authoringRunId = null;
   let memoryRun;
   const result = (step) => ({
     analysis:
@@ -126,7 +147,7 @@ export async function customExecutionFixture(
         ],
       },
     ],
-    outputPaths: step === 1 ? [] : [output],
+    outputPaths: step === outputStep ? [output] : [],
   });
   const adapter = {
     async probe(options) {
@@ -259,7 +280,7 @@ export async function customExecutionFixture(
           ...empty,
         };
       else if (state.workflowState === "IMPLEMENT") {
-        if (step === 2)
+        if (step === outputStep)
           await writeFile(
             output,
             "Conclusion: supplied evidence (source.md). Remote evidence unavailable.\n",
@@ -351,14 +372,14 @@ export async function customExecutionFixture(
                 "source.md",
                 "https://example.invalid/reference",
               ],
-              outputPaths: ["reports"],
+              outputPaths: [outputDeclaration],
             },
           },
         }),
       ),
   });
   if (author) {
-    runId = (
+    runId = authoringRunId = (
       await runner.create({
         pipelineId: "plan-authoring",
         projectPath,
@@ -623,6 +644,7 @@ export async function customExecutionFixture(
     runner,
     store,
     runId,
+    authoringRunId,
     calls,
     probes,
     trustedCalls,
