@@ -182,6 +182,20 @@ const PENDING_EDIT_FIELDS = new Set([
   "preEditorHash",
 ]);
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
+const COMPACT_CUSTOM_BASELINE_FIELDS = Object.freeze([
+  "schemaVersion",
+  "workspacePath",
+  "outputPaths",
+  "entryCount",
+  "entriesHash",
+  "contentFingerprint",
+  "identityFingerprint",
+  "remainderCount",
+  "remainderHash",
+  "outputs",
+  "allowedPaths",
+  "projectPath",
+]);
 const FINALIZATION_GUIDANCE_FIELDS = Object.freeze([
   "configuredPolicy",
   "selection",
@@ -920,6 +934,87 @@ function hasExactFields(value, fields) {
   return (
     Object.keys(value).length === fields.length &&
     fields.every((field) => Object.hasOwn(value, field))
+  );
+}
+
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const isHash = (value) => typeof value === "string" && HASH_PATTERN.test(value);
+const isDecimal = (value) =>
+  typeof value === "string" && /^[0-9]{1,32}$/u.test(value);
+// Captured timestamps keep String(stat.mtimeNs), negative before 1970.
+const isTimestamp = (value) =>
+  typeof value === "string" && /^-?[0-9]{1,32}$/u.test(value);
+
+// Captured entries keep their closed snapshot shapes; a derived output root is
+// the closed missing record.
+function isCustomBaselineEntry(entry, path) {
+  if (!isRecord(entry) || entry.path !== path) return false;
+  if (entry.kind === "missing")
+    return (
+      hasExactFields(entry, ["path", "kind", "mode", "size", "hash"]) &&
+      entry.mode === null &&
+      entry.size === 0 &&
+      entry.hash === null
+    );
+  const directory = entry.kind === "directory";
+  return (
+    ["directory", "file", "symlink"].includes(entry.kind) &&
+    hasExactFields(entry, [
+      "path",
+      "kind",
+      "mode",
+      "size",
+      "hash",
+      "identity",
+      ...(directory ? [] : ["modifiedNs", "changedNs"]),
+    ]) &&
+    Number.isSafeInteger(entry.mode) &&
+    entry.mode >= 0 &&
+    entry.mode <= 0o777 &&
+    (directory
+      ? entry.size === 0 && entry.hash === null
+      : isCount(entry.size) &&
+        isHash(entry.hash) &&
+        isTimestamp(entry.modifiedNs) &&
+        isTimestamp(entry.changedNs)) &&
+    isRecord(entry.identity) &&
+    hasExactFields(entry.identity, ["device", "inode", "mode"]) &&
+    Object.values(entry.identity).every(isDecimal)
+  );
+}
+
+function isCompactCustomBaseline(baseline, run) {
+  const outputPaths = run.workspace?.policy?.outputPaths;
+  return (
+    hasExactFields(baseline, COMPACT_CUSTOM_BASELINE_FIELDS) &&
+    baseline.workspacePath === run.projectPath &&
+    baseline.projectPath === run.projectPath &&
+    Array.isArray(outputPaths) &&
+    isDeepStrictEqual(baseline.outputPaths, outputPaths) &&
+    isCount(baseline.entryCount) &&
+    isCount(baseline.remainderCount) &&
+    [
+      baseline.entriesHash,
+      baseline.contentFingerprint,
+      baseline.identityFingerprint,
+      baseline.remainderHash,
+    ].every(isHash) &&
+    Array.isArray(baseline.outputs) &&
+    baseline.outputs.length === outputPaths.length &&
+    baseline.outputs.every(
+      (output, index) =>
+        isRecord(output) &&
+        hasExactFields(output, [
+          "path",
+          "entry",
+          "descendantCount",
+          "descendantsHash",
+        ]) &&
+        output.path === outputPaths[index] &&
+        isCustomBaselineEntry(output.entry, output.path) &&
+        isCount(output.descendantCount) &&
+        isHash(output.descendantsHash),
+    )
   );
 }
 
@@ -6613,7 +6708,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 41 ||
+    run.pipelineStateVersion !== 42 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6760,6 +6855,13 @@ export function assertRun(run) {
     ) {
       throw workflowError("Plan-execution repository baseline is invalid.");
     }
+    // Legacy full custom snapshots keep their checks; compact ones are closed.
+    if (
+      state.planKind === "custom" &&
+      !Object.hasOwn(state.repositoryBaseline, "entries") &&
+      !isCompactCustomBaseline(state.repositoryBaseline, run)
+    )
+      throw workflowError("Plan-execution repository baseline is invalid.");
   }
   if (
     state.pendingEdit !== null &&

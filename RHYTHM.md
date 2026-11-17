@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-17
 
+- **Both custom pipelines persist bounded directory baselines.** Custom
+  authoring and execution previously saved every captured entry, so ordinary
+  large workspaces failed preflight on the generic state array limit. Authoring
+  now saves the read-only compact baseline; execution saves an
+  output-partitioned projection whose per-root partition evidence is used only
+  for exact output preparation, while output allowances, receipts and
+  fingerprints stay with complete transient snapshots. Capture and generic
+  limits are unchanged. Legacy runs keep their full representation and exact
+  comparisons behind an explicit capacity stop instead of an internal failure.
+
 - **Identity baselines use the commit executors' isolated environment.** The
   Git capability now owns the environment-isolation rule shared by snapshot
   identity queries and both provider local-commit executors. The baseline,

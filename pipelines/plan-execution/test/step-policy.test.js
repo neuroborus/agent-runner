@@ -259,7 +259,12 @@ test("kind-specific runtime and provider requirements do not demand custom commi
         "prepareEdit",
       ].map((name) => [name, noop]),
     ),
-    workspace: { assertUnchanged: noop, inspectPath: noop, snapshot: noop },
+    workspace: {
+      assertUnchanged: noop,
+      inspectPath: noop,
+      outputBaseline: noop,
+      snapshot: noop,
+    },
     git: { assertUnchanged: noop, inspectPath: noop, snapshot: noop },
     trustedValidation: { execute: noop, preflight: noop },
     finishAgentTurn: noop,

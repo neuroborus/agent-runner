@@ -640,11 +640,13 @@ test("output preparation saves its verified baseline with the identity before in
   await assert.rejects(f.run(), (error) => error === failure);
   const state = f.currentRun.pipelineState;
   const prepared = state.customResults.preparation.prepared;
-  assert.deepEqual(
-    state.repositoryBaseline.entries.find(({ path }) => path === prepared.path)
-      .identity,
-    prepared.identity,
+  assert.equal(Object.hasOwn(state.repositoryBaseline, "entries"), false);
+  const record = state.repositoryBaseline.outputs.find(
+    ({ path }) => path === prepared.path,
   );
+  assert.equal(record.entry.kind, "directory");
+  assert.deepEqual(record.entry.identity, prepared.identity);
+  assert.equal(record.descendantCount, 0);
   assert.equal(
     f.calls.some(({ phase }) => phase === "implement"),
     false,
@@ -657,6 +659,128 @@ test("output preparation saves its verified baseline with the identity before in
   );
   assert.equal(run.pipelineState.customResults.accepted.length, 2);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
+});
+
+test("existing output preparation after an authorized clarification edit survives reconstruction", async (t) => {
+  let asked = false;
+  let interrupted = false;
+  const failure = new Error("Prepared identity response lost");
+  const f = await fixture(t, "combined", {
+    beforeTurn({ saved }) {
+      if (asked || saved.pipelineState.workflowState !== "CLARIFY") return;
+      asked = true;
+      return {
+        status: "QUESTIONS",
+        questions: [
+          {
+            question: "Which source governs conflicting evidence?",
+            whyItMatters: "It decides the summary basis.",
+          },
+        ],
+        reason: "",
+        stepAssessment: {
+          step: 1,
+          subject: "Analyze evidence",
+          disposition: "CURRENT",
+          evidence: [],
+        },
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      };
+    },
+    afterTransition(saved) {
+      if (
+        !interrupted &&
+        saved.pipelineState.customResults?.preparation?.prepared
+      ) {
+        interrupted = true;
+        throw failure;
+      }
+    },
+  });
+  const { run: waiting } = await f.run();
+  assert.equal(waiting.pause.reason, "clarification_answers_required");
+  const baseline = waiting.pipelineState.repositoryBaseline;
+  const path = waiting.pipelineState.clarificationPath;
+  await writeFile(path, `${await readFile(path, "utf8")}\nUse source.md.\n`);
+  await assert.rejects(f.run(), (error) => error === failure);
+  const state = f.currentRun.pipelineState;
+  assert.equal(state.customResults.preparation.intent.before.exists, true);
+  assert.notEqual(
+    state.repositoryBaseline.identityFingerprint,
+    baseline.identityFingerprint,
+  );
+  assert.deepEqual(state.repositoryBaseline.outputs, baseline.outputs);
+  const { run } = await f.run();
+  assert.equal(
+    run.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(run.pause),
+  );
+  assert.equal(run.pipelineState.customResults.accepted.length, 2);
+});
+
+test("a legacy full baseline above state capacity stops for a fresh custom run", async (t) => {
+  let oversized = false;
+  let interrupted = false;
+  const f = await fixture(t, "combined", {
+    syntheticEntries: () =>
+      oversized
+        ? Array.from({ length: 10_001 }, (_, index) => ({
+            path: join(f.projectPath, "reports", `generated-${index}.md`),
+            kind: "file",
+            mode: 0o644,
+            size: 0,
+            hash: "0".repeat(64),
+            identity: { device: "0", inode: String(index), mode: "33188" },
+            modifiedNs: "0",
+            changedNs: "0",
+          }))
+        : [],
+    beforeTurn({ saved }) {
+      if (
+        saved.pipelineState.currentStep !== 2 ||
+        saved.activeTurn.phase !== "implement"
+      )
+        return;
+      if (!interrupted) {
+        interrupted = true;
+        throw Object.assign(new Error("Provider temporarily unavailable"), {
+          recoverable: true,
+        });
+      }
+      oversized = true;
+    },
+  });
+  const { run: paused } = await f.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  const earlier = structuredClone(paused.pipelineState.customResults.accepted);
+  const compact = paused.pipelineState.repositoryBaseline;
+  f.currentRun = {
+    ...paused,
+    pipelineState: {
+      ...paused.pipelineState,
+      repositoryBaseline: {
+        ...(await f.workspace.snapshot({ allowedPaths: compact.allowedPaths })),
+        contentFingerprint: compact.contentFingerprint,
+      },
+    },
+  };
+  const { run } = await f.run();
+  assert.equal(run.pause.reason, "plan_revision_required");
+  assert.equal(run.pause.code, "ERR_CUSTOM_BASELINE_CAPACITY");
+  assert.match(run.pause.explanation, /10,000-entry state capacity/u);
+  assert.equal(
+    Object.hasOwn(run.pipelineState.repositoryBaseline, "entries"),
+    true,
+  );
+  assert.deepEqual(run.pipelineState.customResults.accepted, earlier);
+  const calls = f.calls.length;
+  assert.equal(f.calls.at(-1).phase, "implement");
+  await f.run();
+  assert.equal(f.calls.length, calls);
 });
 
 test("custom resume prepares missing outputs after ledger initialization was interrupted", async (t) => {

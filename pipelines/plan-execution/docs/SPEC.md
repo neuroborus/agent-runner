@@ -400,6 +400,19 @@ rejecting empty replacements before the first public-path identity read.
 The workflow saves that verified prepared identity and its workspace baseline in
 one transition, accepting only the exact empty-root creation. Recovery cannot
 mistake a journaled preparation for unrelated drift or adopt intervening output edits.
+Custom runs persist a bounded projection of each complete directory inspection
+instead of a per-entry array: the entry count and digest, both fingerprints, an
+immutable-remainder digest and one record per declared output root with its
+entry and descendant digest. An absent root is a derived missing record proven by
+complete capture; file or link ancestors fail closed. Complete snapshots stay
+transient for output allowances, accepted-result receipts and validation
+infrastructure, so their formulas are unchanged. Preparation compares only scope
+and filtered-entry evidence, never the identity fingerprint that also covers
+authorized artifacts such as an edited clarification transcript. An existing
+root requires equal entry, remainder and output records. A missing root
+requires an equal remainder and other output records while its own record changes
+from missing to the prepared empty directory identity. Interrupted
+reconciliation without allowed changes requires an equal entry digest.
 Resume checks every required directory's settled preparation record, including
 interruptions after ledger initialization or between separate root preparations.
 An interrupted allocation or publication without a recorded identity stays
@@ -431,6 +444,21 @@ custom ledger. Version 35 adds nullable `customCandidate`, a nullable
 `customWritePolicy` receipt and explicit setting defaults. Its version-34 migration
 preserves commit semantics, gates, counters and consumed effects without granting
 custom access or a writable policy receipt.
+
+State version 42 persists new custom `repositoryBaseline` values in the closed
+compact form: the snapshot-baseline fields, `remainderCount`, `remainderHash`,
+`outputs`, `allowedPaths` and `projectPath`. Workspace and project paths equal the
+run project, output paths equal the frozen policy, and each output record is a
+closed path, captured or missing entry, descendant count and digest. Unknown,
+scope or malformed fields fail closed. The identity version-41 migration rewrites
+no state: legacy full baselines keep their representation, reconciliation and
+bootstrap-scope fingerprint, and a version-41 runtime refuses compact baselines
+as skew. A legacy run whose complete entries or link resolutions would exceed the
+10,000-entry state capacity stops with `plan_revision_required` and
+`ERR_CUSTOM_BASELINE_CAPACITY` before persisting the oversized baseline; the
+operator preserves the work and starts a fresh custom run for the remaining
+steps. Accepted provenance, frozen inputs, budgets and allowances are never
+rebound.
 
 Custom execution uses the existing sequential state machine. `IMPLEMENT` produces
 bounded `customResult` data: analysis, observations in exact current criterion-reference

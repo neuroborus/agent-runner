@@ -37,6 +37,7 @@ import {
 } from "../src/custom-results.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
+  assertRun,
   createPersistedFinalizationEvidence,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -89,6 +90,7 @@ import {
   versionOneState,
   versionThirteenState,
 } from "./support/index.js";
+import { customExecutionFixture } from "../../../test/support/index.js";
 
 function writableResultContracts() {
   const { summary: _blockedSummary, ...blocked } = implementationBlocked();
@@ -1306,7 +1308,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 41);
+  assert.equal(planExecutionPipeline.stateVersion, 42);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -3122,4 +3124,104 @@ test("rejects inconsistent persisted workflow state", async (t) => {
       (error) => error.code === "ERR_INVALID_PLAN_EXECUTION_STATE",
     );
   });
+});
+
+test("custom repository baselines accept only the legacy full or closed compact shape", async (t) => {
+  const f = await customExecutionFixture(t, "combined");
+  const { run } = await f.run();
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  const baseline = run.pipelineState.repositoryBaseline;
+  const [record] = baseline.outputs;
+  const withBaseline = (repositoryBaseline) => ({
+    ...run,
+    pipelineState: { ...run.pipelineState, repositoryBaseline },
+  });
+  const { remainderCount, remainderHash, outputs, ...legacy } = baseline;
+  const missing = {
+    path: record.path,
+    kind: "missing",
+    mode: null,
+    size: 0,
+    hash: null,
+  };
+  const file = {
+    path: record.path,
+    kind: "file",
+    mode: 0o644,
+    size: 0,
+    hash: "a".repeat(64),
+    identity: { device: "1", inode: "2", mode: "33188" },
+    modifiedNs: "-86400000000000",
+    changedNs: "1",
+  };
+  for (const valid of [
+    baseline,
+    { ...baseline, outputs: [{ ...record, entry: missing }] },
+    { ...baseline, outputs: [{ ...record, entry: file }] },
+    { ...legacy, entries: [], linkResolutions: [] },
+  ])
+    assert.doesNotThrow(() => assertRun(withBaseline(valid)));
+  for (const malformed of [
+    { ...baseline, unknown: true },
+    { ...baseline, inspectionPaths: [run.projectPath] },
+    { ...baseline, linkResolutions: [] },
+    { ...baseline, workspacePath: f.taskPath },
+    { ...baseline, outputPaths: [] },
+    { ...baseline, entryCount: -1 },
+    { ...baseline, remainderCount: 1.5 },
+    { ...baseline, remainderHash: "unbound" },
+    { ...baseline, outputs: [] },
+    { ...baseline, outputs: [{ ...record, unknown: true }] },
+    { ...baseline, outputs: [{ ...record, path: run.projectPath }] },
+    { ...baseline, outputs: [{ ...record, descendantsHash: null }] },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, unknown: true } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, path: f.output } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...missing, mode: 0o700 } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, identity: {} } }],
+    },
+    ...["--1", "1e3", "", 1].map((modifiedNs) => ({
+      ...baseline,
+      outputs: [{ ...record, entry: { ...file, modifiedNs } }],
+    })),
+    {
+      ...baseline,
+      outputs: [
+        {
+          ...record,
+          entry: { ...file, identity: { ...file.identity, inode: "-2" } },
+        },
+      ],
+    },
+  ])
+    assert.throws(() => assertRun(withBaseline(malformed)), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+});
+
+test("version 41 migration preserves custom baselines without rewriting state", () => {
+  const pipelineState = {
+    ...createPlanExecutionState(),
+    planKind: "custom",
+    repositoryBaseline: {
+      schemaVersion: 1,
+      entries: [],
+      linkResolutions: [],
+    },
+  };
+  const saved = structuredClone(pipelineState);
+  const migrated = planExecutionPipeline.migrations[41]({ pipelineState });
+  assert.deepEqual(migrated, saved);
+  assert.deepEqual(pipelineState, saved);
+  assert.ok(Object.isFrozen(migrated));
 });

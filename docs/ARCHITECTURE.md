@@ -6261,7 +6261,13 @@ without copying or replacing an arriving directory. Existing roots need no move.
 The directory descriptor stays open through identity verification and parent
 synchronization. The execution workflow atomically saves the prepared identity
 with a baseline allowing only that exact empty-root creation; intervening output
-edits cannot be adopted. No workspace siblings or parents are created, and provider
+edits cannot be adopted. `custom-workspace.js` obtains both forms from one
+`runtime.workspace.outputBaseline` inspection and compares only scope and
+filtered-entry evidence: equal entry, remainder and output records for an
+existing root, or an equal remainder and other records while the root's
+missing record becomes the prepared empty directory. The artifact-sensitive
+identity fingerprint is never compared, so an authorized clarification edit
+cannot block preparation. No workspace siblings or parents are created, and provider
 mount authority stays unchanged. The runner returns refreshed state after
 process retirement so the identity transition retains revision checking.
 Cancellation is checked immediately before allocation and publication. Lost
@@ -6294,6 +6300,19 @@ policy drift fails closed without replacing the frozen startup receipt.
 Missing directory roots require explicit trailing-slash declarations. Existing
 file outputs grant no parent write. Legacy and commit execution retain their
 Git effects, exact subjects, nonempty initial implementation and one-shot recovery.
+
+Execution state version 42 persists new custom `repositoryBaseline` values as the
+closed output-partitioned projection, adding `outputBaseline` to the custom
+workspace methods. The facade fixes each run's representation from its persisted
+baseline: a legacy full snapshot stays full, and null or compact selects compact.
+Complete snapshots stay transient for runner output allowances, the custom-result
+checkpoint, content and validation-infrastructure fingerprints, so receipts and
+their formulas are unchanged. The run contract accepts the legacy full shape
+under its existing checks or the closed compact shape. The identity version-41
+migration rewrites no state; a version-41 runtime refuses compact baselines as
+skew. A legacy baseline that would exceed the 10,000-entry state capacity raises
+`ERR_CUSTOM_BASELINE_CAPACITY`, mapped to the public `plan_revision_required`
+pause instead of an internal state-limit failure.
 
 ## Global Safety Policy
 

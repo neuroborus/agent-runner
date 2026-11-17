@@ -742,7 +742,11 @@ export async function runPlanExecution({
   if (run.pipelineState.workflowState === "CANCELED") return run;
   assertRuntime(runtime, Object.keys(run.roles), stepPolicy.kind);
   const safety = custom
-    ? customWorkspace(runtime.workspace, run.projectPath)
+    ? customWorkspace(
+        runtime.workspace,
+        run.projectPath,
+        run.pipelineState.repositoryBaseline,
+      )
     : runtime.git;
   const resumeAction = normalizeResumeAction(action);
   if (!operatorStop && run.pause?.reason === "validation_policy_blocked")
@@ -8057,8 +8061,11 @@ ${JSON.stringify(
         ...runtime,
         workspace: {
           ...runtime.workspace,
+          // Ledger receipts keep their complete-entry formulas.
           snapshot: () =>
-            safety.snapshot({ allowedPaths: [state().clarificationPath] }),
+            safety.completeSnapshot({
+              allowedPaths: [state().clarificationPath],
+            }),
         },
         async transition(patch, options) {
           const preparation = patch.pipelineState.customResults.preparation;
@@ -9308,6 +9315,16 @@ ${step.subject}`),
           "Frozen custom inputs or earlier accepted outputs changed. Preserve the work, revise the plan and start a new run.",
         evidence: [
           "Custom acceptance bindings no longer match the inspected workspace.",
+        ],
+      });
+    }
+    if (custom && cause?.code === "ERR_CUSTOM_BASELINE_CAPACITY") {
+      return pause("plan_revision_required", {
+        code: cause.code,
+        explanation:
+          "The legacy full custom baseline exceeds the 10,000-entry state capacity. Preserve the work and start a fresh custom run for the remaining steps.",
+        evidence: [
+          "The workspace no longer fits this run's legacy baseline representation.",
         ],
       });
     }

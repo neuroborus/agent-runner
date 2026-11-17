@@ -576,6 +576,12 @@ Boundary validation and creation cover a project commit-kind override of a
 runner custom default before plan parsing.
 Focused reconstruction coverage rejects writable provider-policy drift before
 another turn while preserving startup receipts, accepted results and permissions.
+Its lightweight workspace matches real capture: complete unfiltered identity,
+no synthetic missing-root entry and the real output projection. Cases assert the
+compact prepared-root record, reconstruct existing-root preparation after an
+authorized clarification edit without a drift stop, and stop an injected legacy
+full baseline above state capacity with `ERR_CUSTOM_BASELINE_CAPACITY` and no
+further provider turn.
 `test/runner-custom-execution.slow.test.js` owns real leased authoring-to-execution
 composition and accepted-result recovery without Git, plus a durable lazy
 candidate-review diagnostic through its cold null retry; run it when changing public
@@ -586,7 +592,13 @@ Fast recovery cases cover compatible authorized decisions before acceptance and
 after an earlier receipt, fresh gates for the new clarification version, and
 rejection of unauthorized drift or an answer invalidating accepted results.
 The pure result-checkpoint suite rejects stale clarification approvals; execution
-contract tests retain legacy finalization/trusted-check defaults in every mode.
+contract tests retain legacy finalization/trusted-check defaults in every mode,
+accept only the legacy full or closed compact custom baseline and keep the
+identity version-41 migration lossless. The fast pipeline-owned
+`custom-workspace.test.js` injects in-memory complete/projection pairs to cover
+exact missing- and existing-root preparation, rejected remainder, output,
+identity and root drift, interrupted reconciliation, unchanged legacy entry
+comparison and the legacy capacity stop.
 The existing root orchestration, effect, stop and CLI/MCP slow suites retain their
 separate guarantees and remain applicable to their documented boundaries.
 

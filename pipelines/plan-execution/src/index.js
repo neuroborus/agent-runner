@@ -1619,7 +1619,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 41,
+  stateVersion: 42,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1693,6 +1693,9 @@ export const planExecutionPipeline = Object.freeze({
         ...run.pipelineState,
         workReports: run.pipelineState.workReports ?? Object.freeze([]),
       }),
+    // Legacy full baselines keep their exact comparison; new custom runs
+    // persist a compact baseline that a version-41 runtime must refuse as skew.
+    41: (run) => Object.freeze({ ...run.pipelineState }),
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,
