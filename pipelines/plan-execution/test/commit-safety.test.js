@@ -962,7 +962,7 @@ test("verifies a consumed version-5 authorization before validation migration", 
   );
 });
 
-test("prepared commit authority survives an unavailable capability and resumes once", async (t) => {
+async function preparedCommitFixture(t) {
   const trustedValidation = trustedValidationSnapshot();
   const finalization = finalizationWithTrustedCheck(trustedValidation);
   const requiredChecks = finalization.requiredChecks;
@@ -1005,6 +1005,11 @@ test("prepared commit authority survives an unavailable capability and resumes o
   );
   const prepared = fixture.currentRun.pipelineState.pendingCommit;
   assert.equal(prepared.status, "prepared");
+  return { fixture, settings, prepared };
+}
+
+test("prepared commit authority survives an unavailable capability and resumes once", async (t) => {
+  const { fixture, settings, prepared } = await preparedCommitFixture(t);
   const calls = Object.values(fixture.calls).flat().length;
   for (const code of [
     "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
@@ -1056,6 +1061,43 @@ test("prepared commit authority survives an unavailable capability and resumes o
       .length,
     1,
   );
+});
+
+test("repository drift retires unconsumed commit authority", async (t) => {
+  for (const [name, drift, reason, code] of [
+    [
+      "refs drift",
+      (repository) => repository.changeRefs(),
+      "unsafe_git_state",
+      "ERR_READ_ONLY_REPOSITORY_CHANGED",
+    ],
+    [
+      "external HEAD change",
+      (repository) => repository.commit("fix(test): advance external history"),
+      "plan_revision_required",
+      "ERR_STALE_EXECUTION_PLAN",
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const { fixture, settings } = await preparedCommitFixture(t);
+      const calls = Object.values(fixture.calls).flat().length;
+      await drift(fixture.repository);
+      const paused = await fixture.run(settings);
+      assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(paused.pause.reason, reason);
+      assert.equal(paused.pause.code, code);
+      assert.equal(paused.pipelineState.pendingCommit, null);
+      assert.deepEqual(paused.pipelineState.completedCommits, []);
+      assert.equal(Object.values(fixture.calls).flat().length, calls);
+      assert.equal(
+        fixture.calls.worker.some(({ access }) => access === "local-commit"),
+        false,
+      );
+      assert.doesNotThrow(() =>
+        planExecutionPipeline.workflow.validateRun(paused),
+      );
+    });
+  }
 });
 
 test("interrupted safety pauses do not inspect capabilities before recovery is authorized", async (t) => {

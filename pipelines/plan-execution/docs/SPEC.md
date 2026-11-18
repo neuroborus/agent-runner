@@ -917,6 +917,10 @@ an unavailable trusted capability or isolation boundary, or a blocked
 required-check capability inspection, preserves it in an `environment_blocked`
 pause targeting `COMMIT`. Retry rechecks capabilities
 before consuming that same authorization; it does not advance commit progress.
+Repository drift or a plan-position conflict found before consumption instead
+retires the unconsumed authorization within its existing `unsafe_git_state` or
+`plan_revision_required` safety stop, as consumption does for a changed commit
+gate; a later `COMMIT` must pass the complete gate and prepare a new one.
 An interrupted safety pause without a resume checkpoint retains its original
 reason; capability inspection cannot replace it with an environment retry.
 Status and immutable terminal reads do not probe

@@ -1367,11 +1367,22 @@ Include every listed command exactly once in requiredChecks with its actual cano
       await pause(
         "unsafe_git_state",
         { code: cause.code },
-        { bootstrapProgress: clearedBootstrapWork(state().bootstrapProgress) },
+        {
+          bootstrapProgress: clearedBootstrapWork(state().bootstrapProgress),
+          ...retiredPreparedCommit(),
+        },
       );
       return false;
     }
     return true;
+  }
+
+  // A never-consumed authorization cannot survive a safety stop; any later
+  // COMMIT must pass the complete gate and prepare a new one.
+  function retiredPreparedCommit() {
+    return state().pendingCommit?.status === "prepared"
+      ? { pendingCommit: null }
+      : {};
   }
 
   async function ensurePlanPosition() {
@@ -1404,6 +1415,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     await transition(
       {
         ...current,
+        ...retiredPreparedCommit(),
         currentStep: stepNumber,
         workflowState: "WAITING_FOR_USER",
       },
