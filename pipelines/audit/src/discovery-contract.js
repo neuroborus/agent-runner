@@ -263,7 +263,13 @@ export function normalizeClarification(value) {
         "invalid-text",
       );
   }
-  return value;
+  return {
+    ...value,
+    questions: value.questions.map(({ question, whyItMatters }) => ({
+      question: question.trim().replace(/\s+/gu, " "),
+      whyItMatters: whyItMatters.trim().replace(/\s+/gu, " "),
+    })),
+  };
 }
 
 export function createAuditState({
@@ -310,6 +316,7 @@ export function createAuditState({
     inputsFingerprint: null,
     clarificationHash: null,
     clarificationRounds: 0,
+    pendingClarificationAppend: null,
     pendingEdit: null,
     sourceForkConsumed: false,
     sourceForkRecovery: null,
@@ -447,6 +454,60 @@ export function assertDiscoveryRun(run) {
         state.pendingEdit.preEditorHash === run.hashes.clarifications),
     "Audit clarification authorization is inconsistent.",
   );
+  if (state.pendingClarificationAppend !== null) {
+    const append = state.pendingClarificationAppend;
+    exact(append, [
+      "kind",
+      "questions",
+      "round",
+      "expectedHash",
+      "resultHash",
+      "checkpoint",
+    ]);
+    exact(append.checkpoint, [
+      "workflowState",
+      "contextKey",
+      "snapshotFingerprint",
+      "settlementFingerprint",
+    ]);
+    const normalized = normalizeClarification({
+      status: "QUESTIONS",
+      inputs: null,
+      questions: append.questions,
+      reason: "",
+    });
+    assertAudit(
+      append.kind === "questions" &&
+        same(append.questions, normalized.questions) &&
+        Number.isSafeInteger(append.round) &&
+        append.round === state.clarificationRounds + 1 &&
+        append.round <= MAX_CLARIFICATION_ROUNDS &&
+        isHash(append.expectedHash) &&
+        isHash(append.resultHash) &&
+        append.expectedHash !== append.resultHash &&
+        append.expectedHash === run.hashes.clarifications &&
+        state.inputs === null &&
+        state.pendingEdit === null &&
+        state.proactiveClarificationComplete &&
+        run.activeTurn === null &&
+        state.sourceForkRecovery === null &&
+        append.checkpoint.workflowState === "CLARIFY" &&
+        append.checkpoint.contextKey === sessionContextKey(run, "clarify") &&
+        run.sessionLineage.children.some(
+          ({ role, contextKey }) =>
+            role === "auditor" && contextKey === append.checkpoint.contextKey,
+        ) &&
+        isHash(append.checkpoint.snapshotFingerprint) &&
+        append.checkpoint.snapshotFingerprint ===
+          state.repositoryBaseline?.contentFingerprint &&
+        append.checkpoint.settlementFingerprint ===
+          fingerprint({
+            correctionFeedback: state.correctionFeedback,
+            outputRecovery: state.outputRecovery,
+          }),
+      "Audit pending clarification append is inconsistent.",
+    );
+  }
   if (state.pendingEdit !== null) {
     const edit = state.pendingEdit;
     exact(edit, [

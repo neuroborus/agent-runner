@@ -204,7 +204,8 @@ test("combined pending revisions survive exhaustion, legacy cold migration and i
   // Import an exercised legacy snapshot through the store's creation boundary,
   // preserving its evidence rather than rewriting canonical journal bytes.
   const legacyStore = f.open().store;
-  const { outputRecovery, ...legacyState } = waiting.pipelineState;
+  const { outputRecovery, pendingClarificationAppend, ...legacyState } =
+    waiting.pipelineState;
   const legacy = await legacyStore.createRun({
     ...Object.fromEntries(
       [
@@ -258,7 +259,7 @@ test("combined pending revisions survive exhaustion, legacy cold migration and i
   assert.equal(f.calls.length, turns);
   const replacement = f.open();
   const saved = await replacement.store.loadRun(legacyRunId);
-  assert.equal(saved.pipelineStateVersion, 9);
+  assert.equal(saved.pipelineStateVersion, 10);
   assert.equal(saved.pause, null);
   assert.deepEqual(saved.pipelineState.outputRecovery, outputRecovery);
   assert.deepEqual(frozen(saved), frozen(waiting));
@@ -386,7 +387,7 @@ test("combined pending revisions survive exhaustion, legacy cold migration and i
   assert.ok(
     history.events.some(
       ({ state, activity }) =>
-        state.pipelineStateVersion === 9 && activity?.kind === "migrated",
+        state.pipelineStateVersion === 10 && activity?.kind === "migrated",
     ),
   );
 });

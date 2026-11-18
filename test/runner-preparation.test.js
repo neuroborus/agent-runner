@@ -1013,6 +1013,7 @@ test("legacy pending audit resumes whole-directory capture without changing froz
       25;
   legacy.pipelineStateVersion = 6;
   delete legacy.pipelineState.outputRecovery;
+  delete legacy.pipelineState.pendingClarificationAppend;
   delete legacy.pipelineState.settings.sourceScope;
   delete legacy.pipelineState.settings.excludePaths;
   legacy.workspacePreparation.inputFingerprint =

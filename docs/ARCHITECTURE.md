@@ -2625,7 +2625,7 @@ preserve that exact selection. Interrupted selection publication recovers once;
 later capture/reconstruction verifies existing membership rather than reselecting.
 Partial capture supplies no authority. Version-25 preparation and completed
 bindings remain unchanged on migration. The detached token is `1:26`, with
-matching package metadata and audit version 9 compatibility.
+matching package metadata and audit version 10 compatibility.
 
 Audit selects `preparation: "deferred"` in its directory workspace descriptor.
 Runner and MCP boundary validation perform only canonical routing, configuration
@@ -6167,6 +6167,22 @@ its public `index.js`: creating the `clarifications.md` artifact, invoking
 Pipelines own the artifact location, prompt, round limit, transition out of
 `CLARIFY`, and safe re-entry after an exceptional product decision. This is a
 bounded preparation protocol, not a general chat or dialogue engine.
+
+Audit state version 10 journals question appends through the clarification
+service's existing `persistAppend` callback before transcript replacement.
+Its closed nullable intent binds exact normalized questions, round, prior/result
+hashes and checkpoint settlement data. Before replay it verifies protected
+non-transcript inputs, workspace/control ownership and checkpoint bindings,
+then accepts only prior bytes or the exact journaled result. `resultHash`
+reconciles an already completed replacement without duplicating it or invoking
+another role. Verified readback precedes one atomic hash/round/editor-request
+publication that retires intent and clears accepted correction/recovery feedback;
+only then may an editor open. Interrupted replacement or publication retains
+proof for supported resume, while unexpected edits remain non-resumable.
+The descriptor migrates legacy absence to null without inferring append
+authority. Audit operator-stop reconciliation only inspects this proof and
+retains intent; it never appends, creates an editor window or accepts an answer.
+Existing init and coding settlement append owners remain independent.
 
 The transcript reader retains its existing error codes and 1 MiB limit. Its
 size and regular-file/single-link guards add optional `constraint` metadata of

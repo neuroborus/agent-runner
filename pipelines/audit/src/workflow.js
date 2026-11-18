@@ -119,10 +119,32 @@ export async function runAuditDiscovery({
     );
     return current;
   }
-  async function inspectInputs() {
+  async function inspectInputs({ allowPendingAppend = false } = {}) {
     const inputs = await runtime.readInputs({ taskPath: run.taskPath });
-    const clarification =
-      await runtime.clarifications.inspectTranscript(transcript);
+    let clarification;
+    try {
+      clarification =
+        await runtime.clarifications.inspectTranscript(transcript);
+    } catch (cause) {
+      if (state().pendingClarificationAppend === null) throw cause;
+      if (cause?.code === "ERR_CLARIFICATION_READ") {
+        await pause("clarification_append_interrupted", "CLARIFY", {
+          code: cause.code,
+        });
+        return null;
+      }
+      if (
+        [
+          "ERR_CLARIFICATION_NOT_FOUND",
+          "ERR_UNSAFE_CLARIFICATION_PATH",
+          "ERR_INVALID_CLARIFICATION",
+        ].includes(cause?.code)
+      ) {
+        await pause("input_changed", "CLARIFY");
+        return null;
+      }
+      throw cause;
+    }
     const hashes = {
       task: inputs.task.hash,
       context: inputs.context?.hash ?? null,
@@ -130,7 +152,16 @@ export async function runAuditDiscovery({
     };
     if (
       current.hashes.task !== undefined &&
-      Object.keys(hashes).some((key) => current.hashes[key] !== hashes[key])
+      Object.keys(hashes).some(
+        (key) =>
+          current.hashes[key] !== hashes[key] &&
+          !(
+            key === "clarifications" &&
+            allowPendingAppend &&
+            state().pendingClarificationAppend !== null &&
+            hashes[key] === state().pendingClarificationAppend.resultHash
+          ),
+      )
     ) {
       await pause("input_changed");
       return null;
@@ -222,6 +253,125 @@ export async function runAuditDiscovery({
       consumePendingEdit: consumeEdit,
     });
     return result.status !== "WAITING_FOR_USER" && state().pendingEdit === null;
+  }
+  async function appendQuestions(questions) {
+    // The same guards precede initial mutation and cold replay. A stop only
+    // inspects this proof; it cannot consume intent or create an edit window.
+    try {
+      await runtime.workspace.assertUnchanged(state().repositoryBaseline);
+    } catch {
+      await pause("workspace_changed", "CLARIFY");
+      return false;
+    }
+    if ((await inspectInputs({ allowPendingAppend: true })) === null)
+      return false;
+    const pending = state().pendingClarificationAppend;
+    const intent = pending ?? {
+      kind: "questions",
+      questions,
+      round: state().clarificationRounds + 1,
+      expectedHash: current.hashes.clarifications,
+      checkpoint: {
+        workflowState: "CLARIFY",
+        contextKey: sessionContextKey(current, "clarify"),
+        snapshotFingerprint: state().repositoryBaseline.contentFingerprint,
+        settlementFingerprint: fingerprint({
+          correctionFeedback: state().correctionFeedback,
+          outputRecovery: state().outputRecovery,
+        }),
+      },
+    };
+    try {
+      const appended = await runtime.clarifications.appendQuestionRound({
+        ...transcript,
+        expectedHash: intent.expectedHash,
+        ...(pending === null ? {} : { resultHash: intent.resultHash }),
+        round: intent.round,
+        questions: intent.questions,
+        persistAppend: async ({ expectedHash, hash }) => {
+          assertAudit(
+            expectedHash === intent.expectedHash,
+            "Audit append prior hash changed.",
+          );
+          if (pending !== null) {
+            assertAudit(
+              hash === pending.resultHash,
+              "Audit append result hash changed.",
+            );
+            return;
+          }
+          await save({
+            ...state(),
+            pendingClarificationAppend: { ...intent, resultHash: hash },
+          });
+        },
+      });
+      assertAudit(
+        appended.hash === state().pendingClarificationAppend?.resultHash,
+        "Audit append readback differs from its intent.",
+      );
+      try {
+        await runtime.workspace.assertUnchanged(state().repositoryBaseline);
+      } catch {
+        await pause("workspace_changed", "CLARIFY");
+        return false;
+      }
+      const readback = await inspectInputs({ allowPendingAppend: true });
+      if (readback === null) return false;
+      if (readback.clarification.hash !== appended.hash) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
+      return await requestEdit(
+        "clarification-answers",
+        "clarification_answers_required",
+        {
+          expectedHash: appended.hash,
+          round: intent.round,
+          settled: {
+            correctionFeedback: null,
+            outputRecovery: null,
+            pendingClarificationAppend: null,
+          },
+          inputRequest: {
+            kind: "clarification",
+            questions: intent.questions.map((question, index) => ({
+              id: `q${index + 1}`,
+              question: question.question,
+              options: [],
+              rationale: question.whyItMatters,
+            })),
+            rationale: "Answer every material clarification question.",
+          },
+        },
+      );
+    } catch (cause) {
+      if (
+        (cause?.code === "ERR_CLARIFICATIONS_CHANGED" &&
+          state().pendingEdit === null) ||
+        (state().pendingClarificationAppend !== null &&
+          [
+            "ERR_CLARIFICATION_NOT_FOUND",
+            "ERR_UNSAFE_CLARIFICATION_PATH",
+            "ERR_INVALID_CLARIFICATION",
+          ].includes(cause?.code))
+      ) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
+      if (
+        state().pendingClarificationAppend !== null &&
+        ["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+          cause?.code,
+        )
+      ) {
+        await pause("clarification_append_interrupted", "CLARIFY", {
+          code: cause.code,
+        });
+        return false;
+      }
+      throw cause;
+    }
   }
   const retry = Symbol("retry");
   async function turn(phase, evidence) {
@@ -582,6 +732,15 @@ export async function runAuditDiscovery({
 
   if (["FAILED", "CANCELED"].includes(state().workflowState)) return current;
 
+  if (
+    state().pendingClarificationAppend !== null &&
+    [
+      "input_changed",
+      "workspace_changed",
+      "project_configuration_changed",
+    ].includes(current.pause?.reason)
+  )
+    return current;
   if (operatorStop) {
     if (state().repositoryBaseline !== null) {
       try {
@@ -589,9 +748,13 @@ export async function runAuditDiscovery({
       } catch {
         return pause("workspace_changed");
       }
-      if (state().pendingEdit === null) await inspectInputs();
+      if (state().pendingEdit === null)
+        await inspectInputs({ allowPendingAppend: true });
     }
     return current;
+  }
+  if (state().pendingClarificationAppend !== null) {
+    if (!(await appendQuestions())) return current;
   }
   if (state().pendingEdit !== null) {
     // An edit window authorizes only the transcript, never changed task inputs or sources.
@@ -753,35 +916,7 @@ export async function runAuditDiscovery({
     }
     if (state().clarificationRounds >= MAX_CLARIFICATION_ROUNDS)
       return pause("clarification_limit_reached", "CLARIFY", {}, settled);
-    const round = state().clarificationRounds + 1;
-    const appended = await runtime.clarifications.appendQuestionRound({
-      ...transcript,
-      expectedHash: current.hashes.clarifications,
-      round,
-      questions: output.questions,
-    });
-    if (
-      !(await requestEdit(
-        "clarification-answers",
-        "clarification_answers_required",
-        {
-          expectedHash: appended.hash,
-          round,
-          settled,
-          inputRequest: {
-            kind: "clarification",
-            questions: output.questions.map((question, index) => ({
-              id: `q${index + 1}`,
-              question: question.question,
-              options: [],
-              rationale: question.whyItMatters,
-            })),
-            rationale: "Answer every material clarification question.",
-          },
-        },
-      ))
-    )
-      return current;
+    if (!(await appendQuestions(output.questions))) return current;
   }
 
   while (["DISCOVER", "VERIFY_FINDINGS"].includes(state().workflowState)) {

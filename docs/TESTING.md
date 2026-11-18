@@ -90,7 +90,7 @@ the admission state fingerprint across cold reload. It preserves all source,
 input, policy, role and accounting declarations and rejects attempted changes,
 including workflow advancement or rebinding without increasing the version.
 The Runner preparation suite's legacy pending-audit case exercises the actual
-audit migrations through version 9, including the version-8 nullable default,
+audit migrations through version 10, including the nullable recovery defaults,
 before capture. These focused cases retain the complete slow release gate for
 persisted/lifecycle changes.
 
@@ -397,6 +397,12 @@ Discovery also covers persisted clarification/discovery correction feedback,
 replacement, checkpoint confinement and rejection of unsafe diagnostics.
 Its incomplete-work regression retains an already accepted batch, report,
 limitations and uncertainty across reload without adopting proposed revisions.
+Fast `pipelines/audit/test/clarification-append.test.js` owns injected append-intent,
+replacement and editor-publication interruption, repeated recovery, verification-only
+stops, strict payload/checkpoint validation and legacy absence. The existing
+ordinary-directory case in `test/runner-audit.test.js` exercises real transcript
+replacement and fresh clarification-service reconstruction without role replay.
+These focused tests do not attest cold Runner-journal or slow release coverage.
 Fast `pipelines/audit/test/verification.test.js` owns all five finding dispositions,
 fresh independent versus continuing lazy rechecks, review additions, retained
 rejections, version invalidation, stale/malformed/incomplete output, interrupted

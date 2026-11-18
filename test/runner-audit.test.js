@@ -596,7 +596,7 @@ test("persistent text limits retain the aggregate two-MiB audit-result allowance
   assert.deepEqual(result.pipelineState.report.limitations, report.limitations);
 });
 
-test("audit discovery composes confined clarification edits and persisted session contexts", async (t) => {
+test("ordinary-directory audit recovers journaled questions before confined edits without session replay", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "runner-audit-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const projectPath = join(root, "project");
@@ -708,7 +708,45 @@ test("audit discovery composes confined clarification edits and persisted sessio
     },
   };
 
+  const append = runtime.clarifications.appendQuestionRound;
+  runtime.clarifications = {
+    ...runtime.clarifications,
+    appendQuestionRound: async (request) => {
+      const result = await append(request);
+      assert.equal(
+        result.hash,
+        current.pipelineState.pendingClarificationAppend.resultHash,
+      );
+      throw Object.assign(new Error("Lost append readback"), {
+        code: "ERR_CLARIFICATION_READ",
+      });
+    },
+  };
+  const interrupted = await runAuditDiscovery({ run: current, runtime });
+  assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+  assert.equal(interrupted.pipelineState.pendingEdit, null);
+  assert.equal(interrupted.pipelineState.clarificationRounds, 0);
+  const appendedBytes = await readFile(
+    join(taskPath, "clarifications.md"),
+    "utf8",
+  );
+  current = JSON.parse(JSON.stringify(interrupted));
+  runtime.clarifications = createClarificationService({ interactive: false });
+  for (let index = 0; index < 2; index += 1) {
+    const stopped = await runAuditDiscovery({
+      run: current,
+      runtime,
+      operatorStop: true,
+    });
+    assert.deepEqual(stopped, interrupted);
+  }
   const waiting = await runAuditDiscovery({ run: current, runtime });
+  assert.equal(turns, 1);
+  assert.equal(
+    await readFile(join(taskPath, "clarifications.md"), "utf8"),
+    appendedBytes,
+  );
+  assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
   assert.equal(waiting.pause.reason, "clarification_answers_required");
   assert.ok(waiting.pipelineState.pendingEdit);
   await writeFile(

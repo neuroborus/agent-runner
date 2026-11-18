@@ -123,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 9 retains the workspace baseline, frozen declarations and their
+State version 10 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -140,6 +140,13 @@ writing state directly. The ordered version-2 migration adds an empty
 `sourceForkContexts` list for combined logical-owner fork consumption; it changes
 no existing history, roles, budgets, batch versions or approval. Combined had no
 invocable lifecycle in prior versions. Task/context hashes remain in the common envelope.
+The version-9 migration adds nullable `pendingClarificationAppend` only for
+legacy absence; a preexisting field is rejected rather than inferred or adopted.
+The closed question intent retains normalized questions, the next round,
+prior/result hashes and the CLARIFY checkpoint's logical context, snapshot and
+correction/output-recovery settlement fingerprint. It cannot coexist with an
+editor window, frozen declarations or an active turn. Legacy null grants no
+append authority, and audit adds no product-decision path.
 Report and pending-batch bindings pin the inspected content snapshot. Each
 history entry retains its ordinal, logical session context, outcome, report
 binding and candidate IDs. Actual opaque child identities/lineage use the
@@ -606,6 +613,21 @@ CLI editor or waiting in MCP. MCP never opens an editor. Answers are accepted
 through the shared response boundary or an authorized external edit and resume;
 unchanged material answers retain the pending request without another model turn
 or question round. Closing clarification freezes its accepted transcript hash.
+
+Question append intent is persisted through the shared clarification service's
+`persistAppend` callback before transcript replacement. Recovery first verifies
+unchanged task/context inputs, workspace content/controls and checkpoint bindings;
+only the exact prior bytes or journaled `resultHash` may precede replay. It never
+adopts an observed hash or invokes the producing role again. Intent survives
+replacement, readback and publication interruption. After verified readback,
+one atomic transition publishes the resulting hash, once-only round accounting,
+cleared correction/output-recovery state, edit authorization and structured
+request while retiring intent. The editor opens only after that transition.
+Read/write interruptions project bounded `clarification_append_interrupted`
+diagnostics with null-action resume; unauthorized bytes and protected-input or
+workspace drift remain non-resumable. Operator-stop reconciliation verifies
+append proof and retains intent without appending, preparing/opening an editor
+or accepting an answer. Report publication remains independently owned.
 
 Runner publishes `<task-dir>/audit.md` atomically after accepted structured report,
 ledger or disposition updates. An initial report is marked **In progress**.

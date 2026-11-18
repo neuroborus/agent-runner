@@ -9,6 +9,7 @@ import {
 import { projectAuditReport, REPORT_FILENAME } from "./publication-contract.js";
 
 const RESUMABLE = Object.freeze([
+  "clarification_append_interrupted",
   "audit_scope_blocked",
   "discovery_interrupted",
   "invalid_discovery",
@@ -20,6 +21,8 @@ const RESUMABLE = Object.freeze([
   "backend_unavailable",
 ]);
 const EXPLANATIONS = Object.freeze({
+  clarification_append_interrupted:
+    "Clarification append was interrupted; resume verifies the saved intent before publishing the question request.",
   audit_scope_blocked: "Audit scope cannot yet be resolved.",
   discovery_interrupted:
     "Discovery was interrupted; resume preserves its charged pass.",

@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import {
   AUDIT_MODES,
+  assertAudit,
   createAuditState,
   MAX_DISCOVERY_PASSES,
   MAX_FINDING_RECHECK_PASSES,
@@ -39,7 +40,7 @@ const LAZY_ROLES = Object.freeze(["auditor"]);
 
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 9,
+  stateVersion: 10,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -76,6 +77,13 @@ export const auditPipeline = Object.freeze({
     // Legacy full baselines keep their exact comparison; new runs persist a
     // compact baseline that a version-8 runtime must refuse as skew.
     8: ({ pipelineState }) => ({ ...pipelineState }),
+    9: ({ pipelineState }) => {
+      assertAudit(
+        !Object.hasOwn(pipelineState, "pendingClarificationAppend"),
+        "Legacy audit already contains clarification append intent.",
+      );
+      return { ...pipelineState, pendingClarificationAppend: null };
+    },
   }),
   roles: ROLES,
   resolveActiveRoles: (settings) =>

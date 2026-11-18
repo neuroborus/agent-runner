@@ -60,6 +60,7 @@ export function fixture(
     saved,
     context = null,
     clarificationContent = "",
+    transcriptHash: savedTranscriptHash,
     proactiveClarification = false,
   } = {},
 ) {
@@ -85,7 +86,8 @@ export function fixture(
   let editSequence = Number(
     current.pipelineState.pendingEdit?.id.split("-").at(-1) ?? 0,
   );
-  let transcriptHash = current.hashes.clarifications ?? "c".repeat(64);
+  let transcriptHash =
+    savedTranscriptHash ?? current.hashes.clarifications ?? "c".repeat(64);
   let taskHash = current.hashes.task ?? "b".repeat(64);
   let changed = false;
   let stopAfterReservation = false;
@@ -164,8 +166,19 @@ export function fixture(
         events.push({ type: "freeze" });
         return { hash: transcriptHash };
       },
-      appendQuestionRound: async () => {
-        transcriptHash = "d".repeat(64);
+      appendQuestionRound: async ({
+        expectedHash,
+        resultHash,
+        persistAppend,
+      }) => {
+        if (resultHash !== undefined && transcriptHash === resultHash)
+          return { hash: transcriptHash };
+        assert.equal(expectedHash, transcriptHash);
+        const hash = "d".repeat(64);
+        if (resultHash !== undefined) assert.equal(resultHash, hash);
+        await persistAppend?.({ expectedHash, hash });
+        transcriptHash = hash;
+        events.push({ type: "append" });
         return { hash: transcriptHash };
       },
       prepareEdit: async (request) => {
