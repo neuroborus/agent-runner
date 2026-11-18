@@ -481,6 +481,16 @@ or editor authority. Orchestration covers authoring questions and execution
 decisions; the owning fast workflow fixtures separately cover reconstruction
 policy, including authoring decisions and execution questions. Workflow-only
 reconstruction is not cold journal evidence.
+Fast execution `clarification-and-bootstrap` also owns the terminal `CONFIRM`
+product-decision append checkpoint with actual producing role results: changed
+and missing ignored finalized-only infrastructure blocks replay, and drift after
+readback blocks editor authority. Its unchanged control protects selected-file
+composition, deduplicated inventories and once-only settlement separately from
+the retained finalization tuple. Runner orchestration owns focused cold
+store/service/Runner reconstruction through the same route, interrupted by a
+finite service callback after durable intent but before replacement. Repeated
+reconstruction retains rejected intent, accounting and redacted status/wait
+projections, or settles unchanged bytes once without producing-role replay.
 Existing init and coding settlement coverage retains its owners. Changes to this
 cross-capability lifecycle retain the affected slow owners above and the complete
 slow release gate; focused development cases do not attest those gates or the

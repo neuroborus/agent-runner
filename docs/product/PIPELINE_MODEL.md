@@ -198,6 +198,9 @@ In audit, plan authoring and execution, a service readback that disagrees with
 the journaled result durably blocks publication and editor authority. Recovery
 and verification-only stops retain the rejection, intent and unchanged
 accounting even if the transcript later returns to prior or expected bytes.
+Execution and polishing also bind append recovery to all infrastructure in
+retained finalization evidence, including ignored files, before replay and editor
+authority. Missing or changed files retain the original intent and block recovery.
 Existing init and coding settlement owners remain separate.
 
 The runner freezes the clarification artifact before work begins. Ordinary

@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-18
 
+- **Execution append recovery binds retained finalized infrastructure.** A
+  terminal product decision can retain finalization evidence while suspending to
+  implementation. Append inspection now measures that inventory together with
+  established infrastructure, including ignored additions absent from ordinary
+  snapshots, before replay and editor authority. It reuses the existing composed
+  fingerprint owner and strict state shape; drift retains intent and accounting
+  instead of rebinding recovery to newly observed bytes.
+
 - **Sibling append readback drift retains a durable rejection.** Audit,
   plan authoring and execution now persist their existing input-change blocker
   when the real service returns bytes that disagree with the journaled result.

@@ -48,6 +48,8 @@ import {
   reconciliationResolved,
   resolution,
   reviewFindings,
+  reviewProductDecision,
+  terminalConfirmation,
 } from "./support/index.js";
 
 test("clarifies and bootstraps through independent source-session forks", async (t) => {
@@ -2081,6 +2083,173 @@ for (const [kind, boundary, mode] of [
           /Review the updated clarifications/u.test(prompt),
         ),
       );
+  });
+}
+
+for (const [change, boundary] of [
+  ["changed", "replay"],
+  ["missing", "replay"],
+  ["changed", "publication"],
+  ["unchanged", "replay"],
+]) {
+  test(`terminal decision append ${boundary} guards ${change} finalized-only infrastructure after workflow reconstruction`, async (t) => {
+    const extraPath = "LOCAL_ARTIFACTS/finalized-check.js";
+    const infrastructure = [...VALIDATION_INFRASTRUCTURE, extraPath];
+    const f = await createFixture(t, {
+      workWorker: [
+        implementationCompleted(),
+        { ...finalizationPassed(), validationInfrastructure: infrastructure },
+      ],
+      workReviewer: [terminalConfirmation(reviewProductDecision())],
+      async onRoleRun(role, request) {
+        if (request.schema === FINALIZATION_SCHEMA) {
+          await writeFile(join(request.cwd, extraPath), "original check\n");
+        }
+      },
+    });
+    const service = createClarificationService({ interactive: false });
+    let appendCalls = 0;
+    let editors = 0;
+    const mutate = () =>
+      change === "missing"
+        ? rm(join(f.projectPath, extraPath))
+        : writeFile(join(f.projectPath, extraPath), "changed check\n");
+    f.runtime.clarifications = {
+      ...service,
+      async appendProductDecision(options) {
+        appendCalls++;
+        if (appendCalls === 1)
+          return service.appendProductDecision({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw Object.assign(new Error("Interrupted before replacement"), {
+                code: "ERR_CLARIFICATION_READ",
+              });
+            },
+          });
+        const result = await service.appendProductDecision(options);
+        if (boundary === "publication") await mutate();
+        return result;
+      },
+      async prepareEdit(...args) {
+        assert.equal(change, "unchanged", "Drift cannot authorize an editor");
+        editors++;
+        return service.prepareEdit(...args);
+      },
+    };
+    const interrupted = await f.run();
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const saved = structuredClone(interrupted);
+    const intent = saved.pipelineState.pendingClarificationAppend;
+    assert.equal(intent.checkpoint.workflowState, "CONFIRM");
+    assert.equal(intent.checkpoint.suspendedState, "IMPLEMENT");
+    const finalization = saved.pipelineState.finalizationResult;
+    assert.ok(finalization.validationInfrastructure.includes(extraPath));
+    assert.ok(
+      !saved.pipelineState.validationInfrastructure.includes(extraPath),
+    );
+    const guidance = saved.pipelineState.finalizationGuidance;
+    assert.equal(guidance.selection, "file");
+    const paths = [
+      ...new Set([
+        ...saved.pipelineState.validationInfrastructure,
+        ...finalization.validationInfrastructure,
+      ]),
+    ];
+    const composed = hash(
+      JSON.stringify({
+        infrastructure: await f.runtime.git.validationInfrastructureFingerprint(
+          {
+            paths: paths.filter((path) => path !== guidance.skillPath),
+          },
+        ),
+        finalizationFile: (
+          await f.runtime.finalization.inspectFile({
+            path: guidance.skillPath,
+          })
+        ).fingerprint,
+      }),
+    );
+    const calls = Object.values(f.calls).map((requests) => requests.length);
+    const bytes = await readFile(f.clarificationPath, "utf8");
+    const content = await f.runtime.git.contentFingerprint();
+    if (change !== "unchanged" && boundary === "replay") await mutate();
+    assert.equal(await f.runtime.git.contentFingerprint(), content);
+
+    // Fresh workflow invocations use saved producing results, not synthetic state.
+    const result = await f.run();
+    if (change === "unchanged") {
+      assert.equal(result.pause.reason, "product_decision_required");
+      assert.equal(result.pipelineState.pendingClarificationAppend, null);
+      assert.equal(result.counters.productDecisions, 1);
+      assert.equal(result.hashes.executionClarifications, intent.resultHash);
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.equal(editors, 1);
+      const settled = structuredClone(result);
+      await f.run();
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.equal(f.currentRun.counters.productDecisions, 1);
+      assert.deepEqual(
+        f.currentRun.pipelineState.workReports,
+        settled.pipelineState.workReports,
+      );
+      assert.deepEqual(f.currentRun.sessionLineage, settled.sessionLineage);
+    } else {
+      assert.equal(result.pause.reason, "unsafe_git_state");
+      assert.equal(
+        result.pause.code,
+        "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      );
+      assert.deepEqual(result.pipelineState.pendingClarificationAppend, intent);
+      assert.deepEqual(result.pipelineState.finalizationResult, finalization);
+      assert.deepEqual(result.counters, saved.counters);
+      assert.deepEqual(result.hashes, saved.hashes);
+      assert.equal(result.pipelineState.pendingEdit, null);
+      assert.equal(editors, 0);
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        boundary === "replay" ? hash(bytes) : intent.resultHash,
+      );
+      await f.run();
+      await runPlanExecution({
+        run: f.currentRun,
+        runtime: f.runtime,
+        operatorStop: true,
+      });
+      assert.deepEqual(
+        f.currentRun.pipelineState.pendingClarificationAppend,
+        intent,
+      );
+      assert.deepEqual(
+        f.currentRun.pipelineState.finalizationResult,
+        finalization,
+      );
+      assert.deepEqual(f.currentRun.counters, saved.counters);
+    }
+    assert.equal(
+      appendCalls,
+      boundary === "replay" && change !== "unchanged" ? 1 : 2,
+    );
+    assert.deepEqual(
+      Object.values(f.calls).map((requests) => requests.length),
+      calls,
+    );
+    assert.equal(intent.checkpoint.infrastructureFingerprint, composed);
+    assert.notEqual(
+      composed,
+      saved.pipelineState.validationInfrastructureFingerprint,
+    );
+    assert.notEqual(
+      composed,
+      await f.runtime.git.validationInfrastructureFingerprint({ paths }),
+    );
   });
 }
 

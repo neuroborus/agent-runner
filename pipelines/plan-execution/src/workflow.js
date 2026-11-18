@@ -3075,14 +3075,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return null;
     if (custom && state().currentStep !== null) await checkpoint().verify();
     const pending = state().pendingClarificationAppend;
+    const infrastructure = state().validationInfrastructure;
     let infrastructureFingerprint;
     try {
       infrastructureFingerprint =
-        state().validationInfrastructure === null
+        infrastructure === null
           ? null
-          : await validationInfrastructureFingerprint(
-              state().validationInfrastructure,
-            );
+          : await validationInfrastructureFingerprint([
+              ...new Set([
+                ...infrastructure,
+                ...(state().finalizationResult?.validationInfrastructure ?? []),
+              ]),
+            ]);
     } catch (cause) {
       if (pending === null) throw cause;
       await pause("unsafe_git_state", {

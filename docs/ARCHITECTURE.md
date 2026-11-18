@@ -6213,6 +6213,18 @@ retains resumable intent, while changed inputs/bytes/controls remain
 non-resumable. Operator stops only inspect append proof and retain intent;
 existing writable-result and commit effects keep their independent ownership.
 
+Execution's terminal `CONFIRM` product-decision route retains finalization
+evidence while preparing the append that suspends to `IMPLEMENT`. Append
+inspection measures the deduplicated established and retained-finalization
+infrastructure inventories before intent creation/replay and after transcript
+readback, before editor authority. Ignored finalized-only files therefore remain
+protected even when ordinary content snapshots are unchanged. Measurement uses
+the existing fingerprint owner, including selected-file composition and
+ordinary/legacy domains, independently of the finalization evidence tuple.
+Missing or changed infrastructure retains the original intent and accounting
+under the existing validation-infrastructure safety pause. No state shape or
+version changes, and recovery never rebinds an old intent to observed bytes.
+
 Audit, plan-authoring and plan-execution compare the service's returned hash
 with the durable append intent's `resultHash` before publication. A mismatch
 persists the owning non-resumable rejection (`input_changed` for audit,

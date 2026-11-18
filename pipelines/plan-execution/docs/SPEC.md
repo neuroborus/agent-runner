@@ -2358,6 +2358,20 @@ pending editor authorization and structured input request. Only then may the
 editor open. Material answers retain compatibility/replanning re-entry;
 unchanged answers renew only the existing editor window.
 
+Terminal `CONFIRM` product decisions suspend to `IMPLEMENT` through this same
+append owner while retaining `finalizationResult` until publication. Before
+intent creation or replay, and again before editor authorization, measure the
+deduplicated union of established validation infrastructure and any inventory in
+retained finalization evidence. This includes ignored finalized-only files that
+ordinary content snapshots omit. Use the existing
+`validationInfrastructureFingerprint` owner, preserving selected-file composition
+and ordinary/legacy fingerprint domains; the finalization evidence tuple remains
+separate. Missing or changed infrastructure rejects replay against the original
+intent with `unsafe_git_state` / `ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED`,
+retaining its hashes, checkpoint, accounting and unsettled work. Never rebind an
+old intent to current bytes. The existing strict state shape needs no migration;
+an older intent whose fingerprint omits retained infrastructure fails closed.
+
 Replacement, readback or publication interruption retains the original intent
 and checkpoint. Bounded read/write failures pause as
 `clarification_append_interrupted`, with only an allowlisted code and null-action
