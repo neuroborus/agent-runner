@@ -7333,6 +7333,10 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
               ...clearedCandidateAndTerminalGate(),
               workflowState,
               repositoryBaseline: inspected,
+              finalizationRecovery: {
+                ...current.finalizationRecovery,
+                pending: false,
+              },
               ...(interruptedTurn?.phase === "check-and-fix"
                 ? markPendingLazyCorrectionCharged(current)
                 : {}),

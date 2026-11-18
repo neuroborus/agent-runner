@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { migratePolishingStateV10, polishingPipeline } from "../src/index.js";
+import { runPolishing } from "../src/workflow.js";
 import {
   BOOTSTRAP_SCHEMA,
   BOOTSTRAP_RECONCILIATION_SCHEMA,
@@ -713,6 +714,145 @@ test("semantic pending attempt reconstructs after interruption without a native 
       /SHA256\(JSON\.stringify\(\{infrastructure, finalizationFile\}\)\)/u,
     );
     assert.match(prompt, /"finalizationGuidance":/u);
+  }
+});
+
+test("operator stop retires a pending recovery attempt after adopting interrupted replacement content", async (t) => {
+  for (const mode of ["independent", "lazy"]) {
+    await t.test(mode, async (t) => {
+      const stop = new Error("simulated process loss");
+      let stopped = false;
+      let finalizations = 0;
+      let reserved = null;
+      const fixture = await recoveryFixture(t, {
+        mode,
+        async onRoleRun(_role, request) {
+          if (request.schema !== FINALIZATION_SCHEMA) return;
+          finalizations += 1;
+          if (finalizations === 2) {
+            await writeFile(
+              join(fixture.projectPath, "partial.txt"),
+              "Partial replacement finalization.\n",
+            );
+            stopped = true;
+            throw stop;
+          }
+          if (finalizations === 3) {
+            reserved = structuredClone(
+              fixture.currentRun.pipelineState.finalizationRecovery,
+            );
+            stopped = true;
+            throw stop;
+          }
+        },
+      });
+      const finish = fixture.runtime.finishAgentTurn;
+      const transition = fixture.runtime.transition;
+      fixture.runtime.finishAgentTurn = (turn) => {
+        if (stopped) throw stop;
+        return finish(turn);
+      };
+      fixture.runtime.transition = (patch, options) => {
+        if (stopped) throw stop;
+        return transition(patch, options);
+      };
+      await assert.rejects(fixture.run(), (error) => error === stop);
+      const before = structuredClone(fixture.currentRun);
+      assert.equal(before.activeTurn.phase, "finalize");
+      assert.equal(before.pipelineState.finalizationRecovery.attempts, 1);
+      assert.equal(before.pipelineState.finalizationRecovery.pending, true);
+      stopped = false;
+      const roleCalls = Object.values(fixture.calls).flat().length;
+
+      const reconciled = await runPolishing({
+        run: fixture.currentRun,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      assertRun(reconciled);
+      const state = reconciled.pipelineState;
+      assert.equal(
+        state.workflowState,
+        mode === "lazy" ? "CHECK_AND_FIX" : "REVIEW",
+      );
+      assert.equal(reconciled.activeTurn, null);
+      assert.notEqual(
+        state.repositoryBaseline.contentFingerprint,
+        before.pipelineState.repositoryBaseline.contentFingerprint,
+      );
+      for (const field of [
+        "head",
+        "branch",
+        "refsFingerprint",
+        "indexFingerprint",
+        "remoteConfigurationFingerprint",
+        "identityFingerprint",
+      ]) {
+        assert.equal(
+          state.repositoryBaseline[field],
+          before.pipelineState.repositoryBaseline[field],
+        );
+      }
+      assert.equal(
+        await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+        "Partial replacement finalization.\n",
+      );
+      for (const field of [
+        "candidateReviewedFingerprint",
+        "candidateConfirmationFingerprint",
+        "finalizationResult",
+        "finalizedFingerprint",
+        "reviewResult",
+        "reviewedFingerprint",
+      ]) {
+        assert.equal(state[field], null);
+      }
+      assert.deepEqual(state.finalizationRecovery, {
+        attempts: 1,
+        additionalAttempts: 0,
+        required: true,
+        pending: false,
+        feedback: null,
+      });
+      assert.deepEqual(reconciled.counters, before.counters);
+      assert.equal(Object.values(fixture.calls).flat().length, roleCalls);
+      assert.equal(fixture.handoffs.length, 0);
+
+      const repeated = await runPolishing({
+        run: reconciled,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      assert.deepEqual(repeated.pipelineState, state);
+      assert.deepEqual(repeated.counters, reconciled.counters);
+      assert.equal(Object.values(fixture.calls).flat().length, roleCalls);
+      assert.equal(fixture.handoffs.length, 0);
+
+      await assert.rejects(fixture.run(), (error) => error === stop);
+      assert.equal(finalizations, 3);
+      assert.deepEqual(reserved, {
+        attempts: 2,
+        additionalAttempts: 0,
+        required: true,
+        pending: true,
+        feedback: null,
+      });
+      assert.equal(
+        calls(
+          fixture,
+          mode === "lazy"
+            ? CANDIDATE_CLEAN_CONFIRM_SCHEMA
+            : CANDIDATE_REVIEW_SCHEMA,
+        ).length,
+        2,
+      );
+      assert.equal(fixture.handoffs.length, 0);
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        0,
+      );
+    });
   }
 });
 

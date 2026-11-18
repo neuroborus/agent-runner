@@ -1263,6 +1263,10 @@ while the consumed allowance remains until the run ends.
 A blocking product decision retires the pending attempt and its feedback before
 returning through bootstrap and polishing; it does not restore
 consumed allowance or remove the replacement-finalization requirement.
+An operator stop that adopts changed content from an interrupted recovery
+finalization likewise retires the pending marker when it returns to candidate
+convergence. The consumed allowance and the replacement requirement remain, and
+the replacement finalization reserves its next attempt before invocation.
 
 Exhaustion pauses as `finalization_evidence_rejected`, with `FINALIZE` as the
 resume checkpoint, bounded actionable CLI/MCP evidence, and an explicit null
