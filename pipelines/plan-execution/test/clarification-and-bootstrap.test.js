@@ -9,6 +9,7 @@ import {
   createPlanExecutionState,
   migratePlanExecutionStateV9,
   planExecutionPipeline,
+  runPlanExecution,
 } from "../src/index.js";
 import { FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
@@ -1890,4 +1891,277 @@ test("verifies frozen inputs at the implementation boundary", async (t) => {
   assert.equal(result.pause.reason, "task_input_changed");
   assert.equal(result.pipelineState.currentStep, null);
   assert.equal(result.pipelineState.resolvedSummary, null);
+});
+
+for (const [kind, boundary, mode] of [
+  ["questions", "intent", "combined"],
+  ["questions", "replacement", "independent"],
+  ["questions", "publication", "lazy"],
+  ["decision", "intent", "lazy"],
+  ["decision", "replacement", "combined"],
+  ["arbitration", "replacement", "independent"],
+]) {
+  test(`${kind} append recovers ${boundary} interruption in ${mode} without role replay`, async (t) => {
+    const interruption = new Error("Append publication interrupted");
+    let interrupted = false;
+    let stopAtImplementation = false;
+    const accepted = Object.assign(
+      new Error("Reached safe implementation re-entry"),
+      { code: "ERR_RUN_REVISION_CHANGED" },
+    );
+    const questions = kind === "questions";
+    const arbitration = kind === "arbitration";
+    const fixture = await createFixture(t, {
+      mode,
+      worker: questions
+        ? [
+            clarificationQuestions(),
+            clarificationReady(),
+            bootstrapReady("Worker"),
+            reconciliationResolved(),
+          ]
+        : arbitration
+          ? [
+              clarificationReady(),
+              bootstrapReady("Worker"),
+              reconciliationDisagreement(),
+              compatibilityReady(),
+              bootstrapReady("Worker"),
+              reconciliationResolved(),
+            ]
+          : [
+              clarificationReady(),
+              bootstrapProductDecision(),
+              compatibilityReady(),
+              bootstrapReady("Worker"),
+              reconciliationResolved(),
+            ],
+      ...(arbitration ? { arbiter: [arbitrationProductDecision()] } : {}),
+      ...(arbitration
+        ? { reviewer: [bootstrapReady("Reviewer"), bootstrapReady("Reviewer")] }
+        : {}),
+      onTransition(run) {
+        if (
+          stopAtImplementation &&
+          run.pipelineState.workflowState === "IMPLEMENT"
+        )
+          throw accepted;
+        if (
+          !interrupted &&
+          ((boundary === "intent" &&
+            run.pipelineState.pendingClarificationAppend !== null) ||
+            (boundary === "publication" &&
+              run.pipelineState.pendingEdit !== null))
+        ) {
+          interrupted = true;
+          throw interruption;
+        }
+      },
+    });
+    const service = fixture.runtime.clarifications;
+    let editors = 0;
+    fixture.runtime.clarifications = {
+      ...service,
+      async [questions ? "appendQuestionRound" : "appendProductDecision"](
+        options,
+      ) {
+        const result =
+          await service[
+            questions ? "appendQuestionRound" : "appendProductDecision"
+          ](options);
+        if (!interrupted && boundary === "replacement") {
+          interrupted = true;
+          throw interruption;
+        }
+        return result;
+      },
+      async openEditor(...args) {
+        editors++;
+        return service.openEditor(...args);
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const saved = structuredClone(fixture.currentRun);
+    const calls = Object.values(fixture.calls).reduce(
+      (count, list) => count + list.length,
+      0,
+    );
+    const bytes = fixture.readClarification();
+    if (boundary !== "publication") {
+      assert.equal(
+        saved.counters[questions ? "clarificationRounds" : "productDecisions"],
+        0,
+      );
+      assert.equal(saved.pipelineState.pendingEdit, null);
+      assert.notEqual(saved.pipelineState.pendingClarificationAppend, null);
+      if (!questions) {
+        const malformed = structuredClone(saved);
+        malformed.pipelineState.pendingClarificationAppend.checkpoint.workReport =
+          {};
+        assert.throws(
+          () => planExecutionPipeline.workflow.validateRun(malformed),
+          {
+            code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+          },
+        );
+      }
+      // Stops inspect proof only, retaining intent and prior/result bytes unchanged.
+      await runPlanExecution({
+        run: fixture.currentRun,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      await runPlanExecution({
+        run: fixture.currentRun,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      assert.equal(fixture.readClarification(), bytes);
+      assert.deepEqual(
+        fixture.currentRun.pipelineState.pendingClarificationAppend,
+        saved.pipelineState.pendingClarificationAppend,
+      );
+      assert.equal(editors, 0);
+    }
+    const paused = await fixture.run();
+    assert.equal(
+      paused.pause.reason,
+      questions
+        ? "clarification_answers_required"
+        : "product_decision_required",
+    );
+    assert.equal(paused.pipelineState.pendingClarificationAppend, null);
+    assert.equal(
+      paused.counters[questions ? "clarificationRounds" : "productDecisions"],
+      1,
+    );
+    assert.equal(
+      paused.hashes.executionClarifications,
+      hash(fixture.readClarification()),
+    );
+    assert.equal(
+      Object.values(fixture.calls).reduce(
+        (count, list) => count + list.length,
+        0,
+      ),
+      calls,
+    );
+    const expectedBytes = fixture.readClarification();
+    const history = structuredClone(paused.pipelineState.workReports);
+    if (arbitration) {
+      assert.equal(history.at(-1).phase, "ARBITRATE_BOOTSTRAP");
+      assert.equal(
+        history.at(-1).arbitration.direction,
+        "PRODUCT_DECISION_REQUIRED",
+      );
+    }
+    const repeated = await fixture.run();
+    assert.equal(fixture.readClarification(), expectedBytes);
+    assert.equal(
+      repeated.counters[questions ? "clarificationRounds" : "productDecisions"],
+      1,
+    );
+    assert.deepEqual(repeated.pipelineState.workReports, history);
+    fixture.writeClarification(`${expectedBytes}\nSelected behavior A.\n`);
+    stopAtImplementation = true;
+    await assert.rejects(fixture.run(), (cause) => cause === accepted);
+    const completed = fixture.currentRun;
+    assert.equal(completed.pipelineState.workflowState, "IMPLEMENT");
+    assert.equal(
+      completed.counters[
+        questions ? "clarificationRounds" : "productDecisions"
+      ],
+      1,
+    );
+    if (!questions)
+      assert.ok(
+        fixture.calls.worker.some(({ prompt }) =>
+          /Review the updated clarifications/u.test(prompt),
+        ),
+      );
+  });
+}
+
+for (const failure of ["write", "readback"]) {
+  test(`append ${failure} failure retains intent and exposes bounded resumable diagnostics`, async (t) => {
+    const fixture = await createFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    let failed = false;
+    let failReadback = false;
+    const code =
+      failure === "write"
+        ? "ERR_CLARIFICATION_WRITE"
+        : "ERR_CLARIFICATION_READ";
+    fixture.runtime.clarifications = {
+      ...service,
+      async inspectTranscript(options) {
+        if (failReadback) {
+          failReadback = false;
+          throw Object.assign(new Error("Private filesystem detail"), { code });
+        }
+        return service.inspectTranscript(options);
+      },
+      async appendQuestionRound(options) {
+        if (!failed) {
+          failed = true;
+          if (failure === "readback") {
+            const result = await service.appendQuestionRound(options);
+            failReadback = true;
+            return result;
+          }
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw Object.assign(new Error("Private filesystem detail"), {
+                code,
+              });
+            },
+          });
+        }
+        return service.appendQuestionRound(options);
+      },
+    };
+    const interrupted = await fixture.run();
+    assert.deepEqual(interrupted.pause, {
+      reason: "clarification_append_interrupted",
+      code,
+    });
+    if (failure === "write") assert.equal(fixture.readClarification(), "");
+    else assert.match(fixture.readClarification(), /## Round 1/u);
+    assert.equal(interrupted.counters.clarificationRounds, 0);
+    const projection = planExecutionPipeline.projections.pause(interrupted);
+    assert.equal(projection.reason, "clarification_append_interrupted");
+    assert.deepEqual(projection.nextActions, [
+      { type: "resume", action: null },
+    ]);
+    assert.doesNotMatch(JSON.stringify(projection), /Private filesystem/u);
+    const recovered = await fixture.run();
+    assert.equal(recovered.pause.reason, "clarification_answers_required");
+    assert.equal(recovered.counters.clarificationRounds, 1);
+    assert.equal(fixture.calls.worker.length, 1);
+  });
+}
+
+test("failed initial append-intent publication leaves transcript bytes unchanged", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+  });
+  const persist = fixture.runtime.transition;
+  const interruption = new Error("Initial publication failed");
+  fixture.runtime.transition = async function (patch, options) {
+    if (patch.pipelineState.pendingClarificationAppend !== null)
+      throw interruption;
+    return persist.call(this, patch, options);
+  };
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  assert.equal(fixture.readClarification(), "");
+  assert.equal(
+    fixture.currentRun.pipelineState.pendingClarificationAppend,
+    null,
+  );
+  assert.equal(fixture.currentRun.pipelineState.pendingEdit, null);
+  assert.equal(fixture.currentRun.counters.clarificationRounds, 0);
 });

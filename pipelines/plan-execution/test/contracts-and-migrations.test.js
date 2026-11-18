@@ -63,6 +63,7 @@ import {
   bootstrapReady,
   checkAndFix,
   clarificationReady,
+  clarificationQuestions,
   cleanConfirmation,
   createFixture,
   finalizationBlocked,
@@ -1308,7 +1309,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 42);
+  assert.equal(planExecutionPipeline.stateVersion, 43);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -3230,4 +3231,94 @@ test("version 41 migration preserves custom baselines without rewriting state", 
   assert.deepEqual(migrated, saved);
   assert.deepEqual(pipelineState, saved);
   assert.ok(Object.isFrozen(migrated));
+});
+
+test("pending clarification append is closed, checkpoint-bound and grants no legacy authority", async (t) => {
+  const interruption = new Error("Saved append proof");
+  let saved;
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+    onTransition(run) {
+      if (run.pipelineState.pendingClarificationAppend !== null) {
+        saved = structuredClone(run);
+        throw interruption;
+      }
+    },
+  });
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  assert.doesNotThrow(() => planExecutionPipeline.workflow.validateRun(saved));
+  for (const mutate of [
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.extra = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.questions[0].extra = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.questions = [];
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.number++;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.expectedHash =
+        hash("different");
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.resultHash =
+        run.hashes.executionClarifications;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.suspendedState =
+        "IMPLEMENT";
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.preserveLineage = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.workReport = {};
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.infrastructureFingerprint =
+        hash("unsupported");
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.fingerprint =
+        hash("changed");
+    },
+    (run) => {
+      run.pipelineState.workReports = [
+        { step: 1, phase: "IMPLEMENT", summary: "Intervening work." },
+      ];
+    },
+    (run) => {
+      run.counters.fixRounds++;
+    },
+    (run) => {
+      run.hashes.context = hash("changed context");
+    },
+    (run) => {
+      run.sessionLineage.children = [];
+    },
+  ]) {
+    const rejected = structuredClone(saved);
+    mutate(rejected);
+    assert.throws(() => planExecutionPipeline.workflow.validateRun(rejected), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  }
+  const { pendingClarificationAppend: _append, ...legacy } =
+    saved.pipelineState;
+  const migrated = planExecutionPipeline.migrations[42]({
+    ...saved,
+    pipelineState: legacy,
+  });
+  assert.deepEqual(migrated, { ...legacy, pendingClarificationAppend: null });
+  assert.doesNotThrow(() =>
+    planExecutionPipeline.workflow.validateRun({
+      ...saved,
+      pipelineState: migrated,
+    }),
+  );
+  assert.throws(() => planExecutionPipeline.migrations[42](saved));
 });

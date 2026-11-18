@@ -6198,6 +6198,21 @@ verifies proof; unsafe input remains blocking and transient read/write failures
 retain bounded resumable diagnostics. Editor authorization stays separate from
 append intent, including unanswered material-window renewal.
 
+Plan-execution state version 43 extends that contract to question rounds and
+supported nonsettlement product decisions, without competing with
+`writableResult.productDecision`. Its closed intent retains normalized payload,
+number, prior/result hashes, the producing checkpoint fingerprint, suspended
+state, inspected validation infrastructure, lineage requirements and any
+arbitration report required for settlement.
+Protected inputs, repository/controls and applicable custom accepted-output
+bindings precede replay; verified readback precedes atomic hash/count/editor
+publication with the established invalidations and once-only report retention.
+Recovery precedes interrupted-turn inspection and fresh role work. Legacy
+absence migrates to null without authority. Bounded read/write interruption
+retains resumable intent, while changed inputs/bytes/controls remain
+non-resumable. Operator stops only inspect append proof and retain intent;
+existing writable-result and commit effects keep their independent ownership.
+
 The transcript reader retains its existing error codes and 1 MiB limit. Its
 size and regular-file/single-link guards add optional `constraint` metadata of
 `file_size` or `isolated_regular_file`, respectively. Other path, read, decoding

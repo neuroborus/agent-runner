@@ -216,6 +216,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "Independent bootstrap summaries remain unresolved. Retry reconciliation after clarifying the repository evidence; combined mode cannot arbitrate bootstrap.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
+  clarification_append_interrupted:
+    "Clarification append publication was interrupted. Resume verifies the saved intent before continuing without another role turn.",
   clarification_answers_required:
     "Material clarification answers are required before execution can continue.",
   clarification_limit_reached:
@@ -298,6 +300,11 @@ function publicCode(value) {
 }
 
 function publicResumeState(run) {
+  if (run.pause?.reason === "clarification_append_interrupted")
+    return (
+      run.pipelineState.pendingClarificationAppend?.checkpoint.workflowState ??
+      null
+    );
   if (
     run.pause?.reason === "commit_failed" &&
     run.pipelineState.pendingCommit === null &&
@@ -635,6 +642,12 @@ function validateResumeAction(run, action) {
   )
     return;
   if (action === null && canRecoverLegacyConfirmation(run)) return;
+  if (
+    action === null &&
+    run.pause?.reason === "clarification_append_interrupted" &&
+    run.pipelineState.pendingClarificationAppend !== null
+  )
+    return;
   if (
     action === null &&
     run.pause?.reason === "writable_output_invalid" &&
@@ -1619,7 +1632,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 42,
+  stateVersion: 43,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1696,6 +1709,16 @@ export const planExecutionPipeline = Object.freeze({
     // Legacy full baselines keep their exact comparison; new custom runs
     // persist a compact baseline that a version-41 runtime must refuse as skew.
     41: (run) => Object.freeze({ ...run.pipelineState }),
+    42: (run) => {
+      if (Object.hasOwn(run.pipelineState, "pendingClarificationAppend"))
+        throw new PlanExecutionWorkflowError(
+          "Legacy state cannot own a clarification append.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        pendingClarificationAppend: null,
+      });
+    },
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,

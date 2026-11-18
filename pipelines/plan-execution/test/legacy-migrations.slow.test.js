@@ -23,6 +23,7 @@ test("legacy confirmation proof crosses authentic persisted migration history", 
     );
     // A migration marks old context provisional; it cannot synthesize a review.
     for (const event of events) {
+      delete event.state.pipelineState.pendingClarificationAppend;
       event.state.pipelineState.planContextVersion = 0;
       event.state.pipelineState.stepImplementation = null;
       event.state.pipelineState.implementationEvidenceLegacy = true;
@@ -75,6 +76,7 @@ test("legacy confirmation proof crosses authentic persisted migration history", 
   const unproven = structuredClone(fixture.failed);
   unproven.pipelineStateVersion = 13;
   for (const field of [
+    "pendingClarificationAppend",
     "candidateReviewResult",
     "candidateReviewedFingerprint",
     "candidateConfirmationFingerprint",

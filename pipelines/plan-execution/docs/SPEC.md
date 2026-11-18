@@ -2332,6 +2332,42 @@ changes are valid and do not consume an agent question round. The Worker still
 runs and may return `READY`; only unanswered questions appended by the Worker
 require user input.
 
+State version 43 adds closed nullable `pendingClarificationAppend` for question
+rounds and supported product decisions outside `writableResult.productDecision`.
+The version-42 migration accepts only legacy absence and initializes `null`;
+it infers no append authority and preserves completed provenance, prepared or
+consumed commits, frozen plans, validation inventories and stop-recovery markers.
+
+The clarification service's `persistAppend` callback journals exact normalized
+questions or decision data, number, prior/result hashes and settlement checkpoint
+before replacing transcript bytes. The checkpoint binds the complete producing
+state, counters, input hashes and session lineage, and retains the inspected
+validation-infrastructure fingerprint, suspended state, lineage-preservation choice and any accepted arbitration work report.
+Append intent and editor authorization are separate and cannot compete with a
+writable-result settlement or commit effect.
+
+Before replay, verify the checkpoint, protected non-transcript inputs and
+workspace/control ownership, frozen guidance and inspected validation
+infrastructure, including custom accepted-output bindings where applicable. Only the prior hash or exact journaled result may precede ordinary
+transcript-drift rejection. Replay supplies `resultHash`; it never adopts a
+guessed hash, reruns the producing role or renews a budget. After verified
+readback and repeated input/workspace guards, one atomic publication retires
+intent, publishes the new hash and once-only round/decision count, applies the
+established product-decision invalidations and retained reports, and creates the
+pending editor authorization and structured input request. Only then may the
+editor open. Material answers retain compatibility/replanning re-entry;
+unchanged answers renew only the existing editor window.
+
+Replacement, readback or publication interruption retains the original intent
+and checkpoint. Bounded read/write failures pause as
+`clarification_append_interrupted`, with only an allowlisted code and null-action
+resume; unknown publication failures propagate without overwriting possible
+journal progress. Unauthorized transcript bytes or changed protected inputs and
+controls remain non-resumable and retain rejected proof. Operator-stop
+reconciliation verifies prior-or-result bytes and controls only: it retains
+intent without appending, preparing/opening an editor or accepting an answer.
+Existing consumed-commit and writable-result reconciliation keep their owners.
+
 Append each question round to the execution clarification artifact, open the
 editor for answers, then let the Worker reread the complete transcript. The
 fixed clarification protocol permits at most three agent question rounds; it
@@ -4365,6 +4401,7 @@ Typical reasons:
 
 ```text
 clarification_answers_required
+clarification_append_interrupted
 clarification_limit_reached
 clarifications_changed
 bootstrap_inventory_capacity_exhausted

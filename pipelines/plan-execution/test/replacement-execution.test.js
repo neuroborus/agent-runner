@@ -1050,6 +1050,56 @@ for (const [mode, decisionRole] of [
   });
 }
 
+for (const checkpoint of ["discovery", "review"]) {
+  test(`interrupted ${checkpoint} decision preserves the producing replacement checkpoint`, async (t) => {
+    const { f, commits } = await fixture(
+      t,
+      checkpoint === "discovery"
+        ? { decisionRole: "worker" }
+        : { lateDecisionStep: 1 },
+    );
+    const service = f.runtime.clarifications;
+    let interrupted = false;
+    f.runtime.clarifications = {
+      ...service,
+      async appendProductDecision(options) {
+        const result = await service.appendProductDecision(options);
+        if (!interrupted) {
+          interrupted = true;
+          throw Object.assign(new Error("Interrupted append readback"), {
+            code: "ERR_CLARIFICATION_READ",
+          });
+        }
+        return result;
+      },
+    };
+    const pending = await f.run();
+    assert.equal(pending.pause.reason, "clarification_append_interrupted");
+    const intent = structuredClone(
+      pending.pipelineState.pendingClarificationAppend,
+    );
+    const turns = pending.sessionLineage.children.length;
+    const paused = await f.run();
+    assert.equal(paused.pause.reason, "product_decision_required");
+    assert.equal(paused.pipelineState.pendingClarificationAppend, null);
+    assert.equal(paused.counters.productDecisions, 1);
+    assert.equal(paused.sessionLineage.children.length, turns);
+    assert.equal(
+      paused.pipelineState.replacementExecution.inputChanges[0].checkpoint,
+      intent.checkpoint.workflowState,
+    );
+    f.writeClarification(`${f.readClarification()}Behavior A.\n`);
+    const result = await f.run();
+    assert.equal(
+      result.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(result.pause),
+    );
+    assert.equal(commits(), 2);
+    assert.equal(result.counters.productDecisions, 1);
+  });
+}
+
 for (const change of ["frozen input", "read-only content"]) {
   test(`${change} drift after receipt archival persists the safety pause and historical inventories`, async (t) => {
     const { f, captured, commits } = await fixture(t, {

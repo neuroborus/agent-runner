@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -38,6 +38,7 @@ import {
   checkAndFix,
   checkResults,
   clarificationReady,
+  clarificationQuestions,
   cleanConfirmation,
   createFixture,
   createRealGitFixture,
@@ -53,6 +54,7 @@ import {
   resolution,
   reviewApproved,
   reviewFindings,
+  reviewProductDecision,
   terminalConfirmation,
   terminalLazyConfirmation,
   trustedValidationSnapshot,
@@ -2211,3 +2213,152 @@ test("output exhaustion retries the charged finding fix at the correction bounda
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.counters.fixRounds, 1);
 });
+
+for (const change of [
+  "prior-bytes",
+  "result-bytes",
+  "protected-input",
+  "controls",
+]) {
+  test(`pending clarification append rejects ${change} drift before replay`, async (t) => {
+    const interruption = new Error("Retained append intent");
+    const fixture = await createFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    fixture.runtime.clarifications = {
+      ...service,
+      async appendQuestionRound(options) {
+        if (change === "prior-bytes")
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw interruption;
+            },
+          });
+        await service.appendQuestionRound(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const intent = structuredClone(
+      fixture.currentRun.pipelineState.pendingClarificationAppend,
+    );
+    const calls = fixture.calls.worker.length;
+    if (change === "protected-input")
+      await writeFile(
+        join(fixture.taskPath, "context.md"),
+        "Changed protected context.\n",
+      );
+    else if (change === "controls") fixture.repository.changeRemote();
+    else
+      fixture.writeClarification(
+        `${fixture.readClarification()}Unauthorized bytes.\n`,
+      );
+    const rejectedBytes = fixture.readClarification();
+    fixture.runtime.clarifications = service;
+    const rejected = await fixture.run();
+    assert.equal(
+      rejected.pause.reason,
+      change === "protected-input"
+        ? "task_input_changed"
+        : change === "controls"
+          ? "unsafe_git_state"
+          : "clarifications_changed",
+    );
+    assert.equal(fixture.readClarification(), rejectedBytes);
+    assert.deepEqual(rejected.pipelineState.pendingClarificationAppend, intent);
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.clarificationRounds, 0);
+    assert.equal(fixture.calls.worker.length, calls);
+    // A later read failure or stop cannot erase the proven rejection.
+    fixture.runtime.clarifications = {
+      ...service,
+      async inspectTranscript() {
+        throw Object.assign(new Error("Private read failure"), {
+          code: "ERR_CLARIFICATION_READ",
+        });
+      },
+    };
+    const repeated = await runPlanExecution({
+      run: rejected,
+      runtime: fixture.runtime,
+      operatorStop: true,
+    });
+    assert.deepEqual(repeated.pause, rejected.pause);
+    assert.deepEqual(repeated.pipelineState.pendingClarificationAppend, intent);
+  });
+}
+
+for (const missing of [false, true]) {
+  test(`post-start decision recovery rejects ${missing ? "missing" : "changed"} ignored validation infrastructure`, async (t) => {
+    const interruption = new Error("Retained review decision");
+    const infrastructure = [
+      ...bootstrapReady("Worker").validationInfrastructure,
+      "LOCAL_ARTIFACTS/check.json",
+    ];
+    const fixture = await createFixture(t, {
+      async prepareProject(projectPath) {
+        await mkdir(join(projectPath, "LOCAL_ARTIFACTS"));
+        await writeFile(
+          join(projectPath, "LOCAL_ARTIFACTS/check.json"),
+          "{}\n",
+        );
+      },
+      worker: [
+        clarificationReady(),
+        {
+          ...bootstrapReady("Worker"),
+          validationInfrastructure: infrastructure,
+        },
+        reconciliationResolved(),
+      ],
+      reviewer: [
+        {
+          ...bootstrapReady("Reviewer"),
+          validationInfrastructure: infrastructure,
+        },
+      ],
+      workReviewer: [reviewProductDecision()],
+    });
+    const service = fixture.runtime.clarifications;
+    fixture.runtime.clarifications = {
+      ...service,
+      async appendProductDecision(options) {
+        await service.appendProductDecision(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const intent = structuredClone(
+      fixture.currentRun.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(intent.checkpoint.workflowState, "REVIEW");
+    assert.match(
+      intent.checkpoint.infrastructureFingerprint,
+      /^[a-f0-9]{64}$/u,
+    );
+    if (missing)
+      await rm(join(fixture.projectPath, "LOCAL_ARTIFACTS/check.json"));
+    else
+      await writeFile(
+        join(fixture.projectPath, "LOCAL_ARTIFACTS/check.json"),
+        '{"changed":true}\n',
+      );
+    const bytes = fixture.readClarification();
+    const calls = fixture.calls.reviewer.length;
+    fixture.runtime.clarifications = service;
+    const rejected = await fixture.run();
+    assert.equal(rejected.pause.reason, "unsafe_git_state");
+    assert.equal(
+      rejected.pause.code,
+      "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+    );
+    assert.equal(rejected.counters.productDecisions, 0);
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.deepEqual(rejected.pipelineState.pendingClarificationAppend, intent);
+    assert.equal(fixture.readClarification(), bytes);
+    assert.equal(fixture.calls.reviewer.length, calls);
+  });
+}
