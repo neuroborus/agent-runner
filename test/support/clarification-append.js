@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
   createClarificationService,
+  createMcpControlPlane,
   createRunner,
   createRunStore,
+  getPipeline,
+  main,
 } from "../../src/index.js";
+import { restoredAppendReadback } from "./clarification-readback.js";
 import {
   configurationLoader,
   createExecutionAdapter,
@@ -148,3 +152,170 @@ export async function clarificationAppendFixture(
 
 export const transcriptHash = (bytes) =>
   createHash("sha256").update(bytes).digest("hex");
+
+// Cold journal proof, distinct from workflow-only reconstruction: every reopen
+// discards the store cache, transcript service and Runner. Only replies and the
+// finite native replacement interleaving are injected.
+export async function assertColdReadbackRejection(t, f, kind = "questions") {
+  const pipelineId = f.input.pipelineId;
+  const operation =
+    kind === "questions" ? "appendQuestionRound" : "appendProductDecision";
+  const service = createClarificationService({ interactive: false });
+  let proof;
+  let producing;
+  let runId;
+  const noEditor = {
+    prepareEdit() {
+      assert.fail("Rejected readback cannot authorize an editor");
+    },
+    openEditor() {
+      assert.fail("Rejected readback cannot open an editor");
+    },
+    acceptEdit() {
+      assert.fail("Rejected readback cannot accept an answer");
+    },
+  };
+  const initial = f.open({
+    clarifications: {
+      ...service,
+      ...noEditor,
+      [operation]: restoredAppendReadback(
+        t,
+        service,
+        operation,
+        async (bytes) => {
+          proof = bytes;
+          producing = await initial.store.loadRun(runId);
+        },
+      ),
+    },
+  });
+  runId = (await initial.runner.create(f.input)).run.runId;
+  const blocked = (await initial.runner.resume({ runId })).run;
+  const reason =
+    pipelineId === "audit" ? "input_changed" : "clarifications_changed";
+  assert.equal(blocked.pause.reason, reason);
+  const intent = producing.pipelineState.pendingClarificationAppend;
+  assert.ok(intent);
+  assert.equal(intent.expectedHash, transcriptHash(proof.priorBytes));
+  assert.equal(intent.resultHash, transcriptHash(proof.resultBytes));
+  assert.deepEqual(blocked.pipelineState, {
+    ...producing.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(blocked.counters, producing.counters);
+  assert.deepEqual(blocked.hashes, producing.hashes);
+  assert.deepEqual(blocked.sessionLineage, producing.sessionLineage);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.equal(
+    pipelineId === "audit"
+      ? blocked.pipelineState.clarificationRounds
+      : blocked.counters[
+          kind === "questions" ? "clarificationRounds" : "productDecisions"
+        ],
+    0,
+  );
+  const calls = f.calls.length;
+  const probes = f.probes.length;
+  const reopen = () =>
+    f.open({
+      clarifications: {
+        ...createClarificationService({ interactive: false }),
+        ...noEditor,
+        appendQuestionRound() {
+          assert.fail("Rejected append cannot replay questions");
+        },
+        appendProductDecision() {
+          assert.fail("Rejected append cannot replay a decision");
+        },
+      },
+    });
+  const projection = getPipeline(pipelineId).projections.pause(blocked);
+  assert.deepEqual(projection.nextActions, []);
+  for (const bytes of [proof.priorBytes, proof.resultBytes]) {
+    await writeFile(proof.transcriptPath, bytes);
+    const cold = reopen();
+    assert.deepEqual(await cold.store.loadRun(runId), blocked);
+    await assert.rejects(cold.runner.resume({ runId }), {
+      code: "ERR_INAPPLICABLE_RESUME_ACTION",
+    });
+    const control = createMcpControlPlane({
+      runner: cold.runner,
+      runStore: cold.store,
+    });
+    const status = await control.runStatus({ runId });
+    assert.deepEqual(status.pause, projection);
+    assert.deepEqual(
+      (await control.runWait({ runId, cursor: 0, timeoutMs: 0 })).pause,
+      status.pause,
+    );
+    let output = "";
+    assert.equal(
+      await main(["status", "--run", runId], {
+        runner: cold.runner,
+        stdout: {
+          write(chunk) {
+            output += chunk;
+          },
+        },
+        stderr: {
+          write(chunk) {
+            assert.fail(chunk);
+          },
+        },
+      }),
+      0,
+    );
+    assert.ok(output.includes(status.pause.explanation));
+    assert.doesNotMatch(output, /Retry with:/u);
+    for (const privateValue of [
+      intent.expectedHash,
+      intent.resultHash,
+      ...(kind === "questions"
+        ? intent.questions.map(({ question }) => question)
+        : [intent.decision.question]),
+    ])
+      assert.equal(JSON.stringify(status.pause).includes(privateValue), false);
+    assert.deepEqual(await reopen().store.loadRun(runId), blocked);
+    assert.deepEqual(await readFile(proof.transcriptPath), bytes);
+  }
+  // The real stop settlement must retain the rejection as its suspended pause,
+  // with the complete intent and unsettled checkpoint, even at the result hash.
+  const cold = reopen();
+  await cold.store.requestOperatorStop({
+    runId,
+    kind: "pause_requested",
+    expectedRevision: blocked.revision,
+    idempotencyKey: "readback-rejection-stop",
+  });
+  const stopped = (await cold.runner.resume({ runId })).run;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.deepEqual(stopped.pause.operatorResume.pause, blocked.pause);
+  assert.deepEqual(stopped.pipelineState, blocked.pipelineState);
+  assert.deepEqual(stopped.counters, blocked.counters);
+  assert.deepEqual(stopped.hashes, blocked.hashes);
+  assert.equal(stopped.stopRequest.reconciledRevision, stopped.revision);
+  assert.deepEqual(await reopen().store.loadRun(runId), stopped);
+  const restored = (await reopen().runner.resume({ runId })).run;
+  assert.deepEqual(restored.pause, blocked.pause);
+  assert.deepEqual(restored.pipelineState, blocked.pipelineState);
+  assert.deepEqual(restored.counters, blocked.counters);
+  assert.deepEqual(restored.hashes, blocked.hashes);
+  await assert.rejects(reopen().runner.resume({ runId }), {
+    code: "ERR_INAPPLICABLE_RESUME_ACTION",
+  });
+  const history = await reopen().store.loadRunHistory(runId);
+  const intents = history.events
+    .map(({ state }) => state.pipelineState.pendingClarificationAppend)
+    .filter((value) => value !== null);
+  assert.ok(intents.length > 1);
+  for (const retained of intents) assert.deepEqual(retained, intent);
+  assert.equal(
+    history.events.some(
+      ({ state }) => state.pipelineState.pendingEdit !== null,
+    ),
+    false,
+  );
+  assert.equal(f.calls.length, calls);
+  assert.equal(f.probes.length, probes);
+}

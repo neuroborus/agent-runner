@@ -629,6 +629,13 @@ workspace drift remain non-resumable. Operator-stop reconciliation verifies
 append proof and retains intent without appending, preparing/opening an editor
 or accepting an answer. Report publication remains independently owned.
 
+If the service returns a hash different from the durable intent's `resultHash`,
+persist `input_changed` before any publication or editor preparation. Retain
+the complete intent, prior hashes, checkpoint, accounting and unsettled work.
+This rejection survives reconstruction and verification-only stop settlement,
+even if later transcript bytes match the prior or result hash; neither match
+restores replay authority.
+
 Runner publishes `<task-dir>/audit.md` atomically after accepted structured report,
 ledger or disposition updates. An initial report is marked **In progress**.
 Only current ledger versions with exact accepted-batch receipts and confirm/correct

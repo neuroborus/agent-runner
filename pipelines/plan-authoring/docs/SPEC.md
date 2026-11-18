@@ -496,6 +496,13 @@ An unchanged material-answer close renews only its editor window, without
 another append, question charge or role turn. An empty proactive close remains
 valid without consuming a round.
 
+A service-readback hash different from the durable intent's `resultHash`
+persists `clarifications_changed` before publication or editor preparation.
+Retain the complete intent, prior hashes, checkpoint, accounting and unsettled
+work. Reconstruction and verification-only stop settlement preserve this
+rejection even when later transcript bytes match the prior or result hash;
+neither match restores replay authority.
+
 Through MCP, the root runtime never opens an editor. It exposes the same pending
 authorization as a structured request with identified questions and accepts an
 empty response for optional proactive clarification or one exact answer per

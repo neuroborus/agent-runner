@@ -1029,10 +1029,10 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
     });
     if (
       snapshot.hash !== pipelineState().pendingClarificationAppend?.resultHash
-    )
-      throw workflowError(
-        "Plan-authoring append readback differs from its intent.",
-      );
+    ) {
+      await invalidateDependentWork("clarifications_changed");
+      return false;
+    }
     await safety.assertUnchanged(pipelineState().repositoryBaseline);
     const readback = await readCurrentInputs({ allowPendingAppend: true });
     if (readback === null) return false;

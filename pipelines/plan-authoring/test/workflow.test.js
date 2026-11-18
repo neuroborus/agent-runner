@@ -21,6 +21,7 @@ import {
 } from "@agent-runner/custom-plan";
 
 import { createClarificationService as realClarificationService } from "../../../src/clarifications/index.js";
+import { restoredAppendReadback } from "../../../test/support/clarification-readback.js";
 
 import {
   attachOutputExhaustion,
@@ -1964,6 +1965,72 @@ test("journaled authoring appends reconstruct exact requests once without anothe
       );
     });
   }
+});
+
+test("authoring service-readback rejection survives workflow reconstruction and verification-only stops", async (t) => {
+  const f = await createFixture(t, { planner: [ready(), productDecision()] });
+  const service = realClarificationService({ env: {}, interactive: false });
+  let proof;
+  let producing;
+  f.runtime.clarifications = {
+    ...service,
+    appendProductDecision: restoredAppendReadback(
+      t,
+      service,
+      "appendProductDecision",
+      (bytes) => {
+        proof = bytes;
+        producing = structuredClone(f.currentRun);
+      },
+    ),
+    prepareEdit() {
+      assert.fail("Rejected readback cannot authorize an editor");
+    },
+    openEditor() {
+      assert.fail("Rejected readback cannot open an editor");
+    },
+  };
+  const blocked = await f.run();
+  assert.deepEqual(blocked.pause, { reason: "clarifications_changed" });
+  assert.deepEqual(blocked.pipelineState, {
+    ...producing.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(blocked.counters, producing.counters);
+  assert.deepEqual(blocked.hashes, producing.hashes);
+  assert.equal(blocked.counters.productDecisions, 0);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.throws(() =>
+    planAuthoringPipeline.validateResumeAction(blocked, null),
+  );
+  for (const bytes of [proof.priorBytes, proof.resultBytes]) {
+    await writeFile(proof.transcriptPath, bytes);
+    f.restore(blocked);
+    f.runtime.clarifications = {
+      ...realClarificationService({ env: {}, interactive: false }),
+      appendProductDecision() {
+        assert.fail("Rejected append cannot replay");
+      },
+      prepareEdit() {
+        assert.fail("Rejected append cannot authorize an editor");
+      },
+      openEditor() {
+        assert.fail("Rejected append cannot open an editor");
+      },
+    };
+    assert.deepEqual(await f.run(), blocked);
+    assert.deepEqual(
+      await runPlanAuthoring({
+        run: JSON.parse(JSON.stringify(blocked)),
+        runtime: f.runtime,
+        operatorStop: true,
+      }),
+      blocked,
+    );
+    assert.deepEqual(await readFile(proof.transcriptPath), bytes);
+  }
+  assert.equal(f.calls.planner.length, 2);
+  assert.equal(f.calls.reviewer.length + f.calls.arbiter.length, 0);
 });
 
 test("failed authoring append intent publication leaves transcript untouched", async (t) => {

@@ -20,6 +20,10 @@ import { inspectOwnedSessionProcesses } from "../src/platform/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { createStateJournal } from "../src/state/journal.js";
 import {
+  assertColdReadbackRejection,
+  clarificationAppendFixture,
+} from "./support/clarification-append.js";
+import {
   configurationLoader,
   createAdapter,
   createExecutionAdapter,
@@ -42,6 +46,16 @@ import {
   APPLICABILITY_BATCH_SCHEMA,
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+for (const [pipelineId, kind] of [
+  ["plan-authoring", "questions"],
+  ["plan-execution", "product-decision"],
+]) {
+  test(`cold service-readback rejection ${pipelineId} ${kind} preserves the durable blocker`, async (t) => {
+    const f = await clarificationAppendFixture(t, pipelineId, { kind });
+    await assertColdReadbackRejection(t, f, kind);
+  });
+}
 
 test("derived plan publication recovers after durable state and ignores manual completion or effect claims", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");

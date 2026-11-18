@@ -6213,6 +6213,16 @@ retains resumable intent, while changed inputs/bytes/controls remain
 non-resumable. Operator stops only inspect append proof and retain intent;
 existing writable-result and commit effects keep their independent ownership.
 
+Audit, plan-authoring and plan-execution compare the service's returned hash
+with the durable append intent's `resultHash` before publication. A mismatch
+persists the owning non-resumable rejection (`input_changed` for audit,
+`clarifications_changed` for authoring/execution), retaining the complete intent,
+prior hashes, checkpoint, counters and unsettled work without editor authority.
+Fresh workflow or cold Runner/store recovery and verification-only stops keep
+that rejection even when later bytes match the prior or result hash. This uses
+the existing strict intent and pause contracts without a state-version change;
+transient I/O and unknown publication failures retain their existing policies.
+
 Polishing state version 23 extends the same protocol to question rounds and
 supported product decisions outside `resolutionCorrection.productDecision`.
 Its pipeline-owned closed intent retains exact normalized payload, prior/result

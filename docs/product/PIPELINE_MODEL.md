@@ -194,6 +194,10 @@ journaled result under unchanged protected inputs and workspace controls. It
 publishes the verified hash, once-only accounting and editor request together,
 without repeating the producing role. Stop reconciliation verifies proof without
 appending or granting an editor window; unexpected edits remain blocking.
+In audit, plan authoring and execution, a service readback that disagrees with
+the journaled result durably blocks publication and editor authority. Recovery
+and verification-only stops retain the rejection, intent and unchanged
+accounting even if the transcript later returns to prior or expected bytes.
 Existing init and coding settlement owners remain separate.
 
 The runner freezes the clarification artifact before work begins. Ordinary

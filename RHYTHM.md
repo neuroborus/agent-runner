@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-18
+
+- **Sibling append readback drift retains a durable rejection.** Audit,
+  plan authoring and execution now persist their existing input-change blocker
+  when the real service returns bytes that disagree with the journaled result.
+  A generic workflow error previously retained replayable intent. Rejection
+  now retains that proof and unsettled work without granting replay or editor
+  authority, including after reconstruction, matching-byte restoration and
+  verification-only stops. Existing strict state shapes and failure owners stay
+  unchanged.
+
 ## 2026-11-17
 
 - **Terminal review credits Runner's serial trusted-check order.** Plan

@@ -306,10 +306,10 @@ export async function runAuditDiscovery({
           });
         },
       });
-      assertAudit(
-        appended.hash === state().pendingClarificationAppend?.resultHash,
-        "Audit append readback differs from its intent.",
-      );
+      if (appended.hash !== state().pendingClarificationAppend?.resultHash) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
       try {
         await runtime.workspace.assertUnchanged(state().repositoryBaseline);
       } catch {

@@ -2368,6 +2368,13 @@ reconciliation verifies prior-or-result bytes and controls only: it retains
 intent without appending, preparing/opening an editor or accepting an answer.
 Existing consumed-commit and writable-result reconciliation keep their owners.
 
+A service-readback hash different from the durable intent's `resultHash`
+persists `clarifications_changed` before publication or editor preparation.
+Retain the complete intent, prior hashes, checkpoint, accounting and unsettled
+work. Reconstruction and verification-only stop settlement preserve this
+rejection even when later transcript bytes match the prior or result hash;
+neither match restores replay authority.
+
 Append each question round to the execution clarification artifact, open the
 editor for answers, then let the Worker reread the complete transcript. The
 fixed clarification protocol permits at most three agent question rounds; it

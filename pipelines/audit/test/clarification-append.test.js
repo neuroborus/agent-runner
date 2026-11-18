@@ -124,6 +124,44 @@ test("failed initial intent publication leaves transcript bytes untouched", asyn
   );
 });
 
+// Workflow reconstruction policy; the slow Runner fixture separately proves
+// native replacement/readback drift with the real service and cold journals.
+test("audit service-readback rejection survives workflow reconstruction and verification-only stops", async () => {
+  const f = fixture([QUESTIONS]);
+  const append = f.runtime.clarifications.appendQuestionRound;
+  f.runtime.clarifications.appendQuestionRound = async (request) => {
+    await append(request);
+    return { hash: PRIOR };
+  };
+  const blocked = await f.execute();
+  assert.equal(blocked.pause.reason, "input_changed");
+  assert.equal(
+    blocked.pipelineState.pendingClarificationAppend.resultHash,
+    RESULT,
+  );
+  assert.equal(blocked.pipelineState.clarificationRounds, 0);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.equal(blocked.hashes.clarifications, PRIOR);
+  assert.throws(() => auditPipeline.validateResumeAction(blocked, null));
+  for (const hash of [PRIOR, RESULT]) {
+    const fresh = fixture([], {
+      saved: JSON.parse(JSON.stringify(blocked)),
+      transcriptHash: hash,
+    });
+    assert.deepEqual(await fresh.execute(), blocked);
+    assert.deepEqual(
+      await runAuditDiscovery({
+        run: fresh.run(),
+        runtime: fresh.runtime,
+        operatorStop: true,
+      }),
+      blocked,
+    );
+    assert.equal(fresh.events.length, 0);
+    assert.equal(fresh.calls.length, 0);
+  }
+});
+
 test("pending append rejects third-party bytes and protected input or workspace drift before replay", async () => {
   const first = await interruptedAppend("intent");
   for (const drift of ["editTranscript", "inputDrift", "drift"]) {

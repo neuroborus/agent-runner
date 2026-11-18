@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { createGitService } from "../../../src/git/index.js";
 import { getPipeline } from "../../../src/index.js";
+import { createClarificationService } from "../../../src/clarifications/index.js";
+import { restoredAppendReadback } from "../../../test/support/clarification-readback.js";
 import {
   createPlanExecutionState,
   migratePlanExecutionStateV9,
@@ -2081,6 +2083,72 @@ for (const [kind, boundary, mode] of [
       );
   });
 }
+
+test("execution service-readback rejection survives workflow reconstruction and verification-only stops", async (t) => {
+  const f = await createFixture(t, { worker: [clarificationQuestions()] });
+  const service = createClarificationService({ interactive: false });
+  let proof;
+  let producing;
+  f.runtime.clarifications = {
+    ...service,
+    appendQuestionRound: restoredAppendReadback(
+      t,
+      service,
+      "appendQuestionRound",
+      (bytes) => {
+        proof = bytes;
+        producing = structuredClone(f.currentRun);
+      },
+    ),
+    prepareEdit() {
+      assert.fail("Rejected readback cannot authorize an editor");
+    },
+    openEditor() {
+      assert.fail("Rejected readback cannot open an editor");
+    },
+  };
+  const blocked = await f.run();
+  assert.deepEqual(blocked.pause, { reason: "clarifications_changed" });
+  assert.deepEqual(blocked.pipelineState, {
+    ...producing.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(blocked.counters, producing.counters);
+  assert.deepEqual(blocked.hashes, producing.hashes);
+  assert.equal(blocked.counters.clarificationRounds, 0);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.throws(() =>
+    planExecutionPipeline.validateResumeAction(blocked, null),
+  );
+  for (const bytes of [proof.priorBytes, proof.resultBytes]) {
+    await writeFile(proof.transcriptPath, bytes);
+    f.runtime.clarifications = {
+      ...createClarificationService({ interactive: false }),
+      appendQuestionRound() {
+        assert.fail("Rejected append cannot replay");
+      },
+      prepareEdit() {
+        assert.fail("Rejected append cannot authorize an editor");
+      },
+      openEditor() {
+        assert.fail("Rejected append cannot open an editor");
+      },
+    };
+    for (const operatorStop of [false, true])
+      assert.deepEqual(
+        await runPlanExecution({
+          run: JSON.parse(JSON.stringify(blocked)),
+          runtime: f.runtime,
+          settings: SETTINGS,
+          operatorStop,
+        }),
+        blocked,
+      );
+    assert.deepEqual(await readFile(proof.transcriptPath), bytes);
+  }
+  assert.equal(f.calls.worker.length, 1);
+  assert.equal(f.calls.reviewer.length + f.calls.arbiter.length, 0);
+});
 
 for (const failure of ["write", "readback"]) {
   test(`append ${failure} failure retains intent and exposes bounded resumable diagnostics`, async (t) => {

@@ -22,6 +22,7 @@ import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { createRunStore } from "../src/state/index.js";
 import { availabilityFailure } from "./support/availability.js";
+import { assertColdReadbackRejection } from "./support/clarification-append.js";
 import {
   APPEND_QUESTIONS,
   appendReadFailure,
@@ -148,6 +149,17 @@ function frozen(run) {
     baseline: state.repositoryBaseline,
   };
 }
+
+test("cold service-readback rejection audit questions preserves the durable blocker", async (t) => {
+  const f = await fixture(t, "combined");
+  f.outputs.push({
+    status: "QUESTIONS",
+    inputs: null,
+    questions: APPEND_QUESTIONS,
+    reason: "",
+  });
+  await assertColdReadbackRejection(t, f);
+});
 
 for (const boundary of [
   "unpublished-intent",

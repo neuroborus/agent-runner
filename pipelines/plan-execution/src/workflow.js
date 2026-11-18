@@ -3154,10 +3154,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
           });
       },
     });
-    if (transcript.hash !== state().pendingClarificationAppend?.resultHash)
-      throw workflowError(
-        "Clarification append readback differs from its intent.",
-      );
+    if (transcript.hash !== state().pendingClarificationAppend?.resultHash) {
+      await invalidateInputs("clarifications_changed");
+      return false;
+    }
     const readback = await inspectAppendCheckpoint();
     if (readback === null) return false;
     if (readback.clarification.hash !== transcript.hash) {

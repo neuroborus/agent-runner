@@ -472,6 +472,15 @@ result bytes, including delayed stop dispatch. These distinct cases span the
 three modes without duplicating the pipeline policy matrices. They assert exact
 bytes, once-only accounting and no producing-role replay, use no sleeps or live
 providers, and never edit canonical state to manufacture recovery evidence.
+Audit recovery and Runner orchestration additionally own durable service-readback
+rejection: a finite native replacement callback restores prior bytes before the
+real service's readback. Repeated uncached store/service/Runner reconstruction
+at prior and result bytes and real verification-only stop settlement preserve
+intent, checkpoint, accounting and redacted CLI/MCP projections without replay
+or editor authority. Orchestration covers authoring questions and execution
+decisions; the owning fast workflow fixtures separately cover reconstruction
+policy, including authoring decisions and execution questions. Workflow-only
+reconstruction is not cold journal evidence.
 Existing init and coding settlement coverage retains its owners. Changes to this
 cross-capability lifecycle retain the affected slow owners above and the complete
 slow release gate; focused development cases do not attest those gates or the
