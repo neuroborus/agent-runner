@@ -142,6 +142,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
   "output_exhausted",
   "bootstrap_disagreement",
+  "clarification_append_interrupted",
   "backend_unavailable",
   "confirmation_output_invalid",
   "environment_blocked",
@@ -180,6 +181,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   backend_unavailable: "The selected backend is temporarily unavailable.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
+  clarification_append_interrupted:
+    "A journaled clarification append was interrupted; resume verifies its exact bytes before publishing the input request.",
   clarification_answers_required:
     "Material clarification answers are required before polishing can continue.",
   clarification_limit_reached:
@@ -255,6 +258,11 @@ function publicCode(value) {
 }
 
 function publicResumeState(run) {
+  if (run.pause?.reason === "clarification_append_interrupted")
+    return (
+      run.pipelineState.pendingClarificationAppend?.checkpoint.workflowState ??
+      null
+    );
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
@@ -501,6 +509,16 @@ function validateResumeAction(run, action) {
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
+  }
+  if (state.pendingClarificationAppend !== null) {
+    if (
+      action === null &&
+      run.pause?.reason === "clarification_append_interrupted"
+    )
+      return;
+    throw new Error(
+      "Pending append recovery does not accept this resume action.",
+    );
   }
   if (state.pendingEdit !== null) {
     if (action !== null) {
@@ -1187,7 +1205,7 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 22,
+  stateVersion: 23,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1222,6 +1240,16 @@ export const polishingPipeline = Object.freeze({
         ...run.pipelineState,
         workReports: run.pipelineState.workReports ?? Object.freeze([]),
       }),
+    22: (run) => {
+      if (Object.hasOwn(run.pipelineState, "pendingClarificationAppend"))
+        throw new PolishingWorkflowError(
+          "Legacy state cannot own a clarification append.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        pendingClarificationAppend: null,
+      });
+    },
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

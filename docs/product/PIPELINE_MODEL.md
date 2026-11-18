@@ -187,6 +187,15 @@ planned implementation, and they must use repository evidence for questions it
 can answer. An empty clarification file and an authorized editor close without
 changes are valid inputs.
 
+Audit question rounds and supported question/product-decision appends in
+plan authoring, execution and polishing are journaled before transcript
+replacement. After interruption, recovery accepts only the prior bytes or exact
+journaled result under unchanged protected inputs and workspace controls. It
+publishes the verified hash, once-only accounting and editor request together,
+without repeating the producing role. Stop reconciliation verifies proof without
+appending or granting an editor window; unexpected edits remain blocking.
+Existing init and coding settlement owners remain separate.
+
 The runner freezes the clarification artifact before work begins. Ordinary
 questions are prohibited after that point. `PRODUCT_DECISION_REQUIRED` is the
 only later question path and is reserved for progress that is impossible

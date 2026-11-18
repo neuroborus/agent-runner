@@ -611,6 +611,48 @@ for input. Authorized edits update the accepted hash. Edits outside that window
 pause as unexpected input changes. The transcript is frozen and hashed before
 leaving `CLARIFY`.
 
+State version 23 journals question rounds and supported product decisions outside
+`resolutionCorrection.productDecision` through the existing clarification
+service's `persistAppend` callback before replacing transcript bytes. The closed
+nullable `pendingClarificationAppend` contains `kind` (`questions` or
+`product-decision`), normalized `questions` and nullable `decision`, next `number`,
+`expectedHash`, `resultHash`, and a closed `checkpoint`. The checkpoint retains
+the producing `workflowState`, safe `suspendedState`, complete pipeline/input/
+counter/session-lineage `fingerprint`, inspected `infrastructureFingerprint`
+(or null before inventory selection), and nullable normalized arbitration
+`workReport`. Questions suspend only `CLARIFY`; supported decisions suspend
+`CLARIFY` or return through `BOOTSTRAP` under the existing invalidation rules.
+The two append owners cannot coexist; a pending append also excludes an editor
+window, active turn and authentication source-fork recovery.
+
+Before replay, verify the complete checkpoint, protected non-transcript inputs,
+repository/content/control ownership, frozen guidance and applicable validation
+infrastructure. The checkpoint infrastructure fingerprint covers the union of
+the established inventory and any retained finalization inventory, including
+ignored files added during finalization. Recognize only the prior transcript
+bytes or exact journaled result before ordinary transcript-drift rejection.
+Replay supplies `resultHash` to verify an already completed replacement without
+another append or provider response. Verified readback precedes one atomic
+publication of the resulting hash, once-only round/decision accounting, existing
+work invalidation and retained
+arbitration report, structured input request and one-shot editor authorization,
+while retiring intent. Only after that publication may an editor open. An
+unchanged material answer renews only its editor window, without a model turn or
+another question charge; an empty proactive close remains accepted.
+
+Recovery runs before interrupted-turn inspection or new role work. Interrupted
+replacement, readback or state publication retains the original checkpoint and
+intent. Transient clarification read/write failures expose only the bounded
+`clarification_append_interrupted` reason and source-defined code; explicit resume
+reverifies the original checkpoint. Changed inputs, bytes, controls or frozen
+infrastructure remain non-resumable, including through later read failures.
+Operator-stop reconciliation only verifies proof and retains intent: it never
+appends, prepares/opens an editor or accepts an answer. Existing finding-resolution
+settlement and handoff effect reconciliation keep their independent ownership.
+The ordered version-22 migration initializes only absent legacy intent to null,
+without inferring payload, hashes, session authority or renewed budgets. Existing
+settings, mode routing, correction accounting and source-fork rules are unchanged.
+
 After clarification closes, agents must not ask questions. A later
 `PRODUCT_DECISION_REQUIRED` is valid only when progress is impossible without
 choosing between materially different product requirements that the task,

@@ -6213,6 +6213,22 @@ retains resumable intent, while changed inputs/bytes/controls remain
 non-resumable. Operator stops only inspect append proof and retain intent;
 existing writable-result and commit effects keep their independent ownership.
 
+Polishing state version 23 extends the same protocol to question rounds and
+supported product decisions outside `resolutionCorrection.productDecision`.
+Its pipeline-owned closed intent retains exact normalized payload, prior/result
+hashes, next numbering, producing checkpoint fingerprint, safe re-entry state,
+inspected infrastructure and optional arbitration report. Replay verifies
+protected inputs, repository/content/controls, frozen guidance and applicable
+infrastructure, including additions in retained finalization evidence, before
+accepting prior or exact result bytes. Verified readback precedes atomic
+hash/count/work-invalidation/editor publication and intent retirement, retaining
+the existing correction and arbitration accounting rules.
+Recovery precedes interrupted-turn inspection and fresh role work; stop handling
+only verifies proof and retains intent. Legacy absence migrates to null without
+authority. Bounded transient append diagnostics remain resumable, while proven
+input/control drift remains non-resumable. Finding-resolution settlement and
+runner-owned handoff keep their independent effect ownership.
+
 The transcript reader retains its existing error codes and 1 MiB limit. Its
 size and regular-file/single-link guards add optional `constraint` metadata of
 `file_size` or `isolated_regular_file`, respectively. Other path, read, decoding

@@ -123,6 +123,7 @@ function pausedRun(pause, pipelineState = {}) {
     pipelineState: {
       workflowState: "WAITING_FOR_USER",
       pendingEdit: null,
+      pendingClarificationAppend: null,
       preflightComplete: true,
       ...pipelineState,
     },

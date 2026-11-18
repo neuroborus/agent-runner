@@ -481,7 +481,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 22);
+  assert.equal(polishingPipeline.stateVersion, 23);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -587,7 +587,7 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 22,
+    pipelineStateVersion: 23,
     pipelineState: polishingPipeline.migrations[20]({
       pipelineState: migratePolishingStateV19({
         pipelineState: migratePolishingStateV17({
@@ -2370,4 +2370,26 @@ test("finding-resolution correction diagnostics keep only bounded source identit
       constraint: "nonempty-plain-text-up-to-4000-characters",
     },
   ]);
+});
+
+test("version 22 migrates append absence without inferring replay authority", () => {
+  const current = createPolishingState();
+  const legacy = structuredClone(current);
+  delete legacy.pendingClarificationAppend;
+  assert.throws(() => normalizePipelineState(legacy), {
+    code: "ERR_INVALID_POLISHING_STATE",
+  });
+  const migrated = polishingPipeline.migrations[22]({ pipelineState: legacy });
+  assert.deepEqual(migrated, current);
+  assert.equal(migrated.pendingClarificationAppend, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  for (const pendingClarificationAppend of [null, {}, { kind: "questions" }]) {
+    assert.throws(
+      () =>
+        polishingPipeline.migrations[22]({
+          pipelineState: { ...legacy, pendingClarificationAppend },
+        }),
+      { code: "ERR_POLISHING_WORKFLOW" },
+    );
+  }
 });

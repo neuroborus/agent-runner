@@ -68,6 +68,7 @@ import {
 } from "./schemas.js";
 import {
   activeTurn,
+  appendCheckpointFingerprint,
   activity,
   assertRun,
   assertRuntime,
@@ -133,6 +134,20 @@ export {
   PolishingWorkflowError,
   WORKFLOW_STATES,
 };
+
+const NON_RESUMABLE_APPEND_PAUSES = new Set([
+  "task_input_changed",
+  "clarifications_changed",
+  "read_only_agent_mutated_repository",
+  "unsafe_git_state",
+  "project_configuration_changed",
+  "finalization_skill_invalid",
+  "finalization_skill_missing",
+  "unexpected_git_ref_change",
+  "unexpected_git_index_change",
+  "unexpected_remote_configuration_change",
+  "unexpected_git_identity_change",
+]);
 
 const INPUT_DRIFT_CODES = new Set([
   "ENOENT",
@@ -633,6 +648,7 @@ export async function runPolishing({
   let dispositionPausePersistence = false;
   // An unacknowledged history publication may already be authoritative.
   let workReportPublicationFailure = null;
+  let clarificationAppendInProgress = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -976,9 +992,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
   }
 
   async function invalidateInputs(reason, message) {
-    // A finding-resolution checkpoint retains its blockers, bindings and
-    // accounting; the input stop still requires a new run.
-    const retained = state().resolutionCorrection !== null;
+    // Unsettled checkpoints retain their bindings and accounting;
+    // the input stop still requires a new run.
+    const retained =
+      state().resolutionCorrection !== null ||
+      state().pendingClarificationAppend !== null;
     await transition(
       retained
         ? { ...state(), workflowState: "WAITING_FOR_USER" }
@@ -1013,6 +1031,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   async function readCurrentInputs({
     allowProductDecisionAppend = false,
+    allowPendingAppend = false,
   } = {}) {
     let inputs;
     try {
@@ -1037,6 +1056,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         transcriptPath: state().clarificationPath,
       });
     } catch (cause) {
+      if (allowPendingAppend && cause?.code === "ERR_CLARIFICATION_READ")
+        throw cause;
       if (
         !INPUT_DRIFT_CODES.has(cause?.code) &&
         !cause?.code?.startsWith("ERR_CLARIFICATION")
@@ -1055,10 +1076,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       context: inputs.context?.hash ?? null,
       executionClarifications: clarification.hash,
     };
-    // Only the exact journaled product-decision append is an authorized change.
+    // Only the selected owner's exact journaled append is an authorized change.
     const appendedHash = allowProductDecisionAppend
       ? state().resolutionCorrection?.productDecision?.resultHash
-      : null;
+      : allowPendingAppend
+        ? state().pendingClarificationAppend?.resultHash
+        : null;
     const changed = Object.keys(nextHashes).find(
       (field) =>
         nextHashes[field] !== currentRun.hashes[field] &&
@@ -2305,39 +2328,61 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     suspendedState,
     { settlement, workReport = null } = {},
   ) {
+    if (settlement === undefined)
+      return appendClarification({
+        kind: "product-decision",
+        questions: [],
+        decision,
+        suspendedState,
+        workReport,
+      });
+    const number = settlement.number;
+    const transcript = await runtime.clarifications.appendProductDecision({
+      artifactRoot: state().repositoryBaseline.projectPath,
+      transcriptPath: state().clarificationPath,
+      expectedHash: settlement.expectedHash,
+      number,
+      ...decision,
+      ...(settlement.resultHash === null
+        ? {}
+        : { resultHash: settlement.resultHash }),
+      async persistAppend({ hash }) {
+        if (settlement.resultHash === hash) return;
+        await transition({
+          ...state(),
+          resolutionCorrection: {
+            ...state().resolutionCorrection,
+            productDecision: { ...settlement, resultHash: hash },
+          },
+        });
+      },
+    });
+    const authorization = await publishProductDecision(
+      decision,
+      suspendedState,
+      workReport,
+      transcript,
+      number,
+    );
+    const result = await runtime.clarifications.openEditor(authorization, {
+      consumePendingEdit: consumeEdit,
+    });
+    return result.status !== "WAITING_FOR_USER" && result.result.changed;
+  }
+
+  async function publishProductDecision(
+    decision,
+    suspendedState,
+    workReport,
+    transcript,
+    number,
+  ) {
     const workReports =
       workReport === null
         ? state().workReports
         : retainWorkReport(state().workReports, workReport);
-    const number = settlement?.number ?? counters().productDecisions + 1;
-    const transcript = await runtime.clarifications.appendProductDecision({
-      artifactRoot: state().repositoryBaseline.projectPath,
-      transcriptPath: state().clarificationPath,
-      expectedHash:
-        settlement?.expectedHash ?? currentRun.hashes.executionClarifications,
-      number,
-      ...decision,
-      ...(settlement === undefined
-        ? {}
-        : {
-            ...(settlement.resultHash === null
-              ? {}
-              : { resultHash: settlement.resultHash }),
-            // Journal the exact appended bytes before replacing the transcript.
-            async persistAppend({ hash }) {
-              if (settlement.resultHash === hash) return;
-              await transition({
-                ...state(),
-                resolutionCorrection: {
-                  ...state().resolutionCorrection,
-                  productDecision: { ...settlement, resultHash: hash },
-                },
-              });
-            },
-          }),
-    });
     const bootstrapDecision = suspendedState === "BOOTSTRAP";
-    return requestEdit(
+    return prepareEdit(
       "product-decision",
       suspendedState,
       "product_decision_required",
@@ -2357,6 +2402,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         nextPipelineState: {
           ...clearedWorkState(state(), { clearBootstrap: bootstrapDecision }),
           workReports,
+          pendingClarificationAppend: null,
           clarificationFrozen: false,
           refreezeRequired: false,
           resolvedSummary: null,
@@ -2380,6 +2426,153 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ),
       },
     );
+  }
+
+  async function inspectAppendCheckpoint() {
+    assertRun(currentRun);
+    const input = await readCurrentInputs({ allowPendingAppend: true });
+    if (
+      input === null ||
+      !(await verifyPersistedRepository()) ||
+      !(await verifyFinalizationGuidance())
+    )
+      return null;
+    const pending = state().pendingClarificationAppend;
+    const infrastructure = state().validationInfrastructure;
+    let infrastructureFingerprint;
+    try {
+      infrastructureFingerprint =
+        infrastructure === null
+          ? null
+          : await validationInfrastructureFingerprint([
+              ...new Set([
+                ...infrastructure,
+                ...(state().finalizationResult?.validationInfrastructure ?? []),
+              ]),
+            ]);
+    } catch (cause) {
+      if (pending === null) throw cause;
+      await pause("unsafe_git_state", {
+        code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      });
+      return null;
+    }
+    if (
+      pending !== null &&
+      infrastructureFingerprint !== pending.checkpoint.infrastructureFingerprint
+    ) {
+      await pause("unsafe_git_state", {
+        code: "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      });
+      return null;
+    }
+    return { infrastructureFingerprint, clarification: input.clarification };
+  }
+
+  async function appendClarification(payload) {
+    clarificationAppendInProgress = true;
+    const inspected = await inspectAppendCheckpoint();
+    if (inspected === null) return false;
+    const pending = state().pendingClarificationAppend;
+    const intent = pending ?? {
+      kind: payload.kind,
+      questions: payload.questions,
+      decision: payload.decision,
+      number:
+        counters()[
+          payload.kind === "questions"
+            ? "clarificationRounds"
+            : "productDecisions"
+        ] + 1,
+      expectedHash: currentRun.hashes.executionClarifications,
+      checkpoint: {
+        workflowState: state().workflowState,
+        infrastructureFingerprint: inspected.infrastructureFingerprint,
+        suspendedState: payload.suspendedState,
+        fingerprint: appendCheckpointFingerprint(
+          currentRun,
+          state().workflowState,
+        ),
+        workReport: payload.workReport ?? null,
+      },
+    };
+    const decision = intent.kind === "product-decision";
+    const transcript = await runtime.clarifications[
+      decision ? "appendProductDecision" : "appendQuestionRound"
+    ]({
+      artifactRoot: state().repositoryBaseline.projectPath,
+      transcriptPath: state().clarificationPath,
+      expectedHash: intent.expectedHash,
+      ...(pending === null ? {} : { resultHash: intent.resultHash }),
+      ...(decision
+        ? { number: intent.number, ...intent.decision }
+        : { round: intent.number, questions: intent.questions }),
+      async persistAppend({ expectedHash, hash }) {
+        if (
+          expectedHash !== intent.expectedHash ||
+          (pending !== null && hash !== pending.resultHash)
+        )
+          throw workflowError("Clarification append hashes changed.");
+        if (pending === null)
+          await transition({
+            ...state(),
+            pendingClarificationAppend: { ...intent, resultHash: hash },
+          });
+      },
+    });
+    if (transcript.hash !== state().pendingClarificationAppend?.resultHash) {
+      await invalidateInputs(
+        "clarifications_changed",
+        "Polishing clarification changed outside an authorized window.",
+      );
+      return false;
+    }
+    const readback = await inspectAppendCheckpoint();
+    if (readback === null) return false;
+    if (readback.clarification.hash !== transcript.hash) {
+      await invalidateInputs(
+        "clarifications_changed",
+        "Polishing clarification changed outside an authorized window.",
+      );
+      return false;
+    }
+    const authorization = decision
+      ? await publishProductDecision(
+          intent.decision,
+          intent.checkpoint.suspendedState,
+          intent.checkpoint.workReport,
+          transcript,
+          intent.number,
+        )
+      : await prepareEdit(
+          "clarification-answers",
+          "CLARIFY",
+          "clarification_answers_required",
+          {
+            expectedHash: transcript.hash,
+            inputRequest: {
+              kind: "clarification",
+              questions: intent.questions.map((question, index) => ({
+                id: `q${index + 1}`,
+                question: question.question,
+                options: [],
+                rationale: question.whyItMatters,
+              })),
+              rationale: "Answer every material clarification question.",
+            },
+            nextPipelineState: { ...state(), pendingClarificationAppend: null },
+            nextCounters: { ...counters(), clarificationRounds: intent.number },
+            nextHashes: {
+              ...currentRun.hashes,
+              executionClarifications: transcript.hash,
+            },
+          },
+        );
+    clarificationAppendInProgress = false;
+    const result = await runtime.clarifications.openEditor(authorization, {
+      consumePendingEdit: consumeEdit,
+    });
+    return result.status !== "WAITING_FOR_USER" && result.result.changed;
   }
 
   async function writeContext(path, content) {
@@ -7280,6 +7473,19 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
 
   assertResumeActionApplicable();
   try {
+    if (state().pendingClarificationAppend !== null) {
+      if (NON_RESUMABLE_APPEND_PAUSES.has(currentRun.pause?.reason))
+        return currentRun;
+      if (operatorStop) {
+        await runtime.git.reconcileInterrupted(state().repositoryBaseline, {
+          allowWorkspaceChanges: false,
+          allowIndexChanges: false,
+        });
+        await inspectAppendCheckpoint();
+        return currentRun;
+      }
+      if (!(await appendClarification())) return currentRun;
+    }
     if (operatorStop) {
       if (state().workflowState === "HANDOFF") {
         await runHandoff(true);
@@ -7542,41 +7748,15 @@ ${evidence}`,
             questions: result.questions,
           });
         }
-        const round = counters().clarificationRounds + 1;
-        const transcript = await runtime.clarifications.appendQuestionRound({
-          artifactRoot: state().repositoryBaseline.projectPath,
-          transcriptPath: state().clarificationPath,
-          expectedHash: currentRun.hashes.executionClarifications,
-          round,
-          questions: result.questions,
-        });
         if (
-          !(await requestEdit(
-            "clarification-answers",
-            "CLARIFY",
-            "clarification_answers_required",
-            {
-              expectedHash: transcript.hash,
-              inputRequest: {
-                kind: "clarification",
-                questions: result.questions.map((question, index) => ({
-                  id: `q${index + 1}`,
-                  question: question.question,
-                  options: [],
-                  rationale: question.whyItMatters,
-                })),
-                rationale: "Answer every material clarification question.",
-              },
-              nextCounters: { ...counters(), clarificationRounds: round },
-              nextHashes: {
-                ...currentRun.hashes,
-                executionClarifications: transcript.hash,
-              },
-            },
-          ))
-        ) {
+          !(await appendClarification({
+            kind: "questions",
+            questions: result.questions,
+            decision: null,
+            suspendedState: "CLARIFY",
+          }))
+        )
           return currentRun;
-        }
         continue;
       }
 
@@ -7729,6 +7909,30 @@ ${evidence}`,
         return fail(cause);
       throw cause;
     }
+    if (
+      state().pendingClarificationAppend !== null &&
+      ["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+        cause?.code,
+      )
+    ) {
+      if (NON_RESUMABLE_APPEND_PAUSES.has(currentRun.pause?.reason))
+        return currentRun;
+      return pause("clarification_append_interrupted", { code: cause.code });
+    }
+    if (
+      (clarificationAppendInProgress ||
+        state().pendingClarificationAppend !== null) &&
+      [
+        "ERR_CLARIFICATIONS_CHANGED",
+        "ERR_CLARIFICATION_NOT_FOUND",
+        "ERR_INVALID_CLARIFICATION",
+        "ERR_UNSAFE_CLARIFICATION_PATH",
+      ].includes(cause?.code)
+    )
+      return invalidateInputs(
+        "clarifications_changed",
+        "Polishing clarification changed outside an authorized window.",
+      );
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }
@@ -7770,6 +7974,11 @@ ${evidence}`,
         restoreLazySourceFork ? { lazySourceForkConsumed: false } : {},
       );
     }
+    if (
+      clarificationAppendInProgress ||
+      state().pendingClarificationAppend !== null
+    )
+      throw cause;
     return fail(cause);
   }
 }

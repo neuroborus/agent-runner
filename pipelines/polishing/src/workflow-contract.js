@@ -68,6 +68,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "clarificationPath",
   "clarificationFrozen",
   "pendingEdit",
+  "pendingClarificationAppend",
   "refreezeRequired",
   "workerSummary",
   "reviewerSummary",
@@ -5490,7 +5491,154 @@ export function normalizePipelineState(value) {
   if (!validResolutionCorrection(value)) {
     throw workflowError("Polishing finding-resolution correction is invalid.");
   }
+  assertClarificationAppend(value);
   return value;
+}
+
+// Bind recovery to the complete producing checkpoint, independent of a native session.
+export function appendCheckpointFingerprint(run, workflowState) {
+  return sha256(
+    JSON.stringify(
+      {
+        state: {
+          ...run.pipelineState,
+          workflowState,
+          pendingClarificationAppend: null,
+        },
+        counters: normalizedCounters(run.counters),
+        hashes: run.hashes,
+        lineage: run.sessionLineage,
+      },
+      (_key, value) =>
+        isRecord(value)
+          ? Object.fromEntries(
+              Object.keys(value)
+                .sort()
+                .map((key) => [key, value[key]]),
+            )
+          : value,
+    ),
+  );
+}
+
+function assertClarificationAppend(value) {
+  const append = value.pendingClarificationAppend;
+  if (append === null) return;
+  const invalid = () => workflowError("Invalid pending clarification append.");
+  if (
+    !isRecord(append) ||
+    !hasExactFields(append, [
+      "kind",
+      "questions",
+      "decision",
+      "number",
+      "expectedHash",
+      "resultHash",
+      "checkpoint",
+    ]) ||
+    !isRecord(append.checkpoint) ||
+    !hasExactFields(append.checkpoint, [
+      "workflowState",
+      "suspendedState",
+      "fingerprint",
+      "infrastructureFingerprint",
+      "workReport",
+    ])
+  )
+    throw invalid();
+  const checkpoint = append.checkpoint;
+  let canonical = false;
+  try {
+    canonical =
+      append.kind === "questions"
+        ? append.decision === null &&
+          checkpoint.workflowState === "CLARIFY" &&
+          checkpoint.suspendedState === "CLARIFY" &&
+          checkpoint.workReport === null &&
+          append.questions.length > 0 &&
+          isDeepStrictEqual(
+            append.questions,
+            normalizeClarificationResult({
+              status: "QUESTIONS",
+              questions: append.questions,
+              reason: "",
+              question: "",
+              options: [],
+              whyBlocked: "",
+              evidence: [],
+            }).questions,
+          )
+        : append.kind === "product-decision" &&
+          Array.isArray(append.questions) &&
+          append.questions.length === 0 &&
+          isRecord(append.decision) &&
+          hasExactFields(append.decision, [
+            "question",
+            "options",
+            "whyBlocked",
+            "evidence",
+          ]) &&
+          isDeepStrictEqual(
+            append.decision,
+            normalizeProductDecision(append.decision),
+          ) &&
+          [
+            "CLARIFY",
+            "BOOTSTRAP",
+            "POLISH",
+            "CHECK_AND_FIX",
+            "CLEAN_CONFIRM",
+            "REVIEW",
+            "FINALIZE",
+            "CONFIRM",
+            "RESOLVE_FINDINGS",
+          ].includes(checkpoint.workflowState) &&
+          checkpoint.suspendedState ===
+            (checkpoint.workflowState === "CLARIFY" ? "CLARIFY" : "BOOTSTRAP");
+    if (checkpoint.workReport !== null) {
+      retainWorkReport(value.workReports, checkpoint.workReport);
+      const report = checkpoint.workReport;
+      canonical &&=
+        report.phase === "ARBITRATE_BOOTSTRAP"
+          ? checkpoint.workflowState === "BOOTSTRAP" &&
+            polishingPolicy(value.settings).bootstrapArbitration &&
+            report.arbitration.direction === "PRODUCT_DECISION_REQUIRED"
+          : checkpoint.workflowState === "RESOLVE_FINDINGS" &&
+            polishingPolicy(value.settings).arbitration &&
+            (report.phase === "ARBITRATE_FINDING"
+              ? report.arbitration.direction === "REQUIREMENT_AMBIGUOUS" &&
+                value.pendingDisputes.some(
+                  ({ findingId }) => findingId === report.arbitration.findingId,
+                )
+              : report.phase === "ARBITRATE_STAGNATION" &&
+                report.arbitration.direction === "PRODUCT_DECISION_REQUIRED");
+    }
+  } catch {
+    // Invalid saved payloads grant no replay authority.
+    canonical = false;
+  }
+  if (
+    !canonical ||
+    !Number.isSafeInteger(append.number) ||
+    append.number < 1 ||
+    (append.kind === "questions" && append.number > MAX_CLARIFICATION_ROUNDS) ||
+    ![append.expectedHash, append.resultHash, checkpoint.fingerprint].every(
+      (hash) => typeof hash === "string" && HASH_PATTERN.test(hash),
+    ) ||
+    append.expectedHash === append.resultHash ||
+    (value.validationInfrastructure === null
+      ? checkpoint.infrastructureFingerprint !== null
+      : typeof checkpoint.infrastructureFingerprint !== "string" ||
+        !HASH_PATTERN.test(checkpoint.infrastructureFingerprint)) ||
+    !value.preflightComplete ||
+    !value.proactiveClarificationComplete ||
+    value.pendingEdit !== null ||
+    value.resolutionCorrection !== null ||
+    ![checkpoint.workflowState, "WAITING_FOR_USER"].includes(
+      value.workflowState,
+    )
+  )
+    throw invalid();
 }
 
 export function createPolishingState({
@@ -5527,6 +5675,7 @@ export function createPolishingState({
       clarificationPath: null,
       clarificationFrozen: false,
       pendingEdit: null,
+      pendingClarificationAppend: null,
       refreezeRequired: false,
       workerSummary: null,
       reviewerSummary: null,
@@ -5712,7 +5861,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 22 ||
+    run.pipelineStateVersion !== 23 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6138,6 +6287,43 @@ export function assertRun(run) {
   ) {
     throw workflowError("Polishing input hashes are invalid.");
   }
+  const append = state.pendingClarificationAppend;
+  if (append !== null) {
+    normalizePipelineState({
+      ...state,
+      pendingClarificationAppend: null,
+      workflowState: append.checkpoint.workflowState,
+    });
+    if (
+      append.expectedHash !== run.hashes.executionClarifications ||
+      append.number !==
+        normalizedCounters(run.counters)[
+          append.kind === "questions"
+            ? "clarificationRounds"
+            : "productDecisions"
+        ] +
+          1 ||
+      append.checkpoint.fingerprint !==
+        appendCheckpointFingerprint(run, append.checkpoint.workflowState) ||
+      run.activeTurn !== null ||
+      state.authenticationSourceForkRecovery !== null ||
+      !run.sessionLineage.children.some(({ role }) => role === "worker") ||
+      (append.checkpoint.workReport !== null &&
+        run.sessionLineage.children.at(-1)?.role !== "arbiter")
+    )
+      throw workflowError("Pending clarification append checkpoint changed.");
+  }
+  if (
+    run.pause?.reason === "clarification_append_interrupted" &&
+    (append === null ||
+      !hasExactFields(run.pause, ["reason", "code"]) ||
+      !["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+        run.pause.code,
+      ))
+  )
+    throw workflowError(
+      "Invalid clarification append interruption diagnostic.",
+    );
   const counters = normalizedCounters(run.counters);
   const correction = state.resolutionCorrection;
   if (
