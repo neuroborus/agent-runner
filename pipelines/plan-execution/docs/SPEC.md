@@ -3622,7 +3622,11 @@ malformed-output and code-fix budgets. Before invocation, persist the consumed
 attempt and pending marker. Interruption, provider unavailability, and external
 validation blockage resume that pending attempt without recounting it. Content
 or infrastructure scope drift discards stale feedback without replenishing the
-step allowance. Content repair still returns through candidate convergence;
+step allowance. When operator-stop reconciliation adopts changed content, it
+retires pending recovery before returning through candidate convergence,
+retains the consumed step allowance and replacement-finalization requirement,
+and durably reserves the next attempt before replacement invocation.
+Content repair still returns through candidate convergence;
 formatting within finalization retains its usual permissions and fingerprint
 rules. Accepted replacement finalization clears pending recovery and feedback,
 while the consumed allowance remains until the step ends.

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   migratePlanExecutionStateV14,
   planExecutionPipeline,
+  runPlanExecution,
 } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
@@ -821,6 +822,186 @@ test("semantic pending attempt reconstructs after interruption without a native 
     assert.match(prompt, /"finalizationGuidance":/u);
   }
 });
+
+for (const mode of ["independent", "lazy"]) {
+  test(`${mode} operator stop retires pending recovery after adopting partial finalization content`, async (t) => {
+    const stop = new Error("simulated process loss");
+    let stopped = false;
+    let finalizations = 0;
+    const fixture = await recoveryFixture(t, {
+      mode,
+      work: mode === "lazy" ? [checkAndFix()] : [],
+      async onRoleRun(_role, request) {
+        if (request.schema !== FINALIZATION_SCHEMA) return;
+        finalizations += 1;
+        if (finalizations === 1) return;
+        const run = fixture.currentRun;
+        assertRun(run);
+        assert.deepEqual(run.activeTurn, { role: "worker", phase: "finalize" });
+        assert.equal(run.pipelineState.workflowState, "FINALIZE");
+        assert.equal(
+          run.pipelineState.finalizationRecovery.attempts,
+          finalizations - 1,
+        );
+        assert.equal(run.pipelineState.finalizationRecovery.pending, true);
+        assert.equal(run.pipelineState.finalizationRecovery.required, true);
+        assert.notEqual(run.pipelineState.candidateReviewedFingerprint, null);
+        if (finalizations === 2) {
+          assert.notEqual(
+            run.pipelineState.finalizationRecovery.feedback,
+            null,
+          );
+          await writeFile(
+            join(request.cwd, "partial.txt"),
+            "Partial finalization.\n",
+          );
+        } else {
+          assert.equal(finalizations, 3);
+          assert.equal(run.pipelineState.finalizationRecovery.feedback, null);
+          assert.equal(rejectionTransitions(fixture).length, 1);
+          assert.equal(
+            fixture.transitions.filter(
+              ({ options }) => options.activity?.kind === "evidence-retry",
+            ).length,
+            2,
+          );
+        }
+        stopped = true;
+        throw stop;
+      },
+      onCommitRun() {
+        assert.fail("Recovery must not invoke a commit effect.");
+      },
+    });
+    const finish = fixture.runtime.finishAgentTurn;
+    const transition = fixture.runtime.transition;
+    fixture.runtime.finishAgentTurn = (turn) => {
+      if (stopped) throw stop;
+      return finish(turn);
+    };
+    fixture.runtime.transition = (patch, options) => {
+      if (stopped) throw stop;
+      return transition(patch, options);
+    };
+    await assert.rejects(fixture.run(), (error) => error === stop);
+    const interrupted = fixture.currentRun;
+    assertRun(interrupted);
+    const expectedBaseline = await fixture.runtime.git.snapshot({
+      allowedPaths: interrupted.pipelineState.repositoryBaseline.allowedPaths,
+    });
+    assert.notEqual(
+      expectedBaseline.contentFingerprint,
+      interrupted.pipelineState.repositoryBaseline.contentFingerprint,
+    );
+    for (const field of [
+      "head",
+      "branch",
+      "detached",
+      "refsFingerprint",
+      "indexFingerprint",
+      "remoteConfigurationFingerprint",
+      "identityFingerprint",
+    ]) {
+      assert.equal(
+        expectedBaseline[field],
+        interrupted.pipelineState.repositoryBaseline[field],
+        field,
+      );
+    }
+    const roleCalls = Object.values(fixture.calls).map(
+      (requests) => requests.length,
+    );
+    const contextCalls = fixture.contextCalls.length;
+    const applicabilityCalls = fixture.applicabilityCalls.length;
+    stopped = false;
+    const reconciled = await runPlanExecution({
+      run: interrupted,
+      runtime: fixture.runtime,
+      operatorStop: true,
+    });
+    assertRun(reconciled);
+    const state = reconciled.pipelineState;
+    assert.equal(
+      state.workflowState,
+      mode === "independent" ? "REVIEW" : "CHECK_AND_FIX",
+    );
+    assert.equal(
+      await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+      "Partial finalization.\n",
+    );
+    assert.deepEqual(state.repositoryBaseline, expectedBaseline);
+    assert.equal(reconciled.activeTurn, null);
+    for (const field of [
+      "candidateReviewResult",
+      "candidateReviewedFingerprint",
+      "candidateConfirmationFingerprint",
+      "finalizationResult",
+      "finalizedFingerprint",
+      "reviewResult",
+      "reviewedFingerprint",
+      "cleanConfirmationFingerprint",
+      "pendingCommit",
+    ])
+      assert.equal(state[field], null, field);
+    assert.deepEqual(state.finalizationRecovery, {
+      attempts: 1,
+      additionalAttempts: 0,
+      required: true,
+      pending: false,
+      feedback: null,
+    });
+    assert.deepEqual(reconciled.counters, interrupted.counters);
+    for (const field of [
+      "completedCommits",
+      "correctionHistory",
+      "sameFindingRounds",
+      "pendingCorrection",
+      "availabilityCorrectionCharged",
+    ])
+      assert.deepEqual(state[field], interrupted.pipelineState[field], field);
+    assert.deepEqual(
+      await fixture.runtime.git.snapshot({
+        allowedPaths: expectedBaseline.allowedPaths,
+      }),
+      expectedBaseline,
+    );
+    const repeated = await runPlanExecution({
+      run: reconciled,
+      runtime: fixture.runtime,
+      operatorStop: true,
+    });
+    assertRun(repeated);
+    assert.deepEqual(repeated, reconciled);
+    assert.deepEqual(
+      Object.values(fixture.calls).map((requests) => requests.length),
+      roleCalls,
+    );
+    assert.equal(fixture.contextCalls.length, contextCalls);
+    assert.equal(fixture.applicabilityCalls.length, applicabilityCalls);
+    await assert.rejects(fixture.run(), (error) => error === stop);
+    assert.equal(finalizations, 3);
+    assert.equal(
+      calls(
+        fixture,
+        mode === "independent"
+          ? CANDIDATE_REVIEW_SCHEMA
+          : CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+      ).length,
+      2,
+    );
+    assert.equal(fixture.currentRun.pipelineState.pendingCommit, null);
+    assert.deepEqual(fixture.currentRun.counters, {
+      ...interrupted.counters,
+      fixRounds: interrupted.counters.fixRounds + (mode === "lazy" ? 1 : 0),
+    });
+    assert.equal(
+      Object.values(fixture.calls)
+        .flat()
+        .some(({ access }) => access === "local-commit"),
+      false,
+    );
+  });
+}
 
 test("recovery rejects omitted checks and substituted infrastructure through the separate malformed-output correction", async (t) => {
   const invalid = {
