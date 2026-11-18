@@ -42,6 +42,7 @@ import {
   assertRun,
   assertRuntime,
   assertSettings,
+  appendCheckpointFingerprint,
   createPlanAuthoringState,
   isOutputDiagnostic,
   isRecord,
@@ -292,6 +293,7 @@ export async function runPlanAuthoring({
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let dispositionPausePersistence = false;
+  let clarificationAppendInProgress = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -391,6 +393,9 @@ export async function runPlanAuthoring({
     } = {},
   ) {
     const state = pipelineState();
+    // Rejected append proof remains available for diagnostics, never replay.
+    if (state.pendingClarificationAppend !== null)
+      return pause(reason, details);
     await transition(
       {
         ...state,
@@ -421,7 +426,7 @@ export async function runPlanAuthoring({
     return currentRun;
   }
 
-  async function readCurrentInputs() {
+  async function readCurrentInputs({ allowPendingAppend = false } = {}) {
     let inputSnapshot;
     try {
       inputSnapshot = await runtime.readInputs({
@@ -441,31 +446,36 @@ export async function runPlanAuthoring({
         ? resolve(currentRun.projectPath, pipelineState().settings.criteriaPath)
         : null,
     );
-    const clarification = await runtime.clarifications.inspectTranscript({
-      artifactRoot: currentRun.taskPath,
-      transcriptPath: clarificationPath,
-    });
     const nextHashes = {
       ...currentRun.hashes,
       task: inputs.task.hash,
       context: inputs.context?.hash ?? null,
       criteria: inputs.criteria?.hash ?? null,
       declaredInputs: inputs.declaredInputsHash,
-      clarifications: clarification.hash,
     };
     const changed =
       currentRun.hashes.task !== nextHashes.task ||
       currentRun.hashes.context !== nextHashes.context ||
       (currentRun.hashes.criteria ?? null) !== nextHashes.criteria ||
-      (currentRun.hashes.declaredInputs ?? null) !==
-        nextHashes.declaredInputs ||
-      currentRun.hashes.clarifications !== nextHashes.clarifications;
+      (currentRun.hashes.declaredInputs ?? null) !== nextHashes.declaredInputs;
     if (changed) {
-      const clarificationChanged =
-        currentRun.hashes.clarifications !== nextHashes.clarifications;
-      await invalidateDependentWork(
-        clarificationChanged ? "clarifications_changed" : "input_changed",
-      );
+      await invalidateDependentWork("input_changed");
+      return null;
+    }
+    const clarification = await runtime.clarifications.inspectTranscript({
+      artifactRoot: currentRun.taskPath,
+      transcriptPath: clarificationPath,
+    });
+    if (
+      clarification.hash !== currentRun.hashes.clarifications &&
+      !(
+        allowPendingAppend &&
+        pipelineState().pendingClarificationAppend !== null &&
+        clarification.hash ===
+          pipelineState().pendingClarificationAppend.resultHash
+      )
+    ) {
+      await invalidateDependentWork("clarifications_changed");
       return null;
     }
     return Object.freeze({ inputs, clarification });
@@ -963,65 +973,162 @@ ${evidence.inputs.criteria ? `User criteria (${evidence.inputs.criteria.path}):\
     return result.changed || result.action === "proactive-clarification";
   }
 
-  async function productDecision(decision, statePatch = {}) {
-    const count = counters().productDecisions + 1;
-    const snapshot = await runtime.clarifications.appendProductDecision({
+  async function appendClarification(payload) {
+    clarificationAppendInProgress = true;
+    await safety.assertUnchanged(pipelineState().repositoryBaseline);
+    if ((await readCurrentInputs({ allowPendingAppend: true })) === null)
+      return false;
+    const pending = pipelineState().pendingClarificationAppend;
+    const intent = pending ?? {
+      kind: payload.kind,
+      questions: payload.questions,
+      decision: payload.decision,
+      number:
+        counters()[
+          payload.kind === "questions"
+            ? "clarificationRounds"
+            : "productDecisions"
+        ] + 1,
+      expectedHash: currentRun.hashes.clarifications,
+      checkpoint: {
+        workflowState: pipelineState().workflowState,
+        fingerprint: appendCheckpointFingerprint(
+          currentRun,
+          pipelineState().workflowState,
+        ),
+        arbitrationUsed:
+          payload.kind === "product-decision" &&
+          payload.arbitrationUsed === true
+            ? true
+            : pipelineState().arbitrationUsed,
+      },
+    };
+    const decision = intent.kind === "product-decision";
+    const snapshot = await runtime.clarifications[
+      decision ? "appendProductDecision" : "appendQuestionRound"
+    ]({
       artifactRoot: currentRun.taskPath,
       transcriptPath: clarificationPath,
-      expectedHash: currentRun.hashes.clarifications,
-      number: count,
-      ...decision,
+      expectedHash: intent.expectedHash,
+      ...(pending === null ? {} : { resultHash: intent.resultHash }),
+      ...(decision
+        ? { number: intent.number, ...intent.decision }
+        : { round: intent.number, questions: intent.questions }),
+      persistAppend: async ({ expectedHash, hash }) => {
+        if (
+          expectedHash !== intent.expectedHash ||
+          (pending !== null && hash !== pending.resultHash)
+        )
+          throw workflowError("Plan-authoring append hashes changed.");
+        if (pending === null)
+          await transition({
+            ...pipelineState(),
+            pendingClarificationAppend: { ...intent, resultHash: hash },
+          });
+      },
     });
+    if (
+      snapshot.hash !== pipelineState().pendingClarificationAppend?.resultHash
+    )
+      throw workflowError(
+        "Plan-authoring append readback differs from its intent.",
+      );
+    await safety.assertUnchanged(pipelineState().repositoryBaseline);
+    const readback = await readCurrentInputs({ allowPendingAppend: true });
+    if (readback === null) return false;
+    if (readback.clarification.hash !== snapshot.hash) {
+      await invalidateDependentWork("clarifications_changed");
+      return false;
+    }
     const state = pipelineState();
-    return requestEdit(
-      "product-decision",
-      "ANALYZE",
-      "product_decision_required",
+    const authorization = await prepareEdit(
+      decision ? "product-decision" : "clarification-answers",
+      decision ? "ANALYZE" : "CLARIFY",
+      decision ? "product_decision_required" : "clarification_answers_required",
       {
         expectedHash: snapshot.hash,
-        inputRequest: {
-          kind: "product-decision",
-          questions: [
-            {
-              id: "decision",
-              question: decision.question,
-              options: decision.options,
+        inputRequest: decision
+          ? {
+              kind: "product-decision",
+              questions: [
+                {
+                  id: "decision",
+                  question: intent.decision.question,
+                  options: intent.decision.options,
+                },
+              ],
+              rationale: intent.decision.whyBlocked,
+            }
+          : {
+              kind: "clarification",
+              questions: intent.questions.map((question, index) => ({
+                id: `q${index + 1}`,
+                question: question.question,
+                options: [],
+                rationale: question.whyItMatters,
+              })),
+              rationale: "Answer every material clarification question.",
             },
-          ],
-          rationale: decision.whyBlocked,
-        },
         nextPipelineState: {
           ...state,
-          ...statePatch,
-          clarificationFrozen: false,
-          draft: null,
-          draftFingerprint: null,
-          findings: [],
-          validationIssues: [],
-          blockerKind: null,
-          reviewApproved: false,
-          cleanConfirmationFingerprint: null,
-          lazyCorrections: [],
-          pendingLazyCorrection: null,
-          lastCountedRevision: counters().revisionRounds,
-          blockedSinceArbitration: 0,
-          arbiterDirection: null,
-          correctionHistory: [],
-          canonicalPlan: null,
+          pendingClarificationAppend: null,
+          ...(decision
+            ? {
+                clarificationFrozen: false,
+                draft: null,
+                draftFingerprint: null,
+                findings: [],
+                validationIssues: [],
+                blockerKind: null,
+                reviewApproved: false,
+                cleanConfirmationFingerprint: null,
+                lazyCorrections: [],
+                pendingLazyCorrection: null,
+                lastCountedRevision: counters().revisionRounds,
+                blockedSinceArbitration: 0,
+                arbitrationUsed: intent.checkpoint.arbitrationUsed,
+                arbiterDirection: null,
+                correctionHistory: [],
+                canonicalPlan: null,
+              }
+            : {}),
         },
-        nextCounters: { ...counters(), productDecisions: count },
-        nextHashes: {
-          ...currentRun.hashes,
-          clarifications: snapshot.hash,
+        nextCounters: {
+          ...counters(),
+          [decision ? "productDecisions" : "clarificationRounds"]:
+            intent.number,
         },
-        publicActivity: activity(
-          "runner",
-          "clarification",
-          "product-decision",
-          "Blocking product decision recorded; user input is required.",
-        ),
+        nextHashes: { ...currentRun.hashes, clarifications: snapshot.hash },
+        ...(decision
+          ? {
+              publicActivity: activity(
+                "runner",
+                "clarification",
+                "product-decision",
+                "Blocking product decision recorded; user input is required.",
+              ),
+            }
+          : {}),
       },
     );
+    clarificationAppendInProgress = false;
+    const editorResult = await runtime.clarifications.openEditor(
+      authorization,
+      { consumePendingEdit: consumeEdit },
+    );
+    return (
+      editorResult.status !== "WAITING_FOR_USER" && editorResult.result.changed
+    );
+  }
+
+  async function productDecision(decision, statePatch = {}) {
+    return appendClarification({
+      kind: "product-decision",
+      questions: [],
+      decision,
+      arbitrationUsed:
+        statePatch.arbitrationUsed ?? pipelineState().arbitrationUsed,
+    });
   }
 
   function lazyCorrectionPrompt(correction) {
@@ -1325,15 +1432,30 @@ ${JSON.stringify(
   }
 
   try {
+    if (
+      pipelineState().pendingClarificationAppend !== null &&
+      [
+        "input_changed",
+        "clarifications_changed",
+        "read_only_mutation",
+        "workspace_changed",
+        "project_configuration_changed",
+      ].includes(currentRun.pause?.reason)
+    )
+      return currentRun;
     if (operatorStop) {
       if (pipelineState().repositoryBaseline !== null) {
         await safety.reconcileInterrupted(pipelineState().repositoryBaseline, {
           allowWorkspaceChanges: false,
           allowIndexChanges: false,
         });
-        if (pipelineState().pendingEdit === null) await readCurrentInputs();
+        if (pipelineState().pendingEdit === null)
+          await readCurrentInputs({ allowPendingAppend: true });
       }
       return currentRun;
+    }
+    if (pipelineState().pendingClarificationAppend !== null) {
+      if (!(await appendClarification())) return currentRun;
     }
     if (!(await recoverInterruptedTurn())) {
       return currentRun;
@@ -1454,41 +1576,14 @@ ${evidence}`,
             questions: clarification.questions,
           });
         }
-        const round = counters().clarificationRounds + 1;
-        const transcript = await runtime.clarifications.appendQuestionRound({
-          artifactRoot: currentRun.taskPath,
-          transcriptPath: clarificationPath,
-          expectedHash: currentRun.hashes.clarifications,
-          round,
-          questions: clarification.questions,
-        });
         if (
-          !(await requestEdit(
-            "clarification-answers",
-            "CLARIFY",
-            "clarification_answers_required",
-            {
-              expectedHash: transcript.hash,
-              inputRequest: {
-                kind: "clarification",
-                questions: clarification.questions.map((question, index) => ({
-                  id: `q${index + 1}`,
-                  question: question.question,
-                  options: [],
-                  rationale: question.whyItMatters,
-                })),
-                rationale: "Answer every material clarification question.",
-              },
-              nextCounters: { ...counters(), clarificationRounds: round },
-              nextHashes: {
-                ...currentRun.hashes,
-                clarifications: transcript.hash,
-              },
-            },
-          ))
-        ) {
+          !(await appendClarification({
+            kind: "questions",
+            questions: clarification.questions,
+            decision: null,
+          }))
+        )
           return currentRun;
-        }
         continue;
       }
 
@@ -2053,6 +2148,19 @@ ${findingPrompt(pipelineState())}`,
     if (preflightComplete && inputPathDrift) {
       return invalidateDependentWork("input_changed");
     }
+    if (
+      pipelineState().pendingClarificationAppend !== null &&
+      ["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+        cause?.code,
+      )
+    ) {
+      return pause("clarification_append_interrupted", { code: cause.code });
+    }
+    if (
+      clarificationAppendInProgress ||
+      pipelineState().pendingClarificationAppend !== null
+    )
+      throw cause;
     if (cause?.recoverable === true) {
       const code =
         typeof cause.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(cause.code)

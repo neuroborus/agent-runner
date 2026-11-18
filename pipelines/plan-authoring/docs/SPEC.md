@@ -339,6 +339,17 @@ migration rewrites no state; legacy full baselines keep their representation
 and exact comparison, and a version-7 runtime refuses compact baselines as
 skew. Authoring never refreshes its baseline, so no capacity limit remains.
 
+Pipeline state version 9 adds the closed nullable `pendingClarificationAppend`
+record. The ordered version-8 migration initializes legacy absence to `null`,
+without inferring append ownership or changing settings, declarations, drafts,
+provenance, counters, source lineage or editor authorization. An intent retains
+its kind, exact normalized questions or product decision, next round/decision
+number, prior/result hashes and checkpoint. The checkpoint binds the original
+workflow state, a deterministic fingerprint of pipeline state, input hashes,
+counters and source lineage, and the existing or newly consumed Arbiter marker.
+Unknown fields, noncanonical payloads, competing editor windows, stale numbers,
+changed checkpoint bindings and unsupported re-entry states reject.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -382,6 +393,10 @@ which reconciliation wraps once as `operator_canceled` without provider work.
 Every planning turn remains repository-read-only. Stop reconciliation requires
 an unchanged baseline and preserves the durable draft and declared artifacts.
 A read-only mutation remains a blocker after an operator pause is lifted.
+For a pending clarification append, reconciliation verifies protected inputs,
+workspace/controls and prior-or-exact-result transcript proof, retaining intent
+and accounting. It never appends, creates or opens an editor window, or accepts
+an answer. Rejected proof remains non-resumable on later reconciliation.
 
 ## Clarification
 
@@ -457,6 +472,29 @@ state, pending editor action, and last accepted artifact hash. An edit made
 through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
+
+Before replacing the transcript for questions or a supported product decision,
+the runner journals the append through the injected clarification service's
+`persistAppend` callback. Resume handles that intent before interrupted-turn
+transcript inspection or fresh role work. It revalidates frozen non-transcript
+inputs, repository/directory controls and checkpoint bindings, then recognizes
+only the prior bytes or the exact persisted result. `resultHash` verifies an
+already completed replacement; it never adopts a guessed hash or invokes the
+producing role again. Unexpected bytes remain non-resumable.
+
+After verified readback and unchanged protected bindings, one transition
+publishes the new transcript hash, once-only numbering, structured input request
+and one-shot editor authorization while clearing append intent. Only then may
+an editor open. Product-decision publication performs the existing draft/review
+invalidation and consecutive-stagnation reset, preserving cumulative revision
+and correction counts and the consumed Arbiter allowance. Intent survives lost
+replacement, readback or publication acknowledgements without native-session
+dependence. Read/write interruptions pause with bounded
+`clarification_append_interrupted` diagnostics and a null resume action; unsafe
+paths, malformed transcripts and protected-input drift retain blocking proof.
+An unchanged material-answer close renews only its editor window, without
+another append, question charge or role turn. An empty proactive close remains
+valid without consuming a round.
 
 Through MCP, the root runtime never opens an editor. It exposes the same pending
 authorization as a structured request with identified questions and accepts an

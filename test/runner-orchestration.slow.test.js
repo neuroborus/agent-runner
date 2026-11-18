@@ -1202,6 +1202,7 @@ test("migrates legacy authoring line targets under the lease without configurati
   for (const legacy of [state, ...events.map((event) => event.state)]) {
     legacy.pipelineStateVersion = 3;
     delete legacy.pipelineState.settings.preferredCommitLineLimit;
+    delete legacy.pipelineState.pendingClarificationAppend;
   }
   await writeFile(statePath, `${JSON.stringify(state)}\n`);
   await writeFile(

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   assertCustomAuthoringBudget,
@@ -43,6 +44,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "proactiveClarificationComplete",
   "clarificationFrozen",
   "pendingEdit",
+  "pendingClarificationAppend",
   "draft",
   "draftFingerprint",
   "findings",
@@ -183,6 +185,31 @@ export function workflowError(
 
 export function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function appendCheckpointFingerprint(run, workflowState) {
+  return sha256(
+    JSON.stringify(
+      {
+        state: {
+          ...run.pipelineState,
+          workflowState,
+          pendingClarificationAppend: null,
+        },
+        counters: normalizedCounters(run.counters),
+        hashes: run.hashes,
+        lineage: run.sessionLineage,
+      },
+      (_key, value) =>
+        isRecord(value)
+          ? Object.fromEntries(
+              Object.keys(value)
+                .sort()
+                .map((key) => [key, value[key]]),
+            )
+          : value,
+    ),
+  );
 }
 
 function repositoryRelativePath(projectPath, path) {
@@ -830,6 +857,96 @@ export function normalizePipelineState(value) {
       throw workflowError("Plan-authoring pending edit is invalid.");
     }
   }
+  if (value.pendingClarificationAppend !== null) {
+    const append = value.pendingClarificationAppend;
+    if (
+      !isRecord(append) ||
+      !hasExactFields(append, [
+        "kind",
+        "questions",
+        "decision",
+        "number",
+        "expectedHash",
+        "resultHash",
+        "checkpoint",
+      ]) ||
+      !isRecord(append.checkpoint) ||
+      !hasExactFields(append.checkpoint, [
+        "workflowState",
+        "fingerprint",
+        "arbitrationUsed",
+      ])
+    )
+      throw workflowError(
+        "Plan-authoring pending clarification append is invalid.",
+      );
+    let canonical = false;
+    try {
+      canonical =
+        append.kind === "questions"
+          ? append.decision === null &&
+            append.checkpoint.workflowState === "CLARIFY" &&
+            isDeepStrictEqual(
+              append.questions,
+              normalizeQuestions({
+                status: "QUESTIONS",
+                questions: append.questions,
+              }).questions,
+            )
+          : append.kind === "product-decision" &&
+            append.questions.length === 0 &&
+            hasExactFields(append.decision, [
+              "question",
+              "options",
+              "whyBlocked",
+              "evidence",
+            ]) &&
+            isDeepStrictEqual(
+              append.decision,
+              normalizeProductDecision(append.decision),
+            ) &&
+            [
+              "DRAFT",
+              "REVISE",
+              "CHECK_AND_FIX",
+              "CLEAN_CONFIRM",
+              "REVIEW",
+            ].includes(append.checkpoint.workflowState);
+    } catch {
+      /* Invalid persisted payloads never acquire append authority. */
+    }
+    if (
+      !canonical ||
+      !Array.isArray(append.questions) ||
+      !Number.isSafeInteger(append.number) ||
+      append.number < 1 ||
+      (append.kind === "questions" &&
+        append.number > MAX_CLARIFICATION_ROUNDS) ||
+      typeof append.expectedHash !== "string" ||
+      !HASH_PATTERN.test(append.expectedHash) ||
+      typeof append.resultHash !== "string" ||
+      !HASH_PATTERN.test(append.resultHash) ||
+      append.expectedHash === append.resultHash ||
+      typeof append.checkpoint.fingerprint !== "string" ||
+      !HASH_PATTERN.test(append.checkpoint.fingerprint) ||
+      typeof append.checkpoint.arbitrationUsed !== "boolean" ||
+      (append.checkpoint.arbitrationUsed &&
+        !value.arbitrationUsed &&
+        (append.kind !== "product-decision" ||
+          append.checkpoint.workflowState !== "REVISE" ||
+          !authoringPolicy(value.settings).arbitration)) ||
+      (value.arbitrationUsed && !append.checkpoint.arbitrationUsed) ||
+      !value.preflightComplete ||
+      !value.proactiveClarificationComplete ||
+      value.pendingEdit !== null ||
+      ![append.checkpoint.workflowState, "WAITING_FOR_USER"].includes(
+        value.workflowState,
+      )
+    )
+      throw workflowError(
+        "Plan-authoring pending clarification append is inconsistent.",
+      );
+  }
   if (
     value.pendingEdit !== null &&
     !["WAITING_FOR_USER", "FAILED"].includes(value.workflowState)
@@ -1221,6 +1338,7 @@ export function createPlanAuthoringState({
     proactiveClarificationComplete: !proactiveClarification,
     clarificationFrozen: false,
     pendingEdit: null,
+    pendingClarificationAppend: null,
     draft: null,
     draftFingerprint: null,
     findings: Object.freeze([]),
@@ -1321,7 +1439,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 8 ||
+    run.pipelineStateVersion !== 9 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1537,6 +1655,15 @@ export function assertRun(run) {
   }
   assertInputPause(run, pipelineState);
   if (pipelineState.workflowState === "WAITING_FOR_USER") {
+    if (
+      run.pause.reason === "clarification_append_interrupted" &&
+      (pipelineState.pendingClarificationAppend === null ||
+        !hasExactFields(run.pause, ["reason", "code"]) ||
+        !["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+          run.pause.code,
+        ))
+    )
+      throw workflowError("Plan-authoring append recovery pause is invalid.");
     const configurationChanged =
       run.pause.reason === "project_configuration_changed";
     const workspaceChanged = run.pause.reason === "workspace_changed";
@@ -1682,6 +1809,35 @@ export function assertRun(run) {
   }
   assertCounterRecord(run.counters);
   const counters = normalizedCounters(run.counters);
+  const append = pipelineState.pendingClarificationAppend;
+  if (append !== null)
+    normalizePipelineState({
+      ...pipelineState,
+      pendingClarificationAppend: null,
+      workflowState: append.checkpoint.workflowState,
+    });
+  if (
+    append !== null &&
+    (append.expectedHash !== run.hashes.clarifications ||
+      append.number !==
+        counters[
+          append.kind === "questions"
+            ? "clarificationRounds"
+            : "productDecisions"
+        ] +
+          1 ||
+      append.checkpoint.fingerprint !==
+        appendCheckpointFingerprint(run, append.checkpoint.workflowState) ||
+      run.activeTurn !== null ||
+      pipelineState.authenticationSourceForkRecovery !== null ||
+      (append.checkpoint.arbitrationUsed &&
+        !pipelineState.arbitrationUsed &&
+        run.sessionLineage.children.at(-1)?.role !== "arbiter") ||
+      !run.sessionLineage.children.some(({ role }) => role === "planner"))
+  )
+    throw workflowError(
+      "Plan-authoring pending clarification append checkpoint changed.",
+    );
   if (
     counters.clarificationRounds > MAX_CLARIFICATION_ROUNDS ||
     counters.correctionRounds > counters.revisionRounds ||

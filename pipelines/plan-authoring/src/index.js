@@ -79,6 +79,8 @@ const TASK_INPUTS = Object.freeze({
   context: Object.freeze({ filename: "context.md", optional: true }),
 });
 const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
+  clarification_append_interrupted:
+    "Clarification append was interrupted; resume verifies the saved intent before publishing the input request.",
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
@@ -92,8 +94,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   clarification_limit_reached:
     "Clarification reached its configured question-round limit.",
   clarifications_changed:
-    "The clarification artifact changed outside an authorized editor window.",
-  input_changed: "A task input changed after the run began.",
+    "The clarification transcript changed outside an authorized window; start a new run.",
+  input_changed: "Frozen task inputs changed; start a new run.",
   internal_failure: "Plan authoring failed.",
   lazy_output_invalid:
     "The primary convergence result remains invalid and requires an explicit retry.",
@@ -261,9 +263,13 @@ function projectStatus(run) {
 
 function validateResumeAction(run, action) {
   if (
-    ["project_configuration_changed", "workspace_changed"].includes(
-      run.pause?.reason,
-    )
+    [
+      "project_configuration_changed",
+      "workspace_changed",
+      "input_changed",
+      "clarifications_changed",
+      "read_only_mutation",
+    ].includes(run.pause?.reason)
   ) {
     throw new Error("A run with changed protected inputs cannot resume.");
   }
@@ -282,6 +288,7 @@ function validateResumeAction(run, action) {
         "output_exhausted",
         "backend_unavailable",
         "lazy_output_invalid",
+        "clarification_append_interrupted",
       ].includes(run.pause?.reason)) ||
     (run.pause?.reason === "lazy_output_invalid" &&
       run.pipelineState.pendingLazyCorrection === null)
@@ -369,7 +376,7 @@ export function migratePlanAuthoringStateV6(run) {
 
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 8,
+  stateVersion: 9,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
@@ -380,6 +387,16 @@ export const planAuthoringPipeline = Object.freeze({
     // Legacy full baselines keep their exact comparison; new custom runs
     // persist a compact baseline that a version-7 runtime must refuse as skew.
     7: (run) => Object.freeze({ ...run.pipelineState }),
+    8: (run) => {
+      if (Object.hasOwn(run.pipelineState, "pendingClarificationAppend"))
+        throw new Error(
+          "Legacy plan-authoring already contains clarification append intent.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        pendingClarificationAppend: null,
+      });
+    },
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

@@ -6184,6 +6184,20 @@ authority. Audit operator-stop reconciliation only inspects this proof and
 retains intent; it never appends, creates an editor window or accepts an answer.
 Existing init and coding settlement append owners remain independent.
 
+Plan-authoring state version 9 applies the same journal-before-replacement
+protocol to question rounds and supported product decisions. Its closed intent
+binds normalized payload, numbering, prior/result hashes, original checkpoint,
+pipeline/input/accounting/lineage fingerprint and Arbiter settlement marker.
+Recovery precedes interrupted-turn transcript inspection and role dispatch,
+retains commit/custom selection and directory guards, and publishes hash,
+once-only accounting and the editor request atomically with intent retirement.
+Product decisions preserve existing draft/review invalidation and consecutive
+stagnation reset without renewing cumulative revision or arbitration allowances.
+Legacy absence migrates to null without authority. Stop reconciliation only
+verifies proof; unsafe input remains blocking and transient read/write failures
+retain bounded resumable diagnostics. Editor authorization stays separate from
+append intent, including unanswered material-window renewal.
+
 The transcript reader retains its existing error codes and 1 MiB limit. Its
 size and regular-file/single-link guards add optional `constraint` metadata of
 `file_size` or `isolated_regular_file`, respectively. Other path, read, decoding
