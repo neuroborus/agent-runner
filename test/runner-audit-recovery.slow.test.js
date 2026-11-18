@@ -15,13 +15,19 @@ import {
   recheck,
 } from "../pipelines/audit/test/support/index.js";
 import { CodexAdapterError } from "../src/agents/index.js";
+import { createClarificationService } from "../src/clarifications/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { main } from "../src/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
 import { createRunStore } from "../src/state/index.js";
 import { availabilityFailure } from "./support/availability.js";
-import { executeFile } from "./support/index.js";
+import {
+  APPEND_QUESTIONS,
+  appendReadFailure,
+  executeFile,
+  transcriptHash,
+} from "./support/index.js";
 import { outputExhaustion } from "./support/output-exhaustion.js";
 
 const evidence = (request) => JSON.parse(request.prompt.split("\n").at(-1));
@@ -142,6 +148,234 @@ function frozen(run) {
     baseline: state.repositoryBaseline,
   };
 }
+
+for (const boundary of [
+  "unpublished-intent",
+  "journaled-intent",
+  "journaled-editor",
+]) {
+  test(`cold clarification append audit retains ${boundary} evidence without role replay`, async (t) => {
+    const f = await fixture(t, "combined");
+    f.outputs.push({
+      status: "QUESTIONS",
+      inputs: null,
+      questions: APPEND_QUESTIONS,
+      reason: "",
+    });
+    const failure = new Error("Controlled append intent publication loss.");
+    let runId;
+    let injected = false;
+    const store = createRunStore({
+      stateRoot: f.stateRoot,
+      async onTransitionBoundary(point) {
+        if (
+          boundary === "unpublished-intent" ||
+          injected ||
+          point !== "event-appended" ||
+          !runId
+        )
+          return;
+        const state = (await store.loadRun(runId)).pipelineState;
+        if (
+          boundary === "journaled-intent"
+            ? state.pendingClarificationAppend !== null
+            : state.pendingEdit !== null
+        ) {
+          injected = true;
+          throw failure;
+        }
+      },
+    });
+    const initial = f.open({
+      runStore: {
+        ...store,
+        async transitionRun(lease, patch, options) {
+          if (
+            boundary === "unpublished-intent" &&
+            patch.pipelineState?.pendingClarificationAppend != null
+          ) {
+            injected = true;
+            throw failure;
+          }
+          return store.transitionRun(lease, patch, options);
+        },
+      },
+      clarifications: createClarificationService({ interactive: false }),
+    });
+    runId = (await initial.runner.create(f.input)).run.runId;
+    await assert.rejects(
+      initial.runner.resume({ runId }),
+      (error) => error === failure,
+    );
+    assert.equal(injected, true);
+    const cold = f.open();
+    const retained = await cold.store.loadRun(runId);
+    const prior = await readFile(join(f.taskPath, "clarifications.md"), "utf8");
+    assert.equal(transcriptHash(prior), retained.hashes.clarifications);
+    if (boundary === "journaled-editor") {
+      assert.equal(retained.pipelineState.pendingClarificationAppend, null);
+      assert.equal(retained.pipelineState.clarificationRounds, 1);
+      assert.equal(
+        retained.pause.inputRequest.id,
+        retained.pipelineState.pendingEdit.id,
+      );
+      assert.equal(
+        retained.pipelineState.pendingEdit.preEditorHash,
+        transcriptHash(prior),
+      );
+      const waiting = (await cold.runner.resume({ runId })).run;
+      assert.equal(waiting.pipelineState.clarificationRounds, 1);
+      assert.equal(
+        await readFile(join(f.taskPath, "clarifications.md"), "utf8"),
+        prior,
+      );
+      assert.equal(f.calls.length, 1);
+      return;
+    }
+    assert.equal(retained.pipelineState.clarificationRounds, 0);
+    assert.equal(retained.pipelineState.pendingEdit, null);
+    assert.equal(f.calls.length, 1);
+    if (boundary === "unpublished-intent") {
+      assert.equal(retained.pipelineState.pendingClarificationAppend, null);
+      return;
+    }
+    const intent = retained.pipelineState.pendingClarificationAppend;
+    assert.deepEqual(intent.questions, APPEND_QUESTIONS);
+    assert.equal(intent.expectedHash, transcriptHash(prior));
+    const waiting = (await cold.runner.resume({ runId })).run;
+    const bytes = await readFile(join(f.taskPath, "clarifications.md"), "utf8");
+    assert.equal(transcriptHash(bytes), intent.resultHash);
+    assert.equal(waiting.hashes.clarifications, intent.resultHash);
+    assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
+    assert.equal(waiting.pipelineState.clarificationRounds, 1);
+    assert.equal(
+      waiting.pause.inputRequest.id,
+      waiting.pipelineState.pendingEdit.id,
+    );
+    const repeated = (await f.open().runner.resume({ runId })).run;
+    assert.equal(repeated.pipelineState.clarificationRounds, 1);
+    assert.equal(
+      await readFile(join(f.taskPath, "clarifications.md"), "utf8"),
+      bytes,
+    );
+    assert.equal(f.calls.length, 1);
+    const history = await cold.store.loadRunHistory(runId);
+    assert.ok(
+      history.events.some(
+        ({ state }) =>
+          state.pipelineState.pendingClarificationAppend?.resultHash ===
+          intent.resultHash,
+      ),
+    );
+  });
+}
+
+test("cold clarification append audit legacy migration grants no proof and refuses unsupported ownership", async (t) => {
+  const f = await fixture(t, "lazy");
+  f.outputs.push({
+    status: "QUESTIONS",
+    inputs: null,
+    questions: APPEND_QUESTIONS,
+    reason: "",
+  });
+  const service = createClarificationService({ interactive: false });
+  const initial = f.open({
+    clarifications: {
+      ...service,
+      appendQuestionRound(options) {
+        return service.appendQuestionRound({
+          ...options,
+          async persistAppend(proof) {
+            await options.persistAppend(proof);
+            throw appendReadFailure();
+          },
+        });
+      },
+    },
+  });
+  const pending = (await initial.runner.run(f.input)).run;
+  assert.equal(pending.pause.reason, "clarification_append_interrupted");
+  const bytes = await readFile(join(f.taskPath, "clarifications.md"), "utf8");
+  const { pendingClarificationAppend, ...legacyState } = pending.pipelineState;
+  assert.ok(pendingClarificationAppend);
+  const fields = Object.fromEntries(
+    [
+      "pipelineId",
+      "projectPath",
+      "taskPath",
+      "roles",
+      "workspace",
+      "projectConfigurationProtection",
+      "hashes",
+      "pause",
+      "counters",
+      "providerPolicies",
+      "availabilityPolicy",
+      "providerInactivityTimeoutMs",
+    ].map((key) => [key, pending[key]]),
+  );
+  for (const unsupported of [false, true]) {
+    const store = createRunStore({ stateRoot: f.stateRoot });
+    // Historical shapes enter through normal creation; canonical journal bytes
+    // are never rewritten to manufacture migration or ownership evidence.
+    const imported = await store.createRun({
+      ...fields,
+      pipelineStateVersion: 9,
+      pipelineState: unsupported ? pending.pipelineState : legacyState,
+      sourceSession: pending.sessionLineage.source,
+      sourceProfile: pending.sessionLineage.sourceProfile,
+      childSessions: pending.sessionLineage.children,
+    });
+    await imported.lease.release();
+    const runId = imported.state.runId;
+    const cold = f.open({
+      adapters: {
+        codex: {
+          async probe() {
+            return {
+              version: "fixture",
+              readOnly: false,
+              structuredOutput: true,
+              remoteWriteBlocked: true,
+            };
+          },
+          run() {
+            assert.fail("Unavailable capabilities cannot invoke a role");
+          },
+        },
+      },
+      clarifications: {
+        ...service,
+        appendQuestionRound() {
+          assert.fail("Legacy absence grants no append authority");
+        },
+        prepareEdit() {
+          assert.fail("Migration cannot authorize an editor");
+        },
+      },
+    });
+    if (unsupported) {
+      await assert.rejects(cold.runner.resume({ runId }), {
+        code: "ERR_PIPELINE_MIGRATION_FAILED",
+      });
+      assert.equal((await cold.store.loadRun(runId)).pipelineStateVersion, 9);
+    } else {
+      await assert.rejects(cold.runner.resume({ runId }), {
+        code: "ERR_UNSUPPORTED_BACKEND",
+      });
+      const paused = await cold.store.loadRun(runId);
+      assert.equal(paused.pipelineStateVersion, 10);
+      assert.equal(paused.pipelineState.pendingClarificationAppend, null);
+      assert.equal(paused.pipelineState.pendingEdit, null);
+      assert.equal(paused.pipelineState.clarificationRounds, 0);
+    }
+    assert.equal(
+      await readFile(join(f.taskPath, "clarifications.md"), "utf8"),
+      bytes,
+    );
+    assert.equal(f.calls.length, 1);
+  }
+});
 
 test("combined pending revisions survive exhaustion, legacy cold migration and interruption before replacement launch", async (t) => {
   const f = await fixture(t, "combined");

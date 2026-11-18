@@ -455,6 +455,28 @@ audit recovery, migration, native selection, persisted audit baselines or their
 public projections. The complete slow release gate includes it automatically;
 it replaces no existing or separately selected Runner-trusted check.
 
+Cold clarification-append coverage uses the real transcript service, store and
+Runner, with fresh instances after each interruption. The audit recovery suite
+owns failed initial intent publication, durable intent/editor events ahead of
+snapshot replacement, and legacy absence versus unsupported append ownership
+with unavailable capabilities in an ordinary directory. Runner effects owns
+execution readback loss, polishing editor-publication loss and nonsettlement
+execution decisions. CLI workflows owns authoring reconstruction and one
+event-synchronized owned Runner process loss after replacement/readback; that
+case proves dead-owner lease recovery without normal exception cleanup. MCP
+workflows owns recovered polishing decisions and idempotent answer publication;
+control-plane coverage owns rejection of changed transcript, task and Git controls
+before replay with matching sanitized CLI/status/wait projections. Runner
+operator stops owns verification-only pause/cancel settlement for prior and
+result bytes, including delayed stop dispatch. These distinct cases span the
+three modes without duplicating the pipeline policy matrices. They assert exact
+bytes, once-only accounting and no producing-role replay, use no sleeps or live
+providers, and never edit canonical state to manufacture recovery evidence.
+Existing init and coding settlement coverage retains its owners. Changes to this
+cross-capability lifecycle retain the affected slow owners above and the complete
+slow release gate; focused development cases do not attest those gates or the
+separate package-install requirement.
+
 Fast `pipelines/audit/test/combined.test.js` owns initially clean and
 finding-producing fresh discovery cycles, duplicate and report-only corrections,
 same-Auditor batch convergence, correcting Reviewer continuity/additions and

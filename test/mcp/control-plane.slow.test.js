@@ -43,7 +43,114 @@ import {
 } from "../../src/platform/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
-import { createAdapter, operatorFixture, runnerFor } from "../support/index.js";
+import {
+  appendReadFailure,
+  clarificationAppendFixture,
+  createAdapter,
+  operatorFixture,
+  runnerFor,
+} from "../support/index.js";
+
+for (const change of ["transcript", "task", "controls"]) {
+  test(`cold clarification append rejects changed ${change} before mutation with matching CLI/MCP projections`, async (t) => {
+    const f = await clarificationAppendFixture(t, "plan-execution", {
+      mode: "lazy",
+    });
+    const service = createClarificationService({ interactive: false });
+    const initial = f.open({
+      clarifications: {
+        ...service,
+        appendQuestionRound(options) {
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw appendReadFailure();
+            },
+          });
+        },
+      },
+    });
+    const runId = (await initial.runner.create(f.input)).run.runId;
+    const interrupted = (await initial.runner.resume({ runId })).run;
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const path =
+      change === "transcript"
+        ? interrupted.pipelineState.clarificationPath
+        : change === "task"
+          ? join(f.taskPath, "task.md")
+          : join(f.projectPath, ".git", "config");
+    const prior = await readFile(path, "utf8");
+    await writeFile(
+      path,
+      prior +
+        (change === "controls"
+          ? '\n[remote "origin"]\n\turl = https://example.invalid/changed.git\n'
+          : "\nUnexpected third-party text.\n"),
+    );
+    const bytes = await f.transcript(interrupted);
+    const cold = f.open({
+      clarifications: {
+        ...service,
+        appendQuestionRound() {
+          assert.fail(
+            "Protected bindings must be checked before append replay",
+          );
+        },
+        prepareEdit() {
+          assert.fail("Rejected proof cannot authorize an editor");
+        },
+        openEditor() {
+          assert.fail("Rejected proof cannot open an editor");
+        },
+      },
+    });
+    const rejected = (await cold.runner.resume({ runId })).run;
+    assert.equal(rejected.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(
+      rejected.pipelineState.pendingClarificationAppend,
+      interrupted.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.clarificationRounds, 0);
+    assert.equal(await f.transcript(rejected), bytes);
+    assert.equal(f.calls.length, 1);
+    const control = createMcpControlPlane({
+      runner: cold.runner,
+      runStore: cold.store,
+    });
+    const status = await control.runStatus({ runId });
+    const waited = await control.runWait({ runId, cursor: 0, timeoutMs: 0 });
+    assert.deepEqual(waited.pause, status.pause);
+    assert.equal(status.pendingInput, null);
+    assert.equal(status.pause.resumeState, null);
+    assert.ok(
+      status.pause.nextActions.every(
+        ({ type }) => type !== "resume" && type !== "respond",
+      ),
+    );
+    let output = "";
+    assert.equal(
+      await main(["status", "--run", runId], {
+        runner: cold.runner,
+        stdout: {
+          write(chunk) {
+            output += chunk;
+          },
+        },
+        stderr: {
+          write(message) {
+            assert.fail(message);
+          },
+        },
+      }),
+      0,
+    );
+    assert.ok(output.includes(status.pause.explanation));
+    assert.doesNotMatch(JSON.stringify(status), /Unexpected third-party text/u);
+    assert.doesNotMatch(output, /Unexpected third-party text/u);
+  });
+}
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";

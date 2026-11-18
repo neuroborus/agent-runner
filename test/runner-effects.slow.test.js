@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test, { after, before } from "node:test";
 
 import {
+  createClarificationService,
   createGitService,
   createMcpControlPlane,
   createRunStore,
@@ -21,6 +22,8 @@ import {
 import { ClaudeAdapterError } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
+  appendReadFailure,
+  clarificationAppendFixture,
   createArbiterAdapter,
   createExecutionAdapter,
   createFixture,
@@ -30,7 +33,147 @@ import {
   requestedStepAssessment,
   runnerFor,
   RUNNER_CONFIGURATION,
+  transcriptHash,
 } from "./support/index.js";
+
+for (const [pipelineId, kind, boundary, mode] of [
+  ["plan-execution", "questions", "readback", "independent"],
+  ["polishing", "questions", "publication", "combined"],
+  ["plan-execution", "product-decision", "replacement", "lazy"],
+]) {
+  test(`cold clarification append ${pipelineId} ${kind} survives ${boundary} loss`, async (t) => {
+    const f = await clarificationAppendFixture(t, pipelineId, { kind, mode });
+    const service = createClarificationService({ interactive: false });
+    const operation =
+      kind === "questions" ? "appendQuestionRound" : "appendProductDecision";
+    const failure = new Error("Controlled atomic editor publication loss.");
+    let lost = false;
+    const store = createRunStore({ stateRoot: f.stateRoot });
+    const initial = f.open({
+      store: {
+        ...store,
+        async transitionRun(lease, patch, options) {
+          if (
+            !lost &&
+            boundary === "publication" &&
+            patch.pipelineState?.pendingEdit != null &&
+            patch.pipelineState.pendingClarificationAppend === null
+          ) {
+            lost = true;
+            throw failure;
+          }
+          return store.transitionRun(lease, patch, options);
+        },
+      },
+      clarifications: {
+        ...service,
+        async [operation](options) {
+          if (boundary === "replacement") {
+            return service[operation]({
+              ...options,
+              async persistAppend(proof) {
+                await options.persistAppend(proof);
+                lost = true;
+                throw appendReadFailure();
+              },
+            });
+          }
+          const result = await service[operation](options);
+          if (boundary === "readback") {
+            lost = true;
+            throw appendReadFailure();
+          }
+          return result;
+        },
+        openEditor() {
+          assert.fail("No editor before atomic publication");
+        },
+      },
+    });
+    const runId = (await initial.runner.create(f.input)).run.runId;
+    if (boundary === "publication")
+      await assert.rejects(
+        initial.runner.resume({ runId }),
+        (error) => error === failure,
+      );
+    else
+      assert.equal(
+        (await initial.runner.resume({ runId })).run.pause.reason,
+        "clarification_append_interrupted",
+      );
+    assert.equal(lost, true);
+    const cold = f.open();
+    const retained = await cold.store.loadRun(runId);
+    const intent = retained.pipelineState.pendingClarificationAppend;
+    assert.ok(intent);
+    assert.equal(retained.pipelineState.pendingEdit, null);
+    const counter =
+      kind === "questions" ? "clarificationRounds" : "productDecisions";
+    assert.equal(retained.counters[counter], 0);
+    const priorBytes = await f.transcript(retained);
+    assert.equal(
+      transcriptHash(priorBytes),
+      boundary === "replacement" ? intent.expectedHash : intent.resultHash,
+    );
+    const calls = f.calls.length;
+    const waiting = (await cold.runner.resume({ runId })).run;
+    assert.equal(
+      waiting.pause.reason,
+      kind === "questions"
+        ? "clarification_answers_required"
+        : "product_decision_required",
+    );
+    assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
+    assert.equal(waiting.counters[counter], 1);
+    assert.equal(
+      waiting.pipelineState.pendingEdit.preEditorHash,
+      intent.resultHash,
+    );
+    assert.equal(
+      waiting.pause.inputRequest.id,
+      waiting.pipelineState.pendingEdit.id,
+    );
+    assert.equal(
+      transcriptHash(await f.transcript(waiting)),
+      intent.resultHash,
+    );
+    const repeated = (await f.open().runner.resume({ runId })).run;
+    assert.equal(repeated.counters[counter], 1);
+    assert.equal(
+      transcriptHash(await f.transcript(repeated)),
+      intent.resultHash,
+    );
+    assert.deepEqual(
+      repeated.pipelineState.workReports,
+      waiting.pipelineState.workReports,
+    );
+    assert.deepEqual(repeated.sessionLineage, waiting.sessionLineage);
+    assert.equal(f.calls.length, calls);
+    const history = await cold.store.loadRunHistory(runId);
+    const publications = history.events.filter(
+      ({ state }, index, events) =>
+        index > 0 &&
+        events[index - 1].state.pipelineState.pendingClarificationAppend !==
+          null &&
+        state.pipelineState.pendingClarificationAppend === null,
+    );
+    assert.equal(
+      publications.length,
+      1,
+      "Only one transition may settle the append",
+    );
+    const published = publications[0].state;
+    assert.equal(published.counters[counter], 1);
+    assert.equal(
+      published.pause.inputRequest.id,
+      published.pipelineState.pendingEdit.id,
+    );
+    assert.equal(
+      published.pipelineState.pendingEdit.preEditorHash,
+      intent.resultHash,
+    );
+  });
+}
 
 const SECOND_PLAN = `${PLAN}
 

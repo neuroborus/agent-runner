@@ -30,6 +30,8 @@ import { spawnOwnedProcess } from "../src/platform/index.js";
 import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
+  appendReadFailure,
+  clarificationAppendFixture,
   configurationLoader,
   createAdapter,
   createExecutionAdapter,
@@ -43,6 +45,85 @@ import {
 } from "./support/index.js";
 
 const checkpointCleanups = [];
+
+for (const [pipelineId, kind, boundary] of [
+  ["plan-execution", "pause_requested", "prior"],
+  ["polishing", "cancel_requested", "result"],
+]) {
+  test(`cold clarification append ${pipelineId} stop only verifies ${boundary} bytes`, async (t) => {
+    const f = await clarificationAppendFixture(t, pipelineId, {
+      mode: "combined",
+    });
+    const service = createClarificationService({ interactive: false });
+    const initial = f.open({
+      clarifications: {
+        ...service,
+        async appendQuestionRound(options) {
+          if (boundary === "prior")
+            return service.appendQuestionRound({
+              ...options,
+              async persistAppend(proof) {
+                await options.persistAppend(proof);
+                throw appendReadFailure();
+              },
+            });
+          await service.appendQuestionRound(options);
+          throw appendReadFailure();
+        },
+      },
+    });
+    const runId = (await initial.runner.create(f.input)).run.runId;
+    const interrupted = (await initial.runner.resume({ runId })).run;
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const bytes = await f.transcript(interrupted);
+    const cold = f.open({
+      clarifications: {
+        ...service,
+        appendQuestionRound() {
+          assert.fail("Stop reconciliation cannot append");
+        },
+        prepareEdit() {
+          assert.fail("Stop reconciliation cannot authorize an editor");
+        },
+        openEditor() {
+          assert.fail("Stop reconciliation cannot open an editor");
+        },
+        acceptEdit() {
+          assert.fail("Stop reconciliation cannot accept answers");
+        },
+      },
+    });
+    const receipt = await cold.store.requestOperatorStop({
+      runId,
+      kind,
+      expectedRevision: interrupted.revision,
+      idempotencyKey: "stop-pending-append",
+    });
+    const stopped = (await cold.runner.resume({ runId })).run;
+    assert.equal(
+      stopped.pause.reason,
+      kind === "pause_requested" ? "operator_paused" : "operator_canceled",
+    );
+    assert.deepEqual(
+      stopped.pipelineState.pendingClarificationAppend,
+      interrupted.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(stopped.pipelineState.pendingEdit, null);
+    assert.equal(stopped.counters.clarificationRounds, 0);
+    assert.equal(stopped.stopRequest.reconciledRevision, stopped.revision);
+    assert.equal(await f.transcript(stopped), bytes);
+    const delayed = (
+      await cold.runner.resume({
+        runId,
+        stopCheckpointRevision: receipt.expectedRevision,
+        expectedRuntimeCompatibility: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+      })
+    ).run;
+    assert.deepEqual(delayed, stopped);
+    assert.equal(await f.transcript(delayed), bytes);
+    assert.equal(f.calls.length, 1);
+  });
+}
 const POLISHING_TRUSTED_CONFIGURATION = {
   ...RUNNER_CONFIGURATION,
   trustedCommands: {

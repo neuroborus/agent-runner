@@ -29,3 +29,9 @@ export {
 
 export { customExecutionFixture } from "./custom-execution.js";
 export { runtimeFixture, runtimeFixtureDirectory } from "./runtime.js";
+export {
+  APPEND_QUESTIONS,
+  appendReadFailure,
+  clarificationAppendFixture,
+  transcriptHash,
+} from "./clarification-append.js";
