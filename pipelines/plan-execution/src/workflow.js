@@ -6547,26 +6547,6 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
           return productDecision(result.decision, "IMPLEMENT");
         }
         if (result.status === "BLOCKED") {
-          if (correction !== null) {
-            await transition({
-              ...state(),
-              availabilityCorrectionCharged: false,
-              pendingLazyCorrection: null,
-            });
-          }
-          if (changed) {
-            await transition({
-              ...state(),
-              availabilityCorrectionCharged: false,
-              ...clearedCandidateAndTerminalGate(),
-              previousFindings:
-                current.findings.length === 0
-                  ? current.previousFindings
-                  : current.findings,
-              findings: [],
-              pendingCorrection: true,
-            });
-          }
           await pause(
             "environment_blocked",
             {
@@ -6575,8 +6555,14 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
               resumeState: "CHECK_AND_FIX",
             },
             {
+              // The role attempt already reconciled content and charged repairs.
+              // Publish remaining correction cleanup with the accepted pause.
+              ...(changed || correction !== null
+                ? { availabilityCorrectionCharged: false }
+                : {}),
+              ...(correction !== null ? { pendingLazyCorrection: null } : {}),
               workReports: retainWorkReport(state().workReports, {
-                step: current.currentStep,
+                step: state().currentStep,
                 phase: "CHECK_AND_FIX",
                 ...result,
               }),

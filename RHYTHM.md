@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-19
+
+- **Checkpoint publication retains reconciled progress.** Plan execution folds
+  remaining check/fix correction cleanup and the accepted BLOCKED report into
+  its environment pause after the role attempt reconciles content and charges
+  the repair. A matching pending size assessment continues its durable
+  checkpoint without republishing the reservation or consuming another attempt.
+  Strict empty-transition rejection, existing state shapes, accepted effects
+  and review gates remain unchanged. Historical initial causes remain UNKNOWN.
+
 ## 2026-11-18
 
 - **Ownership refusals retain bounded future-discrimination evidence.** Platform

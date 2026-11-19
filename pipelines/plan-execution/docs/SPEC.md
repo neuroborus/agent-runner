@@ -71,7 +71,13 @@ Accepted `BLOCKED` results at `IMPLEMENT`, `CHECK_AND_FIX` and
 (`BLOCKED`), `reason` and `evidence`, under the existing blocked-result text/item
 bounds and normalization. These reports publish atomically with the environment
 pause, including read-only restatement, and survive retry clearing or replacing
-that pause. The historical blocker grants neither check credit nor a current
+that pause. At `CHECK_AND_FIX`, the role attempt has already persisted any
+changed-content baseline, invalidated dependent gates and charged the repair.
+The caller uses that live reconciled state without repeating its publication;
+remaining pending-output-correction cleanup and the accepted blocked report
+publish together in `environment_blocked`, resuming at `CHECK_AND_FIX`.
+Earlier accepted commits, current candidate and finding history remain intact.
+The historical blocker grants neither check credit nor a current
 finding; the retry still must satisfy its checkpoint normally.
 `FINALIZE` reports may additionally retain nonempty normalized `issues` under
 the existing finalization-issue contract (`id`, `command`, `problem`, `evidence`)
@@ -3043,10 +3049,15 @@ dependency fingerprints describe implementation within frozen requirements;
 changed frozen inputs are rejected, never accepted as new requirements.
 
 Each original step and all eventual replacements share at most three reserved
-assessments, including split proposals. Publish a pending reservation before
-invocation; restart reuses the same checkpoint and consumes no second attempt.
-Only a matching result settles it; unresolved changed reservations require
-reconciliation. Later content repairs alone do not repeat an atomic assessment.
+assessments, including split proposals. Publish a newly reserved ledger before
+invocation. A durable matching pending reservation continues directly at its
+existing read-only role/checkpoint without republishing the unchanged ledger or
+consuming another attempt. Provider completion without a persisted decision
+supplies no decision evidence: reinvoke that checkpoint, then normalize and
+persist its matching result before atomic continuation or split publication.
+Recovery after decision publication still reuses the exact saved decision.
+Unresolved changed reservations require reconciliation. Later content repairs
+alone do not repeat an atomic assessment.
 Reassessment requires changed implementation scope/dependencies or growth of
 strictly more than one further preferred target over the last assessment. Neither
 refinement nor reconstruction resets this lineage allowance or correction budgets.

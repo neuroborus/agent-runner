@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+
+import { createRunStore } from "../../../src/state/index.js";
 
 import {
   attachOutputExhaustion,
@@ -536,6 +539,124 @@ test("an earlier refinement does not consume corrections for a later unsplit ste
   assert.deepEqual(retained.replacementExecution, state.replacementExecution);
   assert.equal(replacementCorrectionConsumed(retained, "review"), false);
   assert.equal(replacementCorrectionConsumed(retained, "check"), false);
+});
+
+test("cold pending size assessment continues its durable reservation through the strict store", async (t) => {
+  let pending;
+  const f = await createFixture(t, {
+    mode: "combined",
+    onTransition(run) {
+      if (
+        run.pipelineState.commitSizeAssessment.lineages[0]?.attempts[0]
+          ?.result === null
+      ) {
+        pending = structuredClone(run);
+        throw new Error("Interrupted before assessment invocation");
+      }
+    },
+  });
+  const measurement = {
+    changedPaths: ["source.js"],
+    changedLines: 2701,
+    binaryPaths: [],
+    gitlinkPaths: [],
+  };
+  f.runtime.git.measureChanges = async ({
+    baseHead,
+    expectedContentFingerprint,
+  }) => ({
+    ...measurement,
+    baseHead,
+    contentFingerprint: expectedContentFingerprint,
+  });
+  await assert.rejects(f.run(), /Interrupted before assessment invocation/u);
+  const stateRoot = await mkdtemp(join(tmpdir(), "assessment-store-"));
+  let lease;
+  t.after(async () => {
+    await lease?.release();
+    await rm(stateRoot, { recursive: true, force: true });
+  });
+  const initial = createRunStore({ stateRoot });
+  const created = await initial.createRun({
+    pipelineId: "plan-execution",
+    pipelineStateVersion: planExecutionPipeline.stateVersion,
+    projectPath: f.projectPath,
+    taskPath: f.taskPath,
+    roles: pending.roles,
+    hashes: pending.hashes,
+    counters: pending.counters,
+    pipelineState: pending.pipelineState,
+  });
+  lease = created.lease;
+  await lease.release();
+  const store = createRunStore({ stateRoot });
+  let saved = await store.loadRun(created.state.runId);
+  lease = await store.acquireRunLease(saved.runId);
+  const reservation = structuredClone(saved.pipelineState.commitSizeAssessment);
+  const [attempt] = reservation.lineages[0].attempts;
+  assert.equal(attempt.result, null);
+  // This is the actual guard that rejected the original caller before invocation.
+  await assert.rejects(
+    store.transitionRun(lease, { pipelineState: saved.pipelineState }),
+    { code: "ERR_EMPTY_RUN_TRANSITION" },
+  );
+  let invocations = 0;
+  let publications = 0;
+  const coordinator = createReplacementCoordinator({
+    state: () => saved.pipelineState,
+    run: () => saved,
+    async transition(pipelineState) {
+      publications++;
+      saved = await store.transitionRun(lease, { pipelineState });
+    },
+    runtime: { git: { measureChanges: f.runtime.git.measureChanges } },
+    async runRole(role, schema, prompt, options) {
+      invocations++;
+      assert.equal(role, "reviewer");
+      assert.equal(schema, COMMIT_SIZE_ASSESSMENT_SCHEMA);
+      assert.equal(options.checkpoint, "commit-size:1:1");
+      const data = JSON.parse(
+        /Assessment binding \(data\):\n([^\n]+)/u.exec(prompt(""))[1],
+      );
+      assert.deepEqual(data.binding, attempt.binding);
+      assert.deepEqual(saved.pipelineState.commitSizeAssessment, reservation);
+      assert.equal(publications, 0);
+      return {
+        bindingFingerprint: data.bindingFingerprint,
+        decision: "ATOMIC",
+        reason: "The reader and writer share one indivisible format change.",
+        replacementPlan: "",
+      };
+    },
+  });
+  assert.equal(await coordinator.advance(), "again");
+  assert.equal(invocations, 1);
+  assert.equal(publications, 1);
+  const settled = await store.loadRun(saved.runId);
+  const ledger = settled.pipelineState.commitSizeAssessment;
+  assert.equal(ledger.lineages.length, 1);
+  assert.equal(ledger.lineages[0].attempts.length, 1);
+  assert.deepEqual(ledger.lineages[0].attempts[0].binding, attempt.binding);
+  assert.equal(
+    ledger.lineages[0].attempts[0].result.reason,
+    "The reader and writer share one indivisible format change.",
+  );
+  assert.equal(ledger.lineages[0].attempts[0].result.decision, "ATOMIC");
+  assert.equal((await store.loadRunHistory(saved.runId)).events.length, 2);
+  assert.deepEqual(settled, saved);
+  assert.deepEqual(settled.roles, created.state.roles);
+  assert.deepEqual(settled.hashes, created.state.hashes);
+  assert.deepEqual(settled.counters, created.state.counters);
+  assert.deepEqual(settled.pipelineState, {
+    ...created.state.pipelineState,
+    commitSizeAssessment: ledger,
+  });
+  assert.equal(settled.pipelineState.pendingCommit, null);
+  assert.deepEqual(settled.pipelineState.replacementExecution.separations, []);
+  assert.deepEqual(settled.pipelineState.effectivePlanRevisions.revisions, []);
+  assert.equal(await coordinator.advance(), "continue");
+  assert.equal(invocations, 1);
+  assert.equal(publications, 1);
 });
 
 test("large cumulative captures supply bounded verified references instead of file bytes", async () => {

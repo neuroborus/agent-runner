@@ -22,6 +22,18 @@ import {
 import { ClaudeAdapterError } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
+  CHECK_AND_FIX_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
+  FINALIZATION_SCHEMA,
+  REVIEW_SCHEMA,
+} from "../pipelines/plan-execution/src/schemas.js";
+import {
+  checkAndFix,
+  cleanConfirmation,
+  cleanConfirmationFindings,
+} from "../pipelines/plan-execution/test/support/index.js";
+import {
   appendReadFailure,
   clarificationAppendFixture,
   createArbiterAdapter,
@@ -181,6 +193,252 @@ const SECOND_PLAN = `${PLAN}
 
 Refine the behavior.
 `;
+
+test("combined changed BLOCKED pauses atomically and cold-resumes without replaying accepted work", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(join(fixture.taskPath, "plan.md"), SECOND_PLAN);
+  const adapter = createExecutionAdapter();
+  const original = adapter.run.bind(adapter);
+  let step = 0;
+  let repairs = 0;
+  let confirmations = 0;
+  let sessions = 0;
+  let beforeRepair;
+  let runId;
+  const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+  const turns = [];
+  adapter.run = async (request) => {
+    if (request.prompt.includes("Implement the changes described"))
+      step = requestedStepAssessment(request).step;
+    turns.push([step, request.schema, request.access]);
+    const respond = (result) => ({
+      structured: result,
+      sessionId: request.session?.id ?? `combined-${++sessions}`,
+    });
+    if (request.schema === CHECK_AND_FIX_SCHEMA) {
+      if (step === 2 && confirmations === 1 && repairs === 0) {
+        beforeRepair = await runStore.loadRun(runId);
+        repairs++;
+        await writeFile(
+          join(fixture.projectPath, "candidate.txt"),
+          "candidate repair\n",
+        );
+        return respond({
+          status: "BLOCKED",
+          summary: "",
+          reason: "A required external resource is unavailable.",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: ["The synthetic resource is offline."],
+        });
+      }
+      return respond(checkAndFix());
+    }
+    if (request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA) {
+      assert.equal(request.access, "read-only");
+      const {
+        validationChange,
+        validationEvidence,
+        finalizationFindingIds,
+        ...candidate
+      } =
+        step === 2 && ++confirmations === 1
+          ? cleanConfirmationFindings("R1", "R2")
+          : cleanConfirmation();
+      return respond(candidate);
+    }
+    const response = await original(request);
+    if (
+      step === 2 &&
+      request.prompt.includes("Implement the changes described")
+    )
+      await writeFile(
+        join(fixture.projectPath, "feature.js"),
+        "export const value = 2;\n",
+      );
+    return response;
+  };
+  const configuration = {
+    ...RUNNER_CONFIGURATION,
+    pipelines: { "plan-execution": { mode: "combined" } },
+  };
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  runId = created.runId;
+  const paused = (await runner.resume({ runId: created.runId })).run;
+  assert.equal(
+    paused.pause.reason,
+    "environment_blocked",
+    JSON.stringify(paused.pause),
+  );
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.pipelineState.completedCommits.length, 1);
+  const [accepted] = paused.pipelineState.completedCommits;
+  assert.equal(paused.pipelineState.repositoryBaseline.head, accepted);
+  assert.equal(beforeRepair.counters.fixRounds, 1);
+  assert.equal(paused.pipelineState.pendingCorrection, true);
+  for (const field of [
+    "completedCommits",
+    "stepImplementation",
+    "correctionHistory",
+    "sameFindingRounds",
+    "disputeHistory",
+    "findingArbitrations",
+    "replacementExecution",
+    "settings",
+  ])
+    assert.deepEqual(
+      paused.pipelineState[field],
+      beforeRepair.pipelineState[field],
+      field,
+    );
+  assert.notEqual(
+    paused.pipelineState.repositoryBaseline.contentFingerprint,
+    beforeRepair.pipelineState.repositoryBaseline.contentFingerprint,
+  );
+  assert.equal(paused.counters.fixRounds, beforeRepair.counters.fixRounds + 1);
+  assert.equal(
+    paused.counters.correctionRounds,
+    beforeRepair.counters.correctionRounds,
+  );
+  assert.deepEqual(paused.pipelineState.primaryFindings, []);
+  const findingReport = paused.pipelineState.workReports.findLast(
+    ({ phase }) => phase === "CLEAN_CONFIRM",
+  );
+  assert.deepEqual(
+    findingReport.findings.map(({ id }) => id),
+    ["R1", "R2"],
+  );
+  for (const field of [
+    "candidateConfirmationFingerprint",
+    "candidateReviewResult",
+    "finalizationResult",
+    "reviewResult",
+  ])
+    assert.equal(paused.pipelineState[field], null, field);
+  const blockedReport = paused.pipelineState.workReports.at(-1);
+  assert.equal(blockedReport.phase, "CHECK_AND_FIX");
+  assert.equal(blockedReport.status, "BLOCKED");
+  assert.equal(blockedReport.reason, paused.pause.explanation);
+  assert.deepEqual(blockedReport.evidence, paused.pause.evidence);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "candidate repair\n",
+  );
+
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const saved = await store.loadRun(created.runId);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(await store.runIsLeased(saved.runId), false);
+  assert.deepEqual(saved, paused);
+  const history = await store.loadRunHistory(saved.runId);
+  const publication = history.events.find(
+    ({ state }) => state.pause?.reason === "environment_blocked",
+  );
+  assert.deepEqual(
+    publication.state.pipelineState.workReports.at(-1),
+    blockedReport,
+  );
+  const beforeResume = turns.length;
+  const cold = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore: store },
+  );
+  const done = (await cold.resume({ runId: saved.runId, action: null })).run;
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.deepEqual(done.roles, saved.roles);
+  assert.deepEqual(done.hashes, saved.hashes);
+  assert.deepEqual(done.pipelineState.settings, saved.pipelineState.settings);
+  assert.deepEqual(
+    done.pipelineState.correctionHistory.slice(
+      0,
+      saved.pipelineState.correctionHistory.length,
+    ),
+    saved.pipelineState.correctionHistory,
+  );
+  assert.deepEqual(
+    done.pipelineState.workReports.find(({ status }) => status === "BLOCKED"),
+    blockedReport,
+  );
+  assert.equal(done.pipelineState.completedCommits.length, 2);
+  assert.equal(done.pipelineState.completedCommits[0], accepted);
+  // A renewed unchanged check/fix is a new round; recovery never recharges the repair.
+  assert.equal(done.counters.fixRounds, saved.counters.fixRounds + 1);
+  assert.equal(done.counters.correctionRounds, saved.counters.correctionRounds);
+  assert.equal(repairs, 1);
+  const resumedGates = turns
+    .slice(beforeResume)
+    .filter(
+      ([, schema, access]) =>
+        access === "local-commit" ||
+        [
+          CHECK_AND_FIX_SCHEMA,
+          CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+          CANDIDATE_REVIEW_SCHEMA,
+          FINALIZATION_SCHEMA,
+          REVIEW_SCHEMA,
+        ].includes(schema),
+    );
+  assert.deepEqual(
+    resumedGates.map(([, schema, access]) =>
+      access === "local-commit" ? "commit" : schema,
+    ),
+    [
+      CHECK_AND_FIX_SCHEMA,
+      CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+      CANDIDATE_REVIEW_SCHEMA,
+      FINALIZATION_SCHEMA,
+      REVIEW_SCHEMA,
+      "commit",
+    ],
+  );
+  const completedHistory = await store.loadRunHistory(saved.runId);
+  const commitGate = completedHistory.events.findLast(
+    ({ state }) => state.pipelineState.workflowState === "COMMIT",
+  ).state;
+  assert.deepEqual(
+    commitGate.pipelineState.stepImplementation,
+    saved.pipelineState.stepImplementation,
+  );
+  assert.equal(
+    commitGate.pipelineState.candidateConfirmationFingerprint,
+    saved.pipelineState.repositoryBaseline.contentFingerprint,
+  );
+  assert.equal(
+    commitGate.pipelineState.candidateReviewedFingerprint,
+    commitGate.pipelineState.candidateConfirmationFingerprint,
+  );
+  assert.equal(
+    commitGate.pipelineState.reviewedFingerprint,
+    commitGate.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(
+    turns.filter(([, , access]) => access === "local-commit").length,
+    2,
+  );
+  const git = (...args) =>
+    executeFile("git", ["-C", fixture.projectPath, ...args]);
+  assert.equal((await git("rev-parse", "HEAD^")).stdout.trim(), accepted);
+  assert.equal((await git("rev-list", "--count", "HEAD")).stdout.trim(), "3");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "candidate repair\n",
+  );
+});
 
 test("reconstructed readiness rejection preserves work and agrees across CLI and MCP", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");

@@ -437,7 +437,13 @@ fingerprint-bound atomic/split decisions and a three-attempt original-step
 lineage ledger. Read-only assessment uses the continuing Worker in lazy mode
 and a distinct configured Reviewer checkpoint in independent/combined modes,
 before further convergence. Only scope/dependency expansion or more than one
-additional preferred target renews assessment of an atomic exception. Proposal
+additional preferred target renews assessment of an atomic exception. The
+replacement coordinator publishes new reservations before invocation. A matching
+durable null-result reservation continues its existing read-only role/checkpoint
+without an unchanged transition or another attempt. Missing durable output
+requires reinvocation; the matching normalized decision is persisted before
+atomic continuation or split-proposal publication. A saved decision survives
+interruption before proposal publication without another assessment. Proposal
 and assessment allowances survive reconstruction and future replacement steps;
 they grant no execution approval or effect authority. State version 29 persists
 the resolved size settings and disabled eligibility, with a default-only
@@ -1074,6 +1080,12 @@ retain normalized status, reason and evidence atomically with their environment
 pause. Retry and read-only restatement preserve this context after clearing or
 replacing the pause, without converting the former blocker into an active
 finding or validation credit.
+Execution check/fix uses its already reconciled live baseline and repair charge;
+it does not republish the gate reset. Remaining output-correction cleanup and
+the accepted blocked report enter the same `environment_blocked` pause, retaining
+`CHECK_AND_FIX` as the resume target, earlier accepted commits and candidate bytes.
+These caller corrections change no persisted shape or historical failed run;
+initial historical causes remain UNKNOWN.
 Accepted Reviewer reconsideration decisions and finding/stagnation Arbiter
 rationales also publish in common history with their accepting transitions,
 including finding `REQUIREMENT_AMBIGUOUS` and stagnation

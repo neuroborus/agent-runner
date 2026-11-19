@@ -768,7 +768,8 @@ export function createReplacementCoordinator({
       }
       return "continue";
     }
-    await transition({ ...state(), commitSizeAssessment: request.ledger });
+    if (!isDeepStrictEqual(current.commitSizeAssessment, request.ledger))
+      await transition({ ...state(), commitSizeAssessment: request.ledger });
     const output = await runRole(
       request.role,
       COMMIT_SIZE_ASSESSMENT_SCHEMA,

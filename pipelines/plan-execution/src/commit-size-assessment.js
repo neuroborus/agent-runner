@@ -215,7 +215,8 @@ export function assertCommitSizeAssessment(value, settings, inputChanges = []) {
 }
 
 // Called only at a reconciled boundary before another convergence/review loop.
-// The caller must publish the returned ledger before invoking the checkpoint.
+// The caller publishes a new ledger before invocation; a durable pending ledger
+// continues its existing checkpoint without another reservation publication.
 // Production callers reconcile effects and preserve work before separation.
 export function reserveCommitSizeAssessment(
   ledger,
