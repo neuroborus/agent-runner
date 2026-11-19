@@ -306,6 +306,12 @@ redirection fails closed as one bounded provider-neutral safety pause. The
 runner never restores the file or derives missing evidence for a legacy run,
 and begun irreversible effects remain verification-only.
 
+External execution/polishing transcripts grant only exact Runner operations under
+the frozen infrastructure owner and existing leases. They grant no target Git
+exemption, provider output or parent write authority. Repository-local transcripts
+must already be ignored and untracked. Legacy paths and pending permissions remain
+unchanged; see the [clarification lifecycle](../ARCHITECTURE.md#clarification-lifecycle).
+
 Explicit finalization Markdown files use confined, identity-bound reads from
 the selected infrastructure root. They grant no configuration authority or
 parent-directory access, and cannot be replaced or redirected on resume. The

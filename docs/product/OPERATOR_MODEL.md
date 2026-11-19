@@ -535,9 +535,12 @@ The receipt exposes only a fingerprint and common supported access modes, never
 provider flags, credentials, native output, prompts, or session storage.
 
 Plan authoring writes its declared task artifacts. Plan execution and polishing
-may place runner-owned clarification artifacts below the configured repository
-artifact root only after Git proves the path is already ignored. The runner
-does not edit target ignore rules.
+freeze configuration-selected infrastructure ownership for their run transcripts.
+External placement grants only exact Runner transcript operations; repository-local
+paths must already be ignored and untracked. Legacy runs retain their exact
+repository-owned paths and pending authorizations. The runner never relocates
+artifacts on resume or changes ignore rules. The
+[clarification lifecycle](../ARCHITECTURE.md#clarification-lifecycle) owns these bindings.
 
 One execution lease protects a mutating run. Plan execution and polishing also
 hold a canonical-worktree lease so independently identified runs cannot mutate

@@ -62,6 +62,11 @@ export async function discoverControls(
     )
       paths.add(path);
   }
+  // Exact destinations reserve every control component before parents exist.
+  if (!recursive)
+    for (const destination of declarations.infrastructurePaths)
+      for (let path = destination; path !== dirname(path); path = dirname(path))
+        if (CONTROL_NAMES.includes(basename(path))) protect(path, false);
   // Provider control aliases grant no reads, but every resolution hop must be
   // immutable to the workspace writer, even when later dot segments leave it.
   async function aliasTarget(path) {

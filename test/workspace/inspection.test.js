@@ -1350,6 +1350,28 @@ test("ancestor provider aliases cannot traverse writable output intermediaries",
     assert.ok(!snapshot.entries.some((entry) => entry.path.startsWith(path)));
 });
 
+test("controls-only queries reserve absent nested control destinations", async (t) => {
+  const f = await fixture(t);
+  const service = createWorkspaceService();
+  const controls = [".git", ".codex", ".claude", ".agents", ".claude.json"];
+  const paths = controls.map((name) => join("artifacts", name, "notes.md"));
+  const protectedPaths = await service.inspectControls({
+    workspacePath: f.workspacePath,
+    paths,
+    stateRoot: f.stateRoot,
+  });
+  for (const name of controls)
+    assert.ok(
+      protectedPaths.includes(join(f.workspacePath, "artifacts", name)),
+    );
+  assert.equal(
+    await fs
+      .stat(join(f.workspacePath, "artifacts"))
+      .catch((error) => error.code),
+    "ENOENT",
+  );
+});
+
 test("internal provider-control directory aliases protect canonical targets and reject unsupported aliases", async (t) => {
   const query = (f, fileSystem) =>
     createWorkspaceService({ fileSystem }).inspectControls({

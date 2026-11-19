@@ -288,17 +288,26 @@ task/
 The execution run keeps its own clarification transcript at:
 
 ```text
-<project>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
+<infrastructure-root>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
 ```
 
-This local artifact uses the common Markdown transcript format and contains
-execution-specific questions and answers. Before creating it, preflight must
-verify that any enclosing target repository ignores the resolved path with
-`git check-ignore`; ordinary directories require no Git inspection.
-`artifactRoot` is a persisted normalized project-relative selection and
-defaults to `LOCAL_ARTIFACTS`. If a repository-contained path is not ignored,
-pause with `local_artifacts_not_ignored`; never edit `.gitignore` or
-`.git/info/exclude` automatically. The artifact is not runner state and must
+The selected configuration supplies the infrastructure root and resolved artifact
+path; without configuration the root is the target. New state version 44 freezes
+`clarificationRoot` and uses it for all transcript operations, pending edits,
+append recovery, compatibility and product decisions. `artifactRoot` remains a
+normalized infrastructure-relative selection, defaulting to `LOCAL_ARTIFACTS`.
+Explicit version-43 migration preserves legacy repository ownership, exact paths,
+workspace policy, hashes, receipts, pending edits/appends and consumed allowances.
+Preflight-paused legacy runs resolve only their original repository root, never
+current configuration. No artifact is relocated on resume.
+
+Any enclosing repository must already ignore the untracked resolved path. Failure
+pauses with `local_artifacts_not_ignored`; never edit ignore rules automatically.
+External transcripts add no target Git baseline exemption or provider output
+permission. Runner retains confined real parents, protected configuration,
+control/task/state separation and target/infrastructure leases. Custom workspace
+selection declares only this exact Runner artifact, never an output root.
+The artifact is not runner state and must
 never enter a planned commit. The task directory may be located inside or
 outside the target repository. Runner state must therefore **never** be stored
 inside the task directory or target repository.

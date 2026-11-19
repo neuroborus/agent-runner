@@ -58,6 +58,7 @@ const COUNTER_FIELDS = Object.freeze([
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
   "artifactRoot",
+  "clarificationRoot",
   "preflightComplete",
   "settings",
   "finalizationGuidance",
@@ -4430,6 +4431,17 @@ export function normalizePipelineState(value) {
     throw workflowError("Polishing state is invalid.");
   }
   if (
+    value.clarificationRoot !== null &&
+    (typeof value.clarificationRoot !== "string" ||
+      !isAbsolute(value.clarificationRoot) ||
+      resolve(value.clarificationRoot) !== value.clarificationRoot ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value.clarificationRoot))
+  ) {
+    throw workflowError("Clarification confinement root is invalid.");
+  }
+  if (value.preflightComplete && value.clarificationRoot === null)
+    throw workflowError("Clarification confinement root is missing.");
+  if (
     typeof value.artifactRoot !== "string" ||
     value.artifactRoot.includes("\\") ||
     /^[a-zA-Z]:\//u.test(value.artifactRoot) ||
@@ -5643,10 +5655,18 @@ function assertClarificationAppend(value) {
 
 export function createPolishingState({
   artifactRoot = "LOCAL_ARTIFACTS",
+  clarificationRoot = null,
+  artifactPath,
   proactiveClarification = false,
   settings = null,
   trustedValidation = EMPTY_TRUSTED_VALIDATION,
 } = {}) {
+  if (
+    artifactPath !== undefined &&
+    (clarificationRoot === null ||
+      artifactPath !== join(clarificationRoot, artifactRoot))
+  )
+    throw workflowError("Selected clarification resources disagree.");
   if (typeof proactiveClarification !== "boolean") {
     throw workflowError("proactiveClarification must be a boolean.");
   }
@@ -5659,6 +5679,7 @@ export function createPolishingState({
     normalizePipelineState({
       workflowState: "CLARIFY",
       artifactRoot,
+      clarificationRoot,
       preflightComplete: false,
       settings:
         settings === null
@@ -5861,7 +5882,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 23 ||
+    run.pipelineStateVersion !== 24 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5962,7 +5983,7 @@ export function assertRun(run) {
   if (state.repositoryBaseline !== null) {
     const repositoryPath = state.repositoryBaseline.projectPath;
     const expectedClarificationPath = join(
-      repositoryPath,
+      state.clarificationRoot,
       state.artifactRoot,
       "agent-runner",
       run.runId,
@@ -5976,15 +5997,17 @@ export function assertRun(run) {
       (repositoryPath !== run.projectPath &&
         repositoryRelativePath(repositoryPath, run.projectPath) === null) ||
       state.clarificationPath !== expectedClarificationPath ||
-      state.repositoryBaseline.allowedPaths.length !== 1 ||
-      state.repositoryBaseline.allowedPaths[0] !== expectedAllowedPath
+      !isDeepStrictEqual(
+        state.repositoryBaseline.allowedPaths,
+        expectedAllowedPath === null ? [] : [expectedAllowedPath],
+      )
     ) {
       throw workflowError("Polishing repository baseline is invalid.");
     }
   }
   if (
     state.pendingEdit !== null &&
-    (state.pendingEdit.artifactRoot !== state.repositoryBaseline?.projectPath ||
+    (state.pendingEdit.artifactRoot !== state.clarificationRoot ||
       state.pendingEdit.transcriptPath !== state.clarificationPath ||
       state.pendingEdit.preEditorHash !== run.hashes.executionClarifications)
   ) {

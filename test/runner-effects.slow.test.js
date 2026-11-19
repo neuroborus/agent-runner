@@ -51,10 +51,17 @@ import {
 for (const [pipelineId, kind, boundary, mode] of [
   ["plan-execution", "questions", "readback", "independent"],
   ["polishing", "questions", "publication", "combined"],
-  ["plan-execution", "product-decision", "replacement", "lazy"],
+  ["plan-execution", "product-decision", "replacement", "combined"],
 ]) {
   test(`cold clarification append ${pipelineId} ${kind} survives ${boundary} loss`, async (t) => {
-    const f = await clarificationAppendFixture(t, pipelineId, { kind, mode });
+    const external =
+      pipelineId === "plan-execution" && kind === "product-decision";
+    const f = await clarificationAppendFixture(t, pipelineId, {
+      kind,
+      mode,
+      external,
+      questionFirst: external,
+    });
     const service = createClarificationService({ interactive: false });
     const operation =
       kind === "questions" ? "appendQuestionRound" : "appendProductDecision";
@@ -97,12 +104,34 @@ for (const [pipelineId, kind, boundary, mode] of [
           }
           return result;
         },
-        openEditor() {
+        openEditor(...args) {
+          if (external && !lost) return service.openEditor(...args);
           assert.fail("No editor before atomic publication");
         },
       },
     });
     const runId = (await initial.runner.create(f.input)).run.runId;
+    let answeredHash;
+    if (external) {
+      const questions = (await initial.runner.resume({ runId })).run;
+      assert.equal(questions.pause.reason, "clarification_answers_required");
+      const response = {
+        runId,
+        requestId: questions.pause.inputRequest.id,
+        expectedRevision: questions.revision,
+        answers: [{ questionId: "q1", answer: "Use behavior A." }],
+      };
+      const cold = f.open();
+      const preview = await cold.runner.previewInput(response);
+      const submitted = (
+        await cold.runner.submitInput({
+          ...response,
+          responseHash: preview.responseHash,
+        })
+      ).run;
+      answeredHash = submitted.pause.inputResponse.transcriptHash;
+      assert.equal(answeredHash, preview.responseHash);
+    }
     if (boundary === "publication")
       await assert.rejects(
         initial.runner.resume({ runId }),
@@ -118,6 +147,30 @@ for (const [pipelineId, kind, boundary, mode] of [
     const retained = await cold.store.loadRun(runId);
     const intent = retained.pipelineState.pendingClarificationAppend;
     assert.ok(intent);
+    if (external) {
+      assert.equal(retained.pipelineState.clarificationRoot, f.rootPath);
+      assert.equal(
+        retained.pipelineState.clarificationPath,
+        join(
+          f.rootPath,
+          "LOCAL_ARTIFACTS",
+          "agent-runner",
+          runId,
+          "clarifications.md",
+        ),
+      );
+      assert.deepEqual(
+        retained.pipelineState.repositoryBaseline.allowedPaths,
+        [],
+      );
+      assert.equal(retained.hashes.executionClarifications, answeredHash);
+      assert.equal(retained.pipelineState.clarificationFrozen, true);
+      assert.equal(retained.counters.clarificationRounds, 1);
+      assert.equal(
+        (await readdir(f.projectPath)).includes("LOCAL_ARTIFACTS"),
+        false,
+      );
+    }
     assert.equal(retained.pipelineState.pendingEdit, null);
     const counter =
       kind === "questions" ? "clarificationRounds" : "productDecisions";
@@ -165,8 +218,8 @@ for (const [pipelineId, kind, boundary, mode] of [
     const publications = history.events.filter(
       ({ state }, index, events) =>
         index > 0 &&
-        events[index - 1].state.pipelineState.pendingClarificationAppend !==
-          null &&
+        events[index - 1].state.pipelineState.pendingClarificationAppend
+          ?.expectedHash === intent.expectedHash &&
         state.pipelineState.pendingClarificationAppend === null,
     );
     assert.equal(

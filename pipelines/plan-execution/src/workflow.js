@@ -1333,7 +1333,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     let clarification;
     try {
       clarification = await runtime.clarifications.inspectTranscript({
-        artifactRoot: state().repositoryBaseline.projectPath,
+        artifactRoot: state().clarificationRoot,
         transcriptPath: state().clarificationPath,
       });
     } catch (cause) {
@@ -2774,7 +2774,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   async function prepareEdit(action, suspendedState, reason, options) {
     return runtime.clarifications.prepareEdit({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash:
         options?.expectedHash ?? currentRun.hashes.executionClarifications,
@@ -2908,7 +2908,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       );
     const count = settlement.number;
     const transcript = await runtime.clarifications.appendProductDecision({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash: settlement.expectedHash,
       number: count,
@@ -3150,7 +3150,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const transcript = await runtime.clarifications[
       decision ? "appendProductDecision" : "appendQuestionRound"
     ]({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash: intent.expectedHash,
       ...(pending === null ? {} : { resultHash: intent.resultHash }),
@@ -3260,7 +3260,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   async function contentFingerprint() {
     const fingerprint = await safety.contentFingerprint({
-      allowedPaths: [state().clarificationPath],
+      allowedPaths: state().repositoryBaseline.allowedPaths,
       projectPath: state().repositoryBaseline.projectPath,
     });
     return executionContentFingerprint(state(), {
@@ -4714,6 +4714,7 @@ ${JSON.stringify(
       git: safety,
       projectPath: currentRun.projectPath,
       artifactRoot: state().artifactRoot,
+      clarificationRoot: state().clarificationRoot,
       runId: currentRun.runId,
       pause,
     });
@@ -4747,13 +4748,14 @@ ${JSON.stringify(
       return false;
     }
     const clarification = await runtime.clarifications.ensureTranscript({
-      artifactRoot: repositoryPath,
+      artifactRoot: state().clarificationRoot ?? repositoryPath,
       transcriptPath: clarificationPath,
     });
     await transition(
       {
         ...state(),
         preflightComplete: true,
+        clarificationRoot: state().clarificationRoot ?? repositoryPath,
         finalizationGuidance,
         repositoryBaseline: custom
           ? await safety.snapshot({ allowedPaths: [clarificationPath] })
@@ -8309,7 +8311,7 @@ ${JSON.stringify(
           // Ledger receipts keep their complete-entry formulas.
           snapshot: () =>
             safety.completeSnapshot({
-              allowedPaths: [state().clarificationPath],
+              allowedPaths: state().repositoryBaseline.allowedPaths,
             }),
         },
         async transition(patch, options) {
@@ -8408,7 +8410,7 @@ ${JSON.stringify(
         currentStep: done ? null : current.currentStep + 1,
         reviewerStep: null,
         repositoryBaseline: await safety.snapshot({
-          allowedPaths: [current.clarificationPath],
+          allowedPaths: current.repositoryBaseline.allowedPaths,
         }),
       },
       {
@@ -8925,8 +8927,8 @@ ${step.subject}`),
       const current = state();
       const checked = await safety.preflight({
         projectPath: currentRun.projectPath,
-        allowedPaths: [current.clarificationPath],
-        requiredIgnoredPaths: [current.clarificationPath],
+        allowedPaths: current.repositoryBaseline.allowedPaths,
+        requiredIgnoredPaths: current.repositoryBaseline.allowedPaths,
         requireClean: false,
         requireIdentity: true,
       });
@@ -9277,7 +9279,7 @@ ${step.subject}`),
           return pauseForPlanRevision(result);
         }
         const frozen = await runtime.clarifications.freezeTranscript({
-          artifactRoot: state().repositoryBaseline.projectPath,
+          artifactRoot: state().clarificationRoot,
           transcriptPath: state().clarificationPath,
           expectedHash: currentRun.hashes.executionClarifications,
         });
@@ -9351,7 +9353,7 @@ ${step.subject}`),
         }
         if (result.status === "READY") {
           const frozen = await runtime.clarifications.freezeTranscript({
-            artifactRoot: state().repositoryBaseline.projectPath,
+            artifactRoot: state().clarificationRoot,
             transcriptPath: state().clarificationPath,
             expectedHash: currentRun.hashes.executionClarifications,
           });
@@ -9617,6 +9619,19 @@ ${step.subject}`),
     ) {
       return pause(interruptedControlChange(cause), { code: cause.code });
     }
+    if (
+      !state().preflightComplete &&
+      cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED"
+    )
+      return pause("local_artifacts_not_ignored", {
+        path: join(
+          state().clarificationRoot ?? currentRun.projectPath,
+          state().artifactRoot,
+          "agent-runner",
+          currentRun.runId,
+          "clarifications.md",
+        ),
+      });
     const preflightComplete = state().preflightComplete;
     const causePath = cause?.path ?? cause?.cause?.path;
     const filesystemDrift =

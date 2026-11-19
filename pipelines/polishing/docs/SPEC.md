@@ -582,16 +582,25 @@ material questions, or a narrowly valid `PRODUCT_DECISION_REQUIRED` outcome.
 The run-specific transcript is:
 
 ```text
-<repository>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
+<infrastructure-root>/<artifactRoot>/agent-runner/<run-id>/clarifications.md
 ```
 
-`artifactRoot` is a normalized repository-relative selection that defaults to
-`LOCAL_ARTIFACTS`; a legacy run without that persisted field keeps the default.
-Before creating the transcript, preflight requires `git check-ignore` evidence
-that the resolved path is ignored and untracked. The runner never changes
-ignore rules.
-The transcript is excluded from the repository content fingerprint and hashed
-separately as immutable workflow input.
+The selected configuration supplies the infrastructure root and resolved artifact
+path; without configuration the root is the target. Version 24 freezes
+`clarificationRoot` for every transcript operation, pending edit, append recovery,
+answer, freeze and product decision. `artifactRoot` remains infrastructure-relative
+and defaults to `LOCAL_ARTIFACTS`. Explicit version-23 migration preserves exact
+legacy repository-owned paths, pending authorizations/appends, hashes, receipts,
+workspace policy and consumed allowances. Preflight-paused legacy runs discover
+only their original repository root; resume never relocates artifacts or selects
+current configuration.
+
+Any enclosing repository must already ignore the untracked transcript. Runner
+never changes ignore rules. Only an in-worktree transcript receives a target Git
+baseline exemption; external placement grants only confined Runner transcript
+effects, with protected configuration, real parents, control/task/state separation
+and target/infrastructure leases. Provider output and Git authority do not expand.
+The transcript has its own immutable-input hash in either placement.
 
 `--clarify` opens the authorized editor before the first agent turn. Otherwise
 the editor opens only when questions exist. MCP never opens an editor and uses

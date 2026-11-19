@@ -1052,7 +1052,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let clarification;
     try {
       clarification = await runtime.clarifications.inspectTranscript({
-        artifactRoot: state().repositoryBaseline.projectPath,
+        artifactRoot: state().clarificationRoot,
         transcriptPath: state().clarificationPath,
       });
     } catch (cause) {
@@ -2226,7 +2226,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   async function prepareEdit(actionName, suspendedState, reason, options) {
     return runtime.clarifications.prepareEdit({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash:
         options?.expectedHash ?? currentRun.hashes.executionClarifications,
@@ -2350,7 +2350,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       });
     const number = settlement.number;
     const transcript = await runtime.clarifications.appendProductDecision({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash: settlement.expectedHash,
       number,
@@ -2512,7 +2512,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     const transcript = await runtime.clarifications[
       decision ? "appendProductDecision" : "appendQuestionRound"
     ]({
-      artifactRoot: state().repositoryBaseline.projectPath,
+      artifactRoot: state().clarificationRoot,
       transcriptPath: state().clarificationPath,
       expectedHash: intent.expectedHash,
       ...(pending === null ? {} : { resultHash: intent.resultHash }),
@@ -2593,7 +2593,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   async function contentFingerprint() {
     return runtime.git.contentFingerprint({
-      allowedPaths: [state().clarificationPath],
+      allowedPaths: state().repositoryBaseline.allowedPaths,
       projectPath: state().repositoryBaseline.projectPath,
     });
   }
@@ -4291,21 +4291,25 @@ ${JSON.stringify(
         }
       }
     }
+    const clarificationRoot = state().clarificationRoot ?? repositoryPath;
     const clarificationPath = join(
-      repositoryPath,
+      clarificationRoot,
       state().artifactRoot,
       "agent-runner",
       currentRun.runId,
       "clarifications.md",
     );
+    const allowedPaths = isWithin(repositoryPath, clarificationPath)
+      ? [clarificationPath]
+      : [];
     let preflight;
     try {
       preflight = await runtime.git.preflight({
-        allowedPaths: [clarificationPath],
+        allowedPaths,
         projectPath: repositoryPath,
         requireClean: false,
         requireIdentity: false,
-        requiredIgnoredPaths: [clarificationPath],
+        requiredIgnoredPaths: allowedPaths,
       });
     } catch (cause) {
       if (cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED") {
@@ -4380,13 +4384,14 @@ ${JSON.stringify(
       return false;
     }
     const clarification = await runtime.clarifications.ensureTranscript({
-      artifactRoot: repositoryPath,
+      artifactRoot: clarificationRoot,
       transcriptPath: clarificationPath,
     });
     await transition(
       {
         ...state(),
         preflightComplete: true,
+        clarificationRoot,
         settings: effectiveSettings,
         finalizationGuidance,
         repositoryBaseline: preflight.snapshot,
@@ -7731,7 +7736,7 @@ ${evidence}`,
         }
         if (result.status === "READY") {
           const frozen = await runtime.clarifications.freezeTranscript({
-            artifactRoot: state().repositoryBaseline.projectPath,
+            artifactRoot: state().clarificationRoot,
             transcriptPath: state().clarificationPath,
             expectedHash: currentRun.hashes.executionClarifications,
           });
@@ -7776,7 +7781,7 @@ ${evidence}`,
       if (current.workflowState === "BOOTSTRAP") {
         if (current.refreezeRequired) {
           const frozen = await runtime.clarifications.freezeTranscript({
-            artifactRoot: current.repositoryBaseline.projectPath,
+            artifactRoot: current.clarificationRoot,
             transcriptPath: current.clarificationPath,
             expectedHash: currentRun.hashes.executionClarifications,
           });
@@ -7946,6 +7951,19 @@ ${evidence}`,
         "clarifications_changed",
         "Polishing clarification changed outside an authorized window.",
       );
+    if (
+      !state().preflightComplete &&
+      cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED"
+    )
+      return pause("local_artifacts_not_ignored", {
+        path: join(
+          state().clarificationRoot ?? currentRun.projectPath,
+          state().artifactRoot,
+          "agent-runner",
+          currentRun.runId,
+          "clarifications.md",
+        ),
+      });
     if (cause?.code === "ERR_PROJECT_CONFIGURATION_CHANGED") {
       throw cause;
     }

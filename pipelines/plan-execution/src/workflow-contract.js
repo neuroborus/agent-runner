@@ -88,6 +88,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "writableResult",
   "implementationEvidenceLegacy",
   "artifactRoot",
+  "clarificationRoot",
   "preflightComplete",
   "settings",
   "commitSizeAssessment",
@@ -4925,6 +4926,17 @@ export function normalizePipelineState(value) {
       "Commit execution cannot carry custom result authority.",
     );
   if (
+    value.clarificationRoot !== null &&
+    (typeof value.clarificationRoot !== "string" ||
+      !isAbsolute(value.clarificationRoot) ||
+      resolve(value.clarificationRoot) !== value.clarificationRoot ||
+      /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value.clarificationRoot))
+  ) {
+    throw workflowError("Clarification confinement root is invalid.");
+  }
+  if (value.preflightComplete && value.clarificationRoot === null)
+    throw workflowError("Clarification confinement root is missing.");
+  if (
     typeof value.artifactRoot !== "string" ||
     value.artifactRoot.includes("\\") ||
     /^[a-zA-Z]:\//u.test(value.artifactRoot) ||
@@ -6550,11 +6562,19 @@ function assertClarificationAppend(value) {
 
 export function createPlanExecutionState({
   artifactRoot = "LOCAL_ARTIFACTS",
+  clarificationRoot = null,
+  artifactPath,
   planKind,
   proactiveClarification = false,
   settings = null,
   trustedValidation = EMPTY_TRUSTED_VALIDATION,
 } = {}) {
+  if (
+    artifactPath !== undefined &&
+    (clarificationRoot === null ||
+      artifactPath !== join(clarificationRoot, artifactRoot))
+  )
+    throw workflowError("Selected clarification resources disagree.");
   if (typeof proactiveClarification !== "boolean") {
     throw workflowError("proactiveClarification must be a boolean.");
   }
@@ -6573,6 +6593,7 @@ export function createPlanExecutionState({
       customCandidate: null,
       customWritePolicy: null,
       artifactRoot,
+      clarificationRoot,
       preflightComplete: false,
       planContextVersion: 1,
       stepImplementation: null,
@@ -6857,7 +6878,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 43 ||
+    run.pipelineStateVersion !== 44 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6983,7 +7004,7 @@ export function assertRun(run) {
       throw workflowError("Plan-execution repository baseline is invalid.");
     }
     const expectedClarificationPath = join(
-      repositoryPath,
+      state.clarificationRoot,
       state.artifactRoot,
       "agent-runner",
       run.runId,
@@ -6996,11 +7017,14 @@ export function assertRun(run) {
     if (
       state.clarificationPath !== expectedClarificationPath ||
       !Array.isArray(state.repositoryBaseline.allowedPaths) ||
-      state.repositoryBaseline.allowedPaths.length !== 1 ||
-      state.repositoryBaseline.allowedPaths[0] !==
-        (state.planKind === "custom"
-          ? expectedClarificationPath
-          : expectedAllowedPath)
+      !isDeepStrictEqual(
+        state.repositoryBaseline.allowedPaths,
+        state.planKind === "custom"
+          ? [expectedClarificationPath]
+          : expectedAllowedPath === null
+            ? []
+            : [expectedAllowedPath],
+      )
     ) {
       throw workflowError("Plan-execution repository baseline is invalid.");
     }
@@ -7014,7 +7038,7 @@ export function assertRun(run) {
   }
   if (
     state.pendingEdit !== null &&
-    (state.pendingEdit.artifactRoot !== state.repositoryBaseline?.projectPath ||
+    (state.pendingEdit.artifactRoot !== state.clarificationRoot ||
       state.pendingEdit.transcriptPath !== state.clarificationPath ||
       state.pendingEdit.preEditorHash !== run.hashes.executionClarifications)
   ) {

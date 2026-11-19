@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-11-19
 
+- **Clarification ownership freezes selected infrastructure.** Execution and
+  polishing use configuration-resolved infrastructure and artifact paths for
+  every transcript operation, including cold append and editor recovery. Their
+  explicit state migrations retain exact legacy locations, pending permissions,
+  receipts and consumed allowances, including preflight pauses. External
+  transcripts reuse infrastructure exclusion and confined Runner effects, gain
+  no target Git exemption or provider output authority, and retain any enclosing
+  repository's ignored/untracked requirement. Task-owned pipelines stay unchanged.
+
 - **Checkpoint publication retains reconciled progress.** Plan execution folds
   remaining check/fix correction cleanup and the accepted BLOCKED report into
   its environment pause after the role attempt reconciles content and charges

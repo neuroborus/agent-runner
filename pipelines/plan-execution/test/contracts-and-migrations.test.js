@@ -1309,7 +1309,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 43);
+  assert.equal(planExecutionPipeline.stateVersion, 44);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -3247,6 +3247,17 @@ test("pending clarification append is closed, checkpoint-bound and grants no leg
   });
   await assert.rejects(fixture.run(), (cause) => cause === interruption);
   assert.doesNotThrow(() => planExecutionPipeline.workflow.validateRun(saved));
+  const { clarificationRoot: _root, ...legacyOwnership } = saved.pipelineState;
+  const ownership = planExecutionPipeline.migrations[43]({
+    ...saved,
+    pipelineState: legacyOwnership,
+  });
+  assert.deepEqual(ownership, saved.pipelineState);
+  assert.equal(
+    ownership.clarificationRoot,
+    saved.pipelineState.repositoryBaseline.projectPath,
+  );
+
   for (const mutate of [
     (run) => {
       run.pipelineState.pendingClarificationAppend.extra = true;
@@ -3321,4 +3332,30 @@ test("pending clarification append is closed, checkpoint-bound and grants no leg
     }),
   );
   assert.throws(() => planExecutionPipeline.migrations[42](saved));
+});
+
+test("legacy clarification ownership is explicit and preflight-paused state never selects current resources", () => {
+  const current = createPlanExecutionState();
+  const { clarificationRoot: _root, ...legacy } = current;
+  assert.throws(() => normalizePipelineState(legacy));
+  const migration = planExecutionPipeline.migrations[43];
+  const saved = structuredClone(legacy);
+  assert.deepEqual(migration({ pipelineState: legacy }), current);
+  assert.deepEqual(legacy, saved);
+  assert.throws(() => migration({ pipelineState: current }));
+  for (const clarificationRoot of [
+    "relative",
+    "/workspace/../other",
+    3,
+    undefined,
+  ])
+    assert.throws(() =>
+      normalizePipelineState({ ...current, clarificationRoot }),
+    );
+  assert.throws(() =>
+    createPlanExecutionState({
+      clarificationRoot: "/infrastructure",
+      artifactPath: "/elsewhere/LOCAL_ARTIFACTS",
+    }),
+  );
 });

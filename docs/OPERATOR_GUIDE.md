@@ -147,13 +147,12 @@ identity is currently unapproved, so update actions fail closed. Follow
 The global layer, also called runner-root configuration, defines trusted profile
 implementations. Global and safe project configuration may define exact trusted
 command vectors; project configuration may select these aliases and safe settings.
-The default project
-configuration is `LOCAL_ARTIFACTS/agent-runner.json`. Integrated Git configuration
-must be confined to the project, ignored and untracked. Explicit CLI
-`--project-config` / MCP `projectConfigurationPath` may instead select an existing
-external file whose versioned `infrastructure` binding names the canonical target
-and a disjoint external root. Relative infrastructure resources resolve from that
-root; resume retains the selected file, bytes, identity and real ancestry.
+Default project configuration: `LOCAL_ARTIFACTS/agent-runner.json`. Integrated Git
+files must be project-confined, ignored and untracked. CLI `--project-config` /
+MCP `projectConfigurationPath` can select an existing external file whose versioned
+`infrastructure` binds the canonical target and a disjoint root. Relative resources
+resolve there, including new execution/polishing transcripts; legacy paths and
+authorizations remain. Resume pins configuration bytes, identity and real ancestry.
 Selection never creates, relocates or merges infrastructure. See
 [configuration](product/OPERATOR_MODEL.md#configuration). `artifactRoot` defaults
 to `LOCAL_ARTIFACTS`.

@@ -1205,7 +1205,7 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 23,
+  stateVersion: 24,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1248,6 +1248,18 @@ export const polishingPipeline = Object.freeze({
       return Object.freeze({
         ...run.pipelineState,
         pendingClarificationAppend: null,
+      });
+    },
+    23: (run) => {
+      if (Object.hasOwn(run.pipelineState, "clarificationRoot"))
+        throw new PolishingWorkflowError(
+          "Legacy state cannot select clarification resources.",
+        );
+      // Preserve exact legacy repository ownership, including preflight-paused runs.
+      return Object.freeze({
+        ...run.pipelineState,
+        clarificationRoot:
+          run.pipelineState.repositoryBaseline?.projectPath ?? null,
       });
     },
   }),

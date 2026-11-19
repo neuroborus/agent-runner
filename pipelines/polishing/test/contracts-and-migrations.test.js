@@ -481,7 +481,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 23);
+  assert.equal(polishingPipeline.stateVersion, 24);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -587,7 +587,7 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 23,
+    pipelineStateVersion: 24,
     pipelineState: polishingPipeline.migrations[20]({
       pipelineState: migratePolishingStateV19({
         pipelineState: migratePolishingStateV17({
@@ -2392,4 +2392,30 @@ test("version 22 migrates append absence without inferring replay authority", ()
       { code: "ERR_POLISHING_WORKFLOW" },
     );
   }
+});
+
+test("legacy clarification ownership is explicit and preflight-paused state never selects current resources", () => {
+  const current = createPolishingState();
+  const { clarificationRoot: _root, ...legacy } = current;
+  assert.throws(() => normalizePipelineState(legacy));
+  const migration = polishingPipeline.migrations[23];
+  const saved = structuredClone(legacy);
+  assert.deepEqual(migration({ pipelineState: legacy }), current);
+  assert.deepEqual(legacy, saved);
+  assert.throws(() => migration({ pipelineState: current }));
+  for (const clarificationRoot of [
+    "relative",
+    "/workspace/../other",
+    3,
+    undefined,
+  ])
+    assert.throws(() =>
+      normalizePipelineState({ ...current, clarificationRoot }),
+    );
+  assert.throws(() =>
+    createPolishingState({
+      clarificationRoot: "/infrastructure",
+      artifactPath: "/elsewhere/LOCAL_ARTIFACTS",
+    }),
+  );
 });

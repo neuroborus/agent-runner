@@ -1632,7 +1632,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 43,
+  stateVersion: 44,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1717,6 +1717,18 @@ export const planExecutionPipeline = Object.freeze({
       return Object.freeze({
         ...run.pipelineState,
         pendingClarificationAppend: null,
+      });
+    },
+    43: (run) => {
+      if (Object.hasOwn(run.pipelineState, "clarificationRoot"))
+        throw new PlanExecutionWorkflowError(
+          "Legacy state cannot select clarification resources.",
+        );
+      // Preserve exact legacy repository ownership, including preflight-paused runs.
+      return Object.freeze({
+        ...run.pipelineState,
+        clarificationRoot:
+          run.pipelineState.repositoryBaseline?.projectPath ?? null,
       });
     },
   }),

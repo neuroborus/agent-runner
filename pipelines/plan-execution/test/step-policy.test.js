@@ -396,3 +396,32 @@ for (const mode of ["independent", "lazy", "combined"]) {
     );
   });
 }
+
+test("custom selection and inspection bind the selected external transcript without output authority", async () => {
+  const transcript =
+    "/infrastructure/artifacts/agent-runner/run-1/clarifications.md";
+  const selection = await resolveExecutionWorkspace({
+    projectPath: "/workspace",
+    infrastructureRoot: "/infrastructure",
+    artifactPath: "/infrastructure/artifacts",
+    artifactRoot: "artifacts",
+    runId: "run-1",
+    settingOverrides: { planKind: "custom" },
+    readTaskInput: async () => customPlan,
+  });
+  assert.deepEqual(selection.artifactPaths, [transcript]);
+  assert.deepEqual(selection.outputPaths, []);
+  const inspected = await planKindPolicy("custom").inspectWorkspace({
+    projectPath: "/workspace",
+    clarificationRoot: "/infrastructure",
+    artifactRoot: "artifacts",
+    runId: "run-1",
+    git: {
+      async snapshot(options) {
+        assert.deepEqual(options.allowedPaths, [transcript]);
+        return {};
+      },
+    },
+  });
+  assert.equal(inspected.clarificationPath, transcript);
+});

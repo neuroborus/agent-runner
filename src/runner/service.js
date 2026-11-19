@@ -644,6 +644,91 @@ export function createRunner(options = {}) {
     return runStore.loadRun(run.runId);
   }
 
+  async function assertClarificationResources(run, request) {
+    const selected = Object.hasOwn(run.pipelineState, "clarificationRoot");
+    if (!selected && run.workspace?.kind !== "directory") return;
+    if (selected) {
+      // An unselected legacy run uses the pipeline's verified preflight root.
+      const rootPath =
+        run.pipelineState.clarificationRoot ?? request.artifactRoot;
+      const transcriptPath = join(
+        rootPath,
+        run.pipelineState.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+        "agent-runner",
+        run.runId,
+        "clarifications.md",
+      );
+      const overlaps = (left, right) => {
+        const name = relative(left, right);
+        return (
+          name === "" ||
+          (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+        );
+      };
+      const controlPaths = [];
+      for (const workspacePath of new Set([run.projectPath, rootPath]))
+        controlPaths.push(
+          ...(await workspace.inspectControls({
+            workspacePath,
+            paths: [transcriptPath],
+            stateRoot: runStore.rootPath,
+          })),
+        );
+      const protectedPaths = [
+        run.taskPath,
+        runStore.rootPath,
+        run.projectConfigurationProtection?.path,
+        ...(run.workspace?.policy?.outputPaths ?? []),
+        ...controlPaths,
+      ].filter(Boolean);
+      if (
+        request.artifactRoot !== rootPath ||
+        request.transcriptPath !== transcriptPath ||
+        protectedPaths.some(
+          (path) =>
+            overlaps(path, transcriptPath) || overlaps(transcriptPath, path),
+        )
+      )
+        throw new RunnerError(
+          "Clarification path overlaps protected resources.",
+          {
+            code: "ERR_UNSAFE_CLARIFICATION_PATH",
+          },
+        );
+    }
+    // Check the artifact's own enclosing worktree, including external resources.
+    let parent = request.artifactRoot;
+    if (selected) {
+      parent = dirname(request.transcriptPath);
+      while (parent !== request.artifactRoot) {
+        const inspected = await workspace.inspectPath({
+          projectPath: request.artifactRoot,
+          path: parent,
+        });
+        if (inspected.exists) break;
+        parent = dirname(parent);
+      }
+    }
+    const root = await workspace.exclusionPath({ workspacePath: parent });
+    const marker = await workspace.inspectPath({
+      projectPath: root,
+      path: join(root, ".git"),
+    });
+    if (marker.exists) {
+      const artifact = await git.inspectPath({
+        projectPath: root,
+        path: request.transcriptPath,
+      });
+      if (artifact.tracked || !artifact.ignored)
+        throw new RunnerError(
+          "Repository-local artifact path must be ignored and untracked.",
+          {
+            code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED",
+          },
+        );
+    }
+  }
+
   function runtimeFor(
     pipeline,
     lease,
@@ -947,33 +1032,20 @@ export function createRunner(options = {}) {
                 },
               ]),
             ),
-      clarifications:
-        run.workspace?.kind !== "directory"
-          ? clarifications
-          : Object.freeze({
-              ...clarifications,
-              async ensureTranscript(request) {
-                const root = await workspace.exclusionPath({
-                  workspacePath: request.artifactRoot,
-                });
-                const marker = await workspace.inspectPath({
-                  projectPath: root,
-                  path: join(root, ".git"),
-                });
-                if (marker.exists) {
-                  const artifact = await git.inspectPath({
-                    projectPath: root,
-                    path: request.transcriptPath,
-                  });
-                  if (artifact.tracked || !artifact.ignored)
-                    throw new RunnerError(
-                      "Repository-local artifact path must be ignored and untracked.",
-                      { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
-                    );
-                }
-                return clarifications.ensureTranscript(request);
-              },
-            }),
+      clarifications: Object.freeze(
+        Object.fromEntries(
+          Object.entries(clarifications).map(([operation, invoke]) => [
+            operation,
+            async (request, ...args) => {
+              await monitor?.check();
+              // Stop reconciliation still verifies frozen inputs after drift.
+              if (operation !== "inspectTranscript") await checkConfiguration();
+              await assertClarificationResources(run, request);
+              return invoke(request, ...args);
+            },
+          ]),
+        ),
+      ),
       workspace: Object.freeze({
         kind: run.workspace?.kind ?? "git",
         policy: run.workspace?.policy ?? null,
@@ -1992,7 +2064,12 @@ export function createRunner(options = {}) {
             return onInspectionFailure(diagnosed);
           }
         }
-        return operation();
+        const root = run.pipelineState.clarificationRoot;
+        const name =
+          typeof root === "string" ? relative(ownership.projectPath, root) : "";
+        return isAbsolute(name) || name === ".." || name.startsWith(`..${sep}`)
+          ? withInfrastructureLease(run.runId, root, operation)
+          : operation();
       },
       executionLease,
     );
@@ -2507,6 +2584,7 @@ export function createRunner(options = {}) {
             projectConfiguration?.infrastructure.rootPath ?? projectPath,
           runId: createOptions.runId,
           artifactRoot: resolved.artifactRoot,
+          artifactPath: projectConfiguration?.artifactPath,
         },
         workspace,
       );
@@ -2548,6 +2626,7 @@ export function createRunner(options = {}) {
               projectConfiguration?.infrastructure.rootPath ?? projectPath,
             runId: createOptions.runId,
             artifactRoot: resolved.artifactRoot,
+            artifactPath: projectConfiguration?.artifactPath,
           },
           workspace,
         );
@@ -2648,6 +2727,11 @@ export function createRunner(options = {}) {
     }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
+      clarificationRoot:
+        projectConfiguration?.infrastructure.rootPath ?? projectPath,
+      artifactPath:
+        projectConfiguration?.artifactPath ??
+        resolve(projectPath, resolved.artifactRoot),
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
       ...(pipeline.setup
@@ -3021,6 +3105,8 @@ export function createRunner(options = {}) {
     const normalized = normalizeInputSubmission(input);
     const { run } = await status(normalized.runId);
     const answers = orderedInputAnswers(run, normalized);
+    await guardProjectConfiguration(run);
+    await assertClarificationResources(run, run.pipelineState.pendingEdit);
     const preview = await clarifications.previewEditAnswers(
       run.pipelineState.pendingEdit,
       answers,
@@ -3090,6 +3176,11 @@ export function createRunner(options = {}) {
           }
           let transcript;
           try {
+            await guardProjectConfiguration(run);
+            await assertClarificationResources(
+              run,
+              run.pipelineState.pendingEdit,
+            );
             transcript = await clarifications.writeEditAnswers(
               run.pipelineState.pendingEdit,
               answers,

@@ -187,6 +187,12 @@ planned implementation, and they must use repository evidence for questions it
 can answer. An empty clarification file and an authorized editor close without
 changes are valid inputs.
 
+Execution and polishing freeze the selected infrastructure owner for all
+clarification operations; legacy runs retain their exact repository-owned paths.
+Authoring, audit and init retain task-owned artifacts. The
+[clarification lifecycle](../ARCHITECTURE.md#clarification-lifecycle) owns path,
+confinement and migration details.
+
 Audit question rounds and supported question/product-decision appends in
 plan authoring, execution and polishing are journaled before transcript
 replacement. After interruption, recovery accepts only the prior bytes or exact

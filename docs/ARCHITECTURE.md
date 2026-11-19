@@ -208,6 +208,8 @@ and a symlinked `.git` remains rejected as a non-ordinary Git control. Full
 `inspect` still rejects any alias among its control bindings, because those
 bindings feed directory workflows and provider projections; only the
 controls-only `inspectControls` query accepts them.
+That query reserves every control-name component in exact infrastructure
+destinations, including nested components whose parents do not yet exist.
 Routing directories remain pinned by identity and mode, while links and files
 retain full metadata checks. Unrelated sibling creation outside inspected trees
 does not invalidate alias resolution; inspected trees retain their complete
@@ -1545,7 +1547,7 @@ Both files require `schemaVersion: 1`; unknown versions, pipelines, roles,
 settings, and fields are errors. Project
 configuration may define exact trusted commands, select trusted aliases,
 override execution defaults, pipeline roles and settings, and select a normalized
-repository-relative artifact root. It cannot define profiles, credentials,
+infrastructure-relative artifact root. It cannot define profiles, credentials,
 provider binaries, or arbitrary environment values. Integrated Git files must
 remain ignored and untracked. Missing explicit, unsafe, and symbolic-link paths
 are rejected without creating a file or changing ignore rules.
@@ -1559,8 +1561,11 @@ selection. Integrated discovery remains unchanged, and explicit selection
 replaces discovery rather than merging competing placements. No sibling scan,
 relocation, rewriting, registration or new host authority occurs.
 The loader returns the binding as `infrastructure` and resolves `artifactPath`
-from its root and the effective relative `artifactRoot`. Pipeline artifact and
-guidance publication remain owned by their existing contracts. This resource
+from its root and the effective relative `artifactRoot`. Root composition passes
+both resolved resources into execution and polishing state creation and custom
+workspace selection. Their frozen `clarificationRoot` is the confinement owner;
+the exact transcript is beneath the selected artifact path. Guidance and explicit
+finalization retain this owner; authoring, audit and init keep task-owned artifacts. This resource
 resolution grants no directory read or write permission. External configuration
 can select custom directory semantics before Git inspection, just like an
 integrated project overlay. For a Git selection supplied from a subdirectory,
@@ -1970,8 +1975,8 @@ already begun, its existing verification-only accounting remains authoritative
 before further execution is blocked.
 
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`. Plan execution and polishing use
-it only for runner-owned repository-local artifacts beneath
-`<artifactRoot>/agent-runner/<run-id>/`; ignored-path, traversal, symlink,
+it only for runner-owned transcripts beneath the frozen selected infrastructure
+root at `<artifactRoot>/agent-runner/<run-id>/`; repository-local ignored-path, traversal, symlink,
 overlap, and fingerprint guards apply to the resolved path. Legacy runs with no
 persisted selection retain `LOCAL_ARTIFACTS`. Plan authoring continues to keep
 its task-owned `clarifications.md` and `plan.md` beside `task.md`.
@@ -6236,6 +6241,34 @@ Replacing the outer npm path cannot redirect either the current server or its
 detached continuation to another application tree.
 
 ## Clarification Lifecycle
+
+Execution state version 44 and polishing version 24 persist `clarificationRoot`.
+New runs freeze the configuration-owned infrastructure root (the canonical target
+without selected configuration), and derive
+`<artifactPath>/agent-runner/<run-id>/clarifications.md`. Every transcript read,
+creation, append/recovery, editor authorization, answer, freeze, compatibility
+check and product decision uses that same confinement owner. Public CLI/MCP
+projections retain the exact transcript path without configuration contents.
+
+Explicit migrations preserve the legacy repository root, transcript, pending
+append/edit authorization, hashes, receipts, workspace policy and consumed
+allowances. A legacy run paused before preflight keeps a null selection until
+Git discovery supplies its original repository root; current configuration never
+relocates it. Runner verifies the owner against protected configuration or the
+legacy repository; pipeline validators bind the derived transcript and pending
+edit without reading configuration protection. Git baselines allow only the
+transcript actually inside their worktree; external transcripts add no target Git
+exemption. Custom directory policies keep
+only their exact declared artifact exemption. External operations reuse the
+infrastructure lease alongside target exclusion, retain configuration identity
+and ancestry checks and confined real parents, and cannot overlap task, state,
+configuration, output or Git/provider controls, including their aliased targets.
+Every transcript operation inspects controls from both the target workspace and
+frozen infrastructure owner, and revalidates enclosing-worktree ignored/untracked
+status through the existing workspace and Git owners. Answer previews remain
+read-only; submission and cold append recovery hold the existing leases.
+This grants only Runner transcript effects, never provider outputs,
+parent writes, staging or commit authority.
 
 Every pipeline starts with an explicit, pipeline-owned `CLARIFY` state. Its
 primary agent studies the task and repository read-only, then returns `READY`,

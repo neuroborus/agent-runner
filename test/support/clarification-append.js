@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -37,9 +37,37 @@ export function appendReadFailure() {
 export async function clarificationAppendFixture(
   t,
   pipelineId,
-  { mode = "combined", kind = "questions" } = {},
+  {
+    mode = "combined",
+    kind = "questions",
+    external = false,
+    questionFirst = false,
+    artifactRoot = "LOCAL_ARTIFACTS",
+  } = {},
 ) {
   const paths = await operatorFixture(t, pipelineId);
+  const rootPath = external
+    ? join(paths.workspace, "infrastructure")
+    : paths.projectPath;
+  const configurationPath = external
+    ? join(rootPath, "agent-runner.json")
+    : null;
+  if (external) {
+    await mkdir(rootPath);
+    await writeFile(
+      configurationPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        artifactRoot,
+        infrastructure: {
+          schemaVersion: 1,
+          placement: "external",
+          projectPath: paths.projectPath,
+          rootPath,
+        },
+      }),
+    );
+  }
   const calls = [];
   const probes = [];
   const adapter = {
@@ -64,17 +92,17 @@ export async function clarificationAppendFixture(
         whyBlocked: "",
         evidence: [],
       };
-      if (kind === "questions") {
+      if (kind === "questions" || (questionFirst && calls.length === 1)) {
         assert.equal(calls.length, 1, "Append recovery must not replay a role");
         structured = { status: "QUESTIONS", questions: APPEND_QUESTIONS };
         if (pipelineId !== "plan-authoring")
           Object.assign(structured, emptyDecision);
-      } else if (calls.length === 1) {
+      } else if (calls.length === (questionFirst ? 2 : 1)) {
         structured = { status: "READY", questions: [], ...emptyDecision };
       } else {
         assert.equal(
           calls.length,
-          2,
+          questionFirst ? 3 : 2,
           "Decision recovery must not replay a role",
         );
         structured = {
@@ -126,6 +154,7 @@ export async function clarificationAppendFixture(
         loadConfiguration: configurationLoader({
           schemaVersion: 1,
           defaultBackend: "codex",
+          artifactRoot,
           pipelines: { [pipelineId]: { mode } },
         }),
       }),
@@ -134,12 +163,14 @@ export async function clarificationAppendFixture(
   return {
     ...paths,
     calls,
+    rootPath,
     probes,
     open,
     input: {
       pipelineId,
       projectPath: paths.projectPath,
       taskPath: paths.taskPath,
+      ...(external ? { projectConfigurationPath: configurationPath } : {}),
     },
     async transcript(run) {
       const path =

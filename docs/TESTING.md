@@ -44,6 +44,25 @@ rediscovery before an untouched legacy effect, and no repair of a partial effect
 These fixtures require no live provider, network, paid service or live-project
 hook execution; they do not replace the full slow gate or operator acceptance.
 
+Fast `test/runner-configuration.test.js` owns selected external execution/polishing
+transcripts, CLI/MCP path projection, integrated ignore rejection, reserved and
+aliased provider-control rejection from both target and infrastructure owners,
+and exact legacy pending-editor migration.
+The workspace inspection suite owns absent nested control-name reservation;
+the Runner regression rejects such transcripts before parent creation or role work.
+Answer preview and submission reject newly aliased controls or changed external
+ignore rules before reading or mutation; cold append recovery retains intent and
+accounting without replay when a provider alias appears after admission.
+Runner migration tests bind frozen roots to their protected resource owner.
+Pipeline contract tests own strict saved roots and
+preflight absence; `step-policy.test.js` owns custom artifact selection without
+output authority. Existing configuration and clarification suites retain confined
+identity, symlink, ancestor substitution and unauthorized-edit rejection. The
+combined external product-decision case in `test/runner-effects.slow.test.js`
+extends its existing append-replacement witness with creation, authorized answer
+and freeze, and cold recovery without target artifacts or duplicate accounting.
+It remains part of the complete slow gate, with no additional workflow matrix.
+
 ## Operator-owned Codex file-output acceptance
 
 Existing-file output readiness regressions live in `test/agents/codex.test.js`,

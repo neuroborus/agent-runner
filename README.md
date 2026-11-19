@@ -765,7 +765,7 @@ A target repository may optionally provide an ignored, untracked
 ignored path with `--project-config`. An explicitly selected external file may
 instead declare an exact target-bound infrastructure root. A project file may
 select aliases already trusted by the runner, set backend/model/context defaults, override pipeline
-roles and limits, and select a normalized repository-relative `artifactRoot`.
+roles and limits, and select a normalized infrastructure-relative `artifactRoot`.
 It may also define exact `trustedCommands` vectors under the same contract as
 the runner catalog; profile implementations remain runner-owned. Agent Runner
 expects an existing confined regular file; integrated Git files must also be
@@ -1572,9 +1572,12 @@ questions pause the run.
 
 Authoring uses `<task-dir>/clarifications.md`. Execution and polishing keep
 their run-specific transcript under
-`<project>/<artifactRoot>/agent-runner/<run-id>/clarifications.md`, where
-`artifactRoot` defaults to `LOCAL_ARTIFACTS`. Preflight requires the target
-repository to ignore that resolved path. Ignore rules remain operator-managed.
+`<infrastructure-root>/<artifactRoot>/agent-runner/<run-id>/clarifications.md`.
+The selected configuration owns that root; without configuration it is the target.
+`artifactRoot` defaults to `LOCAL_ARTIFACTS`. New runs freeze this ownership;
+legacy runs keep their exact repository-owned paths, including pending edits.
+Any enclosing repository must already ignore the untracked transcript.
+Ignore rules remain operator-managed.
 The artifact has an independent hash and stays outside planned commits.
 Execution pauses for a revised plan and a
 new run if clarification input conflicts with the validated plan. Plan
