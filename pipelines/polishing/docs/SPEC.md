@@ -1396,7 +1396,8 @@ turn, writable or read-only after budget exhaustion, publishes a strict
 `resolutionCorrection` checkpoint atomically with its active turn. It holds the
 validated blockers, non-disputable IDs, budget flag, original access, pre-turn
 content fingerprint, fix accounting, attempts, bounded diagnostics, and an
-optional product-decision intent; never a rejected value, exception text, or
+optional product-decision intent. Schema 2 also binds frozen resolution facts
+and a predecessor repair report; never a rejected value, exception text, or
 native output. Lazy mode creates no checkpoint and keeps its existing contract.
 
 A returned report, including a provider structured-output failure, is
@@ -1408,8 +1409,8 @@ approval. The workflow stays at `RESOLVE_FINDINGS` with its blockers; the
 candidate move waits for settlement. A pure classifier retains only the strict
 normalizer's bounded diagnostic. Availability backoff, inactivity
 reconstruction, authentication, and output exhaustion keep their existing
-reconciliation, charging, and retry contracts and retire the checkpoint with
-their first transition; only an inactivity expiry proven during that invocation
+reconciliation, charging, and retry contracts for ordinary resolution and retire
+that checkpoint with their first transition; only an inactivity expiry proven during that invocation
 counts, never retained evidence of an earlier timeout. Terminal failures keep
 their existing failure. Any other recoverable failure lost the report: the same
 transition publishes `ready` with the fixed `result`/`interrupted-response`
@@ -1433,8 +1434,8 @@ consumed `correcting` attempt, then invokes one fresh read-only Worker session
 at `resolve-findings:read-only:finding-resolution-correction` with the original
 request rebuilt from checkpoint facts, the restatement instructions, and the
 diagnostic batch. It may not edit, stage, validate, test, finalize, or repair;
-it preserves the original claims and uncertainty and returns only supported FIX
-or DISPUTE dispositions. Content, control, or validation-infrastructure drift
+it preserves the original claims and uncertainty and returns supported FIX
+or DISPUTE dispositions, or the recovery-only unfinished outcome below. Content, control, or validation-infrastructure drift
 from the candidate binding pauses `unsafe_git_state` before invocation and
 retains the checkpoint; frozen guidance and that binding are verified again
 before a returned report settles. Protected-input drift keeps its existing
@@ -1448,7 +1449,8 @@ contamination keeps `read_only_agent_mutated_repository`.
 
 Recovery handles a checkpoint before stagnation, budget, and legacy
 interrupted-turn rules. Only an inactivity expiry proven during the reserved
-original keeps its reconstruction contract. Any other ownerless `invoking`
+ordinary original keeps its reconstruction contract. An explicitly continued
+repair never replays an invoked effect. Any other ownerless `invoking`
 original may have consumed provider work: it is reconciled with workspace
 changes allowed only for its writable access, charged once, and published as
 `ready` with the fixed `result`/`interrupted-response` diagnostic. Until a
@@ -1485,8 +1487,43 @@ explanation, `Worker field <field> violated <constraint>.` evidence, and
 `RESOLVE_FINDINGS`. Availability backoff, the shared inactivity allowance,
 authentication, and output exhaustion retry the same consumed attempt without
 recharging it. An explicit null resume of either checkpoint-bound pause persists
-one more consumed attempt before exactly one further read-only restatement; no
-resume runs writable resolution or renews the automatic allowance.
+one more consumed attempt before exactly one further read-only restatement;
+neither retry runs writable resolution or renews the automatic allowance.
+
+Recovery-only `UNFINISHED` establishes an observable still-required repair under
+frozen authority. It requires empty decisions, options, question and whyBlocked,
+a bounded reason and nonempty current-blocker evidence. Ordinary resolution and
+polishing turns reject it. It establishes no historical completion, disposition,
+containment or validation credit; missing provenance that prevents safe
+continuation remains a bounded stop, and genuine environment and unsatisfiable
+validation-policy stops retain their existing contracts.
+
+The runner retains every original blocker and publishes `repair-required` with
+`finding_repair_required`. Null-action resume explicitly authorizes one new
+repair, after owner retirement and verification of inputs, configuration,
+candidate/content/controls, frozen guidance, infrastructure and permissions.
+Authorization is journaled as `repair-authorized` before atomic turn publication.
+An uncertain repair checkpoint, invocation, retirement or child-session publication
+acknowledgement, including read-only restatement startup, propagates without a
+stale failure or pause transition; recovery uses the authoritative journal.
+Only that proven unstarted authorization is reusable; a published invocation
+requires reconciliation, retirement and read-only recovery. This also applies
+to provider failures during the new repair, including authentication and output
+exhaustion pauses, preserving consumed recovery allowances.
+
+Bounded UNFINISHED work reports retain checkpoint/candidate/facts/blocker hashes,
+consumed attempts, diagnostics, pending correction, fix accounting and predecessor
+lineage independently of native sessions. New invocations carry consumed attempts
+forward without renewing the automatic restatement allowance. A previously charged
+logical repair remains pending and is charged only once; an additional uncharged
+round needs available fix budget. Without it, retain the binding at the existing
+`fix_limit_reached` pause: only its narrowly eligible `extra-fix-rounds` grant can
+authorize the repair, including one originally inspected read-only. No action
+resets stagnation/dispute limits, grants staging/commit authority or replaces
+mode-specific convergence, candidate review, FINALIZE or terminal confirmation.
+CLI/MCP expose the bounded pause and only its applicable existing resume action.
+Related replacement-proposal, clarification-retirement and stale-finalization-marker
+repairs remain separate pending scope with their original histories and budgets.
 
 #### Lazy check/fix and clean confirmation
 
@@ -1784,6 +1821,8 @@ or finalization is blocked and the precise `POLISH`, `REVIEW`, `FINALIZE`, `CHEC
 `RESOLVE_FINDINGS` retry checkpoint. `resolution_output_invalid` exposes its
 bounded field-and-constraint evidence, `RESOLVE_FINDINGS`, and only the null
 retry; a blocked finding-resolution restatement offers only the same retry.
+`finding_repair_required` instead explains and offers one new repair invocation;
+its exhausted-budget variant offers only the eligible explicit fix-budget grant.
 This read-only projection does not itself change the pipeline state version.
 The runner-owned handoff is represented by pipeline state version 5.
 Missing, invalid, or changed frozen guidance exposes only a `start-new-run`
@@ -1993,6 +2032,11 @@ to the pre-turn count plus the single charge, consistent stage and attempt
 arithmetic, a binding equal to the persisted baseline, matching pauses, and
 allowlisted diagnostics; unknown diagnostics reduce to
 `result`/`semantic-contract`.
+
+Pipeline state version 25 upgrades version-24 resolution checkpoints to schema 2
+with a null repair predecessor and a current facts binding. Blocked/exhausted
+positions, original blockers, consumption and accounting remain unchanged; migration
+grants no repair authorization, infers no historical disposition and replays no effect.
 
 MCP uses the common STDIO tools, persists idempotency intents before mutation
 and receipts before returning, and launches detached continuation under the

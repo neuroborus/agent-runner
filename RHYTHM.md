@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-19
 
+- **Polishing unfinished repairs keep explicit ownership.** Independent/combined
+  read-only recovery may establish current repair need without inventing a past
+  disposition. Explicit resume or the narrowly eligible existing budget grant
+  journals one new repair against verified bindings. Original blockers, historical
+  uncertainty, consumed attempts and pending once-only charges survive; migration
+  grants no writes. Lazy resolution and runner-owned handoff retain their gates.
+  Runner cold-continuation regressions and related marker repairs remain pending.
+
 - **Unfinished execution repairs require explicit continuation.** Read-only
   retired-turn recovery can report UNFINISHED without inventing dispositions.
   A distinct pause authorizes one new repair only through explicit resume or

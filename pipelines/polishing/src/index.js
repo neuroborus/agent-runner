@@ -26,6 +26,7 @@ import {
   isFinalizationPolicy,
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
+  resolutionFactsFingerprint,
   sha256,
   snapshotChangeEvidence,
 } from "./workflow-contract.js";
@@ -205,6 +206,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The bounded automatic lazy checkpoint correction remains invalid.",
   resolution_output_invalid:
     "The bounded read-only finding-resolution report restatement remains invalid.",
+  finding_repair_required:
+    "Inspection found an unfinished repair. Resume authorizes one new repair invocation against the preserved candidate; it does not replay the retired effect.",
   review_output_invalid:
     "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
@@ -545,6 +548,26 @@ function validateResumeAction(run, action) {
     throw new Error("Semantic finalization retry is not applicable.");
   }
   const correction = state.resolutionCorrection;
+  if (correction?.stage === "repair-required") {
+    const needsBudget =
+      !state.pendingCorrection &&
+      run.counters.fixRounds >=
+        state.settings.maxFixRounds + state.additionalFixRounds;
+    if (
+      action === null &&
+      run.pause?.reason === "finding_repair_required" &&
+      !needsBudget
+    )
+      return;
+    if (
+      run.pause?.reason !== "fix_limit_reached" ||
+      action?.type !== "extra-fix-rounds" ||
+      !needsBudget
+    )
+      throw new Error(
+        "Unfinished finding repair requires its explicit authorization or budget grant.",
+      );
+  }
   if (
     run.pause?.reason === "resolution_output_invalid" ||
     (run.pause?.reason === "environment_blocked" &&
@@ -1205,7 +1228,7 @@ export function migratePolishingStateV19(run) {
 
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 24,
+  stateVersion: 25,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1260,6 +1283,31 @@ export const polishingPipeline = Object.freeze({
         ...run.pipelineState,
         clarificationRoot:
           run.pipelineState.repositoryBaseline?.projectPath ?? null,
+      });
+    },
+    // Shape upgrade only: retained checkpoints grant no new repair authority.
+    24: (run) => {
+      const checkpoint = run.pipelineState.resolutionCorrection;
+      if (
+        checkpoint !== null &&
+        (checkpoint.schemaVersion !== 1 ||
+          Object.hasOwn(checkpoint, "repair") ||
+          Object.hasOwn(checkpoint, "factsFingerprint"))
+      )
+        throw new PolishingWorkflowError(
+          "Legacy state cannot own finding repair authority.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        resolutionCorrection:
+          checkpoint === null
+            ? null
+            : Object.freeze({
+                ...checkpoint,
+                schemaVersion: 2,
+                repair: null,
+                factsFingerprint: resolutionFactsFingerprint(run.pipelineState),
+              }),
       });
     },
   }),

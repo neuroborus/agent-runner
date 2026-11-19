@@ -19,6 +19,7 @@ import {
   FINALIZATION_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   DISPUTE_RECONSIDERATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
 } from "../src/schemas.js";
@@ -751,7 +752,11 @@ for (const [mode, phase] of [
     if (restated)
       assert.deepEqual(
         fixture.calls.worker
-          .filter(({ schema }) => schema === FINDING_RESOLUTION_SCHEMA)
+          .filter(({ schema }) =>
+            [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(
+              schema,
+            ),
+          )
           .map(({ access }) => access),
         ["workspace-write", "read-only", "read-only"],
       );
@@ -955,8 +960,8 @@ test("content-changing resolution can restate a policy stop without replay or a 
     await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
     "safe repair\n",
   );
-  const requests = fixture.calls.worker.filter(
-    ({ schema }) => schema === FINDING_RESOLUTION_SCHEMA,
+  const requests = fixture.calls.worker.filter(({ schema }) =>
+    [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema),
   );
   assert.deepEqual(
     requests.map(({ access }) => access),
@@ -1327,8 +1332,8 @@ for (const mode of ["independent", "lazy", "combined"]) {
     );
     assert.ok(inspected);
     assert.equal(
-      fixture.calls.worker.filter(
-        ({ schema }) => schema === FINDING_RESOLUTION_SCHEMA,
+      fixture.calls.worker.filter(({ schema }) =>
+        [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema),
       ).length,
       1,
     );

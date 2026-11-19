@@ -4,16 +4,28 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
   attachAvailability,
   availabilityFailure,
 } from "../../../test/support/availability.js";
 import { attachInactivity } from "../../../test/support/inactivity.js";
 import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+import {
   polishingPipeline,
   RESOLUTION_CORRECTION_INSTRUCTIONS,
   runPolishing,
 } from "../src/index.js";
-import { FINDING_RESOLUTION_SCHEMA } from "../src/schemas.js";
+import {
+  FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
+} from "../src/schemas.js";
+import { normalizeResolutionResult } from "../src/workflow-contract.js";
 import {
   SETTINGS,
   bootstrapReady,
@@ -25,6 +37,7 @@ import {
   createRealStoreFixture,
   environmentBlocked,
   finalizationPassed,
+  matchesSchemaSubset,
   polishingCompleted,
   productDecision,
   reconciliationResolved,
@@ -38,6 +51,516 @@ const REJECTED = "rejected-report-marker";
 const REASON_EVIDENCE =
   "Worker field decisions[0].reason violated nonempty-plain-text-up-to-4000-characters.";
 const LOST_EVIDENCE = "Worker field result violated interrupted-response.";
+const unfinished = () => ({
+  status: "UNFINISHED",
+  decisions: [],
+  reason: "The original repair remains necessary.",
+  question: "",
+  options: [],
+  whyBlocked: "",
+  evidence: ["The preserved candidate still contains blocker R1."],
+});
+
+test("unfinished is recovery-only and rejects dispositions or unsupported authority claims", () => {
+  const normalize = (payload) =>
+    normalizeResolutionResult(payload, [{ id: "R1" }], new Set(), {
+      recoveryOnly: true,
+    });
+  assert.doesNotThrow(() => normalize(unfinished()));
+  assert.equal(
+    matchesSchemaSubset(FINDING_RECOVERY_SCHEMA, unfinished()),
+    true,
+  );
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, unfinished()),
+    false,
+  );
+  assert.throws(() =>
+    normalizeResolutionResult(unfinished(), [{ id: "R1" }], new Set()),
+  );
+  for (const patch of [
+    { decisions: resolution("FIX", "R1").decisions },
+    { evidence: [] },
+    { reason: "" },
+    { question: "New question" },
+  ]) {
+    assert.throws(() => normalize({ ...unfinished(), ...patch }), {
+      code: "ERR_INVALID_POLISHING_OUTPUT",
+    });
+  }
+});
+
+test("legacy blocked recovery preserves unfinished bytes until one new repair is authorized", async (t) => {
+  let writes = 0;
+  const fixture = await createFixture(t, {
+    ...terminalFindingFlow("independent", [
+      invalidResolution(),
+      environmentBlocked(
+        "Required inspection evidence is unavailable.",
+        "Resolve the inspection prerequisite before retrying.",
+      ),
+      unfinished(),
+      resolution("FIX", "R1"),
+    ]),
+    settings: { ...SETTINGS, maxFixRounds: 1 },
+    async onRoleRun(_role, request, _turn, { projectPath }) {
+      if (
+        request.schema === FINDING_RESOLUTION_SCHEMA &&
+        request.access === "workspace-write"
+      ) {
+        writes++;
+        await writeFile(
+          join(projectPath, "repair.txt"),
+          writes === 1 ? "unfinished\n" : "fixed\n",
+        );
+        if (writes === 2) throw availabilityFailure();
+      }
+    },
+  });
+  const availability = attachAvailability(fixture);
+  const blocked = await fixture.run();
+  assert.equal(blocked.pause.reason, "environment_blocked");
+  const legacy = structuredClone(blocked.pipelineState);
+  legacy.resolutionCorrection.schemaVersion = 1;
+  delete legacy.resolutionCorrection.repair;
+  delete legacy.resolutionCorrection.factsFingerprint;
+  const migrated = polishingPipeline.migrations[24]({ pipelineState: legacy });
+  assert.deepEqual(migrated, blocked.pipelineState);
+  assert.throws(() => polishingPipeline.migrations[24](blocked));
+  await fixture.persistPipelineState(migrated);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  assert.equal(paused.activeTurn, null);
+  const checkpoint = paused.pipelineState.resolutionCorrection;
+  assert.equal(checkpoint.stage, "repair-required");
+  assert.equal(checkpoint.blockers[0].id, "R1");
+  assert.equal(checkpoint.attempts, 2);
+  assert.equal(checkpoint.additionalAttempts, 1);
+  assert.equal(paused.counters.fixRounds, 1);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "unfinished\n",
+  );
+  assert.deepEqual(polishingPipeline.projections.pause(paused).nextActions, [
+    { type: "resume", action: null },
+  ]);
+  for (const mutate of [
+    (run) => {
+      run.pipelineState.resolutionCorrection.repair = null;
+    },
+    (run) => {
+      run.pipelineState.resolutionCorrection.attempts--;
+    },
+    (run) => {
+      run.pipelineState.workReports.at(-1).recovery.previous =
+        checkpoint.repair;
+    },
+    (run) => {
+      run.pipelineState.requiredChecks[0].command = "node other-check.js";
+    },
+    (run) => {
+      run.activeTurn = { role: "worker", phase: "resolve-findings" };
+    },
+  ]) {
+    const rejected = structuredClone(paused);
+    mutate(rejected);
+    assert.throws(() => polishingPipeline.workflow.validateRun(rejected), {
+      code: "ERR_INVALID_POLISHING_STATE",
+    });
+  }
+  const exhausted = await fixture.run();
+  assert.equal(exhausted.pause.reason, "resolution_output_invalid");
+  assert.equal(availability.scheduled.length, 1);
+  assert.equal(writes, 2);
+  const done = await fixture.run();
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(done.counters.fixRounds, 1);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "fixed\n",
+  );
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    [
+      "workspace-write",
+      "read-only",
+      "read-only",
+      "workspace-write",
+      "read-only",
+    ],
+  );
+  const authorization = fixture.transitions.findIndex(
+    ({ patch }) =>
+      patch.pipelineState?.resolutionCorrection?.stage === "repair-authorized",
+  );
+  assert.ok(authorization >= 0);
+  const reservation =
+    fixture.transitions[authorization].patch.pipelineState.resolutionCorrection;
+  assert.equal(reservation.attempts, 2);
+  assert.equal(reservation.additionalAttempts, 1);
+  assert.equal(fixture.calls.reviewer.length, 5); // Bootstrap, original candidate and terminal, renewed candidate and terminal.
+  assert.ok(
+    done.pipelineState.workReports.some(
+      ({ status }) => status === "UNFINISHED",
+    ),
+  );
+});
+
+for (const [reason, attach, failure] of [
+  ["authentication_required", attachAuthentication, authenticationFailure],
+  ["output_exhausted", attachOutputExhaustion, outputExhaustion],
+]) {
+  test(`${reason} during a continued repair retains its consumed recovery checkpoint`, async (t) => {
+    let writes = 0;
+    const fixture = await createFixture(t, {
+      ...terminalFindingFlow("independent", [
+        invalidResolution(),
+        unfinished(),
+        resolution("FIX", "R1"),
+      ]),
+      settings: { ...SETTINGS, maxFixRounds: 1 },
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (!isResolution(request) || request.access !== "workspace-write")
+          return;
+        writes++;
+        await writeFile(
+          join(projectPath, "repair.txt"),
+          writes === 1 ? "unfinished\n" : "fixed\n",
+        );
+        if (writes === 2) throw failure();
+      },
+    });
+    attach(fixture);
+    const required = await fixture.run();
+    assert.equal(required.pause.reason, "finding_repair_required");
+    const predecessor = required.pipelineState.resolutionCorrection;
+
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, reason);
+    assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+    assert.equal(paused.activeTurn, null);
+    const checkpoint = paused.pipelineState.resolutionCorrection;
+    assert.equal(checkpoint?.stage, "ready");
+    assert.equal(checkpoint.repair, predecessor.repair);
+    assert.deepEqual(checkpoint.blockers, predecessor.blockers);
+    assert.equal(checkpoint.attempts, predecessor.attempts);
+    assert.equal(checkpoint.additionalAttempts, predecessor.additionalAttempts);
+    assert.equal(checkpoint.fixCharged, false); // The pending round was already charged.
+    assert.equal(paused.pipelineState.pendingCorrection, true);
+    assert.equal(paused.counters.fixRounds, 1);
+    assert.equal(
+      await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+      "fixed\n",
+    );
+
+    // The first read-only recovery allowance is still consumed.
+    const exhausted = await fixture.run();
+    assert.equal(exhausted.pause.reason, "resolution_output_invalid");
+    assert.equal(writes, 2);
+    assert.equal(resolutionCalls(fixture).length, 3);
+    const completed = await fixture.run();
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(completed.counters.fixRounds, 1);
+    assert.deepEqual(
+      resolutionCalls(fixture).map(({ access }) => access),
+      ["workspace-write", "read-only", "workspace-write", "read-only"],
+    );
+    assert.equal(fixture.calls.reviewer.length, 5);
+    assert.deepEqual(
+      completed.pipelineState.workReports.find(
+        ({ status }) => status === "UNFINISHED",
+      ),
+      required.pipelineState.workReports.at(-1),
+    );
+  });
+}
+
+test("lost repair-authorization acknowledgement preserves durable unstarted authority", async (t) => {
+  let writes = 0;
+  const fixture = await createRealStoreFixture(t, {
+    ...terminalFindingFlow("independent", [
+      invalidResolution(),
+      unfinished(),
+      resolution("FIX", "R1"),
+    ]),
+    settings: { ...SETTINGS, maxFixRounds: 1 },
+    async onRoleRun(_role, request, _turn, { projectPath }) {
+      if (!isResolution(request) || request.access !== "workspace-write")
+        return;
+      writes++;
+      await writeFile(
+        join(projectPath, "repair.txt"),
+        writes === 1 ? "unfinished\n" : "fixed\n",
+      );
+    },
+  });
+  const required = await fixture.run();
+  assert.equal(required.pause.reason, "finding_repair_required");
+  const transition = fixture.runtime.transition;
+  const loss = new Error("Synthetic authorization acknowledgement loss.");
+  let lost = false;
+  fixture.runtime.transition = async (...args) => {
+    const next = await transition(...args);
+    if (
+      !lost &&
+      next.pipelineState.resolutionCorrection?.stage === "repair-authorized"
+    ) {
+      lost = true;
+      throw loss;
+    }
+    return next;
+  };
+
+  await assert.rejects(fixture.run(), (cause) => cause === loss);
+  const reloaded = await fixture.recover();
+  assert.equal(reloaded.pipelineState.workflowState, "RESOLVE_FINDINGS");
+  assert.equal(reloaded.pause, null);
+  assert.equal(reloaded.activeTurn, null);
+  assert.equal(
+    reloaded.pipelineState.resolutionCorrection.stage,
+    "repair-authorized",
+  );
+  assert.deepEqual(reloaded.pipelineState.resolutionCorrection, {
+    ...required.pipelineState.resolutionCorrection,
+    stage: "repair-authorized",
+  });
+  assert.deepEqual(
+    reloaded.pipelineState.workReports,
+    required.pipelineState.workReports,
+  );
+  assert.equal(reloaded.counters.fixRounds, 1);
+  assert.equal(writes, 1);
+  const completed = await fixture.run();
+  assert.equal(
+    completed.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(completed.pause),
+  );
+  assert.equal(completed.counters.fixRounds, 1);
+  assert.equal(writes, 2);
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only", "workspace-write"],
+  );
+  assert.equal(fixture.calls.reviewer.length, 5);
+});
+
+for (const publication of [
+  "invocation",
+  "reconciliation",
+  "retirement",
+  "session",
+  "restatement",
+]) {
+  test(`lost repair ${publication} acknowledgement preserves consumed authority for read-only recovery`, async (t) => {
+    let writes = 0;
+    const fixture = await createRealStoreFixture(t, {
+      ...terminalFindingFlow("independent", [
+        invalidResolution(),
+        unfinished(),
+        publication === "invocation"
+          ? unfinished()
+          : publication === "restatement"
+            ? invalidResolution()
+            : resolution("FIX", "R1"),
+        resolution("FIX", "R1"),
+      ]),
+      settings: { ...SETTINGS, maxFixRounds: 1 },
+      async onRoleRun(_role, request, _turn, { projectPath }) {
+        if (!isResolution(request) || request.access !== "workspace-write")
+          return;
+        writes++;
+        await writeFile(
+          join(projectPath, "repair.txt"),
+          writes === 1 ? "unfinished\n" : "fixed\n",
+        );
+      },
+    });
+    const required = await fixture.run();
+    assert.equal(required.pause.reason, "finding_repair_required");
+    const method = {
+      invocation: "startAgentTurn",
+      reconciliation: "transition",
+      retirement: "finishAgentTurn",
+      session: "recordChildSession",
+      restatement: "startAgentTurn",
+    }[publication];
+    const publish = fixture.runtime[method];
+    const loss = new Error("Synthetic repair acknowledgement loss.");
+    const publishedStage = {
+      invocation: "invoking",
+      reconciliation: "ready",
+      retirement: "ready",
+      session: "ready",
+      restatement: "correcting",
+    }[publication];
+    fixture.runtime[method] = async (...args) => {
+      const next = await publish(...args);
+      if (
+        next.pipelineState.resolutionCorrection?.repair != null &&
+        next.pipelineState.resolutionCorrection.stage === publishedStage
+      )
+        throw loss;
+      return next;
+    };
+    if (publication === "restatement") {
+      const exhausted = await fixture.run();
+      assert.equal(exhausted.pause.reason, "resolution_output_invalid");
+      assert.equal(writes, 2);
+    }
+    await assert.rejects(fixture.run(), (cause) => cause === loss);
+    const reloaded = await fixture.recover();
+    assert.equal(reloaded.pipelineState.workflowState, "RESOLVE_FINDINGS");
+    assert.equal(reloaded.pause, null);
+    assert.deepEqual(
+      reloaded.activeTurn,
+      ["invocation", "restatement"].includes(publication)
+        ? { role: "worker", phase: "resolve-findings" }
+        : null,
+    );
+    assert.equal(
+      reloaded.pipelineState.resolutionCorrection.stage,
+      publishedStage,
+    );
+    assert.equal(
+      reloaded.pipelineState.resolutionCorrection.repair,
+      required.pipelineState.resolutionCorrection.repair,
+    );
+    const consumedRetry = publication === "restatement" ? 1 : 0;
+    for (const field of ["attempts", "additionalAttempts"]) {
+      assert.equal(
+        reloaded.pipelineState.resolutionCorrection[field],
+        required.pipelineState.resolutionCorrection[field] + consumedRetry,
+      );
+    }
+    assert.equal(reloaded.counters.fixRounds, 1);
+    assert.deepEqual(
+      reloaded.pipelineState.resolutionCorrection.blockers,
+      required.pipelineState.resolutionCorrection.blockers,
+    );
+    assert.deepEqual(
+      reloaded.pipelineState.workReports,
+      required.pipelineState.workReports,
+    );
+    const expectedWrites = publication === "invocation" ? 1 : 2;
+    assert.equal(writes, expectedWrites);
+    const exhausted = await fixture.run();
+    assert.equal(exhausted.pause.reason, "resolution_output_invalid");
+    assert.equal(exhausted.activeTurn, null);
+    assert.equal(writes, expectedWrites);
+    let completed = await fixture.run();
+    if (publication === "invocation") {
+      assert.equal(completed.pause.reason, "finding_repair_required");
+      assert.equal(writes, expectedWrites);
+      assert.equal(
+        await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+        "unfinished\n",
+      );
+      completed = await fixture.run();
+    }
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(completed.counters.fixRounds, 1);
+    assert.equal(writes, 2);
+    assert.deepEqual(
+      resolutionCalls(fixture).map(({ access }) => access),
+      publication === "invocation"
+        ? ["workspace-write", "read-only", "read-only", "workspace-write"]
+        : ["workspace-write", "read-only", "workspace-write", "read-only"],
+    );
+    assert.equal(fixture.calls.reviewer.length, 5);
+  });
+}
+
+test("an uncharged unfinished repair requires only its eligible explicit fix-budget grant", async (t) => {
+  const fixture = await createFixture(t, {
+    settings: { ...SETTINGS, maxFixRounds: 1 },
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      reviewFindings("R1"),
+      reviewFindings("R1"),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "R1"),
+      invalidResolution(),
+      unfinished(),
+      resolution("FIX", "R1"),
+      finalizationPassed(),
+    ],
+    onRoleRun: (_role, request, _turn, { projectPath }) =>
+      writeRepair(request, projectPath),
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(
+    paused.pipelineState.resolutionCorrection.stage,
+    "repair-required",
+  );
+  assert.equal(paused.pipelineState.resolutionCorrection.access, "read-only");
+  assert.equal(paused.pipelineState.pendingCorrection, false);
+  assert.throws(() => polishingPipeline.validateResumeAction(paused, null));
+  assert.throws(() =>
+    polishingPipeline.validateResumeAction(paused, {
+      type: "override-finding",
+      findingId: "R1",
+    }),
+  );
+  assert.deepEqual(polishingPipeline.projections.pause(paused).nextActions, [
+    { type: "resume", action: { type: "extra-fix-rounds", amount: 1 } },
+  ]);
+  const done = await fixture.run({ type: "extra-fix-rounds", amount: 1 });
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(done.counters.fixRounds, 2);
+  assert.deepEqual(
+    resolutionCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only", "read-only", "workspace-write"],
+  );
+  assert.equal(
+    done.pipelineState.workReports.find(({ status }) => status === "UNFINISHED")
+      .recovery.budgetExhausted,
+    true,
+  );
+});
+
+test("unfinished continuation refuses changed infrastructure before any new repair", async (t) => {
+  const fixture = await createFixture(t, {
+    ...terminalFindingFlow("independent", [invalidResolution(), unfinished()]),
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  await appendFile(join(fixture.projectPath, "package.json"), "\n");
+  const stopped = await fixture.run();
+  assert.equal(stopped.pause.reason, "unsafe_git_state");
+  assert.equal(stopped.activeTurn, null);
+  assert.equal(
+    stopped.pipelineState.resolutionCorrection.stage,
+    "repair-required",
+  );
+  assert.equal(resolutionCalls(fixture).length, 2);
+  assert.equal(stopped.counters.fixRounds, 0);
+});
 
 function invalidResolution(decision = "FIX") {
   const result = resolution(decision, "R1");
@@ -77,17 +600,15 @@ function terminalFindingFlow(mode, resolutions, { refinalize = true } = {}) {
   };
 }
 
+const isResolution = ({ schema }) =>
+  [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema);
+
 function resolutionCalls(fixture) {
-  return fixture.calls.worker.filter(
-    ({ schema }) => schema === FINDING_RESOLUTION_SCHEMA,
-  );
+  return fixture.calls.worker.filter(isResolution);
 }
 
 async function writeRepair(request, projectPath) {
-  if (
-    request.schema === FINDING_RESOLUTION_SCHEMA &&
-    request.access === "workspace-write"
-  ) {
+  if (isResolution(request) && request.access === "workspace-write") {
     await writeFile(join(projectPath, "repair.txt"), "fixed\n");
   }
 }
@@ -226,7 +747,7 @@ for (const lost of ["invoking", "ready"]) {
         await writeRepair(request, projectPath);
         if (
           lost === "invoking" &&
-          request.schema === FINDING_RESOLUTION_SCHEMA &&
+          isResolution(request) &&
           request.access === "workspace-write"
         ) {
           throw process.stop();
@@ -275,7 +796,7 @@ for (const changed of [false, true]) {
       async onRoleRun(_role, request, _turn, { projectPath }) {
         if (
           failed ||
-          request.schema !== FINDING_RESOLUTION_SCHEMA ||
+          !isResolution(request) ||
           request.access !== "workspace-write"
         )
           return;
@@ -325,10 +846,7 @@ test("an unclassified failure during reconstruction after a timeout is restated 
   const fixture = await createFixture(t, {
     ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (
-        request.schema !== FINDING_RESOLUTION_SCHEMA ||
-        request.access !== "workspace-write"
-      )
+      if (!isResolution(request) || request.access !== "workspace-write")
         return;
       writable += 1;
       if (writable === 1) return inactivity.expire(request);
@@ -372,10 +890,7 @@ test("process loss during a reconstructed original keeps the consumed allowance"
   const fixture = await createFixture(t, {
     ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (
-        request.schema !== FINDING_RESOLUTION_SCHEMA ||
-        request.access !== "workspace-write"
-      )
+      if (!isResolution(request) || request.access !== "workspace-write")
         return;
       assert.equal(await request.onFreshSession(), true);
       await writeRepair(request, projectPath);
@@ -423,10 +938,7 @@ test("infrastructure drift during a restatement retains its unsettled checkpoint
     ]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
       await writeRepair(request, projectPath);
-      if (
-        request.schema === FINDING_RESOLUTION_SCHEMA &&
-        request.access === "read-only"
-      ) {
+      if (isResolution(request) && request.access === "read-only") {
         const fingerprint =
           fixture.runtime.git.validationInfrastructureFingerprint;
         fixture.runtime.git.validationInfrastructureFingerprint = async (
@@ -457,7 +969,7 @@ test("operator stops settle the original and consume an interrupted restatement"
   const fixture = await createFixture(t, {
     ...terminalFindingFlow("independent", []),
     async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (request.schema !== FINDING_RESOLUTION_SCHEMA) return;
+      if (!isResolution(request)) return;
       await writeRepair(request, projectPath);
       throw process.stop();
     },
@@ -505,10 +1017,7 @@ test("a lost restatement without a stop exhausts without invocation", async (t) 
   const fixture = await createFixture(t, {
     ...terminalFindingFlow("independent", [invalidResolution()]),
     async onRoleRun(_role, request) {
-      if (
-        request.schema === FINDING_RESOLUTION_SCHEMA &&
-        request.access === "read-only"
-      ) {
+      if (isResolution(request) && request.access === "read-only") {
         throw process.stop();
       }
     },
@@ -536,7 +1045,7 @@ for (const loss of ["lost", "stopped"]) {
     const fixture = await createFixture(t, {
       ...terminalFindingFlow("independent", []),
       async onRoleRun(_role, request, _turn, { projectPath }) {
-        if (request.schema !== FINDING_RESOLUTION_SCHEMA) return;
+        if (!isResolution(request)) return;
         if (request.access === "read-only") throw process.stop();
         original += 1;
         if (original === 1) throw availabilityFailure();
@@ -596,11 +1105,7 @@ test("an unclassified interrupted restatement is lost and retried only explicitl
     ]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
       await writeRepair(request, projectPath);
-      if (
-        !failed &&
-        request.schema === FINDING_RESOLUTION_SCHEMA &&
-        request.access === "read-only"
-      ) {
+      if (!failed && isResolution(request) && request.access === "read-only") {
         failed = true;
         throw Object.assign(new Error("Synthetic interrupted provider."), {
           code: "ERR_SYNTHETIC_PROVIDER_INTERRUPTED",
@@ -631,10 +1136,7 @@ test("a terminal provider rejection of a restatement keeps its failure", async (
     ...terminalFindingFlow("independent", [invalidResolution()]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
       await writeRepair(request, projectPath);
-      if (
-        request.schema === FINDING_RESOLUTION_SCHEMA &&
-        request.access === "read-only"
-      ) {
+      if (isResolution(request) && request.access === "read-only") {
         throw Object.assign(new Error("Synthetic rejected provider."), {
           code: "ERR_SYNTHETIC_PROVIDER_REJECTED",
         });
@@ -663,7 +1165,7 @@ for (const loss of ["returned", "ownerless"]) {
         loss === "returned" ? [resolution("FIX", "R1")] : [],
       ),
       async onRoleRun(_role, request, _turn, { projectPath }) {
-        if (request.schema !== FINDING_RESOLUTION_SCHEMA) return;
+        if (!isResolution(request)) return;
         await writeRepair(request, projectPath);
         await writeFile(
           join(projectPath, ".agents", "skills", "finalization", "SKILL.md"),
@@ -718,7 +1220,7 @@ for (const drift of ["input", "guidance"]) {
         await writeRepair(request, projectPath);
         if (
           drift === "input" &&
-          request.schema === FINDING_RESOLUTION_SCHEMA &&
+          isResolution(request) &&
           request.access === "read-only"
         ) {
           await appendFile(join(fixture.taskPath, "task.md"), "Drift.\n");
@@ -998,7 +1500,7 @@ test("a restatement backoff kept at its original checkpoint resumes after proces
   const fixture = await createFixture(t, {
     ...terminalFindingFlow("independent", [resolution("FIX", "R1")]),
     async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (request.schema !== FINDING_RESOLUTION_SCHEMA) return;
+      if (!isResolution(request)) return;
       if (request.access === "workspace-write") {
         original += 1;
         if (original === 1) throw availabilityFailure();
@@ -1075,7 +1577,7 @@ test("a classified retry settles an earlier partial write as changed content", a
       finalizationPassed(),
     ],
     async onRoleRun(_role, request, _turn, { projectPath }) {
-      if (request.schema === FINDING_RESOLUTION_SCHEMA && unavailable) {
+      if (isResolution(request) && unavailable) {
         unavailable = false;
         await writeRepair(request, projectPath);
         throw availabilityFailure();

@@ -481,6 +481,18 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze({
   additionalProperties: false,
 });
 
+// Only retired-turn inspection may establish current unfinished repair need.
+export const FINDING_RECOVERY_SCHEMA = deepFreeze({
+  ...FINDING_RESOLUTION_SCHEMA,
+  properties: {
+    ...FINDING_RESOLUTION_SCHEMA.properties,
+    status: {
+      type: "string",
+      enum: [...FINDING_RESOLUTION_SCHEMA.properties.status.enum, "UNFINISHED"],
+    },
+  },
+});
+
 export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
   type: "object",
   properties: {

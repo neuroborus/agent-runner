@@ -59,6 +59,7 @@ import {
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import { assertRun, MAX_BOOTSTRAP_ITEMS } from "../../src/workflow-contract.js";
@@ -1114,9 +1115,11 @@ async function createFixture(
           await onRoleRun?.(role, request, calls[role].length, { projectPath });
           if (
             role === "worker" &&
-            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-              request.schema,
-            ) &&
+            [
+              CHECK_AND_FIX_SCHEMA,
+              FINDING_RESOLUTION_SCHEMA,
+              FINDING_RECOVERY_SCHEMA,
+            ].includes(request.schema) &&
             isFinalizationResult(queues.worker[0])
           ) {
             deferredFinalization = queues.worker.shift();

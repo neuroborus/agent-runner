@@ -29,6 +29,7 @@ import {
   MAX_DISPUTE_HISTORY_BYTES,
   normalizeFinalizationResult,
   normalizePipelineState,
+  resolutionFactsFingerprint,
 } from "../src/workflow-contract.js";
 import {
   SETTINGS,
@@ -2914,7 +2915,7 @@ test("compacts correlated decision records for a thirty-third disputed finding",
       });
     }
   }
-  await fixture.persistPipelineState({
+  const pipelineState = {
     ...paused.pipelineState,
     disputeCounts,
     disputeHistory,
@@ -2925,6 +2926,13 @@ test("compacts correlated decision records for a thirty-third disputed finding",
         rationale: "Historical arbitration resolved the first finding.",
       },
     ],
+  };
+  await fixture.persistPipelineState({
+    ...pipelineState,
+    resolutionCorrection: {
+      ...pipelineState.resolutionCorrection,
+      factsFingerprint: resolutionFactsFingerprint(pipelineState),
+    },
   });
 
   const result = await fixture.run();

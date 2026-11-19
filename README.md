@@ -2094,7 +2094,10 @@ Polishing likewise preserves reconciled finding-resolution work after a
 malformed or lost report in independent and combined modes. One automatic
 read-only report restatement precedes `resolution_output_invalid`; explicit
 resume of that checkpoint authorizes one additional read-only retry without
-writable replay, additional fix budget or approval. See
+writable replay, additional fix budget or approval. Recovery-only UNFINISHED
+instead pauses at `finding_repair_required` for one explicitly authorized new
+repair, retaining original blockers, uncertainty and consumed accounting. An
+uncharged exhausted round requires the eligible existing fix-budget grant. See
 [finding-resolution result recovery](pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
 
 Action-free recovery uses the same leased runner path through CLI and MCP.

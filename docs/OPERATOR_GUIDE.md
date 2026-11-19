@@ -617,7 +617,7 @@ Execution implementation/finding-resolution and polishing finding-report failure
 preserve candidates. One read-only restatement precedes `writable_output_invalid`
 or polishing's `resolution_output_invalid`; explicit resume grants one more
 read-only retry. Inspect bounded diagnostics/`nextActions`; use the offered CLI/MCP
-null resume at that revision. Execution `finding_repair_required` instead grants
+null resume at that revision. `finding_repair_required` instead grants
 one new repair; `fix_limit_reached` needs its explicit budget grant.
 Neither renews attempts or invents dispositions. Never replay effects or
 edit state. Resolve `environment_blocked` prerequisites first. Candidate edits,

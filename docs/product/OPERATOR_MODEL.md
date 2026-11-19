@@ -19,7 +19,8 @@ It grants no writable replay, additional fix budget or approval. Resolve a
 validated environment blocker before resuming; unsafe drift or contamination
 retains its existing stop. See the
 [execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
-Recovery-only `UNFINISHED` instead establishes a still-required execution repair.
+Recovery-only `UNFINISHED` instead establishes a still-required execution repair
+or independent/combined polishing finding repair.
 At `finding_repair_required`, null resume authorizes one new repair against the
 verified preserved candidate. Unavailable uncharged budget requires the existing
 explicit `extra-fix-rounds` grant at `fix_limit_reached`. Neither action invents

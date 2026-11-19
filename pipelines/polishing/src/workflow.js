@@ -62,6 +62,7 @@ import {
   FINALIZATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   POLISH_SCHEMA,
   REVIEW_SCHEMA,
   STAGNATION_SCHEMA,
@@ -120,6 +121,8 @@ import {
   runnerHygieneIssue,
   resolutionCorrectionDiagnostic,
   resolutionNonDisputableIds,
+  resolutionFactsFingerprint,
+  unfinishedResolutionReport,
   sha256,
   snapshotChangeEvidence,
   snapshotChangeLabels,
@@ -386,7 +389,10 @@ function roleOutputContextFor(role, schema, checkpoint) {
   ) {
     return confirmationOutputContext(role);
   }
-  if (schema === FINDING_RESOLUTION_SCHEMA && role === "worker") {
+  if (
+    [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema) &&
+    role === "worker"
+  ) {
     return Object.freeze({
       role: "worker",
       phase: "finding-resolution",
@@ -646,8 +652,8 @@ export async function runPolishing({
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
   let dispositionPausePersistence = false;
-  // An unacknowledged history publication may already be authoritative.
-  let workReportPublicationFailure = null;
+  // An unacknowledged history or continued-repair write may be durable.
+  let protectedPublicationFailure = null;
   let clarificationAppendInProgress = false;
 
   function state() {
@@ -850,8 +856,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       nextActiveTurn,
     } = {},
   ) {
-    if (workReportPublicationFailure !== null)
-      throw workReportPublicationFailure.cause;
+    if (protectedPublicationFailure !== null)
+      throw protectedPublicationFailure.cause;
     if (
       nextPipelineState.repositoryBaseline?.contentFingerprint !==
       state().repositoryBaseline?.contentFingerprint
@@ -882,16 +888,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       ...patch,
       revision: currentRun.revision + 1,
     });
-    const publishesWorkReports = !isDeepStrictEqual(
-      state().workReports,
-      nextPipelineState.workReports,
-    );
+    const publishesProtectedState =
+      !isDeepStrictEqual(state().workReports, nextPipelineState.workReports) ||
+      state().resolutionCorrection?.repair != null ||
+      nextPipelineState.resolutionCorrection?.stage === "repair-authorized";
     try {
       currentRun = await runtime.transition(patch, {
         activity: publicActivity,
       });
     } catch (cause) {
-      if (publishesWorkReports) workReportPublicationFailure = { cause };
+      if (publishesProtectedState) protectedPublicationFailure = { cause };
       throw cause;
     }
     assertRun(currentRun);
@@ -1160,18 +1166,34 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ],
       },
     });
-    currentRun = await runtime.recordChildSession(
-      { role, sessionId, contextKey },
-      {
-        activity: activity(
-          role,
-          "session",
-          "started",
-          `${role} session recorded.`,
-        ),
-      },
-    );
+    try {
+      currentRun = await runtime.recordChildSession(
+        { role, sessionId, contextKey },
+        {
+          activity: activity(
+            role,
+            "session",
+            "started",
+            `${role} session recorded.`,
+          ),
+        },
+      );
+    } catch (cause) {
+      if (state().resolutionCorrection?.repair != null)
+        protectedPublicationFailure = { cause };
+      throw cause;
+    }
     assertRun(currentRun);
+  }
+
+  async function finishAgentTurn(turn, options) {
+    try {
+      return await runtime.finishAgentTurn(turn, options);
+    } catch (cause) {
+      if (state().resolutionCorrection?.repair != null)
+        protectedPublicationFailure ??= { cause };
+      throw cause;
+    }
   }
 
   let trustedCapabilitiesChecked = false;
@@ -1386,7 +1408,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       // consumed reconstruction marker is a lost report, restated read-only.
       if (
         state().resolutionCorrection.stage !== "invoking" ||
-        currentRun.inactivityRecovery?.status !== "expired"
+        currentRun.inactivityRecovery?.status !== "expired" ||
+        state().resolutionCorrection.repair !== null
       )
         return recoverResolutionCorrectionTurn();
       await transition({ ...state(), resolutionCorrection: null });
@@ -1567,7 +1590,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       !restatementExpiryPending();
     if (lost)
       await exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
-    currentRun = await runtime.finishAgentTurn(interruptedTurn);
+    currentRun = await finishAgentTurn(interruptedTurn);
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
@@ -1621,6 +1644,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     for (;;) {
       const result = await runRoleAttempt(role, schema, buildPrompt, options);
       if (result !== availabilityRetry) return result;
+      if (options?.reserveResolution?.repair !== undefined) return result;
       await options?.onAvailabilityRetry?.();
     }
   }
@@ -1821,7 +1845,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       reserveResolution === undefined
         ? null
         : {
-            schemaVersion: 1,
+            schemaVersion: 2,
             stage: "invoking",
             access,
             blockers: reserveResolution.blockers,
@@ -1832,25 +1856,49 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             candidate: null,
             fixRoundsBefore: counters().fixRounds,
             fixCharged: false,
-            attempts: 0,
-            additionalAttempts: 0,
+            attempts:
+              reserveResolution.repair === undefined
+                ? 0
+                : state().resolutionCorrection.attempts,
+            additionalAttempts:
+              reserveResolution.repair === undefined
+                ? 0
+                : state().resolutionCorrection.additionalAttempts,
             diagnostics: [],
             productDecision: null,
+            repair: reserveResolution.repair ?? null,
+            factsFingerprint: resolutionFactsFingerprint(state()),
           };
-    currentRun = await runtime.startAgentTurn(
-      turn,
-      consumeSourceFork || reservation !== null
-        ? {
-            pipelineState: {
-              ...state(),
-              ...(consumeSourceFork ? { lazySourceForkConsumed: true } : {}),
-              ...(reservation === null
-                ? {}
-                : { resolutionCorrection: reservation }),
-            },
-          }
-        : undefined,
-    );
+    if (
+      reserveResolution?.repair !== undefined &&
+      (state().resolutionCorrection?.stage !== "repair-authorized" ||
+        currentRun.activeTurn !== null)
+    )
+      throw workflowError("Finding repair invocation authority was consumed.");
+    try {
+      currentRun = await runtime.startAgentTurn(
+        turn,
+        consumeSourceFork || reservation !== null
+          ? {
+              pipelineState: {
+                ...state(),
+                ...(consumeSourceFork ? { lazySourceForkConsumed: true } : {}),
+                ...(reservation === null
+                  ? {}
+                  : { resolutionCorrection: reservation }),
+              },
+            }
+          : undefined,
+      );
+    } catch (cause) {
+      // Invocation may already be durable; never restore unstarted authority.
+      if (
+        reservation?.repair != null ||
+        state().resolutionCorrection?.repair != null
+      )
+        protectedPublicationFailure = { cause };
+      throw cause;
+    }
     assertRun(currentRun);
     interruptedTurn = null;
     interruptedRepositoryReconciled = false;
@@ -1881,23 +1929,24 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         (agentError === undefined ||
           (agentError.failureClass === STRUCTURED_OUTPUT_FAILURE_CLASS &&
             !outputExhausted));
-      // Any other recoverable failure lost the report: its reconciled effects
-      // settle through the retained checkpoint and a read-only restatement.
-      // Terminal failures keep their existing retirement and failure.
-      const reportLost =
-        reservation !== null &&
-        !reportReturned &&
-        !currentInactivityFailure &&
-        !availabilityFailure &&
-        !authenticationFailure &&
-        !outputExhausted &&
-        agentError?.recoverable === true;
-      retireReservation =
-        reservation !== null && !reportReturned && !reportLost;
       const pausingDisposition =
         outputExhausted ||
         (authenticationFailure &&
           agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS);
+      // A continued repair never replays an invoked effect, including after
+      // authentication/output pauses. Other terminal failures still fail.
+      const reportLost =
+        reservation !== null &&
+        !reportReturned &&
+        ((reservation.repair !== null &&
+          (agentError?.recoverable === true || pausingDisposition)) ||
+          (!currentInactivityFailure &&
+            !availabilityFailure &&
+            !authenticationFailure &&
+            !outputExhausted &&
+            agentError?.recoverable === true));
+      retireReservation =
+        reservation !== null && !reportReturned && !reportLost;
       nextRepositoryBaseline = baseline;
       if (access === "read-only") {
         await runtime.git.assertUnchanged(turnSnapshot);
@@ -2103,7 +2152,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
-        currentRun = await runtime.finishAgentTurn(turn, {
+        currentRun = await finishAgentTurn(turn, {
           repositoryReconciled,
         });
         assertRun(currentRun);
@@ -3987,6 +4036,11 @@ ${JSON.stringify(
     if (resumeAction === null) {
       const correction = state().resolutionCorrection;
       if (
+        currentRun.pause?.reason === "finding_repair_required" &&
+        correction?.stage === "repair-required"
+      )
+        return authorizeFindingRepair();
+      if (
         state().workflowState === "WAITING_FOR_USER" &&
         (currentRun.pause.reason === "resolution_output_invalid" ||
           (currentRun.pause.reason === "environment_blocked" &&
@@ -4078,6 +4132,9 @@ ${JSON.stringify(
         !Number.isSafeInteger(totalFixRounds)
       ) {
         throw workflowError("Additional fix-round budget is too large.");
+      }
+      if (current.resolutionCorrection?.stage === "repair-required") {
+        return authorizeFindingRepair(additionalFixRounds);
       }
       await transition(
         {
@@ -6777,9 +6834,19 @@ ${JSON.stringify(
   }
 
   async function runResolutionTurn() {
-    if (state().resolutionCorrection !== null) {
+    const continuingRepair =
+      state().resolutionCorrection?.stage === "repair-authorized";
+    if (state().resolutionCorrection !== null && !continuingRepair) {
       return continueResolutionCorrection();
     }
+    if (
+      continuingRepair &&
+      ((await readCurrentInputs()) === null ||
+        !(await verifyPersistedRepository()) ||
+        !(await verifyFinalizationGuidance()) ||
+        (await resolutionScopeChanged()))
+    )
+      return false;
     const current = state();
     if (current.findings.length === 0 && finalizationGatePassed(current)) {
       await prepareHandoffIfReady();
@@ -6840,11 +6907,12 @@ ${JSON.stringify(
     }
     const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
-      retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
-      (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
-        true &&
-        !current.availabilityCorrectionCharged &&
-        counters().fixRounds >= fixBudget());
+      !continuingRepair &&
+      (retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
+        (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
+          true &&
+          !current.availabilityCorrectionCharged &&
+          counters().fixRounds >= fixBudget()));
     const blockers = activeBlockers();
     const nonDisputableIds = new Set(
       resolutionNonDisputableIds(current, blockers),
@@ -6892,6 +6960,8 @@ ${JSON.stringify(
         reconciled: turn.workspaceChanged,
       });
     }
+    if (continuingRepair)
+      await runtime.adapters.worker.probe({ access: "workspace-write" });
     let output;
     try {
       output = await runRole(
@@ -6905,6 +6975,9 @@ ${JSON.stringify(
           reserveResolution: {
             ...facts,
             beforeFingerprint: current.repositoryBaseline.contentFingerprint,
+            ...(continuingRepair
+              ? { repair: current.resolutionCorrection.repair }
+              : {}),
           },
           classifyResult: (structured) =>
             classifyResolutionResult(structured, facts),
@@ -6921,6 +6994,7 @@ ${JSON.stringify(
     if (output === null) {
       return false;
     }
+    if (output === availabilityRetry) return continueResolutionCorrection();
     return state().resolutionCorrection.diagnostics.length === 0
       ? acceptResolutionOutput(output)
       : restateResolution();
@@ -6934,6 +7008,10 @@ ${JSON.stringify(
     return `${FINDING_RESOLUTION_INSTRUCTIONS}
 
 ${prefinalizationTrustedCommands()}${
+      current.resolutionCorrection?.stage === "repair-authorized"
+        ? "\nThis is one explicitly authorized new repair against the preserved candidate, not replay of the retired effect. Preserve original blockers and historical uncertainty; retained UNFINISHED reports establish no past dispositions or validation credit. Consumed attempts and pending fix accounting remain binding."
+        : ""
+    }${
       budgetExhausted
         ? "\nThe fix budget is exhausted: do not modify the repository and return DISPUTE only where valid; a required FIX will pause for additional budget."
         : ""
@@ -7047,7 +7125,32 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       output,
       checkpoint.blockers,
       new Set(checkpoint.nonDisputableIds),
+      { recoveryOnly: checkpoint.stage === "correcting" },
     );
+    if (result.status === "UNFINISHED") {
+      const report = unfinishedResolutionReport(state(), result);
+      const workReports = retainWorkReport(state().workReports, report);
+      const needsBudget =
+        !state().pendingCorrection && counters().fixRounds >= fixBudget();
+      await pause(
+        needsBudget ? "fix_limit_reached" : "finding_repair_required",
+        {
+          ...(needsBudget ? { fixRounds: counters().fixRounds } : {}),
+          resumeState: "RESOLVE_FINDINGS",
+        },
+        {
+          workReports,
+          resolutionCorrection: {
+            ...checkpoint,
+            stage: "repair-required",
+            repair: workReports.findIndex((entry) =>
+              isDeepStrictEqual(entry, report),
+            ),
+          },
+        },
+      );
+      return false;
+    }
     return settleResolution(result, state(), {
       budgetExhausted: checkpoint.budgetExhausted,
       contentChanged: checkpoint.contentChanged,
@@ -7285,6 +7388,54 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     return restateResolution();
   }
 
+  async function authorizeFindingRepair(
+    additionalFixRounds = state().additionalFixRounds,
+  ) {
+    if (
+      (await readCurrentInputs()) === null ||
+      !(await verifyPersistedRepository()) ||
+      !(await verifyFinalizationGuidance()) ||
+      (await resolutionScopeChanged())
+    )
+      return false;
+    if (currentRun.activeTurn !== null || interruptedTurn !== null)
+      throw workflowError("Finding repair still has an execution owner.");
+    const current = state();
+    if (
+      !current.pendingCorrection &&
+      counters().fixRounds >=
+        current.settings.maxFixRounds + additionalFixRounds
+    ) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    const next = { ...current, additionalFixRounds };
+    await transition(
+      {
+        ...next,
+        workflowState: "RESOLVE_FINDINGS",
+        resolutionCorrection: {
+          ...current.resolutionCorrection,
+          stage: "repair-authorized",
+          factsFingerprint: resolutionFactsFingerprint(next),
+        },
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "resolution",
+          "repair-authorized",
+          "One new finding repair explicitly authorized; the retired effect is not replayed.",
+        ),
+      },
+    );
+    return true;
+  }
+
   async function reconcileOriginalResolution() {
     const checkpoint = state().resolutionCorrection;
     try {
@@ -7306,7 +7457,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       // The guidance stop requires a new run and retains the checkpoint;
       // retire the inspected turn.
       if (interruptedTurn !== null) {
-        currentRun = await runtime.finishAgentTurn(interruptedTurn);
+        currentRun = await finishAgentTurn(interruptedTurn);
         assertRun(currentRun);
         interruptedTurn = null;
       }
@@ -7372,7 +7523,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
         checkpoint.productDecision === null
       )
         await exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
-      currentRun = await runtime.finishAgentTurn(interruptedTurn);
+      currentRun = await finishAgentTurn(interruptedTurn);
       interruptedTurn = null;
     }
   }
@@ -7421,6 +7572,12 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
       return exhaustResolutionCorrection([INTERRUPTED_RESOLUTION_DIAGNOSTIC]);
     }
     if (checkpoint.stage === "ready") {
+      if (checkpoint.attempts >= checkpoint.additionalAttempts + 1)
+        return exhaustResolutionCorrection(
+          checkpoint.diagnostics.length
+            ? checkpoint.diagnostics
+            : [INTERRUPTED_RESOLUTION_DIAGNOSTIC],
+        );
       checkpoint = {
         ...checkpoint,
         stage: "correcting",
@@ -7447,7 +7604,7 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
     try {
       output = await runRole(
         "worker",
-        FINDING_RESOLUTION_SCHEMA,
+        FINDING_RECOVERY_SCHEMA,
         (evidence) => `${resolutionPrompt(checkpoint, evidence)}
 
 ${RESOLUTION_CORRECTION_INSTRUCTIONS}
@@ -7483,6 +7640,7 @@ ${JSON.stringify(checkpoint.diagnostics, null, 2)}`,
     const diagnostics = classifyResolutionResult(
       output,
       state().resolutionCorrection,
+      { recoveryOnly: true },
     );
     return diagnostics.length === 0
       ? acceptResolutionOutput(output)
@@ -7906,8 +8064,8 @@ ${evidence}`,
       );
     }
   } catch (cause) {
-    if (workReportPublicationFailure !== null)
-      throw workReportPublicationFailure.cause;
+    if (protectedPublicationFailure !== null)
+      throw protectedPublicationFailure.cause;
     if (
       dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(

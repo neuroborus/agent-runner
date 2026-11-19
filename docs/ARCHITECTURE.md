@@ -5099,6 +5099,20 @@ further read-only attempt. Lazy mode keeps its existing resolution contract. The
 owning [polishing specification](../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery)
 defines the checkpoint and pause contract.
 
+Polishing state version 25 adds its own recovery-only UNFINISHED and
+`repair-required` / `repair-authorized` continuation through existing null resume
+and narrowly eligible extra-fix-rounds actions. Schema-2 resolution checkpoints
+bind frozen facts, original blockers, candidate/controls/infrastructure and
+predecessor work reports. New repair invocations preserve consumed attempts and
+pending once-only correction accounting; invoked effects return through read-only
+recovery, including authentication and output-exhaustion pauses. Uncertain repair
+checkpoint, invocation, retirement or child-session publication, including
+read-only restatement startup, propagates without overwriting durable authority
+with stale failure or pause state; reconstruction uses the journal.
+Version-24 migration upgrades shape only and grants no writes or renewed
+allowances. Lazy resolution, candidate/terminal gates and runner-owned HANDOFF
+remain unchanged.
+
 Plan execution also owns lazy structured-output recovery. Provider and
 deterministic checkpoint failures are reduced to bounded diagnostics, then one
 fresh Worker session receives the complete durable checkpoint request with its

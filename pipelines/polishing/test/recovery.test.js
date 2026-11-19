@@ -19,6 +19,7 @@ import {
   CHECK_AND_FIX_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   POLISH_SCHEMA,
   REVIEW_SCHEMA,
 } from "../src/schemas.js";
@@ -1324,7 +1325,9 @@ test("accounts for a content-changing interrupted correction before recovery", a
   assert.equal(resumed.counters.correctionRounds, 1);
   assert.deepEqual(
     fixture.calls.worker
-      .filter(({ schema }) => schema === FINDING_RESOLUTION_SCHEMA)
+      .filter(({ schema }) =>
+        [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema),
+      )
       .map(({ access }) => access),
     ["workspace-write", "read-only"],
   );
@@ -1560,7 +1563,11 @@ for (const mode of ["independent", "lazy"]) {
         });
         const runWorker = fixture.runtime.adapters.worker.run;
         fixture.runtime.adapters.worker.run = async (request) => {
-          if (request.schema === schema) {
+          if (
+            request.schema === schema ||
+            (schema === FINDING_RESOLUTION_SCHEMA &&
+              request.schema === FINDING_RECOVERY_SCHEMA)
+          ) {
             targetCalls.push(request);
             attempts += 1;
             for (const prompt of [request.prompt, request.recoveryPrompt]) {
@@ -1609,9 +1616,11 @@ for (const mode of ["independent", "lazy"]) {
             }
           }
           if (
-            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-              request.schema,
-            )
+            [
+              CHECK_AND_FIX_SCHEMA,
+              FINDING_RESOLUTION_SCHEMA,
+              FINDING_RECOVERY_SCHEMA,
+            ].includes(request.schema)
           ) {
             fixture.calls.worker.push(request);
             return {

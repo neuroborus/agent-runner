@@ -365,6 +365,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   review_output_invalid: Object.freeze(["REVIEW"]),
   lazy_output_invalid: Object.freeze(["CHECK_AND_FIX", "CLEAN_CONFIRM"]),
   resolution_output_invalid: Object.freeze(["RESOLVE_FINDINGS"]),
+  finding_repair_required: Object.freeze(["RESOLVE_FINDINGS"]),
   fix_limit_reached: Object.freeze([
     "POLISH",
     "CHECK_AND_FIX",
@@ -2761,7 +2762,12 @@ function decisionConstraint(index, suffix, constraint) {
     : outputConstraint("decisions", "array-up-to-32-items");
 }
 
-export function normalizeResolutionResult(payload, blockers, nonDisputableIds) {
+export function normalizeResolutionResult(
+  payload,
+  blockers,
+  nonDisputableIds,
+  { recoveryOnly = false } = {},
+) {
   assertExactOutputFields(payload, RESOLUTION_OUTPUT_FIELDS);
   assertStructuredResult(payload);
   if (
@@ -2771,6 +2777,7 @@ export function normalizeResolutionResult(payload, blockers, nonDisputableIds) {
       "BLOCKED",
       "VALIDATION_POLICY_BLOCKED",
       "PRODUCT_DECISION_REQUIRED",
+      ...(recoveryOnly && blockers.length ? ["UNFINISHED"] : []),
     ].includes(payload.status)
   ) {
     throw outputError(
@@ -2791,7 +2798,7 @@ export function normalizeResolutionResult(payload, blockers, nonDisputableIds) {
       decision: normalizeProductDecision(payload),
     });
   }
-  if (payload.status === "BLOCKED") {
+  if (["BLOCKED", "UNFINISHED"].includes(payload.status)) {
     assertInactiveResolutionFields(
       payload,
       ["decisions", "question", "whyBlocked", "options"],
@@ -2923,6 +2930,8 @@ const RESOLUTION_CORRECTION_FIELDS = Object.freeze([
   "additionalAttempts",
   "diagnostics",
   "productDecision",
+  "repair",
+  "factsFingerprint",
 ]);
 // The candidate binds the reconciled snapshot fields compared for workspace
 // control drift, its content, and the established validation infrastructure.
@@ -2943,6 +2952,8 @@ const RESOLUTION_CORRECTION_STAGES = Object.freeze([
   "correcting",
   "exhausted",
   "blocked",
+  "repair-required",
+  "repair-authorized",
 ]);
 const RESOLUTION_DIAGNOSTIC_CONSTRAINTS = new Set([
   "object",
@@ -2986,12 +2997,13 @@ export function resolutionCorrectionDiagnostic(value) {
 
 // A pure classifier for the strict normalizer: an empty batch means the
 // report is valid; an invalid one yields only its reduced diagnostic.
-export function classifyResolutionResult(payload, checkpoint) {
+export function classifyResolutionResult(payload, checkpoint, options) {
   try {
     normalizeResolutionResult(
       payload,
       checkpoint.blockers,
       new Set(checkpoint.nonDisputableIds),
+      options,
     );
     return Object.freeze([]);
   } catch (cause) {
@@ -3062,6 +3074,114 @@ function validResolutionProductDecision(value) {
   }
 }
 
+export function resolutionFactsFingerprint(state) {
+  return sha256(
+    JSON.stringify([
+      state.settings,
+      state.requiredChecks,
+      state.validationInfrastructure,
+      state.trustedValidation,
+      state.finalizationGuidance,
+      state.findings,
+      state.previousFindings,
+      state.pendingDisputes,
+      state.disputeCounts,
+      state.disputeHistory,
+      state.findingArbitrations,
+      state.findingOverrides,
+      state.correctionHistory,
+      state.sameFindingRounds,
+      state.blockedSinceStagnation,
+      state.stagnationDirection,
+      state.stagnationArbitrationUsed,
+      state.additionalFixRounds,
+    ]),
+  );
+}
+
+export function unfinishedResolutionReport(state, result) {
+  const checkpoint = state.resolutionCorrection;
+  return {
+    phase: "RESOLVE_FINDINGS",
+    ...result,
+    recovery: {
+      checkpointFingerprint: sha256(JSON.stringify(checkpoint)),
+      candidateFingerprint: checkpoint.candidate.contentFingerprint,
+      factsFingerprint: checkpoint.factsFingerprint,
+      blockersFingerprint: sha256(
+        JSON.stringify([checkpoint.blockers, checkpoint.nonDisputableIds]),
+      ),
+      attempts: checkpoint.attempts,
+      additionalAttempts: checkpoint.additionalAttempts,
+      fixRounds: checkpoint.fixRoundsBefore + (checkpoint.fixCharged ? 1 : 0),
+      pendingCorrection: state.pendingCorrection,
+      budgetExhausted: checkpoint.budgetExhausted,
+      diagnostics: checkpoint.diagnostics,
+      previous: checkpoint.repair,
+    },
+  };
+}
+
+function assertUnfinishedResolutionReport(report, reports, index) {
+  const value = report.recovery;
+  const count = (entry) => Number.isSafeInteger(entry) && entry >= 0;
+  const hash = (entry) => typeof entry === "string" && HASH_PATTERN.test(entry);
+  if (
+    report.phase !== "RESOLVE_FINDINGS" ||
+    !hasExactFields(value, [
+      "checkpointFingerprint",
+      "candidateFingerprint",
+      "factsFingerprint",
+      "blockersFingerprint",
+      "attempts",
+      "additionalAttempts",
+      "fixRounds",
+      "pendingCorrection",
+      "budgetExhausted",
+      "diagnostics",
+      "previous",
+    ]) ||
+    ![
+      value.checkpointFingerprint,
+      value.candidateFingerprint,
+      value.factsFingerprint,
+      value.blockersFingerprint,
+    ].every(hash) ||
+    ![value.attempts, value.additionalAttempts, value.fixRounds].every(count) ||
+    !Number.isSafeInteger(value.additionalAttempts + 1) ||
+    value.attempts !== value.additionalAttempts + 1 ||
+    typeof value.pendingCorrection !== "boolean" ||
+    typeof value.budgetExhausted !== "boolean" ||
+    !Array.isArray(value.diagnostics) ||
+    value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS ||
+    value.diagnostics.some(
+      (diagnostic) =>
+        !isDeepStrictEqual(
+          diagnostic,
+          resolutionCorrectionDiagnostic(diagnostic),
+        ),
+    ) ||
+    (value.previous !== null &&
+      (!count(value.previous) ||
+        value.previous >= index ||
+        reports[value.previous]?.status !== "UNFINISHED"))
+  )
+    throw workflowError("Invalid unfinished repair history.");
+  if (value.previous !== null) {
+    const previous = reports[value.previous].recovery;
+    if (
+      value.attempts < previous.attempts ||
+      value.additionalAttempts < previous.additionalAttempts ||
+      value.fixRounds < previous.fixRounds ||
+      value.blockersFingerprint !== previous.blockersFingerprint ||
+      (previous.pendingCorrection && !value.pendingCorrection)
+    )
+      throw workflowError(
+        "Unfinished repair history renewed consumed authority.",
+      );
+  }
+}
+
 function validResolutionCorrection(state) {
   const value = state.resolutionCorrection;
   if (value === null) return true;
@@ -3069,7 +3189,8 @@ function validResolutionCorrection(state) {
   const count = (entry) => Number.isSafeInteger(entry) && entry >= 0;
   if (
     !hasExactFields(value, RESOLUTION_CORRECTION_FIELDS) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
+    value.factsFingerprint !== resolutionFactsFingerprint(state) ||
     !polishingPolicy(state.settings).independentReview ||
     !["RESOLVE_FINDINGS", "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
       state.workflowState,
@@ -3089,9 +3210,13 @@ function validResolutionCorrection(state) {
     !count(value.attempts) ||
     !count(value.additionalAttempts) ||
     !Number.isSafeInteger(value.additionalAttempts + 1) ||
-    value.attempts !==
-      value.additionalAttempts +
-        (["invoking", "ready"].includes(value.stage) ? 0 : 1) ||
+    value.attempts < value.additionalAttempts ||
+    value.attempts > value.additionalAttempts + 1 ||
+    (["correcting", "exhausted", "blocked"].includes(value.stage) &&
+      value.attempts !== value.additionalAttempts + 1) ||
+    (["invoking", "ready"].includes(value.stage) &&
+      value.repair === null &&
+      value.attempts !== value.additionalAttempts) ||
     !Array.isArray(value.diagnostics) ||
     value.diagnostics.length > MAX_DIAGNOSTIC_ITEMS ||
     value.diagnostics.some(
@@ -3109,12 +3234,47 @@ function validResolutionCorrection(state) {
   ) {
     return false;
   }
+  if (value.repair !== null) {
+    const report = state.workReports[value.repair];
+    const previous = report?.recovery;
+    if (
+      !count(value.repair) ||
+      report?.status !== "UNFINISHED" ||
+      previous.blockersFingerprint !==
+        sha256(JSON.stringify([value.blockers, value.nonDisputableIds])) ||
+      value.attempts < previous.attempts ||
+      value.additionalAttempts < previous.additionalAttempts ||
+      value.fixRoundsBefore + (value.fixCharged ? 1 : 0) < previous.fixRounds ||
+      (previous.pendingCorrection && !state.pendingCorrection) ||
+      (["repair-required", "repair-authorized"].includes(value.stage)
+        ? value.candidate?.contentFingerprint !==
+            previous.candidateFingerprint ||
+          value.fixRoundsBefore + (value.fixCharged ? 1 : 0) !==
+            previous.fixRounds ||
+          value.attempts !== previous.attempts ||
+          value.additionalAttempts !== previous.additionalAttempts ||
+          state.pendingCorrection !== previous.pendingCorrection
+        : value.fixRoundsBefore !== previous.fixRounds ||
+          value.beforeFingerprint !== previous.candidateFingerprint ||
+          state.pendingCorrection !==
+            (previous.pendingCorrection || value.fixCharged) ||
+          (value.stage !== "invoking" &&
+            value.fixCharged !==
+              (value.contentChanged && !previous.pendingCorrection)) ||
+          (value.stage === "invoking" &&
+            (value.budgetExhausted ||
+              value.additionalAttempts !== previous.additionalAttempts ||
+              value.attempts !== previous.attempts)))
+    )
+      return false;
+  } else if (["repair-required", "repair-authorized"].includes(value.stage))
+    return false;
   if (value.stage === "invoking") {
     return (
       value.contentChanged === null &&
       value.candidate === null &&
       !value.fixCharged &&
-      value.attempts === 0 &&
+      (value.repair !== null || value.attempts === 0) &&
       value.diagnostics.length === 0 &&
       // A classified retry keeps the round's content after a charged partial write.
       (state.repositoryBaseline?.contentFingerprint ===
@@ -3800,10 +3960,16 @@ function normalizeWorkReports(reports) {
   }
   for (const report of reports) {
     if (!isRecord(report)) throw workflowError("Invalid work report history.");
-    if (report.status === "BLOCKED") {
+    if (["BLOCKED", "UNFINISHED"].includes(report.status)) {
       assertExactFields(
         report,
-        ["phase", "status", "reason", "evidence"],
+        [
+          "phase",
+          "status",
+          "reason",
+          "evidence",
+          ...(report.status === "UNFINISHED" ? ["recovery"] : []),
+        ],
         "Blocked work report",
       );
       if (
@@ -3822,7 +3988,7 @@ function normalizeWorkReports(reports) {
         });
         if (
           !isDeepStrictEqual(normalized, {
-            status: report.status,
+            status: "BLOCKED",
             reason: report.reason,
             evidence: report.evidence,
           })
@@ -3831,6 +3997,12 @@ function normalizeWorkReports(reports) {
       } catch {
         throw workflowError("Invalid blocked work report.");
       }
+      if (report.status === "UNFINISHED")
+        assertUnfinishedResolutionReport(
+          report,
+          reports,
+          reports.indexOf(report),
+        );
       continue;
     }
     const findingReport = ["CLEAN_CONFIRM", "REVIEW", "CONFIRM"].includes(
@@ -5882,7 +6054,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "polishing" ||
-    run.pipelineStateVersion !== 24 ||
+    run.pipelineStateVersion !== 25 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6226,6 +6398,7 @@ export function assertRun(run) {
         "lazy_output_invalid",
         "no_progress",
         "resolution_output_invalid",
+        "finding_repair_required",
       ].includes(run.pause.reason) ||
       (state.preflightComplete &&
         [
@@ -6362,6 +6535,25 @@ export function assertRun(run) {
   }
   const fixBudget =
     (state.settings?.maxFixRounds ?? 0) + state.additionalFixRounds;
+  const repairNeedsBudget =
+    !state.pendingCorrection && counters.fixRounds >= fixBudget;
+  if (
+    (run.pause?.reason === "finding_repair_required" &&
+      (correction?.stage !== "repair-required" ||
+        repairNeedsBudget ||
+        !hasExactFields(run.pause, ["reason", "resumeState"]))) ||
+    (correction?.stage === "repair-required" &&
+      state.workflowState === "RESOLVE_FINDINGS") ||
+    (correction?.stage === "repair-authorized" &&
+      state.workflowState === "RESOLVE_FINDINGS" &&
+      repairNeedsBudget) ||
+    (["repair-required", "repair-authorized"].includes(correction?.stage) &&
+      run.activeTurn !== null) ||
+    (correction?.stage === "repair-required" &&
+      run.pause?.reason === "fix_limit_reached" &&
+      (!repairNeedsBudget || run.pause.resumeState !== "RESOLVE_FINDINGS"))
+  )
+    throw workflowError("Invalid unfinished finding repair authorization.");
   const correctionHistory = state.correctionHistory;
   const lastCorrection = correctionHistory.at(-1)?.round ?? 0;
   const lastCorrectionFindingIds = new Set(
