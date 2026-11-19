@@ -30,6 +30,21 @@ import { spawnOwnedProcess } from "../src/platform/index.js";
 import { CLAUDE_STORAGE_IDENTITY } from "../src/agents/claude/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
+  CHECK_AND_FIX_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
+  FINALIZATION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  REVIEW_SCHEMA,
+} from "../pipelines/plan-execution/src/schemas.js";
+import {
+  checkAndFix,
+  cleanConfirmation,
+  resolution,
+  reviewFindings,
+} from "../pipelines/plan-execution/test/support/index.js";
+import {
   appendReadFailure,
   clarificationAppendFixture,
   configurationLoader,
@@ -37,7 +52,9 @@ import {
   createExecutionAdapter,
   executeFile,
   operatorFixture,
+  PLAN,
   PREPARED_RUN,
+  requestedStepAssessment,
   runnerFor,
   RUNNER_CONFIGURATION,
   SOURCE_SESSION,
@@ -968,6 +985,409 @@ test("operator stop contains native provider work and preserves writable content
     await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
     "preserved",
   );
+});
+
+test("combined finding repair survives an owned stop and cold continuation publication loss", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    `${PLAN}\n\n## Commit 2: fix(test): refine behavior\n\nRefine the behavior.\n`,
+  );
+  const configuration = {
+    ...RUNNER_CONFIGURATION,
+    pipelines: { "plan-execution": { mode: "combined" } },
+  };
+  const delegate = createExecutionAdapter();
+  const started = Promise.withResolvers();
+  let store = createRunStore({ stateRoot: fixture.stateRoot });
+  let runId;
+  let writes = 0;
+  let sessions = 0;
+  let found = false;
+  let fault = null;
+  const loss = new Error(
+    "Synthetic continuation publication acknowledgement loss.",
+  );
+  const turns = [];
+  const candidate = () =>
+    readFile(join(fixture.projectPath, "repair.txt"), "utf8");
+  const adapter = {
+    ...delegate,
+    async run(request) {
+      const step = requestedStepAssessment(request)?.step;
+      turns.push({ step, schema: request.schema, access: request.access });
+      const respond = (result) => ({
+        structured:
+          request.schema?.properties?.result?.anyOf === undefined
+            ? result
+            : { result },
+        sessionId: `repair-session-${++sessions}`,
+      });
+      if (request.schema === CHECK_AND_FIX_SCHEMA)
+        return respond(checkAndFix());
+      if (request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA) {
+        const {
+          validationChange,
+          validationEvidence,
+          finalizationFindingIds,
+          ...clean
+        } = cleanConfirmation();
+        return respond(clean);
+      }
+      if (step === 2 && request.schema === CANDIDATE_REVIEW_SCHEMA && !found) {
+        found = true;
+        const {
+          validationChange,
+          validationEvidence,
+          finalizationFindingIds,
+          ...findings
+        } = reviewFindings("R1");
+        return respond(findings);
+      }
+      if (request.schema === FINDING_RECOVERY_SCHEMA) {
+        assert.equal(request.access, "read-only");
+        assert.equal(request.session, undefined);
+        assert.equal(await candidate(), "unfinished repair\n");
+        assert.match(
+          request.recoveryPrompt,
+          /original repair|original blocker/iu,
+        );
+        return respond({
+          status: "UNFINISHED",
+          decisions: [],
+          reason:
+            "The original repair is still necessary under frozen authority.",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [
+            "The preserved repair.txt still contains unfinished content for R1.",
+          ],
+        });
+      }
+      if (request.schema === FINDING_RESOLUTION_SCHEMA) {
+        assert.equal(request.access, "workspace-write");
+        writes++;
+        if (writes === 1) {
+          await writeFile(
+            join(fixture.projectPath, "repair.txt"),
+            "unfinished repair\n",
+          );
+          const stopped = new Promise((_resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => reject(request.signal.reason),
+              { once: true },
+            );
+          });
+          started.resolve();
+          return stopped;
+        }
+        assert.equal(
+          writes,
+          2,
+          "A consumed invocation must never be replayed.",
+        );
+        const saved = await store.loadRun(runId);
+        for (const report of saved.pipelineState.workReports.filter(
+          ({ status }) => status === "UNFINISHED",
+        )) {
+          assert.ok(request.recoveryPrompt.includes(report.reason));
+          assert.ok(request.recoveryPrompt.includes(report.evidence[0]));
+        }
+        await writeFile(
+          join(fixture.projectPath, "repair.txt"),
+          "completed repair\n",
+        );
+        return respond(resolution({ id: "R1", decision: "FIX" }));
+      }
+      const response = await delegate.run(request);
+      if (
+        step === 2 &&
+        request.prompt.includes("Implement the changes described")
+      )
+        await writeFile(
+          join(fixture.projectPath, "feature.js"),
+          "export const value = 2;\n",
+        );
+      return response;
+    },
+  };
+  const open = () =>
+    runnerFor(
+      fixture,
+      { codex: adapter },
+      {
+        configuration,
+        runStore: {
+          ...store,
+          async transitionRun(...args) {
+            const next = await store.transitionRun(...args);
+            if (
+              fault === "authorization" &&
+              next.pipelineState.writableResult?.stage === "repair-authorized"
+            ) {
+              fault = null;
+              throw loss;
+            }
+            return next;
+          },
+          async startAgentTurn(...args) {
+            const next = await store.startAgentTurn(...args);
+            if (
+              fault === "invocation" &&
+              next.pipelineState.writableResult?.repair != null &&
+              next.pipelineState.writableResult.stage === "invoking"
+            ) {
+              fault = null;
+              throw loss;
+            }
+            return next;
+          },
+        },
+      },
+    );
+  const runner = open();
+  runId = (
+    await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      sourceSession: null,
+    })
+  ).run.runId;
+  const executing = runner.resume({ runId });
+  let invoking;
+  let stopped;
+  try {
+    await Promise.race([
+      started.promise,
+      executing.then(() => assert.fail("The finding repair did not start.")),
+    ]);
+    invoking = await store.loadRun(runId);
+    assert.equal(invoking.activeTurn.phase, "resolve-findings");
+    assert.equal(invoking.pipelineState.completedCommits.length, 1);
+    await assert.rejects(open().resume({ runId }), { code: "ERR_RUN_LEASED" });
+    await runner.requestOperatorStop({
+      runId,
+      kind: "pause_requested",
+      expectedRevision: invoking.revision,
+      idempotencyKey: "unfinished-repair-stop",
+    });
+    stopped = (await executing).run;
+  } finally {
+    if (await store.runIsLeased(runId)) {
+      await runner.requestOperatorStop({
+        runId,
+        kind: "pause_requested",
+        idempotencyKey: "repair-cleanup",
+      });
+    }
+    await executing;
+  }
+  const [accepted] = invoking.pipelineState.completedCommits;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.equal(stopped.activeTurn, null);
+  assert.equal(stopped.executionProcess, null);
+  assert.equal(stopped.stopRequest.reconciledRevision, stopped.revision);
+  assert.equal(stopped.pipelineState.writableResult.stage, "ready");
+  assert.equal(stopped.pipelineState.pendingCorrection, true);
+  assert.equal(stopped.counters.fixRounds, invoking.counters.fixRounds + 1);
+  assert.equal(await store.runIsLeased(runId), false);
+  assert.equal(await store.worktreeIsLeased(fixture.projectPath, runId), false);
+
+  store = createRunStore({ stateRoot: fixture.stateRoot });
+  assert.deepEqual(await store.loadRun(runId), stopped);
+  const required = (
+    await open().resume({ runId, expectedRevision: stopped.revision })
+  ).run;
+  assert.equal(required.pause.reason, "finding_repair_required");
+  assert.equal(required.pipelineState.writableResult.stage, "repair-required");
+  assert.equal(required.pipelineState.writableResult.attempts, 1);
+  assert.equal(required.pipelineState.writableResult.additionalAttempts, 0);
+  assert.deepEqual(
+    required.pipelineState.writableResult.blockers,
+    stopped.pipelineState.writableResult.blockers,
+  );
+  assert.equal(required.counters.fixRounds, stopped.counters.fixRounds);
+  assert.equal(writes, 1);
+  assert.equal(await candidate(), "unfinished repair\n");
+  const originalReport = required.pipelineState.workReports.at(-1);
+  assert.equal(originalReport.status, "UNFINISHED");
+  assert.equal(originalReport.recovery.previous, null);
+
+  // Reopen only from the real journal. Authorization is reusable only before invocation.
+  fault = "authorization";
+  await assert.rejects(
+    open().resume({ runId, expectedRevision: required.revision }),
+    (cause) => cause === loss,
+  );
+  store = createRunStore({ stateRoot: fixture.stateRoot });
+  const authorized = await store.loadRun(runId);
+  assert.equal(
+    authorized.pipelineState.writableResult.stage,
+    "repair-authorized",
+  );
+  assert.equal(authorized.activeTurn, null);
+  assert.deepEqual(authorized.pipelineState.writableResult, {
+    ...required.pipelineState.writableResult,
+    stage: "repair-authorized",
+  });
+  assert.equal(writes, 1);
+  fault = "invocation";
+  await assert.rejects(
+    open().resume({ runId, expectedRevision: authorized.revision }),
+    (cause) => cause === loss,
+  );
+  store = createRunStore({ stateRoot: fixture.stateRoot });
+  const published = await store.loadRun(runId);
+  assert.equal(published.pipelineState.writableResult.stage, "invoking");
+  assert.equal(published.activeTurn.phase, "resolve-findings");
+  assert.equal(published.counters.fixRounds, required.counters.fixRounds);
+  assert.equal(writes, 1);
+  const exhausted = (
+    await open().resume({ runId, expectedRevision: published.revision })
+  ).run;
+  assert.equal(exhausted.pause.reason, "writable_output_invalid");
+  assert.equal(exhausted.activeTurn, null);
+  assert.equal(exhausted.pipelineState.writableResult.attempts, 1);
+  assert.equal(writes, 1);
+  const reinspected = (
+    await open().resume({ runId, expectedRevision: exhausted.revision })
+  ).run;
+  assert.equal(reinspected.pause.reason, "finding_repair_required");
+  assert.equal(reinspected.pipelineState.writableResult.attempts, 2);
+  assert.equal(reinspected.pipelineState.writableResult.additionalAttempts, 1);
+  assert.equal(
+    reinspected.pipelineState.workReports.at(-1).recovery.previous,
+    required.pipelineState.writableResult.repair,
+  );
+  assert.equal(await candidate(), "unfinished repair\n");
+  for (const snapshot of [
+    required,
+    authorized,
+    published,
+    exhausted,
+    reinspected,
+  ]) {
+    for (const field of [
+      "roles",
+      "hashes",
+      "projectConfigurationProtection",
+      "providerPolicies",
+    ])
+      assert.deepEqual(snapshot[field], stopped[field], field);
+    assert.equal(snapshot.sessionLineage.source, null);
+    for (const field of [
+      "settings",
+      "completedCommits",
+      "requiredChecks",
+      "validationSchedule",
+      "disputeCounts",
+      "additionalFixRounds",
+      "repositoryBaseline",
+    ])
+      assert.deepEqual(
+        snapshot.pipelineState[field],
+        stopped.pipelineState[field],
+        field,
+      );
+    assert.deepEqual(
+      snapshot.pipelineState.writableResult.blockers,
+      stopped.pipelineState.writableResult.blockers,
+    );
+    assert.equal(snapshot.pipelineState.pendingCommit, null);
+    for (const field of [
+      "candidateReviewedFingerprint",
+      "finalizedFingerprint",
+      "reviewedFingerprint",
+    ])
+      assert.equal(snapshot.pipelineState[field], null, field);
+    assert.equal(snapshot.counters.fixRounds, stopped.counters.fixRounds);
+    assert.equal(snapshot.pipelineState.pendingCorrection, true);
+  }
+  const beforeRepair = turns.length;
+  const done = (
+    await open().resume({ runId, expectedRevision: reinspected.revision })
+  ).run;
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(writes, 2);
+  assert.equal(await candidate(), "completed repair\n");
+  assert.deepEqual(
+    done.pipelineState.workReports.find(
+      ({ status }) => status === "UNFINISHED",
+    ),
+    originalReport,
+  );
+  assert.equal(done.pipelineState.completedCommits.length, 2);
+  assert.equal(done.pipelineState.completedCommits[0], accepted);
+  assert.deepEqual(done.roles, stopped.roles);
+  assert.deepEqual(done.hashes, stopped.hashes);
+  // The resumed logical repair is already charged; only renewed convergence adds a round.
+  assert.equal(done.counters.fixRounds, stopped.counters.fixRounds + 1);
+  const resumedGates = turns
+    .slice(beforeRepair)
+    .filter(
+      ({ schema, access }) =>
+        access === "local-commit" ||
+        [
+          FINDING_RESOLUTION_SCHEMA,
+          CHECK_AND_FIX_SCHEMA,
+          CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+          CANDIDATE_REVIEW_SCHEMA,
+          FINALIZATION_SCHEMA,
+          REVIEW_SCHEMA,
+        ].includes(schema),
+    );
+  assert.deepEqual(
+    resumedGates.map(({ schema, access }) =>
+      access === "local-commit" ? "commit" : schema,
+    ),
+    [
+      FINDING_RESOLUTION_SCHEMA,
+      CHECK_AND_FIX_SCHEMA,
+      CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+      CANDIDATE_REVIEW_SCHEMA,
+      FINALIZATION_SCHEMA,
+      REVIEW_SCHEMA,
+      "commit",
+    ],
+  );
+  const history = await store.loadRunHistory(runId);
+  const commitGate = history.events.findLast(
+    ({ state }) => state.pipelineState.workflowState === "COMMIT",
+  ).state.pipelineState;
+  assert.equal(
+    commitGate.candidateConfirmationFingerprint,
+    commitGate.candidateReviewedFingerprint,
+  );
+  assert.equal(commitGate.finalizedFingerprint, commitGate.reviewedFingerprint);
+  assert.ok(
+    history.events.some(
+      ({ state }) => state.pause?.reason === "operator_paused",
+    ),
+  );
+  assert.ok(
+    history.events.some(
+      ({ state }) =>
+        state.pipelineState.writableResult?.stage === "invoking" &&
+        state.pipelineState.writableResult.repair !== null,
+    ),
+  );
+  assert.equal(
+    turns.filter(({ access }) => access === "local-commit").length,
+    2,
+  );
+  const git = (...args) =>
+    executeFile("git", ["-C", fixture.projectPath, ...args]);
+  assert.equal((await git("rev-parse", "HEAD^")).stdout.trim(), accepted);
+  assert.equal((await git("rev-list", "--count", "HEAD")).stdout.trim(), "3");
+  assert.equal(await store.runIsLeased(runId), false);
+  assert.equal(await store.worktreeIsLeased(fixture.projectPath, runId), false);
 });
 
 test("operator pause preserves partial content and restates the result read-only without reforking", async () => {

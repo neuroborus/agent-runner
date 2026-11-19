@@ -304,6 +304,17 @@ test("lost repair-authorization acknowledgement preserves durable unstarted auth
   });
   const required = await fixture.run();
   assert.equal(required.pause.reason, "finding_repair_required");
+  const coldRequired = await fixture.recover();
+  assert.deepEqual(coldRequired, required);
+  assert.equal(coldRequired.activeTurn, null);
+  assert.equal(
+    coldRequired.pipelineState.resolutionCorrection.stage,
+    "repair-required",
+  );
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "unfinished\n",
+  );
   const transition = fixture.runtime.transition;
   const loss = new Error("Synthetic authorization acknowledgement loss.");
   let lost = false;
@@ -337,6 +348,19 @@ test("lost repair-authorization acknowledgement preserves durable unstarted auth
     required.pipelineState.workReports,
   );
   assert.equal(reloaded.counters.fixRounds, 1);
+  for (const field of [
+    "repositoryBaseline",
+    "requiredChecks",
+    "validationInfrastructure",
+    "pendingCorrection",
+  ])
+    assert.deepEqual(
+      reloaded.pipelineState[field],
+      required.pipelineState[field],
+      field,
+    );
+  assert.deepEqual(reloaded.hashes, required.hashes);
+  assert.deepEqual(reloaded.roles, required.roles);
   assert.equal(writes, 1);
   const completed = await fixture.run();
   assert.equal(
@@ -351,6 +375,17 @@ test("lost repair-authorization acknowledgement preserves durable unstarted auth
     ["workspace-write", "read-only", "workspace-write"],
   );
   assert.equal(fixture.calls.reviewer.length, 5);
+  const history = required.pipelineState.workReports.at(-1);
+  assert.equal(history.status, "UNFINISHED");
+  assert.deepEqual(
+    completed.pipelineState.workReports.find(
+      ({ status }) => status === "UNFINISHED",
+    ),
+    history,
+  );
+  const terminal = fixture.calls.reviewer.at(-1).recoveryPrompt;
+  assert.ok(terminal.includes(history.reason));
+  assert.ok(terminal.includes(history.evidence[0]));
 });
 
 for (const publication of [

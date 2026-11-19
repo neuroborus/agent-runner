@@ -29,6 +29,21 @@ complete slow release gate; focused fast coverage does not attest either.
 Operator-stop slow fixtures retain separate prepared and invoked checkpoints:
 native containment starts from proven unstarted work, while interrupted effects
 resume read-only and keep their consumed accounting.
+The combined finding-repair regression in
+`test/runner-operator-stops.slow.test.js` stops an owned resolution before repair
+completion, cold-loads the settled journal and inspects the dirty candidate
+read-only. It preserves the earlier accepted commit, original blockers, frozen
+inputs/configuration, pending checks and once-only correction accounting.
+Controlled authorization and invocation acknowledgement losses distinguish a
+reusable unstarted reservation from a consumed invocation requiring reconciliation,
+retirement and explicit read-only recovery. A newly authorized repair still passes
+primary convergence, independent candidate review, finalization and distinct
+terminal confirmation before one exact second commit. No sleep, polling, model
+or surviving native session supplies correctness. The focused polishing
+`resolution-correction` journal fixture additionally cold-loads its distinct
+repair-required/authorized checkpoints and retains unfinished history in terminal
+reconstruction. These development regressions do not replace the complete slow
+gate, separate exact-artifact package-install check or operator acceptance.
 
 Fast `test/git/polishing-handoff.test.js` uses isolated real-Git fixtures with
 preconfigured ignored hooks and a harmless `post-index-change` receipt outside

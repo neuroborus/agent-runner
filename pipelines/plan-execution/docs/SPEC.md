@@ -4865,8 +4865,9 @@ the continuation at `fix_limit_reached`; only the existing explicit
 stagnation, disputes or any other budget. An exhausted read-only turn gains no
 write permission without that grant. Repairs still return through independent
 review or combined/lazy convergence and every original terminal/effect gate.
-Polishing continuation, replacement-proposal pauses, clarification reconsideration
-retirement and stale polishing finalization markers remain separate pending scope.
+Polishing supports its own unfinished finding repair continuation. Replacement-proposal
+pauses, clarification reconsideration retirement and stale polishing finalization
+markers remain separate pending scope.
 
 ## 16. Resume
 
