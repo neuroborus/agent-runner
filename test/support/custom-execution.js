@@ -25,6 +25,7 @@ import { runPlanExecution } from "@agent-runner/plan-execution";
 import { directorySafety } from "../../src/runner/workspace.js";
 import { createTrustedValidationSnapshot } from "../../src/trusted-validation/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
+import { PROVIDER_REGISTRY } from "../../src/agents/index.js";
 import { executeFile } from "./runner.js";
 
 const empty = { question: "", options: [], whyBlocked: "", evidence: [] };
@@ -47,6 +48,10 @@ export async function customExecutionFixture(
     contained = false,
     finalization = "auto",
     missingOutputRoot = false,
+    outputDeclaration: selectedOutputDeclaration,
+    outputDeclarations: selectedOutputDeclarations,
+    assertOutputReady = (request) =>
+      PROVIDER_REGISTRY.get("codex").assertWorkspaceReady(request),
     outputStep = 2,
     vendorFiles = 0,
     afterOutputPreparation,
@@ -63,7 +68,9 @@ export async function customExecutionFixture(
   const taskPath = join(root, "task");
   const output = join(projectPath, "reports", "summary.md");
   // A missing output root is declared as a directory for authoring and execution.
-  const outputDeclaration = missingOutputRoot ? "reports/" : "reports";
+  const outputDeclaration =
+    selectedOutputDeclaration ?? (missingOutputRoot ? "reports/" : "reports");
+  const outputDeclarations = selectedOutputDeclarations ?? [outputDeclaration];
   await mkdir(missingOutputRoot ? projectPath : join(projectPath, "reports"), {
     recursive: true,
   });
@@ -116,7 +123,7 @@ export async function customExecutionFixture(
     kind: "custom",
     criteria,
     inputs: ["source.md", "https://example.invalid/reference"],
-    outputs: [outputDeclaration],
+    outputs: outputDeclarations,
     steps: [1, 2].map((number) => ({
       number,
       title: number === 1 ? "Analyze evidence" : "Write summary",
@@ -346,7 +353,7 @@ export async function customExecutionFixture(
       };
     },
   };
-  const runner = createRunner({
+  const runnerOptions = {
     adapters: { codex: adapter },
     runStore: store,
     git: new Proxy(
@@ -372,12 +379,25 @@ export async function customExecutionFixture(
                 "source.md",
                 "https://example.invalid/reference",
               ],
-              outputPaths: [outputDeclaration],
+              outputPaths: outputDeclarations,
             },
           },
         }),
       ),
-  });
+  };
+  const openRunner = (runStore) => createRunner({ ...runnerOptions, runStore });
+  const runner = openRunner(
+    durable && afterTransition
+      ? {
+          ...store,
+          async transitionRun(...args) {
+            const saved = await store.transitionRun(...args);
+            await afterTransition(saved);
+            return saved;
+          },
+        }
+      : store,
+  );
   if (author) {
     runId = authoringRunId = (
       await runner.create({
@@ -450,7 +470,7 @@ export async function customExecutionFixture(
       schemaVersion: 1,
       projectPath,
       workspacePath: projectPath,
-      outputPaths: [join(projectPath, "reports")],
+      outputPaths: created.run.workspace.policy.outputPaths,
       allowedPaths,
       entries: entries.filter(
         ({ path }) =>
@@ -546,6 +566,12 @@ export async function customExecutionFixture(
       Object.keys(created.run.roles).map((role) => [
         role,
         {
+          assertWorkspaceReady: ({ preparableOutputPaths }) =>
+            assertOutputReady({
+              access: "workspace-write",
+              workspacePolicy: created.run.workspace.policy,
+              preparableOutputPaths,
+            }),
           probe: async (options) =>
             options?.access
               ? adapter.probe(options)
@@ -661,8 +687,13 @@ export async function customExecutionFixture(
     set currentRun(value) {
       memoryRun = value;
     },
-    run: async () => {
-      if (durable) return runner.resume({ runId });
+    run: async ({ cold = false } = {}) => {
+      if (durable) {
+        const selectedRunner = cold
+          ? openRunner(createRunStore({ stateRoot: join(root, "state") }))
+          : runner;
+        return selectedRunner.resume({ runId });
+      }
       memoryRun = await runPlanExecution({ run: memoryRun, runtime });
       return { run: memoryRun };
     },

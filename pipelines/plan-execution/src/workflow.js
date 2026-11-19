@@ -8338,7 +8338,7 @@ ${JSON.stringify(
   }
 
   async function prepareCustomOutputs() {
-    await checkpoint().verify();
+    await checkpoint().reconcile();
     const roots = [];
     const declaredDirectories = stepPolicy
       .parse(state().canonicalPlan)
@@ -8352,6 +8352,12 @@ ${JSON.stringify(
       if (inspected.kind === "directory" || declaredDirectories.includes(path))
         roots.push(path);
     }
+    await runtime.adapters.worker.assertWorkspaceReady({
+      preparableOutputPaths: roots,
+    });
+    // Validate every directory's shape and existing parent before publishing any.
+    for (const path of roots)
+      await runtime.workspace.inspectOutputDirectory(path);
     const ledger = state().customResults;
     if (
       ledger === null ||
@@ -8363,6 +8369,9 @@ ${JSON.stringify(
       await checkpoint().prepareOutputRoots(roots);
       await safety.assertUnchanged(state().repositoryBaseline);
     }
+    await runtime.adapters.worker.assertWorkspaceReady({
+      preparableOutputPaths: [],
+    });
   }
 
   async function acceptCustomStep() {

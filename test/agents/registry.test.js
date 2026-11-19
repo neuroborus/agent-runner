@@ -303,7 +303,10 @@ test("optional workspace readiness is validated and retained by descriptors", as
   const request = { access: "workspace-write" };
   await registry.get("fixture").assertWorkspaceReady(request);
   assert.deepEqual(requests, [request]);
-  assert.equal(PROVIDER_REGISTRY.get("claude").assertWorkspaceReady, undefined);
+  assert.equal(
+    typeof PROVIDER_REGISTRY.get("claude").assertWorkspaceReady,
+    "function",
+  );
 });
 
 test("client attribution is strict, frozen, and descriptor-driven", () => {

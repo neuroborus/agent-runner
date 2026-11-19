@@ -20,27 +20,30 @@ Choose one pipeline for the intended outcome:
 | `polishing`      | An existing non-empty local change set | The complete finalized and reviewed changes staged, without a commit |
 | `audit`          | An agreed Git or ordinary workspace    | A reviewed `audit.md`; sources remain read-only                      |
 
-Execution defaults to commit plans. Explicit `--plan-kind custom` (MCP
-`planKind: "custom"`) consumes agreed criteria and confined declarations from
-its plan, including in ordinary directories. Custom results pass the same
-mode-required candidate, criterion-dependent finalization and distinct terminal
-confirmation gates before durable acceptance. They gain no staging/commit
-authority or automatic coding checks. `auto` selects no custom coding skill;
-explicit guidance remains frozen. Preserve accepted receipts and outputs on
-recovery; changed inputs or earlier results require revised planning and a new run.
+Execution defaults to commit. Explicit `--plan-kind custom` (MCP
+`planKind: "custom"`) consumes agreed criteria and confined plan declarations,
+even in ordinary directories. Durable acceptance requires all mode-required
+candidate, criterion-dependent finalization and distinct terminal-confirmation
+gates. No staging/commit authority or automatic coding checks apply. `auto`
+selects no custom coding skill; explicit guidance stays frozen. Recovery preserves
+accepted receipts/outputs; changed inputs or earlier results require revised
+planning and a new run. Absent directories need trailing `/` and existing parents;
+missing slashless outputs need exact-file creation, unsupported by Codex/Claude.
+Prose grants no kind/parent writes; correct declarations/backend only in an
+authorized fresh run.
 
-`independent` is the default and recommended mode: separate primary/review roles
-cost more context and tokens. Choose `lazy` explicitly, never automatically to
-save tokens. Without independent review, coding uses bounded primary check/fix and
-separate read-only clean confirmations; audit uses one read-only Auditor with
-separate discovery and finding-recheck gates.
+`independent` is the default and recommended mode; separate primary/review roles
+cost more context/tokens. Select `lazy` explicitly, never automatically to save tokens.
+Without independent review, coding uses bounded primary check/fix and separate
+read-only clean confirmations; audit uses one read-only Auditor with separate
+discovery/finding-recheck gates.
 
-Combined coding adds primary check/fix and a separate read-only clean confirmation
+Combined coding adds primary check/fix and separate read-only clean confirmation
 before full independent review of the same fingerprint. Repairs restart convergence;
 self-findings return to fixing. Only independent finding resolution may invoke a
-fresh Arbiter. Unresolved bootstrap disagreements and primary or structural
-exhaustion pause without arbitration. Resume preserves mode, evidence and bounded
-accounting; interrupted corrections are charged once.
+fresh Arbiter. Unresolved bootstrap disagreements and primary/structural exhaustion
+pause without arbitration. Resume preserves mode, evidence and bounded accounting;
+interrupted corrections are charged once.
 
 Planning stays repository-read-only; Runner writes artifacts.
 See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
@@ -67,44 +70,42 @@ a deferred stop waits for the original logical step's last verified child.
 Legacy/intermediate runs remain disabled on resume. Size alone never fails work.
 See [preserved replacement execution](../pipelines/plan-execution/docs/SPEC.md#preserved-replacement-execution).
 
-Plan execution and polishing enforce one canonical worktree owner across CLI/MCP.
-While execution is owned, do not mutate repository/Git state, frozen inputs,
-configuration or local/finalization guidance, switch branches, stash, reset,
-rewrite history, edit checks or start another mutating workflow. Inspect read-only;
-inspect other bases without changing this checkout. Lease release does not
-authorize interference with resumable work.
+Execution and polishing share one canonical worktree owner across CLI/MCP.
+While owned, do not mutate repository/Git state, frozen inputs, configuration or
+local/finalization guidance, switch branches, stash, reset, rewrite history, edit
+checks or start another mutating workflow. Inspect read-only, including other
+bases without changing this checkout. Lease release grants no interference with
+resumable work.
 
 ## 2. Prepare against the actual base
 
-Read project instructions, owning specifications and code on the intended base.
-Verify required files, symbols, behavior, counts and paths locally. Recompute
-baselines, checksums, inventories and acceptance assumptions; prefer behavior
-and invariants to incidental counts, and never copy stale measurements.
+On the intended base, read project instructions, owning specifications and code.
+Locally verify required files, symbols, behavior, counts and paths; recompute
+baselines, checksums, inventories and acceptance assumptions. Prefer behavior
+and invariants to incidental counts; never copy stale measurements.
 
 Git-content observation rejects gitlinks and non-ignored embedded repositories
 with `ERR_UNSUPPORTED_GIT_PATH`, without executing nested Git or removing content.
 Directory workflows retain read-only nested worktrees. Follow the
 [Git safety contract](product/SAFETY_MODEL.md#git-ownership).
 
-Use `agent-run pipelines` or `pipelines_list` to confirm inputs/settings. Reconcile
+Confirm inputs/settings with `agent-run pipelines` or `pipelines_list`; reconcile
 task, context, plan and clarifications before starting. Put requirements and
-acceptance criteria in task inputs or tracked documentation. Identify commands
-as required checks or background examples; ambiguity can change the inventory.
+acceptance criteria in task inputs or tracked docs. Mark commands as required
+checks or background examples; ambiguity can change the inventory.
 
-Commit execution consumes the validated subjects and commit boundaries unchanged;
-custom execution consumes the frozen ordered steps and agreed result criteria.
-A decision that conflicts with the plan requires a revised plan and a new
-execution run. Do not edit a frozen clarification transcript to override it,
-rewrite completed commits, or reuse a plan whose steps are already implemented.
+Commit execution preserves validated subjects/boundaries; custom execution consumes
+frozen ordered steps and agreed result criteria. Conflicting decisions require a
+revised plan and new execution run. Never override them by editing frozen
+clarifications, rewriting completed commits or reusing a plan with implemented steps.
 Prepare a new plan for the remaining work when required.
 
 Plan authoring's `preferredCommitLineLimit` defaults to 900 anticipated additions
-plus deletions per commit, including tests and documentation. Set this positive
-integer under `pipelines.plan-authoring` in runner or safe project configuration;
-project values take precedence. Prefer cohesive commits within the target. An
-indivisible larger change remains valid with a rationale in the plan. This is a
-planning preference, not an execution limit. Resume retains the saved target;
-legacy runs receive 900.
+plus deletions per commit, including tests/docs. Set a positive integer under
+`pipelines.plan-authoring` in runner or safe project configuration; project wins.
+Prefer cohesive commits within the target; indivisible larger changes remain
+valid with plan rationale. This planning preference imposes no execution limit.
+Resume retains the saved target; legacy runs receive 900.
 
 Execution assesses commit-plan work strictly above `preferredCommitLineLimit`
 times `commitSizeAssessmentMultiplier` (900 and 3 by default; both positive

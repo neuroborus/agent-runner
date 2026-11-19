@@ -41,6 +41,13 @@ not by adding separate review-fix commits. A completed earlier commit is durable
 history and is never rewritten automatically when later work encounters a
 problem.
 
+Custom output admission preserves canonical directory intent and checks backend
+feasibility before new preparation or writable work. Missing slashless outputs
+never imply directories. Frozen declarations/backend selection can be corrected
+only in an authorized fresh run; the [custom-plan contract](../../packages/custom-plan/README.md)
+owns syntax and limits. Authoring reports infeasibility without changing frozen
+selectors; prose grants no output kind or parent writes.
+
 Each step converges semantically before its terminal gate: independent mode
 uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
 read-only candidate confirmation. Combined mode requires primary convergence

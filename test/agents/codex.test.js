@@ -3010,11 +3010,22 @@ test("preserves directory policy receipts across authorized output, artifact and
   await rm(directory.output, { recursive: true });
   const fixture = createFixture({ version: "0.164.0" });
   const options = {
-    access: "workspace-write",
+    access: "read-only",
     workspacePolicy: directory.workspacePolicy,
   };
   const before = await fixture.adapter.probe(options);
+  await assert.rejects(
+    fixture.adapter.probe({ ...options, access: "workspace-write" }),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_missing_output",
+    ),
+  );
   await mkdir(directory.output);
+  const writable = await fixture.adapter.probe({
+    ...options,
+    access: "workspace-write",
+  });
   await writeFile(join(directory.output, "report.md"), "Accepted result\n");
   await mkdir(directory.workspacePolicy.stateRoot);
   await mkdir(directory.workspacePolicy.artifactPaths[0]);
@@ -3024,6 +3035,11 @@ test("preserves directory policy receipts across authorized output, artifact and
   );
   const after = await fixture.adapter.probe(options);
   assert.deepEqual(after.policyReceipt, before.policyReceipt);
+  assert.deepEqual(
+    (await fixture.adapter.probe({ ...options, access: "workspace-write" }))
+      .policyReceipt,
+    writable.policyReceipt,
+  );
 
   const replacement = join(directory.cwd, "replacement.md");
   await writeFile(replacement, "Replaced input\n");

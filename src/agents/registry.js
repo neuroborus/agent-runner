@@ -5,6 +5,7 @@ import {
   CLAUDE_STORAGE_IDENTITY,
   recoverClaudeStorage,
   CLAUDE_FAILURE_CLASSES,
+  assertClaudeWorkspaceReady,
   classifyClaudeFailure,
   createClaudeAdapter,
   validateClaudeExecutionOptions,
@@ -123,6 +124,7 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
   }),
   Object.freeze({
     id: CLAUDE_BACKEND_ID,
+    assertWorkspaceReady: assertClaudeWorkspaceReady,
     resources: Object.freeze({
       identity: CLAUDE_STORAGE_IDENTITY,
       recover: recoverClaudeStorage,

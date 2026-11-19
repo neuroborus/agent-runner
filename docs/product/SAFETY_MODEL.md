@@ -199,6 +199,13 @@ directory outputs retain exact authority; refusal never widens grants to a paren
 or changes a frozen selection. Existing recovery, access-specific receipts and
 consumed-effect accounting remain authoritative.
 
+Custom declarations retain their exact text: only trailing `/` authorizes
+preparation of an absent directory, under an existing parent. Missing slashless
+outputs require enforceable exact-file creation; Codex and Claude reject these
+before new preparation or writable provider work. Pending effects reconcile
+first; supported exact files receive no parent writes. See the
+[provider limits](PROVIDER_MODEL.md#selection-and-capabilities).
+
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 

@@ -13,12 +13,25 @@ const CONTRACT = "codex-declared-directory-v1";
 // Never substitute its parent: that would grant undeclared sibling writes.
 export async function assertDirectoryOutputSupport(request, AdapterError) {
   if (request.access !== "workspace-write" || !request.workspacePolicy) return;
+  assertLiteralPermissionPaths(
+    request.workspacePolicy.outputPaths ?? [],
+    AdapterError,
+  );
+  let hasMissingOutput = false;
   for (const path of request.workspacePolicy.outputPaths ?? []) {
     let stat;
     try {
       stat = await lstat(path);
     } catch (cause) {
-      if (cause.code === "ENOENT") continue;
+      if (cause.code === "ENOENT") {
+        if (
+          request.preparableOutputPaths === undefined ||
+          request.preparableOutputPaths.includes(path)
+        )
+          continue;
+        hasMissingOutput = true;
+        continue;
+      }
       throw directoryPolicyError(AdapterError);
     }
     if (stat.isFile())
@@ -31,6 +44,15 @@ export async function assertDirectoryOutputSupport(request, AdapterError) {
         },
       );
   }
+  if (hasMissingOutput)
+    throw new AdapterError(
+      "Codex output root is missing and exact-file creation is unsupported. " +
+        "Declare a directory with a trailing / or select a supported backend in an authorized fresh run.",
+      {
+        code: "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+        diagnosticClass: "capability_missing_output",
+      },
+    );
 }
 
 // config/read may serialize these optional permission-profile settings as null.

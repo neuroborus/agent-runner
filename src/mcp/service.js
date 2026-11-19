@@ -230,14 +230,20 @@ function createRunStartSchema(providers) {
         .enum(["commit", "custom"])
         .optional()
         .describe(
-          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes criteria and declarations from its frozen plan.",
+          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes frozen criteria/declarations. Trailing / requests directory preparation. Codex refuses regular-file roots; Claude needs existing exact mount roots. Correct unsupported declarations/backend in an authorized fresh run.",
         ),
       criteriaPath: z.string().min(1).max(4096).optional(),
       sourceReferences: z
         .array(z.string().min(1).max(4096))
         .max(256)
         .optional(),
-      outputPaths: z.array(z.string().min(1).max(4096)).max(256).optional(),
+      outputPaths: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional()
+        .describe(
+          "Authoring declarations, preserved exactly. Trailing / requests execution directory preparation under an existing parent; absent exact files require backend support. Prose grants no kind or parent writes.",
+        ),
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),

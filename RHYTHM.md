@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-19
 
+- **Custom output admission requires enforceable roots.** Execution reconciles
+  pending effects before checking every output against descriptor-owned backend
+  policy. Canonical trailing `/` retains directory intent after normalization;
+  absent slashless paths never silently become directories. Codex and Claude
+  reject missing exact-file roots before new preparation or writable work,
+  retaining their existing file and mount limits. Owned directory publication,
+  startup and writable receipts, accepted results and budgets remain unchanged.
+  Infeasible frozen selections require an authorized fresh run, without wider
+  parent permissions or a new output-kind schema.
+
 - **Clarification ownership freezes selected infrastructure.** Execution and
   polishing use configuration-resolved infrastructure and artifact paths for
   every transcript operation, including cold append and editor recovery. Their

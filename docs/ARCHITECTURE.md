@@ -4228,6 +4228,24 @@ with supported outputs/backend; frozen selections, receipts, accepted outputs an
 budgets are unchanged. No public or persisted shape changes or migration are
 needed. File declarations remain valid in the shared custom-plan contract.
 
+For custom execution, pending preparation/acceptance reconciles first. The
+workflow derives directory intent from trailing `/` in the unchanged canonical
+plan, then compares normalized absolute roots. Its configured Worker adapter
+exposes descriptor-backed `assertWorkspaceReady({ preparableOutputPaths })`:
+before new preparation the list contains only existing directories or explicit
+directory declarations; afterward it is empty. Omitted lists retain read-only
+startup discovery of missing roots without granting writes. Codex rejects absent
+unprepared roots with `capability_missing_output`; Claude's descriptor rejects
+them with `output_root_missing`, because exact bind targets must exist. Direct
+writable probes and native policy admission recheck actual shapes without a
+preparation allowance. Other backends may prove exact-file creation under their
+exact frozen policy; no parent permission or output-kind schema is added.
+Both descriptors apply their native literal-path restrictions to output roots
+before preparation, including absent explicitly preparable directories.
+Writable capability proof follows preparation and precedes provider work, retaining
+the startup receipt and separate pinned writable receipt. Frozen declaration or
+backend corrections require an authorized fresh run.
+
 Its access-specific probe inspects bindings and snapshot safety without Git, an artificial repository,
 or a local-commit executor probe. Frozen policy receipts bind the version,
 access, declared paths and immutable input/control bindings; authorized output

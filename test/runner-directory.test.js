@@ -224,6 +224,42 @@ test("readiness rejects mixed file outputs before initial read-only probes or pr
   }
 });
 
+test("readiness rejects nonliteral output roots before preparation or provider work", async (t) => {
+  for (const backend of ["codex", "claude"]) {
+    const f = await fixture(t);
+    const outputs = ["reports", "reports[1]"];
+    const runner = f.runner(() => assert.fail("No workflow may start."), {
+      selection: () => ({
+        kind: "directory",
+        lease: "exclusive",
+        inputPaths: ["input.txt"],
+        outputPaths: outputs,
+      }),
+      initialRoleAccess: () => ["read-only"],
+      adapters: { [backend]: f.adapter },
+      loadConfiguration: async () =>
+        parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            defaultBackend: backend,
+            pipelines: { "plan-authoring": { mode: "lazy" } },
+          }),
+        ),
+    });
+    await assert.rejects(runner.create(f.input), (cause) => {
+      assert.equal(cause.code, "ERR_UNSUPPORTED_BACKEND");
+      assert.match(cause.message, /isolation_workspace_policy/u);
+      return true;
+    });
+    assert.equal(f.probes.length, 0);
+    assert.equal(f.calls.length, 0);
+    for (const output of outputs)
+      await assert.rejects(lstat(join(f.projectPath, output)), {
+        code: "ENOENT",
+      });
+  }
+});
+
 test("paused directory runs recheck current output shapes before a cached writable turn", async (t) => {
   const f = await fixture(t);
   const path = join(f.projectPath, "out");
@@ -267,6 +303,12 @@ test("output readiness rechecks all roots before allocating a missing directory"
   const runner = f.runner(
     async ({ run, runtime }) => {
       runId = run.runId;
+      await assert.rejects(
+        runtime.adapters.planner.assertWorkspaceReady({
+          preparableOutputPaths: [path],
+        }),
+        /capability_missing_output/u,
+      );
       // Initially absent declarations passed admission. A file arriving at the
       // other output must prevent preparation of even the safe directory root.
       await writeFile(join(f.projectPath, "result.txt"), "Retain output\n");
@@ -476,6 +518,7 @@ test("near-limit directory declarations preserve compact storage exclusions at t
 
 test("directory lifecycle reconstructs interrupted output work without Git or configuration reload", async (t) => {
   const f = await fixture(t);
+  await mkdir(join(f.projectPath, "out"));
   const output = join(f.projectPath, "out", "report.txt");
   f.adapter.run = async (request) => {
     f.calls.push(request);
@@ -484,7 +527,6 @@ test("directory lifecycle reconstructs interrupted output work without Git or co
       join(f.projectPath, "out"),
     ]);
     if (request.access === "workspace-write") {
-      await mkdir(join(f.projectPath, "out"));
       await writeFile(output, "accepted partial result\n");
     }
     return { structured: {}, sessionId: "opaque-child" };
@@ -663,6 +705,7 @@ test("directory provider turns reject read-only and undeclared mutations includi
   for (const access of ["read-only", "workspace-write"]) {
     await t.test(access, async (t) => {
       const f = await fixture(t);
+      await mkdir(join(f.projectPath, "out"));
       f.adapter.run = async () => {
         await writeFile(join(f.projectPath, "unrelated.txt"), "unauthorized\n");
         throw new Error("provider failed");
@@ -1464,6 +1507,7 @@ test("initial directory execution retains process-only ownership for same-instan
       processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
     },
   });
+  await mkdir(join(f.projectPath, "out"));
   const namespaceId = await readlink("/proc/self/ns/pid");
   const failure = Object.assign(new Error("Fixture process ownership lost."), {
     code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
@@ -1592,6 +1636,7 @@ test("directory inspection failure retains process-only ownership for same-insta
 
 test("live directory storage cleanup retains Runner ownership for same-instance recovery", async (t) => {
   const f = await fixture(t);
+  await mkdir(join(f.projectPath, "out"));
   const metadata = join(f.root, "metadata");
   const pointer = join(f.projectPath, ".git");
   await mkdir(metadata);

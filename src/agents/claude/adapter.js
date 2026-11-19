@@ -45,11 +45,16 @@ import {
 } from "./stream.js";
 import { createClaudeObservations } from "./observations.js";
 import {
+  assertDirectoryOutputSupport,
   directoryPolicyError,
   prepareDirectoryPolicy,
 } from "./directory-policy.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
+
+export function assertClaudeWorkspaceReady(request) {
+  return assertDirectoryOutputSupport(request, ClaudeAdapterError);
+}
 
 const executeFileAsync = promisify(executeFileCallback);
 const BUBBLEWRAP_BINARY = "bwrap";
@@ -70,6 +75,7 @@ const PERMISSION_REASON_CLASSES = Object.freeze(
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
   "isolation_workspace_policy",
+  "output_root_missing",
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",

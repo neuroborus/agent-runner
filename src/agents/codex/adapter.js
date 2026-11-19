@@ -68,6 +68,7 @@ const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const CAPABILITY_DIAGNOSTICS = Object.freeze({
   declaredWorkspace: "capability_declared_workspace",
   existingFileOutput: "capability_existing_file_output",
+  missingOutput: "capability_missing_output",
   autonomousWrite: "capability_autonomous_write",
   gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
@@ -901,7 +902,7 @@ async function validateModel(
 }
 
 async function selectThread(client, request, fresh) {
-  await assertCodexWorkspaceReady(request);
+  await assertCodexWorkspaceReady({ ...request, preparableOutputPaths: [] });
   const options = threadOptions(request);
   if (fresh || request.session === undefined) {
     const result = await client.request("thread/start", {
@@ -1282,7 +1283,7 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
 }
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {
-  await assertCodexWorkspaceReady(request);
+  await assertCodexWorkspaceReady({ ...request, preparableOutputPaths: [] });
   let response;
   try {
     response = await client.request(
@@ -1847,7 +1848,7 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function probeCapabilities(options) {
-    await assertCodexWorkspaceReady(options);
+    await assertCodexWorkspaceReady({ ...options, preparableOutputPaths: [] });
     const { capabilities, startupConfig } = await (options.access !==
       undefined && options.access !== "local-commit"
       ? (accessProbePromise ??= inspectCapabilities(false))
@@ -2109,12 +2110,15 @@ export function createCodexAdapter(options = {}) {
   ) {
     settlement.directoryVerified = false;
     request.signal?.throwIfAborted();
-    await assertCodexWorkspaceReady(request);
+    await assertCodexWorkspaceReady({ ...request, preparableOutputPaths: [] });
     const workspaceStorage = await prepareWorkspaceStorage(request);
     let processRetired = true;
     let attemptFailed = false;
     try {
-      await assertCodexWorkspaceReady(request);
+      await assertCodexWorkspaceReady({
+        ...request,
+        preparableOutputPaths: [],
+      });
       await request.directoryBoundary?.verify();
       const attemptRequest =
         request.directoryBoundary === undefined
@@ -2296,7 +2300,10 @@ export function createCodexAdapter(options = {}) {
 
   async function run(value) {
     const normalized = normalizeRequest(value);
-    await assertCodexWorkspaceReady(normalized);
+    await assertCodexWorkspaceReady({
+      ...normalized,
+      preparableOutputPaths: [],
+    });
     if (
       normalized.sessionNaming !== undefined &&
       normalized.onSessionCreated === undefined

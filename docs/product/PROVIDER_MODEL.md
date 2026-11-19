@@ -62,6 +62,15 @@ their access semantics. Recovery still retires owned processes and reconciles
 pending effects before admitting new writes. Readiness adds no durable shape,
 receipt, accepted-result, source/control or budget migration.
 
+Custom execution preserves trailing `/` from canonical declarations to identify
+preparable directories under existing parents. Missing slashless outputs require
+proved exact-file creation, unsupported by Codex's named-profile route and
+Claude's exact mounts. Every output is checked before new preparation; actual
+shapes and exact writable capabilities are checked again before provider work.
+Pending effects reconcile first. Prose supplies no output kind, and refusal
+grants no parent writes. The [custom-plan contract](../../packages/custom-plan/README.md)
+owns declaration syntax and fresh-run correction.
+
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. Custom authoring uses read-only directory

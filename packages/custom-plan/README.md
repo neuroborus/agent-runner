@@ -36,7 +36,7 @@ Titles are ordinary single-line text; Conventional Commit syntax is not required
     }
   ],
   "inputs": ["sources/catalog.md"],
-  "outputs": ["reports/summary.md"]
+  "outputs": ["reports/"]
 }
 ```
 
@@ -88,6 +88,17 @@ its steps. The contract requires no file diff, Git repository or commit.
 These declarations are data: they grant no reading, retrieval, writing, command
 or Git authority. The owning runner must separately resolve, confine, authorize
 and freeze actual paths and permissions before using them.
+
+Execution prepares an absent output as a directory only when its unchanged
+declaration ends in `/`, under an existing real parent. Existing directories
+need no slash. Prose supplies neither output kind nor parent write authority.
+A slashless absent output requires a backend that proves exact-file creation;
+Codex's named-profile route and Claude's exact mounts do not support it. Codex
+also refuses existing regular-file roots; Claude requires existing exact file
+or directory mount roots. Runner checks all current shapes before new
+preparation, then proves exact writable access before invocation. Correct an
+infeasible declaration or select a supported backend in an authorized fresh
+run; never rewrite frozen selectors during execution.
 
 ## Public API
 

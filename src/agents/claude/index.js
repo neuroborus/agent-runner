@@ -1,6 +1,7 @@
 export {
   CLAUDE_BACKEND_ID,
   CLAUDE_FAILURE_CLASSES,
+  assertClaudeWorkspaceReady,
   ClaudeAdapterError,
   classifyClaudeFailure,
   createClaudeAdapter,

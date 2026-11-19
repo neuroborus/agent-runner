@@ -204,7 +204,7 @@ Options:
       --plan-kind          Select commit (default) or custom authoring/execution
       --criteria           Read user criteria from a local Markdown file
       --source             Declare a source path or reference (repeatable; no retrieval)
-      --output             Declare an intended output path (repeatable; no authoring writes)
+      --output             Declare an output (repeatable; trailing / prepares a directory at execution, no authoring writes)
       --clarify            Open the clarification editor before agent questions
       --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely

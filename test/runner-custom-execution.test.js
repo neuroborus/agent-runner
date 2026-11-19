@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { getPipeline } from "../src/index.js";
 import { createWorkspaceService } from "../src/workspace/index.js";
+import { PROVIDER_REGISTRY } from "../src/agents/index.js";
 import {
   createExecutionAdapter,
   createFixture,
@@ -12,6 +13,64 @@ import {
   PLAN,
   runnerFor,
 } from "./support/index.js";
+
+for (const backend of ["codex", "claude"]) {
+  test(`${backend} rejects a missing slashless custom output before preparation or writable work`, async (t) => {
+    const f = await fixture(t, "combined", {
+      missingOutputRoot: true,
+      outputDeclaration: "reports",
+      assertOutputReady: (request) =>
+        PROVIDER_REGISTRY.get(backend).assertWorkspaceReady(request),
+    });
+    await assert.rejects(f.run(), (error) => {
+      assert.match(error.message, /missing/u);
+      assert.match(error.message, /authorized fresh run/u);
+      return true;
+    });
+    assert.equal(
+      f.calls.some(({ request }) => request.access === "workspace-write"),
+      false,
+    );
+    assert.equal(f.currentRun.pipelineState.customResults, null);
+    await assert.rejects(lstat(join(f.projectPath, "reports")), {
+      code: "ENOENT",
+    });
+  });
+}
+
+test("a backend with exact-file creation accepts an absent slashless output without directory preparation", async (t) => {
+  const f = await fixture(t, "combined", {
+    outputDeclaration: "reports/summary.md",
+    assertOutputReady: ({ preparableOutputPaths }) => {
+      assert.deepEqual(preparableOutputPaths, []);
+    },
+  });
+  const { run } = await f.run();
+  assert.equal(
+    run.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(run.pause),
+  );
+  assert.deepEqual(run.pipelineState.customResults.preparedRoots, []);
+  assert.ok((await lstat(f.output)).isFile());
+  assert.ok(f.probes.some(({ access }) => access === "workspace-write"));
+});
+
+test("all custom directory parents must exist before any new root is prepared", async (t) => {
+  const f = await fixture(t, "combined", {
+    missingOutputRoot: true,
+    outputDeclarations: ["reports/", "missing/child/"],
+  });
+  await assert.rejects(f.run(), { code: "ERR_WORKSPACE_PATH" });
+  assert.equal(f.currentRun.pipelineState.customResults, null);
+  assert.equal(
+    f.calls.some(({ request }) => request.access === "workspace-write"),
+    false,
+  );
+  await assert.rejects(lstat(join(f.projectPath, "reports")), {
+    code: "ENOENT",
+  });
+});
 
 test("project commit selection overrides a runner custom default before execution plan discovery", async (t) => {
   const f = await createFixture(t);

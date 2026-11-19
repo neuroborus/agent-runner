@@ -401,6 +401,25 @@ Unsupported shapes use existing unsupported-backend/policy-drift paths with
 bounded CLI/MCP diagnostics. Changing output or backend selection requires an
 authorized fresh run, not a resume override. No durable shape migration is added.
 
+Pending preparation and acceptance reconcile before new output admission.
+Directory intent comes from the unchanged canonical declarations before path
+normalization removes trailing `/`. Existing directories and explicit slash
+directories use the owned preparation checkpoint; missing slashless paths never
+implicitly become directories. Before preparing any new root, every output must
+satisfy the selected descriptor's shape requirements, allowing only explicitly
+preparable missing directories or enforceable exact-file creation. Codex rejects
+missing unprepared roots (`capability_missing_output`); Claude rejects missing
+exact mount roots (`output_root_missing`). After preparation, readiness permits
+no missing roots for either backend, and the writable probe proves exact access
+before invocation. Startup receipts and the separately pinned writable receipt
+remain unchanged by recovery; cached proofs cannot approve changed shapes.
+Workspace-owned directory inspection verifies every preparable root's current
+shape and existing real parent before any new root is published.
+Backend readiness also applies native literal-path restrictions before
+preparation, including absent explicitly preparable directories.
+Prose supplies no output kind or parent writes. See the
+[custom-plan contract](../../../packages/custom-plan/README.md).
+
 Output-directory preparation journals the exact declared root, its prior state,
 real parent and a unique allocation path in private durable state before
 creation. It pins the empty allocation with a no-follow descriptor before

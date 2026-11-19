@@ -8,10 +8,32 @@ import { customExecutionFixture } from "./support/index.js";
 
 test("durable custom authoring and execution settle reviewed steps across interrupted confirmation", async (t) => {
   let interrupt = true;
+  let preparationInterrupted = false;
+  let preparationCounters;
+  let preparationRecovered = false;
+  const lostPreparation = new Error("Prepared identity response lost");
   const f = await customExecutionFixture(t, "combined", {
     durable: true,
     author: true,
+    missingOutputRoot: true,
+    afterTransition(saved) {
+      if (
+        !preparationInterrupted &&
+        saved.pipelineState.customResults?.preparation?.prepared
+      ) {
+        preparationInterrupted = true;
+        throw lostPreparation;
+      }
+    },
     beforeTurn({ saved }) {
+      if (
+        preparationCounters &&
+        saved.pipelineState.currentStep === 1 &&
+        saved.activeTurn.phase === "implement"
+      ) {
+        assert.deepEqual(saved.counters, preparationCounters);
+        preparationRecovered = true;
+      }
       if (
         interrupt &&
         saved.pipelineState.currentStep === 2 &&
@@ -24,13 +46,32 @@ test("durable custom authoring and execution settle reviewed steps across interr
       }
     },
   });
-  const paused = await f.run();
+  await assert.rejects(f.run(), (error) => error === lostPreparation);
+  const interrupted = await f.store.loadRun(f.runId);
+  preparationCounters = structuredClone(interrupted.counters);
+  const prepared = interrupted.pipelineState.customResults.preparation.prepared;
+  assert.deepEqual(
+    interrupted.pipelineState.repositoryBaseline.outputs[0].entry.identity,
+    prepared.identity,
+  );
+  assert.equal(interrupted.pipelineState.customWritePolicy, null);
+  assert.equal(
+    f.calls.some(({ request }) => request.access === "workspace-write"),
+    false,
+  );
+  const paused = await f.run({ cold: true });
   assert.equal(paused.run.pause.reason, "backend_unavailable");
+  assert.equal(paused.run.pipelineState.customResults.preparation, null);
+  assert.deepEqual(paused.run.pipelineState.customResults.preparedRoots, [
+    prepared,
+  ]);
+  assert.deepEqual(paused.run.providerPolicies, interrupted.providerPolicies);
+  assert.equal(preparationRecovered, true);
   assert.equal(paused.run.pipelineState.customResults.accepted.length, 1);
   const writePolicy = paused.run.pipelineState.customWritePolicy;
   assert.deepEqual(writePolicy.supportedAccess, ["workspace-write"]);
   const receipt = paused.run.pipelineState.customResults.accepted[0].receipt;
-  const resumed = await f.run();
+  const resumed = await f.run({ cold: true });
   assert.equal(
     resumed.run.pipelineState.workflowState,
     "DONE",
@@ -42,6 +83,10 @@ test("durable custom authoring and execution settle reviewed steps across interr
   );
   assert.equal(resumed.run.pipelineState.customResults.accepted.length, 2);
   assert.deepEqual(resumed.run.pipelineState.customWritePolicy, writePolicy);
+  assert.deepEqual(resumed.run.pipelineState.customResults.preparedRoots, [
+    prepared,
+  ]);
+  assert.deepEqual(resumed.run.counters, paused.run.counters);
   assert.deepEqual(resumed.run.pipelineState.completedCommits, []);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
   assert.match(await readFile(f.output, "utf8"), /source.md/u);

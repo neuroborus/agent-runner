@@ -798,6 +798,11 @@ criteria, inputs and outputs match the frozen catalog/source/output selection
 exactly. Unknown kinds, mismatched formats or changed declarations cannot
 publish: deterministic issues return to correction. Analysis-only plans may have
 no output files or diff. Agents never write the plan.
+Frozen output selectors stay unchanged even when infeasible. Absent directory
+outputs require a trailing `/` and existing parents; prose grants no kind or
+parent writes. Exact-file outputs require enforceable execution-backend support.
+Planner and Plan Reviewer report infeasibility rather than rewriting declarations;
+the [custom-plan contract](../../../packages/custom-plan/README.md) owns the limits.
 
 The final artifact must pass its selected shared plan contract's validation
 before Runner canonically serializes and writes it atomically. This pipeline never changes Git history,

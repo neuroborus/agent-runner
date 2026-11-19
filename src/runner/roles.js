@@ -87,6 +87,7 @@ export async function assertWorkspaceReadiness(
   providers,
   workspacePolicy,
   code = "ERR_UNSUPPORTED_BACKEND",
+  preparableOutputPaths,
 ) {
   if (workspacePolicy === undefined) return;
   for (const [role, configuration] of Object.entries(roles)) {
@@ -98,6 +99,9 @@ export async function assertWorkspaceReadiness(
       await providers.get(configuration.backend)?.assertWorkspaceReady?.({
         access: "workspace-write",
         workspacePolicy,
+        ...(preparableOutputPaths === undefined
+          ? {}
+          : { preparableOutputPaths }),
       });
     } catch (cause) {
       const failure = normalizeAdapterFailure(
@@ -506,6 +510,7 @@ function configuredAdapter(
         providers,
         run.workspace?.policy ?? undefined,
         "ERR_PROVIDER_POLICY_CHANGED",
+        [],
       );
     const selectedAccess =
       run.workspace?.policy && pipeline.initialRoleAccess
@@ -548,6 +553,15 @@ function configuredAdapter(
   };
   return Object.freeze({
     probe: resolveCapabilities,
+    assertWorkspaceReady: ({ preparableOutputPaths }) =>
+      assertWorkspaceReadiness(
+        pipeline,
+        { [role]: configuration },
+        providers,
+        run.workspace?.policy ?? undefined,
+        "ERR_PROVIDER_POLICY_CHANGED",
+        preparableOutputPaths,
+      ),
     async canReadFiles(request) {
       await resolveCapabilities();
       return (
@@ -567,6 +581,7 @@ function configuredAdapter(
           providers,
           run.workspace.policy,
           "ERR_PROVIDER_POLICY_CHANGED",
+          request.access === "workspace-write" ? [] : undefined,
         );
         await resolveCapabilities();
         if (pipeline.initialRoleAccess)

@@ -55,6 +55,7 @@ import {
   createClaudeCommandLauncher,
 } from "../../src/agents/claude/command-launcher.js";
 import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
+import { prepareDirectoryPolicy } from "../../src/agents/claude/directory-policy.js";
 import {
   CLAUDE_PERMISSION_REASON_CODES as CLAUDE_REASON_CODES,
   createClaudeStream,
@@ -1592,6 +1593,33 @@ async function scopedDirectoryWorkspace(t) {
   return { ...directory, selectedFile, excluded, unselected };
 }
 
+test("missing exact output mounts fail before native work and existing files keep exact mounts", async (t) => {
+  const directory = await directoryWorkspace(t);
+  await rm(directory.output, { recursive: true });
+  const fixture = createFixture();
+  const options = {
+    access: "workspace-write",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  await assert.rejects(fixture.adapter.probe(options), (error) => {
+    assert.equal(error.diagnosticClass, "output_root_missing");
+    assert.match(error.message, /authorized fresh run/u);
+    return true;
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ ...options, cwd: directory.cwd })),
+    hasDiagnostic("ERR_UNSUPPORTED_CLAUDE_CAPABILITY", "output_root_missing"),
+  );
+  assert.deepEqual(fixture.calls, []);
+  await writeFile(directory.output, "Exact file\n");
+  const boundary = await prepareDirectoryPolicy(options, ClaudeAdapterError);
+  const mounts = await boundary.bindMounts();
+  assert.deepEqual(mounts.writablePaths, [directory.output]);
+  assert.equal(mounts.writablePaths.includes(dirname(directory.output)), false);
+  assert.ok(mounts.bindings.some(({ path }) => path === directory.output));
+  assert.equal(await readFile(directory.output, "utf8"), "Exact file\n");
+});
+
 // Claude prepares a declared directory read-only for every access: the
 // workspace appears only as the exact reservation, never as a write grant.
 function directoryCommandArguments(directory, native) {
@@ -2792,10 +2820,6 @@ test("fails closed on invalid directory declarations and unsupported isolation",
     { ...directory.workspacePolicy, excludePaths: ["input.md"] },
     { ...directory.workspacePolicy, excludePaths: ["out"] },
     { ...directory.workspacePolicy, excludePaths: [".claude"] },
-    {
-      ...directory.workspacePolicy,
-      outputPaths: [join(directory.cwd, "absent")],
-    },
   ])
     await assert.rejects(
       fixture.adapter.run(

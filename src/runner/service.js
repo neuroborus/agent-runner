@@ -947,6 +947,11 @@ export function createRunner(options = {}) {
               Object.keys(selectedAdapters).map((role) => [
                 role,
                 {
+                  assertWorkspaceReady: async (options) => {
+                    await monitor.check();
+                    await checkConfiguration();
+                    return selectedAdapters[role].assertWorkspaceReady(options);
+                  },
                   probe: async (options) => {
                     await monitor.check();
                     return selectedAdapters[role].probe(options);

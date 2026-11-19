@@ -707,6 +707,15 @@ Boundary validation and creation cover a project commit-kind override of a
 runner custom default before plan parsing.
 Focused reconstruction coverage rejects writable provider-policy drift before
 another turn while preserving startup receipts, accepted results and permissions.
+The same fast owner distinguishes missing slashless rejection (no preparation or
+writable calls), explicit slash-directory preparation and a backend proving
+absent exact-file creation. A mixed-directory witness rejects a missing parent
+before preparing any root. `test/runner-directory.test.js` checks the configured
+descriptor readiness route against every root before preparation; adapter owners
+inspect exact Codex permission and Claude mount projections and reject missing
+unprepared roots before native work. The configured readiness route also rejects
+nonliteral output roots for both backends before probes, creation or invocation.
+Existing shape, parent, control and symlink witnesses retain their owners.
 Its lightweight workspace matches real capture: complete unfiltered identity,
 no synthetic missing-root entry and the real output projection. Cases assert the
 compact prepared-root record, reconstruct existing-root preparation after an
@@ -718,6 +727,11 @@ composition and accepted-result recovery without Git, plus a durable lazy
 candidate-review diagnostic through its cold null retry; run it when changing public
 custom selection, directory role probing, custom orchestration, settlement, or
 candidate-review correction diagnostics and recovery.
+Its existing combined authoring/execution witness also interrupts after the
+prepared identity and baseline settle, then reconstructs with fresh Runner/store
+instances. It retains prepared identities, startup/writable receipts, accepted
+result chains and consumed budgets across preparation and confirmation recovery.
+This adds no workflow/mode matrix and remains in the full slow gate.
 One shared owned fixture writes 10,050 empty dependency-like `vendor/` files and
 a small `.agents/` control file before creation. Real authoring and execution
 pass preflight above the state array limit with compact baselines. Step 1

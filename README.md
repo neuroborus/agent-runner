@@ -1394,7 +1394,7 @@ Author criterion-driven custom plans explicitly, including in an ordinary direct
 agent-run run plan-authoring --project /path/to/workspace --task /path/to/task \
   --plan-kind custom --criteria criteria.md \
   --source sources/catalog.md --source https://example.invalid/reference \
-  --output reports/summary.md
+  --output reports/
 ```
 
 Criteria may be ordinary Markdown in the selected file, task or clarification
@@ -1418,8 +1418,13 @@ configuration uses `pipelines.plan-execution.planKind`. Execution takes sources,
 outputs and agreed criteria from `plan.md`; authoring-only selectors cannot
 replace them. Existing output files or directories can be writable. To create
 new files, prefer a declared output directory; a trailing `/` explicitly
-requests directory preparation under an existing parent. A missing file grants
-no parent writes, and Claude requires an existing exact mount root.
+requests directory preparation under an existing real parent. Missing slashless
+outputs require proved exact-file creation, unsupported by Codex's named-profile
+route and Claude's exact mounts. Codex also refuses existing regular-file roots;
+Claude requires an existing exact file or directory mount root. Admission checks
+every output before new preparation or writable work. Prose grants no kind or
+parent writes. Correct declarations or select a supported backend only in an
+authorized fresh run; frozen selectors remain unchanged.
 
 All three modes retain candidate convergence, criterion-dependent finalization
 and distinct read-only terminal confirmation. `finalization: auto` selects no
@@ -1438,7 +1443,7 @@ untracked, including custom authoring; the runner never changes ignore rules.
 
 MCP `run_start` uses `planKind: "custom"`, `criteriaPath: "criteria.md"`,
 `sourceReferences: ["sources/catalog.md"]` and
-`outputPaths: ["reports/summary.md"]`. The same fields belong under
+`outputPaths: ["reports/"]`. The same fields belong under
 `pipelines.plan-authoring` in global/project configuration. CLI/MCP overrides
 win; selections and read bindings freeze for resume. Omitted and legacy kinds
 remain `commit`, including with supplemental criteria. Unknown or mismatched
