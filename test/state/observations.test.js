@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
@@ -115,7 +116,14 @@ test("an accepted two-mebibyte result survives interrupted durable publication w
 
 test("measured attempts survive durable failure and expose only allowlisted evidence and activity", async (t) => {
   const f = await fixture(t);
-  const failure = new Error("private arbitrary provider error");
+  const diagnostic = createOwnershipDiagnostic("parent-session-signal", {
+    startRequested: true,
+    terminationRequested: true,
+    ownershipHandedOff: false,
+  });
+  const failure = Object.assign(new Error("private arbitrary provider error"), {
+    ownershipDiagnostic: diagnostic,
+  });
   const published = [];
   await assert.rejects(
     runObservedAttempt({
@@ -153,6 +161,7 @@ test("measured attempts survive durable failure and expose only allowlisted evid
   assert.equal(attempt.role, selected.role);
   assert.equal(attempt.checkpoint, selected.checkpoint);
   assert.equal(attempt.status, "failed");
+  assert.deepEqual(attempt.ownershipDiagnostic, diagnostic);
   assert.equal(attempt.accounting, "incomplete");
   assert.equal(attempt.incomplete, true);
   assert.deepEqual(attempt.observations, [observation]);
@@ -736,6 +745,8 @@ test("version-18 observations require migration before measurements and preserve
   for (const event of events) {
     event.schemaVersion = event.state.schemaVersion = 18;
     event.state.runtimeCompatibility.runStateVersion = 18;
+    if (event.state.observations !== null)
+      event.state.observations.schemaVersion = 1;
   }
   const source = events.map(JSON.stringify).join("\n") + "\n";
   await writeFile(eventsPath, source);
@@ -832,7 +843,7 @@ test("bounded retention and closed numeric contracts preserve nullable counters 
   );
   const value = structuredClone(normalized);
   for (const patch of [
-    { schemaVersion: 2 },
+    { schemaVersion: 3 },
     { raw: "private payload" },
     { omittedAttempts: Infinity },
     { attempts: [...value.attempts, value.attempts.at(-1)] },
@@ -885,4 +896,81 @@ test("bounded retention and closed numeric contracts preserve nullable counters 
   assert.equal(terminal.accounting, "reported");
   assert.deepEqual(terminal.observations, [reported]);
   assert.equal(terminal.observations[0].cumulative.totalTokens, null);
+});
+
+test("terminal ownership diagnostics survive cold journal reconstruction and cannot rewrite a terminal attempt", async (t) => {
+  let armed = false;
+  const f = await fixture(t, {
+    onTransitionBoundary: async (point) => {
+      if (armed && point === "event-appended") {
+        armed = false;
+        throw new Error("interrupted terminal publication");
+      }
+    },
+  });
+  const started = await f.store.startObservationAttempt(f.lease, selected);
+  const diagnostic = createOwnershipDiagnostic("parent-containment-relay", {
+    branch: "terminate-signal",
+    startRequested: true,
+    terminationRequested: true,
+    ownershipHandedOff: false,
+    inspection: {
+      work: 12,
+      elapsedMs: 312,
+      maxWork: 65_536,
+      maxElapsedMs: 250,
+      maxAttempts: 3,
+    },
+  });
+  armed = true;
+  await assert.rejects(
+    f.store.recordObservationBatch(f.lease, identity(started), [], {
+      status: "failed",
+      ownershipDiagnostic: diagnostic,
+    }),
+  );
+  const cold = createRunStore({ stateRoot: f.stateRoot });
+  const run = await cold.loadRun(started.runId);
+  assert.deepEqual(
+    projectObservations(run).attempts[0].ownershipDiagnostic,
+    diagnostic,
+  );
+  const recovered = await f.store.recoverRun(f.lease);
+  assert.deepEqual(recovered.observations, run.observations);
+  assert.deepEqual(recovered.counters, started.counters);
+  assert.deepEqual(recovered.pipelineState, started.pipelineState);
+  assert.deepEqual(
+    await f.store.recordObservationBatch(f.lease, identity(started), [], {
+      status: "failed",
+      ownershipDiagnostic: createOwnershipDiagnostic("registration"),
+    }),
+    recovered,
+  );
+  const invalid = structuredClone(recovered);
+  invalid.observations.attempts[0].ownershipDiagnostic = {
+    ...diagnostic,
+    raw: "discarded",
+  };
+  assert.throws(() => normalizeRunState(invalid));
+  const legacy = {
+    ...recovered,
+    schemaVersion: 26,
+    runtimeCompatibility: {
+      ...recovered.runtimeCompatibility,
+      runStateVersion: 26,
+    },
+  };
+  assert.throws(() => normalizeRunState(legacy));
+  legacy.observations = {
+    ...legacy.observations,
+    schemaVersion: 1,
+    attempts: legacy.observations.attempts.map(
+      ({ ownershipDiagnostic: _diagnostic, ...attempt }) => attempt,
+    ),
+  };
+  assert.equal(
+    projectObservations(normalizeRunState(legacy)).attempts[0]
+      .ownershipDiagnostic,
+    null,
+  );
 });

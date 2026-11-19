@@ -1,3 +1,4 @@
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import {
   ADAPTER_FAILURE_CLASS,
   deriveEffectStarted,
@@ -29,6 +30,7 @@ export class AgentBoundaryError extends Error {
     super(boundaryMessage(code, failure.failureClass));
     this.name = "AgentBoundaryError";
     this.failure = failure;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     if (code !== undefined) this.code = code;
     this.ambiguous = failure.outcome === "ambiguous";
     this.recoverable = failure.retry === "transient";

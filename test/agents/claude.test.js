@@ -39,6 +39,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
 import { largeFinalizationResult } from "../support/index.js";
 
@@ -384,9 +385,11 @@ function fallbackAccess(argumentsList) {
   );
 }
 
-async function createFallbackProject(t) {
+async function createFallbackProject(t, parentPath = tmpdir()) {
   // The launcher validates real paths; do not depend on this checkout's Git layout.
-  const projectPath = await mkdtemp(join(tmpdir(), "claude-fallback-project-"));
+  const projectPath = await mkdtemp(
+    join(parentPath, "claude-fallback-project-"),
+  );
   t.after(() => rm(projectPath, { force: true, recursive: true }));
   await Promise.all([
     mkdir(join(projectPath, ".git")),
@@ -4800,7 +4803,10 @@ test("fails closed when bubblewrap rejects direct seccomp setup", async (t) => {
 });
 
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
-  const projectPath = await createFallbackProject(t);
+  // Keep the enclosing mask distinct from permitted system mounts such as /tmp.
+  const projectRoot = await mkdtemp(join(tmpdir(), "claude-fallback-root-"));
+  t.after(() => rm(projectRoot, { force: true, recursive: true }));
+  const projectPath = await createFallbackProject(t, projectRoot);
   const fakeBubblewrap = await createFakeBubblewrap(t);
   // Owner-only and empty, but outside every turn's private TMPDIR.
   const ambientMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
@@ -6812,28 +6818,62 @@ test("maps native structured-output exhaustion to the shared failure class", asy
 });
 
 test("retries only harmless unclassified read-only process failures", async () => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
   for (const [access, recoverable, diagnosticClass] of [
     ["read-only", true, "read_only_process_failed"],
     ["workspace-write", false, "writable_process_ambiguous"],
   ]) {
-    const fixture = createFixture({
-      handle({ call }) {
-        if (call.file === "claude" && call.argumentsList.includes("-p")) {
-          throw processFailure(undefined, "provider-native secret text");
-        }
-        return undefined;
-      },
-    });
+    for (const [ownershipDiagnostic, signal] of [
+      [undefined, undefined],
+      [diagnostic, undefined],
+      [diagnostic, "SIGTERM"],
+      [{ ...diagnostic, private: "discarded" }, undefined],
+    ]) {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            throw Object.assign(
+              processFailure(undefined, "provider-native secret text"),
+              { code: "EAGAIN", ownershipDiagnostic, signal },
+            );
+          }
+          return undefined;
+        },
+      });
 
-    await assert.rejects(fixture.adapter.run(request({ access })), (error) => {
-      assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
-      assert.equal(error.diagnosticClass, diagnosticClass);
-      assert.equal(error.recoverable, recoverable);
-      assert.equal(error.ambiguous, access === "workspace-write");
-      assert.doesNotMatch(error.message, /provider-native/u);
-      assert.equal(error.cause, undefined);
-      return true;
-    });
+      await assert.rejects(
+        fixture.adapter.run(request({ access })),
+        (error) => {
+          assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, recoverable);
+          assert.equal(error.ambiguous, access === "workspace-write");
+          assert.doesNotMatch(error.message, /provider-native/u);
+          assert.equal(error.cause, undefined);
+          const normalized = normalizeAdapterFailure("claude", error);
+          assert.deepEqual(
+            normalized.ownershipDiagnostic,
+            ownershipDiagnostic === diagnostic ? diagnostic : null,
+          );
+          const baseline = normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError(error.message, {
+              code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
+              diagnosticClass,
+              recoverable,
+              ambiguous: access === "workspace-write",
+            }),
+          );
+          assert.deepEqual(normalized.failure, baseline.failure);
+          assert.equal(normalized.effectStarted, baseline.effectStarted);
+          assert.doesNotMatch(
+            JSON.stringify(normalized),
+            /provider-native|private|discarded/u,
+          );
+          return true;
+        },
+      );
+    }
   }
 });
 

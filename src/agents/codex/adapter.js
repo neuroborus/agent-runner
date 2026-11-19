@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import {
   executeOwnedProcess,
+  ownershipDiagnosticFrom,
   spawnOwnedProcess,
 } from "../../platform/index.js";
 import { isolateGitEnvironment } from "../../git/index.js";
@@ -422,6 +423,7 @@ export class CodexAdapterError extends Error {
     super(message, { cause });
     this.name = "CodexAdapterError";
     this.code = code;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     this.ambiguous = ambiguous;
     this.recoverable = recoverable;
     if (availabilityReason !== undefined)
@@ -1899,8 +1901,9 @@ export function createCodexAdapter(options = {}) {
     });
   }
 
-  function workspaceStorageFailure() {
+  function workspaceStorageFailure(cause) {
     return new CodexAdapterError("Codex workspace storage is unsafe.", {
+      cause,
       code: "ERR_CODEX_ISOLATION",
       diagnosticClass: "isolation_shell_environment",
     });
@@ -1912,8 +1915,8 @@ export function createCodexAdapter(options = {}) {
     }
     try {
       return assertCodexWorkspaceStorage(await workspaceStorageFactory());
-    } catch {
-      throw workspaceStorageFailure();
+    } catch (cause) {
+      throw workspaceStorageFailure(cause);
     }
   }
 
@@ -1923,8 +1926,8 @@ export function createCodexAdapter(options = {}) {
     }
     try {
       await workspaceStorage.cleanup();
-    } catch {
-      throw workspaceStorageFailure();
+    } catch (cause) {
+      throw workspaceStorageFailure(cause);
     }
   }
 
@@ -1975,6 +1978,7 @@ export function createCodexAdapter(options = {}) {
           throw new CodexAdapterError(
             "Codex MCP configuration is temporarily unavailable.",
             {
+              cause,
               code: "ERR_CODEX_UNAVAILABLE",
               diagnosticClass: "isolation_mcp_discovery",
               method: "mcp/list",

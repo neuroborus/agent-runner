@@ -509,6 +509,14 @@ remains incomplete. Legacy runs have absent observations until new attempts
 occur. Observation publication is coalesced at native fallback and terminal
 boundaries and uses the same write-ahead recovery; it grants no retry or effect
 permission and stores no prompts, transcripts, or native session identifiers.
+Failed/interrupted attempts may additionally expose a nullable validated
+`ownershipDiagnostic` with a raising site, applicable supervisor branch,
+pre-cleanup flags and bounded inspection measurements. Missing legacy facts stay
+null. Correlated recovery causes and direct CLI/MCP failures expose the same
+redacted evidence. Stage/code/explanation and separate exit/signal facts retain
+their meaning; use existing supported status/resume/stop guidance. These facts
+improve future discrimination, not historical attribution or recovery authority.
+See the [owning contract](../ARCHITECTURE.md#bounded-ownership-failure-diagnostics).
 Runner results and MCP status/wait expose this bounded `observations` evidence;
 CLI status shows the latest attempt, and activity records concise start,
 fallback, and terminal summaries. Optional measurements distinguish supplied

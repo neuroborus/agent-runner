@@ -812,6 +812,11 @@ test("reconstruction provenance and legacy markers cannot prove inactivity or re
     const legacy = structuredClone(run);
     legacy.schemaVersion = 19;
     legacy.runtimeCompatibility = { runnerVersion: 1, runStateVersion: 19 };
+    if (legacy.observations !== null) {
+      legacy.observations.schemaVersion = 1;
+      for (const attempt of legacy.observations.attempts)
+        delete attempt.ownershipDiagnostic;
+    }
     legacy.inactivityRecovery.status = status;
     delete legacy.inactivityRecovery.expiryRevision;
     const migrated = normalizeRunState(legacy, legacy.runId);

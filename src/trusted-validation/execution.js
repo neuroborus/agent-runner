@@ -21,6 +21,7 @@ import {
 import {
   createIsolatedCommand,
   ISOLATION_SYSTEM_PATHS,
+  ownershipDiagnosticFrom,
   PROCESS_GROUPS_AVAILABLE,
   resolveIsolationLauncher,
   spawnOwnedProcess,
@@ -226,7 +227,7 @@ export async function runExactCommand(
               : {}),
           }),
     });
-  } catch {
+  } catch (cause) {
     await onNoLaunch?.();
     return {
       status: "BLOCKED",
@@ -234,6 +235,7 @@ export async function runExactCommand(
       signal: null,
       timedOut: false,
       reason: "spawn",
+      ownershipDiagnostic: ownershipDiagnosticFrom(cause),
     };
   }
   let closedAfterDeadline = false;
@@ -281,6 +283,7 @@ export async function runExactCommand(
   signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
+    let ownershipDiagnostic;
     if (preparationOnly && child.pid === undefined) {
       // Node reports failed launches asynchronously without assigning a PID.
       // Drain close and supervision before durably settling that no-launch fact.
@@ -288,6 +291,8 @@ export async function runExactCommand(
         processClosed,
         child.ownedCompletion,
       ]);
+      if (supervision.status === "rejected")
+        ownershipDiagnostic = ownershipDiagnosticFrom(supervision.reason);
       if (child.pid === undefined && (await closed).type === "error") {
         await onNoLaunch?.();
         signal?.throwIfAborted();
@@ -299,6 +304,7 @@ export async function runExactCommand(
       signal: null,
       timedOut: false,
       reason: "spawn",
+      ...(ownershipDiagnostic === undefined ? {} : { ownershipDiagnostic }),
     };
   }
   if (outcome.type === "timeout" || outcome.type === "aborted") {

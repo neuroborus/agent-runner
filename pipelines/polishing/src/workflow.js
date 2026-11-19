@@ -1199,7 +1199,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         code: cause.code,
         explanation:
           "The frozen trusted execution request is unavailable. Repair the environment and resume; changing declarations requires a new run.",
-        evidence: ["Trusted execution preflight failed before provider work."],
+        evidence: [
+          "Trusted execution preflight failed before provider work.",
+          ...runtime.trustedValidation.failureEvidence(cause),
+        ],
         ...(state().preflightComplete
           ? { resumeState: state().workflowState }
           : {}),
@@ -1233,7 +1236,13 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         throw cause;
       result = {
         status: "BLOCKED",
-        blockers: [{ command: "Required checks", reason: "unavailable" }],
+        blockers: [
+          {
+            command: "Required checks",
+            reason: "unavailable",
+            evidence: runtime.trustedValidation.failureEvidence(cause),
+          },
+        ],
       };
     }
     if (result.status === "READY") return true;
@@ -1243,7 +1252,10 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
       evidence: result.blockers
         .slice(0, 16)
-        .map((item) => `${item.command.slice(0, 3_000)}: ${item.reason}`),
+        .flatMap((item) => [
+          `${item.command.slice(0, 3_000)}: ${item.reason}`,
+          ...(item.evidence ?? []),
+        ]),
       resumeState: current.workflowState,
     });
     return false;
@@ -5018,6 +5030,7 @@ ${establishedValidationPrompt(state())}${
               "Trusted execution storage cleanup requires verified ownership before retry.",
             evidence: [
               "Storage ownership remains recorded for recovery; no new work is authorized.",
+              ...runtime.trustedValidation.failureEvidence(cause),
             ],
             resumeState: "FINALIZE",
           });

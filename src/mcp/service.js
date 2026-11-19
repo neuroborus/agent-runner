@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import {
   serveStdio,
@@ -383,10 +384,29 @@ function result(value) {
   };
 }
 
+function ownershipFailureResult(error) {
+  const ownershipDiagnostic = ownershipDiagnosticFrom(error);
+  if (ownershipDiagnostic === null) return null;
+  return {
+    ...result({
+      code:
+        typeof error.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message:
+        "Execution ownership could not be verified. Use status and supported recovery before retrying.",
+      ownershipDiagnostic,
+    }),
+    isError: true,
+  };
+}
+
 async function observationResult(operation) {
   try {
     return result(await operation());
   } catch (error) {
+    const ownershipFailure = ownershipFailureResult(error);
+    if (ownershipFailure !== null) return ownershipFailure;
     if (!(error instanceof RunObservationBusyError)) throw error;
     return {
       ...result({ code: error.code, message: error.message, retryable: true }),
@@ -399,8 +419,11 @@ async function detachedResult(operation) {
   try {
     return result(await operation());
   } catch (error) {
-    if (!(error instanceof RunStoreError) || !error.dispatchFailure)
+    if (!(error instanceof RunStoreError) || !error.dispatchFailure) {
+      const ownershipFailure = ownershipFailureResult(error);
+      if (ownershipFailure !== null) return ownershipFailure;
       throw error;
+    }
     return {
       ...result({
         code: error.code,
@@ -1580,7 +1603,7 @@ export function createMcpServer(options = {}) {
       inputSchema: z.object({ runId }).strict(),
       annotations: readOnly,
     },
-    async (input) => result(await control.runStatus(input)),
+    async (input) => detachedResult(() => control.runStatus(input)),
   );
   server.registerTool(
     "run_pause",

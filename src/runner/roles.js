@@ -298,7 +298,13 @@ async function runAdapter(adapter, backend, request, providers, naming) {
           ? { commitExecutor: "not_started" }
           : {}),
       });
-      throw new AgentBoundaryError({ code: stopReason?.code }, record);
+      throw new AgentBoundaryError(
+        {
+          code: stopReason?.code,
+          ownershipDiagnostic: failure.ownershipDiagnostic,
+        },
+        record,
+      );
     }
     if (
       request.signal?.aborted &&
@@ -307,7 +313,13 @@ async function runAdapter(adapter, backend, request, providers, naming) {
       ) &&
       [cause, cause?.cause, cause?.cause?.cause].includes(stopReason)
     ) {
-      throw new AgentBoundaryError({ code: stopReason.code }, failure.failure);
+      throw new AgentBoundaryError(
+        {
+          code: stopReason.code,
+          ownershipDiagnostic: failure.ownershipDiagnostic,
+        },
+        failure.failure,
+      );
     }
     throw failure;
   }

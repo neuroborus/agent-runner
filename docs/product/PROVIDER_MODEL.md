@@ -447,6 +447,14 @@ current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
 
+Both adapters and the shared failure boundary carry platform-validated nullable
+`ownershipDiagnostic` evidence without changing failure/effect/retry policy.
+No backend or pipeline derives a raising site from generic codes, native text
+or sessions. Malformed supplemental evidence stays unavailable; the original
+ownership refusal and retirement requirements remain authoritative. The
+[platform contract](../ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its fields, versions and durable/public projections.
+
 Init persists an otherwise unhandled normalized terminal adapter failure before
 execution ownership releases, using only a bounded code and optional registered
 class. Registry interpretation stays at the agent boundary. Read-only Runner callback

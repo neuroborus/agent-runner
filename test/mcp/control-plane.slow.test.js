@@ -261,6 +261,7 @@ await writeFile(${JSON.stringify(diagnosticPath)}, JSON.stringify({ diagnostic, 
     stage: "execution-lease",
     code: "ERR_RUN_LEASED",
     explanation: "Execution ownership could not be acquired.",
+    ownershipDiagnostic: null,
   };
   const control = createMcpControlPlane({
     runner: storedRunner(store, paths),

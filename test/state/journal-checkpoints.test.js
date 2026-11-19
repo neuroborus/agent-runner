@@ -3890,8 +3890,11 @@ test("preparation custody: cold rollback cannot hide an unmerged custody log", a
     () => replacement.runIsLeased(f.current.runId),
     () => replacement.acquireRunLease(f.current.runId),
   ])
-    await assert.rejects(inspect(), {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    await assert.rejects(inspect(), (cause) => {
+      assert.equal(cause.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+      assert.equal(cause.ownershipDiagnostic.site, "state-custody");
+      assert.equal(cause.ownershipDiagnostic.inspection, null);
+      return true;
     });
   assert.equal(await readFile(custodyPath, "utf8"), custody);
   assert.equal(await readFile(eventsPath, "utf8"), beforeEvents);

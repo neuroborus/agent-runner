@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-11-18
 
+- **Ownership refusals retain bounded future-discrimination evidence.** Platform
+  raising sites now attach a closed versioned envelope with pre-cleanup parent
+  flags, actual inspection consumption and distinct relayed supervisor branches.
+  Existing budget checks supply samples without new inspection operations or
+  relaxed retirement. Both adapters, Runner attempts, correlated recovery
+  sidecars and CLI/MCP share the validator; state owns strict legacy reads and
+  leased envelope-27 migration. Diagnostics preserve original-error precedence,
+  frozen progress and consumed effects and grant no acceptance or recovery
+  authority. Historical cause and Source-contract violation remain UNKNOWN;
+  deployment proves no historical fix or reproduction. Exact Source/Installed
+  real-supervisor acceptance remains separately operator-owned after commit.
+
 - **Execution append recovery binds retained finalized infrastructure.** A
   terminal product decision can retain finalization evidence while suspending to
   implementation. Append inspection now measures that inventory together with

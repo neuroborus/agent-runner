@@ -3,6 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import { dirname, isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 import {
+  createOwnershipDiagnostic,
+  ownershipDiagnosticFrom,
+} from "../platform/index.js";
+import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
   isAdapterDiagnosticClass,
@@ -19,7 +23,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 26;
+export const RUN_STATE_SCHEMA_VERSION = 27;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -60,6 +64,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   23,
   24,
   25,
+  26,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -178,10 +183,16 @@ const MAX_INPUT_TEXT_LENGTH = 4_000;
 const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
 
 export class RunStoreError extends Error {
-  constructor(message, { cause, code = "ERR_RUN_STORE" } = {}) {
+  constructor(
+    message,
+    { cause, code = "ERR_RUN_STORE", ownershipDiagnostic } = {},
+  ) {
     super(message, { cause });
     this.name = "RunStoreError";
     this.code = code;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(
+      ownershipDiagnostic === undefined ? cause : { ownershipDiagnostic },
+    );
   }
 }
 
@@ -195,8 +206,8 @@ export class RunObservationBusyError extends RunStoreError {
   }
 }
 
-function fail(message, code = "ERR_INVALID_RUN_STATE") {
-  throw new RunStoreError(message, { code });
+function fail(message, code = "ERR_INVALID_RUN_STATE", ownershipDiagnostic) {
+  throw new RunStoreError(message, { code, ownershipDiagnostic });
 }
 
 export function preservationError(cause) {
@@ -1139,6 +1150,7 @@ export function normalizePreparationCustody(records, reservation) {
     fail(
       "Preparation custody is invalid.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      createOwnershipDiagnostic("state-custody"),
     );
   if (!Array.isArray(records) || records.length < 1 || records.length > 16)
     invalid();

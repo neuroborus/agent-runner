@@ -65,6 +65,65 @@ skips and limits before installation/activation. This negative native witness
 must never become a PASS-required agent check. Neither mocked tests nor CLI
 version/help success grants native acceptance credit.
 
+## Ownership diagnostic acceptance
+
+Focused deterministic development coverage lives in
+`test/platform/ownership-diagnostic.test.js`, the injected supervisor/parent
+cases in `test/platform/owned-process.test.js`,
+`test/runner-observations.test.js`, `test/state/observations.test.js` and
+`test/state/recovery-failures.test.js`. It owns closed shape/site/branch rejection,
+measured overruns and unavailable facts without additional inspection work,
+adapter parity, unchanged failure policy, retained samples across cleanup,
+terminal write-ahead reconstruction, immutable legacy records and correlated
+recovery publication. CLI and MCP fixtures retain projection parity and redaction.
+The parent/supervisor fixture also covers valid post-request pre-spawn expiry,
+with no target spawn, no added inspection and close before deregistration.
+Injected `test/trusted-timing.test.js` regressions cover synchronous and
+asynchronous no-launch refusals, plus preparation refusals through receipts and
+capability blockers; `test/agents/codex.test.js` covers storage allocation/cleanup
+cause propagation. Both adapter suites cover launcher-failure mappings with
+validated, unavailable and malformed diagnostics while preserving failure policy.
+Both coding pipelines' `capability-requirements.test.js` fixtures cover retained
+blocker evidence and caught inspection, preflight and cleanup diagnostics in
+persisted pauses, with unchanged stopping behavior and redacted native errors.
+Both retain malformed-evidence rejection and unchanged failure policy without
+executing selected trusted commands or consuming native acceptance.
+Existing state custody, stop, journal, migration, orchestration, CLI/MCP and release
+slow suites remain required through the complete `npm run test:slow` gate; do not
+repeat those selected files as additional equivalent slow commands. Release
+assembly/archive verification and the separate exact-artifact
+`npm run test:slow -- test/package-install.slow.test.js` gate remain additive.
+Focused development results give none of those later gates acceptance credit.
+
+After reviewed polishing HANDOFF, the separate authorized operator commit,
+whole-result review and inactive candidate installation, the supervising operator
+runs the smallest model-free native acceptance against exact committed Source and
+a separately installed candidate:
+
+```bash
+node scripts/accept-ownership-diagnostics.js --enable --candidate=/absolute/private/package --commit=<source-commit>
+```
+
+The script verifies clean committed Source and identical platform bytes in the
+separate installation. Both executions use the real supervisor/IPC with an owned
+synthetic Node target: one controlled inspection refusal, a post-request pre-spawn
+preparation expiry and a clean-retirement control. The expiry uses the existing
+parent preparation-clock/deadline injection and a supervisor clock preload to
+reach the absolute deadline when handling start, without sleeps or target effects.
+It requires an actual parent request, recorded expiry, no target effect marker
+and positive retirement/deregistration. The refusal injects a procfs read denial
+and labels that condition separately from actual native launch, IPC and verified
+retirement. Injected preparation clocks are likewise labeled separately from
+native execution. It changes no supervision mode, sandbox, native inspection
+limits or provider settings. It retains fixture storage if retirement is
+uncertain. An unsupported environment,
+missing evidence or failed control is a failure, never a skip credited as native
+acceptance. Unrun acceptance stays NOT_RUN; injected tests and retained evidence
+cannot substitute for Source/Installed execution. Historical cause and
+Source-contract violation remain UNKNOWN. Live-model smoke remains opt-in.
+Activation and default concurrent MCP acceptance remain separate operator
+delivery work after these gates.
+
 ## Ordinary gate
 
 Fast `test/state/workspace-preparation.test.js` owns bounded pending admission,

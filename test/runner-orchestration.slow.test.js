@@ -518,6 +518,11 @@ async function writeVersion22Preparation(directory, runId) {
   for (const event of events) {
     event.schemaVersion = event.state.schemaVersion = 22;
     event.state.runtimeCompatibility.runStateVersion = 22;
+    if (event.state.observations !== null) {
+      event.state.observations.schemaVersion = 1;
+      for (const attempt of event.state.observations.attempts)
+        delete attempt.ownershipDiagnostic;
+    }
     delete event.state.preservationRecords;
     delete event.state.workspace;
   }
@@ -1340,7 +1345,10 @@ Extend the requested behavior.
       runStore: replacement,
       inspectSessionProcesses(sessionId, token, options) {
         assert.equal(sessionId, executionPid);
-        assert.deepEqual(options, { includeSession: true });
+        const { onInspection, ...inspectionOptions } = options;
+        assert.deepEqual(inspectionOptions, { includeSession: true });
+        if (onInspection !== undefined)
+          assert.equal(typeof onInspection, "function");
         inspected = true;
         return inspectOwnedSessionProcesses(sessionId, token, {
           ...options,

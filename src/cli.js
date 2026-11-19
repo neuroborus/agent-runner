@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
+import { ownershipDiagnosticFrom } from "./platform/index.js";
 import packageMetadata from "../package.json" with { type: "json" };
 import { migrateRunnerConfiguration } from "./config/index.js";
 import { createGuidanceService } from "./guidance/index.js";
@@ -389,6 +390,10 @@ function runSummary({ directoryPath, run }) {
       `Supplied context bytes: prompt ${known(measured?.promptBytes)}; reconstruction prompt ${known(measured?.recoveryPromptBytes)}; schema ${known(measured?.schemaBytes)}`,
       `Result bytes: output ${known(measured?.resultBytes)}; structured JSON ${known(measured?.structuredResultBytes)}; referenced file bytes/count unknown`,
     );
+    if (latest.ownershipDiagnostic !== null)
+      lines.push(
+        `Ownership diagnostic: ${JSON.stringify(latest.ownershipDiagnostic)}`,
+      );
     for (const value of latest.observations) {
       lines.push(
         `  Native attempt ${value.attempt} turn ${value.turn} (${value.kind}): ${value.outcome}; accounting ${value.accounting}; commands ${value.commandCompletions}; compactions ${value.compactions}; facts incomplete ${value.factsIncomplete}`,
@@ -1165,6 +1170,8 @@ async function runCommand(
     const details = recoveryStarted
       ? recoveryFailureDetails(recoveryStage, error)
       : null;
+    const ownershipDiagnostic =
+      details?.ownershipDiagnostic ?? ownershipDiagnosticFrom(error);
     if (
       details !== null &&
       (details.code !== null ||
@@ -1189,11 +1196,23 @@ async function runCommand(
         stderr.write(
           "Restart the Agent Runner MCP server and retry the same idempotency key.\n",
         );
+    } else if (ownershipDiagnostic !== null) {
+      const code =
+        typeof error.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "ERR_EXECUTION_PROCESS_UNVERIFIABLE";
+      stderr.write(
+        `Execution ownership could not be verified (${code}). Use status and supported recovery before retrying.\n`,
+      );
     } else {
       stderr.write(
         `${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
+    if (ownershipDiagnostic !== null)
+      stderr.write(
+        `Ownership diagnostic: ${JSON.stringify(ownershipDiagnostic)}\n`,
+      );
     return error?.code === "ERR_RUNTIME_VERSION_SKEW"
       ? RUNTIME_VERSION_SKEW_EXIT_CODE
       : 1;

@@ -20,6 +20,7 @@ import {
 
 import { executeFile, largeFinalizationResult } from "../support/index.js";
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 
 const BOOT_A = "11111111-1111-4111-8111-111111111111";
 const BOOT_B = "22222222-2222-4222-8222-222222222222";
@@ -1756,9 +1757,22 @@ test("checkpoint settlement cannot bypass owned processes or a pending stop outc
     },
   });
   await f.store.recordExecutionProcess(f.lease, 101);
+  const owned = await f.store.loadRun(f.input.runId);
   await assert.rejects(f.store.settleCheckpoint(f.lease, build), {
     code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
   });
+  await assert.rejects(
+    f.store.completeOperatorStop(f.lease, {
+      requestId: "pending-stop",
+      patch: {},
+    }),
+    {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
+    },
+  );
+  assert.deepEqual(await f.store.loadRun(f.input.runId), owned);
   const retired = await f.store.recordExecutionProcess(f.lease, null);
   await assert.rejects(
     f.store.settleCheckpoint(f.lease, build, {

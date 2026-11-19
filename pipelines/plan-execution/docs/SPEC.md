@@ -1459,6 +1459,15 @@ reconstructing and retrying the durable request is safe. Safety, protocol, and
 isolation failures are not recoverable; an ambiguous `local-commit` outcome is
 never retried and must instead return to Git-state verification.
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+Capability pauses retain the trusted service's bounded blocker evidence. Caught
+preflight, inspection and cleanup refusals use its pure `failureEvidence`
+projection without changing pause codes or resume checkpoints.
+
 The root agent boundary normalizes thrown failures through the selected
 adapter's own finite diagnostic-class validator. It exposes only a fixed
 message, bounded code, safe effect/recovery flags, the shared structured-output

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../src/platform/index.js";
 import {
   createTrustedValidationService,
   createTrustedValidationSnapshot,
+  runExactCommand,
 } from "../src/trusted-validation/index.js";
 
 const passed = {
@@ -21,10 +24,33 @@ const blocked = {
   reason: "isolation",
 };
 
+test("trusted failure evidence projects only platform-validated ownership facts", () => {
+  const service = createTrustedValidationService();
+  const diagnostic = createOwnershipDiagnostic("trusted-resource-custody");
+  for (const supplied of [
+    undefined,
+    null,
+    diagnostic,
+    { ...diagnostic, private: "PRIVATE_NATIVE_OUTPUT" },
+  ]) {
+    const cause = Object.assign(new Error("PRIVATE_NATIVE_OUTPUT"), {
+      ownershipDiagnostic: supplied,
+      evidence: ["PRIVATE_NATIVE_OUTPUT"],
+    });
+    assert.deepEqual(
+      service.failureEvidence(cause),
+      supplied === diagnostic
+        ? [`Ownership diagnostic: ${JSON.stringify(diagnostic)}`]
+        : [],
+    );
+  }
+});
+
 function fixture({
   result = passed,
   preparationFailure,
   executionFailure,
+  launchFailure,
   safetyFailure,
   onExecution,
 } = {}) {
@@ -65,12 +91,22 @@ function fixture({
       if (preparationFailure) throw preparationFailure;
       return { command, environment };
     },
-    async runCommand(_command, options) {
+    async runCommand(command, options) {
       events.push(options.preparationOnly ? "availability" : "invocation");
       now += 3_125_000n;
       if (options.preparationOnly) await options.onNoLaunch();
       onExecution?.();
       if (executionFailure) throw executionFailure;
+      if (launchFailure)
+        return runExactCommand(command, {
+          ...options,
+          onNoLaunch() {
+            events.push("no-launch");
+          },
+          spawnProcess() {
+            throw launchFailure;
+          },
+        });
       return result;
     },
   });
@@ -87,6 +123,135 @@ function fixture({
   };
   return { service, request, events };
 }
+
+test("launcher refusals retain only validated diagnostics through trusted receipts", async () => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  for (const ownershipDiagnostic of [
+    diagnostic,
+    undefined,
+    { ...diagnostic, private: "discarded" },
+  ]) {
+    const launchFailure = Object.assign(new Error("private launcher failure"), {
+      ownershipDiagnostic,
+    });
+    const f = fixture({ launchFailure });
+    const receipt = await f.service.execute(f.request);
+    const expected = ownershipDiagnostic === diagnostic ? diagnostic : null;
+    assert.equal(receipt.status, "BLOCKED");
+    assert.equal(receipt.exitCode, null);
+    assert.equal(receipt.signal, null);
+    assert.equal(receipt.timedOut, false);
+    assert.deepEqual(receipt.ownershipDiagnostic, expected);
+    assert.deepEqual(receipt.evidence, [
+      "Runner-trusted command check could not be started safely.",
+      ...(expected === null
+        ? []
+        : [`Ownership diagnostic: ${JSON.stringify(expected)}`]),
+      "Runner-measured attempt elapsed time: 12.125 ms (executor invoked).",
+    ]);
+    assert.deepEqual(f.events, [
+      "snapshot",
+      "clock",
+      "preparation",
+      "invocation",
+      "no-launch",
+      "safety",
+      "clock",
+    ]);
+    assert.doesNotMatch(JSON.stringify(receipt), /private|discarded/u);
+  }
+});
+
+test("asynchronous preparation launch failures retain validated diagnostics after no-launch settlement", async () => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  for (const ownershipDiagnostic of [
+    diagnostic,
+    undefined,
+    { ...diagnostic, private: "discarded" },
+  ]) {
+    const events = [];
+    const supervision = Promise.withResolvers();
+    const child = Object.assign(new EventEmitter(), {
+      ownedCompletion: supervision.promise,
+    });
+    const cause = Object.assign(new Error("private launcher failure"), {
+      ownershipDiagnostic,
+    });
+    const result = await runExactCommand(
+      { executable: "unused", arguments: [] },
+      {
+        preparationOnly: true,
+        timeoutMs: 1_000,
+        monotonicNow: () => 0n,
+        onNoLaunch() {
+          events.push("no-launch");
+        },
+        spawnProcess() {
+          queueMicrotask(() => {
+            events.push("error");
+            child.emit("error", cause);
+            events.push("close");
+            child.emit("close", null, null);
+            events.push("supervision");
+            supervision.reject(cause);
+          });
+          return child;
+        },
+      },
+    );
+    assert.deepEqual(result, {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      reason: "spawn",
+      ownershipDiagnostic:
+        ownershipDiagnostic === diagnostic ? diagnostic : null,
+    });
+    assert.deepEqual(events, ["error", "close", "supervision", "no-launch"]);
+    assert.doesNotMatch(JSON.stringify(result), /private|discarded/u);
+  }
+});
+
+test("trusted preparation and caught refusals retain diagnostics without changing availability", async () => {
+  const ownershipDiagnostic = createOwnershipDiagnostic("launcher-setup");
+  const cause = Object.assign(new Error("private refusal"), {
+    ownershipDiagnostic,
+  });
+  for (const boundary of ["preparationFailure", "executionFailure"]) {
+    const f = fixture({ [boundary]: cause });
+    const receipt = await f.service.execute(f.request);
+    assert.equal(receipt.status, "BLOCKED");
+    assert.deepEqual(receipt.ownershipDiagnostic, ownershipDiagnostic);
+    assert.equal(
+      receipt.evidence[1],
+      `Ownership diagnostic: ${JSON.stringify(ownershipDiagnostic)}`,
+    );
+    assert.doesNotMatch(JSON.stringify(receipt), /private refusal/u);
+  }
+  const f = fixture({ preparationFailure: cause });
+  const report = await f.service.inspectRequirements({
+    ...f.request,
+    inventory: [f.request.snapshot.commands[0].command],
+    onResource: async () => {},
+    onProcess: async () => {},
+    onPreparation: async () => assert.fail("refusal precedes registration"),
+  });
+  assert.deepEqual(report, {
+    status: "BLOCKED",
+    blockers: [
+      {
+        command: f.request.snapshot.commands[0].command,
+        commandIdentity: f.request.commandIdentity,
+        reason: "unavailable",
+        evidence: [
+          "The runner could not prepare the frozen command capabilities.",
+          `Ownership diagnostic: ${JSON.stringify(ownershipDiagnostic)}`,
+        ],
+      },
+    ],
+  });
+});
 
 for (const [name, result, outcome] of [
   ["success", passed, "exited with code 0"],

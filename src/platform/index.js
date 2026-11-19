@@ -4,6 +4,12 @@
 // Process facts.
 export { readProcessIdentity, readProcessNamespace } from "./linux-process.js";
 
+export {
+  createOwnershipDiagnostic,
+  normalizeOwnershipDiagnostic,
+  ownershipDiagnosticFrom,
+} from "./ownership-diagnostic.js";
+
 // Owned processes.
 export {
   assertOwnedProcessLauncherProtected,

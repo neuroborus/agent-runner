@@ -599,6 +599,12 @@ change audited sources, stage, commit, create issues, or retrieve references.
 
 ## Public completion and publication
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+
 Use `agent-run run audit --project <workspace> --task <task-dir>` or MCP
 `run_start` with `pipelineId: "audit"`. The descriptor exposes Auditor and finding
 Reviewer configuration, mode and finite budgets through pipeline metadata;

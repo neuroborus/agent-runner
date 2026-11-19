@@ -29,6 +29,7 @@ import { inspectFinalizationFile } from "../../../../src/config/index.js";
 import { createClarificationService } from "../../../../src/clarifications/index.js";
 import { createGitService } from "../../../../src/git/index.js";
 import { createRunStore } from "../../../../src/state/index.js";
+import { trustedValidationFailureEvidence } from "../../../../src/trusted-validation/index.js";
 import {
   createPolishingState,
   migratePolishingStateV1,
@@ -1527,6 +1528,7 @@ async function createFixture(
     clarifications,
     git,
     trustedValidation: {
+      failureEvidence: trustedValidationFailureEvidence,
       async preflight() {},
       async inspectRequirements(options) {
         return (

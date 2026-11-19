@@ -2175,6 +2175,14 @@ summed into consumption totals. `run_activity` and live progress include concise
 observation events at attempt start, changed fallback batches, and settlement.
 They do not grant progress, retry, or effect authority.
 
+Failed/interrupted attempts also project nullable `ownershipDiagnostic` evidence:
+a validated raising site, applicable supervisor branch, pre-cleanup flags and
+bounded inspection sample. CLI status/direct failures and correlated recovery
+errors expose the same evidence; unavailable legacy facts stay null. These facts
+change no recovery, retry, acceptance or ownership authority. See the
+[contract](docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics) and
+[operator-owned native acceptance](docs/TESTING.md#ownership-diagnostic-acceptance).
+
 ## Provider Boundary
 
 One provider descriptor binds a backend ID to its adapter factory,

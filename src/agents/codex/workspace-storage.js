@@ -1,6 +1,10 @@
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import {
+  createOwnershipDiagnostic,
+  ownershipDiagnosticFrom,
+} from "../../platform/index.js";
 const STORAGE_PARENT = process.platform === "darwin" ? "/private/tmp" : "/tmp";
 const STORAGE_PREFIX = "agent-runner-codex-workspace-";
 const DIRECTORY_MODE = 0o700;
@@ -16,6 +20,9 @@ export class CodexWorkspaceStorageError extends Error {
     super(message, { cause });
     this.name = "CodexWorkspaceStorageError";
     this.code = "ERR_CODEX_WORKSPACE_STORAGE";
+    this.ownershipDiagnostic =
+      ownershipDiagnosticFrom(cause) ??
+      createOwnershipDiagnostic("adapter-resource-custody");
   }
 }
 

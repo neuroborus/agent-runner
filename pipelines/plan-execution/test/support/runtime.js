@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { inspectFinalizationFile } from "../../../../src/config/index.js";
+import { trustedValidationFailureEvidence } from "../../../../src/trusted-validation/index.js";
 import {
   createGitService,
   isolateGitEnvironment,
@@ -1851,6 +1852,7 @@ async function createFixture(
     adapters,
     clarifications,
     trustedValidation: {
+      failureEvidence: trustedValidationFailureEvidence,
       async preflight() {},
       async inspectRequirements(options) {
         return (

@@ -546,6 +546,13 @@ token used to detect survivors after supervisor loss without signalling them.
 PID replacement, unverifiable ownership, or surviving descendants retains
 exclusion. A PID disappearing between the live and identity observations is
 rechecked before it can be classified dead.
+Bounded ownership diagnostics snapshot existing inspection checks and pre-cleanup
+flags; they add no discovery, signals, waits, retries or ownership authority.
+Malformed or unavailable evidence cannot establish safe retirement. The
+[platform contract](../ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns validation and propagation; historical cause and Source-contract violation
+remain UNKNOWN. Deployment alone grants no foreign-run resume or historical-fix
+claim.
 Each shared-host snapshot entry receives at most three classification attempts.
 Transient disappearance or parent/session change restarts that entry. Positively
 associated identities stay pinned across retries and live scans, including when

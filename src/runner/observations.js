@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import { normalizeProviderObservation } from "../agents/index.js";
 import { observationActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
@@ -65,10 +66,14 @@ export async function runObservedAttempt({
     }
   }
   async function flush(status) {
+    const ownershipDiagnostic = ["failed", "interrupted"].includes(status)
+      ? ownershipDiagnosticFrom(failure)
+      : null;
     const next = await persist(() =>
       runStore.recordObservationBatch(lease, identity, [...records.values()], {
         status,
         incomplete,
+        ...(ownershipDiagnostic === null ? {} : { ownershipDiagnostic }),
         ...(status === "completed"
           ? {
               resultBytes: bytes(response?.output),

@@ -12,6 +12,7 @@ import {
   sep,
 } from "node:path";
 
+import { createOwnershipDiagnostic } from "../../platform/index.js";
 import { createWorkspaceService } from "../../workspace/index.js";
 
 // New allocations use the fixed platform temporary location so the provider
@@ -27,6 +28,7 @@ export const CLAUDE_STORAGE_IDENTITY = createHash("sha256")
 
 export function environmentError(stage) {
   return Object.assign(new Error(`Agent environment ${stage} is incomplete.`), {
+    ownershipDiagnostic: createOwnershipDiagnostic("adapter-resource-custody"),
     code:
       stage === "preparation"
         ? "ERR_AGENT_ENVIRONMENT_PREPARATION"

@@ -8,6 +8,7 @@ import {
   resolvePipelineConfiguration,
 } from "../src/config/index.js";
 import { getPipeline } from "../src/pipeline-registry.js";
+import { createOwnershipDiagnostic } from "../src/platform/index.js";
 import {
   createTrustedValidationService,
   createTrustedValidationSnapshot,
@@ -251,6 +252,7 @@ test("legacy restricted snapshots retain exact identities and evidence bindings"
 
 test("unavailable storage fails closed before sandbox or command activity", async () => {
   let activity = 0;
+  const diagnostic = createOwnershipDiagnostic("trusted-resource-custody");
   const service = createTrustedValidationService({
     storageRoot: "/project/private-storage",
     sandboxCommand() {
@@ -264,7 +266,17 @@ test("unavailable storage fails closed before sandbox or command activity", asyn
     const selected = snapshot(capabilities);
     await assert.rejects(
       service.preflight({ projectPath: "/project", snapshot: selected }),
-      { code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
+      (error) => {
+        assert.equal(
+          error.code,
+          "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+        );
+        assert.deepEqual(error.ownershipDiagnostic, diagnostic);
+        assert.deepEqual(service.failureEvidence(error), [
+          `Ownership diagnostic: ${JSON.stringify(diagnostic)}`,
+        ]);
+        return true;
+      },
     );
   }
   await service.preflight({ projectPath: "/project", snapshot: snapshot({}) });

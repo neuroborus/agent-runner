@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../src/platform/index.js";
 import { runObservedAttempt } from "../src/runner/observations.js";
 import { createInactivityCoordinator } from "../src/runner/inactivity.js";
 import { createStopMonitor } from "../src/runner/stops.js";
@@ -157,6 +158,14 @@ test("terminal evidence flushes on failure and interruption while persistence er
       controller = new AbortController();
     const failure = Object.assign(new Error("established safety failure"), {
       code: "ERR_EXECUTION_OWNERSHIP",
+      ownershipDiagnostic: createOwnershipDiagnostic(
+        "parent-completion-inspection",
+        {
+          startRequested: true,
+          terminationRequested: true,
+          ownershipHandedOff: true,
+        },
+      ),
       effectStarted: true,
     });
     await assert.rejects(
@@ -176,6 +185,10 @@ test("terminal evidence flushes on failure and interruption while persistence er
       aborted ? "interrupted" : "failed",
     );
     assert.deepEqual(f.writes[0].records, [missing]);
+    assert.deepEqual(
+      f.writes[0].options.ownershipDiagnostic,
+      failure.ownershipDiagnostic,
+    );
     f.runStore.recordObservationBatch = async () => {
       throw new Error("private storage diagnostic");
     };

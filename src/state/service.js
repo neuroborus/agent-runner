@@ -5,6 +5,7 @@ import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
@@ -872,7 +873,10 @@ export function createRunStore({
       }
       throw new RunStoreError(
         "Unmerged preparation custody has no authority.",
-        { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+        {
+          code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
+        },
       );
     }
     assertDisjointStateRoot(
@@ -1294,6 +1298,7 @@ export function createRunStore({
       incomplete = false,
       resultBytes,
       structuredResultBytes,
+      ownershipDiagnostic,
     } = {},
   ) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
@@ -1306,7 +1311,7 @@ export function createRunStore({
         records,
         status,
         incomplete,
-        { resultBytes, structuredResultBytes },
+        { resultBytes, structuredResultBytes, ownershipDiagnostic },
       );
       return persistObservations(
         runDirectory,
@@ -1384,7 +1389,12 @@ export function createRunStore({
       ) {
         throw new RunStoreError(
           "Detached recovery retains execution resources.",
-          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+          {
+            ownershipDiagnostic: createOwnershipDiagnostic(
+              "state-process-active",
+            ),
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+          },
         );
       }
       const activity = dispatchActivity(dispatch, ready);
@@ -2186,6 +2196,9 @@ export function createRunStore({
           throw new RunStoreError(
             "The preceding execution process must stop first.",
             {
+              ownershipDiagnostic: createOwnershipDiagnostic(
+                "state-process-active",
+              ),
               code: "ERR_EXECUTION_PROCESS_ACTIVE",
             },
           );
@@ -2210,6 +2223,8 @@ export function createRunStore({
           "Execution identity changed before registration.",
           {
             code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            ownershipDiagnostic:
+              createOwnershipDiagnostic("state-registration"),
           },
         );
       }
@@ -2252,7 +2267,12 @@ export function createRunStore({
       if (snapshot.state.preparation != null) {
         throw new RunStoreError(
           "Preparation custody must settle before storage changes.",
-          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+          {
+            ownershipDiagnostic: createOwnershipDiagnostic(
+              "state-process-active",
+            ),
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+          },
         );
       }
       const previous = snapshot.state.executionResource;
@@ -2281,6 +2301,9 @@ export function createRunStore({
         (normalized === null && snapshot.state.executionProcess !== null)
       ) {
         throw new RunStoreError("Execution resource transition is unsafe.", {
+          ownershipDiagnostic: createOwnershipDiagnostic(
+            "state-resource-custody",
+          ),
           code: "ERR_EXECUTION_RESOURCE_ACTIVE",
         });
       }

@@ -4,7 +4,10 @@ import { mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { executeOwnedProcess } from "../../platform/index.js";
+import {
+  executeOwnedProcess,
+  ownershipDiagnosticFrom,
+} from "../../platform/index.js";
 import { isolateGitEnvironment } from "../../git/index.js";
 import { canReadFiles } from "../file-access.js";
 import {
@@ -394,6 +397,7 @@ export class ClaudeAdapterError extends Error {
     super(message, { cause });
     this.name = "ClaudeAdapterError";
     this.code = code;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     this.ambiguous = ambiguous;
     this.recoverable =
       recoverable && RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
@@ -1207,22 +1211,23 @@ function permissionError(denials, request, sessionId, stream) {
   });
 }
 
-function processFailureError(request) {
-  if (request.access === "read-only") {
-    return diagnosticError("Claude read-only process failed.", {
-      code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
-      diagnosticClass: "read_only_process_failed",
-      recoverable: true,
-    });
-  }
-  return diagnosticError(
-    "Claude process outcome requires repository reconciliation.",
+function processFailureError(request, cause) {
+  const isReadOnly = request.access === "read-only";
+  const error = diagnosticError(
+    isReadOnly
+      ? "Claude read-only process failed."
+      : "Claude process outcome requires repository reconciliation.",
     {
-      ambiguous: true,
+      ambiguous: !isReadOnly,
       code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
-      diagnosticClass: "writable_process_ambiguous",
+      diagnosticClass: isReadOnly
+        ? "read_only_process_failed"
+        : "writable_process_ambiguous",
+      recoverable: isReadOnly,
     },
   );
+  error.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
+  return error;
 }
 
 function validateRequestedModel(payload, model) {
@@ -1875,7 +1880,7 @@ export function createClaudeAdapter(options = {}) {
         if (cause instanceof ClaudeAdapterError) throw cause;
         if (cause?.signal != null || cause?.killed === true) {
           // Even a parseable diagnostic cannot prove a killed process completed.
-          throw processFailureError(request);
+          throw processFailureError(request, cause);
         }
         const standardError = processOutput(cause?.stderr);
         if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
@@ -1906,7 +1911,7 @@ export function createClaudeAdapter(options = {}) {
           ) {
             throw reportedError;
           }
-          throw processFailureError(request);
+          throw processFailureError(request, cause);
         }
         const sessionId = payloadSessionId(payload);
         if (

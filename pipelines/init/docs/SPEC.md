@@ -443,6 +443,12 @@ reservations and counters are not migrated or fabricated.
 
 ## Terminal provider failures
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+
 After unchanged-workspace verification and physical turn/resource retirement,
 an unhandled boundary-normalized terminal adapter failure persists `FAILED`
 before execution ownership is released. Only the matching reserved read-only

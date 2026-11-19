@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { createRunStore, RunStoreError } from "../../src/state/index.js";
 
 const BOOT_ID = "11111111-1111-4111-8111-111111111111";
@@ -370,4 +371,56 @@ test("stores only bounded allowlisted facts and rejects altered diagnostic shape
     ),
     { code: "ERR_UNSAFE_RUN_ARTIFACT_PATH" },
   );
+});
+
+test("correlated recovery sidecars retain validated ownership evidence, strict versions and legacy absence", async (t) => {
+  const f = await fixture(t);
+  const diagnostic = createOwnershipDiagnostic("state-custody");
+  const input = failure();
+  input.error.ownershipDiagnostic = diagnostic;
+  const recorded = await f.child.recordRecoveryFailure(
+    f.runId,
+    f.dispatch,
+    input,
+  );
+  assert.equal(recorded.schemaVersion, 2);
+  const reader = createRunStore(f.childOptions);
+  assert.deepEqual(
+    (await reader.readRecoveryFailure(f.runId, { ...f.dispatch, owner }))
+      .ownershipDiagnostic,
+    diagnostic,
+  );
+  const source = await readFile(f.failurePath(), "utf8");
+  assert.ok(Buffer.byteLength(source) <= 4_096);
+  assert.deepEqual(
+    await f.child.recordRecoveryFailure(f.runId, f.dispatch, input),
+    recorded,
+  );
+  assert.equal(
+    await reader.readRecoveryFailure(f.runId, {
+      ...f.dispatch,
+      owner: { ...owner, pid: 303 },
+    }),
+    null,
+  );
+  for (const patch of [
+    { schemaVersion: 3 },
+    { ownershipDiagnostic: { ...diagnostic, raw: "discarded" } },
+    { ownershipDiagnostic: undefined },
+  ]) {
+    await writeFile(f.failurePath(), JSON.stringify({ ...recorded, ...patch }));
+    await assert.rejects(
+      reader.readRecoveryFailure(f.runId, { ...f.dispatch, owner }),
+      { code: "ERR_INVALID_RECOVERY_FAILURE" },
+    );
+  }
+  const { ownershipDiagnostic: _diagnostic, ...legacy } = recorded;
+  legacy.schemaVersion = 1;
+  await writeFile(f.failurePath(), JSON.stringify(legacy));
+  assert.deepEqual(
+    await reader.readRecoveryFailure(f.runId, { ...f.dispatch, owner }),
+    legacy,
+  );
+  await f.child.recordRecoveryFailure(f.runId, f.dispatch, failure());
+  assert.deepEqual(JSON.parse(await readFile(f.failurePath(), "utf8")), legacy);
 });

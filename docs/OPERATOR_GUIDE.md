@@ -354,56 +354,61 @@ changes; then use the action-free resume below. Ownerless `idle` does not prove
 loss; terminal states and pending input end waits. See
 [observation safety](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
 
-Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
-and checkpoint. Compare byte measurements and token snapshots separately;
-unknown referenced-file reads, missing results, incomplete accounting, and
-omitted attempts are evidence limits. Never infer a service output limit, sum
-cumulative snapshots, or collect private provider content to fill those gaps.
+Inspect output pressure by attempt, role and checkpoint via CLI status or MCP
+`observations`. Keep byte measurements and token snapshots separate. Unknown
+referenced-file reads, missing results, incomplete accounting and omitted attempts
+limit evidence. Never infer service output limits, sum cumulative snapshots or
+collect private provider content to fill gaps.
 
-A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
-work continues. Inspect `execution.leaseOwner` (none/live/dead/replaced/unverifiable)
-and `execution.processRecord` (durable ownership present, without identity).
+A timeout, wait cancellation or MCP disconnect ends only that wait; detached work
+continues. Inspect `execution.leaseOwner` (none/live/dead/replaced/unverifiable)
+and `execution.processRecord` (durable ownership present, no identity).
 An ownerless nonterminal unpaused checkpoint or `applicable` stop may accept
-action-free recovery through
+action-free recovery via
 `agent-run resume --run <run-id> [--expected-revision <revision>]`, or a separate
-MCP `run_resume` mutation with `action: null`, the exact current revision, and
-a new idempotency key, never a recreated pause/cancel receipt. MCP rejects stale
-revisions, non-null actions, live owners, and ownership races. Follow the
-current public state and actions; this never authorizes a second owner.
+MCP `run_resume` with `action: null`, the exact current revision and a new
+idempotency key, never a recreated pause/cancel receipt. MCP rejects stale
+revisions, non-null actions, live owners and ownership races. Follow public
+state/actions; no second owner is authorized.
 
-An action-free `ERR_EXECUTION_PROCESS_UNVERIFIABLE` keeps its saved checkpoint,
-including `FINALIZE`; first resolve ownership through supported resume, then let
-the runner reconcile inputs and repository controls.
-Do not interpret finished validation commands as accepted finalization evidence.
+Action-free `ERR_EXECUTION_PROCESS_UNVERIFIABLE` preserves the checkpoint, including
+`FINALIZE`: resolve ownership by supported resume before Runner reconciles inputs
+and repository controls. Finished checks are not accepted finalization evidence.
 MCP `ERR_MCP_ACTION_IN_PROGRESS` and `ERR_DETACHED_OWNERSHIP_PENDING` are bounded,
-retryable ownership outcomes. Retry the identical key and arguments; neither
-client timeout nor disconnect cancels the durable continuation or its receipt.
-Unrelated revision movement and retained lease reservations are not launch proof.
-Inspection-budget exhaustion preserves exclusion just like incomplete evidence.
+retryable ownership outcomes: retry identical keys/arguments. Timeout/disconnect
+cancels neither continuation nor receipt. Unrelated revision movement and retained
+leases prove no launch; inspection exhaustion and incomplete evidence retain exclusion.
 
-For detached failures, inspect `dispatchFailure` (known exit code/signal) and
-the separate nullable `recoveryCause` (safe stage, Runner code and explanation).
-CLI resume uses the same fixed explanations. Missing causes are explicitly
-unavailable; an exit or signal never establishes why the owner disappeared.
-Restart can retain a correlated cause without known exit facts. Address the
-reported blocker, then retry the identical key and arguments. Retry alone
-does not repair it, complete the intent or release uncertain ownership. Never
-collect raw child streams, provider output or transcripts to fill this gap.
+Detached failures expose `dispatchFailure` (known exit code/signal) and nullable
+`recoveryCause` (safe stage, Runner code, explanation); CLI resume shares the fixed
+explanations. Missing causes are unavailable; exit/signal never explains owner loss.
+Restart may retain a correlated cause without exit facts. Fix the blocker;
+retry identical keys/arguments: retry cannot repair it, complete the intent
+or release uncertain ownership. Never collect raw child streams, provider output
+or transcripts to fill gaps.
 
-Shared-host recovery requires recorded supervisor identity and namespace, then
-bounded positive-association inspection through the owned session, matching
-launch token or observed owned ancestry. Unassociated processes neither block
-progress nor receive signals because metadata is unreadable, their session is
-newer or their cgroup is shared. Shared-host discovery cannot prove absence
-against arbitrary same-user processes hiding all ancestry and token evidence.
-Live or replaced recorded owners, namespace mismatches, uncertain known
-descendants and inspection-budget exhaustion remain blocking. Never signal
-persisted host PIDs or delete process/lease records. The
+Optional bounded, validated `ownershipDiagnostic` reports raising site,
+applicable supervisor branch, pre-cleanup flags and actual failing inspection
+sample; unavailable/legacy facts are null. CLI/MCP status, MCP wait and correlated
+recovery expose the same fields. Keep stage/code/explanation
+separate from exit/signal. Use supported recovery; diagnostics grant no effects,
+replay or lease release. Historical cause and Source-contract violation remain UNKNOWN.
+See [contract](ARCHITECTURE.md#bounded-ownership-failure-diagnostics) and
+[separate native acceptance](TESTING.md#ownership-diagnostic-acceptance).
+
+Shared-host recovery requires recorded supervisor identity/namespace, then bounded
+positive-association inspection through owned session, matching launch token or observed
+owned ancestry. Unassociated processes neither block nor receive signals for
+unreadable metadata, newer sessions or shared cgroups. Discovery cannot prove
+absence of arbitrary same-user processes hiding all ancestry/token evidence.
+Live/replaced recorded owners, namespace mismatches, uncertain known descendants
+and inspection exhaustion block recovery. Never signal persisted host PIDs or
+delete process/lease records. The
 [safety contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state) owns exact
 association, retirement and bounded retry rules.
 
-After both fixes pass review and commit gates, follow the operator-owned
-[operational acceptance procedure](product/SAFETY_MODEL.md#ownership-repair-operational-acceptance)
+After both fixes pass review/commit gates, follow operator-owned
+[operational acceptance](product/SAFETY_MODEL.md#ownership-repair-operational-acceptance)
 before dependent work.
 
 Stop with `agent-run pause --run <run-id>` or `agent-run cancel --run <run-id>`.

@@ -819,6 +819,12 @@ artifacts outside Git repositories require no Git inspection.
 
 ### Action-free ownership recovery
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+
 A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
 `ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
 Do not reconcile or accept its output while process ownership is unresolved,

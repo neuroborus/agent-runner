@@ -4,6 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { serializeCommitPlan } from "@agent-runner/commit-plan";
 
+import { createOwnershipDiagnostic } from "../../../src/platform/index.js";
 import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
 import {
   migratePlanExecutionStateV17,
@@ -84,6 +85,7 @@ const blocked = (target = command) => ({
   ],
 });
 const ready = { status: "READY", blockers: [] };
+
 const writes = (fixture) =>
   Object.values(fixture.calls)
     .flat()
@@ -139,6 +141,82 @@ function legacy(run) {
   }
   return migratePlanExecutionStateV17({ ...run, pipelineState });
 }
+
+test("trusted ownership diagnostics survive capability pause publication", async (t) => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  const evidence = [
+    "The runner could not prepare the frozen command capabilities.",
+    `Ownership diagnostic: ${JSON.stringify(diagnostic)}`,
+  ];
+  const fixture = await createFixture(t, {
+    onRequirementInspection: () => ({
+      status: "BLOCKED",
+      blockers: [{ command, reason: "unavailable", evidence }],
+    }),
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "IMPLEMENT");
+  assert.deepEqual(paused.pause.evidence, [
+    `${command}: unavailable`,
+    ...evidence,
+  ]);
+  assert.equal(writes(fixture).length, 0);
+});
+
+test("trusted ownership diagnostics survive caught inspection, preflight and cleanup refusals", async (t) => {
+  for (const boundary of ["inspection", "preflight", "cleanup"]) {
+    const diagnostic = createOwnershipDiagnostic("trusted-resource-custody");
+    const failure = Object.assign(new Error("PRIVATE_NATIVE_OUTPUT"), {
+      code:
+        boundary === "cleanup"
+          ? "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE"
+          : "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      ownershipDiagnostic: diagnostic,
+      evidence: ["PRIVATE_NATIVE_OUTPUT"],
+    });
+    const snapshot = trustedValidationSnapshot();
+    const finalization = finalizationWithTrustedCheck(snapshot);
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      trustedValidation: snapshot,
+      modeSettings: { trustedChecks: ["service-check"] },
+      worker: bootstrapTurns("lazy", {
+        ...bootstrapReady("Worker"),
+        requiredChecks: finalization.requiredChecks,
+      }),
+      workWorker: [implementationCompleted(), checkAndFix(), finalization],
+      onRequirementInspection() {
+        if (boundary === "inspection") throw failure;
+        return ready;
+      },
+      onTrustedValidation() {
+        assert.equal(boundary, "cleanup");
+        throw failure;
+      },
+    });
+    if (boundary === "preflight")
+      fixture.runtime.trustedValidation.preflight = () => {
+        throw failure;
+      };
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "environment_blocked");
+    assert.ok(
+      paused.pause.evidence.includes(
+        `Ownership diagnostic: ${JSON.stringify(diagnostic)}`,
+      ),
+    );
+    assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_NATIVE_OUTPUT/u);
+    assert.equal(paused.pipelineState.finalizationResult, null);
+    if (boundary === "cleanup") {
+      assert.equal(paused.pause.resumeState, "FINALIZE");
+      assert.equal(paused.pause.code, failure.code);
+      assert.equal(paused.pipelineState.pendingCommit, null);
+    } else {
+      assert.equal(writes(fixture).length, 0);
+    }
+  }
+});
 
 test("capability reports reject empty needs, mismatched identities, and malformed parameters", () => {
   const result = bootstrapReady("Worker");

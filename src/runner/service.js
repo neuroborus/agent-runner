@@ -3,6 +3,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import {
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
@@ -38,7 +39,10 @@ import {
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
 } from "../state/index.js";
-import { createTrustedValidationService } from "../trusted-validation/index.js";
+import {
+  createTrustedValidationService,
+  trustedValidationFailureEvidence,
+} from "../trusted-validation/index.js";
 
 import {
   assertNonEmptyString,
@@ -588,7 +592,12 @@ export function createRunner(options = {}) {
     ) {
       throw new RunnerError(
         "Execution storage cleanup requires verified process retirement.",
-        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+        {
+          ownershipDiagnostic: createOwnershipDiagnostic(
+            "trusted-resource-custody",
+          ),
+          code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+        },
       );
     }
     try {
@@ -1088,6 +1097,7 @@ export function createRunner(options = {}) {
         monitor === undefined
           ? trustedValidation
           : {
+              failureEvidence: trustedValidationFailureEvidence,
               preflight: async (value) => {
                 await checkConfiguration();
                 await trustedValidation.preflight({

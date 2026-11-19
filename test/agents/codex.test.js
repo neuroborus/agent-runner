@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
 
 import { largeFinalizationResult } from "../support/index.js";
@@ -288,7 +289,9 @@ function createFixture({
 
   async function workspaceStorageFactory() {
     if (storagePreparationError) {
-      throw new Error("test workspace storage preparation failure");
+      throw storagePreparationError instanceof Error
+        ? storagePreparationError
+        : new Error("test workspace storage preparation failure");
     }
     const index = workspaceStorages.length;
     const rootPath = `/tmp/agent-runner-codex-workspace-test-${index}`;
@@ -309,7 +312,9 @@ function createFixture({
       async cleanup() {
         record.cleanupCalls += 1;
         if (storageCleanupError) {
-          throw new Error("test workspace storage cleanup failure");
+          throw storageCleanupError instanceof Error
+            ? storageCleanupError
+            : new Error("test workspace storage cleanup failure");
         }
       },
     });
@@ -3774,12 +3779,67 @@ test("fails closed on unsafe workspace storage preparation and cleanup", async (
         )(error),
       );
       assert.equal(error.message, "Codex workspace storage is unsafe.");
-      assert.equal(error.cause, undefined);
+      assert.equal(
+        error.cause.message,
+        "test workspace storage cleanup failure",
+      );
       return true;
     },
   );
   assert.equal(cleanupFailure.processes.length, 1);
   assert.equal(cleanupFailure.workspaceStorages[0].cleanupCalls, 1);
+});
+
+test("workspace storage refusals preserve validated ownership diagnostics and failure policy", async () => {
+  const diagnostic = createOwnershipDiagnostic("adapter-resource-custody");
+  for (const phase of ["Preparation", "Cleanup"]) {
+    for (const ownershipDiagnostic of [
+      diagnostic,
+      undefined,
+      { ...diagnostic, private: "discarded" },
+    ]) {
+      const cause = Object.assign(new Error("private storage failure"), {
+        ownershipDiagnostic,
+      });
+      const fixture = createFixture({ [`storage${phase}Error`]: cause });
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        (error) => {
+          assert.ok(
+            hasDiagnostic(
+              "ERR_CODEX_ISOLATION",
+              "isolation_shell_environment",
+            )(error),
+          );
+          assert.equal(error.cause, cause);
+          const expected =
+            ownershipDiagnostic === diagnostic ? diagnostic : null;
+          assert.deepEqual(error.ownershipDiagnostic, expected);
+          const normalized = normalizeAdapterFailure("codex", error);
+          assert.deepEqual(normalized.ownershipDiagnostic, expected);
+          const baseline = normalizeAdapterFailure(
+            "codex",
+            new CodexAdapterError("Codex workspace storage is unsafe.", {
+              code: "ERR_CODEX_ISOLATION",
+              diagnosticClass: "isolation_shell_environment",
+            }),
+          );
+          assert.deepEqual(normalized.failure, baseline.failure);
+          assert.equal(normalized.effectStarted, baseline.effectStarted);
+          assert.equal(normalized.recoverable, baseline.recoverable);
+          assert.doesNotMatch(JSON.stringify(normalized), /private|discarded/u);
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, phase === "Preparation" ? 0 : 1);
+      assert.equal(
+        fixture.workspaceStorages.length,
+        phase === "Preparation" ? 0 : 1,
+      );
+      if (phase === "Cleanup")
+        assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    }
+  }
 });
 
 test("rejects an incorrect workspace shell-environment projection", async () => {
@@ -3971,31 +4031,57 @@ test("retries transient MCP discovery before forking a source", async () => {
 });
 
 test("reports persistent MCP discovery failure as recoverable", async () => {
-  let discoveryCalls = 0;
-  const fixture = createFixture({
-    executeHandle({ argumentsList }) {
-      if (argumentsList.includes("mcp")) {
-        discoveryCalls += 1;
-        throw new Error("MCP discovery timed out");
-      }
-      return undefined;
-    },
-  });
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  for (const ownershipDiagnostic of [
+    diagnostic,
+    undefined,
+    { ...diagnostic, private: "discarded" },
+  ]) {
+    let discoveryCalls = 0;
+    const fixture = createFixture({
+      executeHandle({ argumentsList }) {
+        if (argumentsList.includes("mcp")) {
+          discoveryCalls += 1;
+          throw Object.assign(new Error("private launcher failure"), {
+            code: "EAGAIN",
+            ownershipDiagnostic,
+          });
+        }
+        return undefined;
+      },
+    });
 
-  await assert.rejects(
-    fixture.adapter.run(request({ access: "workspace-write" })),
-    (error) => {
-      assert.ok(error instanceof CodexAdapterError);
-      assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
-      assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
-      assert.equal(error.method, "mcp/list");
-      assert.equal(error.recoverable, true);
-      return true;
-    },
-  );
-  assert.equal(discoveryCalls, 2);
-  assert.equal(fixture.processes.length, 0);
-  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    await assert.rejects(
+      fixture.adapter.run(request({ access: "workspace-write" })),
+      (error) => {
+        assert.ok(error instanceof CodexAdapterError);
+        assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+        assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
+        assert.equal(error.method, "mcp/list");
+        assert.equal(error.recoverable, true);
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.deepEqual(
+          normalized.ownershipDiagnostic,
+          ownershipDiagnostic === diagnostic ? diagnostic : null,
+        );
+        const baseline = normalizeAdapterFailure(
+          "codex",
+          new CodexAdapterError(error.message, {
+            code: "ERR_CODEX_UNAVAILABLE",
+            diagnosticClass: "isolation_mcp_discovery",
+            recoverable: true,
+          }),
+        );
+        assert.deepEqual(normalized.failure, baseline.failure);
+        assert.equal(normalized.effectStarted, baseline.effectStarted);
+        assert.doesNotMatch(JSON.stringify(normalized), /private|discarded/u);
+        return true;
+      },
+    );
+    assert.equal(discoveryCalls, 2);
+    assert.equal(fixture.processes.length, 0);
+    assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  }
 });
 
 test("preserves session recovery after transient MCP discovery", async () => {

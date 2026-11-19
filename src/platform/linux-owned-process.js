@@ -10,8 +10,10 @@ import {
   readlinkSync,
   realpathSync,
 } from "node:fs";
+import { constants as osConstants } from "node:os";
 import { dirname, isAbsolute, sep } from "node:path";
 
+import { createOwnershipDiagnostic } from "./ownership-diagnostic.js";
 import {
   readProcessChildren,
   readProcessIdentity,
@@ -35,18 +37,42 @@ const MAX_INSPECTION_MS = 250;
 function inspectionBudget(now, maxWork, maxElapsedMs) {
   const started = now();
   let spent = 0;
-  return (amount = 1) => {
+  let sample = null;
+  let failed = false;
+  const measured = (value) =>
+    Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER
+      ? value
+      : null;
+  const charge = (amount = 1) => {
     const elapsed = now() - started;
     spent += amount;
+    if (!failed)
+      sample = {
+        work: Number.isSafeInteger(spent) ? measured(spent) : null,
+        elapsedMs: measured(elapsed),
+        maxWork,
+        maxElapsedMs,
+        maxAttempts: 3,
+      };
     if (
       !Number.isFinite(elapsed) ||
       elapsed < 0 ||
       elapsed >= maxElapsedMs ||
       spent > maxWork
     ) {
+      failed = true;
       throw new Error("Ownership inspection budget exhausted.");
     }
   };
+  charge.snapshot = () => sample;
+  return charge;
+}
+
+// Notification cannot affect inspection semantics, including injected consumers.
+function publishInspection(callback, sample) {
+  try {
+    callback?.(sample);
+  } catch {}
 }
 
 const OWNERSHIP_MODES = new Set(["ordinary", "native-sandbox-provider"]);
@@ -88,6 +114,7 @@ function preparationExpired() {
 }
 const inspectionBudget = ${inspectionBudget.toString()};
 let charge;
+let inspectionSample = null;
 function readProc(path, encoding) {
   charge();
   try { return require("node:fs").readFileSync(path, encoding); }
@@ -109,7 +136,9 @@ const inspectOwnedAncestry = ${inspectOwnedAncestry.toString()};
 const inspectSessionProcess = ${inspectSessionProcess.toString()};
 const reconcileOwnedMembers = ${reconcileOwnedMembers.toString()};
 function ownedMembers() {
+  inspectionSample = null;
   if (mode !== "session") return [];
+  charge = undefined;
   const session = String(process.pid);
   // The enclosing namespace may host concurrent trusted work. Limit ownership
   // to this supervisor's session and descendants carrying its launch token.
@@ -131,6 +160,8 @@ function ownedMembers() {
     return reconciled;
   } catch {
     return null;
+  } finally {
+    inspectionSample = charge?.snapshot() ?? null;
   }
 }
 function inspectDescendants() {
@@ -160,11 +191,11 @@ function signalDescendants(signal) {
   }
   return true;
 }
-function retainContainmentFailure(code) {
+function retainContainmentFailure(code, branch) {
   releaseClosed = true;
   ownershipHandedOff = true;
   if (process.connected) {
-    process.send({ type: "containment-failure", code, observedProcesses: [...observedProcesses] });
+    process.send({ type: "containment-failure", code, branch, inspection: inspectionSample, observedProcesses: [...observedProcesses] });
   }
   retentionTimer ??= setInterval(() => {}, 60_000);
 }
@@ -181,7 +212,7 @@ function finish() {
     }
     inspectionDeadline ??= Date.now() + grace;
     if (Date.now() >= inspectionDeadline) {
-      retainContainmentFailure("unverifiable");
+      retainContainmentFailure("unverifiable", "finish-inspection-deadline");
       return;
     }
     setTimeout(
@@ -212,6 +243,7 @@ function finish() {
             descendantsStopped,
             descendantsActive,
             inspectionComplete: inspection.complete,
+            inspection: inspectionSample,
           }, exit);
         } else {
           exit();
@@ -226,7 +258,7 @@ function finish() {
               inspectCompletely((inspection) => {
                 if (!inspection.active) return send(inspection, true);
                 if (Date.now() >= deadline) {
-                  return retainContainmentFailure("active");
+                  return retainContainmentFailure("active", "finish-retirement-deadline");
                 }
                 setTimeout(
                   waitForExit,
@@ -265,7 +297,7 @@ function terminate(signal = "SIGTERM", verify = false) {
   if (target?.pid) {
     try { target.kill(signal); } catch {}
   }
-  if (!inspectionComplete) return retainContainmentFailure("unverifiable");
+  if (!inspectionComplete) return retainContainmentFailure("unverifiable", "terminate-signal");
   if (mode === "session" && process.connected) {
     ownershipHandedOff = true;
     process.send({ type: "ownership-handoff", observedProcesses: [...observedProcesses] });
@@ -273,8 +305,8 @@ function terminate(signal = "SIGTERM", verify = false) {
   terminationCheck ??= setTimeout(() => {
     if (!verifyTermination) return process.exit(124);
     const inspection = inspectDescendants();
-    if (!inspection.complete) return retainContainmentFailure("unverifiable");
-    if (inspection.active) return retainContainmentFailure("active");
+    if (!inspection.complete) return retainContainmentFailure("unverifiable", "terminate-check");
+    if (inspection.active) return retainContainmentFailure("active", "terminate-check");
     process.exit(124);
   }, grace);
   if (!verifyTermination) terminationCheck.unref();
@@ -318,13 +350,91 @@ process.on("message", (message) => {
 if (process.connected) process.send({ type: "ready" });
 `.trim();
 
-function ownedError(message, code, cause) {
+function ownedError(message, code, cause, ownershipDiagnostic = null) {
   return Object.assign(
     new Error(message, cause === undefined ? {} : { cause }),
     {
       code,
+      ownershipDiagnostic,
     },
   );
+}
+
+function hasFrameFields(value, required, optional = []) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    required.every((field) => Object.hasOwn(value, field)) &&
+    Object.keys(value).every((field) =>
+      [...required, ...optional].includes(field),
+    )
+  );
+}
+
+function validSupervisorFrame(message) {
+  if (message?.type === "ready" || message?.type === "preparation-expired")
+    return hasFrameFields(message, ["type"]);
+  if (message?.type === "ownership-handoff")
+    return hasFrameFields(message, ["type", "observedProcesses"]);
+  if (message?.type === "containment-failure")
+    return (
+      hasFrameFields(
+        message,
+        ["type", "code", "observedProcesses"],
+        ["branch", "inspection"],
+      ) && ["active", "unverifiable"].includes(message.code)
+    );
+  if (message?.type !== "outcome") return false;
+  const outcome = message.outcome;
+  return (
+    hasFrameFields(
+      message,
+      [
+        "type",
+        "outcome",
+        "descendantsStopped",
+        "descendantsActive",
+        "inspectionComplete",
+      ],
+      ["inspection"],
+    ) &&
+    ["descendantsStopped", "descendantsActive", "inspectionComplete"].every(
+      (field) => typeof message[field] === "boolean",
+    ) &&
+    (outcome?.type === "error"
+      ? hasFrameFields(outcome, ["type"])
+      : outcome?.type === "close" &&
+        hasFrameFields(outcome, ["type", "exitCode", "signal"]) &&
+        (outcome.exitCode === null ||
+          (Number.isSafeInteger(outcome.exitCode) &&
+            outcome.exitCode >= 0 &&
+            outcome.exitCode <= 255)) &&
+        (outcome.signal === null ||
+          (typeof outcome.signal === "string" &&
+            Object.hasOwn(osConstants.signals, outcome.signal))) &&
+        !(outcome.exitCode !== null && outcome.signal !== null))
+  );
+}
+
+function nativeInspection(message) {
+  const sample = message.inspection;
+  return sample?.maxWork === MAX_INSPECTION_WORK &&
+    sample?.maxElapsedMs === MAX_INSPECTION_MS
+    ? sample
+    : null;
+}
+
+function safeDiagnostic(site, options = {}) {
+  try {
+    return createOwnershipDiagnostic(site, options);
+  } catch {
+    try {
+      return createOwnershipDiagnostic(site, { ...options, inspection: null });
+    } catch {
+      return null;
+    }
+  }
 }
 
 function decodeMountPath(value) {
@@ -344,6 +454,8 @@ function readMountTable() {
         throw ownedError(
           "Owned-process mount protection is unavailable.",
           "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          undefined,
+          createOwnershipDiagnostic("launcher-setup"),
         );
       }
       const mountPoint = decodeMountPath(fields[4]);
@@ -351,6 +463,8 @@ function readMountTable() {
         throw ownedError(
           "Owned-process mount protection is unavailable.",
           "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          undefined,
+          createOwnershipDiagnostic("launcher-setup"),
         );
       }
       const options = fields[5].split(",");
@@ -358,6 +472,8 @@ function readMountTable() {
         throw ownedError(
           "Owned-process mount protection is unavailable.",
           "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          undefined,
+          createOwnershipDiagnostic("launcher-setup"),
         );
       }
       return {
@@ -373,6 +489,8 @@ function readMountTable() {
     throw ownedError(
       "Owned-process mount protection is unavailable.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   return mounts;
@@ -430,6 +548,8 @@ export function assertOwnedProcessLauncherProtected(
       throw ownedError(
         "Owned-process launcher is writable by the runner identity.",
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        undefined,
+        createOwnershipDiagnostic("launcher-setup"),
       );
     }
     if (readOnlyAnchor === null && mount.readOnly) {
@@ -446,6 +566,8 @@ function resolveBubblewrap() {
     throw ownedError(
       "Owned process containment requires Linux.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   let failure;
@@ -467,6 +589,7 @@ function resolveBubblewrap() {
     "Owned-process launcher is unavailable.",
     "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     failure,
+    createOwnershipDiagnostic("launcher-setup"),
   );
 }
 
@@ -715,6 +838,7 @@ export function inspectOwnedSessionProcesses(
     now = () => performance.now(),
     maxWork = MAX_INSPECTION_WORK,
     maxElapsedMs = MAX_INSPECTION_MS,
+    onInspection,
   } = {},
 ) {
   if (
@@ -724,10 +848,13 @@ export function inspectOwnedSessionProcesses(
     !Number.isFinite(maxElapsedMs) ||
     maxElapsedMs <= 0 ||
     maxElapsedMs > MAX_INSPECTION_MS
-  )
+  ) {
+    publishInspection(onInspection, null);
     return null;
+  }
+  let charge;
   try {
-    const charge = inspectionBudget(now, maxWork, maxElapsedMs);
+    charge = inspectionBudget(now, maxWork, maxElapsedMs);
     charge(observedProcesses.size);
     const rawRead = read;
     read = (...args) => {
@@ -782,6 +909,8 @@ export function inspectOwnedSessionProcesses(
     return reconciled;
   } catch {
     return null;
+  } finally {
+    publishInspection(onInspection, charge?.snapshot() ?? null);
   }
 }
 
@@ -791,21 +920,33 @@ function signalSession(
   signal,
   observedProcesses,
   inspectSessionProcesses,
+  diagnostic,
 ) {
+  let inspection = null;
   const members = inspectSessionProcesses(sessionId, ownerToken, {
     observedProcesses,
+    onInspection: (sample) => {
+      inspection = sample;
+    },
   });
   if (members === null) {
     throw ownedError(
       "Owned process descendants are unverifiable.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      diagnostic(inspection),
     );
   }
   for (const pid of members) {
     try {
       process.kill(pid, signal);
     } catch (cause) {
-      if (cause?.code !== "ESRCH") throw cause;
+      if (cause?.code !== "ESRCH") {
+        try {
+          cause.ownershipDiagnostic = diagnostic(inspection);
+        } catch {}
+        throw cause;
+      }
     }
   }
 }
@@ -877,6 +1018,7 @@ function supportsNamespaceLaunch(
       "Owned-process namespace capability is unverifiable.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
       result.error,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   const supported = result.status === 0;
@@ -898,6 +1040,8 @@ export function resolveOwnedProcessLauncher(
     throw ownedError(
       "Owned-process supervision mode is invalid.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   const nativeSandboxProvider = ownershipMode === "native-sandbox-provider";
@@ -944,6 +1088,8 @@ export function resolveOwnedProcessLauncher(
     throw ownedError(
       "Owned process PID isolation is unavailable.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   return {
@@ -961,6 +1107,8 @@ function normalizedStdio(value) {
     throw ownedError(
       "Owned-process stdio is invalid.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   return [...value];
@@ -971,6 +1119,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     throw ownedError(
       "Owned-process command is invalid.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   const {
@@ -1000,6 +1150,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     throw ownedError(
       "Owned-process supervision options are invalid.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("launcher-setup"),
     );
   }
   signal?.throwIfAborted();
@@ -1042,6 +1194,14 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   const observedProcesses = new Map();
   let ownershipHandedOff = false;
   let startRequested = false;
+  const diagnostic = (site, inspection = null, branch = null) =>
+    safeDiagnostic(site, {
+      startRequested,
+      terminationRequested,
+      ownershipHandedOff,
+      inspection,
+      branch,
+    });
   child.ownedPayloadRequested = false;
   const pendingSends = new Set();
   const send = (message, onFailure) => {
@@ -1083,6 +1243,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           signal,
           observedProcesses,
           inspectSessionProcesses,
+          (inspection) => diagnostic("parent-session-signal", inspection),
         );
       } catch (cause) {
         containmentFailure ??= cause;
@@ -1129,6 +1290,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
             ownedError(
               "Owned process namespace did not terminate within its bound.",
               "ERR_EXECUTION_PROCESS_ACTIVE",
+              undefined,
+              diagnostic("parent-termination-deadline"),
             );
           void finishCompletion();
         },
@@ -1174,13 +1337,19 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         terminationRequested &&
         ownershipHandedOff
       ) {
+        let inspection = null;
         const members = inspectSessionProcesses(child.pid, ownerToken, {
           observedProcesses,
+          onInspection: (sample) => {
+            inspection = sample;
+          },
         });
         if (members === null) {
-          containmentFailure = ownedError(
+          containmentFailure ??= ownedError(
             "Owned process descendants are unverifiable.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic("parent-completion-inspection", inspection),
           );
         } else {
           terminationContainmentVerified = members.length === 0;
@@ -1222,6 +1391,12 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
               ? "Owned process ended without safe descendant evidence."
               : "Owned process ended without supervision evidence.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic(
+              registered && !safelyStopped
+                ? "parent-missing-descendant-proof"
+                : "parent-missing-supervision",
+            ),
           ),
         );
         return;
@@ -1231,6 +1406,10 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     finishCompletion = () => finish().catch(reject);
     child.once("error", (cause) => {
       if (settled) return;
+      try {
+        cause.ownershipDiagnostic ??=
+          createOwnershipDiagnostic("launcher-setup");
+      } catch {}
       failure = cause;
       supervision = { outcome: { type: "error" }, descendantsStopped: false };
       if (Number.isSafeInteger(child.pid)) child.kill("SIGKILL");
@@ -1242,10 +1421,21 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     });
     const onMessage = async (message) => {
       if (closed || settled) return;
+      if (!validSupervisorFrame(message)) {
+        failure ??= ownedError(
+          "Owned process supervision frame is invalid.",
+          "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          undefined,
+          diagnostic("parent-invalid-frame"),
+        );
+        child.kill("SIGKILL");
+        return;
+      }
       if (message?.type === "preparation-expired") {
         child.ownedPreparationExpired = true;
         terminationRequested = true;
-        // This message is emitted only before the supervisor spawns a target.
+        // Start may already be requested: the supervisor checks its deadline
+        // when handling that request, before spawning a target.
         // Close still must be observed before clearing durable registration.
         supervision = {
           outcome: { type: "close", exitCode: null, signal: null },
@@ -1278,6 +1468,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           failure ??= ownedError(
             "Owned process observations are invalid.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic("parent-invalid-observations"),
           );
           child.kill("SIGKILL");
           return;
@@ -1285,6 +1477,23 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         for (const [pid, startTicks] of observations) {
           observedProcesses.set(pid, startTicks);
         }
+        const branchMatches =
+          message.code === "unverifiable"
+            ? [
+                "finish-inspection-deadline",
+                "terminate-signal",
+                "terminate-check",
+              ].includes(message.branch)
+            : ["finish-retirement-deadline", "terminate-check"].includes(
+                message.branch,
+              );
+        const relayDiagnostic = branchMatches
+          ? diagnostic(
+              "parent-containment-relay",
+              nativeInspection(message),
+              message.branch,
+            )
+          : null;
         ownershipHandedOff = true;
         if (message.type === "ownership-handoff") return;
         const unverifiable = message.code === "unverifiable";
@@ -1295,6 +1504,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           unverifiable
             ? "ERR_EXECUTION_PROCESS_UNVERIFIABLE"
             : "ERR_EXECUTION_PROCESS_ACTIVE",
+          undefined,
+          relayDiagnostic,
         );
         failure ??= retainedContainmentFailure;
         if (!child.ownedContainmentRetained) {
@@ -1310,16 +1521,22 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         return;
       }
       if (message?.type === "outcome") {
-        supervision = message;
+        // Native samples cross the boundary only in validated diagnostics.
+        const { inspection: _inspection, ...outcomeFrame } = message;
+        supervision = outcomeFrame;
         if (message.inspectionComplete !== true) {
-          failure = ownedError(
+          failure ??= ownedError(
             "Owned process descendants are unverifiable.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic("parent-outcome-incomplete", nativeInspection(message)),
           );
         } else if (message.descendantsActive === true) {
-          failure = ownedError(
+          failure ??= ownedError(
             "Owned process descendants did not terminate within their bound.",
             "ERR_EXECUTION_PROCESS_ACTIVE",
+            undefined,
+            diagnostic("parent-outcome-active", nativeInspection(message)),
           );
         }
         return;
@@ -1332,6 +1549,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           throw ownedError(
             "Owned process namespace identity is ambiguous.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic("registration"),
           );
         }
         child.ownedPid = children?.[0] ?? child.pid;
@@ -1352,6 +1571,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           throw ownedError(
             "Owned process identity is unavailable.",
             "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+            undefined,
+            diagnostic("registration"),
           );
         }
         const proof = {
@@ -1424,6 +1645,8 @@ export async function terminateOwnedProcess(
     throw ownedError(
       "Owned execution process identity was replaced.",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      undefined,
+      createOwnershipDiagnostic("recovery-identity"),
     );
   }
   if (owner.status === "dead") {
@@ -1436,6 +1659,8 @@ export async function terminateOwnedProcess(
       throw ownedError(
         "Owned execution process cannot be safely reconciled.",
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        undefined,
+        createOwnershipDiagnostic("recovery-namespace"),
       );
     }
     if (owner.namespaceId !== namespaceId) {
@@ -1443,30 +1668,42 @@ export async function terminateOwnedProcess(
         throw ownedError(
           "Owned host-session descendants are not visible from this namespace.",
           "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+          undefined,
+          createOwnershipDiagnostic("recovery-namespace"),
         );
       }
       throw ownedError(
         "Owned execution process namespace does not match recovery.",
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        undefined,
+        createOwnershipDiagnostic("recovery-namespace"),
       );
     }
+    let inspection = null;
     const members = inspectSessionProcesses(
       owner.pid,
       ownedProcessToken(owner.pid, owner.processIdentity),
       {
         includeSession: true,
+        onInspection: (sample) => {
+          inspection = sample;
+        },
       },
     );
     if (members === null) {
       throw ownedError(
         "Owned execution process descendants are unverifiable.",
         "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        undefined,
+        safeDiagnostic("recovery-inspection", { inspection }),
       );
     }
     if (members.length > 0) {
       throw ownedError(
         "Owned execution process descendants remain active.",
         "ERR_EXECUTION_PROCESS_ACTIVE",
+        undefined,
+        safeDiagnostic("recovery-active", { inspection }),
       );
     }
     return;
@@ -1476,6 +1713,8 @@ export async function terminateOwnedProcess(
     owner.status === "unverifiable"
       ? "ERR_EXECUTION_PROCESS_UNVERIFIABLE"
       : "ERR_EXECUTION_PROCESS_ACTIVE",
+    undefined,
+    createOwnershipDiagnostic("recovery-identity"),
   );
 }
 

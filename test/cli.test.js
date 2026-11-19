@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../src/platform/index.js";
 import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
@@ -860,9 +861,14 @@ test("status dispatches and renders concise persisted state", async () => {
 });
 
 test("status separates byte measurements from token evidence and excludes private state", async () => {
+  const diagnostic = createOwnershipDiagnostic("parent-session-signal", {
+    startRequested: true,
+    terminationRequested: true,
+    ownershipHandedOff: false,
+  });
   const result = commandResult();
   result.run.observations = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     omittedAttempts: 5,
     attempts: [
       {
@@ -870,6 +876,7 @@ test("status separates byte measurements from token evidence and excludes privat
         role: "worker",
         checkpoint: "implement:workspace-write:1",
         status: "failed",
+        ownershipDiagnostic: diagnostic,
         accounting: "incomplete",
         incomplete: false,
         observations: [
@@ -945,6 +952,11 @@ test("status separates byte measurements from token evidence and excludes privat
   assert.doesNotMatch(
     stdout.read(),
     /private|nativeSessionId|arbitrary error/u,
+  );
+  assert.ok(
+    stdout
+      .read()
+      .includes(`Ownership diagnostic: ${JSON.stringify(diagnostic)}`),
   );
   assert.equal(stderr.read(), "");
 });
@@ -1919,4 +1931,42 @@ test("authoring maps explicit kind and repeated declarations to descriptor setti
     stderr.read(),
   );
   assert.deepEqual(input.settingOverrides, { planKind: "custom" });
+});
+
+test("CLI direct and recovery failures print the same validated ownership diagnostic", async () => {
+  const diagnostic = createOwnershipDiagnostic("recovery-namespace");
+  const failure = Object.assign(new Error("discarded private error"), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ownershipDiagnostic: diagnostic,
+  });
+  for (const command of ["status", "resume"]) {
+    const stderr = createSink();
+    assert.equal(
+      await main([command, "--run", RUN_ID], {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          status: async () => {
+            throw failure;
+          },
+          resume: async (_input, callbacks) => {
+            callbacks.onRecoveryStage("process-recovery");
+            throw failure;
+          },
+        }),
+      }),
+      1,
+    );
+    assert.ok(
+      stderr
+        .read()
+        .includes(`Ownership diagnostic: ${JSON.stringify(diagnostic)}`),
+    );
+    assert.doesNotMatch(stderr.read(), /discarded|private error/u);
+    if (command === "resume")
+      assert.match(
+        stderr.read(),
+        /Recovery failed at process-recovery \(ERR_EXECUTION_PROCESS_UNVERIFIABLE\)/u,
+      );
+  }
 });

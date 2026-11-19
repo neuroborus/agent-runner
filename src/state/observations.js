@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { normalizeProviderObservation } from "../agents/index.js";
+import { normalizeOwnershipDiagnostic } from "../platform/index.js";
 
 const MAX_ATTEMPTS = 32;
 const MAX_OBSERVATIONS = 9;
@@ -65,7 +66,9 @@ export function normalizeObservationState(state) {
   if (value === null) return null;
   if (
     !exact(value, ["schemaVersion", "omittedAttempts", "attempts"]) ||
-    value.schemaVersion !== 1 ||
+    ![1, ...(state.schemaVersion >= 27 ? [2] : [])].includes(
+      value.schemaVersion,
+    ) ||
     !count(value.omittedAttempts) ||
     !Array.isArray(value.attempts) ||
     value.attempts.length < 1 ||
@@ -83,6 +86,11 @@ export function normalizeObservationState(state) {
         "accounting",
         "incomplete",
         "observations",
+        ...(value.schemaVersion === 2 &&
+        attempt != null &&
+        Object.hasOwn(attempt, "ownershipDiagnostic")
+          ? ["ownershipDiagnostic"]
+          : []),
         ...(state.schemaVersion >= 19 &&
         attempt != null &&
         Object.hasOwn(attempt, "measurements")
@@ -105,6 +113,16 @@ export function normalizeObservationState(state) {
       invalid();
     previousId = attempt.id;
     const observations = attempt.observations.map(normalizeProviderObservation);
+    const ownershipDiagnostic = normalizeOwnershipDiagnostic(
+      Object.hasOwn(attempt, "ownershipDiagnostic")
+        ? attempt.ownershipDiagnostic
+        : null,
+    );
+    if (
+      ownershipDiagnostic !== null &&
+      !["failed", "interrupted"].includes(attempt.status)
+    )
+      invalid();
     const measurements = Object.hasOwn(attempt, "measurements")
       ? normalizeMeasurements(attempt.measurements)
       : undefined;
@@ -119,6 +137,9 @@ export function normalizeObservationState(state) {
     return {
       ...attempt,
       observations,
+      ...(Object.hasOwn(attempt, "ownershipDiagnostic")
+        ? { ownershipDiagnostic }
+        : {}),
       ...(Object.hasOwn(attempt, "measurements") ? { measurements } : {}),
     };
   });
@@ -169,6 +190,7 @@ export function beginObservationAttempt(state, identity, measurements) {
   const omitted = Math.max(0, attempts.length - MAX_ATTEMPTS);
   return {
     ...value,
+    schemaVersion: state.schemaVersion >= 27 ? 2 : 1,
     omittedAttempts: Math.min(
       Number.MAX_SAFE_INTEGER,
       value.omittedAttempts + omitted,
@@ -183,7 +205,7 @@ export function recordObservations(
   records,
   status,
   incomplete,
-  { resultBytes, structuredResultBytes } = {},
+  { resultBytes, structuredResultBytes, ownershipDiagnostic } = {},
 ) {
   if (
     !exact(identity, ["id", "role", "checkpoint"]) ||
@@ -200,6 +222,14 @@ export function recordObservations(
       !count(structuredResultBytes)) ||
     (status !== "completed" &&
       (resultBytes != null || structuredResultBytes != null))
+  )
+    invalid();
+  const diagnostic = normalizeOwnershipDiagnostic(ownershipDiagnostic ?? null);
+  if (
+    diagnostic !== null &&
+    (state.schemaVersion < 27 ||
+      state.observations?.schemaVersion !== 2 ||
+      !["failed", "interrupted"].includes(status))
   )
     invalid();
   const value = state.observations;
@@ -228,6 +258,7 @@ export function recordObservations(
     observations,
     incomplete: current.incomplete || incomplete,
   };
+  if (diagnostic !== null) next.ownershipDiagnostic = diagnostic;
   if (current.measurements !== undefined)
     next.measurements = {
       ...current.measurements,
@@ -260,6 +291,7 @@ export function assertObservationContinuity(previous, current) {
   const prior = before?.attempts.at(-1);
   const next = after.attempts.at(-1);
   if (
+    before.schemaVersion !== after.schemaVersion ||
     prior?.status !== "active" ||
     before.omittedAttempts !== after.omittedAttempts ||
     !isDeepStrictEqual(
@@ -270,6 +302,11 @@ export function assertObservationContinuity(previous, current) {
       (field) => prior[field] !== next[field],
     ) ||
     (prior.incomplete && !next.incomplete) ||
+    (prior.ownershipDiagnostic !== undefined &&
+      !isDeepStrictEqual(
+        prior.ownershipDiagnostic,
+        next.ownershipDiagnostic,
+      )) ||
     !isDeepStrictEqual(
       prior.measurements,
       next.measurements === undefined
@@ -302,6 +339,9 @@ export function projectObservations(run) {
       status: attempt.status,
       accounting: attempt.accounting,
       incomplete: attempt.incomplete,
+      ownershipDiagnostic: normalizeOwnershipDiagnostic(
+        attempt.ownershipDiagnostic ?? null,
+      ),
       measurements:
         attempt.measurements === undefined
           ? null

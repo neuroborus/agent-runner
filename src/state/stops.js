@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import { STOP_TIMINGS } from "./stop-contract.js";
 import { interruptObservations } from "./observations.js";
 import {
@@ -231,9 +232,12 @@ export function createStopService({
         current.executionProcess !== null ||
         current.executionResource !== null
       ) {
-        reject(
+        throw new RunStoreError(
           "Owned execution must stop before reconciliation completes.",
-          "ERR_EXECUTION_PROCESS_ACTIVE",
+          {
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
+          },
         );
       }
       if (
@@ -284,9 +288,12 @@ export function createStopService({
         snapshot.state.executionProcess !== null ||
         snapshot.state.executionResource !== null
       ) {
-        reject(
+        throw new RunStoreError(
           "Owned execution must stop before checkpoint settlement.",
-          "ERR_EXECUTION_PROCESS_ACTIVE",
+          {
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
+          },
         );
       }
       if (!stopIsPending(snapshot.state)) {

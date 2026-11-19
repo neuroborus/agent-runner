@@ -1663,9 +1663,12 @@ test("action-free recovery retires a dead session before further provider work",
       runStore: recoveredStore,
       inspectSessionProcesses(sessionId, _token, inspection) {
         assert.equal(sessionId, executionPid);
-        assert.deepEqual(inspection, {
+        const { onInspection, ...inspectionOptions } = inspection;
+        assert.deepEqual(inspectionOptions, {
           includeSession: true,
         });
+        if (onInspection !== undefined)
+          assert.equal(typeof onInspection, "function");
         retirementInspections++;
         return [];
       },
