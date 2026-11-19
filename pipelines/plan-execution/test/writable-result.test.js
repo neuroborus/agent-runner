@@ -14,10 +14,18 @@ import {
 } from "../../../test/support/output-exhaustion.js";
 import { createClarificationService } from "../../../src/clarifications/index.js";
 import { planExecutionPipeline, runPlanExecution } from "../src/index.js";
-import { writableResultDiagnostic } from "../src/writable-result.js";
+import {
+  assertWritableResult,
+  writableResultDiagnostic,
+} from "../src/writable-result.js";
+import {
+  normalizeImplementationResult,
+  normalizeResolutionResult,
+} from "../src/workflow-contract.js";
 import {
   IMPLEMENTATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
 } from "../src/schemas.js";
 import {
   createFixture,
@@ -31,6 +39,7 @@ import {
   cleanConfirmation,
   implementationBlocked,
   implementationProductDecision,
+  matchesSchemaSubset,
   SOURCE_SESSION,
   stagnation,
 } from "./support/index.js";
@@ -40,7 +49,255 @@ const malformed = () => ({
   reason: "PRIVATE_REJECTED_VALUE",
 });
 const resultCalls = (fixture, schema = IMPLEMENTATION_SCHEMA) =>
-  fixture.calls.worker.filter((request) => request.schema === schema);
+  fixture.calls.worker.filter(
+    (request) =>
+      request.schema === schema ||
+      (schema === FINDING_RESOLUTION_SCHEMA &&
+        request.schema === FINDING_RECOVERY_SCHEMA),
+  );
+
+const unfinished = (id = "R1") => ({
+  status: "UNFINISHED",
+  decisions: [],
+  reason: "The original repair remains necessary.",
+  question: "",
+  options: [],
+  whyBlocked: "",
+  evidence: [`The preserved candidate still contains blocker ${id}.`],
+});
+
+test("unfinished recovery is strict and unavailable to ordinary Worker turns", () => {
+  const value = unfinished();
+  const normalize = (payload) =>
+    normalizeResolutionResult(payload, [{ id: "R1" }], new Set(), {
+      recoveryOnly: true,
+    });
+  assert.equal(
+    matchesSchemaSubset(FINDING_RECOVERY_SCHEMA, { result: value }),
+    true,
+  );
+  assert.doesNotThrow(() => normalize(value));
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: value }),
+    false,
+  );
+  assert.throws(() =>
+    normalizeResolutionResult(value, [{ id: "R1" }], new Set()),
+  );
+  assert.throws(() =>
+    normalizeImplementationResult({
+      ...implementationCompleted(),
+      status: "UNFINISHED",
+    }),
+  );
+  for (const change of [
+    { decisions: resolution({ id: "R1", decision: "FIX" }).decisions },
+    { evidence: [] },
+    { reason: "" },
+    { question: "New question" },
+  ]) {
+    assert.equal(
+      matchesSchemaSubset(FINDING_RECOVERY_SCHEMA, {
+        result: { ...value, ...change },
+      }),
+      false,
+    );
+    assert.throws(() => normalize({ ...value, ...change }), {
+      code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    });
+  }
+});
+
+test("legacy blocked recovery inspects unfinished work before explicitly authorizing one repair", async (t) => {
+  let writes = 0;
+  const bad = {
+    ...resolution({ id: "R1", decision: "FIX" }),
+    reason: "invalid",
+  };
+  const fixture = await createFixture(t, {
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    workWorker: [
+      implementationCompleted(),
+      bad,
+      {
+        ...unfinished(),
+        status: "BLOCKED",
+        reason: "Required inspection evidence is unavailable.",
+      },
+      unfinished(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema === FINDING_RESOLUTION_SCHEMA &&
+        request.access === "workspace-write"
+      ) {
+        await writeFile(
+          join(request.cwd, "repair.txt"),
+          ++writes === 1 ? "unfinished\n" : "repaired\n",
+        );
+        if (writes === 2)
+          throw Object.assign(new Error("Provider prerequisite unavailable"), {
+            recoverable: true,
+          });
+      }
+    },
+  });
+  const blocked = await fixture.run({ maxFixRoundsPerStep: 1 });
+  assert.equal(blocked.pause.reason, "environment_blocked");
+  assert.equal(blocked.pipelineState.writableResult.stage, "blocked");
+  const legacy = structuredClone(blocked.pipelineState);
+  legacy.writableResult.schemaVersion = 1;
+  delete legacy.writableResult.repair;
+  const migrated = planExecutionPipeline.migrations[44]({
+    pipelineState: legacy,
+  });
+  assert.deepEqual(migrated, blocked.pipelineState);
+  fixture.persistPipelineState(migrated);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  assert.equal(paused.activeTurn, null);
+  assert.equal(paused.pipelineState.writableResult.stage, "repair-required");
+  assert.equal(paused.pipelineState.writableResult.blockers[0].id, "R1");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "unfinished\n",
+  );
+  assert.equal(paused.counters.fixRounds, 1);
+  assert.equal(paused.pipelineState.writableResult.attempts, 2);
+  assert.equal(paused.pipelineState.writableResult.additionalAttempts, 1);
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(paused).nextActions,
+    [{ type: "resume", action: null }],
+  );
+  for (const mutate of [
+    (run) => {
+      run.pipelineState.writableResult.repair = null;
+    },
+    (run) => {
+      run.pipelineState.writableResult.attempts--;
+    },
+    (run) => {
+      run.pipelineState.workReports.at(-1).recovery.previous =
+        run.pipelineState.writableResult.repair;
+    },
+    (run) => {
+      run.activeTurn = { role: "worker", phase: "resolve-findings" };
+    },
+  ]) {
+    const rejected = structuredClone(paused);
+    mutate(rejected);
+    assert.throws(() => planExecutionPipeline.workflow.validateRun(rejected), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  }
+  const unavailable = await fixture.run();
+  assert.equal(unavailable.pause.reason, "backend_unavailable");
+  assert.equal(unavailable.pipelineState.writableResult.stage, "ready");
+  assert.equal(unavailable.pipelineState.writableResult.attempts, 2);
+  // The new invocation cannot replenish the already consumed inspection allowance.
+  const exhausted = await fixture.run();
+  assert.equal(exhausted.pause.reason, "writable_output_invalid");
+  assert.equal(writes, 2);
+  const done = await fixture.run();
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(writes, 2);
+  assert.equal(done.counters.fixRounds, 1);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "repaired\n",
+  );
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    [
+      "workspace-write",
+      "read-only",
+      "read-only",
+      "workspace-write",
+      "read-only",
+    ],
+  );
+  const reservation = fixture.transitions.find(
+    ({ patch }) =>
+      patch?.pipelineState.writableResult?.stage === "prepared" &&
+      patch.pipelineState.writableResult.repair !== null,
+  );
+  assert.equal(reservation.patch.pipelineState.writableResult.attempts, 2);
+  assert.equal(
+    reservation.patch.pipelineState.writableResult.additionalAttempts,
+    1,
+  );
+  const renewed = structuredClone(reservation.patch.pipelineState);
+  renewed.writableResult.additionalAttempts++;
+  assert.throws(() => assertWritableResult(renewed), {
+    code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+  });
+  assert.ok(
+    done.pipelineState.workReports.some(
+      ({ status }) => status === "UNFINISHED",
+    ),
+  );
+  assert.equal(done.pipelineState.completedCommits.length, 1);
+  assert.equal(fixture.calls.reviewer.length, 4); // Bootstrap, original review, renewed review, terminal confirmation.
+});
+
+test("an uncharged unfinished repair needs the existing explicit fix-budget grant", async (t) => {
+  const fixture = await createFixture(t, {
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    workWorker: [
+      implementationCompleted(),
+      resolution({ id: "R1", decision: "FIX" }),
+      resolution(),
+      unfinished("R2"),
+      resolution({ id: "R2", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [
+      reviewFindings("R1"),
+      reviewFindings("R2"),
+      reviewApproved(),
+    ],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema === FINDING_RESOLUTION_SCHEMA &&
+        request.access === "workspace-write"
+      )
+        await writeFile(join(request.cwd, "repair.txt"), "repair\n");
+    },
+  });
+  const paused = await fixture.run({ maxFixRoundsPerStep: 1 });
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pipelineState.writableResult.stage, "repair-required");
+  assert.equal(paused.pipelineState.writableResult.budgetExhausted, true);
+  assert.equal(paused.pipelineState.pendingCorrection, false);
+  const actions = planExecutionPipeline.projections.pause(paused).nextActions;
+  assert.deepEqual(actions, [
+    { type: "resume", action: { type: "extra-fix-rounds", amount: 1 } },
+  ]);
+  assert.throws(() => planExecutionPipeline.validateResumeAction(paused, null));
+  const done = await fixture.run({}, { type: "extra-fix-rounds", amount: 1 });
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(done.counters.fixRounds, 2);
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    ["workspace-write", "read-only", "read-only", "workspace-write"],
+  );
+  assert.equal(
+    done.pipelineState.workReports.find(({ status }) => status === "UNFINISHED")
+      .recovery.budgetExhausted,
+    true,
+  );
+});
 
 for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
   test(`${phase} registration failure reuses the unstarted reservation without a result correction`, async (t) => {
@@ -121,7 +378,14 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
           ? [reviewApproved()]
           : [reviewFindings("R1"), reviewApproved()],
       async onRoleRun(_role, request) {
-        if (request.schema !== schema) return;
+        if (
+          request.schema !== schema &&
+          !(
+            schema === FINDING_RESOLUTION_SCHEMA &&
+            request.schema === FINDING_RECOVERY_SCHEMA
+          )
+        )
+          return;
         if (!interrupted) {
           interrupted = true;
           throw Object.assign(new Error("Legacy provider unavailable"), {
@@ -403,7 +667,14 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
           ? [reviewApproved()]
           : [reviewFindings("R1"), reviewApproved()],
       async onRoleRun(_role, request) {
-        if (request.schema !== schema) return;
+        if (
+          request.schema !== schema &&
+          !(
+            schema === FINDING_RESOLUTION_SCHEMA &&
+            request.schema === FINDING_RECOVERY_SCHEMA
+          )
+        )
+          return;
         if (request.access === "workspace-write")
           await writeFile(
             join(request.cwd, "candidate.txt"),
@@ -809,6 +1080,39 @@ test("custom recovery retains earlier receipts and validates criterion evidence 
   assert.equal(writes, 1);
   assert.equal(restatements, 2);
   assert.deepEqual(done.pipelineState.completedCommits, []);
+});
+
+test("custom unfinished recovery requests a null result and preserves accepted receipts", async (t) => {
+  const fixture = await customExecutionFixture(t, "independent", {
+    beforeTurn({ saved, request }) {
+      if (saved.pipelineState.currentStep !== 2) return;
+      if (saved.activeTurn.phase === "review") {
+        const {
+          validationChange,
+          finalizationFindingIds,
+          validationEvidence,
+          ...report
+        } = reviewFindings("R1");
+        return report;
+      }
+      if (saved.activeTurn.phase === "resolve-findings")
+        return {
+          ...resolution(),
+          customResult: saved.pipelineState.customCandidate,
+        };
+      if (saved.activeTurn.phase === "writable-result") {
+        assert.match(
+          request.prompt,
+          /Return customResult: null only for [^.]*UNFINISHED/u,
+        );
+        return { ...unfinished(), customResult: null };
+      }
+    },
+  });
+  const paused = (await fixture.run()).run;
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  assert.equal(paused.pipelineState.customResults.accepted.length, 1);
+  assert.equal(paused.pipelineState.writableResult.blockers[0].id, "R1");
 });
 
 test("malformed resolution retains original blockers and charges its mutation once", async (t) => {

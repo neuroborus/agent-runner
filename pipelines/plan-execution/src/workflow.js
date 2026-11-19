@@ -5,6 +5,8 @@ import { canonicalExecutionPlan, planKindPolicy } from "./step-policy.js";
 
 import {
   createWritableResult,
+  createRepairReport,
+  rebindWritableRepair,
   writableResultDiagnostic,
 } from "./writable-result.js";
 import { customWorkspace } from "./custom-workspace.js";
@@ -125,6 +127,7 @@ import {
   FINALIZATION_SCHEMA,
   FINDING_ARBITRATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   IMPLEMENTATION_SCHEMA,
   PLAN_COMPATIBILITY_SCHEMA,
   REVIEW_SCHEMA,
@@ -227,6 +230,11 @@ const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSUPPORTED_GIT_PATH",
 ]);
 const STRUCTURED_OUTPUT_FAILURE_CLASS = "structured-output";
+const WRITABLE_RESULT_SCHEMAS = new Set([
+  IMPLEMENTATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
+]);
 // A fresh commit-readiness child has not received the full logical role context.
 const COMMIT_SESSION_CONTEXT_KEY = sha256("worker\0commit-readiness");
 const ADAPTER_DIAGNOSTIC_CLASS_PATTERN = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -466,7 +474,7 @@ function lazyOutputContext(phase) {
 }
 
 function roleOutputContextFor(role, schema, checkpoint) {
-  if ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema)) {
+  if (WRITABLE_RESULT_SCHEMAS.has(schema)) {
     const phase =
       schema === IMPLEMENTATION_SCHEMA
         ? "implementation"
@@ -855,7 +863,7 @@ Current custom result (data):
 ${JSON.stringify(state().customCandidate)}
 
 Earlier accepted results (data):
-${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED, VALIDATION_POLICY_BLOCKED or PRODUCT_DECISION_REQUIRED." : ""}`;
+${JSON.stringify(state().customResults?.accepted.map(({ step, result, receipt }) => ({ step, result, receipt })) ?? [])}${resultTurn ? "\nReturn customResult as a separate root field alongside the status contract, with bounded analysis, evidence in exact current criterion-reference order (criterionId and observations), and absolute inspected outputPaths. Preserve the schema's status fields and empty inapplicable evidence arrays. Preserve the complete current customResult on UNCHANGED; CHANGED includes analysis/evidence changes. Return customResult: null only for BLOCKED, VALIDATION_POLICY_BLOCKED, PRODUCT_DECISION_REQUIRED or recovery-only UNFINISHED." : ""}`;
   }
 
   function planEvidence(evidence) {
@@ -2216,7 +2224,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       : "";
     const resultTurn =
       custom &&
-      ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema) ||
+      (WRITABLE_RESULT_SCHEMAS.has(schema) ||
         (access === "workspace-write" && schema === CHECK_AND_FIX_SCHEMA));
     const promptFor = (evidence) => {
       const prompt = `${buildPrompt(evidence)}\n${sourceContext}${positionPrompt}${assessmentPrompt}`;
@@ -2291,7 +2299,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const originalWritableTurn =
       !resultRestatement &&
       state().writableResult !== null &&
-      [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema);
+      WRITABLE_RESULT_SCHEMAS.has(schema);
     writableCheckpointPersistence = originalWritableTurn || resultRestatement;
     currentRun = await runtime.startAgentTurn(
       turn,
@@ -2357,6 +2365,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       // borrows that convention to replay the writable effect.
       retireFailedWritable =
         originalWritableTurn &&
+        state().writableResult.repair === null &&
         agentError !== undefined &&
         agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS &&
         agentError?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
@@ -2584,6 +2593,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
             : undefined,
         );
       }
+      // An invoked continuation retains the original failure and result checkpoint.
+      // Environmental recovery may inspect it later, but cannot replay this effect.
+      if (originalWritableTurn && state().writableResult?.repair != null)
+        throw agentError;
       if (
         runtime.inactivity?.eligible(agentError) &&
         (await runtime.inactivity.retry({
@@ -2640,8 +2653,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     if (reconstructingNarrative) {
       narrativeRecovery = { role, checkpoint: availabilityCheckpoint };
     }
-    if ([IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(schema))
-      return response.structured;
+    if (WRITABLE_RESULT_SCHEMAS.has(schema)) return response.structured;
     if (resultTurn) {
       const { customResult: result, ...envelope } = response.structured;
       const output = envelope;
@@ -5042,6 +5054,12 @@ The runner will derive validation inventories from the independently accepted ro
     if (resumeAction === null) {
       const current = state();
       if (
+        currentRun.pause?.reason === "finding_repair_required" &&
+        current.writableResult?.stage === "repair-required"
+      ) {
+        return authorizeFindingRepair();
+      }
+      if (
         current.workflowState === "WAITING_FOR_USER" &&
         (currentRun.pause.reason === "writable_output_invalid" ||
           (currentRun.pause.reason === "environment_blocked" &&
@@ -5187,12 +5205,30 @@ The runner will derive validation inventories from the independently accepted ro
       ) {
         throw workflowError("Additional fix-round budget is too large.");
       }
+      if (state().writableResult?.stage === "repair-required") {
+        if (
+          (await contentFingerprint()) !==
+          state().writableResult.candidateFingerprint
+        )
+          return pauseWritableResultDrift();
+        if (custom) await checkpoint().verify();
+      }
       await transition(
-        {
-          ...state(),
-          workflowState: currentRun.pause.resumeState,
-          additionalFixRounds,
-        },
+        state().writableResult?.stage === "repair-required"
+          ? rebindWritableRepair({
+              ...state(),
+              workflowState: "RESOLVE_FINDINGS",
+              additionalFixRounds,
+              writableResult: {
+                ...state().writableResult,
+                stage: "repair-authorized",
+              },
+            })
+          : {
+              ...state(),
+              workflowState: currentRun.pause.resumeState,
+              additionalFixRounds,
+            },
         {
           pause: null,
           publicActivity: activity(
@@ -5391,6 +5427,24 @@ ${plannedStepContext(step)}${
 
   async function beginWritableResult(facts) {
     const pending = state().writableResult;
+    if (
+      pending?.stage === "repair-authorized" &&
+      currentRun.activeTurn === null
+    ) {
+      if (
+        !isDeepStrictEqual(pending.blockers, facts.blockers) ||
+        !isDeepStrictEqual(pending.restrictedIds, facts.restrictedIds) ||
+        facts.budgetExhausted ||
+        facts.beforeFingerprint !== pending.candidateFingerprint
+      )
+        throw workflowError("Finding repair authority changed.");
+      const next = createWritableResult(state(), counters(), facts);
+      next.repair = pending.repair;
+      next.attempts = pending.attempts;
+      next.additionalAttempts = pending.additionalAttempts;
+      await transition({ ...state(), writableResult: next });
+      return;
+    }
     if (pending !== null) {
       // An absent turn-start publication proves native work never began.
       // Reuse that exact reservation; invoking/retired turns remain restatement-only.
@@ -5469,6 +5523,11 @@ ${plannedStepContext(step)}${
               payload,
               checkpoint.blockers,
               new Set(checkpoint.restrictedIds),
+              {
+                recoveryOnly:
+                  schema === FINDING_RECOVERY_SCHEMA &&
+                  checkpoint.stage === "correcting",
+              },
             ),
       envelope,
       context,
@@ -5522,6 +5581,30 @@ ${plannedStepContext(step)}${
       return pauseWritableResultDrift();
     if (result.status === "VALIDATION_POLICY_BLOCKED")
       return validationPolicyBlocked(result);
+    if (result.status === "UNFINISHED") {
+      const report = createRepairReport(checkpoint, result);
+      const workReports = retainWorkReport(state().workReports, report);
+      const needsBudget =
+        !state().pendingCorrection && counters().fixRounds >= fixBudget();
+      await pause(
+        needsBudget ? "fix_limit_reached" : "finding_repair_required",
+        {
+          ...(needsBudget ? { fixRounds: counters().fixRounds } : {}),
+          resumeState: "RESOLVE_FINDINGS",
+        },
+        {
+          workReports,
+          writableResult: {
+            ...checkpoint,
+            stage: "repair-required",
+            repair: workReports.findIndex((entry) =>
+              isDeepStrictEqual(entry, report),
+            ),
+          },
+        },
+      );
+      return false;
+    }
     if (result.status === "BLOCKED") {
       const retain =
         checkpoint.attempts > 0 || (checkpoint.rework && checkpoint.fixCharged);
@@ -5686,7 +5769,7 @@ ${plannedStepContext(step)}${
     const schema =
       pending.phase === "IMPLEMENT"
         ? IMPLEMENTATION_SCHEMA
-        : FINDING_RESOLUTION_SCHEMA;
+        : FINDING_RECOVERY_SCHEMA;
     try {
       const output = await runRole(
         "worker",
@@ -5706,6 +5789,46 @@ ${plannedStepContext(step)}${
       if (cause?.code !== "ERR_INVALID_PLAN_EXECUTION_OUTPUT") throw cause;
       return exhaustWritableResult(cause);
     }
+  }
+
+  async function authorizeFindingRepair() {
+    if (
+      (await readCurrentInputs()) === null ||
+      !(await verifyPersistedRepository())
+    )
+      return false;
+    const pending = state().writableResult;
+    if (
+      currentRun.activeTurn !== null ||
+      interruptedTurn !== null ||
+      (await contentFingerprint()) !== pending.candidateFingerprint
+    )
+      return pauseWritableResultDrift();
+    if (custom) await checkpoint().verify();
+    if (!state().pendingCorrection && counters().fixRounds >= fixBudget()) {
+      await pause("fix_limit_reached", {
+        fixRounds: counters().fixRounds,
+        resumeState: "RESOLVE_FINDINGS",
+      });
+      return false;
+    }
+    await transition(
+      {
+        ...state(),
+        workflowState: "RESOLVE_FINDINGS",
+        writableResult: { ...pending, stage: "repair-authorized" },
+      },
+      {
+        pause: null,
+        publicActivity: activity(
+          "runner",
+          "resolution",
+          "repair-authorized",
+          "One new finding repair explicitly authorized; the retired effect is not replayed.",
+        ),
+      },
+    );
+    return true;
   }
 
   async function runImplementationTurn() {
@@ -8079,12 +8202,14 @@ ${JSON.stringify(
       return arbitrateStagnation();
     }
     const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
+    const continuingRepair = current.writableResult?.repair != null;
     const budgetExhausted =
-      retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
-      (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
-        true &&
-        !current.availabilityCorrectionCharged &&
-        counters().fixRounds >= fixBudget());
+      !(continuingRepair && current.pendingCorrection) &&
+      (retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
+        (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
+          true &&
+          !current.availabilityCorrectionCharged &&
+          counters().fixRounds >= fixBudget()));
     const blockers = activeBlockers();
     const disputableFindingIds = new Set(
       current.findings
@@ -8121,6 +8246,10 @@ ${JSON.stringify(
         )
         .map(({ id }) => id),
     };
+    if (continuingRepair)
+      await runtime.adapters.worker.probe({
+        access: budgetExhausted ? "read-only" : "workspace-write",
+      });
     return invokeWritableResult(
       FINDING_RESOLUTION_SCHEMA,
       (evidence) => `${FINDING_RESOLUTION_INSTRUCTIONS}
@@ -9233,7 +9362,8 @@ ${step.subject}`),
       ) {
         const pending = state().writableResult;
         const advance =
-          pending.stage === "prepared" && currentRun.activeTurn === null
+          ["prepared", "repair-authorized"].includes(pending.stage) &&
+          currentRun.activeTurn === null
             ? pending.phase === "IMPLEMENT"
               ? runImplementationTurn
               : runResolutionTurn

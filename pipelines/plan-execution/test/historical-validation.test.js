@@ -20,6 +20,7 @@ import {
   IMPLEMENTATION_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   FINALIZATION_SCHEMA,
 } from "../src/schemas.js";
 import { HISTORICAL_VALIDATION_INSTRUCTIONS } from "../src/prompts.js";
@@ -841,7 +842,11 @@ for (const [mode, phase] of [
     if (restated)
       assert.deepEqual(
         fixture.calls.worker
-          .filter(({ schema }) => schema === FINDING_RESOLUTION_SCHEMA)
+          .filter(({ schema }) =>
+            [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(
+              schema,
+            ),
+          )
           .map(({ access }) => access),
         ["workspace-write", "read-only", "read-only"],
       );
@@ -1072,8 +1077,8 @@ test("a malformed policy report is restated read-only, preserving reconciled wor
   });
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "validation_policy_blocked");
-  const calls = fixture.calls.worker.filter(
-    ({ schema }) => schema === FINDING_RESOLUTION_SCHEMA,
+  const calls = fixture.calls.worker.filter(({ schema }) =>
+    [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema),
   );
   assert.deepEqual(
     calls.map(({ access }) => access),

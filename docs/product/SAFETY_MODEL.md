@@ -37,6 +37,13 @@ recovery diagnostics contain only bounded allowlisted identities, never rejected
 values, commands, exception messages or native output. Existing review and
 one-shot effect ownership remain mandatory.
 
+Execution recovery may establish current unfinished repair need with
+`UNFINISHED`, without inventing any historical disposition. Only explicit resume
+of `finding_repair_required` (or its eligible explicit fix-budget grant) grants
+one new invocation after binding checks. Consumed effects/allowances and pending
+corrections survive; an invoked continuation returns through read-only recovery.
+Migration grants no authority, and every original review/effect gate still applies.
+
 ## Git ownership
 
 Commit-plan execution permits exactly one ordinary local commit for each validated

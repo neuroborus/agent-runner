@@ -15,7 +15,7 @@ import {
   normalizeCustomResult,
   executionContentFingerprint,
 } from "./custom-results.js";
-import { assertWritableResult } from "./writable-result.js";
+import { assertWritableResult, assertRepairReport } from "./writable-result.js";
 import { validImplementationEvidence } from "./implementation-evidence.js";
 import {
   assertCommitSizeAssessment,
@@ -479,6 +479,7 @@ const PAUSE_RESUME_STATES = Object.freeze({
   ]),
   confirmation_output_invalid: Object.freeze(["CONFIRM"]),
   writable_output_invalid: Object.freeze(["IMPLEMENT", "RESOLVE_FINDINGS"]),
+  finding_repair_required: Object.freeze(["RESOLVE_FINDINGS"]),
   finalization_cannot_pass: Object.freeze(["FINALIZE"]),
   finalization_skill_invalid: Object.freeze(["FINALIZE"]),
   finalization_skill_missing: Object.freeze(["FINALIZE"]),
@@ -3160,7 +3161,12 @@ export function normalizeCleanConfirmationResult(
     : result;
 }
 
-export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
+export function normalizeResolutionResult(
+  payload,
+  blockers,
+  arbitratedIds,
+  { recoveryOnly = false } = {},
+) {
   if (!isRecord(payload))
     throw outputError(
       "Worker returned an invalid finding resolution.",
@@ -3182,6 +3188,7 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
       "BLOCKED",
       "VALIDATION_POLICY_BLOCKED",
       "PRODUCT_DECISION_REQUIRED",
+      ...(recoveryOnly && blockers.length ? ["UNFINISHED"] : []),
     ].includes(payload.status)
   )
     throw outputError(
@@ -3197,7 +3204,7 @@ export function normalizeResolutionResult(payload, blockers, arbitratedIds) {
       decision: normalizeProductDecision(payload),
     });
   }
-  if (payload.status === "BLOCKED") {
+  if (["BLOCKED", "UNFINISHED"].includes(payload.status)) {
     assertEmptyOutputFields(
       payload,
       ["question", "whyBlocked"],
@@ -3964,8 +3971,48 @@ function normalizeWorkReports(reports) {
       "Work report history exceeds its bounded context capacity.",
     );
   }
-  for (const report of reports) {
+  for (const [index, report] of reports.entries()) {
     if (!isRecord(report)) throw workflowError("Invalid work report history.");
+    if (report.status === "UNFINISHED") {
+      assertExactFields(
+        report,
+        ["step", "phase", "status", "reason", "evidence", "recovery"],
+        "Unfinished repair report",
+      );
+      if (
+        report.phase !== "RESOLVE_FINDINGS" ||
+        !Number.isSafeInteger(report.step) ||
+        report.step < 1
+      )
+        throw workflowError("Invalid unfinished repair checkpoint.");
+      try {
+        const normalized = normalizeResolutionResult(
+          {
+            status: "BLOCKED",
+            reason: report.reason,
+            evidence: report.evidence,
+            decisions: [],
+            question: "",
+            options: [],
+            whyBlocked: "",
+          },
+          [],
+          new Set(),
+        );
+        if (
+          !isDeepStrictEqual(normalized, {
+            status: "BLOCKED",
+            reason: report.reason,
+            evidence: report.evidence,
+          })
+        )
+          throw workflowError("Unfinished repair report must be normalized.");
+      } catch {
+        throw workflowError("Invalid unfinished repair report.");
+      }
+      assertRepairReport(report, reports.slice(0, index));
+      continue;
+    }
     if (report.status === "BLOCKED") {
       assertExactFields(
         report,
@@ -6878,7 +6925,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 44 ||
+    run.pipelineStateVersion !== 45 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -7077,6 +7124,32 @@ export function assertRun(run) {
         (state.writableResult.fixCharged ? 1 : 0)
   )
     throw workflowError("Writable result correction accounting changed.");
+  const repair = state.writableResult;
+  const repairNeedsBudget =
+    repair?.stage === "repair-required" &&
+    !state.pendingCorrection &&
+    normalizedCounters(run.counters).fixRounds >=
+      state.settings.maxFixRoundsPerStep + state.additionalFixRounds;
+  if (
+    (run.pause?.reason === "finding_repair_required" &&
+      (!hasExactFields(run.pause, ["reason", "resumeState"]) ||
+        run.pause.resumeState !== "RESOLVE_FINDINGS" ||
+        repair?.stage !== "repair-required" ||
+        repairNeedsBudget)) ||
+    (repair?.stage === "repair-required" &&
+      run.pause?.reason === "fix_limit_reached" &&
+      (!repairNeedsBudget ||
+        !hasExactFields(run.pause, ["reason", "fixRounds", "resumeState"]) ||
+        run.pause.resumeState !== "RESOLVE_FINDINGS" ||
+        run.pause.fixRounds !== normalizedCounters(run.counters).fixRounds)) ||
+    (repair?.stage === "repair-required" &&
+      !["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+        state.workflowState,
+      )) ||
+    (["repair-required", "repair-authorized"].includes(repair?.stage) &&
+      run.activeTurn !== null)
+  )
+    throw workflowError("Invalid finding repair authorization.");
   const append = state.pendingClarificationAppend;
   if (append !== null) {
     normalizePipelineState({
@@ -7283,6 +7356,7 @@ export function assertRun(run) {
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
+          "finding_repair_required",
           "finalization_transition_invalid",
           "finalization_evidence_rejected",
           "lazy_output_invalid",

@@ -19,6 +19,11 @@ It grants no writable replay, additional fix budget or approval. Resolve a
 validated environment blocker before resuming; unsafe drift or contamination
 retains its existing stop. See the
 [execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+Recovery-only `UNFINISHED` instead establishes a still-required execution repair.
+At `finding_repair_required`, null resume authorizes one new repair against the
+verified preserved candidate. Unavailable uncharged budget requires the existing
+explicit `extra-fix-rounds` grant at `fix_limit_reached`. Neither action invents
+historical dispositions, refunds consumed attempts or replaces original gates.
 Polishing applies the same rule to a finding-resolution report in independent
 and combined modes: `resolution_output_invalid` means its one automatic
 read-only restatement was consumed, and resuming that checkpoint authorizes one

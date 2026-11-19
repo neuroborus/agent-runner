@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-11-19
 
+- **Unfinished execution repairs require explicit continuation.** Read-only
+  retired-turn recovery can report UNFINISHED without inventing dispositions.
+  A distinct pause authorizes one new repair only through explicit resume or
+  the narrowly eligible existing fix-budget grant. Checkpoint lineage, consumed
+  attempts, pending once-only charges and original blockers survive interruption;
+  migration grants no writes, and candidate/terminal gates retain their owners.
+  Polishing continuation and the separate marker repairs remain pending scope.
+
 - **Custom output admission requires enforceable roots.** Execution reconciles
   pending effects before checking every output against descriptor-owned backend
   policy. Canonical trailing `/` retains directory intent after normalization;

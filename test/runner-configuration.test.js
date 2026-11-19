@@ -20,6 +20,11 @@ import {
   runnerFor,
 } from "./support/index.js";
 
+const CLARIFICATION_OWNERSHIP_VERSIONS = Object.freeze({
+  "plan-execution": 43,
+  polishing: 23,
+});
+
 async function externalFixture(t, pipelineId, settings = {}) {
   const f = await createFixture(t);
   const projectPath = join(f.projectPath, "nested");
@@ -208,7 +213,7 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     const { clarificationRoot: _selected, ...legacyInitial } =
       created.pipelineState;
     assert.equal(
-      pipeline.migrations[pipeline.stateVersion - 1]({
+      pipeline.migrations[CLARIFICATION_OWNERSHIP_VERSIONS[pipelineId]]({
         ...created,
         pipelineState: legacyInitial,
       }).clarificationRoot,
@@ -315,7 +320,9 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     const pipeline = getPipeline(pipelineId);
     const { clarificationRoot: _root, ...legacy } = waiting.pipelineState;
     const saved = structuredClone(legacy);
-    const migrated = pipeline.migrations[pipeline.stateVersion - 1]({
+    const migrated = pipeline.migrations[
+      CLARIFICATION_OWNERSHIP_VERSIONS[pipelineId]
+    ]({
       ...waiting,
       pipelineState: legacy,
     });

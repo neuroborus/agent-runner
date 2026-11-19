@@ -4477,6 +4477,7 @@ bootstrap_inventory_capacity_exhausted
 local_artifacts_not_ignored
 product_decision_required
 plan_revision_required
+finding_repair_required
 fix_limit_reached
 dispute_limit_reached
 no_progress
@@ -4783,7 +4784,7 @@ step-start implementation evidence and blocker ownership unchanged.
 
 Normalization failures and the established provider `structured-output` class
 receive one automatically authorized read-only Worker result restatement, using
-the original schema, inspected candidate and saved turn facts. Pending recovery
+the recovery schema, inspected candidate and saved turn facts. Pending recovery
 precedes ordinary dispatch, refinement and another writable turn. It never
 replays implementation or resolution. The dedicated prompt prohibits repair,
 validation execution and invented finding dispositions. Fresh reconstruction
@@ -4831,6 +4832,41 @@ Publication failures preserve recovery authority. Resume and operator-stop
 reconciliation preserve candidate bytes, prior accepted commits and receipts,
 fix/dispute accounting and consumed effect authority; they never renew a budget,
 transfer an approval, skip a blocker or duplicate a commit.
+
+State version 45 upgrades existing result checkpoints to schema version 2 with
+`repair: null`; legacy blocked/exhausted facts and allowances are unchanged.
+Migration authorizes no repair. Only the read-only finding-recovery schema admits
+`UNFINISHED`: empty decisions and inactive question/options/whyBlocked, bounded
+reason and nonempty current-blocker evidence, and null customResult when present.
+It establishes an observable still-required repair permitted by frozen authority,
+never historical completion, FIX/DISPUTE, containment or validation credit.
+Ordinary resolution and implementation reject it. Environment prerequisites and
+proven unsatisfiable validation-policy stops retain their existing contracts;
+missing provenance cannot justify an identical retry without a valid next step.
+
+UNFINISHED preserves every original blocker and publishes `repair-required`.
+`finding_repair_required` null-action resume authorizes one new finding-resolution
+invocation, not replay or another restatement. Runner rechecks inputs/configuration,
+content/controls, original finding ownership, validation and plan-kind/output
+bindings and permissions after owner retirement/reconciliation. It journals
+`repair-authorized` before reserving/invoking the new turn. Only a proven unstarted
+reservation is reusable; published invocations recover read-only, including a lost
+continuation result. Lost publication acknowledgement uses the durable checkpoint.
+Consumed restatement attempts and additional allowances carry forward unchanged;
+a new invocation grants no automatic restatement replenishment.
+
+Bounded UNFINISHED work reports retain reason/evidence, predecessor references,
+checkpoint/candidate/facts/blocker hashes, diagnostics and consumed accounting.
+The journal retains each complete checkpoint. Reconstruction includes this history
+without native sessions. A pending already charged correction continues once;
+a new uncharged round still needs available fix budget. If unavailable, preserve
+the continuation at `fix_limit_reached`; only the existing explicit
+`extra-fix-rounds` grant authorizes it, rebinding that allowance without resetting
+stagnation, disputes or any other budget. An exhausted read-only turn gains no
+write permission without that grant. Repairs still return through independent
+review or combined/lazy convergence and every original terminal/effect gate.
+Polishing continuation, replacement-proposal pauses, clarification reconsideration
+retirement and stale polishing finalization markers remain separate pending scope.
 
 ## 16. Resume
 

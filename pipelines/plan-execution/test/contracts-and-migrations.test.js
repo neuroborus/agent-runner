@@ -1309,7 +1309,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 44);
+  assert.equal(planExecutionPipeline.stateVersion, 45);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({

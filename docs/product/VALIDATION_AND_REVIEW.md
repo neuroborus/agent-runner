@@ -57,6 +57,9 @@ twice. Validated exceptional outcomes still block. Corrected status and custom
 criterion evidence grant no approval: every original candidate, finalization,
 terminal-confirmation and effect gate still applies. See
 [writable result recovery](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+Recovery-only UNFINISHED establishes current repair need without a disposition.
+Explicit continuation preserves consumed accounting and every original gate;
+only an eligible explicit fix-budget grant can authorize an uncharged exhausted round.
 
 ## Execution and polishing review
 

@@ -64,6 +64,7 @@ import {
   FINALIZATION_SCHEMA,
   IMPLEMENTATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import {
@@ -1702,9 +1703,11 @@ async function createFixture(
             output: "structured",
             structured:
               WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema) ||
-              [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-                request.schema,
-              )
+              [
+                IMPLEMENTATION_SCHEMA,
+                FINDING_RESOLUTION_SCHEMA,
+                FINDING_RECOVERY_SCHEMA,
+              ].includes(request.schema)
                 ? { result: candidateStructured }
                 : candidateStructured,
             sessionId:

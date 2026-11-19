@@ -2083,6 +2083,11 @@ finding-resolution output. One automatic read-only result restatement precedes
 `writable_output_invalid`; explicit resume of that same checkpoint authorizes
 one additional read-only retry. It preserves earlier accepted work, blockers and
 fix accounting and still requires every original review and commit/result gate.
+Recovery-only `UNFINISHED` preserves the original blockers at
+`finding_repair_required`: null-action resume authorizes one new repair invocation
+against the verified candidate. If uncharged fix budget is unavailable, only the
+existing explicit `extra-fix-rounds` action at `fix_limit_reached` authorizes it.
+Consumed attempts, historical uncertainty and every original gate remain binding.
 See [writable result recovery](pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
 
 Polishing likewise preserves reconciled finding-resolution work after a

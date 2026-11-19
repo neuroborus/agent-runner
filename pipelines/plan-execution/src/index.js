@@ -207,6 +207,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The Arbiter could not resolve the current blocking dispute.",
   writable_output_invalid:
     "The writable result remains invalid. Resume this same checkpoint to authorize one additional read-only result restatement; candidate work and existing blockers are preserved.",
+  finding_repair_required:
+    "Read-only recovery found unfinished finding repairs. Resume authorizes one new repair invocation against the preserved candidate; blockers, uncertainty, consumed attempts and budgets remain in force.",
   output_exhausted:
     "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
@@ -483,9 +485,16 @@ function projectPause(run, { readOnlySnapshotChanges } = {}) {
     run.pause.reason,
   );
   const reason = knownReason ? run.pause.reason : "unknown_pause";
-  const explanation = knownReason
-    ? PUBLIC_PAUSE_EXPLANATIONS[reason]
-    : "No public diagnostic is available for this pause.";
+  const explanation =
+    run.pipelineState.writableResult?.stage === "repair-required" &&
+    reason === "fix_limit_reached"
+      ? "Unfinished finding repair requires an explicit extra-fix-rounds grant before a new writable invocation. The preserved candidate, original blockers and consumed accounting remain bound."
+      : run.pipelineState.writableResult?.stage === "blocked" &&
+          reason === "environment_blocked"
+        ? "Resolve the result-recovery prerequisite before resuming. Resume inspects the preserved result read-only; it does not authorize a new repair."
+        : knownReason
+          ? PUBLIC_PAUSE_EXPLANATIONS[reason]
+          : "No public diagnostic is available for this pause.";
   const nextActions = [];
   if (canRecoverLegacyConfirmation(run)) {
     return Object.freeze({
@@ -670,6 +679,17 @@ function validateResumeAction(run, action) {
   }
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
+  }
+  if (state.writableResult?.stage === "repair-required") {
+    if (action === null && run.pause?.reason === "finding_repair_required")
+      return;
+    if (
+      action?.type !== "extra-fix-rounds" ||
+      run.pause?.reason !== "fix_limit_reached"
+    )
+      throw new Error(
+        "Unfinished repair requires its explicit continuation or fix-budget grant.",
+      );
   }
   if (
     state.writableResult?.stage === "blocked" &&
@@ -1632,7 +1652,7 @@ export const planExecutionPipeline = Object.freeze({
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 44,
+  stateVersion: 45,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1729,6 +1749,28 @@ export const planExecutionPipeline = Object.freeze({
         ...run.pipelineState,
         clarificationRoot:
           run.pipelineState.repositoryBaseline?.projectPath ?? null,
+      });
+    },
+    // Retain historical checkpoints and allowances; migration grants no repair.
+    44: (run) => {
+      const checkpoint = run.pipelineState.writableResult;
+      if (
+        checkpoint !== null &&
+        (checkpoint.schemaVersion !== 1 || Object.hasOwn(checkpoint, "repair"))
+      )
+        throw new PlanExecutionWorkflowError(
+          "Legacy state cannot own finding repair authority.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        writableResult:
+          run.pipelineState.writableResult === null
+            ? null
+            : {
+                ...run.pipelineState.writableResult,
+                schemaVersion: 2,
+                repair: null,
+              },
       });
     },
   }),

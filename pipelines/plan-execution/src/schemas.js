@@ -713,6 +713,21 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze(
   ]),
 );
 
+// UNFINISHED describes current repair need only in retired-turn inspection.
+export const FINDING_RECOVERY_SCHEMA = deepFreeze(
+  resultUnion([
+    ...FINDING_RESOLUTION_SCHEMA.properties.result.anyOf,
+    variant("status", ["UNFINISHED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
+    }),
+  ]),
+);
+
 export const DISPUTE_RECONSIDERATION_SCHEMA = deepFreeze({
   type: "object",
   properties: {

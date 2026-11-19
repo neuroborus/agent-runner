@@ -5058,7 +5058,7 @@ clarification service binds append replacement to a persisted result hash;
 recovery reuses those exact bytes before input checks or another role turn.
 The checkpoint retires atomically with the suspension and editor authorization.
 
-One durably reserved read-only Worker restatement uses the original schema and
+One durably reserved read-only Worker restatement uses its recovery schema and
 facts under unchanged content, frozen inputs, native policy and filesystem
 permissions. Custom result data and output authority remain independently
 validated and settle with the valid gate transition. Interrupted attempts remain
@@ -5072,6 +5072,17 @@ never repeats writable work, invents dispositions, duplicates fix charges or
 commits, or replaces a mode-required gate. The owning
 [execution specification](../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery)
 defines the checkpoint and pause contract.
+
+Execution state version 45 adds recovery-only `UNFINISHED` and a distinct
+`repair-required` checkpoint. Explicit null resume journals a new repair
+invocation; unavailable uncharged budget instead requires the existing
+`extra-fix-rounds` grant. Schema-2 checkpoints carry consumed restatement
+allowances and pending fix accounting forward; bounded historical work reports
+link predecessor checkpoints and retain uncertainty independently of native
+sessions. Published invocations require reconciliation, retirement and read-only
+recovery; only proven unstarted reservations are reusable. Migration upgrades
+legacy checkpoints without granting writes or renewing budgets. Original blockers,
+frozen authority and every mode-specific gate remain binding.
 
 Polishing owns finding-resolution report recovery in its own workflow and
 contract without importing execution internals. Polishing state version 20 adds

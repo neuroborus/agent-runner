@@ -35,6 +35,7 @@ const FIELDS = [
   "additionalAttempts",
   "diagnostic",
   "productDecision",
+  "repair",
 ];
 const CONSTRAINTS = new Set([
   "object",
@@ -155,7 +156,7 @@ export function createWritableResult(
   },
 ) {
   const checkpoint = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     phase: state.workflowState,
     step: state.currentStep,
     stage: "prepared",
@@ -174,9 +175,107 @@ export function createWritableResult(
     additionalAttempts: 0,
     diagnostic: null,
     productDecision: null,
+    repair: null,
   };
   checkpoint.factsFingerprint = writableResultFacts(state, checkpoint);
   return checkpoint;
+}
+
+// The journal retains the complete retired checkpoint; this bounded lineage is
+// also available to reconstructed prompts after the active checkpoint retires.
+export function createRepairReport(checkpoint, result) {
+  return {
+    step: checkpoint.step,
+    phase: "RESOLVE_FINDINGS",
+    ...result,
+    recovery: {
+      checkpointFingerprint: hash(checkpoint),
+      candidateFingerprint: checkpoint.candidateFingerprint,
+      factsFingerprint: checkpoint.factsFingerprint,
+      blockersFingerprint: hash([
+        checkpoint.blockers,
+        checkpoint.restrictedIds,
+      ]),
+      attempts: checkpoint.attempts,
+      additionalAttempts: checkpoint.additionalAttempts,
+      fixRounds: checkpoint.fixRoundsBefore + (checkpoint.fixCharged ? 1 : 0),
+      pendingCorrection:
+        checkpoint.pendingCorrectionBefore || checkpoint.fixCharged,
+      budgetExhausted: checkpoint.budgetExhausted,
+      diagnostic: checkpoint.diagnostic,
+      previous: checkpoint.repair,
+    },
+  };
+}
+
+export function assertRepairReport(report, reports) {
+  const value = report.recovery;
+  if (
+    !exact(value, [
+      "checkpointFingerprint",
+      "candidateFingerprint",
+      "factsFingerprint",
+      "blockersFingerprint",
+      "attempts",
+      "additionalAttempts",
+      "fixRounds",
+      "pendingCorrection",
+      "budgetExhausted",
+      "diagnostic",
+      "previous",
+    ]) ||
+    ![
+      value.checkpointFingerprint,
+      value.candidateFingerprint,
+      value.factsFingerprint,
+      value.blockersFingerprint,
+    ].every(fingerprint) ||
+    ![value.attempts, value.additionalAttempts, value.fixRounds].every(count) ||
+    !Number.isSafeInteger(value.additionalAttempts + 1) ||
+    value.attempts < value.additionalAttempts ||
+    value.attempts > value.additionalAttempts + 1 ||
+    typeof value.pendingCorrection !== "boolean" ||
+    typeof value.budgetExhausted !== "boolean" ||
+    (value.diagnostic !== null &&
+      !isDeepStrictEqual(
+        value.diagnostic,
+        writableResultDiagnostic(
+          { diagnostic: value.diagnostic },
+          "RESOLVE_FINDINGS",
+        ),
+      )) ||
+    (value.previous !== null &&
+      (!count(value.previous) ||
+        reports[value.previous]?.status !== "UNFINISHED" ||
+        reports[value.previous].step !== report.step))
+  )
+    throw new PlanExecutionWorkflowError("Invalid unfinished repair history.", {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  if (value.previous !== null) {
+    const previous = reports[value.previous].recovery;
+    if (
+      value.attempts < previous.attempts ||
+      value.additionalAttempts < previous.additionalAttempts ||
+      value.fixRounds < previous.fixRounds ||
+      value.blockersFingerprint !== previous.blockersFingerprint ||
+      (previous.pendingCorrection && !value.pendingCorrection)
+    )
+      throw new PlanExecutionWorkflowError(
+        "Unfinished repair history renewed consumed authority.",
+        { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
+      );
+  }
+}
+
+export function rebindWritableRepair(state) {
+  return {
+    ...state,
+    writableResult: {
+      ...state.writableResult,
+      factsFingerprint: writableResultFacts(state, state.writableResult),
+    },
+  };
 }
 
 export function assertWritableResult(
@@ -195,7 +294,7 @@ export function assertWritableResult(
   };
   if (
     !exact(value, FIELDS) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     !["IMPLEMENT", "RESOLVE_FINDINGS"].includes(value.phase) ||
     ![value.phase, "WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
       state.workflowState,
@@ -210,6 +309,8 @@ export function assertWritableResult(
       "correcting",
       "exhausted",
       "blocked",
+      "repair-required",
+      "repair-authorized",
     ].includes(value.stage) ||
     ![
       value.beforeFingerprint,
@@ -265,10 +366,15 @@ export function assertWritableResult(
       value.attempts !== value.additionalAttempts + 1) ||
     (value.stage === "exhausted" &&
       value.attempts !== value.additionalAttempts + 1) ||
-    (value.stage === "ready" && value.attempts !== value.additionalAttempts) ||
+    (value.stage === "ready" &&
+      value.repair === null &&
+      value.attempts !== value.additionalAttempts) ||
     (["prepared", "invoking"].includes(value.stage) &&
       (value.candidateFingerprint !== null ||
-        value.attempts !== 0 ||
+        value.attempts !==
+          (value.repair === null
+            ? 0
+            : state.workReports[value.repair]?.recovery?.attempts) ||
         value.fixCharged)) ||
     (!["prepared", "invoking"].includes(value.stage) &&
       !fingerprint(value.candidateFingerprint)) ||
@@ -315,6 +421,36 @@ export function assertWritableResult(
     value.factsFingerprint !== writableResultFacts(state, value) ||
     state.pendingCommit !== null
   )
+    invalid();
+  if (value.repair !== null) {
+    const report = state.workReports[value.repair];
+    const previous = report?.recovery;
+    if (
+      !count(value.repair) ||
+      report?.status !== "UNFINISHED" ||
+      report.step !== value.step ||
+      value.phase !== "RESOLVE_FINDINGS" ||
+      previous.blockersFingerprint !==
+        hash([value.blockers, value.restrictedIds]) ||
+      value.attempts < previous.attempts ||
+      value.additionalAttempts < previous.additionalAttempts ||
+      value.fixRoundsBefore + (value.fixCharged ? 1 : 0) < previous.fixRounds ||
+      (previous.pendingCorrection && !state.pendingCorrection) ||
+      (["prepared", "invoking"].includes(value.stage) &&
+        (value.budgetExhausted ||
+          value.additionalAttempts !== previous.additionalAttempts)) ||
+      (!["repair-required", "repair-authorized"].includes(value.stage) &&
+        (value.fixRoundsBefore !== previous.fixRounds ||
+          value.pendingCorrectionBefore !== previous.pendingCorrection)) ||
+      (["repair-required", "repair-authorized"].includes(value.stage) &&
+        (value.candidateFingerprint !== previous.candidateFingerprint ||
+          value.fixRoundsBefore + (value.fixCharged ? 1 : 0) !==
+            previous.fixRounds ||
+          value.attempts !== previous.attempts ||
+          value.additionalAttempts !== previous.additionalAttempts))
+    )
+      invalid();
+  } else if (["repair-required", "repair-authorized"].includes(value.stage))
     invalid();
   const blockers =
     value.phase === "IMPLEMENT"

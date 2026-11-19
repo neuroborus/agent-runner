@@ -613,17 +613,16 @@ original native-platform proof of concept nor those later implementations.
 
 ## 5. Recover a pause without taking over the work
 
-Execution preserves candidate work when implementation or finding-resolution
-output fails its contract. Runner attempts one read-only result restatement;
-`writable_output_invalid` or polishing's `resolution_output_invalid` then offers
-explicit resume of that checkpoint for one more read-only retry. Inspect the
-bounded diagnostic and current `nextActions`, then use the offered CLI or MCP
-null-action resume at the inspected revision. Do not ask a writable role to
-repeat the effect, edit state or infer a finding disposition. Resolve a
-validated `environment_blocked` blocker before resume. Candidate edits,
-input/configuration drift and read-only contamination retain their safety stops.
-All [review, correction and effect gates](product/VALIDATION_AND_REVIEW.md)
-remain required.
+Execution implementation/finding-resolution and polishing finding-report failures
+preserve candidates. One read-only restatement precedes `writable_output_invalid`
+or polishing's `resolution_output_invalid`; explicit resume grants one more
+read-only retry. Inspect bounded diagnostics/`nextActions`; use the offered CLI/MCP
+null resume at that revision. Execution `finding_repair_required` instead grants
+one new repair; `fix_limit_reached` needs its explicit budget grant.
+Neither renews attempts or invents dispositions. Never replay effects or
+edit state. Resolve `environment_blocked` prerequisites first. Candidate edits,
+input/configuration drift and read-only contamination retain safety stops and all
+[review, correction and effect gates](product/VALIDATION_AND_REVIEW.md).
 
 New native sessions use `[<full Runner run UUID>] <bounded description>` on both
 providers. Codex names only a verified, durably acknowledged new child; Claude
