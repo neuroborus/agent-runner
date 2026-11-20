@@ -2448,6 +2448,91 @@ test("reused and streamed records keep dispatch redaction and each event's stop 
   );
 });
 
+test("retained, streamed and cold activity use each event's own capability diagnostic", async (t) => {
+  const { store, created, stateRoot } = await fixture(t);
+  const { runId } = created.state;
+  const blocked = {
+    reason: "environment_blocked",
+    code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+    resumeState: "IMPLEMENT",
+  };
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 0,
+        reason: "insufficient-authority",
+        missingCapabilities: [],
+        unmatchedArtifactDigests: [],
+        commandIdentityMismatch: true,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  };
+  for (const [kind, pause] of [
+    ["legacy", blocked],
+    ["typed", { ...blocked, capabilityDiagnostic: diagnostic }],
+    [
+      "retained",
+      {
+        reason: "operator_paused",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: { ...blocked, capabilityDiagnostic: diagnostic },
+          activeTurn: null,
+        },
+      },
+    ],
+    ["cleared", null],
+  ])
+    await store.transitionRun(
+      created.lease,
+      { pause },
+      {
+        activity: { actor: "runner", phase: "run", kind, message: "Paused." },
+      },
+    );
+  // A valid JSON spelling can differ from the value canonicalized on replay.
+  const eventPath = join(created.directoryPath, "events.jsonl");
+  const source = await readFile(eventPath, "utf8");
+  await writeFile(
+    eventPath,
+    source.replaceAll('"checkIndex":0', '"checkIndex":-0'),
+  );
+  const reader = createRunStore({ stateRoot });
+  const page = await reader.readPublicActivity(runId);
+  const decoded = eventDecodes(t);
+  assert.deepEqual(await reader.readPublicActivity(runId), page);
+  assert.deepEqual(decoded, []);
+  // Only events whose own pause is a capability pause carry the field.
+  assert.deepEqual(
+    page.activities.map((activity) => [
+      activity.kind,
+      activity.capabilityDiagnostic,
+    ]),
+    [
+      [page.activities[0].kind, undefined],
+      ["legacy", null],
+      ["typed", diagnostic],
+      ["retained", undefined],
+      ["cleared", undefined],
+    ],
+  );
+  const base = await reader.loadRun(runId);
+  await seedActivities({ created }, 1030, "Checkpoint recorded.", base);
+  await reader.loadRun(runId);
+  decoded.length = 0;
+  decoded.normalized.length = 0;
+  assert.deepEqual(
+    (await reader.readPublicActivity(runId, { limit: 5 })).activities,
+    page.activities,
+  );
+  assert.ok(decoded.includes(page.activities[2].revision));
+  assert.deepEqual(decoded.normalized, []);
+});
+
 const preparationSnapshot = createTrustedValidationSnapshot(
   {
     check: {

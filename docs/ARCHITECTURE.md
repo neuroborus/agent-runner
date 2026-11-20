@@ -6109,15 +6109,15 @@ or persisted. Certificates retain no historical state sequence. Full history
 and recovery-proof APIs continue canonical replay.
 
 Cold validation and validated suffixes collect public activities with their
-revision, timestamp, redacted dispatch message, and event-specific public stop
-summary. Each checkpoint retains at most 1,024 activities and 1 MiB of serialized
-activity data, also counted within the combined checkpoint cap. Overflow evicts
-the oldest activities and retains their last revision as a coverage boundary;
-it never drops authoritative events or retains historical states. Activity
-pagination uses the retained range only when it covers the requested cursor.
-Older requests stream one byte-certified record at a time, decoding only its
-public projection through the owning activity and legacy stop normalizers.
-They do not repeat semantic validation of unchanged historical states. A page
+revision, timestamp, redacted dispatch message, event-specific public stop
+summary, and the event's own capability diagnostic. Each checkpoint retains at
+most 1,024 activities and 1 MiB of serialized activity data, also counted
+within the combined checkpoint cap. Overflow evicts the oldest activities and
+retains their last revision as a coverage boundary. Authoritative events stay
+in the journal. Activity pagination uses the retained range only when it covers
+the requested cursor. Older requests stream one byte-certified record at a time
+and normalize only the activity, legacy stop, and capability diagnostic for
+public projection. They do not revalidate unchanged historical states. A page
 drains and verifies the entire original prefix even after reaching its limit;
 no partial page escapes a failed digest, identity, or namespace observation.
 Cursors still advance across revisions without activity and stop at the last
@@ -6226,6 +6226,23 @@ with `ERR_EVENT_LOG_LIMIT` and retains the legacy history; migration cannot
 silently publish its barrier in a new segment. Readers reject segmented history
 without the original-segment barrier. Segment paths are reserved from
 run-artifact writes.
+
+A coding pipeline's required-check `environment_blocked` pause with
+`ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE` may carry an optional
+`capabilityDiagnostic`. Root pause validation, including pauses retained by
+operator stops, accepts it only on that reason and code for plan execution and
+polishing and validates it through trusted validation's public
+`normalizeCapabilityMismatchDiagnostic`. Generic pause cloning reads only
+the ordinary fields and the checkpoint structure. Invalid diagnostics fail
+state validation with a fixed message. Operator stop restoration returns the
+value unchanged. The additive field preserves existing state versions.
+Historical absence means unknown. Evidence prose and other records cannot supply
+the missing diagnostic. Activity derives `capabilityDiagnostic` from each event's
+own top-level pause. Eligible coding pauses project the diagnostic or `null`
+when it is absent. Other events omit the field. Byte-certified projection reads
+the pause from each event and retains only its normalized public diagnostic.
+Detached recovery-failure sidecars remain separate allowlisted error records
+and never carry it.
 
 Events may carry an optional bounded public activity record containing only
 `actor`, `phase`, `kind`, and a concise one-line `message`. Pipelines derive

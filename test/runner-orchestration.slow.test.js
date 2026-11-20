@@ -21,6 +21,7 @@ import {
 import { inspectOwnedSessionProcesses } from "../src/platform/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { createStateJournal } from "../src/state/journal.js";
+import { createTrustedValidationService } from "../src/trusted-validation/index.js";
 import {
   appendReadFailure,
   assertColdReadbackRejection,
@@ -2007,6 +2008,310 @@ test("unavailable trusted capabilities persist early pauses and retry frozen req
       );
     });
   }
+});
+
+test("cold reconstruction retains event-local capability diagnostics without changing checkpoints", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    `${PLAN}\n\n## Commit 2: feat(test): add more behavior\n\nImplement more behavior.`,
+  );
+  const checkPath = "LOCAL_ARTIFACTS/fixture-check.js";
+  const check = { id: "C1", command: `node ${checkPath}` };
+  await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(
+    join(fixture.projectPath, checkPath),
+    "process.exitCode = 0;\n",
+  );
+  const configuration = {
+    ...RUNNER_CONFIGURATION,
+    trustedCommands: {
+      "fixture-check": {
+        command: check.command,
+        executable: process.execPath,
+        arguments: [checkPath],
+      },
+    },
+    pipelines: { "plan-execution": { trustedChecks: ["fixture-check"] } },
+  };
+  const durable = createRunStore({ stateRoot: fixture.stateRoot });
+  const interruption = new Error(
+    "Interrupted after preparing commit authority",
+  );
+  let interrupt = true;
+  let consumedCheckpoint;
+  // Interrupt once after durable commit preparation to retain pending effects.
+  const store = {
+    ...durable,
+    async transitionRun(...args) {
+      const next = await durable.transitionRun(...args);
+      if (next.pipelineState.pendingCommit?.status === "consumed")
+        consumedCheckpoint = next;
+      if (
+        interrupt &&
+        next.pipelineState.currentStep === 2 &&
+        next.pipelineState.pendingCommit?.status === "prepared"
+      ) {
+        interrupt = false;
+        throw interruption;
+      }
+      return next;
+    },
+  };
+  const delegate = createExecutionAdapter();
+  let implementations = 0;
+  const adapter = {
+    ...delegate,
+    async run(request) {
+      const result = await delegate.run(request);
+      if (request.schema === REPOSITORY_DISCOVERY_SCHEMA) {
+        result.structured.result.requiredChecks = [check];
+        result.structured.result.validationInfrastructure = [checkPath];
+      }
+      if (result.structured.checks !== undefined) {
+        result.structured.requiredChecks = [check];
+        result.structured.validationInfrastructure = [checkPath];
+        result.structured.checks = [
+          {
+            checkId: check.id,
+            command: check.command,
+            status: "NOT_RUN",
+            evidence: ["Reserved for the runner-trusted executor."],
+          },
+        ];
+      }
+      if (request.prompt.includes("Implement the changes described"))
+        await writeFile(
+          join(request.cwd, `part-${++implementations}.js`),
+          "export const part = true;\n",
+        );
+      return result;
+    },
+  };
+  const receipts = [];
+  let now = 0n;
+  const trusted = createTrustedValidationService({
+    monotonicNow: () => (now += 1_000_000n),
+    sandboxCommand: (command, { environment }) => ({ command, environment }),
+    async runCommand(command, { preparationOnly, onNoLaunch }) {
+      assert.equal(command.executable, process.execPath);
+      assert.deepEqual(command.arguments, [checkPath]);
+      if (preparationOnly) await onNoLaunch();
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+      };
+    },
+  });
+  let runId;
+  const trustedValidation = {
+    ...trusted,
+    async execute(options) {
+      const receipt = await trusted.execute(options);
+      receipts.push(receipt);
+      return receipt;
+    },
+    // Refuse only the resumed COMMIT comparison, after the first commit,
+    // the second step's receipts and its prepared authority are durable.
+    async inspectRequirements(options) {
+      const { pipelineState } = await store.loadRun(runId);
+      if (pipelineState.pendingCommit?.status !== "prepared")
+        return trusted.inspectRequirements(options);
+      return {
+        status: "BLOCKED",
+        blockers: [
+          {
+            command: check.command,
+            reason: "insufficient-authority",
+          },
+        ],
+      };
+    },
+  };
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore: store, trustedValidation },
+  );
+  ({
+    run: { runId },
+  } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  }));
+  await assert.rejects(
+    runner.resume({ runId, action: null }),
+    (cause) => cause === interruption,
+  );
+  const paused = (await runner.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.code, "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE");
+  assert.equal(paused.pause.resumeState, "COMMIT");
+  const { pendingCommit, completedCommits } = paused.pipelineState;
+  assert.equal(pendingCommit.status, "prepared");
+  assert.deepEqual(completedCommits, [
+    (
+      await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
+    ).stdout.trim(),
+  ]);
+  assert.equal(receipts.length, 2);
+  // Supply typed comparison evidence at the state boundary under test.
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 0,
+        reason: "insufficient-authority",
+        missingCapabilities: ["cache"],
+        unmatchedArtifactDigests: ["b".repeat(64)],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  };
+  const lease = await durable.acquireRunLease(runId);
+  let saved;
+  try {
+    saved = await durable.transitionRun(
+      lease,
+      { pause: { ...paused.pause, capabilityDiagnostic: diagnostic } },
+      {
+        activity: {
+          actor: "runner",
+          phase: "plan-execution",
+          kind: "paused",
+          message: "Required check capabilities are unavailable.",
+        },
+      },
+    );
+  } finally {
+    await lease.release();
+  }
+
+  const cold = createRunStore({ stateRoot: fixture.stateRoot });
+  const unused = () => assert.fail("Cold reconstruction must stay passive.");
+  const { run } = await createRunner({
+    adapters: { codex: { probe: unused, run: unused } },
+    clarifications: createClarificationService({ interactive: false }),
+    trustedValidation: {
+      preflight: unused,
+      inspectRequirements: unused,
+      execute: unused,
+    },
+    runStore: cold,
+    loadConfiguration: unused,
+  }).status(runId);
+  assert.deepEqual(run, saved);
+  assert.deepEqual(run, {
+    ...paused,
+    revision: saved.revision,
+    updatedAt: saved.updatedAt,
+    pause: { ...paused.pause, capabilityDiagnostic: diagnostic },
+  });
+  const { events } = await cold.loadRunHistory(runId);
+  assert.deepEqual(
+    events.map(({ state }) =>
+      Object.hasOwn(state.pause ?? {}, "capabilityDiagnostic"),
+    ),
+    events.map(({ revision }) => revision === saved.revision),
+  );
+  // Historical revisions keep their own receipts and effect records.
+  assert.deepEqual(
+    events.find(({ revision }) => revision === paused.revision).state
+      .pipelineState,
+    paused.pipelineState,
+  );
+  const consumed = events.find(
+    ({ revision }) => revision === consumedCheckpoint.revision,
+  ).state;
+  assert.deepEqual(consumed, consumedCheckpoint);
+  assert.equal(consumed.pipelineState.pendingCommit.status, "consumed");
+  for (const [step, { pipelineState }] of [consumed, run].entries()) {
+    const receipt = receipts[step];
+    const { finalizationResult, pendingCommit, trustedValidation } =
+      pipelineState;
+    assert.equal(pipelineState.currentStep, step + 1);
+    assert.equal(finalizationResult.step, step + 1);
+    assert.deepEqual(finalizationResult.checks, [
+      {
+        checkId: check.id,
+        command: check.command,
+        status: "PASS",
+        executor: "runner",
+        commandIdentity: trustedValidation.commands[0].identity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: receipt.evidence,
+      },
+    ]);
+    assert.equal(
+      receipt.commandIdentity,
+      trustedValidation.commands[0].identity,
+    );
+    assert.deepEqual(finalizationResult.validationInfrastructure, [checkPath]);
+    assert.equal(
+      receipt.validationInfrastructureFingerprint,
+      pipelineState.validationInfrastructureFingerprint,
+    );
+    assert.equal(
+      receipt.commandFingerprint,
+      trustedValidation.commandFingerprint,
+    );
+    assert.equal(
+      receipt.configurationFingerprint,
+      trustedValidation.configurationFingerprint,
+    );
+    assert.deepEqual(
+      {
+        contentFingerprint: finalizationResult.fingerprint,
+        validationInfrastructureFingerprint:
+          finalizationResult.validationInfrastructureFingerprint,
+        commandFingerprint: finalizationResult.trustedCommandFingerprint,
+        configurationFingerprint:
+          finalizationResult.trustedConfigurationFingerprint,
+      },
+      {
+        contentFingerprint: receipt.contentFingerprint,
+        validationInfrastructureFingerprint:
+          receipt.validationInfrastructureFingerprint,
+        commandFingerprint: receipt.commandFingerprint,
+        configurationFingerprint: receipt.configurationFingerprint,
+      },
+    );
+    assert.equal(
+      receipt.contentFingerprint,
+      pendingCommit.authorization.expectedContentFingerprint,
+    );
+  }
+  const activities = [];
+  for (let afterRevision = 0; afterRevision < saved.revision;) {
+    const page = await cold.readPublicActivity(runId, { afterRevision });
+    activities.push(...page.activities);
+    afterRevision = page.cursor;
+  }
+  // Each activity projects only its own event's pause: the earlier real pause
+  // saved no diagnostic and stays unknown.
+  assert.equal(activities.at(-1).revision, saved.revision);
+  assert.deepEqual(
+    activities
+      .filter((activity) => Object.hasOwn(activity, "capabilityDiagnostic"))
+      .map(({ revision, capabilityDiagnostic }) => [
+        revision,
+        capabilityDiagnostic,
+      ]),
+    [
+      [paused.revision, null],
+      [saved.revision, diagnostic],
+    ],
+  );
 });
 
 test("submits input previewed from a compatible legacy run", async (t) => {

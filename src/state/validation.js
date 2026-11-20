@@ -13,6 +13,7 @@ import {
   normalizeClientAttribution,
 } from "../agents/index.js";
 import { normalizeReadOnlySnapshotChanges } from "../git/index.js";
+import { normalizeCapabilityMismatchDiagnostic } from "../trusted-validation/index.js";
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
@@ -181,6 +182,15 @@ const MAX_INPUT_ITEMS = 32;
 const MAX_INPUT_OPTIONS = 16;
 const MAX_INPUT_TEXT_LENGTH = 4_000;
 const MAX_PROCESS_ANCESTRY_BASELINE_ENTRIES = 4_096;
+// Only coding pipelines save the required-check capability pause.
+const CAPABILITY_DIAGNOSTIC_PIPELINES = new Set([
+  "plan-execution",
+  "polishing",
+]);
+const CAPABILITY_DIAGNOSTIC_CODE = "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE";
+const INVALID_CAPABILITY_DIAGNOSTIC =
+  "run.pause.capabilityDiagnostic is invalid.";
+const INVALID_OPERATOR_RESUME = "Operator resume checkpoint is invalid.";
 
 export class RunStoreError extends Error {
   constructor(
@@ -263,11 +273,14 @@ function assertRecord(value, path, code) {
   }
 }
 
+// Returns the one key snapshot it checked so callers can bound its size.
 function rejectUnknownFields(value, fields, path, code) {
-  const unknownField = Object.keys(value).find((field) => !fields.has(field));
+  const keys = Object.keys(value);
+  const unknownField = keys.find((field) => !fields.has(field));
   if (unknownField !== undefined) {
     fail(`${path}.${unknownField} is not supported.`, code);
   }
+  return keys;
 }
 
 function assertIdentifier(value, path, pattern = IDENTIFIER_PATTERN, code) {
@@ -311,8 +324,212 @@ function assertInputText(value, path, maximumLength = MAX_INPUT_TEXT_LENGTH) {
   return value;
 }
 
+function isCapabilityPause(pause) {
+  return (
+    pause?.reason === "environment_blocked" &&
+    pause.code === CAPABILITY_DIAGNOSTIC_CODE
+  );
+}
+
+function normalizeCapabilityDiagnostic(source, pause = source) {
+  try {
+    if (isCapabilityPause(pause))
+      return cloneRecord(
+        normalizeCapabilityMismatchDiagnostic(source.capabilityDiagnostic),
+        "run.pause.capabilityDiagnostic",
+      );
+  } catch {
+    // Accessors and the owning normalizer can both throw private details.
+  }
+  fail(INVALID_CAPABILITY_DIAGNOSTIC);
+}
+
+function hasCapabilityDiagnostic(pause) {
+  try {
+    return Object.hasOwn(pause, "capabilityDiagnostic");
+  } catch {
+    fail(INVALID_CAPABILITY_DIAGNOSTIC);
+  }
+}
+
+// Event-local public evidence: undefined for other pauses and null when a
+// capability pause has no saved diagnostic. Absence is never reconstructed.
+export function projectCapabilityDiagnostic(pipelineId, pause) {
+  if (
+    !CAPABILITY_DIAGNOSTIC_PIPELINES.has(pipelineId) ||
+    !isCapabilityPause(pause)
+  )
+    return undefined;
+  return hasCapabilityDiagnostic(pause)
+    ? normalizeCapabilityDiagnostic(pause)
+    : null;
+}
+
+// Reads through the descriptor that was just checked, so an accessor that ran
+// earlier cannot substitute a different field.
+function readDescriptor(record, descriptor) {
+  if (Object.hasOwn(descriptor, "value")) return descriptor.value;
+  return descriptor.get === undefined
+    ? undefined
+    : Reflect.apply(descriptor.get, record, []);
+}
+
+// Skip diagnostic reflection until the ordinary pause fields are cloned. The
+// reason was already checked and read once inside the operator checkpoint
+// boundary, so its captured visibility and value are reused.
+function preparePauseForCloning(pause, reason) {
+  let keys;
+  try {
+    keys = Reflect.ownKeys(pause);
+  } catch {
+    fail(INVALID_CAPABILITY_DIAGNOSTIC);
+  }
+  if (reason.present && !keys.includes("reason")) fail(INVALID_OPERATOR_RESUME);
+  const entries = [];
+  for (const key of keys) {
+    if (
+      typeof key !== "string" ||
+      key === "operatorResume" ||
+      key === "capabilityDiagnostic"
+    )
+      continue;
+    if (key === "reason") {
+      if (reason.present) entries.push([key, reason.value]);
+      continue;
+    }
+    let descriptor;
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(pause, key);
+    } catch {
+      fail(INVALID_CAPABILITY_DIAGNOSTIC);
+    }
+    if (descriptor?.enumerable)
+      entries.push([key, readDescriptor(pause, descriptor)]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function isOperatorReason(reason) {
+  return ["operator_paused", "operator_canceled"].includes(reason);
+}
+
+// JSON cloning skips a hidden field, so it is rejected without being read.
+// A visible field is read exactly once through its checked descriptor.
+function readVisibleField(record, key, message = INVALID_OPERATOR_RESUME) {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (descriptor === undefined) return { present: false, value: undefined };
+  if (!descriptor.enumerable) fail(message);
+  return { present: true, value: readDescriptor(record, descriptor) };
+}
+
+function hasOperatorResume(pause) {
+  try {
+    return Object.hasOwn(pause, "operatorResume");
+  } catch {
+    fail(INVALID_OPERATOR_RESUME);
+  }
+}
+
+// Reflection and accessor failures share one fixed message so untrusted
+// checkpoint content never reaches the error.
+function readOperatorResume(value) {
+  try {
+    const reason = readVisibleField(value, "reason");
+    const operatorPause = isOperatorReason(reason.value);
+    // Inspected after the reason accessor, so it cannot swap in a hidden
+    // checkpoint. JSON cloning ignores a hidden checkpoint, so it is never read.
+    const descriptor = Object.getOwnPropertyDescriptor(value, "operatorResume");
+    if (
+      (descriptor !== undefined) !== operatorPause ||
+      (operatorPause && !descriptor.enumerable)
+    )
+      fail(INVALID_OPERATOR_RESUME);
+    if (!operatorPause) return { reason, checkpoint: null };
+
+    const source = readDescriptor(value, descriptor);
+    assertRecord(source, "run.pause.operatorResume");
+    // Every allowed field is visible in one key snapshot before any is read.
+    const keys = rejectUnknownFields(
+      source,
+      new Set(["workflowState", "pause", "activeTurn"]),
+      "run.pause.operatorResume",
+    );
+    if (keys.length !== 3) fail(INVALID_OPERATOR_RESUME);
+    const workflowState = readVisibleField(source, "workflowState").value;
+    if (
+      typeof workflowState !== "string" ||
+      !/^[A-Z][A-Z_]{0,63}$/u.test(workflowState)
+    )
+      fail(INVALID_OPERATOR_RESUME);
+
+    // Reject forbidden retained nesting before reading auxiliary fields, and
+    // again after the retained reason accessor has run.
+    const pause = readVisibleField(source, "pause").value;
+    if (pause !== null && (!isRecord(pause) || hasOperatorResume(pause)))
+      fail(INVALID_OPERATOR_RESUME);
+    const retainedReason =
+      pause === null
+        ? { present: false, value: undefined }
+        : readVisibleField(pause, "reason");
+    if (
+      isOperatorReason(retainedReason.value) ||
+      (pause !== null && hasOperatorResume(pause))
+    )
+      fail(INVALID_OPERATOR_RESUME);
+    return {
+      reason,
+      source,
+      checkpoint: {
+        workflowState,
+        pause,
+        activeTurn: normalizeActiveTurn(
+          readVisibleField(source, "activeTurn").value,
+        ),
+      },
+      retainedReason,
+    };
+  } catch {
+    fail(INVALID_OPERATOR_RESUME);
+  }
+}
+
 function normalizePause(value) {
-  const pause = cloneRecord(value, "run.pause");
+  assertRecord(value, "run.pause");
+  // Reject nested operator checkpoints before cloning can traverse them.
+  const { reason, source, checkpoint, retainedReason } =
+    readOperatorResume(value);
+  const prepared = preparePauseForCloning(value, reason);
+  // Cloning treats each original record as the ancestor of its prepared copy,
+  // so a back-reference is rejected as circular instead of being reread, and
+  // rejects any other reference to an original before traversing it.
+  const sources = new Map([[prepared, value]]);
+  if (checkpoint !== null) {
+    const retained =
+      checkpoint.pause === null
+        ? null
+        : preparePauseForCloning(checkpoint.pause, retainedReason);
+    prepared.operatorResume = { ...checkpoint, pause: retained };
+    sources.set(prepared.operatorResume, source);
+    if (retained !== null) sources.set(retained, checkpoint.pause);
+  }
+  const pause = cloneRecord(prepared, "run.pause", sources);
+  if (checkpoint?.pause != null)
+    normalizePauseFields(checkpoint.pause, pause.operatorResume.pause, false);
+  return normalizePauseFields(value, pause, checkpoint !== null);
+}
+
+function normalizePauseFields(source, pause, hasCheckpoint) {
+  if (hasCapabilityDiagnostic(source)) {
+    if (Object.keys(pause).length >= MAX_OBJECT_KEYS)
+      fail(INVALID_CAPABILITY_DIAGNOSTIC);
+    pause.capabilityDiagnostic = normalizeCapabilityDiagnostic(source, pause);
+  }
+  if (
+    hasOperatorResume(source) !== hasCheckpoint ||
+    isOperatorReason(pause.reason) !== hasCheckpoint
+  )
+    fail(INVALID_OPERATOR_RESUME);
+
   if (Object.hasOwn(pause, "launchRecovery")) {
     if (pause.reason !== "backend_unavailable") {
       fail("run.pause.launchRecovery is invalid.");
@@ -322,34 +539,6 @@ function normalizePause(value) {
     } catch {
       fail("run.pause.launchRecovery is invalid.");
     }
-  }
-  const operatorReason = ["operator_paused", "operator_canceled"].includes(
-    pause.reason,
-  );
-  if (operatorReason !== Object.hasOwn(pause, "operatorResume")) {
-    fail("Operator resume checkpoint is invalid.");
-  }
-  if (operatorReason) {
-    const checkpoint = pause.operatorResume;
-    assertRecord(checkpoint, "run.pause.operatorResume");
-    rejectUnknownFields(
-      checkpoint,
-      new Set(["workflowState", "pause", "activeTurn"]),
-      "run.pause.operatorResume",
-    );
-    if (
-      Object.keys(checkpoint).length !== 3 ||
-      typeof checkpoint.workflowState !== "string" ||
-      !/^[A-Z][A-Z_]{0,63}$/u.test(checkpoint.workflowState) ||
-      Object.hasOwn(checkpoint.pause ?? {}, "operatorResume") ||
-      ["operator_paused", "operator_canceled"].includes(
-        checkpoint.pause?.reason,
-      )
-    )
-      fail("Operator resume checkpoint is invalid.");
-    checkpoint.activeTurn = normalizeActiveTurn(checkpoint.activeTurn);
-    checkpoint.pause =
-      checkpoint.pause === null ? null : normalizePause(checkpoint.pause);
   }
   if (
     Object.hasOwn(pause, "diagnosticClass") &&
@@ -432,7 +621,7 @@ function normalizePause(value) {
   return pause;
 }
 
-function cloneJson(value, path, depth, ancestors) {
+function cloneJson(value, path, depth, ancestors, links) {
   if (value === null || typeof value === "boolean") {
     return value;
   }
@@ -454,11 +643,16 @@ function cloneJson(value, path, depth, ancestors) {
   if (depth >= MAX_JSON_DEPTH) {
     fail(`${path} exceeds the maximum nesting depth.`);
   }
-  if (ancestors.has(value)) {
+  const source = links?.sources.get(value);
+  if (ancestors.has(value) || (source !== undefined && ancestors.has(source))) {
     fail(`${path} must not contain circular references.`);
+  }
+  if (links?.originals.has(value)) {
+    fail(`${path} must not reference a pause record.`);
   }
 
   ancestors.add(value);
+  if (source !== undefined) ancestors.add(source);
   try {
     if (Array.isArray(value)) {
       if (value.length > MAX_COLLECTION_LENGTH) {
@@ -473,6 +667,7 @@ function cloneJson(value, path, depth, ancestors) {
           `${path}[${index}]`,
           depth + 1,
           ancestors,
+          links,
         );
       });
     }
@@ -498,17 +693,26 @@ function cloneJson(value, path, depth, ancestors) {
         ) {
           fail(`${path} contains an unsupported field name.`);
         }
-        return [key, cloneJson(entry, `${path}.${key}`, depth + 1, ancestors)];
+        return [
+          key,
+          cloneJson(entry, `${path}.${key}`, depth + 1, ancestors, links),
+        ];
       }),
     );
   } finally {
     ancestors.delete(value);
+    if (source !== undefined) ancestors.delete(source);
   }
 }
 
-function cloneRecord(value, path) {
+// Optional sources map prepared copies to the originals they replace.
+function cloneRecord(value, path, sources) {
   assertRecord(value, path);
-  return cloneJson(value, path, 0, new WeakSet());
+  const links = sources && {
+    sources,
+    originals: new WeakSet(sources.values()),
+  };
+  return cloneJson(value, path, 0, new WeakSet(), links);
 }
 
 function assertSerializedSize(value, path) {
@@ -902,14 +1106,18 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   }
 
   assertRecord(value, "run.activeTurn");
-  rejectUnknownFields(value, ACTIVE_TURN_FIELDS, "run.activeTurn");
-  if (Object.keys(value).length !== ACTIVE_TURN_FIELDS.size) {
+  const keys = rejectUnknownFields(value, ACTIVE_TURN_FIELDS, "run.activeTurn");
+  if (keys.length !== ACTIVE_TURN_FIELDS.size) {
     fail("run.activeTurn is invalid.");
   }
-  return {
-    role: assertIdentifier(value.role, "run.activeTurn.role"),
-    phase: assertIdentifier(value.phase, "run.activeTurn.phase"),
-  };
+  // Each field is read through its checked descriptor, so an earlier getter
+  // cannot hide a later field after the key snapshot.
+  const read = (key) =>
+    assertIdentifier(
+      readVisibleField(value, key, "run.activeTurn is invalid.").value,
+      `run.activeTurn.${key}`,
+    );
+  return { role: read("role"), phase: read("phase") };
 }
 
 export function normalizeStopRequest(value, state) {
@@ -1798,6 +2006,14 @@ export function normalizeRunState(value, expectedRunId) {
   }
 
   const pause = value.pause === null ? null : normalizePause(value.pause);
+  if (
+    !CAPABILITY_DIAGNOSTIC_PIPELINES.has(pipelineId) &&
+    [pause, pause?.operatorResume?.pause].some((item) =>
+      Object.hasOwn(item ?? {}, "capabilityDiagnostic"),
+    )
+  ) {
+    fail(INVALID_CAPABILITY_DIAGNOSTIC);
+  }
   const createdAt = normalizeTimestamp(value.createdAt, "run.createdAt");
   const updatedAt = normalizeTimestamp(value.updatedAt, "run.updatedAt");
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {

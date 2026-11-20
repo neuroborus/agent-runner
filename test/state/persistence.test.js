@@ -1625,6 +1625,548 @@ test("persists only canonical read-only snapshot change labels", async (t) => {
   }
 });
 
+test("persists typed capability diagnostics only on coding required-check pauses", async (t) => {
+  const { created, projectPath, stateRoot, store, taskPath } =
+    await createFixture(t);
+  const { runId } = created.state;
+  const blocked = {
+    reason: "environment_blocked",
+    code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+    explanation: "Required check capabilities are unavailable.",
+    evidence: ["Required checks: insufficient-authority"],
+    resumeState: "IMPLEMENT",
+  };
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 2,
+        reason: "insufficient-authority",
+        missingCapabilities: ["scratch", "sourceProjection"],
+        unmatchedArtifactDigests: ["a".repeat(64)],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  };
+  const typed = { ...blocked, capabilityDiagnostic: diagnostic };
+  const retained = (pause) => ({
+    reason: "operator_paused",
+    resumeAction: null,
+    operatorResume: {
+      workflowState: "WAITING_FOR_USER",
+      pause,
+      activeTurn: null,
+    },
+  });
+  const rejected = (error) =>
+    error instanceof RunStoreError &&
+    error.code === "ERR_INVALID_RUN_STATE" &&
+    !error.message.includes("example.com");
+
+  // Historical pauses without the additive field remain valid as unknown.
+  await store.transitionRun(created.lease, { pause: blocked });
+  assert.deepEqual(
+    (await createRunStore({ stateRoot }).loadRun(runId)).pause,
+    blocked,
+  );
+  let reads = 0;
+  const saved = await store.transitionRun(created.lease, {
+    pause: {
+      ...blocked,
+      get capabilityDiagnostic() {
+        reads++;
+        return diagnostic;
+      },
+    },
+  });
+  assert.equal(reads, 1);
+  assert.ok(Object.isFrozen(saved.pause.capabilityDiagnostic.blockers[0]));
+  assert.deepEqual(
+    (await createRunStore({ stateRoot }).loadRun(runId)).pause,
+    typed,
+  );
+  const url = "https://example.com/artifact.tgz";
+  const [blocker] = diagnostic.blockers;
+  for (const pause of [
+    { ...typed, reason: "backend_unavailable" },
+    { ...typed, code: "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE" },
+    { ...blocked, capabilityDiagnostic: null },
+    { ...blocked, capabilityDiagnostic: { ...diagnostic, blockers: [] } },
+    { ...blocked, capabilityDiagnostic: { ...diagnostic, url } },
+    // The owner sees the original before generic cloning could echo a
+    // private field name or drop an own key.
+    {
+      ...blocked,
+      capabilityDiagnostic: {
+        ...diagnostic,
+        ...JSON.parse(`{"${url}":{"__proto__":1}}`),
+      },
+    },
+    {
+      ...blocked,
+      capabilityDiagnostic: { ...diagnostic, [Symbol(url)]: true },
+    },
+    {
+      ...blocked,
+      capabilityDiagnostic: {
+        ...diagnostic,
+        blockers: [{ ...blocker, missingCapabilities: [url] }],
+      },
+    },
+  ])
+    for (const candidate of [pause, retained(pause)])
+      await assert.rejects(
+        store.transitionRun(created.lease, { pause: candidate }),
+        rejected,
+      );
+
+  const throwing = {
+    ...blocked,
+    get capabilityDiagnostic() {
+      throw new Error(url);
+    },
+  };
+  for (const pause of [throwing, retained(throwing)])
+    await assert.rejects(store.transitionRun(created.lease, { pause }), {
+      name: "RunStoreError",
+      code: "ERR_INVALID_RUN_STATE",
+      message: "run.pause.capabilityDiagnostic is invalid.",
+    });
+  const changesCheckpoint = {
+    ...blocked,
+    get capabilityDiagnostic() {
+      this.operatorResume = { pause: throwing };
+      return diagnostic;
+    },
+  };
+  let diagnosticRead = false;
+  const obscuresCheckpoint = new Proxy(
+    {
+      ...blocked,
+      get capabilityDiagnostic() {
+        diagnosticRead = true;
+        return diagnostic;
+      },
+    },
+    {
+      getOwnPropertyDescriptor(target, key) {
+        if (diagnosticRead && key === "operatorResume") throw new Error(url);
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    },
+  );
+  for (const pause of [
+    retained(retained(throwing)),
+    retained(changesCheckpoint),
+    retained(obscuresCheckpoint),
+  ])
+    await assert.rejects(store.transitionRun(created.lease, { pause }), {
+      name: "RunStoreError",
+      code: "ERR_INVALID_RUN_STATE",
+      message: "Operator resume checkpoint is invalid.",
+    });
+
+  await t.test(
+    "rejects an invalid workflow state before reading its pause",
+    async () => {
+      const pause = retained(null);
+      pause.operatorResume.workflowState = "invalid";
+      let reads = 0;
+      Object.defineProperty(pause.operatorResume, "pause", {
+        get() {
+          reads++;
+          throw new Error(url);
+        },
+      });
+      await assert.rejects(store.transitionRun(created.lease, { pause }), {
+        name: "RunStoreError",
+        code: "ERR_INVALID_RUN_STATE",
+        message: "Operator resume checkpoint is invalid.",
+      });
+      assert.equal(reads, 0);
+    },
+  );
+  await t.test(
+    "rejects hidden and nested checkpoints before reading them",
+    async () => {
+      let reads = 0;
+      const forbidden = {
+        get() {
+          reads++;
+          throw new Error(url);
+        },
+      };
+      const hidden = { reason: "operator_paused", resumeAction: null };
+      Object.defineProperty(hidden, "operatorResume", forbidden);
+      const nested = retained(retained(blocked));
+      Object.defineProperty(nested.operatorResume, "activeTurn", {
+        ...forbidden,
+        enumerable: true,
+      });
+      const { workflowState: _state, ...checkpoint } =
+        retained(blocked).operatorResume;
+      const hiddenState = { ...retained(blocked), operatorResume: checkpoint };
+      Object.defineProperty(checkpoint, "workflowState", forbidden);
+      const { reason: _reason, ...hiddenReason } = retained(blocked);
+      Object.defineProperty(hiddenReason, "reason", forbidden);
+      const { reason: _retainedReason, ...hiddenRetained } = blocked;
+      Object.defineProperty(hiddenRetained, "reason", forbidden);
+      const hiddenNested = retained(hiddenRetained);
+      for (const pause of [
+        hidden,
+        nested,
+        hiddenState,
+        hiddenReason,
+        hiddenNested,
+      ])
+        await assert.rejects(store.transitionRun(created.lease, { pause }), {
+          name: "RunStoreError",
+          code: "ERR_INVALID_RUN_STATE",
+          message: "Operator resume checkpoint is invalid.",
+        });
+      assert.equal(reads, 0);
+    },
+  );
+  await t.test("reads each visible pause reason once", async () => {
+    let reads = 0;
+    const readOnce = (pause, reason) =>
+      Object.defineProperty(pause, "reason", {
+        enumerable: true,
+        get() {
+          reads++;
+          if (reason === undefined || reads > 1) throw new Error(url);
+          return reason;
+        },
+      });
+    const outer = (reason) => {
+      const { reason: _reason, ...pause } = retained(blocked);
+      return readOnce(pause, reason);
+    };
+    const inner = (reason) => {
+      const { reason: _reason, ...pause } = blocked;
+      const checkpoint = retained(readOnce(pause, reason));
+      checkpoint.operatorResume.workflowState = "IMPLEMENT";
+      return checkpoint;
+    };
+    const implement = retained(blocked);
+    implement.operatorResume.workflowState = "IMPLEMENT";
+    for (const [pause, expected] of [
+      [outer("operator_paused"), retained(blocked)],
+      [inner("environment_blocked"), implement],
+    ]) {
+      reads = 0;
+      const next = await store.transitionRun(created.lease, { pause });
+      assert.equal(reads, 1);
+      assert.deepEqual(next.pause, expected);
+    }
+    for (const pause of [outer(), inner()]) {
+      reads = 0;
+      await assert.rejects(store.transitionRun(created.lease, { pause }), {
+        name: "RunStoreError",
+        code: "ERR_INVALID_RUN_STATE",
+        message: "Operator resume checkpoint is invalid.",
+      });
+      assert.equal(reads, 1);
+    }
+  });
+  await t.test(
+    "checks exact fields from one key snapshot before reading",
+    async () => {
+      let reads = 0;
+      const shifting = (target) => {
+        let passes = 0;
+        return new Proxy(target, {
+          ownKeys(record) {
+            return passes++ === 0
+              ? Reflect.ownKeys(record)
+              : [...Reflect.ownKeys(record), "extra"];
+          },
+          getOwnPropertyDescriptor(record, key) {
+            return key === "extra"
+              ? { value: true, enumerable: true, configurable: true }
+              : Reflect.getOwnPropertyDescriptor(record, key);
+          },
+        });
+      };
+      const hiddenGetter = (record, key) =>
+        Object.defineProperty(record, key, {
+          get() {
+            reads++;
+            throw new Error(url);
+          },
+        });
+      const { workflowState: _state, ...checkpoint } =
+        retained(blocked).operatorResume;
+      const turn = retained(blocked);
+      turn.operatorResume.activeTurn = shifting(
+        hiddenGetter({ phase: "implement" }, "role"),
+      );
+      for (const pause of [
+        {
+          ...retained(blocked),
+          operatorResume: shifting(hiddenGetter(checkpoint, "workflowState")),
+        },
+        turn,
+      ])
+        await assert.rejects(store.transitionRun(created.lease, { pause }), {
+          name: "RunStoreError",
+          code: "ERR_INVALID_RUN_STATE",
+          message: "Operator resume checkpoint is invalid.",
+        });
+      assert.equal(reads, 0);
+    },
+  );
+  await t.test(
+    "clones prepared pauses without rereading their reason",
+    async () => {
+      let reads = 0;
+      const readOnce = (pause, reason) =>
+        Object.defineProperty(pause, "reason", {
+          enumerable: true,
+          get() {
+            if (reads++ > 0) throw new Error(url);
+            return reason;
+          },
+        });
+      const { reason: _reason, ...outer } = retained(blocked);
+      readOnce(outer, "operator_paused").evidence = [outer];
+      const { reason: _retainedReason, ...inner } = blocked;
+      readOnce(inner, "environment_blocked").evidence = [inner];
+      const nested = retained(inner);
+      nested.operatorResume.workflowState = "IMPLEMENT";
+      for (const [pause, path] of [
+        [outer, "run.pause.evidence[0]"],
+        [nested, "run.pause.operatorResume.pause.evidence[0]"],
+      ]) {
+        reads = 0;
+        await assert.rejects(store.transitionRun(created.lease, { pause }), {
+          name: "RunStoreError",
+          code: "ERR_INVALID_RUN_STATE",
+          message: `${path} must not contain circular references.`,
+        });
+        assert.equal(reads, 1);
+      }
+
+      let reflections = 0;
+      const reflectedOnce = new Proxy(retained(blocked), {
+        getOwnPropertyDescriptor(target, key) {
+          if (key === "reason" && reflections++ > 0) throw new Error(url);
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      });
+      const next = await store.transitionRun(created.lease, {
+        pause: reflectedOnce,
+      });
+      assert.equal(reflections, 1);
+      assert.deepEqual(next.pause, retained(blocked));
+    },
+  );
+  await t.test("rejects sibling references to raw pause records", async () => {
+    let reads = 0;
+    const { capabilityDiagnostic: _diagnostic, ...inner } = typed;
+    Object.defineProperty(inner, "capabilityDiagnostic", {
+      enumerable: true,
+      get() {
+        reads++;
+        return diagnostic;
+      },
+    });
+    const pause = retained(inner);
+    pause.operatorResume.workflowState = "IMPLEMENT";
+    for (const reference of [inner, pause.operatorResume]) {
+      reads = 0;
+      await assert.rejects(
+        store.transitionRun(created.lease, {
+          pause: { ...pause, evidence: [reference] },
+        }),
+        {
+          name: "RunStoreError",
+          code: "ERR_INVALID_RUN_STATE",
+          message: "run.pause.evidence[0] must not reference a pause record.",
+        },
+      );
+      assert.equal(reads, 0);
+    }
+  });
+  await t.test(
+    "binds checkpoint reads to the checked descriptors",
+    async () => {
+      let reads = 0;
+      // Redefining an existing field keeps it visible unless hidden explicitly.
+      const forbidden = {
+        configurable: true,
+        enumerable: false,
+        get() {
+          reads++;
+          throw new Error(url);
+        },
+      };
+      const { reason: _reason, ...swapped } = retained(blocked);
+      Object.defineProperty(swapped, "reason", {
+        enumerable: true,
+        get() {
+          Object.defineProperty(this, "operatorResume", forbidden);
+          return "operator_paused";
+        },
+      });
+      const { workflowState: _state, ...checkpoint } =
+        retained(blocked).operatorResume;
+      Object.defineProperty(checkpoint, "workflowState", {
+        enumerable: true,
+        get() {
+          Object.defineProperty(this, "pause", forbidden);
+          return "WAITING_FOR_USER";
+        },
+      });
+      const { reason: _retainedReason, ...inner } = blocked;
+      Object.defineProperty(inner, "reason", {
+        enumerable: true,
+        get() {
+          this.operatorResume = retained(blocked).operatorResume;
+          return "environment_blocked";
+        },
+      });
+      const nests = retained(inner);
+      Object.defineProperty(nests.operatorResume, "activeTurn", {
+        ...forbidden,
+        enumerable: true,
+      });
+      const turn = retained(blocked);
+      turn.operatorResume.activeTurn = {
+        get role() {
+          Object.defineProperty(this, "phase", forbidden);
+          return "worker";
+        },
+        phase: "implement",
+      };
+      for (const pause of [
+        swapped,
+        { ...retained(blocked), operatorResume: checkpoint },
+        nests,
+        turn,
+      ])
+        await assert.rejects(store.transitionRun(created.lease, { pause }), {
+          name: "RunStoreError",
+          code: "ERR_INVALID_RUN_STATE",
+          message: "Operator resume checkpoint is invalid.",
+        });
+      assert.equal(reads, 0);
+    },
+  );
+  await t.test(
+    "redacts failures while checking diagnostic presence",
+    async () => {
+      const pause = new Proxy(typed, {
+        getOwnPropertyDescriptor(target, key) {
+          if (key === "capabilityDiagnostic") throw new Error(url);
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      });
+      await assert.rejects(store.transitionRun(created.lease, { pause }), {
+        name: "RunStoreError",
+        code: "ERR_INVALID_RUN_STATE",
+        message: "run.pause.capabilityDiagnostic is invalid.",
+      });
+    },
+  );
+  await t.test(
+    "snapshots ordinary fields before reading the diagnostic",
+    async () => {
+      const failOnRead = () => {
+        throw new Error(url);
+      };
+      const evidence = ["Original evidence."];
+      const pause = {
+        ...blocked,
+        evidence: [...evidence],
+        get capabilityDiagnostic() {
+          Object.defineProperty(this, "explanation", { get: failOnRead });
+          Object.defineProperty(this.evidence, 0, { get: failOnRead });
+          return diagnostic;
+        },
+      };
+      const next = await store.transitionRun(created.lease, { pause });
+      assert.deepEqual(next.pause, { ...typed, evidence });
+    },
+  );
+  await t.test(
+    "snapshots evidence before checking diagnostic presence",
+    async () => {
+      const evidence = ["Evidence before the presence check."];
+      const pause = new Proxy(
+        { ...typed, evidence: [...evidence] },
+        {
+          getOwnPropertyDescriptor(target, key) {
+            if (key === "capabilityDiagnostic") {
+              Object.defineProperty(target.evidence, 0, {
+                get() {
+                  throw new Error(url);
+                },
+              });
+            }
+            return Reflect.getOwnPropertyDescriptor(target, key);
+          },
+        },
+      );
+      const next = await store.transitionRun(created.lease, { pause });
+      assert.deepEqual(next.pause, { ...typed, evidence });
+    },
+  );
+
+  for (const kind of ["pause_requested", "cancel_requested"]) {
+    const settlement = stopSettlement(
+      {
+        stopRequest: {
+          kind,
+          reconciledRevision: null,
+          effectiveTiming: "immediate",
+        },
+      },
+      {
+        pipelineState: { workflowState: "WAITING_FOR_USER" },
+        pause: saved.pause,
+        activeTurn: null,
+      },
+      null,
+    );
+    const settled = await store.transitionRun(created.lease, {
+      pipelineState: {
+        ...created.state.pipelineState,
+        workflowState: settlement.patch.pipelineState.workflowState,
+      },
+      pause: settlement.patch.pause,
+      activeTurn: null,
+    });
+    assert.deepEqual(restoreOperatorPause(settled).pause, typed);
+  }
+
+  const audit = await store.createRun({
+    ...runInput(projectPath, taskPath),
+    pipelineId: "audit",
+  });
+  t.after(() => audit.lease.release().catch(() => {}));
+  await store.transitionRun(
+    audit.lease,
+    { pause: blocked },
+    {
+      activity: {
+        actor: "runner",
+        phase: "audit",
+        kind: "paused",
+        message: "Fixture paused.",
+      },
+    },
+  );
+  const auditActivity = (
+    await store.readPublicActivity(audit.state.runId)
+  ).activities.at(-1);
+  assert.equal(Object.hasOwn(auditActivity, "capabilityDiagnostic"), false);
+  for (const pause of [typed, retained(typed)])
+    await assert.rejects(store.transitionRun(audit.lease, { pause }), rejected);
+});
+
 test("persists only strict launch recovery and applies operator stop semantics", async (t) => {
   const { created, store } = await createFixture(t);
   const launchRecovery = {

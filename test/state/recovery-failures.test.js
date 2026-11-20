@@ -312,6 +312,8 @@ test("stores only bounded allowlisted facts and rejects altered diagnostic shape
       code: "ERR_PRIVATE_UNRECOGNIZED",
       message: "Discarded message.",
       stderr: "Discarded output.",
+      // Capability diagnostics belong only to saved pauses, never sidecars.
+      capabilityDiagnostic: { schemaVersion: 1 },
     },
   });
   assert.equal(diagnostic.code, null);
@@ -320,7 +322,7 @@ test("stores only bounded allowlisted facts and rejects altered diagnostic shape
   assert.ok(Buffer.byteLength(source) <= 4_096);
   assert.doesNotMatch(
     source,
-    /Discarded|PRIVATE_UNRECOGNIZED|"(?:message|stderr|stack|cause)":/u,
+    /Discarded|PRIVATE_UNRECOGNIZED|"(?:message|stderr|stack|cause|capabilityDiagnostic)":/u,
   );
   for (const invalid of [
     { ...failure(), stage: "arbitrary text" },
