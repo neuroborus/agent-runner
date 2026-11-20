@@ -625,6 +625,31 @@ by successful runner inspection; another command's limitation remains a blocker.
 Inspection never executes or attests the required check, changes authority, or
 reloads configuration.
 
+When the comparison finds blockers, the resulting `environment_blocked` pause
+saves its optional bounded diagnostic. For each pause, CLI status and MCP
+status, wait and activity publish at most 16 comparison blockers in inventory
+order. Each shows its inventory index, its required-check ID in the active
+inventory or `unknown`, and its closed reason: `not-selected`, `unsupported` or
+`insufficient-authority`. Only `insufficient-authority` blockers carry mismatch
+evidence: missing scratch, cache or source-projection authority, up to 32
+unmatched artifact digests with an omitted-digest count, and whether a reported
+command identity differs from the selected one. The empty fields of other
+reasons establish nothing about those needs. Further blockers are only counted.
+A check ID is published only when it binds exactly one blocker index in the
+active inventory; unsafe, ambiguous or unbound associations are `unknown`.
+Legacy pauses, returned preparation blockers and caught availability failures
+have no diagnostic, so their mismatch details are unknown. Any saved ownership
+facts that pass platform revalidation are separate pause-level evidence, still
+published when mismatch details are unknown; a pause may have none. MCP activity
+projects both from each event's own pause.
+The diagnostic describes a normalized comparison of the admitted reports with
+the frozen selection and declarations. It gives operators evidence to assess a
+reported need, without requiring them to accept that need or to infer why it was
+reported. It grants no authority and no check evidence, and unknown details
+never clear the blocker. Commands, URLs, arguments and saved free text are not
+published. Supported recovery is described in the
+[operator model](OPERATOR_MODEL.md#configuration).
+
 Before finalization, writable roles receive the exact
 selected command text from the persisted run, including on continuation,
 reconstruction, and correction. They defer established required-check execution

@@ -114,7 +114,7 @@ to `false` to execute the predefined plan unchanged without size measurement,
 assessment calls or replacement proposals; ordinary validation, review,
 finalization and commit gates still apply. It defaults to `true` and accepts
 only booleans. The value freezes at run creation and never toggles an existing
-run, so edit configuration before starting a run.
+run; edit configuration before starting.
 
 User-global configuration lives outside installations at the
 [platform locations](../README.md#configuration). Before a new workflow, operators
@@ -127,10 +127,10 @@ configuration; resume keeps its frozen snapshot.
 
 Installed processes and detached continuations keep their immutable payload.
 Root API update activation publishes an active or deferred outcome before
-returning; it never restarts an MCP client. After a deferred update, retire the
+returning and never restarts an MCP client. After a deferred update, retire the
 previous runtime users and explicitly restart the owning client. Resume saved
 work separately through a compatible server; frozen configuration and consumed
-effects remain authoritative. Retained older payloads do not undo persisted
+effects remain authoritative. Retained older payloads never undo persisted
 migrations. Preserve progress when a forward-version rejection blocks an older
 installation; see [version and restart limits](RELEASING.md#local-version-selection-and-restart).
 
@@ -145,7 +145,7 @@ package installation and its one-time registration remain separate. Official
 identity is currently unapproved, so update actions fail closed. Follow
 [installation and update examples](../README.md#operator-updates).
 
-The global layer, also called runner-root configuration, defines trusted profile
+The global (runner-root) configuration layer defines trusted profile
 implementations. Global and safe project configuration may define exact trusted
 command vectors; project configuration may select these aliases and safe settings.
 Default project configuration: `LOCAL_ARTIFACTS/agent-runner.json`. Integrated Git
@@ -157,13 +157,13 @@ authorizations remain. Resume pins configuration bytes, identity and real ancest
 Selection never creates, relocates or merges infrastructure. See
 [configuration](product/OPERATOR_MODEL.md#configuration). `artifactRoot` defaults
 to `LOCAL_ARTIFACTS`.
-Repository-local artifacts must already be ignored. The runner never changes
+Repository-local artifacts must already be ignored; the runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
 the project and task directories; neither may contain the other.
 
 Configure provider-visible `clientAttribution: { "name": "...", "title": "..." }`
 only at runner root. It defaults to `agent_runner` / `Agent Runner`, requires
-every active backend's support (Claude does not support custom attribution),
+every active backend's support (Claude lacks custom attribution),
 and is absent from public projections and prompts. Project files and CLI/MCP
 cannot override it. Resume retains the fingerprinted selection; legacy runs
 use the generic default. See [client attribution](product/PROVIDER_MODEL.md#client-attribution).
@@ -178,86 +178,85 @@ retain effort and the original key. Changing attribution or effort requires a
 new run; see [configuration](product/OPERATOR_MODEL.md#configuration).
 
 Select compatible role backends and profiles before starting. Leave the source
-session unset unless the user deliberately chooses to fork a compatible current
-session after being offered a fresh start. Use only a known trusted source
+session unset unless the user, offered a fresh start, deliberately chooses to
+fork a compatible current session. Use only a known trusted source
 profile, or `current` inheritance if it is unknown. Keep session IDs opaque;
 never inspect provider-private storage or invent an ID. Prefer a fresh start
 for long, mixed-topic, or uncertain context. Independent and combined modes fork source
 context separately into primary and review checkpoints; lazy mode forks it
-once into the primary role. Durable recovery does not require native sessions
-to survive.
+once into the primary role. Durable recovery never needs native sessions to
+survive.
 
 ## 3. Establish executable validation
 
 Before starting, verify each required command's exact form in its owning
-environment. Its exit status must express the intended pass/fail rule. Check
+environment; its exit status must express the intended pass/fail rule. Check
 dependencies, generated prerequisites, services and expected baseline failures.
-Checks must detect regressions, not merely pass the base. Distinguish plan-wide
+Checks must detect regressions, not just pass the base. Distinguish plan-wide
 checks from step-specific acceptance criteria.
 
 Establish complete staging-independent inventories: execution bootstrap owns
 one per canonical step (the fast gate plus affected slow checks), and polishing
-owns one for the workspace. Execute only the active inventory. Preserve exact
+owns one for the workspace. Execute only the active inventory, preserving exact
 commands, stable IDs, order, and infrastructure paths; retain future checks for
-their owning steps. Do not create competing lists, renumber, omit, or substitute
+their owning steps. Never create competing lists, renumber, omit, or substitute
 checks. Infrastructure means files controlling commands, discovery, runners,
-configuration, or mandatory finalization guidance, rather than every source,
-test, fixture, or generated input. Classify by responsibility, not filename.
+configuration, or mandatory finalization guidance, not every source, test,
+fixture, or generated input; classify by responsibility, not filename.
 
-Use checks over workspace content, `HEAD`, or explicit trees where applicable.
+Check workspace content, `HEAD`, or explicit trees where applicable.
 Staged/index-relative checks and staging completeness belong to the runner's
-commit or handoff boundary. Do not build an alternate index or hide a dependency
-on staging or changing commit history inside a script. Git inspection is not
-universally forbidden; what matters is which content and boundary the command
-checks.
+commit or handoff boundary. Never build an alternate index or hide staging or
+history-changing dependencies in a script. Git inspection is not universally
+forbidden; what matters is which content and boundary the command checks.
 
 Bootstrap supports 256 checks and 256 infrastructure files per role, up to 512
-entries per merged or finalization field. Report complete inventories; if both
-overflow, report `requiredChecks` first. Execution discovers each active role's
+entries per merged or finalization field. Report complete inventories, putting
+`requiredChecks` first if both overflow. Execution discovers each active role's
 catalog once, then assigns contiguous units of at most four steps and 256 KiB of
 supplied JSON. Accepted units survive restart; only recognized output exhaustion
-may subdivide unfinished applicability, with a persisted limit of sixteen
-subdivisions per role. Indivisible work, exhausted discovery, or exhausted
-allowances pause at that checkpoint. Resume renews no allowance. Both
-independent inventories must be complete before combined writable work.
-Drift invalidates affected evidence; native sessions prove no reusable coverage.
-Legacy migrations preserve evidence and completed work, but unfinished execution
-requires fresh scoped read-only discovery, not applicability inferred from an old
+may subdivide unfinished applicability, at most sixteen persisted subdivisions
+per role. Indivisible work or exhausted discovery or allowances pause there;
+resume renews no allowance. Both independent inventories must be complete before
+combined writable work. Drift invalidates affected evidence; native sessions
+prove no reusable coverage.
+Legacy migrations preserve evidence and completed work; unfinished execution
+needs fresh scoped read-only discovery, not applicability inferred from an old
 union. See [bootstrap inventory](product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
 
-Commands requiring capabilities unavailable to agents may need runner-trusted
-execution. Select `trustedCommands` aliases separately for each pipeline; the
-default is empty and project selection replaces root selection. Catalogs merge
-root then project, deduplicate identical same-name vectors, and reject conflicts
-even when unselected. Limits are 256 definitions and 32 selected aliases per
-pipeline. Exact vectors, identities, and fingerprints freeze before work and
-survive resume; later project edits trigger the protected-input guard.
-Declarations grant no environment, credentials, shell-string substitutes, or
-broader host authority. Isolation and mutation guards still apply; user-attested
-results cannot replace execution. See [configuration](product/OPERATOR_MODEL.md#configuration).
+Commands needing capabilities agents lack may need runner-trusted execution.
+Select `trustedCommands` aliases per pipeline; the default is empty and project
+selection replaces root selection. Catalogs merge root then project, deduplicate
+identical same-name vectors, and reject conflicts even when unselected. Limits
+are 256 definitions and 32 selected aliases per pipeline. Exact vectors,
+identities, and fingerprints freeze before work and survive resume; later
+project edits trip the protected-input guard. Declarations grant no
+environment, credentials, shell-string substitutes, or broader host authority.
+Isolation and mutation guards apply; user attestation never replaces
+execution. See [configuration](product/OPERATOR_MODEL.md#configuration).
 
 Capability reports name each check's assigned executor and checkpoint, never
-the read-only discovery or Reviewer turn: safe output under the ordinary
-Worker's `FINALIZE` workspace-write access needs no report. `sourceProjection`
-is selected trusted authority for checks writing beside their inputs. Use the
-[trusted build examples](../README.md#configuration) to declare exact vectors
-with `scratch`, `cache`, or `sourceProjection`. Projection is an owned writable
-copy of frozen HEAD plus tracked and non-ignored untracked content, without the
-index, `.git`, ignored dependency trees, project configuration, task/state
-artifacts, credentials, or other host paths; the original checkout stays absent.
-Supply tools/dependencies in accepted source or as pinned artifacts. Scratch binds
+the read-only discovery or Reviewer turn; safe output under the Worker's
+`FINALIZE` workspace-write access needs no report. `sourceProjection` is
+selected trusted authority for checks writing beside their inputs. The
+[trusted build examples](../README.md#configuration) show exact vectors with
+`scratch`, `cache`, or projection. Projection is an owned writable copy
+of frozen HEAD plus tracked and non-ignored untracked content, without the index,
+`.git`, ignored dependencies, project configuration, task/state artifacts,
+credentials, other host paths or the original checkout. Supply
+tools/dependencies via accepted source or pinned artifacts. Scratch binds
 `AGENT_RUNNER_SCRATCH`/`TMPDIR`; cache binds `AGENT_RUNNER_CACHE`,
-`XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed; exact arguments do
-not expand variables. Storage, including projected writes, is private and
+`XDG_CACHE_HOME`, and npm's cache. Paths are runner-fixed; arguments do not
+expand variables. Storage, including projected writes, is private and
 disposable; original repository and network access remain prohibited. Cleanup
-follows verified process retirement. Uncertain cleanup retains ownership
-evidence and resumes before new work; interrupted contents are never reused.
+follows verified process retirement; uncertain cleanup keeps ownership evidence
+and resumes before new work, never reusing interrupted contents.
 
 Set top-level `trustedCommandTimeoutMs` in root or safe project configuration:
 strict integer milliseconds `1`–`2147483647`, default `3600000` (60 minutes),
-with no CLI/MCP override. The project value wins over the root value. The
-fingerprinted value is per-run; resume never reloads it. Legacy snapshots retain
-60 minutes. Capability preparation uses the smaller of that deadline and 10 seconds.
+with no CLI/MCP override; project wins over root. The value is fingerprinted
+per run, never reloaded on resume; legacy snapshots retain 60 minutes.
+Capability preparation uses the smaller of that deadline and 10 seconds.
 
 For availability recovery, `availabilityRetryMaxDelayMs` accepts `5000`–
 `2147483647` milliseconds, default `1800000` (30 minutes), with project
@@ -279,25 +278,24 @@ executor never started and Git created no commit. A possibly effective source
 fork reconstructs the logical role fresh rather than risking another child.
 See [authentication pauses](ARCHITECTURE.md#durable-authentication-required-pauses).
 
-Writable implementation, polishing, lazy or combined check/fix, and finding-resolution turns
-receive only the persisted exact selected command text, including after resume
-or reconstruction. Established required-check execution and attestation belong
-to `FINALIZE`; selected trusted commands must never execute inside agent turns.
-Their agent-sandbox limitations alone must not pause repairs or semantic review.
-A constraint affecting nondelegated work still uses the environment-blocker
-recovery path, even when another command is selected. Runner-trusted execution
-can itself report an environment blocker during `FINALIZE`.
+Writable implementation, polishing, check/fix and finding-resolution turns get
+only the persisted exact selected command text, even after resume or
+reconstruction. Established required-check execution and attestation belong to
+`FINALIZE`; selected trusted commands never run inside agent turns, and their
+agent-sandbox limitations alone must not pause repairs or semantic review.
+Constraints on nondelegated work still use environment-blocker recovery, even
+when another command is selected; runner-trusted execution can itself report one
+in `FINALIZE`.
 
 Never weaken tests, assertions, discovery, scripts, formatter/linter settings,
-or validation infrastructure merely to make a check pass. Fix the in-scope
-implementation. A legitimate infrastructure change must be explicitly within
-the task and current planned step and accepted by terminal confirmation.
-An environment blocker requires the permitted recovery action, not relaxed
-sandboxing, an invented command, a new baseline, or fabricated success.
+or validation infrastructure to pass a check; fix the in-scope implementation. Legitimate infrastructure changes must be explicitly within the
+task and current step and accepted by terminal confirmation. Environment
+blockers require the permitted recovery action, not relaxed sandboxing, invented
+commands, a new baseline, or fabricated success.
 
 Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
-stdout/stderr. Missing legacy/controller timing stays unknown; never invent it
-or rerun for telemetry. The 60-second fast-gate target is advisory.
+stdout/stderr. Missing legacy/controller timing stays unknown; never invent it or
+rerun for telemetry. The 60-second fast-gate target is advisory.
 See [validation evidence](product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)
 for timing and isolation/diagnostic limits.
 
@@ -307,22 +305,29 @@ HTTPS `url` and verified SHA-256 `sha256`; see the
 before the network-isolated check and mounts verified files read-only at
 `/run/agent-runner/dependencies/<sha256>` (`AGENT_RUNNER_DEPENDENCIES`). Public
 DNS/HTTPS and built-in TLS trust are required; redirects, proxies, credentials,
-and custom trust are unsupported. Limits remain 64 MiB per file, 256 MiB total,
+and custom trust are unsupported. Limits are 64 MiB per file, 256 MiB total,
 five minutes overall, one A and one AAAA lookup in a five-second DNS phase with
-one resolver try each, connection establishment bounded to 10 seconds, and
-header/body inactivity bounded to 15 seconds. Retirement has a separate
-one-second safety bound. The command handles extraction in declared scratch;
-read-only artifact use needs no scratch/cache. Downloads are never reused.
-Acquisition failure pauses finalization without executing the check. Repair and
-resume; changed declarations require a new run. Never delete uncertain resources
-without verified ownership and transport/process retirement. See
+one resolver try each, connection establishment 10 seconds, and
+header/body inactivity 15 seconds. Retirement has a separate
+one-second safety bound. The command extracts in declared scratch; read-only
+use needs no scratch/cache. Downloads are never reused. Acquisition failure
+pauses finalization without running the check. Repair and resume; changed
+declarations require a new run. Never delete uncertain resources without
+verified ownership and transport/process retirement. See
 [resource safety](product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
-Before each writable execution/polishing checkpoint, including resume, the runner
-prepares every active role's saved exact-command requirements. Unavailable
-storage, isolation, or dependencies pause as `environment_blocked`; repair the
-environment and retry the saved request. Preparation supplies no check
-evidence; finalization verifies dependencies again.
+Consumed commit/handoff verification precedes preparation. New writable
+execution/polishing work, including resume, first prepares every active role's
+saved exact-command requirements; unavailable storage, isolation, or
+dependencies pause as `environment_blocked`. Preparation supplies no check
+evidence; finalization verifies dependencies again. Status/wait/activity show
+up to 16 comparison blockers and any ownership facts to assess, not prove
+or explain, a reported need; they never clear the blocker. Legacy, preparation
+and caught-failure mismatch details are unknown. Reconcile ownership, repair
+availability and resume; preserve work via supported recovery before changing
+selection or declarations in a new run. Recovery keeps sandbox checks and frozen
+bindings, granting no credit or override; see
+[recovery](product/OPERATOR_MODEL.md#configuration).
 
 ## 4. Start, clarify, and observe
 
@@ -338,8 +343,8 @@ Empty artifacts and authorized unchanged editor closes are valid and consume no
 round. Exhaustion pauses; the limit is not a configurable workflow budget.
 Answer material questions from explicit user context or obtain the user's decision.
 CLI persists editor authorization; MCP uses structured pending input, never an
-editor. Only the identified authorization permits clarification edits.
-Closure freezes and hashes inputs and prohibits ordinary follow-up questions.
+editor. Only the identified authorization permits clarification edits. Closure
+freezes and hashes inputs and prohibits ordinary follow-up questions.
 A later product decision requires an otherwise blocking unresolved material
 requirement, never an implementation preference or review finding.
 
@@ -350,14 +355,14 @@ the original receipt. Use `run_wait` for event-driven waits and cursor-based
 `run_wait.timeoutMs` waits 30 seconds (maximum 24 hours). New and held waits
 return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners at
 continuation checkpoints, even between turns without records or revision
-changes; then use the action-free resume below. Ownerless `idle` does not prove
-loss; terminal states and pending input end waits. See
+changes; then use the action-free resume below. Ownerless `idle` does not
+prove loss; terminal states and pending input end waits. See
 [observation safety](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
 
 Inspect output pressure by attempt, role and checkpoint via CLI status or MCP
-`observations`. Keep byte measurements and token snapshots separate. Unknown
-referenced-file reads, missing results, incomplete accounting and omitted attempts
-limit evidence. Never infer service output limits, sum cumulative snapshots or
+`observations`, keeping byte measurements and token snapshots apart. Unknown
+referenced-file reads, missing results, incomplete accounting and omitted
+attempts limit evidence. Never infer service output limits, sum cumulative snapshots or
 collect private provider content to fill gaps.
 
 A timeout, wait cancellation or MCP disconnect ends only that wait; detached work
@@ -369,7 +374,7 @@ action-free recovery via
 MCP `run_resume` with `action: null`, the exact current revision and a new
 idempotency key, never a recreated pause/cancel receipt. MCP rejects stale
 revisions, non-null actions, live owners and ownership races. Follow public
-state/actions; no second owner is authorized.
+state/actions; never start a second owner.
 
 Action-free `ERR_EXECUTION_PROCESS_UNVERIFIABLE` preserves the checkpoint, including
 `FINALIZE`: resolve ownership by supported resume before Runner reconciles inputs
@@ -382,8 +387,8 @@ leases prove no launch; inspection exhaustion and incomplete evidence retain exc
 Detached failures expose `dispatchFailure` (known exit code/signal) and nullable
 `recoveryCause` (safe stage, Runner code, explanation); CLI resume shares the fixed
 explanations. Missing causes are unavailable; exit/signal never explains owner loss.
-Restart may retain a correlated cause without exit facts. Fix the blocker;
-retry identical keys/arguments: retry cannot repair it, complete the intent
+Restart may retain a correlated cause without exit facts. Fix the blocker, then
+retry identical keys/arguments; retry alone cannot repair it, complete the intent
 or release uncertain ownership. Never collect raw child streams, provider output
 or transcripts to fill gaps.
 
@@ -428,22 +433,22 @@ the selected execution step. Omission and explicit `immediate` are equivalent.
 Authoring, polishing, clarification/bootstrap, and checkpoints without a
 selected step reject deferred timing; terminal runs reject new stops. Suspended
 execution steps are eligible.
-For a deferred request, supervise its durable target rather than starting another owner. A
+For a deferred request, supervise its durable target instead of starting another owner. A
 successful target commit and stop outcome are recorded together; a blocked or
 interrupted target stops at its reconciled checkpoint without extra work. Resume
 restores any underlying blocker. A pause after the final commit resumes directly
 to `DONE`; cancellation preserves all completed commits.
 
 An immediate cancel can supersede a pending deferred pause. A deferred cancel
-cannot postpone an earlier immediate pause: inspect effective timing as well as
-requested timing. Acceptance receipts are immutable, so replay does not report
+cannot postpone an earlier immediate pause: inspect both effective and
+requested timing. Acceptance receipts are immutable; replay never reports
 a later settlement. Read status/wait `stop` for the latest outcome, or activity
 for the summary at an event's revision. `pending` awaits the target; `applicable`
 means immediate enforcement or a suspended/failed checkpoint awaiting
 reconciliation; `settled` records completion of stop accounting. An interrupted
 owner can still need reconciliation while the durable summary is `pending`.
-Settlement is either `quiescent` or `commit` with its verified SHA. Legacy
-settled stops may have no settlement details. None of these fields authorize
+Settlement is either `quiescent` or `commit` with its verified SHA; legacy
+settled stops may lack settlement details. None of these fields authorize
 another execution owner or extra work.
 
 Only a descriptor-proved untouched initial execution `CLARIFY` stop may settle
@@ -456,11 +461,11 @@ reclamation; never edit or bypass leases. See
 
 Init: [failure and recovery contracts](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
 
-Structured role results allow exactly 2 MiB of serialized UTF-8 JSON. Semantic
+Structured role results allow exactly 2 MiB of serialized UTF-8 JSON; semantic
 field and inventory limits still apply. This is byte headroom, not a token
 budget or a native model output setting. Run journals may span contiguous
 bounded segments; preserve every segment when inspecting or recovering a run.
-Do not prune history to reclaim capacity. See
+Never prune history to reclaim capacity. See
 [the storage contract](ARCHITECTURE.md#structured-result-headroom).
 
 ### Output-budget verification record
@@ -655,7 +660,7 @@ is a decline with unknown reason, malformed confirmation a fixed shape
 constraint; COMMIT has no output-correction checkpoint, so these need separately
 authorized follow-up. Codex `operation_local_commit_git_operation` refuses a Git
 subcommand outside the disclosed allowlist before effect, keeping no command and
-proving no classifier defect or mutation; `COMMIT` resume remains. Do not edit
+proving no classifier defect or mutation; `COMMIT` resume remains. Never edit
 state or collect provider data; see
 [commit recovery](../pipelines/plan-execution/docs/SPEC.md#137-commit).
 
@@ -673,7 +678,7 @@ settings or editing state. Exact launcher/filter mechanics belong to
 
 Claude's HOME/config projections and temporary scaffolding stay outside project
 and task trees. Missing optional tooling must not appear in project Git status;
-do not add ignores or ask agents to remove sandbox placeholders.
+never add ignores or ask agents to remove sandbox placeholders.
 
 A pre-launch `ERR_AGENT_ENVIRONMENT_PREPARATION` pauses safely; turn-time
 `ERR_EXECUTION_RESOURCE_UNVERIFIABLE` retains its checkpoint and storage
@@ -698,7 +703,7 @@ live, invalid, and unverifiable records block.
 State-mutation contention returns retryable busy after roughly five seconds.
 Supported same-run recovery then proves the persisted process and
 descendants absent before settling stops; a replaced, live, unverifiable, or
-descendant-bearing process still blocks. Do not kill recorded PIDs or remove
+descendant-bearing process still blocks. Never kill recorded PIDs or remove
 lease files. These safety bounds are not workflow budgets or trusted-command
 timeouts; follow the offered action and [ownership contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state).
 
@@ -718,9 +723,8 @@ See [initial implementation evidence](product/VALIDATION_AND_REVIEW.md).
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
 and current `nextActions`. When the run is resumable, resolve only the permitted
 cause and resume that same run. Do not manually finish, validate, rewrite,
-discard, or commit its resumable work. Do not mutate frozen inputs or
-configuration to change what a resumed run will do; resume uses its durable
-snapshot.
+discard, or commit its resumable work, or mutate frozen inputs or configuration
+to change a resumed run; resume uses its durable snapshot.
 
 | Current action  | Operator procedure                                                                             |
 | --------------- | ---------------------------------------------------------------------------------------------- |
@@ -749,7 +753,7 @@ See [confirmation provenance](product/VALIDATION_AND_REVIEW.md#evidence-and-fing
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
 unsafe reconciliation, changed inputs, or ambiguous effects have their own
-bounded recovery rules. Do not erase locks, patch state files, reset stagnation
+bounded recovery rules. Never erase locks, patch state files, reset stagnation
 history, or assume every `no_progress` pause has the same recovery path.
 
 A coding run paused as `validation_policy_blocked` has a proven historical
@@ -813,16 +817,16 @@ or transcripts; see [failure classification](product/PROVIDER_MODEL.md#normalize
 If a genuinely non-resumable run leaves valid dirty work, first establish that
 execution ownership is gone and reconcile inputs and the stopped run's
 requirements. Then use **polishing** to finalize and review that existing
-change set. Do not start plan execution on a dirty tree or discard useful work
-merely to pass its clean-tree preflight. Polishing stages the accepted result
-and never commits; any subsequent operator commit requires separate authority.
-If further planned implementation remains, prepare the appropriate clean base
-and revised remaining plan before starting execution.
+change set. Never start plan execution on a dirty tree or discard useful work
+to pass its clean-tree preflight. Polishing stages the accepted result
+and never commits; a later operator commit requires separate authority.
+If further planned implementation remains, prepare a clean base and revised
+remaining plan before execution.
 
 This fallback never legitimizes contamination. A read-only role mutation or
 unsafe mixed change set requires an uncontaminated worktree and explicit
 reconciliation, not adoption through another pipeline. Preserve unexpected
-user work; the runner does not roll it back automatically.
+user work; the runner never rolls it back automatically.
 
 ## 6. Recognize the actual completion boundary
 
@@ -844,9 +848,9 @@ feedback nor an override can restore rejected evidence or weaken the inventory.
 
 Content-changing repairs invalidate earlier acceptance evidence and require
 the complete gate again. An unchanged successful finalization may be reused
-only under the runner's exact content and infrastructure fingerprint rules;
-there must still be a fresh successful terminal confirmation. An operator's
-manual validation result does not replace this evidence.
+only under the runner's exact content and infrastructure fingerprint rules,
+still followed by a fresh successful terminal confirmation. Manual operator
+validation never replaces this evidence.
 
 For commit-plan execution, only the runner-authorized Worker commit effect stages,
 checks staged hygiene, and creates the exact subject-only planned local commit;
@@ -856,7 +860,7 @@ Custom execution instead settles the exact confirmed result and its receipt,
 preserving earlier receipts and output fingerprints without staging or committing.
 For polishing, only the runner's `HANDOFF` stages and verifies the complete
 accepted change set; `HEAD` stays unchanged. Wait for `DONE` and its verified
-outcome, not merely a successful agent message or passing tests. Never replay
+outcome, not just a successful agent message or passing tests. Never replay
 an ambiguous commit or handoff manually.
 
 ## 7. Report defects and maintain useful local guidance
@@ -870,17 +874,16 @@ Keep these outcomes separate:
   `unexpected_issue_report` only after concluding that behavior contradicts
   the documented contract. Supply bounded English Markdown describing the
   expected and actual behavior and why it is unexpected. Do not attach raw
-  logs, provider output, prompts, credentials, or transcripts. The server does
-  not gather them automatically. Retry an uncertain report with its original
-  key; reporting does not resume or repair the run.
+  logs, provider output, prompts, credentials, or transcripts; the server never
+  gathers them. Retry an uncertain report with its original
+  key; reporting neither resumes nor repairs the run.
 - **Stable project operating lesson:** consolidate it into local guidance when
   no execution owns the project. A universal product rule belongs in the common
   guide; a task or product requirement belongs in task context or tracked
   project documentation.
 
 Reports go to one private per-user [global issue store](product/OPERATOR_MODEL.md#global-issue-store)
-that is shared across projects and survives deletion of its Git or directory
-origin. No project ignore rule is needed. Each issue keeps its
+shared across projects and surviving deletion of its Git or directory origin. No project ignore rule is needed. Each issue keeps its
 Markdown together with one authoritative tracking record that starts `open`.
 Earlier repository-local reports and issue indexes are no longer read or
 maintained; leave them in place. Manage the backlog with MCP `issues_list`,

@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-20
+
+- **Capability blockers publish bounded comparison evidence.** The
+  required-check capability `environment_blocked` pause in both coding
+  pipelines now shows, in CLI and MCP status, wait and activity, up to 16
+  comparison blockers per pause with each inventory index, its unambiguous
+  active-inventory check ID or `unknown`, its closed reason, bounded mismatch
+  fields and omitted counts when a diagnostic exists, plus any saved ownership
+  facts that pass platform revalidation. Public text is rebuilt from validated
+  fields, so saved prose, commands, URLs and arguments never cross. Mismatch
+  details stay unknown for legacy pauses, returned preparation blockers and
+  caught availability failures, while any revalidated ownership facts stay
+  visible. The diagnostic describes a normalized comparison so operators can
+  assess a reported need without accepting it or inferring its historical cause.
+  Unknown mismatch details never clear a blocker. Recovery is unchanged:
+  reconcile ownership, repair availability and resume the frozen request, or
+  preserve unfinished work through supported recovery before a new run with
+  changed selection or declarations. It grants no credit, private-report
+  retrieval or authority override.
+
 ## 2026-11-19
 
 - **Polishing unfinished repairs keep explicit ownership.** Independent/combined

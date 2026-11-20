@@ -344,6 +344,22 @@ delegated check is resolved only when runner inspection succeeds. Required check
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
+When a diagnostic exists, the required-check capability pause publishes
+bounded comparison blockers with mismatch fields, check associations and omitted
+counts. It separately publishes any saved ownership facts that pass platform
+revalidation; a pause may have none. Mismatch details stay unknown for legacy
+pauses, returned preparation blockers and caught availability failures, while
+any such ownership facts remain visible (see
+[capability diagnostics](VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)).
+Treat them as evidence for assessing the reported need, not as proof that the
+need is correct or as an explanation of its historical cause. Supported recovery first reconciles
+outstanding ownership through normal resume or stop reconciliation, then repairs
+availability and resumes the frozen request. If the selection or declarations
+must change, reconcile the existing run and preserve its unfinished work through
+supported recovery before starting a new run. Recovery keeps sandbox checks,
+frozen configuration, receipt bindings and consumed allowances, and grants no
+check credit, private-report retrieval or authority override.
+
 Preparation reservations remain owned work even before a process proof is attached.
 Interrupted registration, settlement or custody-log removal must reconcile before
 cleanup, another command or lease release. Recovery never releases an old probe;

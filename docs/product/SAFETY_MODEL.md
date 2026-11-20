@@ -530,6 +530,13 @@ new writable checkpoint rechecks the saved request under configuration guards,
 cancellation, the execution lease, and durable resource ownership.
 Status does not probe capabilities. Consumed commit/handoff verification precedes
 capability checks needed for new work.
+Public capability-blocker evidence, including for historical pauses, is rebuilt
+from fixed summaries, the validated diagnostic, allowlisted check IDs and
+ownership facts revalidated by the platform. Saved explanations, evidence prose,
+commands, URLs, private arguments and the complete inventory never cross.
+Unknown details or labels never clear or change a blocker. Recovery keeps
+sandbox checks, frozen configuration, receipt bindings and consumed allowances.
+It grants no check credit, private-report retrieval or authority override.
 Private PID namespaces contain detached and reparented descendants. Provider
 processes that require another native sandbox use that mode only when the full
 nested shape is available. Otherwise, an explicitly declared provider alone may
