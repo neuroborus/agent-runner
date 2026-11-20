@@ -8,6 +8,7 @@ export {
   validateTrustedValidationSnapshot,
 } from "./service.js";
 export { runExactCommand } from "./execution.js";
+export { normalizeCapabilityMismatchDiagnostic } from "./requirements.js";
 export { trustedValidationFailureEvidence } from "./errors.js";
 export {
   claimTestAttribution,

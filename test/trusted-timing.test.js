@@ -250,6 +250,8 @@ test("trusted preparation and caught refusals retain diagnostics without changin
         ],
       },
     ],
+    // Availability refusals carry no comparison-owned mismatch diagnostic.
+    diagnostic: null,
   });
 });
 

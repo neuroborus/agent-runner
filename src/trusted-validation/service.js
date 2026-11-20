@@ -26,8 +26,8 @@ import {
   trustedValidationFailureEvidence,
 } from "./errors.js";
 import {
+  compareRequirements,
   normalizeRequirementRequest,
-  requirementBlockers,
 } from "./requirements.js";
 
 export { TrustedValidationError } from "./errors.js";
@@ -1218,7 +1218,7 @@ export function createTrustedValidationService(options = {}) {
         },
       );
     }
-    const blockers = requirementBlockers(request, selected);
+    const { blockers, diagnostic } = compareRequirements(request, selected);
     // Validate the complete request and authority before any preparation effects.
     if (blockers.length === 0) {
       for (const command of selected.commands) {
@@ -1248,10 +1248,12 @@ export function createTrustedValidationService(options = {}) {
       }
     }
     context.signal?.throwIfAborted();
-    return Object.freeze({
-      status: blockers.length === 0 ? "READY" : "BLOCKED",
-      blockers: Object.freeze(blockers),
-    });
+    // Only comparison blockers carry a diagnostic; availability stays unknown.
+    return Object.freeze(
+      blockers.length === 0
+        ? { status: "READY", blockers: Object.freeze(blockers) }
+        : { status: "BLOCKED", blockers: Object.freeze(blockers), diagnostic },
+    );
   }
 
   return Object.freeze({

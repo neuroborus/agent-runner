@@ -5532,6 +5532,26 @@ Artifact authority matches both canonical URL and digest. Selected declarations
 are always runner-known requirements even without reports. Authority for the
 entire request is checked before any preparation; the snapshot is never changed.
 
+The same comparison derives every `BLOCKED` result's `diagnostic`, a closed
+version-1 `{schemaVersion, blockers, omittedBlockers}` value validated by the
+public `normalizeCapabilityMismatchDiagnostic`. Consumers never repeat the
+comparison. It publishes the first 16 comparison blockers in inventory order and
+counts the rest in `omittedBlockers`. Each contains only `checkIndex` (the
+unique 0–511 inventory index), the comparison `reason`, `missingCapabilities` in
+fixed `scratch`, `cache`, `sourceProjection` order, at most 32 lexically sorted
+unique `unmatchedArtifactDigests` with an `omittedArtifactDigests` count,
+and `commandIdentityMismatch`. The union of all reports supplies these details.
+Digests are deduplicated only after exact URL-plus-digest pair comparison, so a
+selected digest requested under another URL remains unmatched. Only
+`insufficient-authority` carries details and requires at least one; other
+reasons keep them empty or false. Unknown own fields, sparse arrays, invalid
+values, duplicates, noncanonical order, inconsistent counts or overflow,
+including evidence needing more than the shared 1,024 reports, raise
+`ERR_INVALID_CAPABILITY_DIAGNOSTIC` without echoing input; output is copied from
+the validated values. URLs, vectors, paths,
+profiles, unsupported labels, reports and exception text are never included.
+Availability blockers carry a null diagnostic. Diagnostics grant no authority.
+
 For authorized requests, inspection prepares each selected command sequentially
 under the existing durable storage, transport, and process lifecycle. It acquires
 and verifies dependencies, constructs the same network-isolated mounts, checks
