@@ -57,7 +57,7 @@
         "reviewer": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         }
       }
@@ -70,13 +70,13 @@
         "auditor": {
           "backend": "claude",
           "profile": "current",
-          "model": "fable",
-          "effort": "max"
+          "model": "claude-fable-5-2",
+          "effort": "high"
         },
         "reviewer": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         }
       }
@@ -96,13 +96,13 @@
         "reviewer": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         },
         "arbiter": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         }
       }
@@ -128,13 +128,13 @@
         "reviewer": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         },
         "arbiter": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         }
       }
@@ -157,13 +157,13 @@
         "reviewer": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         },
         "arbiter": {
           "backend": "codex",
           "profile": "current",
-          "model": "gpt-6.1-sol",
+          "model": "gpt-6.2-sol",
           "effort": "xhigh"
         }
       }

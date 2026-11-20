@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-11-20
 
+- **New Runner roles use Sol 6.2 and a Fable 5.2/high Auditor.** The tracked
+  example and task-scoped role selection now pair a Claude `claude-fable-5-2`
+  Auditor at `high` effort with a distinct independent Codex `gpt-6.2-sol`
+  Reviewer in `independent` audit mode. Codex `gpt-6.2-sol` is now the
+  Reviewer and Arbiter, at `xhigh` in the example, and the usage-limit-only
+  fallback primary. The full native ID avoids the floating `fable` alias, and
+  `high` is a native Claude effort tier. Explicit task selections, other
+  efforts and modes are unchanged, and existing runs keep their frozen role
+  bindings.
+
 - **Audit report publication requires custody proof and rendering
   compatibility.** The shared report publisher now treats temporary ownership
   as mandatory: it allocates exclusively only without a temporary or record,

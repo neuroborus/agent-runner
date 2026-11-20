@@ -847,9 +847,9 @@ runtime plugin or configuration surface.
 
 The `current` selection delegates changing native model IDs to each backend.
 The tracked [example](.agent-runner.example.json) selects Claude `opus` with
-`high` effort for Planner/Worker roles, Codex `gpt-6.1-sol` with `xhigh`
-effort for every Reviewer and Arbiter, and Claude `fable` with `max` effort
-for Auditor.
+`high` effort for Planner/Worker roles, Codex `gpt-6.2-sol` with `xhigh`
+effort for every Reviewer and Arbiter, and Claude `claude-fable-5-2` with
+`high` effort for Auditor.
 It also shows `claude-primary` and `claude-secondary` profile aliases alongside
 the native defaults.
 `artifactRoot` defaults to `LOCAL_ARTIFACTS`.

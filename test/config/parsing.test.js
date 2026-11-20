@@ -65,7 +65,7 @@ test("tracked example is valid and local configuration is ignored", async () => 
     assert.deepEqual(pipeline.roles.reviewer, {
       backend: "codex",
       profile: "current",
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       effort: "xhigh",
     });
   }
@@ -85,14 +85,14 @@ test("tracked example is valid and local configuration is ignored", async () => 
   assert.deepEqual(configuration.pipelines.audit.roles.auditor, {
     backend: "claude",
     profile: "current",
-    model: "fable",
-    effort: "max",
+    model: "claude-fable-5-2",
+    effort: "high",
   });
   for (const pipelineId of ["plan-authoring", "plan-execution", "polishing"]) {
     assert.deepEqual(configuration.pipelines[pipelineId].roles.arbiter, {
       backend: "codex",
       profile: "current",
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       effort: "xhigh",
     });
   }
