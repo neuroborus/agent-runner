@@ -62,6 +62,20 @@ export async function runAudit({ run, runtime, operatorStop = false }) {
       );
       return;
     }
+    const prior = state.publication.published;
+    // The same accepted projection must reproduce its published bytes; a new
+    // rendering is a runtime incompatibility, never a fresh publication.
+    requireBinding(
+      state.publication.pending !== null ||
+        prior === null ||
+        !(
+          prior.snapshotFingerprint === binding.snapshotFingerprint &&
+          prior.reportFingerprint === binding.reportFingerprint &&
+          prior.complete === binding.complete
+        ),
+      "Audit report rendering changed for an unchanged projection.",
+      "ERR_AUDIT_REPORT_RENDERING_CHANGED",
+    );
     if (state.publication.pending === null)
       await save({
         pipelineState: {
@@ -153,11 +167,16 @@ export async function runAudit({ run, runtime, operatorStop = false }) {
     const reason = {
       ERR_AUDIT_REPORT_CHANGED: "audit_report_changed",
       ERR_WORKSPACE_REPORT_CHANGED: "audit_report_changed",
+      ERR_AUDIT_REPORT_RENDERING_CHANGED: "audit_report_rendering_changed",
+      ERR_WORKSPACE_REPORT_TEMPORARY_CONFLICT:
+        "audit_report_temporary_conflict",
       ERR_AUDIT_REPORT_BINDING_REQUIRED: "audit_report_binding_required",
       ERR_AUDIT_INPUT_CHANGED: "input_changed",
       ERR_WORKSPACE_DRIFT: "workspace_changed",
     }[cause?.code];
     if (!reason) throw cause;
+    const { workflowState } = current.pipelineState;
+    // A refusal during resume keeps the suspended checkpoint, not the pause.
     return save({
       pipelineState: {
         ...current.pipelineState,
@@ -165,7 +184,10 @@ export async function runAudit({ run, runtime, operatorStop = false }) {
       },
       pause: {
         reason,
-        resumeState: current.pipelineState.workflowState,
+        resumeState:
+          workflowState === "WAITING_FOR_USER"
+            ? (current.pause?.resumeState ?? null)
+            : workflowState,
         code: cause.code,
       },
     });

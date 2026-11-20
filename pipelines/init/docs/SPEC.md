@@ -281,8 +281,11 @@ and the existing no-replace primitive; its identity is persisted before publicat
 Lease ownership is rechecked after that persistence and before publication.
 File replacement reuses confined directory descriptors, exclusive temporary
 creation, journaled temporary identity, synced bytes, atomic rename and verified
-readback. Unknown temporaries, same-byte inode substitutions, ancestor changes
-and intervening edits are rejected and preserved. Temporary paths remain stable
+readback. The shared publisher requires journaled custody for every temporary,
+never removes one, and verifies destination identity and temporary absence at
+readback. Unknown temporaries, missing recorded custody, same-byte inode
+substitutions, ancestor changes and intervening edits are rejected and
+preserved; Init's separate destination-identity check remains. Temporary paths remain stable
 for each exact destination, avoiding new ignore entries on ordinary reruns.
 Each resource receives a
 verified identity/hash receipt before the next effect. Reload binds the original

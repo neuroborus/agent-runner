@@ -656,8 +656,9 @@ version-3 migration, preserving all earlier roles, history and budgets. Each
 publication binding carries source snapshot, projected report fingerprint, rendered
 content hash and completion flag. Persist the exact intent before writing; verify
 readback and unchanged frozen inputs/source before the receipt. Resume settles a
-pending publication before any further discovery. Exact desired bytes reconcile a
-lost acknowledgement without a provider turn. Unexpected report edits, unsafe
+pending publication before any further discovery. A lost acknowledgement
+reconciles without a provider turn only from the journaled `prepared` identity
+at `audit.md` with no remaining temporary. Unexpected report edits, unsafe
 paths, substituted ancestors or conflicting temporaries fail closed and remain
 preserved. Legacy bindings lacking declared report paths gain no new write authority.
 State version 5 adds the selected proactive-clarification boolean and its completion
@@ -665,17 +666,53 @@ flag. The version-4 migration defaults to no proactive request, preserving exist
 clarification progress, discovery history, roles, publication and both budgets.
 Legacy material edits without structured requests retain external edit/resume support.
 
+Before saving a new intent, the Runner compares the current binding with the last
+published one. Equal snapshot and report fingerprints and completion with a
+different rendered hash mean the current runtime cannot reproduce the saved
+rendering: the audit pauses as `audit_report_rendering_changed`
+(`ERR_AUDIT_REPORT_RENDERING_CHANGED`) before any artifact call or role turn,
+retaining the last receipt and report. Newly accepted projections and completion
+changes publish normally from the prior destination hash.
+
 The Runner anchors replacement to the bound real parent directory, journals the
 temporary's identity and `writing` phase before writing `.audit.md.tmp`, syncs its
-bytes, journals `prepared`, renames it atomically, syncs the parent and verifies bytes.
+bytes, journals `prepared`, renames it atomically, syncs the parent and verifies
+destination bytes, identity and continued temporary absence while the parent
+directory stays unchanged. A bounded read on the pinned parent serializes with
+entry mutations before the closing native sample of its isolated readback watch
+queue. The sample must find no notification and the Runner then revalidates the
+binding.
 Both paths must already be ignored and untracked when repository-local; the
 Runner never edits ignore rules. The publisher accepts only exact declared
-artifacts and bounded report text (32 MiB); agents cannot call it. Recovery may
-rewrite an incomplete `writing` temporary only after verifying its recorded file
-identity, single-link ownership and unchanged destination. Unowned partial files,
-substituted temporaries and changed prepared bytes remain preserved and block report
-publication, independently of immutable source drift. Source snapshots exclude only the declared
-artifacts; per-turn read-only guards still include every artifact.
+artifacts and bounded report text (32 MiB); agents cannot call it. It writes only
+from the expected destination hash and allocates exclusively only when neither the
+temporary nor its record exists. Recovery may rewrite an exact owned `writing`
+temporary in place or rename an exact owned `prepared` temporary whose bytes match
+the intent. Desired destination bytes that differ from the expected baseline are
+accepted only with the recorded `prepared` identity at the destination and no
+temporary; equal expected and desired hashes with neither temporary nor record
+give a verified no-write receipt. The publisher never removes a temporary.
+Partial or empty temporaries whose custody is missing or invalid, missing
+recorded custody, substituted temporaries, desired destination bytes off the
+baseline without the recorded `prepared` identity and changed prepared bytes
+remain preserved and pause as `audit_report_temporary_conflict`
+(`ERR_WORKSPACE_REPORT_TEMPORARY_CONFLICT`), including proven exclusive-create
+collisions, post-open disappearance and a readback notification for the
+temporary alone after parent and ancestor guards pass.
+Destinations matching neither hash, changed during readback or lost at a
+post-open path lookup remain `audit_report_changed` after drift checks.
+Unsafe paths, drift and unrelated I/O keep their own outcomes.
+Source snapshots exclude only the declared artifacts; per-turn
+read-only guards still include every artifact.
+
+A publication refusal saves the active workflow state as `resumeState`, or keeps
+the existing pause's saved checkpoint when the refusal occurs during resume, so
+durable state retains the suspended checkpoint. The rendering and custody pauses
+expose no continuation: projected `resumeState` is null, actions are empty and
+null-action resume is rejected with the specific reason. CLI and MCP explain that
+the saved rendering cannot be reproduced or that temporary custody cannot be
+verified, and direct the operator to preserve `audit.md` and any remaining
+`.audit.md.tmp` before a new audit.
 
 Complete publication requires the selected clean-discovery gate, no pending
 verification, and unchanged source, task, clarification and report bindings. Lazy

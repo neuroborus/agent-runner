@@ -7,6 +7,22 @@ remain in the owning documentation.
 
 ## 2026-11-20
 
+- **Audit report publication requires custody proof and rendering
+  compatibility.** The shared report publisher now treats temporary ownership
+  as mandatory: it allocates exclusively only without a temporary or record,
+  rewrites or renames only its exact journaled allocation, accepts desired
+  destination bytes off the expected baseline only at the recorded `prepared`
+  identity with no temporary, and never removes a temporary. Readback verifies
+  destination identity and continued temporary absence. Custody failures and
+  proven temporary races pause audits as `audit_report_temporary_conflict`,
+  distinct from destination changes, unsafe paths, drift and unrelated I/O.
+  An unchanged report projection whose rendering differs from the published
+  hash pauses as `audit_report_rendering_changed` before any new intent or role
+  turn. Both pauses keep the suspended checkpoint durably, expose no
+  continuation and direct operators to preserve `audit.md` and any remaining
+  `.audit.md.tmp`. Equal-hash publication stays an inert verified receipt; Init
+  keeps its destination-identity check.
+
 - **Capability blockers publish bounded comparison evidence.** The
   required-check capability `environment_blocked` pause in both coding
   pipelines now shows, in CLI and MCP status, wait and activity, up to 16

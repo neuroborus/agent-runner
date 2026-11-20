@@ -2314,7 +2314,10 @@ safe activity; they grant no same-run audit resumption. See the
 Zero or Critical findings can accompany success; findings create no automatic
 issues or repair permissions. Unavailable evidence remains visible. Report
 publication resumes without replaying accepted model work; unexpected report edits
-fail closed. Repository-local task artifacts must already be ignored and untracked.
+fail closed. A saved rendering the current runtime cannot reproduce, or report
+temporary custody that cannot be verified, pauses with no continuation while the
+durable checkpoint is retained; preserve `audit.md` and any remaining
+`.audit.md.tmp`. Repository-local task artifacts must already be ignored and untracked.
 
 The Git/state boundaries preserve unfinished work outside the repository and
 transient validation storage. Newly eligible execution runs use their verified

@@ -47,6 +47,10 @@ const EXPLANATIONS = Object.freeze({
     "This legacy run has no frozen finding Reviewer; start a new independent audit.",
   audit_report_changed:
     "The published audit report changed; preserve it and start a new audit.",
+  audit_report_rendering_changed:
+    "The current runtime cannot reproduce the saved audit report rendering; preserve audit.md and any remaining .audit.md.tmp, then start a new audit.",
+  audit_report_temporary_conflict:
+    "Audit report temporary custody cannot be verified; preserve audit.md and any remaining .audit.md.tmp, then start a new audit.",
   audit_report_binding_required:
     "This legacy run has no frozen report artifact bindings; start a new audit.",
   input_changed:
@@ -61,6 +65,14 @@ const EXPLANATIONS = Object.freeze({
 });
 
 export function validateResumeAction(run, action) {
+  if (run.pause?.reason === "audit_report_rendering_changed")
+    throw new Error(
+      "The saved audit report rendering cannot be reproduced; this audit cannot resume.",
+    );
+  if (run.pause?.reason === "audit_report_temporary_conflict")
+    throw new Error(
+      "Audit report temporary custody cannot be verified; this audit cannot resume.",
+    );
   if (
     [
       "input_changed",

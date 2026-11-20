@@ -621,11 +621,19 @@ absence and redaction, rejecting unsupported classes and contradictory pauses.
 Fast `pipelines/audit/test/publication.test.js` owns escaped report-size rejection
 before ledger acceptance and resumable retry, exact confirmed/pending
 projection, zero/Critical findings, all-mode completion, lost publication
-acknowledgement and completion binding with injected effects.
+acknowledgement with its journaled prepared custody, completion binding, and
+rendering-change and custody pauses that keep a suspended checkpoint, with
+injected effects.
 Fast `test/runner-audit-publication.test.js` owns public Runner/CLI metadata and
 MCP report projection for Git and ordinary directories, plus actual
-confined artifact replacement, exact-byte and partial-write recovery without
-replaying accepted discovery, edits and temporary/alias substitution rejection.
+confined artifact replacement, prepared-custody and partial-write recovery without
+replaying accepted discovery, the inert equal-hash receipt, and preserved
+refusal of unproven custody, injected entry races, edits and
+temporary/destination/alias substitution, with generic unrelated descriptor
+errors. The final lookup fixtures hold sampled metadata equal, model pending
+entry notifications at the closing directory read, and check drift precedence
+for destination disappearance. One child process proves a quiet readback under
+adverse parent runtime options and preloads.
 Its ordinary-directory terminal case reconstructs a failed audit from the real
 journal and checks matching CLI status, MCP status/wait and safe activity without
 replaying discovery or report publication on terminal continuation. Unexpected

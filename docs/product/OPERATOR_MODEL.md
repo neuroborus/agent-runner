@@ -443,7 +443,13 @@ with Critical findings creates no automatic issue and authorizes no repair.
 Invalid audit role results expose bounded field/constraint diagnostics in the
 shared CLI/MCP pause evidence. Resume targets the saved checkpoint with structured
 correction feedback, preserving consumed passes, pending findings and prior
-decisions; it never exposes rejected output or renews a budget. The
+decisions; it never exposes rejected output or renews a budget.
+`audit_report_rendering_changed` means the current runtime cannot reproduce the
+saved rendering of an unchanged report projection; `audit_report_temporary_conflict`
+means report temporary custody cannot be verified. Both retain the suspended
+checkpoint in durable state but project a null resume state and no actions, and
+null-action resume is rejected. Preserve `audit.md` and any remaining
+`.audit.md.tmp`, then start a new audit. The
 [audit specification](../../pipelines/audit/docs/SPEC.md#structured-report)
 owns diagnostic and compatibility details.
 

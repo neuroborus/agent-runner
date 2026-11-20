@@ -1040,9 +1040,27 @@ no pending batch and the exact complete report receipt. CLI/MCP metadata and
 excluded from long-lived source guards but protected during every agent turn.
 The workspace publisher anchors its atomic rename to a verified real parent and
 journals temporary identity and writing/prepared phases before their effects.
-Resume rewrites only its own incomplete temporary, preserving substituted files
-and rejecting unexpected bytes/aliases. Report conflicts remain distinct from
-immutable source drift. Root dispatch confines it to the descriptor's
+Ownership is mandatory: it allocates exclusively only without a temporary or
+record, rewrites only its exact `writing` temporary, renames only exact matching
+`prepared` bytes and never unlinks. Desired destination bytes off the expected
+baseline reconcile only at the recorded `prepared` identity with no temporary;
+equal expected/desired hashes without custody give a verified no-write receipt.
+Readback verifies bytes, identity and temporary absence within an unchanged
+parent directory observation. After the final lookup and parent stat, one
+bounded directory read on the pinned parent serializes with entry mutations
+before a worker samples its isolated native watch queue directly. The worker
+inherits no parent runtime options or preloads. Only an empty queue permits a
+receipt after binding revalidation. Custody failures and proven `EEXIST`/`ENOENT`
+temporary races, classified after parent and ancestor guards, use
+`ERR_WORKSPACE_REPORT_TEMPORARY_CONFLICT`. Destination conflicts including
+post-open path disappearance use `ERR_WORKSPACE_REPORT_CHANGED` after the same
+drift checks. Unsafe paths, drift and unrelated I/O keep their own outcomes.
+Report conflicts remain distinct from immutable source drift. Init keeps its
+separate destination-identity check. Before a new intent,
+an unchanged projection whose rendered hash differs pauses as
+`audit_report_rendering_changed`. Publication pauses keep the active state, or
+the suspended checkpoint on resume, as durable `resumeState` while projecting
+no continuation. Root dispatch confines it to the descriptor's
 filename and requires ignored, untracked repository-local paths. It grants no
 source, index, Git, retrieval or automatic issue authority. Critical findings do
 not block successful completion. Conflicting partial temporaries remain preserved.
