@@ -214,6 +214,48 @@ export function inspectionRequirements(validations) {
   ]);
 }
 
+const CAPABILITY_PAUSE_CODE = "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE";
+export const CAPABILITY_PAUSE_EXPLANATION =
+  "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.";
+
+export function isCapabilityPause(pause) {
+  return (
+    pause?.reason === "environment_blocked" &&
+    pause.code === CAPABILITY_PAUSE_CODE
+  );
+}
+
+// Saved fields of a required-check capability pause. The root diagnostic is
+// kept unchanged and each published inventory index is bound to the ID of its
+// required check, so no command text is saved as evidence. An ambiguous or
+// unlisted command stays unknown. A caught availability failure has no
+// diagnostic; its mismatch details stay unknown.
+export function capabilityPauseDetails(result, inventory, checks) {
+  const labels = new Map();
+  for (const { id, command } of checks)
+    labels.set(command, labels.has(command) ? null : id);
+  const diagnostic = result.diagnostic ?? null;
+  return {
+    code: CAPABILITY_PAUSE_CODE,
+    explanation: CAPABILITY_PAUSE_EXPLANATION,
+    evidence: result.blockers
+      .slice(0, 16)
+      .flatMap((item) => [
+        `Required check capability blocker: ${item.reason}`,
+        ...(item.evidence ?? []),
+      ]),
+    ...(diagnostic === null
+      ? {}
+      : {
+          capabilityDiagnostic: diagnostic,
+          capabilityChecks: diagnostic.blockers.map(({ checkIndex }) => ({
+            checkIndex,
+            label: labels.get(inventory[checkIndex]) ?? null,
+          })),
+        }),
+  };
+}
+
 export function freezeReport(value) {
   if (value !== null && typeof value === "object") {
     for (const child of Object.values(value)) freezeReport(child);

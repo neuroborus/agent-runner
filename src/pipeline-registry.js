@@ -8,12 +8,14 @@ import { polishingPipeline } from "@agent-runner/polishing";
 
 import { normalizeReadOnlySnapshotChanges } from "./git/index.js";
 import { RUNTIME_COMPATIBILITY } from "./state/index.js";
+import { projectCapabilityBlockerEvidence } from "./trusted-validation/index.js";
 
 const PIPELINES = new Map();
 // Root-owned capabilities injected into descriptor projections, so pipelines
 // never import root modules to publish canonical diagnostics.
 const PROJECTION_CAPABILITIES = Object.freeze({
   readOnlySnapshotChanges: normalizeReadOnlySnapshotChanges,
+  capabilityBlockerEvidence: projectCapabilityBlockerEvidence,
 });
 
 function composePipeline(pipeline) {

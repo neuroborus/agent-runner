@@ -52,7 +52,10 @@ import {
   normalizeExecutionState as normalizePipelineState,
 } from "./bootstrap-progress.js";
 import { REPOSITORY_DISCOVERY_SCHEMA } from "./bootstrap-unit-schemas.js";
-import { inspectionRequirements } from "./capability-requirements.js";
+import {
+  capabilityPauseDetails,
+  inspectionRequirements,
+} from "./capability-requirements.js";
 import {
   candidateCheckpoint,
   combinedReview,
@@ -1567,10 +1570,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   async function ensureCheckRequirements() {
     const current = state();
+    const inventory = validationCatalog(current);
     let result;
     try {
       result = await runtime.trustedValidation.inspectRequirements({
-        inventory: validationCatalog(current),
+        inventory,
         requirements: inspectionRequirements(validationReports(current)),
         snapshot: current.trustedValidation,
         projectPath: currentRun.projectPath,
@@ -1596,15 +1600,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     if (result.status === "READY") return true;
     await pause("environment_blocked", {
-      code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
-      explanation:
-        "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
-      evidence: result.blockers
-        .slice(0, 16)
-        .flatMap((item) => [
-          `${item.command.slice(0, 3_000)}: ${item.reason}`,
-          ...(item.evidence ?? []),
-        ]),
+      // Only the active step's IDs are public; role-local bootstrap IDs can
+      // name a different check in this step and stay unknown.
+      ...capabilityPauseDetails(
+        result,
+        inventory,
+        current.requiredChecks ?? [],
+      ),
       resumeState: current.workflowState,
     });
     return false;

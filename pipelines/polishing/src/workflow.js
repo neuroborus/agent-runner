@@ -2,7 +2,10 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import { inspectionRequirements } from "./capability-requirements.js";
+import {
+  capabilityPauseDetails,
+  inspectionRequirements,
+} from "./capability-requirements.js";
 import {
   clearedCandidateAndConfirmationGate,
   clearedCandidateAndTerminalGate,
@@ -1237,10 +1240,11 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   async function ensureCheckRequirements() {
     const current = state();
+    const inventory = current.requiredChecks.map(({ command }) => command);
     let result;
     try {
       result = await runtime.trustedValidation.inspectRequirements({
-        inventory: current.requiredChecks.map(({ command }) => command),
+        inventory,
         requirements: inspectionRequirements([
           current.workerValidation,
           current.reviewerValidation,
@@ -1269,15 +1273,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     if (result.status === "READY") return true;
     await pause("environment_blocked", {
-      code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
-      explanation:
-        "Required check capabilities are unavailable. Repair the environment and resume the saved request; changed declarations require a new run.",
-      evidence: result.blockers
-        .slice(0, 16)
-        .flatMap((item) => [
-          `${item.command.slice(0, 3_000)}: ${item.reason}`,
-          ...(item.evidence ?? []),
-        ]),
+      ...capabilityPauseDetails(result, inventory, current.requiredChecks),
       resumeState: current.workflowState,
     });
     return false;

@@ -1240,6 +1240,13 @@ availability before every writable checkpoint. Unsatisfied requirements pause as
 Changing trusted selection or declarations requires a new run. Inspection may
 prepare verified dependencies but does not execute required checks; those remain
 exclusive to finalization.
+CLI status, `run_status` and `run_wait` show this pause with fixed text, each
+bounded mismatch with its inventory index and required-check ID, omitted-blocker
+counts and validated ownership facts. `run_activity` carries the same
+`capabilityDiagnostic`, `capabilityChecks` and `ownershipDiagnostics` from each
+event's own pause.
+Unknown labels or missing details never clear the blocker. Commands, URLs and
+saved free text are not shown.
 The configuration example keeps `repository-check` on the read-only checkout
 where its installed dependencies remain available, and uses the separate
 `projected-build` declaration to demonstrate source-projection authority.

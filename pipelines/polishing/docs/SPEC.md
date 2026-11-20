@@ -268,6 +268,18 @@ again; cached declaration preflight cannot bypass this gate. Unsatisfied needs
 pause as `environment_blocked` before content or index mutation, preserving the
 checkpoint and bounded runner-derived evidence. Repairing the environment permits
 retry; changing trusted selection or declarations requires a new run.
+A blocked inspection saves the comparison's optional shared diagnostic as
+`capabilityDiagnostic` and binds each published inventory index to the ID of
+its required check in `capabilityChecks`; a command listed under several IDs
+binds null. Saved evidence keeps each blocker
+reason and validated ownership envelopes but no command text. Caught
+availability failures and legacy pauses save no diagnostic, so their mismatch
+details are unknown. Public status, wait and activity for this pause,
+including historical records, use a fixed explanation and project evidence only
+from the validated diagnostic, allowlisted check IDs and revalidated ownership
+envelopes through the root-injected trusted-validation projector. Unsafe,
+missing, ambiguous or unbound labels, including an ID saved for more than one
+published blocker index, project as unknown and never change the blocker.
 
 An agent-sandbox limitation is satisfied only for the exact delegated command
 when runner inspection succeeds. A limitation on another command remains a

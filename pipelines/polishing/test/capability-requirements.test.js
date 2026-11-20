@@ -4,7 +4,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createOwnershipDiagnostic } from "../../../src/platform/index.js";
-import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
+import {
+  createTrustedValidationService,
+  projectCapabilityBlockerEvidence,
+} from "../../../src/trusted-validation/index.js";
 import { inspectionRequirements } from "../src/capability-requirements.js";
 import {
   migratePolishingStateV13,
@@ -145,9 +148,17 @@ test("trusted ownership diagnostics survive capability pause publication", async
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.equal(paused.pause.resumeState, "POLISH");
   assert.deepEqual(paused.pause.evidence, [
-    `${command}: unavailable`,
+    "Required check capability blocker: unavailable",
     ...evidence,
   ]);
+  // Availability blockers have no mismatch details; ownership stays public.
+  assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
+  assert.deepEqual(
+    polishingPipeline.projections.pause(paused, {
+      capabilityBlockerEvidence: projectCapabilityBlockerEvidence,
+    }).evidence,
+    ["Capability mismatch details: unknown.", evidence[1]],
+  );
   assert.equal(writes(fixture).length, 0);
 });
 
@@ -209,6 +220,7 @@ test("trusted ownership diagnostics survive caught inspection, preflight and cle
       ),
     );
     assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_NATIVE_OUTPUT/u);
+    assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
     assert.equal(paused.pipelineState.finalizationResult, null);
     if (boundary === "cleanup") {
       assert.equal(paused.pause.resumeState, "FINALIZE");
@@ -549,7 +561,9 @@ for (const mode of ["independent", "lazy", "combined"]) {
     });
     const paused = await fixture.run();
     assert.equal(paused.pause.reason, "environment_blocked");
-    assert.deepEqual(paused.pause.evidence, [`${target}: unavailable`]);
+    assert.deepEqual(paused.pause.evidence, [
+      "Required check capability blocker: unavailable",
+    ]);
     assert.equal(executions.length, 0);
     assert.equal(writes(fixture).length, 0);
     available = true;
@@ -1144,6 +1158,28 @@ test("combined polishing blocks a genuine assigned-executor need before writable
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.match(paused.pause.evidence[0], /not-selected/u);
+  // The sparse inventory index is bound to its check ID, not command text.
+  assert.deepEqual(paused.pause.capabilityDiagnostic, {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 2,
+        reason: "not-selected",
+        missingCapabilities: [],
+        unmatchedArtifactDigests: [],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  });
+  assert.deepEqual(paused.pause.capabilityChecks, [
+    { checkIndex: 2, label: "C3" },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(paused.pause.evidence),
+    /npm run docs:check/u,
+  );
   assert.deepEqual(requests[0].requirements, [
     {
       command: ordinaryChecks[2].command,

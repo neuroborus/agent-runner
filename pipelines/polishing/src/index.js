@@ -1,4 +1,8 @@
 import {
+  CAPABILITY_PAUSE_EXPLANATION,
+  isCapabilityPause,
+} from "./capability-requirements.js";
+import {
   clearedCandidateAndTerminalGate,
   terminalConfirmationGatePassed,
 } from "./gate-evidence.js";
@@ -273,6 +277,7 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (isCapabilityPause(pause)) return CAPABILITY_PAUSE_EXPLANATION;
   if (pause.reason === "validation_policy_blocked")
     return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   if (
@@ -290,8 +295,15 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(run, readOnlySnapshotChanges) {
+function publicEvidence(
+  run,
+  { readOnlySnapshotChanges, capabilityBlockerEvidence },
+) {
   const pause = run.pause;
+  if (isCapabilityPause(pause))
+    return typeof capabilityBlockerEvidence === "function"
+      ? capabilityBlockerEvidence(pause)
+      : Object.freeze(["Capability mismatch details: unavailable."]);
   if (
     pause.reason === "internal_failure" &&
     pause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
@@ -369,9 +381,10 @@ function publicFindings(state) {
   ];
 }
 
-// The root registry injects the Git-owned label normalizer; a direct
-// uncomposed call has none and reports the diagnosis as unavailable.
-function projectPause(run, { readOnlySnapshotChanges } = {}) {
+// The root registry injects the Git-owned label normalizer and the trusted
+// capability blocker projector; a direct uncomposed call has neither and
+// reports those diagnoses as unavailable.
+function projectPause(run, capabilities = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -465,7 +478,7 @@ function projectPause(run, { readOnlySnapshotChanges } = {}) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run, readOnlySnapshotChanges),
+    evidence: publicEvidence(run, capabilities),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });

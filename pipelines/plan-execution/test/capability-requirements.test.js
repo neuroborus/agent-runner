@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { serializeCommitPlan } from "@agent-runner/commit-plan";
 
 import { createOwnershipDiagnostic } from "../../../src/platform/index.js";
-import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
+import {
+  createTrustedValidationService,
+  projectCapabilityBlockerEvidence,
+} from "../../../src/trusted-validation/index.js";
 import {
   migratePlanExecutionStateV17,
   migratePlanExecutionStateV24,
@@ -36,6 +39,7 @@ import {
   normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
+  PLAN,
   REQUIRED_CHECKS,
   checkAndFix,
   bootstrapReady,
@@ -158,9 +162,17 @@ test("trusted ownership diagnostics survive capability pause publication", async
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.equal(paused.pause.resumeState, "IMPLEMENT");
   assert.deepEqual(paused.pause.evidence, [
-    `${command}: unavailable`,
+    "Required check capability blocker: unavailable",
     ...evidence,
   ]);
+  // Availability blockers have no mismatch details; ownership stays public.
+  assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(paused, {
+      capabilityBlockerEvidence: projectCapabilityBlockerEvidence,
+    }).evidence,
+    ["Capability mismatch details: unknown.", evidence[1]],
+  );
   assert.equal(writes(fixture).length, 0);
 });
 
@@ -207,6 +219,7 @@ test("trusted ownership diagnostics survive caught inspection, preflight and cle
       ),
     );
     assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_NATIVE_OUTPUT/u);
+    assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
     assert.equal(paused.pipelineState.finalizationResult, null);
     if (boundary === "cleanup") {
       assert.equal(paused.pause.resumeState, "FINALIZE");
@@ -1100,6 +1113,28 @@ test("combined execution blocks a genuine assigned-executor need before writable
   const paused = await fixture.run();
   assert.equal(paused.pause.reason, "environment_blocked");
   assert.match(paused.pause.evidence[0], /not-selected/u);
+  // The sparse inventory index is bound to its check ID, not command text.
+  assert.deepEqual(paused.pause.capabilityDiagnostic, {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 2,
+        reason: "not-selected",
+        missingCapabilities: [],
+        unmatchedArtifactDigests: [],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  });
+  assert.deepEqual(paused.pause.capabilityChecks, [
+    { checkIndex: 2, label: "C3" },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(paused.pause.evidence),
+    /npm run docs:check/u,
+  );
   assert.deepEqual(requests[0].requirements, [
     {
       command: ordinaryChecks[2].command,
@@ -1113,6 +1148,84 @@ test("combined execution blocks a genuine assigned-executor need before writable
   const after = await fixture.runtime.git.snapshot();
   assert.equal(after.contentFingerprint, before.contentFingerprint);
   assert.equal(after.indexFingerprint, before.indexFingerprint);
+});
+
+test("capability pause labels name only checks in the active step inventory", async (t) => {
+  const bootstrapChecks = [[1, 2], [1], [2]].map((steps, index) => ({
+    ...ordinaryChecks[index],
+    steps,
+  }));
+  const firstStepChecks = ordinaryChecks.slice(0, 2);
+  let committed = false;
+  const fixture = await createFixture(t, {
+    plan: `${PLAN}\n\n## Commit 2: fix(test): finish behavior\n\nFinish the requested behavior.`,
+    worker: bootstrapTurns("independent", {
+      ...bootstrapReady("Worker"),
+      requiredChecks: bootstrapChecks,
+    }),
+    reviewer: [
+      { ...bootstrapReady("Reviewer"), requiredChecks: bootstrapChecks },
+    ],
+    workWorker: [
+      implementationCompleted(),
+      {
+        ...finalizationPassed(),
+        requiredChecks: firstStepChecks,
+        checks: firstStepChecks.map(({ id, command: target }) => ({
+          checkId: id,
+          command: target,
+          status: "PASS",
+          evidence: ["Passed"],
+        })),
+      },
+    ],
+    onRoleRun(_role, request) {
+      if (request.access === "local-commit") committed = true;
+    },
+    // In step 2, C2 names the docs check; the blocked lint check is not in
+    // this step's inventory, so its role-local bootstrap ID is not published.
+    onRequirementInspection: ({ inventory }) =>
+      committed
+        ? {
+            status: "BLOCKED",
+            blockers: [
+              { command: inventory[1], reason: "unavailable", evidence: [] },
+            ],
+            diagnostic: {
+              schemaVersion: 1,
+              blockers: [
+                {
+                  checkIndex: 1,
+                  reason: "not-selected",
+                  missingCapabilities: [],
+                  unmatchedArtifactDigests: [],
+                  commandIdentityMismatch: false,
+                  omittedArtifactDigests: 0,
+                },
+              ],
+              omittedBlockers: 0,
+            },
+          }
+        : ready,
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pipelineState.currentStep, 2);
+  assert.equal(paused.pipelineState.requiredChecks[1].id, "C2");
+  assert.equal(
+    paused.pipelineState.requiredChecks[1].command,
+    ordinaryChecks[2].command,
+  );
+  assert.equal(paused.pause.capabilityDiagnostic.blockers[0].checkIndex, 1);
+  assert.deepEqual(paused.pause.capabilityChecks, [
+    { checkIndex: 1, label: null },
+  ]);
+  assert.match(
+    planExecutionPipeline.projections.pause(paused, {
+      capabilityBlockerEvidence: projectCapabilityBlockerEvidence,
+    }).evidence[0],
+    /^Check unknown at inventory index 1: not-selected;/u,
+  );
 });
 
 test("legacy validation migration does not admit a read-only-turn observation", async (t) => {

@@ -1,3 +1,7 @@
+import {
+  projectCapabilityChecks,
+  projectCapabilityOwnership,
+} from "../trusted-validation/index.js";
 import { publicDispatchActivity } from "./dispatch.js";
 import { projectOperatorStop } from "./stop-projection.js";
 import {
@@ -24,7 +28,20 @@ function projectPublicActivity(event, activity, stopRequest) {
     recordedAt: event.recordedAt,
     ...publicDispatchActivity(activity),
     ...(stop === null ? {} : { stop }),
-    ...(capabilityDiagnostic === undefined ? {} : { capabilityDiagnostic }),
+    // The event's own saved labels and revalidated ownership envelopes;
+    // unsafe or unbound labels stay unknown and other saved text is ignored.
+    ...(capabilityDiagnostic === undefined
+      ? {}
+      : {
+          capabilityDiagnostic,
+          capabilityChecks: projectCapabilityChecks(
+            capabilityDiagnostic,
+            event.state.pause.capabilityChecks,
+          ),
+          ownershipDiagnostics: projectCapabilityOwnership(
+            event.state.pause.evidence,
+          ),
+        }),
   };
 }
 

@@ -2176,12 +2176,17 @@ test("cold reconstruction retains event-local capability diagnostics without cha
     ],
     omittedBlockers: 0,
   };
+  const typed = {
+    ...paused.pause,
+    capabilityDiagnostic: diagnostic,
+    capabilityChecks: [{ checkIndex: 0, label: check.id }],
+  };
   const lease = await durable.acquireRunLease(runId);
   let saved;
   try {
     saved = await durable.transitionRun(
       lease,
-      { pause: { ...paused.pause, capabilityDiagnostic: diagnostic } },
+      { pause: typed },
       {
         activity: {
           actor: "runner",
@@ -2213,7 +2218,7 @@ test("cold reconstruction retains event-local capability diagnostics without cha
     ...paused,
     revision: saved.revision,
     updatedAt: saved.updatedAt,
-    pause: { ...paused.pause, capabilityDiagnostic: diagnostic },
+    pause: typed,
   });
   const { events } = await cold.loadRunHistory(runId);
   assert.deepEqual(
@@ -2303,13 +2308,14 @@ test("cold reconstruction retains event-local capability diagnostics without cha
   assert.deepEqual(
     activities
       .filter((activity) => Object.hasOwn(activity, "capabilityDiagnostic"))
-      .map(({ revision, capabilityDiagnostic }) => [
+      .map(({ revision, capabilityDiagnostic, capabilityChecks }) => [
         revision,
         capabilityDiagnostic,
+        capabilityChecks,
       ]),
     [
-      [paused.revision, null],
-      [saved.revision, diagnostic],
+      [paused.revision, null, []],
+      [saved.revision, diagnostic, [{ checkIndex: 0, label: check.id }]],
     ],
   );
 });

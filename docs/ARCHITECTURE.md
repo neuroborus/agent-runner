@@ -2022,6 +2022,14 @@ finalization issue IDs and never their commands, problems, evidence, or paths.
 `Changed snapshot domains: <labels>.` from the composed Git normalizer, or
 `Changed snapshot domains: unavailable.` for absent, malformed, unknown, custom,
 directory, or legacy diagnostics; its persisted evidence and causes never cross.
+The coding pipelines' required-check capability pause, including historical
+records, projects a fixed explanation and evidence from the composed
+trusted-validation `projectCapabilityBlockerEvidence`: one line per published
+blocker with its inventory index, allowlisted `C<n>` check label or `unknown`,
+reason and bounded mismatch fields, an omitted-blocker count, and ownership
+envelopes revalidated by the platform normalizer. Missing details project as
+unknown, and an uncomposed call reports them as unavailable. Saved prose,
+command text, URLs and arguments never cross.
 Plan execution also projects `finalization_transition_invalid` as a resumable
 `FINALIZE` checkpoint with a fixed bounded diagnostic when an unexpected
 runner-owned finalization invariant rejects advancement. The retained state
@@ -5551,6 +5559,18 @@ including evidence needing more than the shared 1,024 reports, raise
 the validated values. URLs, vectors, paths,
 profiles, unsupported labels, reports and exception text are never included.
 Availability blockers carry a null diagnostic. Diagnostics grant no authority.
+When pausing, coding pipelines save a non-null diagnostic unchanged and bind
+each published `checkIndex` to its required-check ID in the active step's
+inventory in an exact `capabilityChecks` `{checkIndex, label}` list; role-local
+bootstrap IDs and ambiguous commands bind null. The public
+`projectCapabilityChecks` treats that saved list as untrusted. It returns one
+association per diagnostic blocker by inventory index, never by position.
+Missing, duplicated, non-`C<n>` or unbound labels project as null, as does an
+ID saved for more than one published blocker index, counted before repeated
+index bindings are discarded. Bindings for indexes outside the diagnostic are
+ignored and never remove or change a blocker or suppress another label.
+`projectCapabilityOwnership` returns at most 32 saved ownership envelopes after
+platform revalidation and ignores all other evidence text.
 
 For authorized requests, inspection prepares each selected command sequentially
 under the existing durable storage, transport, and process lifecycle. It acquires
@@ -6110,7 +6130,8 @@ and recovery-proof APIs continue canonical replay.
 
 Cold validation and validated suffixes collect public activities with their
 revision, timestamp, redacted dispatch message, event-specific public stop
-summary, and the event's own capability diagnostic. Each checkpoint retains at
+summary, and the event's own capability diagnostic and check associations.
+Each checkpoint retains at
 most 1,024 activities and 1 MiB of serialized activity data, also counted
 within the combined checkpoint cap. Overflow evicts the oldest activities and
 retains their last revision as a coverage boundary. Authoritative events stay
@@ -6240,7 +6261,9 @@ Historical absence means unknown. Evidence prose and other records cannot supply
 the missing diagnostic. Activity derives `capabilityDiagnostic` from each event's
 own top-level pause. Eligible coding pauses project the diagnostic or `null`
 when it is absent. Other events omit the field. Byte-certified projection reads
-the pause from each event and retains only its normalized public diagnostic.
+the pause from each event and retains only its normalized public diagnostic
+plus its `capabilityChecks` projection, empty when the diagnostic is null, and
+its revalidated `ownershipDiagnostics`, including when the diagnostic is null.
 Detached recovery-failure sidecars remain separate allowlisted error records
 and never carry it.
 
