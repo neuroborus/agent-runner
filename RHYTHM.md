@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-11-21
+
+- **The root decision history is exempt from the topical line limit.** The
+  documentation-structure convention and its fast check now exempt only the
+  exact repository-relative root `RHYTHM.md` from the 1,000-line limit. One
+  continuous newest-first record keeps new decisions and their recent context
+  in the place every change already routes to, instead of forcing further
+  line-count splits that scatter rationale across archives without making it
+  easier to read. Same-name documents elsewhere keep the ordinary limits, the
+  root history keeps every discovery, link, anchor and reachability check, and
+  the existing monthly archives and their routes are unchanged.
+
 ## 2026-11-20
 
 - **Documentation has semantic owners and bounded entry gates.** Maintained

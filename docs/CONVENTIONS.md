@@ -458,6 +458,10 @@ is the procedure for applying these rules.
   physical lines. Every other topical document has at most 1,000. Skill-tree
   Markdown follows the 100-line rule of the
   [skill-authoring skill](../.agents/skills/skill-authoring/SKILL.md).
+- The sole line-limit exception is the root decision history at the exact
+  repository-relative path `RHYTHM.md`, which has no physical-line limit.
+  Same-name documents elsewhere follow the ordinary limits, and the root
+  history still follows every other rule in this section.
 - Count physical lines in the final formatted file, including blank lines,
   fence lines, and an unterminated final line. Byte size is diagnostic only.
   Never squeeze prose into long lines or drop obligations to meet a limit;
@@ -477,7 +481,8 @@ is the procedure for applying these rules.
   maintained document is reachable through relative links from
   [`docs/README.md`](README.md). Anchors are GitHub slugs of rendered headings.
 - The fast suite enforces these limits, links, anchors, and reachability in
-  `test/documentation-structure.test.js`, without document-specific exemptions.
+  `test/documentation-structure.test.js`; it exempts only the root `RHYTHM.md`
+  and only from the line limit.
 
 ## Git
 

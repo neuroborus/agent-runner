@@ -20,6 +20,7 @@ import { assertPackagedRoutes, scanMarkdown } from "./support/index.js";
 const executeFile = promisify(execFile);
 const REPOSITORY_PATH = fileURLToPath(new URL("../", import.meta.url));
 const MAP_PATH = "docs/README.md";
+const ROOT_HISTORY_PATH = "RHYTHM.md";
 const README_LIMIT = 150;
 const TOPICAL_LIMIT = 1000;
 const MARKDOWN = /\.(?:md|markdown)$/iu;
@@ -99,7 +100,8 @@ async function checkDocumentation(repositoryPath) {
   const report = (path, kind, detail) =>
     violations.push({ path, kind, detail });
   for (const [path, { bytes, lines, limit }] of documents) {
-    if (lines > limit) {
+    // The root decision history is the sole line-limit exception.
+    if (path !== ROOT_HISTORY_PATH && lines > limit) {
       report(
         path,
         "line-limit",
@@ -968,6 +970,7 @@ test("documentation check enforces limit and navigation boundaries", async (t) =
   ]);
   const linked = [
     "../README.md",
+    "../RHYTHM.md",
     "../accepted.md",
     "../overflow.md",
     "../draft.md",
@@ -986,6 +989,7 @@ test("documentation check enforces limit and navigation boundaries", async (t) =
     "LOCAL_ARTIFACTS/report.md": lines(1001),
     [MAP_PATH]: `# Map\n\n${linked.map((target) => `- [Doc](${target})\n`).join("")}`,
     "README.md": lines(150),
+    "RHYTHM.md": `[Nested](large/RHYTHM.md) [Missing](absent-history.md)\n${lines(1001)}`,
     "accepted.md": `# Accepted\n\n\`\`\`text\ncode\n\`\`\`\n\n${lines(994)}`,
     "overflow.md": `${lines(1000)}Unterminated`,
     "draft.md": lines(1001),
@@ -993,6 +997,7 @@ test("documentation check enforces limit and navigation boundaries", async (t) =
     "orphan.md": lines(1),
     "large/README.md": `# Large\n${lines(150)}`,
     "large/README.markdown": lines(151),
+    "large/RHYTHM.md": lines(1001),
     "links.md": [
       "# Check operator-facing snake_case value",
       "# Topic",
@@ -1122,7 +1127,9 @@ test("documentation check enforces limit and navigation boundaries", async (t) =
   // misclassification cannot trade an ignored link for a reported one.
   assert.deepEqual(
     violations.map(({ path, kind, detail }) =>
-      path === "links.md" ? { path, kind, detail } : { path, kind },
+      path === "links.md" || path === "RHYTHM.md"
+        ? { path, kind, detail }
+        : { path, kind },
     ),
     [
       { path: ".agents/skills/README.md", kind: "line-limit" },
@@ -1130,11 +1137,17 @@ test("documentation check enforces limit and navigation boundaries", async (t) =
         path: ".agents/skills/example/references/guide.markdown",
         kind: "line-limit",
       },
+      {
+        path: "RHYTHM.md",
+        kind: "missing-target",
+        detail: "line 1: absent-history.md",
+      },
       { path: "draft.md", kind: "line-limit" },
       { path: "hidden.md", kind: "unreachable" },
       { path: "image-reference-only.md", kind: "unreachable" },
       { path: "large/README.markdown", kind: "line-limit" },
       { path: "large/README.md", kind: "line-limit" },
+      { path: "large/RHYTHM.md", kind: "line-limit" },
       ...[
         ["missing-anchor", "line 29: accepted.md#absent-heading"],
         ["missing-anchor", "line 45: #quoted-code"],
