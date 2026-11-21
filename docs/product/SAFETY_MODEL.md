@@ -147,7 +147,7 @@ constraint rejects a selected or missing leaf replaced by a directory before
 descendant discovery or capture. Selection must be rechecked around capture and
 reconstruction; it grants no Git effects or provider authority. Unsupported
 gitlinks, embedded repositories and routing
-aliases fail closed. The [source-selection contract](../ARCHITECTURE.md#root-runner-ownership)
+aliases fail closed. The [source-selection contract](../architecture/git-inspection.md#complete-source-selection)
 owns the exact result, drift guard and traversal limitations; ordinary directory
 inspection continues to require no Git.
 
@@ -179,7 +179,7 @@ capture under the execution and canonical exclusion leases may publish complete
 bindings; changed inputs, substituted roots, stale revisions and cancellation
 cannot accept a partial result. Legacy absence preserves completed preparation
 without inventing inspection evidence. The
-[state contract](../ARCHITECTURE.md#external-run-state) owns this foundation.
+[state contract](../architecture/state/workspace-preparation.md#capture-and-publication) owns this foundation.
 Audit selects deferred preparation: its durable identity is visible before
 capture, and both execution and canonical workspace ownership precede recursive
 reads. Cancellation propagates through traversal; stop settlement preserves an
@@ -216,7 +216,7 @@ first; supported exact files receive no parent writes. See the
 [provider limits](PROVIDER_MODEL.md#selection-and-capabilities).
 
 Custom authoring uses read-only directory turns; custom execution grants only its frozen declared outputs to writable Worker phases. It never stages or commits. See the
-[filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
+[filesystem contract](../architecture/workspace-inspection.md#capture-and-mutation-guards).
 
 The filesystem capability can freeze a confined inspection selection with
 literal subtree exclusions before discovery. Excluded trees remain opaque:

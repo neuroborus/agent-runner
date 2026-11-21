@@ -53,6 +53,9 @@ or changing a capability, package, pipeline, source, test, or documentation owne
 - Distinguish a proved concurrent journal extension from corruption at its owning
   boundary; observation and retries must retain the original byte proof and effect authority.
 
+For maintained Markdown placement and navigation, use
+[documentation-structure](../documentation-structure/SKILL.md).
+
 ## Targeted Reviews
 
 For changed structured role/public contracts, use [contract-review](../contract-review/SKILL.md).

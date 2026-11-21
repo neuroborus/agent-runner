@@ -6,7 +6,10 @@ import test from "node:test";
 
 import { assembleRelease, packRelease } from "../scripts/assemble-release.js";
 import { prepareRuntime } from "../src/runtime/index.js";
-import { runtimeFixtureDirectory } from "./support/index.js";
+import {
+  assertReleaseDocumentation,
+  runtimeFixtureDirectory,
+} from "./support/index.js";
 
 test("the actual npm archive contains the complete standalone application", async (t) => {
   const directory = await runtimeFixtureDirectory(t);
@@ -30,6 +33,7 @@ test("the actual npm archive contains the complete standalone application", asyn
     await readFile(join(runtime.rootPath, "docs/OPERATOR_GUIDE.md")),
     await readFile(new URL("../docs/OPERATOR_GUIDE.md", import.meta.url)),
   );
+  await assertReleaseDocumentation(runtime.rootPath, release.manifest);
   for (const dependency of release.manifest.dependencies)
     assert.equal(
       (await lstat(join(release.packagePath, dependency.path))).isDirectory(),

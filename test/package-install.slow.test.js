@@ -17,7 +17,10 @@ import test from "node:test";
 
 import { assembleRelease, packRelease } from "../scripts/assemble-release.js";
 import { inspectCandidate } from "../scripts/publish-release.js";
-import { runtimeFixtureDirectory } from "./support/index.js";
+import {
+  assertReleaseDocumentation,
+  runtimeFixtureDirectory,
+} from "./support/index.js";
 
 const CHECKOUT = fileURLToPath(new URL("../", import.meta.url));
 const MAX_OUTPUT = 2 * 1024 * 1024;
@@ -229,8 +232,8 @@ async function environment(directory, prefix) {
 
 // Consume the documented vectors without running a shell or registering with
 // real clients. Only their server command after `--` is launched in this fixture.
-function installExamples(readme, prefix, candidate) {
-  const section = readme
+function installExamples(document, prefix, candidate) {
+  const section = document
     .split("### Isolated candidate installation\n")[1]
     ?.split("\n### ")[0];
   assert.ok(section, "Missing isolated-install examples.");
@@ -368,8 +371,8 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
   assert.equal(within(await realpath(CHECKOUT), directory), false);
   const prefix = join(directory, "private prefix");
   const { env, paths, node } = await environment(directory, prefix);
-  const readme = await readFile(
-    new URL("../README.md", import.meta.url),
+  const installation = await readFile(
+    new URL("../docs/user/candidates.md", import.meta.url),
     "utf8",
   );
   const guide = await readFile(
@@ -417,7 +420,7 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
     assert.equal(packed.files, release.manifest.files.length + 1);
   }
   const archiveDigest = digest(await readFile(packed.tarballPath));
-  const examples = installExamples(readme, prefix, packed.tarballPath);
+  const examples = installExamples(installation, prefix, packed.tarballPath);
   await runCommand(examples.install[0], examples.install.slice(1), {
     cwd: paths.work,
     env: { ...env, PATH: process.env.PATH },
@@ -425,6 +428,7 @@ test("an inspected candidate installs offline and serves standalone pinned CLI a
   assert.equal(digest(await readFile(packed.tarballPath)), archiveDigest);
   const installed = join(prefix, "lib/node_modules", release.manifest.name);
   await inspectInstallation(installed, release.manifest, manifestBytes);
+  await assertReleaseDocumentation(installed, release.manifest);
   const executable = join(prefix, "bin/agent-run");
   assert.equal(await realpath(executable), join(installed, "bin/agent-run.js"));
   assert.equal(

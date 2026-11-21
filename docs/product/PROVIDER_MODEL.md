@@ -74,12 +74,12 @@ owns declaration syntax and fresh-run correction.
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. Custom authoring uses read-only directory
-turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../architecture/providers/directory-policy.md#codex-capability-receipt)
 owns its exact fields and native mapping.
 
 Codex verifies the selected directory profile before choosing a thread. Its
 effective configuration may omit supported unset defaults or return them as
-`null`; only the explicit [architecture allowlist](../ARCHITECTURE.md#agent-context-recovery)
+`null`; only the explicit [architecture allowlist](../architecture/providers/codex-isolation.md#directory-permission-profiles)
 receives that equivalence. Unknown settings, non-null overrides and inheritance
 reject. Exact filesystem grants, protected reads, scope and denied network remain
 required. Model-free compatibility fixtures do not establish a successful live
@@ -812,7 +812,7 @@ identifier, or arbitrary provider message enters these diagnostics.
 They change no workflow, progress, retry, or configuration. Observation
 settlement cannot replace an established ownership, isolation, or effect failure
 or extend a running inactivity deadline.
-The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
+The [runtime contract](../architecture/providers/observations.md#observation-contract-and-native-mapping)
 owns snapshot scopes, inclusion rules, bounds, and provider mappings. The
 inspected Codex public protocol exposes no numeric generation-budget control;
 model output ceilings do not establish the effective Codex service limit.

@@ -445,6 +445,40 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
   speculative feature plans and session notes stay in ignored local artifacts.
 - Keep source code, comments, logs, tests, and tracked documentation in English.
 
+## Documentation structure
+
+The [documentation-structure skill](../.agents/skills/documentation-structure/SKILL.md)
+is the procedure for applying these rules.
+
+- Maintained Markdown is tracked or non-ignored untracked `.md` and `.markdown`
+  content, discovered as the formatter discovers files; symlink aliases are
+  not separate documents. Ignored Runner task, report, and clarification
+  artifacts keep their own contracts and are never truncated to fit here.
+- A README entry point, `README.md` or `README.markdown`, has at most 150
+  physical lines. Every other topical document has at most 1,000. Skill-tree
+  Markdown follows the 100-line rule of the
+  [skill-authoring skill](../.agents/skills/skill-authoring/SKILL.md).
+- Count physical lines in the final formatted file, including blank lines,
+  fence lines, and an unterminated final line. Byte size is diagnostic only.
+  Never squeeze prose into long lines or drop obligations to meet a limit;
+  split semantically before the limit when that helps readers.
+- Give each rule one owner and link to it elsewhere. Split by coherent
+  component, contract, or reading task, never into numbered chunks, and
+  preserve active contracts, permissions, examples, and code fences.
+- A documentation family has a concise README gate that states its purpose,
+  which child owns what, and when each child must be read. Add nested gates
+  only when they reduce reading; never require reading a whole tree
+  unconditionally.
+- Before moving a document, inspect its real consumers: agent instructions,
+  semantic tests, runtime loaders, frozen file declarations, and release
+  resources. A moved document is delivered only when those consumers are
+  updated. Keep useful stable entry paths through concise compatibility routes.
+- Relative links and anchors resolve inside the repository, and every
+  maintained document is reachable through relative links from
+  [`docs/README.md`](README.md). Anchors are GitHub slugs of rendered headings.
+- The fast suite enforces these limits, links, anchors, and reachability in
+  `test/documentation-structure.test.js`, without document-specific exemptions.
+
 ## Git
 
 - Use subject-only Conventional Commits in the form

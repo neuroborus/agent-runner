@@ -482,7 +482,8 @@ Accepted structured results have 2 MiB of serialized UTF-8 headroom, with finite
 larger state and recovery containers. Journals roll over into bounded segments
 while retaining the complete authoritative history and crash-recovery ordering;
 capacity exhaustion preserves the last accepted state. See the exact
-[storage and result budgets](../ARCHITECTURE.md#structured-result-headroom).
+[result budgets](../architecture/structured-results.md#structured-result-headroom)
+and [journal storage](../architecture/recovery/journal.md#write-ahead-publication-and-certified-replay).
 One leased recovery can repair an incomplete active tail and durably retire
 interrupted observation accounting using the verified repair result. It keeps
 the complete original history and publishes matching state and progress;

@@ -1,0 +1,18 @@
+# Testing Coverage Map
+
+Read the matching topic before changing its contract. The [document map](../README.md)
+owns the change gate. Read only the affected owners and their required references.
+
+| Topic                                                            | Read when                                                                                                                                                                                          |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Configuration and Guidance Coverage](configuration-guidance.md) | Effort, settings, external infrastructure, bounded reads, clarification or selected finalization guidance                                                                                          |
+| [Finalization Applicability](finalization.md)                    | Assigning per-step checks and executors, bounded slow batches or evidence reuse for a finalized fingerprint                                                                                        |
+| [Test Harness and Storage](harness.md)                           | Changing temporary storage, confinement, cleanup, concurrency, reporters, interruption or scratch-request reporting                                                                                |
+| [Native and Live-Provider Acceptance](native-acceptance.md)      | Changing providers or launchers, or performing host and post-install acceptance; retain explicit skip and evidence limits                                                                          |
+| [Provider Coverage](providers.md)                                | Session naming, failure classification, directory policies, scoped adapters, restricted-host launchers or exact-file admission; follow the linked Claude acceptance procedure for launcher changes |
+| [Runner Composition Coverage](runner.md)                         | Deferred preparation, audit/authoring/custom execution, directory lifecycles, progress publication, interrupted finding repair or CLI/MCP recovery                                                 |
+| [Runtime, Release and Update Coverage](runtime.md)               | Immutable payloads, admission, assembly, publication, compatibility or candidate lifecycle                                                                                                         |
+| [Slow and Release Gates](slow-gates.md)                          | Selecting affected slow suites, the complete release gate, fixture discipline or exact-artifact package-install acceptance                                                                         |
+| [State and Journal Coverage](state.md)                           | Workspace preparation, preservation, journal certification, observation, recovery diagnostics, action reads or preparation custody                                                                 |
+| [Trusted Validation Coverage](trusted-validation.md)             | Receipt timing, storage retirement, measurement evidence, scratch reporting or test-harness coverage                                                                                               |
+| [Workspace and Git Coverage](workspace-git.md)                   | Directory inspection, setup/output proofs, read-only diagnostics, source selection, measurement or repository boundaries                                                                           |

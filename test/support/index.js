@@ -29,6 +29,11 @@ export {
 
 export { customExecutionFixture } from "./custom-execution.js";
 export { runtimeFixture, runtimeFixtureDirectory } from "./runtime.js";
+export { scanMarkdown } from "./documentation-navigation.js";
+export {
+  assertPackagedRoutes,
+  assertReleaseDocumentation,
+} from "./release-documentation.js";
 export {
   APPEND_QUESTIONS,
   appendReadFailure,

@@ -25,10 +25,14 @@
 Use `docs/README.md` as the document map and change gate. Read
 `docs/CONVENTIONS.md` for the intended architecture and repository-wide code
 conventions before changing tracked content. Read `docs/ARCHITECTURE.md` for the
-detailed current runtime contract before changing boundaries or dependency
-direction, and update it when the implementation changes. Read the affected
-pipeline specification under `pipelines/*/docs/` before changing workflow
-behavior, prompts, review resolution, or pipeline CLI contracts.
+detailed current runtime contract and follow its
+[architecture map](docs/architecture/README.md) to affected owners before changing
+boundaries or dependency direction, and update it when the implementation
+changes. Read the affected pipeline specification and its conditional topic map
+under `pipelines/*/docs/` before changing workflow behavior, prompts, review
+resolution, or pipeline CLI contracts.
+Use the [documentation-structure skill](.agents/skills/documentation-structure/SKILL.md)
+before adding, moving or splitting maintained Markdown.
 Use the product-document rows in `docs/README.md` for current workflow meaning,
 business rules, operator guarantees, and accepted nuances. `RHYTHM.md` records
 meaningful implemented decisions and their rationale; it does not replace a

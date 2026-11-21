@@ -1,7 +1,7 @@
 # Agent Runner Operator Guide
 
-Supervise CLI/STDIO MCP runs using this guide. See [product guarantees](README.md)
-and the pipeline specifications for exact workflow and recovery contracts.
+Supervise CLI/MCP runs here. See the [user map](user/README.md). Source paths
+refer to the matching checkout, starting at `docs/README.md`.
 
 | Mode          | Quality | Speed | Token consumption | Meaning                                                         |
 | ------------- | ------- | ----- | ----------------- | --------------------------------------------------------------- |
@@ -46,10 +46,7 @@ pause without arbitration. Resume preserves mode, evidence and bounded accountin
 interrupted corrections are charged once.
 
 Planning stays repository-read-only; Runner writes artifacts.
-See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
-[authoring](../pipelines/plan-authoring/docs/SPEC.md),
-[execution](../pipelines/plan-execution/docs/SPEC.md), and
-[polishing](../pipelines/polishing/docs/SPEC.md) specifications.
+See [pipeline gates and specifications](user/pipelines.md).
 
 Audit defaults to whole-directory sources. Use `--source-scope git` for complete
 Git-selected sources, or repeat `--exclude-path` for opaque literal subtrees in
@@ -59,7 +56,7 @@ Every material finding batch requires verification before discovery continues.
 Discovery cleanliness and finding acceptance remain separate; both run-wide
 budgets stay capped at 20. Runner alone publishes the report. Findings grant no
 fixes, Git effects, retrieval or automatic issues. See the
-[audit specification](../pipelines/audit/docs/SPEC.md).
+audit specification (`pipelines/audit/docs/SPEC.md`).
 
 New eligible commit-plan runs can assess oversized unfinished work and accept
 reviewed replacement commits without editing frozen `plan.md`. Complete role
@@ -68,7 +65,7 @@ restoration. Only the active replacement is reconstructed; each child passes all
 normal gates. Remaining saved work survives interruption and cancellation, and
 a deferred stop waits for the original logical step's last verified child.
 Legacy/intermediate runs remain disabled on resume. Size alone never fails work.
-See [preserved replacement execution](../pipelines/plan-execution/docs/SPEC.md#preserved-replacement-execution).
+See preserved replacement execution (`pipelines/plan-execution/docs/SPEC.md#preserved-replacement-execution`).
 
 Execution and polishing share one canonical worktree owner across CLI/MCP.
 While owned, do not mutate repository/Git state, frozen inputs, configuration or
@@ -87,7 +84,7 @@ and invariants to incidental counts; never copy stale measurements.
 Git-content observation rejects gitlinks and non-ignored embedded repositories
 with `ERR_UNSUPPORTED_GIT_PATH`, without executing nested Git or removing content.
 Directory workflows retain read-only nested worktrees. Follow the
-[Git safety contract](product/SAFETY_MODEL.md#git-ownership).
+Git safety contract (`docs/product/SAFETY_MODEL.md#git-ownership`).
 
 Confirm inputs/settings with `agent-run pipelines` or `pipelines_list`; reconcile
 task, context, plan and clarifications before starting. Put requirements and
@@ -132,7 +129,7 @@ previous runtime users and explicitly restart the owning client. Resume saved
 work separately through a compatible server; frozen configuration and consumed
 effects remain authoritative. Retained older payloads never undo persisted
 migrations. Preserve progress when a forward-version rejection blocks an older
-installation; see [version and restart limits](RELEASING.md#local-version-selection-and-restart).
+installation. See [version and restart limits](user/releases.md#approved-npm-releases).
 
 Use `agent-run update --check` or MCP `update_check` only on explicit demand.
 Apply only a deliberate managing-operator request with `agent-run update` or MCP
@@ -155,7 +152,7 @@ MCP `projectConfigurationPath` can select an existing external file whose versio
 resolve there, including new execution/polishing transcripts; legacy paths and
 authorizations remain. Resume pins configuration bytes, identity and real ancestry.
 Selection never creates, relocates or merges infrastructure. See
-[configuration](product/OPERATOR_MODEL.md#configuration). `artifactRoot` defaults
+configuration (`docs/product/OPERATOR_MODEL.md#configuration`). `artifactRoot` defaults
 to `LOCAL_ARTIFACTS`.
 Repository-local artifacts must already be ignored; the runner never changes
 ignore rules automatically. Keep authoritative state in a separate tree from
@@ -166,7 +163,7 @@ only at runner root. It defaults to `agent_runner` / `Agent Runner`, requires
 every active backend's support (Claude lacks custom attribution),
 and is absent from public projections and prompts. Project files and CLI/MCP
 cannot override it. Resume retains the fingerprinted selection; legacy runs
-use the generic default. See [client attribution](product/PROVIDER_MODEL.md#client-attribution).
+use the generic default. See client attribution (`docs/product/PROVIDER_MODEL.md#client-attribution`).
 
 Select effort separately from model: `current`, `low`, `medium`, `high`,
 `xhigh`, or `max`. Use configuration `defaultEffort`/role `effort`, CLI `--effort`/
@@ -175,7 +172,7 @@ Precedence is role override, run override, project role/default, runner
 role/default, then `current` (the provider default). Unsupported selections fail
 without downgrading. Resume retains private saved role settings; MCP retries
 retain effort and the original key. Changing attribution or effort requires a
-new run; see [configuration](product/OPERATOR_MODEL.md#configuration).
+new run; see configuration (`docs/product/OPERATOR_MODEL.md#configuration`).
 
 Select compatible role backends and profiles before starting. Leave the source
 session unset unless the user, offered a fresh start, deliberately chooses to
@@ -222,7 +219,7 @@ combined writable work. Drift invalidates affected evidence; native sessions
 prove no reusable coverage.
 Legacy migrations preserve evidence and completed work; unfinished execution
 needs fresh scoped read-only discovery, not applicability inferred from an old
-union. See [bootstrap inventory](product/VALIDATION_AND_REVIEW.md#bootstrap-inventory).
+union. See bootstrap inventory (`docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory`).
 
 Commands needing capabilities agents lack may need runner-trusted execution.
 Select `trustedCommands` aliases per pipeline; the default is empty and project
@@ -233,7 +230,7 @@ identities, and fingerprints freeze before work and survive resume; later
 project edits trip the protected-input guard. Declarations grant no
 environment, credentials, shell-string substitutes, or broader host authority.
 Isolation and mutation guards apply; user attestation never replaces
-execution. See [configuration](product/OPERATOR_MODEL.md#configuration).
+execution. See configuration (`docs/product/OPERATOR_MODEL.md#configuration`).
 
 Capability reports name each check's assigned executor and checkpoint, never
 the read-only discovery or Reviewer turn; safe output under the Worker's
@@ -266,7 +263,7 @@ retry from five seconds, doubling to the ceiling and repeating without a quota.
 Follow `availabilityRetry` and schedule/start activity instead of polling.
 Successful provider responses reset the episode; partial work, session changes,
 and restart do not. Stops interrupt waits. Never edit configuration or state to
-reset one. See [durable availability episodes](ARCHITECTURE.md#durable-availability-episodes).
+reset one. See durable availability episodes (`docs/ARCHITECTURE.md#durable-availability-episodes`).
 
 `authentication_required` / `ERR_AUTHENTICATION_REQUIRED` retires a superseded
 availability episode and pauses at the saved checkpoint with one null resume
@@ -276,7 +273,7 @@ editing state. Preserve partial content, fingerprints, lineage, and accounting.
 Commit readiness first proves the
 executor never started and Git created no commit. A possibly effective source
 fork reconstructs the logical role fresh rather than risking another child.
-See [authentication pauses](ARCHITECTURE.md#durable-authentication-required-pauses).
+See authentication pauses (`docs/ARCHITECTURE.md#durable-authentication-required-pauses`).
 
 Writable implementation, polishing, check/fix and finding-resolution turns get
 only the persisted exact selected command text, even after resume or
@@ -296,7 +293,7 @@ commands, a new baseline, or fabricated success.
 Trusted receipts retain outcomes and Runner-measured elapsed attempts, never
 stdout/stderr. Missing legacy/controller timing stays unknown; never invent it or
 rerun for telemetry. The 60-second fast-gate target is advisory.
-See [validation evidence](product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)
+See validation evidence (`docs/product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints`)
 for timing and isolation/diagnostic limits.
 
 For public downloads, declare `capabilities.artifacts` entries with canonical
@@ -314,7 +311,7 @@ use needs no scratch/cache. Downloads are never reused. Acquisition failure
 pauses finalization without running the check. Repair and resume; changed
 declarations require a new run. Never delete uncertain resources without
 verified ownership and transport/process retirement. See
-[resource safety](product/SAFETY_MODEL.md#inputs-artifacts-and-state).
+resource safety (`docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state`).
 
 Consumed commit/handoff verification precedes preparation. New writable
 execution/polishing work, including resume, first prepares every active role's
@@ -327,7 +324,7 @@ and caught-failure mismatch details are unknown. Reconcile ownership, repair
 availability and resume; preserve work via supported recovery before changing
 selection or declarations in a new run. Recovery keeps sandbox checks and frozen
 bindings, granting no credit or override; see
-[recovery](product/OPERATOR_MODEL.md#configuration).
+recovery (`docs/product/OPERATOR_MODEL.md#configuration`).
 
 ## 4. Start, clarify, and observe
 
@@ -357,7 +354,7 @@ return `interrupted` (`timedOut: false`) for `dead` or `replaced` owners at
 continuation checkpoints, even between turns without records or revision
 changes; then use the action-free resume below. Ownerless `idle` does not
 prove loss; terminal states and pending input end waits. See
-[observation safety](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
+observation safety (`docs/product/OPERATOR_MODEL.md#durable-state-and-local-artifacts`).
 
 Inspect output pressure by attempt, role and checkpoint via CLI status or MCP
 `observations`, keeping byte measurements and token snapshots apart. Unknown
@@ -398,8 +395,8 @@ sample; unavailable/legacy facts are null. CLI/MCP status, MCP wait and correlat
 recovery expose the same fields. Keep stage/code/explanation
 separate from exit/signal. Use supported recovery; diagnostics grant no effects,
 replay or lease release. Historical cause and Source-contract violation remain UNKNOWN.
-See [contract](ARCHITECTURE.md#bounded-ownership-failure-diagnostics) and
-[separate native acceptance](TESTING.md#ownership-diagnostic-acceptance).
+See contract (`docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics`) and
+separate native acceptance (`docs/TESTING.md#ownership-diagnostic-acceptance`).
 
 Shared-host recovery requires recorded supervisor identity/namespace, then bounded
 positive-association inspection through owned session, matching launch token or observed
@@ -409,11 +406,11 @@ absence of arbitrary same-user processes hiding all ancestry/token evidence.
 Live/replaced recorded owners, namespace mismatches, uncertain known descendants
 and inspection exhaustion block recovery. Never signal persisted host PIDs or
 delete process/lease records. The
-[safety contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state) owns exact
+safety contract (`docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state`) owns exact
 association, retirement and bounded retry rules.
 
 After both fixes pass review/commit gates, follow operator-owned
-[operational acceptance](product/SAFETY_MODEL.md#ownership-repair-operational-acceptance)
+operational acceptance (`docs/product/SAFETY_MODEL.md#ownership-repair-operational-acceptance`)
 before dependent work.
 
 Stop with `agent-run pause --run <run-id>` or `agent-run cancel --run <run-id>`.
@@ -457,16 +454,16 @@ retain normal exclusion and effect reconciliation. A lease conflict names the
 recorded owner, distinct from an ownerless run awaiting stop settlement. Recover
 that owner through supported actions or await normal release/identity-proved
 reclamation; never edit or bypass leases. See
-[operator stops](ARCHITECTURE.md#state-owned-operator-stop-protocol).
+operator stops (`docs/ARCHITECTURE.md#state-owned-operator-stop-protocol`).
 
-Init: [failure and recovery contracts](../pipelines/init/docs/SPEC.md#terminal-provider-failures).
+Init: failure and recovery contracts (`pipelines/init/docs/SPEC.md#terminal-provider-failures`).
 
 Structured role results allow exactly 2 MiB of serialized UTF-8 JSON; semantic
 field and inventory limits still apply. This is byte headroom, not a token
 budget or a native model output setting. Run journals may span contiguous
 bounded segments; preserve every segment when inspecting or recovering a run.
 Never prune history to reclaim capacity. See
-[the storage contract](ARCHITECTURE.md#structured-result-headroom).
+the storage contract (`docs/architecture/recovery/journal.md#write-ahead-publication-and-certified-replay`).
 
 ### Output-budget verification record
 
@@ -498,7 +495,7 @@ abbreviate `npm run test:slow -- <path>.slow.test.js`: root rows omit `test/`,
 
 Current FINALIZE uses its established inventory and records fresh outcomes and
 elapsed times for finalized content. Historical rows do not assign current slow
-checks; use [affected-check ownership](TESTING.md#slow-gate). Process-churn
+checks; use affected-check ownership (`docs/TESTING.md#slow-gate`). Process-churn
 regressions protect inspection work/time bounds but explain no earlier opaque
 fast-gate failure or queued custody redesign. Earlier CLI/MCP legacy fake-backend
 bootstrap blockers were repaired; preserve assertions and investigate new failures.
@@ -594,7 +591,7 @@ Referenced-file counts/bytes, prior exhausted usage, and effective native output
 limits remain unknown. Supplied bytes exclude separately read files, native wrappers,
 and prior context; reconstruction size proves no delivery. Different workloads,
 discovery, and bounds establish no causal speedup. See
-[observation semantics](product/OPERATOR_MODEL.md#durable-state-and-local-artifacts).
+observation semantics (`docs/product/OPERATOR_MODEL.md#durable-state-and-local-artifacts`).
 
 Diagnostic READY proves neither current execution approval nor inventory
 reconciliation; all current convergence, independent review, finalization,
@@ -627,7 +624,7 @@ one new repair; `fix_limit_reached` needs its explicit budget grant.
 Neither renews attempts or invents dispositions. Never replay effects or
 edit state. Resolve `environment_blocked` prerequisites first. Candidate edits,
 input/configuration drift and read-only contamination retain safety stops and all
-[review, correction and effect gates](product/VALIDATION_AND_REVIEW.md).
+review, correction and effect gates (`docs/product/VALIDATION_AND_REVIEW.md`).
 
 New native sessions use `[<full Runner run UUID>] <bounded description>` on both
 providers. Codex names only a verified, durably acknowledged new child; Claude
@@ -650,10 +647,10 @@ Codex MCP configuration discovery allows two attempts with a 30-second subproces
 deadline each and no retry delay. Non-commit context exhaustion permits at most one
 in-session compaction retry with a usable session. Outside source forks, persistent
 pressure and recoverable work permit one fresh reconstruction before pausing.
-See the [provider contract](product/PROVIDER_MODEL.md#isolation-and-effects).
+See the provider contract (`docs/product/PROVIDER_MODEL.md#isolation-and-effects`).
 
 Explicit resume after audit output exhaustion reconstructs the same checkpoint
-in fresh native context; see [audit recovery](../pipelines/audit/docs/SPEC.md).
+in fresh native context; see audit recovery (`pipelines/audit/docs/SPEC.md`).
 
 Readiness refusals preserve the candidate, HEAD and index. Claude `ready: false`
 is a decline with unknown reason, malformed confirmation a fixed shape
@@ -662,7 +659,7 @@ authorized follow-up. Codex `operation_local_commit_git_operation` refuses a Git
 subcommand outside the disclosed allowlist before effect, keeping no command and
 proving no classifier defect or mutation; `COMMIT` resume remains. Never edit
 state or collect provider data; see
-[commit recovery](../pipelines/plan-execution/docs/SPEC.md#137-commit).
+commit recovery (`pipelines/plan-execution/docs/SPEC.md#137-commit`).
 
 For Claude on a capability-restricted Linux host, do not grant `CAP_SYS_ADMIN`,
 change user-namespace policy, or disable sandboxing. The adapter prefers full
@@ -674,7 +671,7 @@ arguments/filter, incomplete proof, launch, or cleanup failure leaves that acces
 mode unavailable as `ERR_UNSUPPORTED_BACKEND`. Resume must reproduce the saved
 receipt. Repair Claude, bubblewrap, or the environment rather than weakening
 settings or editing state. Exact launcher/filter mechanics belong to
-[provider isolation](product/SAFETY_MODEL.md#redaction-and-provider-isolation).
+provider isolation (`docs/product/SAFETY_MODEL.md#redaction-and-provider-isolation`).
 
 Claude's HOME/config projections and temporary scaffolding stay outside project
 and task trees. Missing optional tooling must not appear in project Git status;
@@ -694,7 +691,7 @@ only inside the proved sandbox; workspace-write retains its tool restrictions.
 After installing access-policy changes, require a fresh real Claude lazy
 plan-authoring run with advertised read-only, workspace-write, and local-commit
 access plus a provider response before dependent work. Fake tests do not replace
-this [post-install acceptance](TESTING.md#finalization).
+this post-install acceptance (`docs/TESTING.md#finalization`).
 
 A current same-host execution or worktree lease is immediately recoverable only
 when recorded boot/PID/start identity proves its exact owner dead or replaced.
@@ -705,7 +702,7 @@ Supported same-run recovery then proves the persisted process and
 descendants absent before settling stops; a replaced, live, unverifiable, or
 descendant-bearing process still blocks. Never kill recorded PIDs or remove
 lease files. These safety bounds are not workflow budgets or trusted-command
-timeouts; follow the offered action and [ownership contract](product/SAFETY_MODEL.md#inputs-artifacts-and-state).
+timeouts; follow the offered action and ownership contract (`docs/product/SAFETY_MODEL.md#inputs-artifacts-and-state`).
 
 Execution requires plan revision for unchanged initial implementation or missing
 trustworthy original step-start evidence. Already-present content under another
@@ -718,7 +715,7 @@ examples and future discussion alone do not redirect work. The runner preserves
 position/history and never adopts external commits. Step one may appear before
 bootstrap completes. Revise the plan and start a new run, without moving HEAD or
 editing frozen inputs. Consumed runner commits settle by verification first.
-See [initial implementation evidence](product/VALIDATION_AND_REVIEW.md).
+See initial implementation evidence (`docs/product/VALIDATION_AND_REVIEW.md`).
 
 **A pause is not completion.** Read its reason, bounded evidence, pending input,
 and current `nextActions`. When the run is resumable, resolve only the permitted
@@ -748,7 +745,7 @@ infrastructure, and Git checks precede confirmation retry. Completed commits,
 accounting, and proven non-actionable `pendingCorrection` survive. Never clear
 markers or edit journals; a matching error or migrated snapshot alone proves
 no eligibility. Explicit availability failures back off at the same checkpoint.
-See [confirmation provenance](product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints).
+See confirmation provenance (`docs/product/VALIDATION_AND_REVIEW.md#evidence-and-fingerprints`).
 
 Classify by current actions rather than an error-name shortcut. Provider usage
 exhaustion and environment limitations may be resumable; exhausted budgets,
@@ -763,7 +760,7 @@ safe work; assess a separately authorized task-compatible disposition or cancel
 through the supported action, which preserves work. The pause offers no retry,
 extra-fix allowance or finding override; another run neither cures the
 violation nor waives explicit policy. Timing restrictions alone do not establish
-irrecoverability: authorized [containment](product/VALIDATION_AND_REVIEW.md#bootstrap-inventory)
+irrecoverability: authorized containment (`docs/product/VALIDATION_AND_REVIEW.md#bootstrap-inventory`)
 retains the fact without check credit, leaves all required checks with their
 later executor/checkpoint and still needs full finalization and the mode's
 distinct terminal confirmation. Accepted summaries, finalization issue/check
@@ -771,9 +768,9 @@ facts, finding reports, FIX/DISPUTE reasons and evidence, and Arbiter rationales
 stay bounded durable history across containment, reconstruction and a
 product-decision answer and re-entry; it grants no validation credit and restores
 no active dispute or ambiguity. See
-[policy stops](ARCHITECTURE.md#historical-validation-policy-stops) and the
-[execution](../pipelines/plan-execution/docs/SPEC.md#historical-validation-noncompliance)
-and [polishing](../pipelines/polishing/docs/SPEC.md#historical-validation-noncompliance)
+policy stops (`docs/ARCHITECTURE.md#historical-validation-policy-stops`) and the
+execution (`pipelines/plan-execution/docs/SPEC.md#historical-validation-noncompliance`)
+and polishing (`pipelines/polishing/docs/SPEC.md#historical-validation-noncompliance`)
 noncompliance rules.
 
 For `backend_unavailable` / `ERR_PROVIDER_INACTIVE`, inspect `Provider inactivity`
@@ -784,7 +781,7 @@ survive one fresh reconstruction without reforking. After a second expiry,
 restore the provider and use the offered resume for one invocation without new
 automatic allowance. Never edit markers/configuration. Trusted deadlines and
 ambiguous effects retain separate rules; see
-[provider inactivity](product/PROVIDER_MODEL.md#provider-inactivity).
+provider inactivity (`docs/product/PROVIDER_MODEL.md#provider-inactivity`).
 
 For a launch failure without explicit availability evidence, CLI status prints
 `Launch recovery: <checkpoint> (<failureClass>)` and MCP status returns the
@@ -812,7 +809,7 @@ keeps one eligible ordinary non-commit reconstruction outside source forks, then
 `backend_unavailable`. Explicit overload/transport failures use durable backoff;
 policy, protocol, and isolation violations take precedence. Commit readiness
 instead requires pre-effect Git verification. Never collect native error payloads
-or transcripts; see [failure classification](product/PROVIDER_MODEL.md#normalized-failures-and-recovery).
+or transcripts; see failure classification (`docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery`).
 
 If a genuinely non-resumable run leaves valid dirty work, first establish that
 execution ownership is gone and reconcile inputs and the stopped run's
@@ -882,7 +879,7 @@ Keep these outcomes separate:
   guide; a task or product requirement belongs in task context or tracked
   project documentation.
 
-Reports go to one private per-user [global issue store](product/OPERATOR_MODEL.md#global-issue-store)
+Reports go to one private per-user global issue store (`docs/product/OPERATOR_MODEL.md#global-issue-store`)
 shared across projects and surviving deletion of its Git or directory origin. No project ignore rule is needed. Each issue keeps its
 Markdown together with one authoritative tracking record that starts `open`.
 Earlier repository-local reports and issue indexes are no longer read or
@@ -908,7 +905,7 @@ or the target without configuration. Explicit external selection never merges
 other placements; ordinary directories need no Git. Local additions specialize
 operation but cannot weaken common safety
 or product contracts. They guide only the supervisor, never pipeline-role
-prompts or active runs. See [guidance ownership](product/OPERATOR_MODEL.md#project-local-operating-guidance).
+prompts or active runs. See guidance ownership (`docs/product/OPERATOR_MODEL.md#project-local-operating-guidance`).
 
 Keep local additions short, non-sensitive, and operator-authored. Exclude
 secrets, credentials, raw provider output, transcripts, and chain-of-thought.
@@ -918,7 +915,7 @@ guides, edit/update destinations and temporaries must be ignored and untracked.
 Unsafe paths fail closed; external resources stay target-bound without target
 or Git-control writes. Documents allow at most 64 KiB of safe UTF-8.
 Recognizable credentials/transcripts are rejected; operators still own content
-safety. See [guidance safety](product/SAFETY_MODEL.md).
+safety. See guidance safety (`docs/product/SAFETY_MODEL.md`).
 
 Replace local additions as a whole document, consolidating obsolete lessons.
 Empty content means no additions; missing files have null hashes, existing empty

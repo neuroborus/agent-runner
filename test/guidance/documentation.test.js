@@ -3,21 +3,36 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("the mapped common guide preserves supervision and recovery contracts without reference-specific advice", async () => {
-  const [guide, map, readme, architecture, operator, safety] =
-    await Promise.all(
-      [
-        "docs/OPERATOR_GUIDE.md",
-        "docs/README.md",
-        "README.md",
-        "docs/ARCHITECTURE.md",
-        "docs/product/OPERATOR_MODEL.md",
-        "docs/product/SAFETY_MODEL.md",
-      ].map((path) =>
-        readFile(new URL(`../../${path}`, import.meta.url), "utf8"),
-      ),
-    );
+  const [
+    guide,
+    map,
+    readme,
+    userMap,
+    mcp,
+    cli,
+    controlPlane,
+    guidance,
+    operator,
+    safety,
+  ] = await Promise.all(
+    [
+      "docs/OPERATOR_GUIDE.md",
+      "docs/README.md",
+      "README.md",
+      "docs/user/README.md",
+      "docs/user/mcp.md",
+      "docs/user/cli.md",
+      "docs/architecture/mcp/control-plane.md",
+      "docs/architecture/operator-guidance.md",
+      "docs/product/OPERATOR_MODEL.md",
+      "docs/product/SAFETY_MODEL.md",
+    ].map((path) =>
+      readFile(new URL(`../../${path}`, import.meta.url), "utf8"),
+    ),
+  );
   assert.equal([...map.matchAll(/\]\(OPERATOR_GUIDE\.md\)/gu)].length, 1);
   assert.match(readme, /\]\(docs\/OPERATOR_GUIDE\.md\)/u);
+  assert.match(userMap, /\]\(\.\.\/OPERATOR_GUIDE\.md\)/u);
   for (const phrase of [
     "plan-authoring",
     "plan-execution",
@@ -52,16 +67,18 @@ test("the mapped common guide preserves supervision and recovery contracts witho
   assert.match(guide, /agent-run guidance --project/u);
   assert.match(guide, /agent-run guidance edit --project/u);
   assert.match(guide, /failed or signalled editor cannot publish/u);
-  assert.match(readme, /guidance edit/u);
-  for (const document of [guide, readme, architecture, operator]) {
+  assert.match(cli, /guidance edit/u);
+  for (const document of [guide, mcp, controlPlane, operator]) {
     assert.match(document, /guidance_read/u);
     assert.match(document, /guidance_update/u);
-    assert.match(document, /expectedHash/u);
-    assert.match(document, /idempotencyKey/u);
     assert.match(document, /issue reporting is disabled/u);
   }
+  for (const document of [guide, mcp, controlPlane, guidance, operator]) {
+    assert.match(document, /expectedHash/u);
+    assert.match(document, /idempotencyKey/u);
+  }
   assert.doesNotMatch(guide, /Co-authored-by:|\/home\/|~\/Desktop/u);
-  for (const document of [architecture, operator, safety]) {
+  for (const document of [controlPlane, operator, safety]) {
     assert.match(document, /guidance/iu);
     assert.match(document, /receipt/iu);
     assert.match(document, /role prompts|roles do not receive/u);
