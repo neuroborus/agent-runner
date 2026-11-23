@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 
+import {
+  createOwnershipDiagnostic,
+  ownershipDiagnosticFrom,
+} from "../platform/index.js";
 import { createGitService } from "../git/index.js";
 import { createWorkspaceService } from "../workspace/index.js";
 import {
@@ -17,10 +21,13 @@ import {
 } from "./resources.js";
 import { normalizeArtifacts } from "./artifact-contract.js";
 import { createArtifactAcquirer } from "./acquisition.js";
-import { TrustedValidationError } from "./errors.js";
 import {
+  TrustedValidationError,
+  trustedValidationFailureEvidence,
+} from "./errors.js";
+import {
+  compareRequirements,
   normalizeRequirementRequest,
-  requirementBlockers,
 } from "./requirements.js";
 
 export { TrustedValidationError } from "./errors.js";
@@ -722,7 +729,12 @@ export function createTrustedValidationService(options = {}) {
     ) {
       throw new TrustedValidationError(
         "Trusted storage requires durable resource and process ownership.",
-        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+        {
+          ownershipDiagnostic: createOwnershipDiagnostic(
+            "trusted-resource-custody",
+          ),
+          code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+        },
       );
     }
     const before = await safety.snapshot({ allowedPaths: [], projectPath });
@@ -767,7 +779,13 @@ export function createTrustedValidationService(options = {}) {
         if (command.capabilities?.artifacts && !signal?.aborted) {
           throw new TrustedValidationError(
             "Trusted acquisition ownership could not be persisted.",
-            { cause, code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+            {
+              cause,
+              ownershipDiagnostic:
+                ownershipDiagnosticFrom(cause) ??
+                createOwnershipDiagnostic("trusted-resource-custody"),
+              code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+            },
           );
         }
         throw cause;
@@ -827,7 +845,12 @@ export function createTrustedValidationService(options = {}) {
               });
               throw new TrustedValidationError(
                 "Trusted acquisition transport retirement is unverified.",
-                { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+                {
+                  ownershipDiagnostic: createOwnershipDiagnostic(
+                    "trusted-resource-custody",
+                  ),
+                  code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+                },
               );
             }
             throw cause;
@@ -870,6 +893,9 @@ export function createTrustedValidationService(options = {}) {
               "Trusted validation source ownership changed during materialization.",
               {
                 cause,
+                ownershipDiagnostic: createOwnershipDiagnostic(
+                  "trusted-resource-custody",
+                ),
                 code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
               },
             );
@@ -942,7 +968,12 @@ export function createTrustedValidationService(options = {}) {
       if (processActive)
         throw new TrustedValidationError(
           "Trusted execution process retirement is unverified.",
-          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+          {
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            ownershipDiagnostic: createOwnershipDiagnostic(
+              "trusted-resource-custody",
+            ),
+          },
         );
       if (allocated !== null) await storage.verify(allocated);
     } catch (cause) {
@@ -966,11 +997,18 @@ export function createTrustedValidationService(options = {}) {
       if (processActive) {
         throw new TrustedValidationError(
           "Trusted execution process retirement is unverified.",
-          { cause, code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+          {
+            cause,
+            code: "ERR_EXECUTION_PROCESS_ACTIVE",
+            ownershipDiagnostic:
+              ownershipDiagnosticFrom(cause) ??
+              createOwnershipDiagnostic("trusted-resource-custody"),
+          },
         );
       }
       result = {
         status: "BLOCKED",
+        ownershipDiagnostic: ownershipDiagnosticFrom(cause),
         exitCode: null,
         signal: null,
         timedOut: false,
@@ -1070,10 +1108,12 @@ export function createTrustedValidationService(options = {}) {
         { code: "ERR_INVALID_TRUSTED_VALIDATION_RESULT" },
       );
     }
+    const ownershipDiagnostic = ownershipDiagnosticFrom(result);
     if (preparationOnly)
       return Object.freeze({
         available: result.status === "PASS",
         reason: result.reason,
+        ownershipDiagnostic,
       });
     const elapsedMs = Number(monotonicNow() - startedAt) / 1_000_000;
     return Object.freeze({
@@ -1085,8 +1125,12 @@ export function createTrustedValidationService(options = {}) {
       exitCode: result.exitCode,
       signal: result.signal,
       timedOut: result.timedOut,
+      ownershipDiagnostic,
       evidence: Object.freeze([
         ...boundedEvidence(command, result),
+        ...(ownershipDiagnostic === null
+          ? []
+          : [`Ownership diagnostic: ${JSON.stringify(ownershipDiagnostic)}`]),
         `Runner-measured attempt elapsed time: ${elapsedMs.toFixed(3)} ms (${executorInvoked ? "executor invoked" : "blocked before executor invocation"}).`,
       ]),
       ...normalizedBindings,
@@ -1103,7 +1147,12 @@ export function createTrustedValidationService(options = {}) {
     if (acquiring.has(resource?.id)) {
       throw new TrustedValidationError(
         "Trusted acquisition transport retirement is unverified.",
-        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+        {
+          ownershipDiagnostic: createOwnershipDiagnostic(
+            "trusted-resource-custody",
+          ),
+          code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+        },
       );
     }
     if (
@@ -1117,7 +1166,13 @@ export function createTrustedValidationService(options = {}) {
       } catch (cause) {
         throw new TrustedValidationError(
           "Trusted acquisition retirement could not be persisted.",
-          { cause, code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+          {
+            cause,
+            ownershipDiagnostic:
+              ownershipDiagnosticFrom(cause) ??
+              createOwnershipDiagnostic("trusted-resource-custody"),
+            code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+          },
         );
       }
     }
@@ -1163,7 +1218,7 @@ export function createTrustedValidationService(options = {}) {
         },
       );
     }
-    const blockers = requirementBlockers(request, selected);
+    const { blockers, diagnostic } = compareRequirements(request, selected);
     // Validate the complete request and authority before any preparation effects.
     if (blockers.length === 0) {
       for (const command of selected.commands) {
@@ -1182,19 +1237,27 @@ export function createTrustedValidationService(options = {}) {
                 result.reason === "registration-timeout"
                   ? "The fixed preparation deadline expired before readiness; registration was drained and the process retired."
                   : "The runner could not prepare the frozen command capabilities.",
+                ...(result.ownershipDiagnostic === null
+                  ? []
+                  : [
+                      `Ownership diagnostic: ${JSON.stringify(result.ownershipDiagnostic)}`,
+                    ]),
               ]),
             }),
           );
       }
     }
     context.signal?.throwIfAborted();
-    return Object.freeze({
-      status: blockers.length === 0 ? "READY" : "BLOCKED",
-      blockers: Object.freeze(blockers),
-    });
+    // Only comparison blockers carry a diagnostic; availability stays unknown.
+    return Object.freeze(
+      blockers.length === 0
+        ? { status: "READY", blockers: Object.freeze(blockers) }
+        : { status: "BLOCKED", blockers: Object.freeze(blockers), diagnostic },
+    );
   }
 
   return Object.freeze({
+    failureEvidence: trustedValidationFailureEvidence,
     execute: (request) => runSelected(request),
     preflight,
     inspectRequirements,

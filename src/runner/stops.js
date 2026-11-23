@@ -1,4 +1,12 @@
-import { terminateOwnedProcess } from "../agents/index.js";
+import { isDeepStrictEqual } from "node:util";
+
+import {
+  EFFORT_DIAGNOSTIC_CLASS,
+  MODEL_CATALOG_INVALID_DIAGNOSTIC,
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
+} from "../agents/index.js";
+import { terminateOwnedProcess } from "../platform/index.js";
+import { MODEL_CATALOG_RETRY_CODE } from "../state/index.js";
 
 import { RunnerError } from "./input.js";
 
@@ -52,6 +60,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   let waiting = false;
   let stopping = null;
   let preEffectRejection = null;
+  let writableNoEffectTurn = null;
   let monitoringFailure = null;
   let pendingWrite = Promise.resolve();
 
@@ -59,6 +68,29 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
     const result = pendingWrite.then(operation);
     pendingWrite = result.catch(() => {});
     return result;
+  }
+
+  function rejectBeforeCommit(authorizationId, cause) {
+    const diagnosticClass = cause?.failure?.failureClass;
+    if (
+      typeof authorizationId !== "string" ||
+      cause?.effectStarted !== false ||
+      diagnosticClass === MODEL_UNAVAILABLE_DIAGNOSTIC
+    )
+      return;
+    preEffectRejection = {
+      authorizationId,
+      rejection: {
+        code: cause.code ?? "ERR_OPERATOR_STOP_BEFORE_COMMIT",
+        recoverable: cause.recoverable === true,
+        ...([
+          MODEL_CATALOG_INVALID_DIAGNOSTIC,
+          EFFORT_DIAGNOSTIC_CLASS,
+        ].includes(diagnosticClass)
+          ? { diagnosticClass }
+          : {}),
+      },
+    };
   }
 
   async function detect(current = null) {
@@ -123,18 +155,26 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
     get preEffectRejection() {
       return preEffectRejection;
     },
+    get writableNoEffectTurn() {
+      return writableNoEffectTurn;
+    },
+    recordWritableNoEffect(turn) {
+      writableNoEffectTurn = turn;
+    },
     async check() {
       await detect();
       controller.signal.throwIfAborted();
     },
     async invoke(operation, request) {
-      await detect();
-      controller.signal.throwIfAborted();
+      const committing = request.access === "local-commit";
+      if (committing) preEffectRejection = null;
       const signal =
         request.signal === undefined
           ? controller.signal
           : AbortSignal.any([request.signal, controller.signal]);
       try {
+        await detect();
+        controller.signal.throwIfAborted();
         return await operation({
           ...request,
           signal,
@@ -148,26 +188,14 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
             write(() => runStore.recordExecutionProcess(lease, pid, proof)),
         });
       } catch (cause) {
-        if (
-          request.access === "local-commit" &&
-          cause?.effectStarted === false
-        ) {
-          preEffectRejection = {
-            code: cause.code ?? "ERR_OPERATOR_STOP_BEFORE_COMMIT",
-            recoverable: cause.recoverable === true,
-          };
-        }
+        if (committing) rejectBeforeCommit(request.authorizationId, cause);
         throw cause;
       }
     },
-    rejectBeforeCommit(cause) {
-      if (cause?.effectStarted === false) {
-        preEffectRejection = {
-          code: cause.code ?? "ERR_OPERATOR_STOP_BEFORE_COMMIT",
-          recoverable: cause.recoverable === true,
-        };
-      }
+    resetCommitRejection() {
+      preEffectRejection = null;
     },
+    rejectBeforeCommit,
     async close() {
       closed = true;
       watcher.abort();
@@ -316,6 +344,7 @@ export async function reconcileOperatorStop({
   runtime,
   publish,
   preEffectRejection = null,
+  writableNoEffectTurn = null,
   configurationFailure = null,
   cleanupResources = async (run) => run,
   inspectSessionProcesses,
@@ -354,6 +383,30 @@ export async function reconcileOperatorStop({
   await publish(activity, current);
 
   onRecoveryStage("checkpoint-continuation");
+  const history =
+    current.workspacePreparation == null &&
+    pipeline.prepareRecovery !== undefined &&
+    runStore.loadRunHistory
+      ? await runStore.loadRunHistory(current.runId, { stream: true })
+      : null;
+  // A cancellation can supersede the pause while activity is published.
+  // Give recovery the same quiescent checkpoint as its certified history.
+  current = history?.run ?? current;
+  if (!stopPending(current)) return current;
+  // Cancelling a settled pause reconciles its underlying checkpoint so that
+  // settlement wraps it once rather than nesting operator checkpoints.
+  if (current.pause?.reason === "operator_paused")
+    current = { ...current, ...restoreOperatorPause(current) };
+  const hasWritableNoEffect =
+    (writableNoEffectTurn !== null &&
+      isDeepStrictEqual(current.activeTurn, writableNoEffectTurn)) ||
+    (history?.hasWritableCatalogRejection === true &&
+      isDeepStrictEqual(current.activeTurn, history.run.activeTurn));
+  const readOnlyCatalogRejection =
+    current.stopRequest.kind === "pause_requested"
+      ? (history?.readOnlyCatalogRejection ?? null)
+      : null;
+  if (history !== null) await pipeline.prepareRecovery(current, history);
   const simulated =
     current.workspacePreparation == null
       ? reconciliationRuntime(runtime, current)
@@ -383,6 +436,8 @@ export async function reconcileOperatorStop({
             action: null,
             operatorStop: true,
             operatorStopPreEffectRejection: preEffectRejection,
+            operatorStopReadOnlyCatalogRejection: readOnlyCatalogRejection,
+            interruptedWritableNoEffect: hasWritableNoEffect,
             run: current,
             settings: current.pipelineState.settings,
             runtime: simulated.runtime,
@@ -406,14 +461,22 @@ export async function reconcileOperatorStop({
   const completed = await runStore.settleCheckpoint(
     lease,
     (latest) => {
+      // The simulated restatement retry only retires the turn. If cancellation
+      // won, keep the certified reservation and retire it without a retry.
+      const canceledRestatement =
+        latest.stopRequest?.kind === "cancel_requested" &&
+        readOnlyCatalogRejection !== null &&
+        current.pause === null &&
+        reconciled.pause?.code === MODEL_CATALOG_RETRY_CODE;
+      const checkpoint = canceledRestatement ? latest : reconciled;
       const settlement = stopSettlement(
         latest,
         {
-          counters: reconciled.counters,
-          hashes: reconciled.hashes,
-          pipelineState: reconciled.pipelineState,
-          pause: reconciled.pause,
-          activeTurn: reconciled.activeTurn,
+          counters: checkpoint.counters,
+          hashes: checkpoint.hashes,
+          pipelineState: checkpoint.pipelineState,
+          pause: checkpoint.pause,
+          activeTurn: canceledRestatement ? null : checkpoint.activeTurn,
         },
         null,
         configurationFailure,

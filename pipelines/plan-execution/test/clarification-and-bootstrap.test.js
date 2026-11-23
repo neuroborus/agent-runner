@@ -1,17 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createGitService } from "../../../src/git/index.js";
+import { getPipeline } from "../../../src/index.js";
+import { createClarificationService } from "../../../src/clarifications/index.js";
+import { preparePipelineMigration } from "../../../src/runner/migration.js";
+import { MODEL_CATALOG_RETRY_CODE } from "../../../src/state/index.js";
+import { restoredAppendReadback } from "../../../test/support/clarification-readback.js";
 import {
   createPlanExecutionState,
   migratePlanExecutionStateV9,
   planExecutionPipeline,
+  runPlanExecution,
 } from "../src/index.js";
 import { FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
   MAX_VALIDATION_ITEMS,
+  appendCheckpointFingerprint,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
 import {
@@ -43,6 +51,8 @@ import {
   reconciliationResolved,
   resolution,
   reviewFindings,
+  reviewProductDecision,
+  terminalConfirmation,
 } from "./support/index.js";
 
 test("clarifies and bootstraps through independent source-session forks", async (t) => {
@@ -1502,22 +1512,75 @@ test("pauses when the repository changes between bootstrap turns", async (t) => 
   assert.equal(fixture.calls.reviewer.length, 0);
 });
 
-test("invalidates bootstrap after a read-only role mutates the repository", async (t) => {
-  const fixture = await createFixture(t, {
-    onRoleRun: async (role) => {
-      if (role === "reviewer") {
-        await writeFile(join(fixture.projectPath, "source.js"), "mutated\n");
+for (const [name, changes, evidence] of [
+  ["known", ["tracked-content"], "tracked-content"],
+  ["unclassified", undefined, "unavailable"],
+  ["unreadable", null, "unavailable"],
+]) {
+  test(`invalidates bootstrap after a read-only role mutates the repository with ${name} domains`, async (t) => {
+    const fixture = await createFixture(t, {
+      onRoleRun: async (role) => {
+        if (role === "reviewer") {
+          await writeFile(join(fixture.projectPath, "source.js"), "mutated\n");
+        }
+      },
+    });
+    const { assertUnchanged } = fixture.runtime.git;
+    fixture.runtime.git.assertUnchanged = async (snapshot) => {
+      try {
+        return await assertUnchanged(snapshot);
+      } catch (cause) {
+        if (changes === undefined) delete cause.changes;
+        if (changes === null)
+          Object.defineProperty(cause, "changes", {
+            get() {
+              throw new Error("Hostile diagnostic access.");
+            },
+          });
+        throw cause;
       }
-    },
+    };
+    fixture.runtime.git.readOnlyChanges = createGitService().readOnlyChanges;
+
+    const result = await fixture.run();
+
+    assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(result.pause, {
+      reason: "read_only_agent_mutated_repository",
+      code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+      ...(changes == null ? {} : { snapshotChanges: changes }),
+    });
+    assert.doesNotThrow(() =>
+      planExecutionPipeline.workflow.validateRun(result),
+    );
+    for (const pause of [
+      { ...result.pause, snapshotChanges: null },
+      { ...result.pause, snapshotChanges: ["head", "head"] },
+      { ...result.pause, code: "ERR_OTHER", snapshotChanges: ["head"] },
+    ]) {
+      assert.throws(
+        () => planExecutionPipeline.workflow.validateRun({ ...result, pause }),
+        /snapshot change diagnostics are invalid/u,
+      );
+    }
+    const projected = getPipeline("plan-execution").projections.pause(result);
+    assert.deepEqual(projected.evidence, [
+      `Changed snapshot domains: ${evidence}.`,
+    ]);
+    assert.deepEqual(projected.nextActions, [
+      { type: "start-new-run", requirement: "uncontaminated-worktree" },
+    ]);
+    assert.equal(
+      fixture.transitions.at(-1).options.activity.message,
+      `Repository changed during a read-only plan-execution turn. Changed snapshot domains: ${evidence}.`,
+    );
+    assert.equal(result.pipelineState.workerSummary, null);
+    assert.equal(result.pipelineState.reviewerSummary, null);
+    assert.equal(result.pipelineState.reviewedFingerprint, null);
+    assert.equal(result.pipelineState.pendingCommit, null);
+    assert.deepEqual(result.pipelineState.completedCommits, []);
   });
-
-  const result = await fixture.run();
-
-  assert.equal(result.pipelineState.workflowState, "WAITING_FOR_USER");
-  assert.equal(result.pause.reason, "read_only_agent_mutated_repository");
-  assert.equal(result.pipelineState.workerSummary, null);
-  assert.equal(result.pipelineState.reviewerSummary, null);
-});
+}
 
 test("detects an ignored transcript mutation during a read-only turn", async (t) => {
   const fixture = await createFixture(t, {
@@ -1835,4 +1898,612 @@ test("verifies frozen inputs at the implementation boundary", async (t) => {
   assert.equal(result.pause.reason, "task_input_changed");
   assert.equal(result.pipelineState.currentStep, null);
   assert.equal(result.pipelineState.resolvedSummary, null);
+});
+
+for (const version of [43, 45]) {
+  test(`version ${version} clarification append recovery preserves the verified intent`, async (t) => {
+    const interruption = new Error("Interrupted after transcript replacement.");
+    const f = await createFixture(t, { worker: [clarificationQuestions()] });
+    const service = f.runtime.clarifications;
+    f.runtime.clarifications = {
+      ...service,
+      async appendQuestionRound(options) {
+        await service.appendQuestionRound(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(f.run(), (cause) => cause === interruption);
+    const legacy = structuredClone(f.currentRun);
+    legacy.pipelineStateVersion = version;
+    legacy.modelCompletionReceipts = {};
+    delete legacy.pipelineState.validationMigrationDisagreement;
+    if (version === 43) delete legacy.pipelineState.clarificationRoot;
+    const intent = legacy.pipelineState.pendingClarificationAppend;
+    const fingerprint = appendCheckpointFingerprint(
+      legacy,
+      intent.checkpoint.workflowState,
+    );
+    intent.checkpoint.fingerprint = "0".repeat(64);
+    assert.throws(
+      () => preparePipelineMigration(legacy, planExecutionPipeline),
+      {
+        code: "ERR_PIPELINE_MIGRATION_FAILED",
+      },
+    );
+    intent.checkpoint.fingerprint = fingerprint;
+
+    const migrated = preparePipelineMigration(legacy, planExecutionPipeline);
+    const rebound = migrated.pipelineState.pendingClarificationAppend;
+    assert.equal(
+      migrated.pipelineState.clarificationRoot,
+      legacy.pipelineState.repositoryBaseline.projectPath,
+    );
+    assert.notEqual(rebound.checkpoint.fingerprint, fingerprint);
+    assert.deepEqual(rebound, {
+      ...intent,
+      checkpoint: {
+        ...intent.checkpoint,
+        fingerprint: rebound.checkpoint.fingerprint,
+      },
+    });
+    planExecutionPipeline.assertCatalogTransition(
+      legacy,
+      migrated,
+      null,
+      MODEL_CATALOG_RETRY_CODE,
+    );
+    assert.throws(
+      () =>
+        planExecutionPipeline.assertCatalogTransition(
+          legacy,
+          {
+            ...migrated,
+            pipelineState: {
+              ...migrated.pipelineState,
+              pendingClarificationAppend: {
+                ...rebound,
+                resultHash: "0".repeat(64),
+              },
+            },
+          },
+          null,
+          MODEL_CATALOG_RETRY_CODE,
+        ),
+      /migration changed the clarification append intent/u,
+    );
+    assert.throws(
+      () =>
+        planExecutionPipeline.assertCatalogTransition(
+          legacy,
+          {
+            ...migrated,
+            pipelineState: {
+              ...migrated.pipelineState,
+              clarificationRoot: null,
+            },
+          },
+          null,
+          MODEL_CATALOG_RETRY_CODE,
+        ),
+      /migration changed the clarification append checkpoint/u,
+    );
+    const transcript = f.readClarification();
+    assert.equal(hash(transcript), intent.resultHash);
+    const calls = f.calls.worker.length;
+    f.runtime.clarifications = service;
+    f.persistPipelineState(migrated.pipelineState);
+    const recovered = await f.run();
+    assert.equal(recovered.pause.reason, "clarification_answers_required");
+    assert.equal(recovered.pipelineState.pendingClarificationAppend, null);
+    assert.equal(recovered.hashes.executionClarifications, intent.resultHash);
+    assert.equal(recovered.counters.clarificationRounds, 1);
+    assert.equal(f.readClarification(), transcript);
+    assert.equal(f.calls.worker.length, calls);
+  });
+}
+
+for (const [kind, boundary, mode] of [
+  ["questions", "intent", "combined"],
+  ["questions", "replacement", "independent"],
+  ["questions", "publication", "lazy"],
+  ["decision", "intent", "lazy"],
+  ["decision", "replacement", "combined"],
+  ["arbitration", "replacement", "independent"],
+]) {
+  test(`${kind} append recovers ${boundary} interruption in ${mode} without role replay`, async (t) => {
+    const interruption = new Error("Append publication interrupted");
+    let interrupted = false;
+    let stopAtImplementation = false;
+    const accepted = Object.assign(
+      new Error("Reached safe implementation re-entry"),
+      { code: "ERR_RUN_REVISION_CHANGED" },
+    );
+    const questions = kind === "questions";
+    const arbitration = kind === "arbitration";
+    const fixture = await createFixture(t, {
+      mode,
+      worker: questions
+        ? [
+            clarificationQuestions(),
+            clarificationReady(),
+            bootstrapReady("Worker"),
+            reconciliationResolved(),
+          ]
+        : arbitration
+          ? [
+              clarificationReady(),
+              bootstrapReady("Worker"),
+              reconciliationDisagreement(),
+              compatibilityReady(),
+              bootstrapReady("Worker"),
+              reconciliationResolved(),
+            ]
+          : [
+              clarificationReady(),
+              bootstrapProductDecision(),
+              compatibilityReady(),
+              bootstrapReady("Worker"),
+              reconciliationResolved(),
+            ],
+      ...(arbitration ? { arbiter: [arbitrationProductDecision()] } : {}),
+      ...(arbitration
+        ? { reviewer: [bootstrapReady("Reviewer"), bootstrapReady("Reviewer")] }
+        : {}),
+      onTransition(run) {
+        if (
+          stopAtImplementation &&
+          run.pipelineState.workflowState === "IMPLEMENT"
+        )
+          throw accepted;
+        if (
+          !interrupted &&
+          ((boundary === "intent" &&
+            run.pipelineState.pendingClarificationAppend !== null) ||
+            (boundary === "publication" &&
+              run.pipelineState.pendingEdit !== null))
+        ) {
+          interrupted = true;
+          throw interruption;
+        }
+      },
+    });
+    const service = fixture.runtime.clarifications;
+    let editors = 0;
+    fixture.runtime.clarifications = {
+      ...service,
+      async [questions ? "appendQuestionRound" : "appendProductDecision"](
+        options,
+      ) {
+        const result =
+          await service[
+            questions ? "appendQuestionRound" : "appendProductDecision"
+          ](options);
+        if (!interrupted && boundary === "replacement") {
+          interrupted = true;
+          throw interruption;
+        }
+        return result;
+      },
+      async openEditor(...args) {
+        editors++;
+        return service.openEditor(...args);
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const saved = structuredClone(fixture.currentRun);
+    const calls = Object.values(fixture.calls).reduce(
+      (count, list) => count + list.length,
+      0,
+    );
+    const bytes = fixture.readClarification();
+    if (boundary !== "publication") {
+      assert.equal(
+        saved.counters[questions ? "clarificationRounds" : "productDecisions"],
+        0,
+      );
+      assert.equal(saved.pipelineState.pendingEdit, null);
+      assert.notEqual(saved.pipelineState.pendingClarificationAppend, null);
+      if (!questions) {
+        const malformed = structuredClone(saved);
+        malformed.pipelineState.pendingClarificationAppend.checkpoint.workReport =
+          {};
+        assert.throws(
+          () => planExecutionPipeline.workflow.validateRun(malformed),
+          {
+            code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+          },
+        );
+      }
+      // Stops inspect proof only, retaining intent and prior/result bytes unchanged.
+      await runPlanExecution({
+        run: fixture.currentRun,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      await runPlanExecution({
+        run: fixture.currentRun,
+        runtime: fixture.runtime,
+        operatorStop: true,
+      });
+      assert.equal(fixture.readClarification(), bytes);
+      assert.deepEqual(
+        fixture.currentRun.pipelineState.pendingClarificationAppend,
+        saved.pipelineState.pendingClarificationAppend,
+      );
+      assert.equal(editors, 0);
+    }
+    const paused = await fixture.run();
+    assert.equal(
+      paused.pause.reason,
+      questions
+        ? "clarification_answers_required"
+        : "product_decision_required",
+    );
+    assert.equal(paused.pipelineState.pendingClarificationAppend, null);
+    assert.equal(
+      paused.counters[questions ? "clarificationRounds" : "productDecisions"],
+      1,
+    );
+    assert.equal(
+      paused.hashes.executionClarifications,
+      hash(fixture.readClarification()),
+    );
+    assert.equal(
+      Object.values(fixture.calls).reduce(
+        (count, list) => count + list.length,
+        0,
+      ),
+      calls,
+    );
+    const expectedBytes = fixture.readClarification();
+    const history = structuredClone(paused.pipelineState.workReports);
+    if (arbitration) {
+      assert.equal(history.at(-1).phase, "ARBITRATE_BOOTSTRAP");
+      assert.equal(
+        history.at(-1).arbitration.direction,
+        "PRODUCT_DECISION_REQUIRED",
+      );
+    }
+    const repeated = await fixture.run();
+    assert.equal(fixture.readClarification(), expectedBytes);
+    assert.equal(
+      repeated.counters[questions ? "clarificationRounds" : "productDecisions"],
+      1,
+    );
+    assert.deepEqual(repeated.pipelineState.workReports, history);
+    fixture.writeClarification(`${expectedBytes}\nSelected behavior A.\n`);
+    stopAtImplementation = true;
+    await assert.rejects(fixture.run(), (cause) => cause === accepted);
+    const completed = fixture.currentRun;
+    assert.equal(completed.pipelineState.workflowState, "IMPLEMENT");
+    assert.equal(
+      completed.counters[
+        questions ? "clarificationRounds" : "productDecisions"
+      ],
+      1,
+    );
+    if (!questions)
+      assert.ok(
+        fixture.calls.worker.some(({ prompt }) =>
+          /Review the updated clarifications/u.test(prompt),
+        ),
+      );
+  });
+}
+
+for (const [change, boundary] of [
+  ["changed", "replay"],
+  ["missing", "replay"],
+  ["changed", "publication"],
+  ["unchanged", "replay"],
+]) {
+  test(`terminal decision append ${boundary} guards ${change} finalized-only infrastructure after workflow reconstruction`, async (t) => {
+    const extraPath = "LOCAL_ARTIFACTS/finalized-check.js";
+    const infrastructure = [...VALIDATION_INFRASTRUCTURE, extraPath];
+    const f = await createFixture(t, {
+      workWorker: [
+        implementationCompleted(),
+        { ...finalizationPassed(), validationInfrastructure: infrastructure },
+      ],
+      workReviewer: [terminalConfirmation(reviewProductDecision())],
+      async onRoleRun(role, request) {
+        if (request.schema === FINALIZATION_SCHEMA) {
+          await writeFile(join(request.cwd, extraPath), "original check\n");
+        }
+      },
+    });
+    const service = createClarificationService({ interactive: false });
+    let appendCalls = 0;
+    let editors = 0;
+    const mutate = () =>
+      change === "missing"
+        ? rm(join(f.projectPath, extraPath))
+        : writeFile(join(f.projectPath, extraPath), "changed check\n");
+    f.runtime.clarifications = {
+      ...service,
+      async appendProductDecision(options) {
+        appendCalls++;
+        if (appendCalls === 1)
+          return service.appendProductDecision({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw Object.assign(new Error("Interrupted before replacement"), {
+                code: "ERR_CLARIFICATION_READ",
+              });
+            },
+          });
+        const result = await service.appendProductDecision(options);
+        if (boundary === "publication") await mutate();
+        return result;
+      },
+      async prepareEdit(...args) {
+        assert.equal(change, "unchanged", "Drift cannot authorize an editor");
+        editors++;
+        return service.prepareEdit(...args);
+      },
+    };
+    const interrupted = await f.run();
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const saved = structuredClone(interrupted);
+    const intent = saved.pipelineState.pendingClarificationAppend;
+    assert.equal(intent.checkpoint.workflowState, "CONFIRM");
+    assert.equal(intent.checkpoint.suspendedState, "IMPLEMENT");
+    const finalization = saved.pipelineState.finalizationResult;
+    assert.ok(finalization.validationInfrastructure.includes(extraPath));
+    assert.ok(
+      !saved.pipelineState.validationInfrastructure.includes(extraPath),
+    );
+    const guidance = saved.pipelineState.finalizationGuidance;
+    assert.equal(guidance.selection, "file");
+    const paths = [
+      ...new Set([
+        ...saved.pipelineState.validationInfrastructure,
+        ...finalization.validationInfrastructure,
+      ]),
+    ];
+    const composed = hash(
+      JSON.stringify({
+        infrastructure: await f.runtime.git.validationInfrastructureFingerprint(
+          {
+            paths: paths.filter((path) => path !== guidance.skillPath),
+          },
+        ),
+        finalizationFile: (
+          await f.runtime.finalization.inspectFile({
+            path: guidance.skillPath,
+          })
+        ).fingerprint,
+      }),
+    );
+    const calls = Object.values(f.calls).map((requests) => requests.length);
+    const bytes = await readFile(f.clarificationPath, "utf8");
+    const content = await f.runtime.git.contentFingerprint();
+    if (change !== "unchanged" && boundary === "replay") await mutate();
+    assert.equal(await f.runtime.git.contentFingerprint(), content);
+
+    // Fresh workflow invocations use saved producing results, not synthetic state.
+    const result = await f.run();
+    if (change === "unchanged") {
+      assert.equal(result.pause.reason, "product_decision_required");
+      assert.equal(result.pipelineState.pendingClarificationAppend, null);
+      assert.equal(result.counters.productDecisions, 1);
+      assert.equal(result.hashes.executionClarifications, intent.resultHash);
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.equal(editors, 1);
+      const settled = structuredClone(result);
+      await f.run();
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.equal(f.currentRun.counters.productDecisions, 1);
+      assert.deepEqual(
+        f.currentRun.pipelineState.workReports,
+        settled.pipelineState.workReports,
+      );
+      assert.deepEqual(f.currentRun.sessionLineage, settled.sessionLineage);
+    } else {
+      assert.equal(result.pause.reason, "unsafe_git_state");
+      assert.equal(
+        result.pause.code,
+        "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      );
+      assert.deepEqual(result.pipelineState.pendingClarificationAppend, intent);
+      assert.deepEqual(result.pipelineState.finalizationResult, finalization);
+      assert.deepEqual(result.counters, saved.counters);
+      assert.deepEqual(result.hashes, saved.hashes);
+      assert.equal(result.pipelineState.pendingEdit, null);
+      assert.equal(editors, 0);
+      assert.equal(
+        hash(await readFile(f.clarificationPath, "utf8")),
+        boundary === "replay" ? hash(bytes) : intent.resultHash,
+      );
+      await f.run();
+      await runPlanExecution({
+        run: f.currentRun,
+        runtime: f.runtime,
+        operatorStop: true,
+      });
+      assert.deepEqual(
+        f.currentRun.pipelineState.pendingClarificationAppend,
+        intent,
+      );
+      assert.deepEqual(
+        f.currentRun.pipelineState.finalizationResult,
+        finalization,
+      );
+      assert.deepEqual(f.currentRun.counters, saved.counters);
+    }
+    assert.equal(
+      appendCalls,
+      boundary === "replay" && change !== "unchanged" ? 1 : 2,
+    );
+    assert.deepEqual(
+      Object.values(f.calls).map((requests) => requests.length),
+      calls,
+    );
+    assert.equal(intent.checkpoint.infrastructureFingerprint, composed);
+    assert.notEqual(
+      composed,
+      saved.pipelineState.validationInfrastructureFingerprint,
+    );
+    assert.notEqual(
+      composed,
+      await f.runtime.git.validationInfrastructureFingerprint({ paths }),
+    );
+  });
+}
+
+test("execution service-readback rejection survives workflow reconstruction and verification-only stops", async (t) => {
+  const f = await createFixture(t, { worker: [clarificationQuestions()] });
+  const service = createClarificationService({ interactive: false });
+  let proof;
+  let producing;
+  f.runtime.clarifications = {
+    ...service,
+    appendQuestionRound: restoredAppendReadback(
+      t,
+      service,
+      "appendQuestionRound",
+      (bytes) => {
+        proof = bytes;
+        producing = structuredClone(f.currentRun);
+      },
+    ),
+    prepareEdit() {
+      assert.fail("Rejected readback cannot authorize an editor");
+    },
+    openEditor() {
+      assert.fail("Rejected readback cannot open an editor");
+    },
+  };
+  const blocked = await f.run();
+  assert.deepEqual(blocked.pause, { reason: "clarifications_changed" });
+  assert.deepEqual(blocked.pipelineState, {
+    ...producing.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(blocked.counters, producing.counters);
+  assert.deepEqual(blocked.hashes, producing.hashes);
+  assert.equal(blocked.counters.clarificationRounds, 0);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.throws(() =>
+    planExecutionPipeline.validateResumeAction(blocked, null),
+  );
+  for (const bytes of [proof.priorBytes, proof.resultBytes]) {
+    await writeFile(proof.transcriptPath, bytes);
+    f.runtime.clarifications = {
+      ...createClarificationService({ interactive: false }),
+      appendQuestionRound() {
+        assert.fail("Rejected append cannot replay");
+      },
+      prepareEdit() {
+        assert.fail("Rejected append cannot authorize an editor");
+      },
+      openEditor() {
+        assert.fail("Rejected append cannot open an editor");
+      },
+    };
+    for (const operatorStop of [false, true])
+      assert.deepEqual(
+        await runPlanExecution({
+          run: JSON.parse(JSON.stringify(blocked)),
+          runtime: f.runtime,
+          settings: SETTINGS,
+          operatorStop,
+        }),
+        blocked,
+      );
+    assert.deepEqual(await readFile(proof.transcriptPath), bytes);
+  }
+  assert.equal(f.calls.worker.length, 1);
+  assert.equal(f.calls.reviewer.length + f.calls.arbiter.length, 0);
+});
+
+for (const failure of ["write", "readback"]) {
+  test(`append ${failure} failure retains intent and exposes bounded resumable diagnostics`, async (t) => {
+    const fixture = await createFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    let failed = false;
+    let failReadback = false;
+    const code =
+      failure === "write"
+        ? "ERR_CLARIFICATION_WRITE"
+        : "ERR_CLARIFICATION_READ";
+    fixture.runtime.clarifications = {
+      ...service,
+      async inspectTranscript(options) {
+        if (failReadback) {
+          failReadback = false;
+          throw Object.assign(new Error("Private filesystem detail"), { code });
+        }
+        return service.inspectTranscript(options);
+      },
+      async appendQuestionRound(options) {
+        if (!failed) {
+          failed = true;
+          if (failure === "readback") {
+            const result = await service.appendQuestionRound(options);
+            failReadback = true;
+            return result;
+          }
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw Object.assign(new Error("Private filesystem detail"), {
+                code,
+              });
+            },
+          });
+        }
+        return service.appendQuestionRound(options);
+      },
+    };
+    const interrupted = await fixture.run();
+    assert.deepEqual(interrupted.pause, {
+      reason: "clarification_append_interrupted",
+      code,
+    });
+    if (failure === "write") assert.equal(fixture.readClarification(), "");
+    else assert.match(fixture.readClarification(), /## Round 1/u);
+    assert.equal(interrupted.counters.clarificationRounds, 0);
+    const projection = planExecutionPipeline.projections.pause(interrupted);
+    assert.equal(projection.reason, "clarification_append_interrupted");
+    assert.deepEqual(projection.nextActions, [
+      { type: "resume", action: null },
+    ]);
+    assert.doesNotMatch(JSON.stringify(projection), /Private filesystem/u);
+    const recovered = await fixture.run();
+    assert.equal(recovered.pause.reason, "clarification_answers_required");
+    assert.equal(recovered.counters.clarificationRounds, 1);
+    assert.equal(fixture.calls.worker.length, 1);
+  });
+}
+
+test("failed initial append-intent publication leaves transcript bytes unchanged", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+  });
+  const persist = fixture.runtime.transition;
+  const interruption = new Error("Initial publication failed");
+  fixture.runtime.transition = async function (patch, options) {
+    if (patch.pipelineState.pendingClarificationAppend !== null)
+      throw interruption;
+    return persist.call(this, patch, options);
+  };
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  assert.equal(fixture.readClarification(), "");
+  assert.equal(
+    fixture.currentRun.pipelineState.pendingClarificationAppend,
+    null,
+  );
+  assert.equal(fixture.currentRun.pipelineState.pendingEdit, null);
+  assert.equal(fixture.currentRun.counters.clarificationRounds, 0);
 });

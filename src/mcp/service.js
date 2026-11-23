@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import {
   serveStdio,
@@ -18,6 +19,7 @@ import {
 } from "../guidance/index.js";
 import { createIssueService, ISSUE_STATUSES } from "../issues/index.js";
 import {
+  createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
@@ -28,7 +30,6 @@ import {
   pipelineRequiresWorktreeLease,
 } from "../runner/index.js";
 import {
-  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
@@ -229,14 +230,20 @@ function createRunStartSchema(providers) {
         .enum(["commit", "custom"])
         .optional()
         .describe(
-          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes criteria and declarations from its frozen plan.",
+          "Authoring/execution plan kind; omitted remains commit. Custom execution consumes frozen criteria/declarations. Trailing / requests directory preparation. Codex refuses regular-file roots; Claude needs existing exact mount roots. Correct unsupported declarations/backend in an authorized fresh run.",
         ),
       criteriaPath: z.string().min(1).max(4096).optional(),
       sourceReferences: z
         .array(z.string().min(1).max(4096))
         .max(256)
         .optional(),
-      outputPaths: z.array(z.string().min(1).max(4096)).max(256).optional(),
+      outputPaths: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional()
+        .describe(
+          "Authoring declarations, preserved exactly. Trailing / requests execution directory preparation under an existing parent; absent exact files require backend support. Prose grants no kind or parent writes.",
+        ),
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),
@@ -383,10 +390,29 @@ function result(value) {
   };
 }
 
+function ownershipFailureResult(error) {
+  const ownershipDiagnostic = ownershipDiagnosticFrom(error);
+  if (ownershipDiagnostic === null) return null;
+  return {
+    ...result({
+      code:
+        typeof error.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      message:
+        "Execution ownership could not be verified. Use status and supported recovery before retrying.",
+      ownershipDiagnostic,
+    }),
+    isError: true,
+  };
+}
+
 async function observationResult(operation) {
   try {
     return result(await operation());
   } catch (error) {
+    const ownershipFailure = ownershipFailureResult(error);
+    if (ownershipFailure !== null) return ownershipFailure;
     if (!(error instanceof RunObservationBusyError)) throw error;
     return {
       ...result({ code: error.code, message: error.message, retryable: true }),
@@ -399,8 +425,11 @@ async function detachedResult(operation) {
   try {
     return result(await operation());
   } catch (error) {
-    if (!(error instanceof RunStoreError) || !error.dispatchFailure)
+    if (!(error instanceof RunStoreError) || !error.dispatchFailure) {
+      const ownershipFailure = ownershipFailureResult(error);
+      if (ownershipFailure !== null) return ownershipFailure;
       throw error;
+    }
     return {
       ...result({
         code: error.code,
@@ -1580,7 +1609,7 @@ export function createMcpServer(options = {}) {
       inputSchema: z.object({ runId }).strict(),
       annotations: readOnly,
     },
-    async (input) => result(await control.runStatus(input)),
+    async (input) => detachedResult(() => control.runStatus(input)),
   );
   server.registerTool(
     "run_pause",

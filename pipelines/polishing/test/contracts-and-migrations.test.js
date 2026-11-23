@@ -16,6 +16,7 @@ import {
   migratePolishingStateV14,
   migratePolishingStateV16,
   migratePolishingStateV17,
+  migratePolishingStateV19,
   polishingPipeline,
   runPolishing,
 } from "../src/index.js";
@@ -25,10 +26,12 @@ import {
   CHECK_AND_FIX_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
+  FINDING_RESOLUTION_SCHEMA,
 } from "../src/schemas.js";
 import {
   assertRun,
   assertSettings,
+  classifyResolutionResult,
   createFinalizationGuidanceDecision,
   MAX_BOOTSTRAP_ITEMS,
   MAX_DURABLE_RUN_BYTES,
@@ -39,6 +42,9 @@ import {
   normalizeCleanConfirmationResult,
   normalizeFinalizationResult,
   normalizePipelineState,
+  normalizeResolutionResult,
+  resolutionCorrectionDiagnostic,
+  RUNNER_HYGIENE_ISSUE_COMMAND,
 } from "../src/workflow-contract.js";
 import {
   SETTINGS,
@@ -60,6 +66,7 @@ import {
   finalizationPassed,
   findingArbitration,
   hash,
+  matchesSchemaSubset,
   migrateVersionOneState,
   polishingCompleted,
   reconciliationDisagreement,
@@ -165,6 +172,122 @@ test("rejects incomplete or substituted finalization PASS evidence", () => {
   assert.equal(exact.validationInfrastructure[0], exactPath);
 });
 
+test("accepts only runner-owned hygiene failures and exact whitespace handoff stops", async (t) => {
+  let hygieneFailed = true;
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "F1"),
+      finalizationPassed(),
+    ],
+    onContentHygiene() {
+      if (!hygieneFailed) return undefined;
+      hygieneFailed = false;
+      return { status: "whitespace", tracked: false, paths: [], omitted: 3 };
+    },
+  });
+  await fixture.run();
+  const failed = fixture.transitions.find(
+    ({ patch }) => patch.pipelineState.finalizationResult?.status === "FAIL",
+  ).patch.pipelineState;
+  const [issue] = failed.finalizationResult.issues;
+  assert.equal(issue.command, RUNNER_HYGIENE_ISSUE_COMMAND);
+  assert.deepEqual(issue.evidence, ["3 more paths have whitespace errors."]);
+  assert.doesNotThrow(() => normalizePipelineState(failed));
+  const agentLabel = {
+    ...failed.finalizationResult,
+    issues: [{ ...issue, command: "npm test" }],
+  };
+  assert.throws(
+    () => normalizePipelineState({ ...failed, finalizationResult: agentLabel }),
+    /finalization result is inconsistent/u,
+  );
+  const passing = finalizationPassed();
+  for (const command of ["npm test", RUNNER_HYGIENE_ISSUE_COMMAND]) {
+    assert.throws(
+      () =>
+        normalizeFinalizationResult({
+          ...finalizationFailed(),
+          issues: [{ ...finalizationFailed().issues[0], command }],
+          checks: passing.checks,
+        }),
+      (error) =>
+        error.diagnostic?.constraint === "fail-status-check-consistency",
+    );
+  }
+
+  const handoff = fixture.transitions.findLast(
+    ({ patch }) => patch.pipelineState.workflowState === "HANDOFF",
+  ).patch.pipelineState;
+  const stopped = (pause, workflowState = "FAILED") => ({
+    ...fixture.currentRun,
+    pipelineState: { ...handoff, workflowState },
+    pause,
+  });
+  for (const [code, evidence] of [
+    ["ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE", "Index effect: none."],
+    [
+      "ERR_POLISHING_HANDOFF_WHITESPACE",
+      "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged.",
+    ],
+  ]) {
+    const run = stopped({ reason: "handoff_whitespace_rejected", code });
+    assert.doesNotThrow(() => assertRun(run));
+    assert.deepEqual(polishingPipeline.projections.pause(run), {
+      reason: "handoff_whitespace_rejected",
+      code,
+      explanation:
+        "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
+      evidence: [evidence],
+      resumeState: null,
+      nextActions: [],
+    });
+  }
+  for (const run of [
+    stopped({
+      reason: "handoff_whitespace_rejected",
+      code: "ERR_POLISHING_HANDOFF_CONTAMINATED",
+    }),
+    stopped({
+      reason: "handoff_whitespace_rejected",
+      code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+      evidence: ["Index effect: none."],
+    }),
+    stopped(
+      {
+        reason: "handoff_whitespace_rejected",
+        code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+      },
+      "WAITING_FOR_USER",
+    ),
+  ]) {
+    assert.throws(() => assertRun(run), /handoff whitespace disposition/u);
+  }
+  const legacy = stopped({
+    reason: "internal_failure",
+    code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+  });
+  assert.doesNotThrow(() => assertRun(legacy));
+  assert.deepEqual(polishingPipeline.projections.pause(legacy), {
+    reason: "internal_failure",
+    code: "ERR_POLISHING_HANDOFF_WHITESPACE",
+    explanation: "Polishing failed.",
+    evidence: [],
+    resumeState: null,
+    nextActions: [],
+  });
+});
+
 test("requires passing finalization for finalized-fingerprint finding scope", async (t) => {
   let failedState;
   const fixture = await createFixture(t, {
@@ -244,8 +367,8 @@ test("rejects mixed failed and blocked finalization before persistence", async (
       role: "worker",
       phase: "finalization",
       contract: "finalization",
-      field: "result",
-      constraint: "semantic-contract",
+      field: "checks",
+      constraint: "fail-status-check-consistency",
     });
     return true;
   });
@@ -358,7 +481,7 @@ test("migrates version-2 state with empty trust and invalidates its active gate"
   assert.deepEqual(migrated.settings.trustedChecks, []);
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(polishingPipeline.stateVersion, 19);
+  assert.equal(polishingPipeline.stateVersion, 25);
   const legacyAuthenticationState = { ...completed.pipelineState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = polishingPipeline.migrations[17]({
@@ -464,10 +587,14 @@ test("version 14 migration makes active validation evidence provisional", async 
   };
   const migratedPaused = {
     ...legacyPaused,
-    pipelineStateVersion: 19,
-    pipelineState: migratePolishingStateV17({
-      pipelineState: migratePolishingStateV16({
-        pipelineState: migratePolishingStateV14(legacyPaused),
+    pipelineStateVersion: polishingPipeline.stateVersion,
+    pipelineState: polishingPipeline.migrations[20]({
+      pipelineState: migratePolishingStateV19({
+        pipelineState: migratePolishingStateV17({
+          pipelineState: migratePolishingStateV16({
+            pipelineState: migratePolishingStateV14(legacyPaused),
+          }),
+        }),
       }),
     }),
   };
@@ -791,6 +918,136 @@ test("normalizes strict lazy polishing convergence results", () => {
   assert.equal(CLEAN_CONFIRM_SCHEMA.additionalProperties, false);
 });
 
+test("candidate-review rejections carry bounded source-defined diagnostics", () => {
+  const sentinel = "sentinel-value";
+  const finding = (fields = {}) => ({
+    id: "R1",
+    file: "source.js",
+    problem: `Problem ${sentinel}.`,
+    reason: "Reason.",
+    suggestedAction: "Fix it.",
+    ...fields,
+  });
+  const result = (status, fields = {}) => ({
+    status,
+    findings: [],
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+    ...fields,
+  });
+  const decision = { whyBlocked: "Blocked.", evidence: ["Evidence."] };
+  const text = "nonempty-plain-text-up-to-4000-characters";
+  for (const clean of [true, false]) {
+    const accepted = clean ? "CLEAN" : "APPROVED";
+    const schema = clean
+      ? CANDIDATE_CLEAN_CONFIRM_SCHEMA
+      : CANDIDATE_REVIEW_SCHEMA;
+    const semantic = [
+      [
+        result(accepted, { findings: [finding()] }),
+        "findings",
+        clean ? "empty-when-clean" : "empty-when-approved",
+      ],
+      [result("FINDINGS"), "findings", "nonempty-when-findings"],
+      [
+        result(accepted, { question: sentinel }),
+        "question",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { evidence: [sentinel] }),
+        "evidence",
+        "empty-for-review",
+      ],
+      [
+        result(accepted, { options: [sentinel], whyBlocked: sentinel }),
+        "whyBlocked",
+        "empty-for-review",
+      ],
+      [
+        result("PRODUCT_DECISION_REQUIRED", {
+          ...decision,
+          question: "Choose?",
+          findings: [finding()],
+        }),
+        "findings",
+        "empty-for-product-decision",
+      ],
+      [result("PRODUCT_DECISION_REQUIRED", decision), "question", text],
+      [
+        result("FINDINGS", { findings: [finding({ file: `/${sentinel}` })] }),
+        "findings[0].file",
+        "repository-relative-path-up-to-4000-characters",
+      ],
+      [
+        result("FINDINGS", { findings: [finding({ suggestedAction: "" })] }),
+        "findings[0].suggestedAction",
+        text,
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding(), finding({ file: "other.js" })],
+        }),
+        "findings",
+        "unique-ids",
+      ],
+      [
+        result("FINDINGS", {
+          findings: [finding({ file: "other.js" }), finding({ id: "R3" })],
+        }),
+        "findings[1].id",
+        "stable-finding-id",
+      ],
+    ];
+    const structural = [
+      [{ ...result(accepted), extra: sentinel }, "result", "exact-field-set"],
+      [result(sentinel), "status", "supported-status"],
+      [result("FINDINGS", { findings: [sentinel] }), "findings[0]", "object"],
+      [
+        result("FINDINGS", { findings: [finding({ id: sentinel })] }),
+        "findings[0].id",
+        "review-finding-id",
+      ],
+      [
+        result("FINDINGS", { findings: [finding({ extra: sentinel })] }),
+        "findings[0]",
+        "exact-field-set",
+      ],
+    ];
+    for (const [cases, schemaValid] of [
+      [semantic, true],
+      [structural, false],
+    ]) {
+      for (const [payload, field, constraint] of cases) {
+        assert.equal(matchesSchemaSubset(schema, payload), schemaValid);
+        assert.throws(
+          () =>
+            normalizeCandidateReviewResult(payload, [finding({ id: "R2" })], {
+              clean,
+            }),
+          (error) => {
+            assert.equal(error.code, "ERR_INVALID_POLISHING_OUTPUT");
+            assert.deepEqual({ ...error.diagnostic }, { field, constraint });
+            assert.equal(
+              JSON.stringify(error.diagnostic).includes(sentinel),
+              false,
+            );
+            return true;
+          },
+        );
+      }
+    }
+    const valid = result("FINDINGS", { findings: [finding()] });
+    assert.equal(matchesSchemaSubset(schema, valid), true);
+    assert.deepEqual(normalizeCandidateReviewResult(valid, [], { clean }), {
+      status: "FINDINGS",
+      findings: [finding()],
+    });
+  }
+});
+
 test("clears partial bootstrap evidence across polishing migrations", async (t) => {
   let unavailable = false;
   const fixture = await createFixture(t, {
@@ -972,24 +1229,20 @@ test("invalidates version-1 validation evidence before completed polishing resum
       constraint: "unique-ids-and-commands",
     },
   ]);
-  assert.ok(
-    fixture.calls.worker.some(
-      ({ prompt }) =>
-        prompt.includes("versioned-state migration checkpoint") &&
-        prompt.includes(
-          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
-        ),
-    ),
-  );
-  assert.ok(
-    fixture.calls.reviewer.some(
-      ({ prompt }) =>
-        prompt.includes("versioned-state migration checkpoint") &&
-        prompt.includes(
-          "The frozen finalization skill or Markdown procedure is .agents/skills/finalization/SKILL.md",
-        ),
-    ),
-  );
+  for (const role of ["worker", "reviewer"]) {
+    const migrations = fixture.calls[role].filter(({ prompt }) =>
+      prompt.includes("versioned-state migration checkpoint"),
+    );
+    assert.ok(migrations.length > 0);
+    for (const { prompt } of migrations) {
+      assert.match(
+        prompt,
+        /The frozen finalization skill or Markdown procedure is \.agents\/skills\/finalization\/SKILL\.md/u,
+      );
+      assert.match(prompt, /determine the owner and checkpoint/u);
+      assert.match(prompt, /mandatory external acceptance, not a pipeline/u);
+    }
+  }
 });
 
 test("corrects staging-dependent validation-migration checks", async (t) => {
@@ -1838,4 +2091,336 @@ test("normalizes legacy polishing state to the default artifact root", () => {
   const normalized = normalizePipelineState(state);
   assert.equal(normalized.artifactRoot, "LOCAL_ARTIFACTS");
   assert.equal(normalized.settings.finalization, "auto");
+});
+
+test("finding-resolution reasons follow the strict plain-text contract", () => {
+  const blockers = [{ id: "R7" }];
+  const resolved = (reason) => ({
+    status: "RESOLVED",
+    decisions: [{ id: "R7", decision: "FIX", reason, evidence: [] }],
+    reason: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  });
+  const valid = resolved("Applied the requested correction.");
+  assert.equal(matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, valid), true);
+  assert.deepEqual(normalizeResolutionResult(valid, blockers, new Set()), {
+    status: "RESOLVED",
+    decisions: valid.decisions,
+  });
+  assert.deepEqual(FINDING_RESOLUTION_SCHEMA.properties.reason, {
+    type: "string",
+    maxLength: 4000,
+  });
+
+  const multiline = "Applied sentinel-value.\nSecond line.";
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, resolved(multiline)),
+    false,
+  );
+  for (const reason of ["", multiline]) {
+    assert.throws(
+      () => normalizeResolutionResult(resolved(reason), blockers, new Set()),
+      (error) => {
+        assert.equal(error.code, "ERR_INVALID_POLISHING_OUTPUT");
+        assert.deepEqual(
+          { ...error.diagnostic },
+          {
+            field: "decisions[0].reason",
+            constraint: "nonempty-plain-text-up-to-4000-characters",
+          },
+        );
+        for (const text of [error.message, JSON.stringify(error.diagnostic)]) {
+          assert.equal(text.includes("sentinel-value"), false);
+          assert.equal(text.includes("R7"), false);
+        }
+        return true;
+      },
+    );
+  }
+});
+
+async function exhaustedResolutionRun(t) {
+  const invalid = resolution("FIX", "R1");
+  invalid.decisions[0].reason = "";
+  const fixture = await createFixture(t, {
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      reviewFindings("R1"),
+    ],
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      invalid,
+      invalid,
+    ],
+  });
+  const run = await fixture.run();
+  assert.equal(run.pause.reason, "resolution_output_invalid");
+  return run;
+}
+
+test("version 20 migrates pending and terminal runs without inferring a report checkpoint", async (t) => {
+  const run = await exhaustedResolutionRun(t);
+  const completed = await (await createFixture(t)).run();
+  const pending = {
+    ...run.pipelineState,
+    workflowState: "RESOLVE_FINDINGS",
+    resolutionCorrection: null,
+  };
+  for (const state of [
+    pending,
+    { ...pending, workflowState: "FAILED" },
+    completed.pipelineState,
+  ]) {
+    const legacy = { ...state };
+    delete legacy.resolutionCorrection;
+    const migrated = migratePolishingStateV19({ pipelineState: legacy });
+    assert.deepEqual(migrated, state);
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => normalizePipelineState(migrated));
+  }
+  assert.throws(() =>
+    assertRun({
+      ...completed,
+      pipelineStateVersion: polishingPipeline.stateVersion + 1,
+    }),
+  );
+});
+
+test("finding-resolution correction checkpoints and pauses stay strictly bound", async (t) => {
+  const run = await exhaustedResolutionRun(t);
+  const correction = run.pipelineState.resolutionCorrection;
+  assert.equal(correction.stage, "exhausted");
+  assert.deepEqual(correction.diagnostics, [
+    {
+      field: "decisions[0].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+  ]);
+  assert.doesNotThrow(() => assertRun(run));
+  const withCorrection = (patch, pipelineState = {}, base = correction) => ({
+    ...run,
+    pipelineState: {
+      ...run.pipelineState,
+      ...pipelineState,
+      resolutionCorrection: { ...base, ...patch },
+    },
+  });
+  // Only a consumed restatement records where its read-only turn started.
+  const unconsumed = { ...correction };
+  delete unconsumed.restatementStartedAfter;
+  const decision = {
+    decision: {
+      question: "Which neutral variant applies?",
+      options: [],
+      whyBlocked: "Both variants remain valid.",
+      evidence: ["No repository convention selects one."],
+    },
+    number: 1,
+    expectedHash: hash("expected transcript"),
+    resultHash: null,
+  };
+  const correcting = (productDecision) =>
+    withCorrection(
+      { stage: "correcting", productDecision },
+      { workflowState: "RESOLVE_FINDINGS" },
+    ).pipelineState;
+  assert.doesNotThrow(() => normalizePipelineState(correcting(decision)));
+  const invoking = (patch = {}, pipelineState = {}) => ({
+    ...withCorrection(
+      {
+        stage: "invoking",
+        contentChanged: null,
+        candidate: null,
+        attempts: 0,
+        diagnostics: [],
+        ...patch,
+      },
+      { workflowState: "RESOLVE_FINDINGS", ...pipelineState },
+      unconsumed,
+    ),
+    pause: null,
+  });
+  const earlierRound = { beforeFingerprint: hash("earlier round content") };
+  assert.doesNotThrow(() => assertRun(invoking()));
+  // A classified retry keeps the round's content after a charged partial write.
+  assert.doesNotThrow(() =>
+    assertRun(invoking(earlierRound, { pendingCorrection: true })),
+  );
+  for (const invalid of [
+    invoking(earlierRound),
+    invoking({ candidate: correction.candidate }),
+    invoking({ contentChanged: false }),
+    invoking({ diagnostics: correction.diagnostics }),
+    invoking({ attempts: 1, additionalAttempts: 1 }),
+    invoking({ restatementStartedAfter: correction.restatementStartedAfter }),
+  ]) {
+    assert.throws(() => assertRun(invalid), /resolution correction/u);
+  }
+  const lazy = {
+    ...run.pipelineState,
+    settings: { ...run.pipelineState.settings, mode: "lazy" },
+    backendVersions: { worker: run.pipelineState.backendVersions.worker },
+    reviewerSummary: null,
+    reviewerValidation: null,
+  };
+  assert.doesNotThrow(() =>
+    normalizePipelineState({ ...lazy, resolutionCorrection: null }),
+  );
+  assert.throws(
+    () => normalizePipelineState(lazy),
+    /finding-resolution correction is invalid/u,
+  );
+  for (const invalid of [
+    withCorrection({ schemaVersion: 1 }),
+    withCorrection({ unexpected: true }),
+    withCorrection({ stage: "unknown" }),
+    withCorrection({ stage: "ready" }),
+    withCorrection({ attempts: 2 }),
+    withCorrection({ fixCharged: true }),
+    withCorrection({ contentChanged: true }),
+    withCorrection({ access: "read-only" }),
+    withCorrection({ budgetExhausted: null }),
+    withCorrection({ budgetExhausted: 0 }),
+    withCorrection({ access: "read-only", budgetExhausted: 1 }),
+    withCorrection({ blockers: [] }),
+    withCorrection({ diagnostics: [] }),
+    withCorrection({
+      diagnostics: [{ field: "decisions[0].reason", constraint: "raw value" }],
+    }),
+    withCorrection({ productDecision: decision }),
+    {
+      ...withCorrection({}, { workflowState: "RESOLVE_FINDINGS" }),
+      pause: null,
+    },
+    { ...run, pause: { ...run.pause, evidence: [] } },
+    {
+      ...run,
+      pause: { ...run.pause, resumeState: "REVIEW" },
+    },
+    withCorrection({ stage: "blocked" }, {}),
+  ]) {
+    assert.throws(() => assertRun(invalid), /resolution|correction/u);
+  }
+  for (const productDecision of [
+    { ...decision, number: 0 },
+    { ...decision, resultHash: decision.expectedHash },
+    { ...decision, decision: { ...decision.decision, question: "" } },
+    { ...decision, unexpected: true },
+  ]) {
+    assert.throws(() => normalizePipelineState(correcting(productDecision)));
+  }
+  assert.throws(() =>
+    assertRun({
+      ...withCorrection({ stage: "blocked" }),
+      pause: {
+        reason: "environment_blocked",
+        explanation: "The report cannot be established.",
+        evidence: ["The repository lacks the original disposition."],
+        resumeState: "REVIEW",
+      },
+    }),
+  );
+});
+
+test("finding-resolution correction diagnostics keep only bounded source identities", () => {
+  for (const diagnostic of [
+    { field: "result", constraint: "interrupted-response" },
+    { field: "status", constraint: "resolution-status" },
+    {
+      field: "options[15]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    {
+      field: "decisions[31].evidence[31]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    { field: "decisions", constraint: "every-current-blocker-exactly-once" },
+  ]) {
+    assert.deepEqual(resolutionCorrectionDiagnostic(diagnostic), diagnostic);
+  }
+  for (const diagnostic of [
+    null,
+    {
+      field: "decisions[32].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    {
+      field: "options[16]",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+    { field: "summary", constraint: "empty-string" },
+    { field: "decisions[0].reason", constraint: "interrupted-response" },
+    { field: "result", constraint: "The provider rejected R7." },
+  ]) {
+    assert.deepEqual(resolutionCorrectionDiagnostic(diagnostic), {
+      field: "result",
+      constraint: "semantic-contract",
+    });
+  }
+  const facts = { blockers: [{ id: "R7" }], nonDisputableIds: [] };
+  const resolved = resolution("FIX", "R7");
+  assert.deepEqual(classifyResolutionResult(resolved, facts), []);
+  resolved.decisions[0].reason = "First line.\nSecond line.";
+  assert.deepEqual(classifyResolutionResult(resolved, facts), [
+    {
+      field: "decisions[0].reason",
+      constraint: "nonempty-plain-text-up-to-4000-characters",
+    },
+  ]);
+});
+
+test("version 22 migrates append absence without inferring replay authority", () => {
+  const current = createPolishingState();
+  const legacy = structuredClone(current);
+  delete legacy.pendingClarificationAppend;
+  assert.throws(() => normalizePipelineState(legacy), {
+    code: "ERR_INVALID_POLISHING_STATE",
+  });
+  const migrated = polishingPipeline.migrations[22]({ pipelineState: legacy });
+  assert.deepEqual(migrated, current);
+  assert.equal(migrated.pendingClarificationAppend, null);
+  assert.doesNotThrow(() => normalizePipelineState(migrated));
+  for (const pendingClarificationAppend of [null, {}, { kind: "questions" }]) {
+    assert.throws(
+      () =>
+        polishingPipeline.migrations[22]({
+          pipelineState: { ...legacy, pendingClarificationAppend },
+        }),
+      { code: "ERR_POLISHING_WORKFLOW" },
+    );
+  }
+});
+
+test("legacy clarification ownership is explicit and preflight-paused state never selects current resources", () => {
+  const current = createPolishingState();
+  const { clarificationRoot: _root, ...legacy } = current;
+  assert.throws(() => normalizePipelineState(legacy));
+  const migration = polishingPipeline.migrations[23];
+  const saved = structuredClone(legacy);
+  assert.deepEqual(migration({ pipelineState: legacy }), current);
+  assert.deepEqual(legacy, saved);
+  assert.throws(() => migration({ pipelineState: current }));
+  for (const clarificationRoot of [
+    "relative",
+    "/workspace/../other",
+    3,
+    undefined,
+  ])
+    assert.throws(() =>
+      normalizePipelineState({ ...current, clarificationRoot }),
+    );
+  assert.throws(() =>
+    createPolishingState({
+      clarificationRoot: "/infrastructure",
+      artifactPath: "/elsewhere/LOCAL_ARTIFACTS",
+    }),
+  );
 });

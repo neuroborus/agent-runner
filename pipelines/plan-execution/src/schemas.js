@@ -412,7 +412,12 @@ export const BOOTSTRAP_ARBITRATION_SCHEMA = deepFreeze(
 const IMPLEMENTATION_PROPERTIES = {
   status: {
     type: "string",
-    enum: ["COMPLETED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+    enum: [
+      "COMPLETED",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ],
   },
   summary: SUMMARY,
   reason: TEXT,
@@ -421,6 +426,19 @@ const IMPLEMENTATION_PROPERTIES = {
 
 export const IMPLEMENTATION_SCHEMA = deepFreeze(
   resultUnion([
+    variant(
+      "status",
+      ["VALIDATION_POLICY_BLOCKED"],
+      IMPLEMENTATION_PROPERTIES,
+      {
+        summary: EMPTY_TEXT,
+        reason: NONEMPTY_TEXT,
+        question: EMPTY_TEXT,
+        options: EMPTY_OPTIONS,
+        whyBlocked: EMPTY_TEXT,
+        evidence: { ...NONEMPTY_TEXT_LIST, minItems: 3, maxItems: 3 },
+      },
+    ),
     variant("status", ["COMPLETED"], IMPLEMENTATION_PROPERTIES, {
       summary: NONEMPTY_SUMMARY,
       reason: EMPTY_TEXT,
@@ -458,6 +476,7 @@ export const FINALIZATION_SCHEMA = deepFreeze({
         "SKILL_MISSING",
         "SKILL_INVALID",
         "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
         "PRODUCT_DECISION_REQUIRED",
       ],
     },
@@ -551,7 +570,13 @@ export const CHECK_AND_FIX_SCHEMA = deepFreeze({
   properties: {
     status: {
       type: "string",
-      enum: ["CHANGED", "UNCHANGED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+      enum: [
+        "CHANGED",
+        "UNCHANGED",
+        "BLOCKED",
+        "VALIDATION_POLICY_BLOCKED",
+        "PRODUCT_DECISION_REQUIRED",
+      ],
     },
     summary: SUMMARY,
     reason: TEXT,
@@ -646,7 +671,12 @@ const FINDING_DECISIONS = {
 const RESOLUTION_PROPERTIES = {
   status: {
     type: "string",
-    enum: ["RESOLVED", "BLOCKED", "PRODUCT_DECISION_REQUIRED"],
+    enum: [
+      "RESOLVED",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+      "PRODUCT_DECISION_REQUIRED",
+    ],
   },
   decisions: FINDING_DECISIONS,
   reason: TEXT,
@@ -655,6 +685,14 @@ const RESOLUTION_PROPERTIES = {
 
 export const FINDING_RESOLUTION_SCHEMA = deepFreeze(
   resultUnion([
+    variant("status", ["VALIDATION_POLICY_BLOCKED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: { ...NONEMPTY_TEXT_LIST, minItems: 3, maxItems: 3 },
+    }),
     variant("status", ["RESOLVED"], RESOLUTION_PROPERTIES, {
       reason: EMPTY_TEXT,
       ...EMPTY_DECISION_PROPERTIES,
@@ -671,6 +709,21 @@ export const FINDING_RESOLUTION_SCHEMA = deepFreeze(
       decisions: { ...FINDING_DECISIONS, maxItems: 0 },
       reason: EMPTY_TEXT,
       ...PRODUCT_DECISION_PROPERTIES,
+    }),
+  ]),
+);
+
+// UNFINISHED describes current repair need only in retired-turn inspection.
+export const FINDING_RECOVERY_SCHEMA = deepFreeze(
+  resultUnion([
+    ...FINDING_RESOLUTION_SCHEMA.properties.result.anyOf,
+    variant("status", ["UNFINISHED"], RESOLUTION_PROPERTIES, {
+      decisions: { ...FINDING_DECISIONS, maxItems: 0 },
+      reason: NONEMPTY_TEXT,
+      question: EMPTY_TEXT,
+      options: EMPTY_OPTIONS,
+      whyBlocked: EMPTY_TEXT,
+      evidence: NONEMPTY_TEXT_LIST,
     }),
   ]),
 );

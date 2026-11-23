@@ -5,6 +5,7 @@ import {
   CLAUDE_STORAGE_IDENTITY,
   recoverClaudeStorage,
   CLAUDE_FAILURE_CLASSES,
+  assertClaudeWorkspaceReady,
   classifyClaudeFailure,
   createClaudeAdapter,
   validateClaudeExecutionOptions,
@@ -12,6 +13,7 @@ import {
 import {
   CODEX_BACKEND_ID,
   CODEX_FAILURE_CLASSES,
+  assertCodexWorkspaceReady,
   classifyCodexFailure,
   createCodexAdapter,
   validateCodexExecutionOptions,
@@ -105,6 +107,7 @@ function normalizeClaudeTrustedProfile(value, path) {
 const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
   Object.freeze({
     id: CODEX_BACKEND_ID,
+    assertWorkspaceReady: assertCodexWorkspaceReady,
     createAdapter: createCodexAdapter,
     clientAttribution: Object.freeze({ supportsCustom: true }),
     validateExecutionOptions: validateCodexExecutionOptions,
@@ -121,6 +124,7 @@ const BUILTIN_PROVIDER_DESCRIPTORS = Object.freeze([
   }),
   Object.freeze({
     id: CLAUDE_BACKEND_ID,
+    assertWorkspaceReady: assertClaudeWorkspaceReady,
     resources: Object.freeze({
       identity: CLAUDE_STORAGE_IDENTITY,
       recover: recoverClaudeStorage,
@@ -146,6 +150,8 @@ function normalizeDescriptor(value, index) {
   if (
     !isRecord(value) ||
     !BACKEND_ID_PATTERN.test(value.id) ||
+    (value.assertWorkspaceReady !== undefined &&
+      typeof value.assertWorkspaceReady !== "function") ||
     (value.resources !== undefined &&
       (!isRecord(value.resources) ||
         Reflect.ownKeys(value.resources).length !== 2 ||
@@ -188,6 +194,9 @@ function normalizeDescriptor(value, index) {
   }
   return Object.freeze({
     id: value.id,
+    ...(value.assertWorkspaceReady === undefined
+      ? {}
+      : { assertWorkspaceReady: value.assertWorkspaceReady }),
     ...(value.resources === undefined
       ? {}
       : {

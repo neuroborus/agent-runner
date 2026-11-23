@@ -4,7 +4,11 @@ import { mkdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { executeOwnedProcess } from "../owned-process.js";
+import {
+  executeOwnedProcess,
+  ownershipDiagnosticFrom,
+} from "../../platform/index.js";
+import { isolateGitEnvironment } from "../../git/index.js";
 import { canReadFiles } from "../file-access.js";
 import {
   ADAPTER_FAILURE_CLASS,
@@ -15,7 +19,6 @@ import {
   isDefaultClientAttribution,
   isEnvironment,
   isRecord,
-  isolateGitEnvironment,
   sessionName,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
@@ -34,14 +37,24 @@ import {
 } from "./local-commit.js";
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
-import { CLAUDE_PROTOCOL_DIAGNOSTICS, createClaudeStream } from "./stream.js";
+import {
+  CLAUDE_PERMISSION_REASON_CODES,
+  CLAUDE_PROTOCOL_DIAGNOSTICS,
+  createClaudeStream,
+  isClaudeIdentifier,
+} from "./stream.js";
 import { createClaudeObservations } from "./observations.js";
 import {
+  assertDirectoryOutputSupport,
   directoryPolicyError,
   prepareDirectoryPolicy,
 } from "./directory-policy.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
+
+export function assertClaudeWorkspaceReady(request) {
+  return assertDirectoryOutputSupport(request, ClaudeAdapterError);
+}
 
 const executeFileAsync = promisify(executeFileCallback);
 const BUBBLEWRAP_BINARY = "bwrap";
@@ -50,9 +63,19 @@ const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 233]);
 const MAX_ARGUMENT_BYTES = 128 * 1024 - 1;
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
+// Each class names only a matched closed native reason code.
+const PERMISSION_REASON_CLASSES = Object.freeze(
+  Object.fromEntries(
+    CLAUDE_PERMISSION_REASON_CODES.map((code) => [
+      code,
+      `permission_reason_${code}`,
+    ]),
+  ),
+);
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
   "isolation_workspace_policy",
+  "output_root_missing",
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
@@ -65,9 +88,15 @@ const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   "context_exhausted",
   "environment_preparation",
   "environment_cleanup",
+  "permission_bash_required_check",
+  "permission_bash_unclassified",
   "permission_capability",
   "permission_forbidden_operation",
+  "permission_tool_unexposed",
   "permission_unclassified",
+  ...Object.values(PERMISSION_REASON_CLASSES),
+  // Legacy persisted diagnostic; no longer emitted by the stream parser.
+  "protocol_record_after_result",
   "provider_unavailable",
   "read_only_execution_failed",
   "read_only_process_failed",
@@ -146,10 +175,15 @@ const COMMON_DENY_POLICY = Object.freeze([
   "Task",
   "WebFetch",
   "WebSearch",
-  "Edit(/.git)",
-  "Edit(/.git/**)",
 ]);
-const WORKSPACE_DENY_POLICY = Object.freeze([
+// Claude resolves single-slash rules against the native startup directory, so
+// file-tool denials bind each canonical protected path in its absolute form.
+const PROTECTED_DIRECTORY_EDIT_DENIALS = Object.freeze([
+  "Edit(//<protected-directory>)",
+  "Edit(//<protected-directory>/**)",
+]);
+// Directory turns keep these denials; Git turns rely on the proved sandbox.
+const DIRECTORY_DENY_POLICY = Object.freeze([
   ...COMMON_DENY_POLICY,
   "Bash(git add *)",
   "Bash(git branch *)",
@@ -177,8 +211,8 @@ const READ_ONLY_ACCESS = Object.freeze({
   tools: READ_ONLY_TOOLS,
 });
 const WORKSPACE_ACCESS = Object.freeze({
-  autoAllowBashIfSandboxed: false,
-  deny: WORKSPACE_DENY_POLICY,
+  autoAllowBashIfSandboxed: true,
+  deny: COMMON_DENY_POLICY,
   permissionMode: "auto",
   tools: WORKSPACE_TOOLS,
 });
@@ -224,10 +258,17 @@ const EFFORT_ERROR_PATTERN =
 const NAMING_ERROR_PATTERN =
   /^(?:error: )?(?:unknown option ['"]--name['"]|option ['"](?:-n, )?--name <name>['"] argument missing|(?:failed|unable) to (?:set|save) (?:the )?session name(?:[.:]|$))/imu;
 const SAFE_BASH_INSPECTION_PATTERNS = Object.freeze([
-  /^git status(?:\s+(?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
-  /^git rev-parse\s+(?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify\s+HEAD|HEAD)$/u,
-  /^git diff\s+(?:--check|--cached\s+--check|--staged\s+--check)$/u,
-  /^git remote(?:\s+-v)?$/u,
+  /^git status(?: (?:-s|-b|-sb|-bs|--short|--branch|--porcelain(?:=v[12])?|--untracked-files=(?:no|normal|all)|--ignored(?:=(?:traditional|matching|no))?|--no-ahead-behind))*$/u,
+  /^git rev-parse (?:--git-dir|--show-toplevel|--is-inside-work-tree|--verify HEAD|HEAD)$/u,
+  /^git diff (?:--check|--check HEAD|--cached --check|--staged --check)$/u,
+  /^git remote(?: -v)?$/u,
+]);
+const PERMISSION_DIAGNOSTIC_PRECEDENCE = Object.freeze([
+  "permission_tool_unexposed",
+  "permission_bash_unclassified",
+  "permission_unclassified",
+  ...Object.values(PERMISSION_REASON_CLASSES),
+  "permission_bash_required_check",
 ]);
 const ERROR_RESULT_SUBTYPES = new Set([
   "error_during_execution",
@@ -362,6 +403,7 @@ export class ClaudeAdapterError extends Error {
     super(message, { cause });
     this.name = "ClaudeAdapterError";
     this.code = code;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     this.ambiguous = ambiguous;
     this.recoverable =
       recoverable && RECOVERABLE_CLAUDE_DIAGNOSTIC_CLASSES.has(diagnosticClass);
@@ -519,7 +561,9 @@ function isolateProcessEnvironment(value) {
     }
   }
   environment.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS = "1";
+  environment.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
   environment.CLAUDE_CODE_AUTO_CONNECT_IDE = "false";
+  environment.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
   environment.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "0";
   return Object.freeze(environment);
 }
@@ -582,10 +626,23 @@ function outputSchemaFor(request) {
 
 function accessConfigurationFor(request) {
   if (request.workspacePolicy !== undefined)
-    return { ...READ_ONLY_ACCESS, deny: WORKSPACE_DENY_POLICY };
+    return { ...READ_ONLY_ACCESS, deny: DIRECTORY_DENY_POLICY };
   return request.access === "workspace-write"
     ? WORKSPACE_ACCESS
     : READ_ONLY_ACCESS;
+}
+
+// Reject a protected path that could broaden or split its native rule.
+function protectedDirectoryEditDenials(paths) {
+  if (
+    paths.some((path) => !isAbsolute(path) || /[*?[\]{}()\\\p{Cc}]/u.test(path))
+  )
+    throw directoryPolicyError(ClaudeAdapterError);
+  return paths.flatMap((path) =>
+    PROTECTED_DIRECTORY_EDIT_DENIALS.map((rule) =>
+      rule.replace("/<protected-directory>", () => path),
+    ),
+  );
 }
 
 function policyIdentity(isolationPolicies, architecture, directory = false) {
@@ -601,7 +658,10 @@ function policyIdentity(isolationPolicies, architecture, directory = false) {
           autoMode: { classifyAllShell: true },
           disableBypassPermissionsMode: "disable",
           permissionMode: configuration.permissionMode,
-          permissions: { deny: configuration.deny },
+          permissions: {
+            deny: configuration.deny,
+            protectedDirectoryDeny: PROTECTED_DIRECTORY_EDIT_DENIALS,
+          },
           sandbox: {
             allowUnsandboxedCommands: false,
             autoAllowBashIfSandboxed: configuration.autoAllowBashIfSandboxed,
@@ -666,6 +726,7 @@ function cliSettings(
   request,
   accessConfiguration,
   gitDirectories,
+  protectedEditDenials,
   credentialEnvironmentNames,
   isolationPolicy,
   providerCwd,
@@ -683,13 +744,17 @@ function cliSettings(
     disableBypassPermissionsMode: "disable",
     env: {
       CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
+      // Keep per-command .claude/.cc-writes preparation in the private native
+      // cwd instead of adopting Bash's projected workspace cwd via --add-dir.
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "1",
       CLAUDE_CODE_AUTO_CONNECT_IDE: "false",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
     },
     fallbackModel: [],
     fileCheckpointingEnabled: false,
     permissions: {
-      deny: accessConfiguration.deny,
+      deny: [...accessConfiguration.deny, ...protectedEditDenials],
     },
     sandbox: {
       enabled: true,
@@ -726,6 +791,7 @@ function cliSettings(
 function commandArguments(
   request,
   gitDirectories,
+  protectedEditDenials,
   credentialEnvironmentNames,
   session,
   isolationPolicy,
@@ -747,6 +813,7 @@ function commandArguments(
       request,
       accessConfiguration,
       gitDirectories,
+      protectedEditDenials,
       credentialEnvironmentNames,
       isolationPolicy,
       providerCwd,
@@ -1079,38 +1146,69 @@ function isClaudeErrorResult(payload) {
   );
 }
 
-function permissionDiagnostic(denials, request) {
+function permissionDiagnostic(denials, request, sessionId, stream) {
   const permittedTools = new Set(
     accessConfigurationFor(request).tools.split(","),
   );
-  let unclassified = false;
+  const requiredChecks = new Set(request.requiredCheckCommands);
+  const facts = new Set();
+  // Reasons need one valid, unique authoritative id for every denial.
+  const toolUseIds = denials.map((denial) => denial?.tool_use_id);
+  const ownedIds =
+    toolUseIds.every(isClaudeIdentifier) &&
+    new Set(toolUseIds).size === toolUseIds.length;
+  const reasons = [];
   for (const denial of denials) {
     if (!isRecord(denial) || typeof denial.tool_name !== "string") {
-      unclassified = true;
-      continue;
-    }
-    if (!permittedTools.has(denial.tool_name)) {
-      return "permission_forbidden_operation";
-    }
-    if (denial.tool_name !== "Bash") {
-      continue;
-    }
-    const command = denial.tool_input?.command;
-    if (typeof command !== "string" || command.length === 0) {
-      unclassified = true;
-      continue;
-    }
-    if (
-      !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
-    ) {
-      return "permission_forbidden_operation";
+      facts.add("permission_unclassified");
+    } else if (!permittedTools.has(denial.tool_name)) {
+      facts.add("permission_tool_unexposed");
+    } else if (denial.tool_name === "Bash") {
+      const command = denial.tool_input?.command;
+      if (typeof command !== "string" || command.length === 0) {
+        facts.add("permission_unclassified");
+      } else if (
+        !SAFE_BASH_INSPECTION_PATTERNS.some((pattern) => pattern.test(command))
+      ) {
+        // Only byte-exact inventory equality identifies a required check.
+        facts.add(
+          requiredChecks.has(command)
+            ? "permission_bash_required_check"
+            : "permission_bash_unclassified",
+        );
+        reasons.push(
+          stream.permissionReason(
+            sessionId,
+            denial.tool_use_id,
+            denial.tool_name,
+          ),
+        );
+      }
     }
   }
-  return unclassified ? "permission_unclassified" : "permission_capability";
+  // Only one matched code shared by every non-safe Bash denial names a reason.
+  if (
+    ownedIds &&
+    reasons.length > 0 &&
+    reasons.every((code) => code !== undefined && code === reasons[0])
+  ) {
+    facts.delete("permission_bash_unclassified");
+    facts.add(PERMISSION_REASON_CLASSES[reasons[0]]);
+  }
+  return (
+    PERMISSION_DIAGNOSTIC_PRECEDENCE.find((diagnosticClass) =>
+      facts.has(diagnosticClass),
+    ) ?? "permission_capability"
+  );
 }
 
-function permissionError(denials, request, sessionId) {
-  const diagnosticClass = permissionDiagnostic(denials, request);
+function permissionError(denials, request, sessionId, stream) {
+  const diagnosticClass = permissionDiagnostic(
+    denials,
+    request,
+    sessionId,
+    stream,
+  );
   return diagnosticError("Claude requested denied permission.", {
     code: "ERR_CLAUDE_PERMISSION_DENIED",
     diagnosticClass,
@@ -1119,22 +1217,23 @@ function permissionError(denials, request, sessionId) {
   });
 }
 
-function processFailureError(request) {
-  if (request.access === "read-only") {
-    return diagnosticError("Claude read-only process failed.", {
-      code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
-      diagnosticClass: "read_only_process_failed",
-      recoverable: true,
-    });
-  }
-  return diagnosticError(
-    "Claude process outcome requires repository reconciliation.",
+function processFailureError(request, cause) {
+  const isReadOnly = request.access === "read-only";
+  const error = diagnosticError(
+    isReadOnly
+      ? "Claude read-only process failed."
+      : "Claude process outcome requires repository reconciliation.",
     {
-      ambiguous: true,
+      ambiguous: !isReadOnly,
       code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
-      diagnosticClass: "writable_process_ambiguous",
+      diagnosticClass: isReadOnly
+        ? "read_only_process_failed"
+        : "writable_process_ambiguous",
+      recoverable: isReadOnly,
     },
   );
+  error.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
+  return error;
 }
 
 function validateRequestedModel(payload, model) {
@@ -1151,7 +1250,7 @@ function validateRequestedModel(payload, model) {
   }
 }
 
-function normalizeResult(payload, request, session) {
+function normalizeResult(payload, request, session, stream) {
   const schema = outputSchemaFor(request);
   const hasValidOutput =
     typeof payload?.result === "string"
@@ -1168,7 +1267,12 @@ function normalizeResult(payload, request, session) {
         diagnosticClass: CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
       });
     }
-    throw permissionError(payload.permission_denials, request, sessionId);
+    throw permissionError(
+      payload.permission_denials,
+      request,
+      sessionId,
+      stream,
+    );
   }
   if (isClaudeErrorResult(payload)) {
     throw outputError(payload, request, session);
@@ -1408,8 +1512,8 @@ export function createClaudeAdapter(options = {}) {
             contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
-              ? "claude-command-boundary-v10"
-              : "claude-isolation-v4",
+              ? "claude-command-boundary-v13"
+              : "claude-isolation-v6",
             policies: resolvedPolicies,
             version: version.text,
           }),
@@ -1632,6 +1736,7 @@ export function createClaudeAdapter(options = {}) {
         (await gitMetadataDirectories(request))),
       ...(request.readPaths ?? []),
     ];
+    const protectedEditDenials = protectedDirectoryEditDenials(gitDirectories);
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy =
       request.isolationPolicy ?? isolationPolicies?.[request.access];
@@ -1718,6 +1823,7 @@ export function createClaudeAdapter(options = {}) {
           providerCwd,
           directory: storage.directory,
           environment: baseEnvironment,
+          producerBinary: claudeBinary,
           gitDirectories,
           directoryPolicy: await request.directoryBoundary?.bindMounts(),
           isolationPolicy,
@@ -1730,6 +1836,7 @@ export function createClaudeAdapter(options = {}) {
       const argumentsList = commandArguments(
         request,
         gitDirectories,
+        protectedEditDenials,
         credentialEnvironmentNames,
         selectedSession,
         isolationPolicy,
@@ -1779,7 +1886,7 @@ export function createClaudeAdapter(options = {}) {
         if (cause instanceof ClaudeAdapterError) throw cause;
         if (cause?.signal != null || cause?.killed === true) {
           // Even a parseable diagnostic cannot prove a killed process completed.
-          throw processFailureError(request);
+          throw processFailureError(request, cause);
         }
         const standardError = processOutput(cause?.stderr);
         if (PERMISSION_MODE_FALLBACK_PATTERN.test(standardError)) {
@@ -1810,7 +1917,7 @@ export function createClaudeAdapter(options = {}) {
           ) {
             throw reportedError;
           }
-          throw processFailureError(request);
+          throw processFailureError(request, cause);
         }
         const sessionId = payloadSessionId(payload);
         if (
@@ -1824,7 +1931,12 @@ export function createClaudeAdapter(options = {}) {
                 CLAUDE_PROTOCOL_DIAGNOSTICS.deniedResultSessionInvalid,
             });
           }
-          throw permissionError(payload.permission_denials, request, sessionId);
+          throw permissionError(
+            payload.permission_denials,
+            request,
+            sessionId,
+            stream,
+          );
         }
         if (!isClaudeErrorResult(payload)) {
           // Only the exact success envelope proves success after a failed exit.
@@ -1866,7 +1978,7 @@ export function createClaudeAdapter(options = {}) {
         stream.assertValid();
       if (isClaudeErrorResult(payload) && !payload.permission_denials?.length)
         await acknowledgeChild(payloadSessionId(payload), "unavailable");
-      const result = normalizeResult(payload, request, selectedSession);
+      const result = normalizeResult(payload, request, selectedSession, stream);
       if (
         selectedSession?.mode === "fork" &&
         result.sessionId === selectedSession.id

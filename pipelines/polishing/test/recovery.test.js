@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
@@ -19,6 +19,7 @@ import {
   CHECK_AND_FIX_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   POLISH_SCHEMA,
   REVIEW_SCHEMA,
 } from "../src/schemas.js";
@@ -28,11 +29,16 @@ import {
   SOURCE_SESSION,
   SETTINGS,
   bootstrapReady,
+  arbitrationResolved,
+  reconciliationDisagreement,
   candidateApproved,
   candidateClean,
   checkAndFix,
   checkResults,
   clarificationReady,
+  clarificationQuestions,
+  productDecision,
+  hash,
   cleanConfirmation,
   createFixture,
   createIntegrationFixture,
@@ -1029,9 +1035,19 @@ test("persists a forbidden-delegation diagnostic without provider data", async (
   );
 });
 
-test("persists a terminal Claude finalization protocol diagnosis without acceptance", async (t) => {
+test("persists terminal Claude finalization diagnoses without acceptance", async (t) => {
   const marker = "PRIVATE_NATIVE_FRAME";
-  for (const diagnosticClass of ["protocol_record_after_result", undefined])
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_assistant_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", undefined],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    [
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_reason_auto_mode_stop_no_verdict",
+    ],
+  ])
     await t.test(diagnosticClass ?? "unclassified", async (t) => {
       let before;
       const fixture = await createIntegrationFixture(t, {
@@ -1051,7 +1067,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
             "claude",
             new ClaudeAdapterError(marker, {
               cause: new Error(marker),
-              code: "ERR_CLAUDE_PROTOCOL",
+              code,
               diagnosticClass,
             }),
           );
@@ -1059,7 +1075,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       });
 
       await assert.rejects(fixture.run(), (error) => {
-        assert.equal(error.code, "ERR_CLAUDE_PROTOCOL");
+        assert.equal(error.code, code);
         assert.equal(error.recoverable, false);
         return true;
       });
@@ -1072,7 +1088,7 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(state.workflowState, "FAILED");
       assert.deepEqual(run.pause, {
         reason: "internal_failure",
-        code: "ERR_CLAUDE_PROTOCOL",
+        code,
         ...(diagnosticClass === undefined ? {} : { diagnosticClass }),
       });
       const projected = polishingPipeline.projections.pause(run);
@@ -1090,8 +1106,8 @@ test("persists a terminal Claude finalization protocol diagnosis without accepta
       assert.equal(
         activities.at(-1).message,
         diagnosticClass === undefined
-          ? "Polishing failed: ERR_CLAUDE_PROTOCOL."
-          : `Polishing failed: ERR_CLAUDE_PROTOCOL (${diagnosticClass}).`,
+          ? `Polishing failed: ${code}.`
+          : `Polishing failed: ${code} (${diagnosticClass}).`,
       );
       assert.equal(state.finalizationResult, null);
       assert.equal(state.finalizedFingerprint, null);
@@ -1272,6 +1288,7 @@ test("accounts for a content-changing interrupted correction before recovery", a
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1290,17 +1307,30 @@ test("accounts for a content-changing interrupted correction before recovery", a
     },
   });
 
+  // The lost report retains its charged checkpoint and is restated read-only.
   const interruptedRun = await fixture.run();
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.counters.fixRounds, 1);
   assert.equal(interruptedRun.pipelineState.pendingCorrection, true);
+  assert.equal(
+    interruptedRun.pipelineState.resolutionCorrection.stage,
+    "ready",
+  );
 
   await fixture.recover();
   const resumed = await fixture.run();
   assert.equal(resumed.pause.reason, "no_progress");
   assert.equal(resumed.counters.fixRounds, 1);
   assert.equal(resumed.counters.correctionRounds, 1);
+  assert.deepEqual(
+    fixture.calls.worker
+      .filter(({ schema }) =>
+        [FINDING_RESOLUTION_SCHEMA, FINDING_RECOVERY_SCHEMA].includes(schema),
+      )
+      .map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
 });
 
 test("invalidates retained finalization after content-changing interrupted terminal resolution", async (t) => {
@@ -1319,6 +1349,7 @@ test("invalidates retained finalization after content-changing interrupted termi
       reconciliationResolved(),
       polishingCompleted(),
       finalizationPassed(),
+      resolution("FIX", "R1"),
       finalizationPassed(),
     ],
     async onRoleRun(role, request, _turn, { projectPath }) {
@@ -1340,7 +1371,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   const interruptedRun = await fixture.run();
 
   assert.equal(interruptedRun.pause.reason, "backend_unavailable");
-  assert.equal(interruptedRun.pause.resumeState, "REVIEW");
+  assert.equal(interruptedRun.pause.resumeState, "RESOLVE_FINDINGS");
   assert.equal(interruptedRun.pipelineState.finalizationResult, null);
 
   await fixture.recover();
@@ -1354,7 +1385,7 @@ test("invalidates retained finalization after content-changing interrupted termi
   );
 });
 
-test("clears a reconciled correction marker without replaying the turn", async (t) => {
+test("clears a legacy reconciled correction marker without replaying the turn", async (t) => {
   const processLoss = new Error(
     "Process stopped after correction reconciliation.",
   );
@@ -1389,7 +1420,24 @@ test("clears a reconciled correction marker without replaying the turn", async (
     if (processStopped) {
       throw processLoss;
     }
-    const next = await transition(patch, options);
+    const ready = patch.pipelineState.resolutionCorrection?.stage === "ready";
+    // Persist the version-19 shape: reconciliation already entered REVIEW
+    // and no report checkpoint exists for the retained turn marker.
+    const next = await transition(
+      ready
+        ? {
+            ...patch,
+            pipelineState: {
+              ...patch.pipelineState,
+              workflowState: "REVIEW",
+              previousFindings: patch.pipelineState.findings,
+              findings: [],
+              resolutionCorrection: null,
+            },
+          }
+        : patch,
+      options,
+    );
     if (
       next.activeTurn?.phase === "resolve-findings" &&
       next.pipelineState.workflowState === "REVIEW" &&
@@ -1515,7 +1563,11 @@ for (const mode of ["independent", "lazy"]) {
         });
         const runWorker = fixture.runtime.adapters.worker.run;
         fixture.runtime.adapters.worker.run = async (request) => {
-          if (request.schema === schema) {
+          if (
+            request.schema === schema ||
+            (schema === FINDING_RESOLUTION_SCHEMA &&
+              request.schema === FINDING_RECOVERY_SCHEMA)
+          ) {
             targetCalls.push(request);
             attempts += 1;
             for (const prompt of [request.prompt, request.recoveryPrompt]) {
@@ -1564,9 +1616,11 @@ for (const mode of ["independent", "lazy"]) {
             }
           }
           if (
-            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-              request.schema,
-            )
+            [
+              CHECK_AND_FIX_SCHEMA,
+              FINDING_RESOLUTION_SCHEMA,
+              FINDING_RECOVERY_SCHEMA,
+            ].includes(request.schema)
           ) {
             fixture.calls.worker.push(request);
             return {
@@ -1745,3 +1799,682 @@ test("combined polishing preserves a charged exhausted correction and reconverge
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.counters.fixRounds, 1);
 });
+
+for (const [kind, boundary, mode] of [
+  ["questions", "intent", "independent"],
+  ["questions", "replacement", "lazy"],
+  ["questions", "publication", "combined"],
+  ["decision", "intent", "lazy"],
+  ["decision", "replacement", "combined"],
+  ["decision", "publication", "independent"],
+  ["arbitration", "replacement", "independent"],
+]) {
+  test(`journaled ${kind} append recovers ${boundary} interruption in ${mode}`, async (t) => {
+    const interruption = new Error("Append publication interrupted.");
+    let interrupted = false;
+    const questions = kind === "questions";
+    const arbitration = kind === "arbitration";
+    const counter = questions ? "clarificationRounds" : "productDecisions";
+    const fixture = await createFixture(t, {
+      mode,
+      ...(arbitration
+        ? {
+            arbiter: [
+              productDecision({
+                ...arbitrationResolved(),
+                direction: "PRODUCT_DECISION_REQUIRED",
+                summary: "",
+              }),
+            ],
+          }
+        : {}),
+      worker: questions
+        ? [clarificationQuestions()]
+        : arbitration
+          ? [
+              clarificationReady(),
+              bootstrapReady("Worker"),
+              reconciliationDisagreement(),
+            ]
+          : [
+              clarificationReady(),
+              productDecision({
+                ...bootstrapReady("Worker"),
+                status: "PRODUCT_DECISION_REQUIRED",
+                summary: "",
+                requiredChecks: [],
+                validationInfrastructure: [],
+                capabilityRequirements: [],
+                environmentBlockers: [],
+              }),
+            ],
+    });
+    const service = fixture.runtime.clarifications;
+    const transition = fixture.runtime.transition;
+    let editors = 0;
+    fixture.runtime.transition = async (patch, options) => {
+      const result = await transition(patch, options);
+      if (
+        !interrupted &&
+        ((boundary === "intent" &&
+          patch.pipelineState.pendingClarificationAppend !== null) ||
+          (boundary === "publication" &&
+            patch.pipelineState.pendingEdit !== null))
+      ) {
+        interrupted = true;
+        throw interruption;
+      }
+      return result;
+    };
+    fixture.runtime.clarifications = {
+      ...service,
+      async [questions ? "appendQuestionRound" : "appendProductDecision"](
+        options,
+      ) {
+        const result =
+          await service[
+            questions ? "appendQuestionRound" : "appendProductDecision"
+          ](options);
+        if (!interrupted && boundary === "replacement") {
+          interrupted = true;
+          throw interruption;
+        }
+        return result;
+      },
+      async openEditor(...args) {
+        editors++;
+        return service.openEditor(...args);
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const saved = structuredClone(fixture.currentRun);
+    const calls = Object.values(fixture.calls).flat().length;
+    const path = saved.pipelineState.clarificationPath;
+    const bytes = await readFile(path, "utf8");
+    if (boundary !== "publication") {
+      assert.notEqual(saved.pipelineState.pendingClarificationAppend, null);
+      assert.equal(saved.pipelineState.pendingEdit, null);
+      assert.equal(saved.counters[counter], 0);
+      if (!questions) {
+        for (const field of ["decision", "workReport"]) {
+          const malformed = structuredClone(saved);
+          const append = malformed.pipelineState.pendingClarificationAppend;
+          if (field === "decision") append.decision.extra = true;
+          else append.checkpoint.workReport = {};
+          assert.throws(
+            () => polishingPipeline.workflow.validateRun(malformed),
+            { code: "ERR_INVALID_POLISHING_STATE" },
+          );
+        }
+      }
+      // Stops verify bytes without appending or granting an edit.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await runPolishing({
+          run: fixture.currentRun,
+          runtime: fixture.runtime,
+          operatorStop: true,
+        });
+        assert.equal(await readFile(path, "utf8"), bytes);
+        assert.deepEqual(
+          fixture.currentRun.pipelineState.pendingClarificationAppend,
+          saved.pipelineState.pendingClarificationAppend,
+        );
+        assert.equal(editors, 0);
+      }
+    }
+    await fixture.recover();
+    const paused = await fixture.run();
+    assert.equal(
+      paused.pause.reason,
+      questions
+        ? "clarification_answers_required"
+        : "product_decision_required",
+    );
+    assert.equal(paused.pipelineState.pendingClarificationAppend, null);
+    assert.equal(paused.counters[counter], 1);
+    const resultBytes = await readFile(path, "utf8");
+    assert.equal(paused.hashes.executionClarifications, hash(resultBytes));
+    assert.equal(Object.values(fixture.calls).flat().length, calls);
+    if (arbitration) {
+      assert.deepEqual(
+        paused.pipelineState.workReports.at(-1),
+        saved.pipelineState.pendingClarificationAppend.checkpoint.workReport,
+      );
+      assert.equal(
+        paused.pipelineState.workReports.at(-1).phase,
+        "ARBITRATE_BOOTSTRAP",
+      );
+    }
+    const authorization = paused.pipelineState.pendingEdit.id;
+    // Unchanged answers renew only the edit window.
+    await fixture.recover();
+    const repeated = await fixture.run();
+    assert.notEqual(repeated.pipelineState.pendingEdit.id, authorization);
+    assert.deepEqual(
+      repeated.pipelineState.workReports,
+      paused.pipelineState.workReports,
+    );
+    assert.equal(repeated.counters[counter], 1);
+    assert.equal(await readFile(path, "utf8"), resultBytes);
+    assert.equal(Object.values(fixture.calls).flat().length, calls);
+  });
+}
+
+for (const change of [
+  "prior-bytes",
+  "result-bytes",
+  "protected-input",
+  "controls",
+  "infrastructure",
+]) {
+  test(`pending polishing append rejects ${change} before replay`, async (t) => {
+    const interruption = new Error("Retained append intent.");
+    const fixture = await createFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    fixture.runtime.clarifications = {
+      ...service,
+      async appendQuestionRound(options) {
+        if (change === "prior-bytes")
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw interruption;
+            },
+          });
+        await service.appendQuestionRound(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const saved = structuredClone(fixture.currentRun);
+    const path = saved.pipelineState.clarificationPath;
+    if (change === "protected-input")
+      await writeFile(
+        join(fixture.taskPath, "context.md"),
+        "Changed protected context.\n",
+      );
+    else if (change === "controls")
+      fixture.runtime.git.assertUnchanged = async () => {
+        throw Object.assign(new Error("Controls changed."), {
+          code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+        });
+      };
+    else if (change === "infrastructure")
+      await writeFile(
+        join(fixture.projectPath, ".agents/skills/finalization/SKILL.md"),
+        "Changed frozen guidance.\n",
+      );
+    else
+      await writeFile(
+        path,
+        `${await readFile(path, "utf8")}Unauthorized bytes.\n`,
+      );
+    const bytes = await readFile(path, "utf8");
+    fixture.runtime.clarifications = service;
+    const rejected = await fixture.run();
+    assert.equal(
+      rejected.pause.reason,
+      change === "protected-input"
+        ? "task_input_changed"
+        : ["controls", "infrastructure"].includes(change)
+          ? "unsafe_git_state"
+          : "clarifications_changed",
+    );
+    assert.deepEqual(
+      rejected.pipelineState.pendingClarificationAppend,
+      saved.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.clarificationRounds, 0);
+    assert.equal(await readFile(path, "utf8"), bytes);
+    fixture.runtime.clarifications = {
+      ...service,
+      async inspectTranscript() {
+        throw Object.assign(new Error("Private read failure."), {
+          code: "ERR_CLARIFICATION_READ",
+        });
+      },
+    };
+    const stopped = await runPolishing({
+      run: rejected,
+      runtime: fixture.runtime,
+      operatorStop: true,
+    });
+    assert.deepEqual(stopped.pause, rejected.pause);
+    assert.equal(fixture.calls.worker.length, 1);
+    assert.deepEqual(
+      polishingPipeline.projections.pause(stopped).nextActions,
+      [],
+    );
+  });
+}
+
+for (const boundary of ["replacement", "readback", "service-readback"]) {
+  test(`polishing append persists a non-resumable ${boundary} rejection`, async (t) => {
+    const fixture = await createRealStoreFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    let rejectedBytes;
+    let intent;
+    let appends = 0;
+    let authorizations = 0;
+    let editors = 0;
+    fixture.runtime.clarifications = {
+      ...service,
+      async appendQuestionRound(options) {
+        appends++;
+        const priorBytes = await readFile(options.transcriptPath, "utf8");
+        if (boundary === "replacement")
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              intent = structuredClone(
+                fixture.currentRun.pipelineState.pendingClarificationAppend,
+              );
+              rejectedBytes = `${priorBytes}Unauthorized bytes.\n`;
+              await writeFile(options.transcriptPath, rejectedBytes);
+            },
+          });
+        const result = await service.appendQuestionRound(options);
+        intent = structuredClone(
+          fixture.currentRun.pipelineState.pendingClarificationAppend,
+        );
+        rejectedBytes = priorBytes;
+        await writeFile(options.transcriptPath, rejectedBytes);
+        // Model prior bytes restored before the service's final readback.
+        if (boundary === "service-readback")
+          return service.inspectTranscript(options);
+        return result;
+      },
+      async prepareEdit(...args) {
+        authorizations++;
+        return service.prepareEdit(...args);
+      },
+      async openEditor(...args) {
+        editors++;
+        return service.openEditor(...args);
+      },
+    };
+    const rejected = await fixture.run();
+    assert.equal(rejected.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(rejected.pause, { reason: "clarifications_changed" });
+    assert.deepEqual(rejected.pipelineState.pendingClarificationAppend, intent);
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.clarificationRounds, 0);
+    assert.equal(rejected.hashes.executionClarifications, intent.expectedHash);
+    assert.equal(editors, 0);
+    const path = rejected.pipelineState.clarificationPath;
+    assert.equal(await readFile(path, "utf8"), rejectedBytes);
+    const recovered = await fixture.recover();
+    assert.deepEqual(fixture.currentRun.pause, rejected.pause);
+    assert.deepEqual(
+      fixture.currentRun.pipelineState.pendingClarificationAppend,
+      intent,
+    );
+    assert.deepEqual(await fixture.run(), recovered);
+    assert.equal(appends, 1);
+    assert.equal(authorizations, 0);
+    assert.equal(editors, 0);
+    assert.equal(fixture.calls.worker.length, 1);
+    assert.equal(await readFile(path, "utf8"), rejectedBytes);
+    assert.deepEqual(
+      polishingPipeline.projections.pause(fixture.currentRun).nextActions,
+      [],
+    );
+  });
+}
+
+for (const failure of ["write", "readback", "editor-preparation"]) {
+  test(`polishing append ${failure} failure retains bounded resumable proof`, async (t) => {
+    const fixture = await createFixture(t, {
+      worker: [clarificationQuestions()],
+    });
+    const service = fixture.runtime.clarifications;
+    let failed = false;
+    let failReadback = false;
+    const code =
+      failure === "write"
+        ? "ERR_CLARIFICATION_WRITE"
+        : "ERR_CLARIFICATION_READ";
+    const fail = () => {
+      throw Object.assign(new Error("Private filesystem detail."), { code });
+    };
+    fixture.runtime.clarifications = {
+      ...service,
+      async inspectTranscript(options) {
+        if (failReadback) {
+          failReadback = false;
+          fail();
+        }
+        return service.inspectTranscript(options);
+      },
+      async prepareEdit(options) {
+        if (!failed && failure === "editor-preparation") {
+          failed = true;
+          fail();
+        }
+        return service.prepareEdit(options);
+      },
+      async appendQuestionRound(options) {
+        if (!failed && failure !== "editor-preparation") {
+          failed = true;
+          if (failure === "readback") {
+            const result = await service.appendQuestionRound(options);
+            failReadback = true;
+            return result;
+          }
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              fail();
+            },
+          });
+        }
+        return service.appendQuestionRound(options);
+      },
+    };
+    const interrupted = await fixture.run();
+    assert.deepEqual(interrupted.pause, {
+      reason: "clarification_append_interrupted",
+      code,
+    });
+    assert.equal(interrupted.counters.clarificationRounds, 0);
+    assert.equal(interrupted.pipelineState.pendingEdit, null);
+    const projection = polishingPipeline.projections.pause(interrupted);
+    assert.equal(projection.resumeState, "CLARIFY");
+    assert.deepEqual(projection.nextActions, [
+      { type: "resume", action: null },
+    ]);
+    assert.doesNotMatch(JSON.stringify(projection), /Private filesystem/u);
+    const recovered = await fixture.run();
+    assert.equal(recovered.pause.reason, "clarification_answers_required");
+    assert.equal(recovered.counters.clarificationRounds, 1);
+    assert.equal(fixture.calls.worker.length, 1);
+  });
+}
+
+test("failed initial polishing append publication leaves bytes and accounting unchanged", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+  });
+  const transition = fixture.runtime.transition;
+  const interruption = new Error("Intent publication failed.");
+  fixture.runtime.transition = async (patch, options) => {
+    if (patch.pipelineState.pendingClarificationAppend !== null)
+      throw interruption;
+    return transition(patch, options);
+  };
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  const saved = fixture.currentRun;
+  assert.equal(saved.pipelineState.pendingClarificationAppend, null);
+  assert.equal(saved.pipelineState.pendingEdit, null);
+  assert.equal(saved.counters.clarificationRounds ?? 0, 0);
+  assert.doesNotMatch(
+    await readFile(saved.pipelineState.clarificationPath, "utf8"),
+    /## Round/u,
+  );
+});
+
+test("polishing append contract rejects malformed proof and changed checkpoint bindings", async (t) => {
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+  });
+  const service = fixture.runtime.clarifications;
+  const interruption = new Error("Intent retained for validation.");
+  fixture.runtime.clarifications = {
+    ...service,
+    appendQuestionRound(options) {
+      return service.appendQuestionRound({
+        ...options,
+        async persistAppend(proof) {
+          await options.persistAppend(proof);
+          throw interruption;
+        },
+      });
+    },
+  };
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  const saved = structuredClone(fixture.currentRun);
+  polishingPipeline.workflow.validateRun(saved);
+  for (const mutate of [
+    (_run, append) => {
+      append.extra = true;
+    },
+    (_run, append) => {
+      append.resultHash = append.expectedHash;
+    },
+    (_run, append) => {
+      append.number++;
+    },
+    (_run, append) => {
+      append.questions[0].question += " ";
+    },
+    (_run, append) => {
+      append.decision = {};
+    },
+    (_run, append) => {
+      append.checkpoint.extra = true;
+    },
+    (_run, append) => {
+      append.checkpoint.workReport = {};
+    },
+    (_run, append) => {
+      append.checkpoint.suspendedState = "POLISH";
+    },
+    (_run, append) => {
+      append.checkpoint.infrastructureFingerprint = "invalid";
+    },
+    (run) => {
+      run.hashes.task = hash("Different task");
+    },
+    (run) => {
+      run.counters.fixRounds = 1;
+    },
+    (run) => {
+      run.pipelineState.proactiveClarificationComplete = false;
+    },
+    (run) => {
+      run.pipelineState.polishSummary = "Invented summary";
+    },
+    (run) => {
+      run.sessionLineage.children = [];
+    },
+    (run) => {
+      run.activeTurn = { role: "worker", phase: "clarify" };
+    },
+    (run) => {
+      run.pipelineState.workflowState = "WAITING_FOR_USER";
+      run.pause = {
+        reason: "clarification_append_interrupted",
+        code: "PRIVATE_UNSUPPORTED_CODE",
+      };
+    },
+  ]) {
+    const malformed = structuredClone(saved);
+    mutate(malformed, malformed.pipelineState.pendingClarificationAppend);
+    assert.throws(() => polishingPipeline.workflow.validateRun(malformed), {
+      code: "ERR_INVALID_POLISHING_STATE",
+    });
+  }
+});
+
+for (const change of ["unchanged", "changed", "missing"]) {
+  test(`confirmation append recovery checks ${change} finalization-only infrastructure`, async (t) => {
+    const interruption = new Error("Retained confirmation decision.");
+    const relativePath = "LOCAL_ARTIFACTS/terminal-check.json";
+    const fixture = await createFixture(t, {
+      async prepareProject(projectPath) {
+        await mkdir(join(projectPath, "LOCAL_ARTIFACTS"));
+        await writeFile(join(projectPath, relativePath), "{}\n");
+      },
+      worker: [
+        clarificationReady(),
+        bootstrapReady("Worker"),
+        reconciliationResolved(),
+        polishingCompleted(),
+        {
+          ...finalizationPassed(),
+          validationInfrastructure: [
+            ...bootstrapReady("Worker").validationInfrastructure,
+            relativePath,
+          ],
+        },
+      ],
+      reviewer: [
+        bootstrapReady("Reviewer"),
+        candidateApproved(),
+        productDecision({
+          ...reviewApproved(),
+          status: "PRODUCT_DECISION_REQUIRED",
+        }),
+      ],
+    });
+    const service = fixture.runtime.clarifications;
+    let appends = 0;
+    let editors = 0;
+    fixture.runtime.clarifications = {
+      ...service,
+      appendProductDecision(options) {
+        appends++;
+        return service.appendProductDecision({
+          ...options,
+          async persistAppend(proof) {
+            await options.persistAppend(proof);
+            throw interruption;
+          },
+        });
+      },
+      openEditor(...args) {
+        editors++;
+        return service.openEditor(...args);
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const saved = structuredClone(fixture.currentRun);
+    const intent = saved.pipelineState.pendingClarificationAppend;
+    assert.equal(intent.checkpoint.workflowState, "CONFIRM");
+    assert.equal(
+      saved.pipelineState.validationInfrastructure.includes(relativePath),
+      false,
+    );
+    assert.equal(
+      saved.pipelineState.finalizationResult.validationInfrastructure.includes(
+        relativePath,
+      ),
+      true,
+    );
+    const path = saved.pipelineState.clarificationPath;
+    const bytes = await readFile(path, "utf8");
+    assert.equal(hash(bytes), intent.expectedHash);
+    if (change === "missing") await rm(join(fixture.projectPath, relativePath));
+    else if (change === "changed")
+      await writeFile(
+        join(fixture.projectPath, relativePath),
+        '{"changed":true}\n',
+      );
+    fixture.runtime.clarifications.appendProductDecision = (options) => {
+      appends++;
+      return service.appendProductDecision(options);
+    };
+    await fixture.recover();
+    const result = await fixture.run();
+    if (change === "unchanged") {
+      assert.equal(result.pause.reason, "product_decision_required");
+      assert.equal(result.pipelineState.pendingClarificationAppend, null);
+      assert.notEqual(result.pipelineState.pendingEdit, null);
+      assert.equal(result.counters.productDecisions, 1);
+      assert.equal(appends, 2);
+      assert.equal(editors, 1);
+    } else {
+      assert.equal(result.pause.reason, "unsafe_git_state");
+      assert.equal(
+        result.pause.code,
+        "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      );
+      assert.deepEqual(result.pipelineState.pendingClarificationAppend, intent);
+      assert.equal(result.pipelineState.pendingEdit, null);
+      assert.equal(result.counters.productDecisions, 0);
+      assert.equal(await readFile(path, "utf8"), bytes);
+      assert.equal(appends, 1);
+      assert.equal(editors, 0);
+    }
+    assert.equal(fixture.calls.worker.length, 5);
+    assert.equal(fixture.calls.reviewer.length, 3);
+    assert.equal(fixture.calls.arbiter.length, 0);
+  });
+}
+
+for (const missing of [false, true]) {
+  test(`post-start polishing append rejects ${missing ? "missing" : "changed"} ignored infrastructure`, async (t) => {
+    const interruption = new Error("Retained post-start decision.");
+    const relativePath = "LOCAL_ARTIFACTS/check.json";
+    const infrastructure = [
+      ...bootstrapReady("Worker").validationInfrastructure,
+      relativePath,
+    ];
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      async prepareProject(projectPath) {
+        await mkdir(join(projectPath, "LOCAL_ARTIFACTS"));
+        await writeFile(join(projectPath, relativePath), "{}\n");
+      },
+      worker: [
+        clarificationReady(),
+        {
+          ...bootstrapReady("Worker"),
+          validationInfrastructure: infrastructure,
+        },
+        productDecision({
+          ...polishingCompleted(),
+          status: "PRODUCT_DECISION_REQUIRED",
+          summary: "",
+        }),
+      ],
+    });
+    const service = fixture.runtime.clarifications;
+    fixture.runtime.clarifications = {
+      ...service,
+      async appendProductDecision(options) {
+        await service.appendProductDecision(options);
+        throw interruption;
+      },
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    const intent = structuredClone(
+      fixture.currentRun.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(intent.checkpoint.workflowState, "POLISH");
+    assert.match(
+      intent.checkpoint.infrastructureFingerprint,
+      /^[a-f0-9]{64}$/u,
+    );
+    if (missing) await rm(join(fixture.projectPath, relativePath));
+    else
+      await writeFile(
+        join(fixture.projectPath, relativePath),
+        '{"changed":true}\n',
+      );
+    const path = fixture.currentRun.pipelineState.clarificationPath;
+    const bytes = await readFile(path, "utf8");
+    fixture.runtime.clarifications = service;
+    const rejected = await fixture.run();
+    assert.equal(rejected.pause.reason, "unsafe_git_state");
+    assert.equal(
+      rejected.pause.code,
+      "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+    );
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.productDecisions, 0);
+    assert.deepEqual(rejected.pipelineState.pendingClarificationAppend, intent);
+    assert.equal(await readFile(path, "utf8"), bytes);
+    assert.equal(fixture.calls.worker.length, 3);
+    assert.equal(fixture.calls.reviewer.length, 0);
+    assert.equal(fixture.calls.arbiter.length, 0);
+  });
+}

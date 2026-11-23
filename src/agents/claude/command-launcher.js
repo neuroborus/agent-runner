@@ -6,6 +6,7 @@ import {
   mkdtemp,
   mkdir,
   lstat,
+  open,
   readdir,
   readFile,
   realpath,
@@ -263,6 +264,8 @@ function launcherSource({
   proof,
   unsetEnvironmentNames,
   directoryPolicy,
+  socketStatisticsBinary,
+  producerIdentity,
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
@@ -278,6 +281,7 @@ const {
   openSync,
   readSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmdirSync,
   rmSync,
@@ -307,6 +311,7 @@ const expectedFilter = Buffer.from(${JSON.stringify(filter.base64)}, "base64");
 const expectedFilterByteLength = ${JSON.stringify(filter.byteLength)};
 const expectedFilterSha256 = ${JSON.stringify(filter.sha256)};
 const hiddenDirectory = ${JSON.stringify(hiddenDirectory)};
+const privateTemporaryDirectory = ${JSON.stringify(join(hiddenDirectory, "tmp"))};
 const gitDirectories = new Set(
   ${JSON.stringify([...new Set(gitDirectories)])},
 );
@@ -315,14 +320,16 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-${projectionSource({ access, cwd, providerCwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp") })}
+${projectionSource({ access, cwd, providerCwd, home, proof, injectHome: false, directoryPolicy, claudeWritablePaths, gitDirectories, privateDirectory: join(hiddenDirectory, "tmp"), socketStatisticsBinary, producerIdentity })}
+const producerDescriptors = {};
 let sourceArguments;
-try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
+try { sourceArguments = projectArguments(process.argv.slice(2), producerDescriptors); } catch { process.exit(125); }
 const validatedArguments = [];
 const presentUnsetEnvironmentNames = [];
 const environmentOperations = new Set();
 const privateWorkspaceMasks = new Map();
 const readOnlyWorkspacePaths = new Set();
+const temporaryBindDescriptors = [];
 let index = 0;
 
 function fail() {
@@ -531,7 +538,7 @@ function takeEnvironmentOperations(networkUnshared = false) {
   }
 }
 // The launcher replaces /tmp, /run and its hidden allocation with private
-// mounts, so Claude's own mounts strictly inside them are discarded.
+// mounts, so Claude's other mounts strictly inside them are discarded.
 function privateDestination(path) {
   const canonical = canonicalPath(path);
   const strictlyPrivate = (value) =>
@@ -545,6 +552,54 @@ function privateDestination(path) {
       (root) => containsPath(root, canonical) || containsPath(canonical, root),
     )
   );
+}
+// Claude's shell exports its selected temporary directory and writes the cwd
+// receipt its parent reads there, so an existing owner-only self-bind strictly
+// inside the private temporary directory survives the private tmpfs mounts.
+// Bubblewrap binds the validated directory through an inherited descriptor, so
+// a later substitution of its path cannot redirect the mount.
+function retainedTemporaryBind(operation, source, destination) {
+  if (
+    operation !== "--bind" ||
+    source !== destination ||
+    destination === privateTemporaryDirectory ||
+    !containsPath(privateTemporaryDirectory, destination) ||
+    !privateDestination(destination) ||
+    pathKind(destination) === "missing"
+  ) return false;
+  try {
+    const parent = lstatSync(privateTemporaryDirectory);
+    const owned = (value) =>
+      process.getuid === undefined || value.uid === process.getuid();
+    if (
+      !parent.isDirectory() ||
+      !owned(parent) ||
+      (parent.mode & 0o077) !== 0 ||
+      realpathSync(privateTemporaryDirectory) !== privateTemporaryDirectory ||
+      !Number.isInteger(constants.O_DIRECTORY) ||
+      !Number.isInteger(constants.O_NOFOLLOW)
+    ) fail();
+    const descriptor = openSync(
+      destination,
+      constants.O_DIRECTORY | constants.O_NOFOLLOW | constants.O_RDONLY,
+    );
+    temporaryBindDescriptors.push(descriptor);
+    const metadata = fstatSync(descriptor);
+    if (
+      !metadata.isDirectory() ||
+      !owned(metadata) ||
+      readlinkSync("/proc/self/fd/" + descriptor) !== destination
+    ) fail();
+  } catch {
+    fail();
+  }
+  // Child descriptor 3 carries the seccomp filter.
+  validatedArguments.push(
+    "--bind-fd",
+    String(3 + temporaryBindDescriptors.length),
+    destination,
+  );
+  return true;
 }
 
 take("--new-session");
@@ -603,6 +658,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
   const source = takeValue();
   const destination = takeValue();
   if (!validPath(source) || !validPath(destination)) fail();
+  if (retainedTemporaryBind(operation, source, destination)) continue;
   // Runner-owned workspace authority replaces Claude's exact workspace mounts.
   const runnerWorkspaceMount = source === cwd && destination === cwd;
   const runnerGitMount =
@@ -756,6 +812,10 @@ const missingUnsetArguments = [...protectedEnvironmentNames]
   .flatMap((name) => ["--unsetenv", name]);
 const filterDescriptor = createSeccompDescriptor();
 if (filterDescriptor === undefined) fail();
+// Claude's info descriptor follows the filter and bind descriptors; its end
+// descriptor stays here, open until bubblewrap has exited.
+const infoDescriptors =
+  producerDescriptors.info === undefined ? [] : [producerDescriptors.info];
 let result;
 try {
   result = spawnSync(
@@ -766,6 +826,9 @@ try {
       ...${JSON.stringify(toolHomeArguments(home, proof))},
       "--seccomp",
       "3",
+      ...(infoDescriptors.length === 0
+        ? []
+        : ["--info-fd", String(4 + temporaryBindDescriptors.length)]),
       ...missingUnsetArguments,
       "--chdir",
       cwd,
@@ -776,13 +839,28 @@ try {
     ],
     {
       env: environment,
-      stdio: ["inherit", "inherit", "inherit", filterDescriptor],
+      stdio: [
+        "inherit",
+        "inherit",
+        "inherit",
+        filterDescriptor,
+        ...temporaryBindDescriptors,
+        ...infoDescriptors,
+      ],
     },
   );
 } catch {
   result = undefined;
 }
-if (!closeDescriptor(filterDescriptor)) process.exit(125);
+if (
+  ![
+    filterDescriptor,
+    ...temporaryBindDescriptors,
+    ...Object.values(producerDescriptors),
+  ]
+    .map(closeDescriptor)
+    .every(Boolean)
+) process.exit(125);
 if (
   result === undefined ||
   result.error !== undefined ||
@@ -801,6 +879,7 @@ export async function createClaudeCommandLauncher({
   cwd,
   providerCwd,
   environment,
+  producerBinary,
   gitDirectories,
   unsetEnvironmentNames,
   directoryPolicy,
@@ -885,6 +964,63 @@ export async function createClaudeCommandLauncher({
     ) {
       throw new Error("Claude command isolation executable is unsafe.");
     }
+    // Only a producer that passes sandbox descriptors needs the socket table;
+    // without a safe one those descriptors fail closed.
+    let socketStatisticsBinary = await resolveExecutable(
+      "ss",
+      environment,
+    ).catch(() => null);
+    if (
+      socketStatisticsBinary !== null &&
+      protectedRoots.some((path) => containsPath(path, socketStatisticsBinary))
+    )
+      socketStatisticsBinary = null;
+    // Missing executables still permit legacy programs without IPC options.
+    // Descriptor-bearing programs additionally need this exact producer file.
+    const producerIdentity = await (async () => {
+      if (producerBinary === undefined) return null;
+      const path = await resolveExecutable(producerBinary, environment);
+      if (protectedRoots.some((root) => containsPath(root, path))) return null;
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const metadata = await file.stat({ bigint: true });
+        const header = Buffer.alloc(256);
+        const { bytesRead } = await file.read(header, 0, header.length, 0);
+        const script = header.subarray(0, 2).toString() === "#!";
+        let interpreter = null;
+        if (script) {
+          const line = header.subarray(0, bytesRead).toString().split("\n")[0];
+          const shebang =
+            /^#![ \t]*(\/[^ \t]+?)(?:[ \t]+([^ \t]+))?[ \t]*$/u.exec(line);
+          if (shebang === null) return null;
+          let executable = await resolveExecutable(shebang[1], environment);
+          // env replaces itself with its command. Pin that executable rather
+          // than env; ambiguous arguments cannot establish a script binding.
+          if (shebang[2] !== undefined) {
+            if (
+              executable !== (await realpath("/usr/bin/env")) ||
+              shebang[2].startsWith("-") ||
+              shebang[2].includes("=")
+            )
+              return null;
+            executable = await resolveExecutable(shebang[2], environment);
+          }
+          if (protectedRoots.some((root) => containsPath(root, executable)))
+            return null;
+          const current = await stat(executable, { bigint: true });
+          interpreter = { dev: String(current.dev), ino: String(current.ino) };
+        }
+        return {
+          path,
+          dev: String(metadata.dev),
+          ino: String(metadata.ino),
+          script,
+          interpreter,
+        };
+      } finally {
+        await file.close();
+      }
+    })().catch(() => null);
     launcherDirectory =
       directory === undefined
         ? await mkdtemp(join(temporaryRoot, "agent-runner-claude-command-"))
@@ -923,13 +1059,19 @@ export async function createClaudeCommandLauncher({
               claudeWritablePaths,
               gitDirectories,
               privateDirectory: join(directory ?? launcherDirectory, "tmp"),
+              socketStatisticsBinary,
+              producerIdentity,
             })
           : launcherSource({
               access,
               bubblewrapBinary: resolvedBubblewrapBinary,
               canonicalCwd,
               canonicalGitDirectories,
-              canonicalTemporaryRoot: temporaryRoot,
+              // Turn masks must lie beneath the TMPDIR Claude receives.
+              canonicalTemporaryRoot:
+                directory === undefined
+                  ? temporaryRoot
+                  : join(directory, "tmp"),
               privateTemporaryRoot: directory ?? temporaryRoot,
               claudeWritablePaths,
               cwd,
@@ -944,6 +1086,8 @@ export async function createClaudeCommandLauncher({
               proof,
               unsetEnvironmentNames,
               directoryPolicy,
+              socketStatisticsBinary,
+              producerIdentity,
             }),
         { mode: 0o500 },
       ),

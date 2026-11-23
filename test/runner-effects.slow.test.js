@@ -13,14 +13,31 @@ import { join } from "node:path";
 import test, { after, before } from "node:test";
 
 import {
+  createClarificationService,
   createGitService,
   createMcpControlPlane,
+  createRunner,
   createRunStore,
   main,
 } from "../src/index.js";
 import { ClaudeAdapterError } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
+  CHECK_AND_FIX_SCHEMA,
+  CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+  CANDIDATE_REVIEW_SCHEMA,
+  FINALIZATION_SCHEMA,
+  REVIEW_SCHEMA,
+} from "../pipelines/plan-execution/src/schemas.js";
+import {
+  checkAndFix,
+  cleanConfirmation,
+  cleanConfirmationFindings,
+} from "../pipelines/plan-execution/test/support/index.js";
+import {
+  appendReadFailure,
+  clarificationAppendFixture,
+  configurationLoader,
   createArbiterAdapter,
   createExecutionAdapter,
   createFixture,
@@ -30,7 +47,618 @@ import {
   requestedStepAssessment,
   runnerFor,
   RUNNER_CONFIGURATION,
+  transcriptHash,
 } from "./support/index.js";
+
+import { availabilityFailure } from "./support/availability.js";
+import {
+  modelCatalogMiss,
+  withModelCompletion,
+} from "./support/model-catalog.js";
+import { outputExhaustion } from "./support/output-exhaustion.js";
+
+test("configuration drift after a proven no-effect miss preserves writable reservations", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const implementing = pipelineId === "plan-execution";
+    const fixture = await operatorFixture(t, pipelineId);
+    const configurationDirectory = join(fixture.projectPath, "LOCAL_ARTIFACTS");
+    const configurationPath = join(configurationDirectory, "agent-runner.json");
+    await mkdir(configurationDirectory);
+    await writeFile(configurationPath, '{"schemaVersion":1}\n');
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const git = createGitService();
+    const adapter = createExecutionAdapter();
+    let configuredPathAvailable = true;
+    let before;
+    let runId;
+    const runner = runnerFor(
+      fixture,
+      {
+        codex: {
+          ...adapter,
+          async run(request) {
+            if (
+              request.access === "workspace-write" &&
+              request.prompt.includes(
+                implementing
+                  ? "Implement the changes described"
+                  : "Resolve every current blocker",
+              )
+            ) {
+              before = await store.loadRun(runId);
+              assert.ok(before.modelCompletionReceipts.worker);
+              await writeFile(join(request.cwd, "concurrent.txt"), "drift\n");
+              configuredPathAvailable = false;
+              throw modelCatalogMiss(request);
+            }
+            const response = await adapter.run(request);
+            if (
+              !implementing &&
+              request.prompt.includes("semantic candidate")
+            ) {
+              return {
+                ...response,
+                structured: {
+                  ...response.structured,
+                  status: "FINDINGS",
+                  findings: [
+                    {
+                      id: "R1",
+                      file: "source.js",
+                      problem: "The candidate needs a repair.",
+                      reason: "The repair is required by the task.",
+                      suggestedAction: "Add the repair.",
+                    },
+                  ],
+                },
+              };
+            }
+            return withModelCompletion(response, request);
+          },
+        },
+      },
+      {
+        git: {
+          ...git,
+          async inspectPath(input) {
+            const inspected = await git.inspectPath(input);
+            return input.path === configurationPath && !configuredPathAvailable
+              ? { ...inspected, exists: false }
+              : inspected;
+          },
+        },
+        runStore: store,
+      },
+    );
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "test-model" } },
+    });
+    runId = created.runId;
+    const { run: paused } = await runner.resume({ runId });
+    assert.ok(before, pipelineId);
+    assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(paused.pause, {
+      reason: "project_configuration_changed",
+      code: "ERR_PROJECT_CONFIGURATION_CHANGED",
+    });
+    assert.equal(paused.activeTurn, null);
+    assert.equal(paused.modelCatalogResume, null);
+    const field = implementing ? "writableResult" : "resolutionCorrection";
+    assert.equal(before.pipelineState[field].stage, "invoking");
+    for (const key of [field, "repositoryBaseline", "findings"]) {
+      assert.deepEqual(paused.pipelineState[key], before.pipelineState[key]);
+    }
+    assert.deepEqual(paused.counters, before.counters);
+  }
+});
+
+test("catalog resume retains narrative availability through the rebuilt prerequisite", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  let now = Date.parse("2026-09-29T10:00:00.000Z");
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    clock: () => new Date(now),
+  });
+  const adapter = createExecutionAdapter();
+  const runRole = adapter.run.bind(adapter);
+  let reviews = 0;
+  let runId;
+  let retriedEpisode;
+  adapter.run = async (request) => {
+    if (request.prompt.startsWith("Validate the proposed context")) {
+      reviews++;
+      assert.ok(reviews <= 4, "The fourth narrative attempt must pause.");
+      if (reviews === 2) throw modelCatalogMiss(request);
+      if (reviews === 4) {
+        retriedEpisode = (await store.loadRun(runId)).availabilityRetry;
+        throw outputExhaustion();
+      }
+      throw availabilityFailure();
+    }
+    return withModelCompletion(await runRole(request), request);
+  };
+  const runner = () =>
+    createRunner({
+      adapters: { codex: adapter },
+      clarifications: createClarificationService({ interactive: false }),
+      loadConfiguration: configurationLoader(),
+      runStore: store,
+      availabilityClock: () => now,
+      availabilityWait: async (delay) => {
+        now += delay;
+      },
+    });
+  const { run: paused } = await runner().run({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    roleOverrides: { worker: { model: "worker-model" } },
+  });
+  assert.equal(paused.pause.code, "ERR_MODEL_CATALOG_RETRY");
+  assert.equal(paused.availabilityRetry.attempt, 1);
+  runId = paused.runId;
+  const { run: exhausted } = await runner().resume({ runId });
+  assert.equal(exhausted.pause.reason, "output_exhausted");
+  assert.equal(reviews, 4);
+  assert.equal(retriedEpisode.id, paused.availabilityRetry.id);
+  assert.equal(retriedEpisode.attempt, 2);
+});
+
+for (const published of [true, false]) {
+  test(`a ${published ? "journaled" : "missing"} model receipt preserves completed writable work`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    const lost = new Error("Model receipt publication was interrupted.");
+    let runId;
+    let interrupted = false;
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      async onTransitionBoundary(point) {
+        if (
+          published &&
+          !interrupted &&
+          point === "event-appended" &&
+          runId !== undefined &&
+          (await store.loadRun(runId)).modelCompletionReceipts.worker != null
+        ) {
+          interrupted = true;
+          throw lost;
+        }
+      },
+    });
+    const candidateReached = Object.assign(new Error("Candidate reached."), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+    const delegate = createExecutionAdapter();
+    let implementation;
+    let writes = 0;
+    let restatements = 0;
+    const adapters = {
+      codex: {
+        ...delegate,
+        async run(request) {
+          if (request.prompt.includes("Original turn facts (runner data)")) {
+            assert.equal(request.access, "read-only");
+            restatements++;
+            return { ...implementation, sessionId: "restated-worker" };
+          }
+          if (request.prompt.includes("Implement the changes described")) {
+            assert.equal(request.access, "workspace-write");
+            writes++;
+            implementation = await delegate.run(request);
+            return withModelCompletion(implementation, request);
+          }
+          if (writes > 0) throw candidateReached;
+          return delegate.run(request);
+        },
+      },
+    };
+    const runner = runnerFor(fixture, adapters, {
+      runStore: published
+        ? store
+        : {
+            ...store,
+            async recordModelCompletion() {
+              interrupted = true;
+              throw lost;
+            },
+          },
+    });
+    const { run } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "test-model" } },
+    });
+    runId = run.runId;
+    if (!published) {
+      await assert.rejects(runner.resume({ runId }), {
+        code: "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
+        cause: lost,
+      });
+      const pending = await store.loadRun(runId);
+      assert.equal(pending.pipelineState.writableResult.stage, "invoking");
+      assert.equal(pending.activeTurn.phase, "implement");
+    }
+    const reopened = runnerFor(fixture, adapters);
+    await assert.rejects((published ? runner : reopened).resume({ runId }), {
+      code: candidateReached.code,
+    });
+    const candidate = await store.loadRun(runId);
+    assert.equal(interrupted, true);
+    assert.equal(
+      Object.hasOwn(candidate.modelCompletionReceipts, "worker"),
+      published,
+    );
+    assert.equal(candidate.pipelineState.writableResult, null);
+    assert.equal(writes, 1);
+    assert.equal(restatements, published ? 0 : 1);
+  });
+}
+
+test("cold coding restatements retain the consumed attempt across a catalog pause", async (t) => {
+  for (const pipelineId of ["plan-execution", "polishing"]) {
+    const execution = pipelineId === "plan-execution";
+    const fixture = await operatorFixture(t, pipelineId);
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    let findings = !execution;
+    let writes = 0;
+    let restatements = 0;
+    adapter.run = async (request) => {
+      const respond = (result) =>
+        withModelCompletion(
+          {
+            structured:
+              request.schema.properties.result === undefined
+                ? result
+                : { result },
+            sessionId: `catalog-${writes}-${restatements}`,
+          },
+          request,
+        );
+      if (
+        findings &&
+        request.prompt.includes("Confirm the finalized change set")
+      ) {
+        findings = false;
+        return respond({
+          status: "FINDINGS",
+          findings: [
+            {
+              id: "R1",
+              file: "source.js",
+              problem: "The candidate needs a repair.",
+              reason: "The repair is required by the task.",
+              suggestedAction: "Add the repair.",
+            },
+          ],
+          validationChange: "UNCHANGED",
+          validationEvidence: [],
+          finalizationFindingIds: [],
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        });
+      }
+      const original =
+        request.access === "workspace-write" &&
+        request.prompt.includes(
+          execution
+            ? "Implement the changes described"
+            : "Resolve every current blocker",
+        );
+      if (original) {
+        writes++;
+        await writeFile(
+          join(fixture.projectPath, "repair.txt"),
+          "preserved bytes\n",
+        );
+        if (execution) assert.equal(await request.onFreshSession(), true);
+        throw modelCatalogMiss({ recovery: true });
+      }
+      if (
+        request.access === "read-only" &&
+        (request.prompt.includes("Original turn facts (runner data)") ||
+          request.prompt.includes("Finding-resolution report diagnostic batch"))
+      ) {
+        if (++restatements === 1) throw modelCatalogMiss();
+        const inactiveFields = {
+          reason: "",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: [],
+        };
+        return respond(
+          execution
+            ? {
+                ...inactiveFields,
+                status: "COMPLETED",
+                summary: "Implemented the candidate.",
+              }
+            : {
+                ...inactiveFields,
+                status: "RESOLVED",
+                decisions: [
+                  {
+                    id: "R1",
+                    decision: "FIX",
+                    reason: "Added the repair.",
+                    evidence: [],
+                  },
+                ],
+              },
+        );
+      }
+      return withModelCompletion(await runRole(request), request);
+    };
+    const adapters = { codex: adapter };
+    const runner = runnerFor(fixture, adapters);
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: { worker: { model: "worker-model" } },
+    });
+    const { run: paused } = await runner.resume({ runId: created.runId });
+    const field = execution ? "writableResult" : "resolutionCorrection";
+    assert.equal(paused.pause?.reason, "backend_unavailable", pipelineId);
+    assert.equal(paused.pipelineState[field].attempts, 1);
+    assert.equal(paused.activeTurn, null);
+    if (execution) assert.equal(paused.inactivityRecovery.attempt, 2);
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const interrupted = Object.assign(
+      new Error("Resume acknowledgement was lost."),
+      {
+        code: "ERR_RUN_REVISION_CHANGED",
+      },
+    );
+    const interruptedStore = {
+      ...store,
+      async transitionRun(lease, patch, options) {
+        const next = await store.transitionRun(lease, patch, options);
+        if (
+          patch.pause === null &&
+          patch.pipelineState?.workflowState === paused.pause.resumeState
+        )
+          throw interrupted;
+        return next;
+      },
+    };
+    await assert.rejects(
+      runnerFor(fixture, adapters, { runStore: interruptedStore }).resume({
+        runId: created.runId,
+      }),
+      (cause) => cause === interrupted,
+    );
+    assert.equal(restatements, 1);
+    const resumed = await store.loadRun(created.runId);
+    assert.equal(resumed.activeTurn, null);
+    assert.equal(resumed.pause, null);
+    assert.equal(resumed.pipelineState[field].attempts, 1);
+    const { run: done } = await runnerFor(fixture, adapters, {
+      runStore: createRunStore({ stateRoot: fixture.stateRoot }),
+    }).resume({ runId: created.runId });
+    assert.equal(done.pipelineState.workflowState, "DONE");
+    assert.equal(writes, 1);
+    assert.equal(restatements, 2);
+    assert.equal(done.counters.fixRounds, execution ? 0 : 1);
+    assert.equal(done.inactivityRecovery, null);
+    assert.equal(
+      await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+      "preserved bytes\n",
+    );
+    const history = await store.loadRunHistory(created.runId);
+    assert.ok(
+      history.events.every(
+        ({ state }) => (state.pipelineState[field]?.attempts ?? 0) <= 1,
+      ),
+    );
+    if (execution)
+      assert.equal(
+        history.events.filter(
+          ({ activity }) => activity?.kind === "reconstructing",
+        ).length,
+        1,
+      );
+  }
+});
+
+for (const [pipelineId, kind, boundary, mode] of [
+  ["plan-execution", "questions", "readback", "independent"],
+  ["polishing", "questions", "publication", "combined"],
+  ["plan-execution", "product-decision", "replacement", "combined"],
+]) {
+  test(`cold clarification append ${pipelineId} ${kind} survives ${boundary} loss`, async (t) => {
+    const external =
+      pipelineId === "plan-execution" && kind === "product-decision";
+    const f = await clarificationAppendFixture(t, pipelineId, {
+      kind,
+      mode,
+      external,
+      questionFirst: external,
+    });
+    const service = createClarificationService({ interactive: false });
+    const operation =
+      kind === "questions" ? "appendQuestionRound" : "appendProductDecision";
+    const failure = new Error("Controlled atomic editor publication loss.");
+    let lost = false;
+    const store = createRunStore({ stateRoot: f.stateRoot });
+    const initial = f.open({
+      store: {
+        ...store,
+        async transitionRun(lease, patch, options) {
+          if (
+            !lost &&
+            boundary === "publication" &&
+            patch.pipelineState?.pendingEdit != null &&
+            patch.pipelineState.pendingClarificationAppend === null
+          ) {
+            lost = true;
+            throw failure;
+          }
+          return store.transitionRun(lease, patch, options);
+        },
+      },
+      clarifications: {
+        ...service,
+        async [operation](options) {
+          if (boundary === "replacement") {
+            return service[operation]({
+              ...options,
+              async persistAppend(proof) {
+                await options.persistAppend(proof);
+                lost = true;
+                throw appendReadFailure();
+              },
+            });
+          }
+          const result = await service[operation](options);
+          if (boundary === "readback") {
+            lost = true;
+            throw appendReadFailure();
+          }
+          return result;
+        },
+        openEditor(...args) {
+          if (external && !lost) return service.openEditor(...args);
+          assert.fail("No editor before atomic publication");
+        },
+      },
+    });
+    const runId = (await initial.runner.create(f.input)).run.runId;
+    let answeredHash;
+    if (external) {
+      const questions = (await initial.runner.resume({ runId })).run;
+      assert.equal(questions.pause.reason, "clarification_answers_required");
+      const response = {
+        runId,
+        requestId: questions.pause.inputRequest.id,
+        expectedRevision: questions.revision,
+        answers: [{ questionId: "q1", answer: "Use behavior A." }],
+      };
+      const cold = f.open();
+      const preview = await cold.runner.previewInput(response);
+      const submitted = (
+        await cold.runner.submitInput({
+          ...response,
+          responseHash: preview.responseHash,
+        })
+      ).run;
+      answeredHash = submitted.pause.inputResponse.transcriptHash;
+      assert.equal(answeredHash, preview.responseHash);
+    }
+    if (boundary === "publication")
+      await assert.rejects(
+        initial.runner.resume({ runId }),
+        (error) => error === failure,
+      );
+    else
+      assert.equal(
+        (await initial.runner.resume({ runId })).run.pause.reason,
+        "clarification_append_interrupted",
+      );
+    assert.equal(lost, true);
+    const cold = f.open();
+    const retained = await cold.store.loadRun(runId);
+    const intent = retained.pipelineState.pendingClarificationAppend;
+    assert.ok(intent);
+    if (external) {
+      assert.equal(retained.pipelineState.clarificationRoot, f.rootPath);
+      assert.equal(
+        retained.pipelineState.clarificationPath,
+        join(
+          f.rootPath,
+          "LOCAL_ARTIFACTS",
+          "agent-runner",
+          runId,
+          "clarifications.md",
+        ),
+      );
+      assert.deepEqual(
+        retained.pipelineState.repositoryBaseline.allowedPaths,
+        [],
+      );
+      assert.equal(retained.hashes.executionClarifications, answeredHash);
+      assert.equal(retained.pipelineState.clarificationFrozen, true);
+      assert.equal(retained.counters.clarificationRounds, 1);
+      assert.equal(
+        (await readdir(f.projectPath)).includes("LOCAL_ARTIFACTS"),
+        false,
+      );
+    }
+    assert.equal(retained.pipelineState.pendingEdit, null);
+    const counter =
+      kind === "questions" ? "clarificationRounds" : "productDecisions";
+    assert.equal(retained.counters[counter], 0);
+    const priorBytes = await f.transcript(retained);
+    assert.equal(
+      transcriptHash(priorBytes),
+      boundary === "replacement" ? intent.expectedHash : intent.resultHash,
+    );
+    const calls = f.calls.length;
+    const waiting = (await cold.runner.resume({ runId })).run;
+    assert.equal(
+      waiting.pause.reason,
+      kind === "questions"
+        ? "clarification_answers_required"
+        : "product_decision_required",
+    );
+    assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
+    assert.equal(waiting.counters[counter], 1);
+    assert.equal(
+      waiting.pipelineState.pendingEdit.preEditorHash,
+      intent.resultHash,
+    );
+    assert.equal(
+      waiting.pause.inputRequest.id,
+      waiting.pipelineState.pendingEdit.id,
+    );
+    assert.equal(
+      transcriptHash(await f.transcript(waiting)),
+      intent.resultHash,
+    );
+    const repeated = (await f.open().runner.resume({ runId })).run;
+    assert.equal(repeated.counters[counter], 1);
+    assert.equal(
+      transcriptHash(await f.transcript(repeated)),
+      intent.resultHash,
+    );
+    assert.deepEqual(
+      repeated.pipelineState.workReports,
+      waiting.pipelineState.workReports,
+    );
+    assert.deepEqual(repeated.sessionLineage, waiting.sessionLineage);
+    assert.equal(f.calls.length, calls);
+    const history = await cold.store.loadRunHistory(runId);
+    const publications = history.events.filter(
+      ({ state }, index, events) =>
+        index > 0 &&
+        events[index - 1].state.pipelineState.pendingClarificationAppend
+          ?.expectedHash === intent.expectedHash &&
+        state.pipelineState.pendingClarificationAppend === null,
+    );
+    assert.equal(
+      publications.length,
+      1,
+      "Only one transition may settle the append",
+    );
+    const published = publications[0].state;
+    assert.equal(published.counters[counter], 1);
+    assert.equal(
+      published.pause.inputRequest.id,
+      published.pipelineState.pendingEdit.id,
+    );
+    assert.equal(
+      published.pipelineState.pendingEdit.preEditorHash,
+      intent.resultHash,
+    );
+  });
+}
 
 const SECOND_PLAN = `${PLAN}
 
@@ -38,6 +666,252 @@ const SECOND_PLAN = `${PLAN}
 
 Refine the behavior.
 `;
+
+test("combined changed BLOCKED pauses atomically and cold-resumes without replaying accepted work", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(join(fixture.taskPath, "plan.md"), SECOND_PLAN);
+  const adapter = createExecutionAdapter();
+  const original = adapter.run.bind(adapter);
+  let step = 0;
+  let repairs = 0;
+  let confirmations = 0;
+  let sessions = 0;
+  let beforeRepair;
+  let runId;
+  const runStore = createRunStore({ stateRoot: fixture.stateRoot });
+  const turns = [];
+  adapter.run = async (request) => {
+    if (request.prompt.includes("Implement the changes described"))
+      step = requestedStepAssessment(request).step;
+    turns.push([step, request.schema, request.access]);
+    const respond = (result) => ({
+      structured: result,
+      sessionId: request.session?.id ?? `combined-${++sessions}`,
+    });
+    if (request.schema === CHECK_AND_FIX_SCHEMA) {
+      if (step === 2 && confirmations === 1 && repairs === 0) {
+        beforeRepair = await runStore.loadRun(runId);
+        repairs++;
+        await writeFile(
+          join(fixture.projectPath, "candidate.txt"),
+          "candidate repair\n",
+        );
+        return respond({
+          status: "BLOCKED",
+          summary: "",
+          reason: "A required external resource is unavailable.",
+          question: "",
+          options: [],
+          whyBlocked: "",
+          evidence: ["The synthetic resource is offline."],
+        });
+      }
+      return respond(checkAndFix());
+    }
+    if (request.schema === CANDIDATE_CLEAN_CONFIRM_SCHEMA) {
+      assert.equal(request.access, "read-only");
+      const {
+        validationChange,
+        validationEvidence,
+        finalizationFindingIds,
+        ...candidate
+      } =
+        step === 2 && ++confirmations === 1
+          ? cleanConfirmationFindings("R1", "R2")
+          : cleanConfirmation();
+      return respond(candidate);
+    }
+    const response = await original(request);
+    if (
+      step === 2 &&
+      request.prompt.includes("Implement the changes described")
+    )
+      await writeFile(
+        join(fixture.projectPath, "feature.js"),
+        "export const value = 2;\n",
+      );
+    return response;
+  };
+  const configuration = {
+    ...RUNNER_CONFIGURATION,
+    pipelines: { "plan-execution": { mode: "combined" } },
+  };
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  runId = created.runId;
+  const paused = (await runner.resume({ runId: created.runId })).run;
+  assert.equal(
+    paused.pause.reason,
+    "environment_blocked",
+    JSON.stringify(paused.pause),
+  );
+  assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+  assert.equal(paused.pipelineState.completedCommits.length, 1);
+  const [accepted] = paused.pipelineState.completedCommits;
+  assert.equal(paused.pipelineState.repositoryBaseline.head, accepted);
+  assert.equal(beforeRepair.counters.fixRounds, 1);
+  assert.equal(paused.pipelineState.pendingCorrection, true);
+  for (const field of [
+    "completedCommits",
+    "stepImplementation",
+    "correctionHistory",
+    "sameFindingRounds",
+    "disputeHistory",
+    "findingArbitrations",
+    "replacementExecution",
+    "settings",
+  ])
+    assert.deepEqual(
+      paused.pipelineState[field],
+      beforeRepair.pipelineState[field],
+      field,
+    );
+  assert.notEqual(
+    paused.pipelineState.repositoryBaseline.contentFingerprint,
+    beforeRepair.pipelineState.repositoryBaseline.contentFingerprint,
+  );
+  assert.equal(paused.counters.fixRounds, beforeRepair.counters.fixRounds + 1);
+  assert.equal(
+    paused.counters.correctionRounds,
+    beforeRepair.counters.correctionRounds,
+  );
+  assert.deepEqual(paused.pipelineState.primaryFindings, []);
+  const findingReport = paused.pipelineState.workReports.findLast(
+    ({ phase }) => phase === "CLEAN_CONFIRM",
+  );
+  assert.deepEqual(
+    findingReport.findings.map(({ id }) => id),
+    ["R1", "R2"],
+  );
+  for (const field of [
+    "candidateConfirmationFingerprint",
+    "candidateReviewResult",
+    "finalizationResult",
+    "reviewResult",
+  ])
+    assert.equal(paused.pipelineState[field], null, field);
+  const blockedReport = paused.pipelineState.workReports.at(-1);
+  assert.equal(blockedReport.phase, "CHECK_AND_FIX");
+  assert.equal(blockedReport.status, "BLOCKED");
+  assert.equal(blockedReport.reason, paused.pause.explanation);
+  assert.deepEqual(blockedReport.evidence, paused.pause.evidence);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "candidate repair\n",
+  );
+
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const saved = await store.loadRun(created.runId);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(await store.runIsLeased(saved.runId), false);
+  assert.deepEqual(saved, paused);
+  const history = await store.loadRunHistory(saved.runId);
+  const publication = history.events.find(
+    ({ state }) => state.pause?.reason === "environment_blocked",
+  );
+  assert.deepEqual(
+    publication.state.pipelineState.workReports.at(-1),
+    blockedReport,
+  );
+  const beforeResume = turns.length;
+  const cold = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore: store },
+  );
+  const done = (await cold.resume({ runId: saved.runId, action: null })).run;
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.deepEqual(done.roles, saved.roles);
+  assert.deepEqual(done.hashes, saved.hashes);
+  assert.deepEqual(done.pipelineState.settings, saved.pipelineState.settings);
+  assert.deepEqual(
+    done.pipelineState.correctionHistory.slice(
+      0,
+      saved.pipelineState.correctionHistory.length,
+    ),
+    saved.pipelineState.correctionHistory,
+  );
+  assert.deepEqual(
+    done.pipelineState.workReports.find(({ status }) => status === "BLOCKED"),
+    blockedReport,
+  );
+  assert.equal(done.pipelineState.completedCommits.length, 2);
+  assert.equal(done.pipelineState.completedCommits[0], accepted);
+  // A renewed unchanged check/fix is a new round; recovery never recharges the repair.
+  assert.equal(done.counters.fixRounds, saved.counters.fixRounds + 1);
+  assert.equal(done.counters.correctionRounds, saved.counters.correctionRounds);
+  assert.equal(repairs, 1);
+  const resumedGates = turns
+    .slice(beforeResume)
+    .filter(
+      ([, schema, access]) =>
+        access === "local-commit" ||
+        [
+          CHECK_AND_FIX_SCHEMA,
+          CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+          CANDIDATE_REVIEW_SCHEMA,
+          FINALIZATION_SCHEMA,
+          REVIEW_SCHEMA,
+        ].includes(schema),
+    );
+  assert.deepEqual(
+    resumedGates.map(([, schema, access]) =>
+      access === "local-commit" ? "commit" : schema,
+    ),
+    [
+      CHECK_AND_FIX_SCHEMA,
+      CANDIDATE_CLEAN_CONFIRM_SCHEMA,
+      CANDIDATE_REVIEW_SCHEMA,
+      FINALIZATION_SCHEMA,
+      REVIEW_SCHEMA,
+      "commit",
+    ],
+  );
+  const completedHistory = await store.loadRunHistory(saved.runId);
+  const commitGate = completedHistory.events.findLast(
+    ({ state }) => state.pipelineState.workflowState === "COMMIT",
+  ).state;
+  assert.deepEqual(
+    commitGate.pipelineState.stepImplementation,
+    saved.pipelineState.stepImplementation,
+  );
+  assert.equal(
+    commitGate.pipelineState.candidateConfirmationFingerprint,
+    saved.pipelineState.repositoryBaseline.contentFingerprint,
+  );
+  assert.equal(
+    commitGate.pipelineState.candidateReviewedFingerprint,
+    commitGate.pipelineState.candidateConfirmationFingerprint,
+  );
+  assert.equal(
+    commitGate.pipelineState.reviewedFingerprint,
+    commitGate.pipelineState.finalizedFingerprint,
+  );
+  assert.equal(
+    turns.filter(([, , access]) => access === "local-commit").length,
+    2,
+  );
+  const git = (...args) =>
+    executeFile("git", ["-C", fixture.projectPath, ...args]);
+  assert.equal((await git("rev-parse", "HEAD^")).stdout.trim(), accepted);
+  assert.equal((await git("rev-list", "--count", "HEAD")).stdout.trim(), "3");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "candidate.txt"), "utf8"),
+    "candidate repair\n",
+  );
+});
 
 test("reconstructed readiness rejection preserves work and agrees across CLI and MCP", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");
@@ -249,6 +1123,159 @@ test("durable writable-result recovery preserves an accepted commit and candidat
     "3",
   );
 });
+
+test("durable finding-resolution recovery restates a lost writable report without replay", async (t) => {
+  const fixture = await operatorFixture(t, "polishing");
+  const git = (...args) =>
+    executeFile("git", ["-C", fixture.projectPath, ...args]);
+  const initialHead = (await git("rev-parse", "HEAD")).stdout.trim();
+  const snapshot = join(fixture.workspace, "captured-state");
+  const original = createRunStore({ stateRoot: fixture.stateRoot });
+  const adapter = createExecutionAdapter();
+  const run = adapter.run.bind(adapter);
+  const decision = (reason) => ({
+    status: "RESOLVED",
+    decisions: [{ id: "R1", decision: "FIX", reason, evidence: [] }],
+    reason: "",
+    question: "",
+    options: [],
+    whyBlocked: "",
+    evidence: [],
+  });
+  let runId;
+  let terminalReviews = 0;
+  let writes = 0;
+  let restatements = 0;
+  adapter.run = async (request) => {
+    const respond = (result) => ({
+      structured:
+        request.schema?.properties?.result?.anyOf === undefined
+          ? result
+          : { result },
+      sessionId: `resolution-${writes}-${restatements}`,
+    });
+    if (
+      request.prompt.includes("Confirm the finalized change set") &&
+      ++terminalReviews === 1
+    )
+      return respond({
+        status: "FINDINGS",
+        findings: [
+          {
+            id: "R1",
+            file: "source.js",
+            problem: "The change lacks a required repair.",
+            reason: "The repair keeps the change complete.",
+            suggestedAction: "Add the repair.",
+          },
+        ],
+        validationChange: "UNCHANGED",
+        validationEvidence: [],
+        finalizationFindingIds: [],
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      });
+    if (!request.prompt.includes("Resolve every current blocker"))
+      return run(request);
+    if (request.access === "read-only") {
+      restatements++;
+      return respond(
+        decision(
+          restatements === 1
+            ? "First line PRIVATE_RESTATED_VALUE.\nSecond line."
+            : "Added the repair.",
+        ),
+      );
+    }
+    assert.equal(request.access, "workspace-write");
+    writes++;
+    await writeFile(
+      join(fixture.projectPath, "repair.txt"),
+      "repaired candidate bytes\n",
+    );
+    const stopped = new Promise((resolve, reject) =>
+      request.signal.addEventListener(
+        "abort",
+        () => reject(request.signal.reason),
+        { once: true },
+      ),
+    );
+    // Attach rejection handling before the stop can abort this call.
+    stopped.catch(() => {});
+    // Capture the journal while the writable original is still in progress.
+    await cp(fixture.stateRoot, snapshot, { recursive: true });
+    await removeCopiedLeases(snapshot);
+    await original.requestOperatorStop({
+      runId,
+      kind: "pause_requested",
+      expectedRevision: (await original.loadRun(runId)).revision,
+      idempotencyKey: "resolution-capture",
+    });
+    return stopped;
+  };
+  const adapters = { codex: adapter };
+  const runner = runnerFor(fixture, adapters, { runStore: original });
+  runId = (
+    await runner.create({
+      pipelineId: "polishing",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    })
+  ).run.runId;
+  const stopped = (await runner.resume({ runId, action: null })).run;
+  assert.equal(stopped.pause.reason, "operator_paused");
+  assert.equal(writes, 1);
+  assert.equal(restatements, 0);
+
+  await rm(fixture.stateRoot, { recursive: true, force: true });
+  await cp(snapshot, fixture.stateRoot, { recursive: true });
+  const store = createRunStore({
+    stateRoot: fixture.stateRoot,
+    resolveStopBoundary,
+  });
+  const restored = await store.loadRun(runId);
+  assert.equal(restored.pipelineState.workflowState, "RESOLVE_FINDINGS");
+  assert.notEqual(restored.activeTurn, null);
+  assert.equal(await store.runIsLeased(runId), false);
+  assert.equal(restored.pipelineState.resolutionCorrection.stage, "invoking");
+  assert.equal(restored.counters.fixRounds, 0);
+  const reconstructed = runnerFor(fixture, adapters, { runStore: store });
+  const paused = (await reconstructed.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.reason, "resolution_output_invalid");
+  assert.equal(writes, 1);
+  assert.equal(restatements, 1);
+  const saved = await store.loadRun(runId);
+  assert.equal(saved.pipelineState.resolutionCorrection.attempts, 1);
+  assert.equal(saved.counters.fixRounds, 1);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "repaired candidate bytes\n",
+  );
+  assert.doesNotMatch(JSON.stringify(saved), /PRIVATE_RESTATED_VALUE/u);
+
+  const done = (
+    await reconstructed.resume({
+      runId,
+      action: null,
+      expectedRevision: saved.revision,
+    })
+  ).run;
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.equal(done.pipelineState.resolutionCorrection, null);
+  assert.equal(done.counters.fixRounds, 1);
+  assert.equal(writes, 1);
+  assert.equal(restatements, 2);
+  assert.equal((await git("rev-parse", "HEAD")).stdout.trim(), initialHead);
+  assert.equal(
+    (await git("diff", "--cached", "--name-only")).stdout,
+    "feature.js\nrepair.txt\nsource.js\n",
+  );
+  assert.equal((await git("diff", "--name-only")).stdout, "");
+});
+
 const checkpointWorkspaces = [];
 let oneStepCheckpoint;
 let twoStepCheckpoint;
@@ -714,6 +1741,11 @@ test("version-18 consumed-commit recovery retires interrupted observations witho
   for (const event of interruptedEvents) {
     event.schemaVersion = event.state.schemaVersion = 18;
     event.state.runtimeCompatibility.runStateVersion = 18;
+    if (event.state.observations !== null) {
+      event.state.observations.schemaVersion = 1;
+      for (const attempt of event.state.observations.attempts)
+        delete attempt.ownershipDiagnostic;
+    }
     delete event.state.workspace;
     for (const attempt of event.state.observations?.attempts ?? [])
       delete attempt.measurements;

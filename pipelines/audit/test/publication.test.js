@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { auditPipeline } from "../src/index.js";
@@ -127,28 +128,109 @@ test("Markdown expansion rejects an oversized ledger update before publication a
 test("interrupted publication settles its exact intent before any additional model turn", async () => {
   const f = fixture([READY, complete()]);
   const publish = f.runtime.workspace.reportArtifact;
-  let fail = true;
-  f.runtime.workspace.reportArtifact = async (...args) => {
-    const result = await publish(...args);
-    if (fail) {
-      fail = false;
-      throw new Error("Publication acknowledgement lost");
-    }
-    return result;
+  const prepared = {
+    phase: "prepared",
+    identity: { device: "1", inode: "2", mode: "33152", birthtimeNs: "3" },
+  };
+  f.runtime.workspace.reportArtifact = async (request, options) => {
+    await options.recordTemporary(prepared);
+    await publish(request, options);
+    throw new Error("Publication acknowledgement lost");
   };
   await assert.rejects(f.executePublic(), /acknowledgement lost/u);
-  const persisted = f.run().pipelineState.publication;
+  const persisted = structuredClone(f.run().pipelineState.publication);
   assert.ok(persisted.pending);
   assert.equal(persisted.published, null);
-  // The real publication primitive treats exact desired bytes as an idempotent retry.
+  assert.deepEqual(persisted.temporary, prepared);
+  // The real publisher reconciles only from this exact prepared custody record.
+  const settled = [];
   f.runtime.workspace.reportArtifact = async (request, options) => {
-    if (!options?.inspectOnly && request.expectedHash === null)
-      return { path: request.path, contentHash: persisted.pending.contentHash };
-    return publish(request, options);
+    if (options?.inspectOnly) return publish(request, options);
+    settled.push({
+      expectedHash: request.expectedHash,
+      content: request.content,
+      temporary: options.temporary,
+      pending: f.run().pipelineState.publication.pending,
+    });
+    if (settled.length > 1) return publish(request, options);
+    return { path: request.path, contentHash: persisted.pending.contentHash };
   };
   assert.equal((await f.executePublic()).pipelineState.workflowState, "DONE");
+  assert.deepEqual(settled, [
+    {
+      expectedHash: null,
+      content: f.publications[0],
+      temporary: prepared,
+      pending: persisted.pending,
+    },
+    // Only the distinct completion binding follows the single settlement.
+    {
+      expectedHash: persisted.pending.contentHash,
+      content: f.publications[1],
+      temporary: null,
+      pending: {
+        ...persisted.pending,
+        contentHash: createHash("sha256")
+          .update(f.publications[1])
+          .digest("hex"),
+        complete: true,
+      },
+    },
+  ]);
   assert.equal(f.calls.length, 2);
   assert.equal(f.run().pipelineState.publication.pending, null);
+  assert.equal(f.run().pipelineState.publication.temporary, null);
+});
+
+test("unreproducible rendering and temporary custody refusals keep the suspended checkpoint", async () => {
+  const f = fixture([READY, complete({ status: "INCOMPLETE" })]);
+  const waiting = await f.executePublic();
+  assert.equal(waiting.pause.reason, "discovery_incomplete");
+  assert.equal(waiting.pause.resumeState, "DISCOVER");
+  assert.ok(waiting.pipelineState.publication.published);
+  for (const [reason, code] of [
+    ["audit_report_rendering_changed", "ERR_AUDIT_REPORT_RENDERING_CHANGED"],
+    [
+      "audit_report_temporary_conflict",
+      "ERR_WORKSPACE_REPORT_TEMPORARY_CONFLICT",
+    ],
+  ]) {
+    const saved = structuredClone(waiting);
+    const rendering = reason === "audit_report_rendering_changed";
+    // The same projection with a different saved render hash, or an exact binding.
+    if (rendering)
+      saved.pipelineState.publication.published.contentHash = "e".repeat(64);
+    const g = fixture([], { saved });
+    g.runtime.workspace.reportArtifact = async (request, options) => {
+      assert.ok(!rendering && options?.inspectOnly, "Unexpected artifact call");
+      throw Object.assign(new Error("Temporary custody refused"), { code });
+    };
+    const blocked = await g.executePublic();
+    assert.equal(blocked.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(blocked.pause, { reason, resumeState: "DISCOVER", code });
+    assert.deepEqual(
+      blocked.pipelineState.publication,
+      saved.pipelineState.publication,
+    );
+    const projected = auditPipeline.projections.pause(blocked);
+    assert.equal(projected.reason, reason);
+    assert.equal(projected.resumeState, null);
+    assert.deepEqual(projected.nextActions, []);
+    assert.match(
+      projected.explanation,
+      /preserve audit\.md and any remaining \.audit\.md\.tmp/u,
+    );
+    assert.throws(
+      () => auditPipeline.validateResumeAction(blocked, null),
+      rendering
+        ? /rendering cannot be reproduced/u
+        : /custody cannot be verified/u,
+    );
+    g.runtime.workspace.reportArtifact = () =>
+      assert.fail("Blocked publication cannot retry");
+    assert.deepEqual(await g.executePublic(), blocked);
+    assert.equal(g.calls.length, 0);
+  }
 });
 
 test("pending revisions remove earlier confirmed versions until the revised batch is accepted", async () => {

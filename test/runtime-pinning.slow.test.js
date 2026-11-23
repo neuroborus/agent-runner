@@ -65,7 +65,7 @@ test("running and detached processes stay pinned after outer replacement; drift 
           "src/mcp/detached.js": await readFile(
             new URL("../src/mcp/detached.js", import.meta.url),
           ),
-          "src/agents/index.js":
+          "src/platform/index.js":
             'export async function readProcessIdentity() { throw new Error("No dispatch expected"); }\n',
           "src/state/index.js":
             "export const normalizeRecoveryDispatch = value => value; export class RunStoreError extends Error { constructor(message, options) { super(message); this.code = options.code; } }\n",

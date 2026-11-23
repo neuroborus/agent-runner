@@ -14,10 +14,48 @@ export function directoryPolicyError(AdapterError) {
   );
 }
 
+function assertLiteralPermissionPaths(paths, AdapterError) {
+  if (paths.some((path) => /[\\*?[\]{}]/u.test(path)))
+    throw directoryPolicyError(AdapterError);
+}
+
+export async function assertDirectoryOutputSupport(request, AdapterError) {
+  if (request.access !== "workspace-write" || !request.workspacePolicy) return;
+  assertLiteralPermissionPaths(
+    request.workspacePolicy.outputPaths,
+    AdapterError,
+  );
+  for (const path of request.workspacePolicy.outputPaths) {
+    try {
+      await lstat(path);
+    } catch (cause) {
+      if (cause.code !== "ENOENT") throw directoryPolicyError(AdapterError);
+      // Read-only discovery may precede Runner-owned directory preparation.
+      if (
+        request.preparableOutputPaths === undefined ||
+        request.preparableOutputPaths.includes(path)
+      )
+        continue;
+      throw new AdapterError(
+        "Claude output mount root is missing; exact-file creation requires an existing mount root. " +
+          "Declare a directory with a trailing / or select a supported backend in an authorized fresh run.",
+        {
+          code: "ERR_UNSUPPORTED_CLAUDE_CAPABILITY",
+          diagnosticClass: "output_root_missing",
+        },
+      );
+    }
+  }
+}
+
 // Bash is the sole directory writer. Native Edit/Write do not cross the
 // authenticated command namespace and therefore cannot receive this authority.
 export async function prepareDirectoryPolicy(request, AdapterError) {
   if (request.workspacePolicy === undefined) return undefined;
+  await assertDirectoryOutputSupport(
+    { ...request, preparableOutputPaths: [] },
+    AdapterError,
+  );
   try {
     const service = createWorkspaceService();
     const { kind: _kind, ...declarations } = request.workspacePolicy;
@@ -36,14 +74,14 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
     // A bind needs an existing target; never widen to an output's parent or
     // materialize ambiguous file/directory declarations during preparation.
     for (const path of writablePaths) await lstat(path);
-    if (
+    assertLiteralPermissionPaths(
       [
         inspection.workspacePath,
         ...inspection.protectedPaths,
         ...writablePaths,
-      ].some((path) => /[\\*?[\]{}]/u.test(path))
-    )
-      throw directoryPolicyError(AdapterError);
+      ],
+      AdapterError,
+    );
     const before = await service.snapshot({ inspection });
     const mounts = deepFreeze({ writablePaths, protectedPaths });
     async function verify() {

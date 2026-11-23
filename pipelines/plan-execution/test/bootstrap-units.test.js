@@ -65,6 +65,7 @@ function discovery() {
           artifacts: [],
         },
         unsupported: [],
+        basis: "assigned-executor",
       },
     ],
     environmentBlockers: [
@@ -72,6 +73,7 @@ function discovery() {
         command: "node validation/extended.js",
         source: "agent-sandbox",
         evidence: ["Private scratch is required."],
+        basis: "assigned-executor",
       },
     ],
   };
@@ -468,6 +470,7 @@ test("invalid-unit correction and aggregate capacity cannot be renewed or trunca
     command: discovery().requiredChecks[0].command,
     source: "runner",
     evidence: ["The required executable is unavailable."],
+    basis: "assigned-executor",
   };
   reports = acceptBootstrapBatch(context, reports, {
     ...batch(reports),

@@ -330,6 +330,26 @@ Default commit inputs retain their existing session-context keys, including
 pending source-fork recovery bindings; adding selection metadata cannot refork
 the source or invalidate an unfinished checkpoint.
 
+Pipeline state version 8 persists new custom baselines in the closed compact
+form: schema version, workspace and project paths equal to the run project,
+empty output paths, a non-negative entry count, the entry digest, both
+fingerprints and exactly the clarification and plan artifact exemptions. Any
+unknown, scope or link-resolution field fails closed. The identity version-7
+migration rewrites no state; legacy full baselines keep their representation
+and exact comparison, and a version-7 runtime refuses compact baselines as
+skew. Authoring never refreshes its baseline, so no capacity limit remains.
+
+Pipeline state version 9 adds the closed nullable `pendingClarificationAppend`
+record. The ordered version-8 migration initializes legacy absence to `null`,
+without inferring append ownership or changing settings, declarations, drafts,
+provenance, counters, source lineage or editor authorization. An intent retains
+its kind, exact normalized questions or product decision, next round/decision
+number, prior/result hashes and checkpoint. The checkpoint binds the original
+workflow state, a deterministic fingerprint of pipeline state, input hashes,
+counters and source lineage, and the existing or newly consumed Arbiter marker.
+Unknown fields, noncanonical payloads, competing editor windows, stale numbers,
+changed checkpoint bindings and unsupported re-entry states reject.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -365,11 +385,18 @@ position, logical turn, and preceding pause. Resuming an already paused
 checkpoint restores its blockers and pending editor authorization without
 consuming them. Session reconstruction uses frozen roles, mode, settings, and
 source lineage; an interrupted role does not refork its source. `CANCELED` is
-terminal and inspectable, and every resume path rejects it.
+terminal and inspectable, and every resume path rejects it. A settled pause
+accepts only a fresh cancellation at its current revision; until reconciliation
+validation accepts that pending cancellation over the preserved pause checkpoint,
+which reconciliation wraps once as `operator_canceled` without provider work.
 
 Every planning turn remains repository-read-only. Stop reconciliation requires
 an unchanged baseline and preserves the durable draft and declared artifacts.
 A read-only mutation remains a blocker after an operator pause is lifted.
+For a pending clarification append, reconciliation verifies protected inputs,
+workspace/controls and prior-or-exact-result transcript proof, retaining intent
+and accounting. It never appends, creates or opens an editor window, or accepts
+an answer. Rejected proof remains non-resumable on later reconciliation.
 
 ## Clarification
 
@@ -445,6 +472,36 @@ state, pending editor action, and last accepted artifact hash. An edit made
 through that authorized editor window is accepted as new clarification input
 and invalidates dependent work; any edit outside an authorized window pauses
 with `clarifications_changed`.
+
+Before replacing the transcript for questions or a supported product decision,
+the runner journals the append through the injected clarification service's
+`persistAppend` callback. Resume handles that intent before interrupted-turn
+transcript inspection or fresh role work. It revalidates frozen non-transcript
+inputs, repository/directory controls and checkpoint bindings, then recognizes
+only the prior bytes or the exact persisted result. `resultHash` verifies an
+already completed replacement; it never adopts a guessed hash or invokes the
+producing role again. Unexpected bytes remain non-resumable.
+
+After verified readback and unchanged protected bindings, one transition
+publishes the new transcript hash, once-only numbering, structured input request
+and one-shot editor authorization while clearing append intent. Only then may
+an editor open. Product-decision publication performs the existing draft/review
+invalidation and consecutive-stagnation reset, preserving cumulative revision
+and correction counts and the consumed Arbiter allowance. Intent survives lost
+replacement, readback or publication acknowledgements without native-session
+dependence. Read/write interruptions pause with bounded
+`clarification_append_interrupted` diagnostics and a null resume action; unsafe
+paths, malformed transcripts and protected-input drift retain blocking proof.
+An unchanged material-answer close renews only its editor window, without
+another append, question charge or role turn. An empty proactive close remains
+valid without consuming a round.
+
+A service-readback hash different from the durable intent's `resultHash`
+persists `clarifications_changed` before publication or editor preparation.
+Retain the complete intent, prior hashes, checkpoint, accounting and unsettled
+work. Reconstruction and verification-only stop settlement preserve this
+rejection even when later transcript bytes match the prior or result hash;
+neither match restores replay authority.
 
 Through MCP, the root runtime never opens an editor. It exposes the same pending
 authorization as a structured request with identified questions and accepts an
@@ -602,8 +659,10 @@ unclassified valid read-only result or process failure may use this path only
 after the repository guard proves the turn remained read-only. A normalized
 `authentication_required` disposition enters the fixed durable
 reauthentication pause after that guard; other authentication evidence,
-forbidden-operation permission denials, protocol failures, and isolation
-failures remain terminal. Denied input and native provider text are discarded.
+unexposed-tool and unclassified-Bash permission denials whose refusal cause is
+unknown, legacy `permission_forbidden_operation` records, protocol failures,
+and isolation failures remain terminal (see the
+[provider permission classes](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)). Denied input and native provider text are discarded.
 Explicit native transport, overload, model-busy, and server availability use the
 injected runner coordinator after repository reconciliation. The exact role and
 logical checkpoint survive five-second exponential backoff capped by the frozen
@@ -616,6 +675,13 @@ restart do not reset it. Safe partial
 content and pending corrections survive; stale approvals are invalidated and the
 same correction is not charged again. Source forks are never replayed. An
 abortable wait retains exclusive ownership and honors immediate/deferred stops.
+A qualifying explicit-model catalog miss pauses at the current read-only
+checkpoint as `backend_unavailable`. Resume reconstructs the same frozen
+request without a source refork or changes to the draft and review budgets.
+Admission and journal replay preserve the saved authoring state and counters
+from resume acceptance through the matching turn start.
+See the [catalog recovery contract](../../../docs/ARCHITECTURE.md#explicit-model-catalog-recovery).
+
 See the common [availability contract](../../../docs/ARCHITECTURE.md#durable-availability-episodes).
 The root agent boundary normalizes those finite adapter-owned classes before
 workflow code sees the failure. In particular, Codex collaboration activity
@@ -739,6 +805,11 @@ criteria, inputs and outputs match the frozen catalog/source/output selection
 exactly. Unknown kinds, mismatched formats or changed declarations cannot
 publish: deterministic issues return to correction. Analysis-only plans may have
 no output files or diff. Agents never write the plan.
+Frozen output selectors stay unchanged even when infeasible. Absent directory
+outputs require a trailing `/` and existing parents; prose grants no kind or
+parent writes. Exact-file outputs require enforceable execution-backend support.
+Planner and Plan Reviewer report infeasibility rather than rewriting declarations;
+the [custom-plan contract](../../../packages/custom-plan/README.md) owns the limits.
 
 The final artifact must pass its selected shared plan contract's validation
 before Runner canonically serializes and writes it atomically. This pipeline never changes Git history,
@@ -748,13 +819,23 @@ persisted hashes of `task.md`, optional `context.md`, and accepted
 `clarifications.md`. Unauthorized drift pauses and invalidates dependent drafts
 and reviews. Preserve the preflight repository snapshot as the run baseline,
 compare it before and after every agent turn and around the final write, and
-also wrap each turn in its own full snapshot check. Any other repository
+also wrap each turn in its own full snapshot check. Custom runs persist the
+bounded read-only projection of a complete directory inspection: entry count,
+ordered entry digest and fingerprints with the exact artifact exemptions, never
+a per-entry array, so baseline size stays independent of the workspace tree.
+Every comparison still inspects the complete directory. Any other repository
 mutation pauses instead of advancing. Before creating any repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
 path is ignored and untracked, including custom authoring. Ordinary-directory
 artifacts outside Git repositories require no Git inspection.
 
 ### Action-free ownership recovery
+
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
 
 A provider turn that returns `ERR_EXECUTION_PROCESS_UNVERIFIABLE` or
 `ERR_EXECUTION_PROCESS_ACTIVE` retains its active-turn marker and checkpoint.
@@ -823,8 +904,8 @@ No large turn implementation moves into the policy module.
   including input drift, read-only mutation rejection, fresh recovery context,
   and retained activity until reconciliation.
 - Cover finite redacted Claude classification, durable reconstruction of a
-  failed read-only request, and terminal authentication and forbidden-operation
-  boundaries without retaining native provider text.
+  failed read-only request, and terminal authentication, unexposed-tool, and
+  unclassified-Bash permission boundaries without retaining native provider text.
 - Cover redacted terminal adapter diagnostics, including forbidden delegated
   turns, through durable state and the shared CLI/MCP pause projection.
 

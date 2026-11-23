@@ -2,6 +2,10 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  normalizeOwnershipDiagnostic,
+  ownershipDiagnosticFrom,
+} from "../platform/index.js";
+import {
   normalizeDispatchOwner,
   normalizeRecoveryDispatch,
 } from "./dispatch.js";
@@ -70,6 +74,7 @@ export function recoveryFailureDetails(stage, error) {
     stage,
     code,
     explanation: EXPLANATIONS.get(code) ?? UNAVAILABLE,
+    ownershipDiagnostic: ownershipDiagnosticFrom(error),
   });
 }
 
@@ -98,13 +103,23 @@ function parseFailure(source) {
     invalid();
   }
   if (
-    !hasFields(value, FIELDS) ||
-    value.schemaVersion !== 1 ||
+    ![1, 2].includes(value?.schemaVersion) ||
+    !hasFields(value, [
+      ...FIELDS,
+      ...(value.schemaVersion === 2 ? ["ownershipDiagnostic"] : []),
+    ]) ||
     !STAGES.has(value.stage) ||
     (value.code !== null && !EXPLANATIONS.has(value.code)) ||
     value.explanation !== (EXPLANATIONS.get(value.code) ?? UNAVAILABLE)
   )
     invalid();
+  if (value.schemaVersion === 2) {
+    try {
+      normalizeOwnershipDiagnostic(value.ownershipDiagnostic);
+    } catch {
+      invalid();
+    }
+  }
   assertRunId(value.runId);
   normalizeRecoveryDispatch(value.dispatch);
   normalizeDispatchOwner(value.owner);
@@ -150,7 +165,7 @@ export function createRecoveryFailureStore({
       processIdentity: await processIdentity(processId),
     });
     const diagnostic = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       runId,
       dispatch,
       owner,
@@ -164,10 +179,21 @@ export function createRecoveryFailureStore({
     } catch (cause) {
       if (cause?.code !== "EEXIST") throw cause;
       const existing = await readFailure(path);
-      if (existing === null || !isDeepStrictEqual(existing, diagnostic))
+      if (
+        existing === null ||
+        !isDeepStrictEqual(
+          {
+            ...existing,
+            schemaVersion: 2,
+            ownershipDiagnostic: existing.ownershipDiagnostic ?? null,
+          },
+          diagnostic,
+        )
+      )
         throw new RunStoreError("Detached recovery failure already differs.", {
           code: "ERR_RECOVERY_FAILURE_CONFLICT",
         });
+      return deepFreeze(existing);
     }
     return deepFreeze(diagnostic);
   }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 
 import {
@@ -127,6 +128,11 @@ test("status, wait and activity share derived revision progress with an explicit
 });
 
 test("status and wait expose bounded observation evidence without private run or session data", async () => {
+  const diagnostic = createOwnershipDiagnostic("parent-completion-inspection", {
+    startRequested: true,
+    terminationRequested: true,
+    ownershipHandedOff: true,
+  });
   const run = {
     runId: RUN_ID,
     revision: 5,
@@ -146,7 +152,7 @@ test("status and wait expose bounded observation evidence without private run or
       completedCommits: [],
     },
     observations: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       omittedAttempts: 2,
       attempts: [
         {
@@ -154,6 +160,7 @@ test("status and wait expose bounded observation evidence without private run or
           role: "worker",
           checkpoint: "implement:workspace-write:1",
           status: "failed",
+          ownershipDiagnostic: diagnostic,
           accounting: "incomplete",
           incomplete: false,
           observations: [],
@@ -180,6 +187,7 @@ test("status and wait expose bounded observation evidence without private run or
         incomplete: false,
         measurements: null,
         observations: [],
+        ownershipDiagnostic: diagnostic,
       },
     ],
   });
@@ -510,11 +518,13 @@ test("MCP separates dispatch exit facts from safe correlated causes and leaves f
     stage: "process-recovery",
     code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     explanation: "Execution process ownership could not be verified.",
+    ownershipDiagnostic: createOwnershipDiagnostic("recovery-inspection"),
   };
   const journalCause = {
     stage: "state-recovery",
     code: "ERR_INVALID_EVENT_LOG",
     explanation: "The saved run journal is invalid.",
+    ownershipDiagnostic: null,
   };
   for (const [
     exitCode,
@@ -656,6 +666,7 @@ test("recorded dispatch inspection failures retain safe causes on identical-key 
     stage: "state-recovery",
     code: "ERR_INVALID_EVENT_LOG",
     explanation: "The saved run journal is invalid.",
+    ownershipDiagnostic: null,
   };
   for (const tool of ["runResume", "runRespond", "runStart"]) {
     for (const boundary of ["status", "proof"]) {
@@ -738,6 +749,7 @@ test("retry-time lease and stop inspections retain correlated causes without com
     stage: "execution-lease",
     code: "ERR_INVALID_RUN_LEASE",
     explanation: "Execution lease evidence is invalid.",
+    ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
   };
   for (const [tool, boundary, applicableStop = false] of [
     ["runResume", "lease"],
@@ -993,4 +1005,48 @@ test("MCP advertises and strictly accepts audit source fields", async (t) => {
       true,
     );
   assert.equal(calls.length, 1);
+});
+
+test("MCP direct ownership failures keep status/wait text and structured evidence identical and redacted", async (t) => {
+  const diagnostic = createOwnershipDiagnostic("state-custody");
+  const failure = new RunStoreError("discarded private error", {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ownershipDiagnostic: diagnostic,
+  });
+  let calls = 0;
+  const observe = async () => {
+    calls++;
+    throw failure;
+  };
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
+  const server = createMcpServer({
+    control: { runStatus: observe, runWait: observe },
+    issueReportingEnabled: false,
+  });
+  const client = new Client({ name: "ownership-test", version: "1.0.0" });
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  for (const name of ["run_status", "run_wait"]) {
+    const response = await client.callTool({
+      name,
+      arguments: { runId: RUN_ID },
+    });
+    assert.equal(response.isError, true);
+    assert.equal(response.structuredContent.code, failure.code);
+    assert.deepEqual(
+      response.structuredContent.ownershipDiagnostic,
+      diagnostic,
+    );
+    assert.deepEqual(
+      JSON.parse(response.content[0].text),
+      response.structuredContent,
+    );
+    assert.doesNotMatch(JSON.stringify(response), /discarded|private error/u);
+  }
+  assert.equal(calls, 2, "diagnostics add no retry");
 });

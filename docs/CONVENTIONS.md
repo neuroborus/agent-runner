@@ -80,6 +80,7 @@ Assign every behavior to one owner before deciding where its file belongs.
 | Run and resume coordination                                  | root runner                 |
 | State, Git, clarification, and trusted-command effects       | their root capability       |
 | Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
+| Process facts, owned-process supervision, protected launcher | root platform boundary      |
 | Workflow decisions and structured role contracts             | owning pipeline             |
 | Commit-plan parsing and subject validation                   | `packages/commit-plan`      |
 | Criterion-driven custom-plan parsing and validation          | `packages/custom-plan`      |
@@ -195,8 +196,10 @@ Keep a cross-cutting effect in the root capability that owns its lifecycle:
   guidance, using state-owned actions and leases;
 - shell-free editor launch and candidate selection belong to `src/editor.js`;
   clarification authorization and guidance publication retain their own exit policy;
-- allowlists and host execution belong to trusted validation;
-- provider processes and native sandboxes belong to agents.
+- allowlists, sandbox policy, and host execution belong to trusted validation;
+- owned-process supervision, process facts, the protected launcher, and Linux
+  isolation mechanics belong to platform;
+- provider flags, transport, and native sandboxes belong to agents.
 
 Pipelines consume these capabilities and must not reproduce their effects.
 Transport boundaries such as CLI and MCP project the same runner instead of
@@ -441,6 +444,45 @@ The runtime floor is Node.js `>=24 <25`; keep `package.json` engines aligned.
   state. Normative documents may prescribe an accepted target convention, but
   speculative feature plans and session notes stay in ignored local artifacts.
 - Keep source code, comments, logs, tests, and tracked documentation in English.
+
+## Documentation structure
+
+The [documentation-structure skill](../.agents/skills/documentation-structure/SKILL.md)
+is the procedure for applying these rules.
+
+- Maintained Markdown is tracked or non-ignored untracked `.md` and `.markdown`
+  content, discovered as the formatter discovers files; symlink aliases are
+  not separate documents. Ignored Runner task, report, and clarification
+  artifacts keep their own contracts and are never truncated to fit here.
+- A README entry point, `README.md` or `README.markdown`, has at most 150
+  physical lines. Every other topical document has at most 1,000. Skill-tree
+  Markdown follows the 100-line rule of the
+  [skill-authoring skill](../.agents/skills/skill-authoring/SKILL.md).
+- The sole line-limit exception is the root decision history at the exact
+  repository-relative path `RHYTHM.md`, which has no physical-line limit.
+  Same-name documents elsewhere follow the ordinary limits, and the root
+  history still follows every other rule in this section.
+- Count physical lines in the final formatted file, including blank lines,
+  fence lines, and an unterminated final line. Byte size is diagnostic only.
+  Never squeeze prose into long lines or drop obligations to meet a limit;
+  split semantically before the limit when that helps readers.
+- Give each rule one owner and link to it elsewhere. Split by coherent
+  component, contract, or reading task, never into numbered chunks, and
+  preserve active contracts, permissions, examples, and code fences.
+- A documentation family has a concise README gate that states its purpose,
+  which child owns what, and when each child must be read. Add nested gates
+  only when they reduce reading; never require reading a whole tree
+  unconditionally.
+- Before moving a document, inspect its real consumers: agent instructions,
+  semantic tests, runtime loaders, frozen file declarations, and release
+  resources. A moved document is delivered only when those consumers are
+  updated. Keep useful stable entry paths through concise compatibility routes.
+- Relative links and anchors resolve inside the repository, and every
+  maintained document is reachable through relative links from
+  [`docs/README.md`](README.md). Anchors are GitHub slugs of rendered headings.
+- The fast suite enforces these limits, links, anchors, and reachability in
+  `test/documentation-structure.test.js`; it exempts only the root `RHYTHM.md`
+  and only from the line limit.
 
 ## Git
 

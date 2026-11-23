@@ -1,33 +1,58 @@
+import {
+  projectCapabilityChecks,
+  projectCapabilityOwnership,
+} from "../trusted-validation/index.js";
 import { publicDispatchActivity } from "./dispatch.js";
 import { projectOperatorStop } from "./stop-projection.js";
-import { normalizePublicActivity, normalizeStopRequest } from "./validation.js";
+import {
+  normalizePublicActivity,
+  normalizeStopRequest,
+  projectCapabilityDiagnostic,
+} from "./validation.js";
 
 const MAX_PROJECTION_ACTIVITIES = 1024;
 const MAX_PROJECTION_BYTES = 1024 * 1024;
 
-export function projectPublicActivity(event) {
-  if (event.activity === null) return null;
+function projectPublicActivity(event, activity, stopRequest) {
+  if (activity === null) return null;
+  const stop = projectOperatorStop({
+    pipelineState: event.state.pipelineState,
+    stopRequest,
+  });
+  const capabilityDiagnostic = projectCapabilityDiagnostic(
+    event.state.pipelineId,
+    event.state.pause,
+  );
   return {
     revision: event.revision,
     recordedAt: event.recordedAt,
-    ...publicDispatchActivity(event.activity),
-    ...(event.state.stopRequest == null
+    ...publicDispatchActivity(activity),
+    ...(stop === null ? {} : { stop }),
+    // The event's own saved labels and revalidated ownership envelopes;
+    // unsafe or unbound labels stay unknown and other saved text is ignored.
+    ...(capabilityDiagnostic === undefined
       ? {}
-      : { stop: projectOperatorStop(event.state) }),
+      : {
+          capabilityDiagnostic,
+          capabilityChecks: projectCapabilityChecks(
+            capabilityDiagnostic,
+            event.state.pause.capabilityChecks,
+          ),
+          ownershipDiagnostics: projectCapabilityOwnership(
+            event.state.pause.evidence,
+          ),
+        }),
   };
 }
 
-// Only for byte-certified events. Reuse the owning legacy transformations
-// without cloning or semantically normalizing the private historical state.
+// Only for byte-certified events. Normalize the public fields without cloning
+// or semantically normalizing the private historical state.
 export function projectCertifiedActivity(event) {
-  return projectPublicActivity({
-    ...event,
-    activity: normalizePublicActivity(event.activity),
-    state: {
-      pipelineState: event.state.pipelineState,
-      stopRequest: normalizeStopRequest(event.state.stopRequest, event.state),
-    },
-  });
+  return projectPublicActivity(
+    event,
+    normalizePublicActivity(event.activity),
+    normalizeStopRequest(event.state.stopRequest, event.state),
+  );
 }
 
 // Retain public records only, never their historical states. afterRevision
@@ -41,7 +66,11 @@ export function createProjection(previous = null) {
 }
 
 export function collectProjection(projection, event) {
-  const activity = projectPublicActivity(event);
+  const activity = projectPublicActivity(
+    event,
+    event.activity,
+    event.state.stopRequest,
+  );
   if (activity === null) return;
   projection.activities.push(activity);
   projection.bytes += Buffer.byteLength(JSON.stringify(activity));

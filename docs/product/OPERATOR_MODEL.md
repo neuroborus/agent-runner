@@ -19,6 +19,17 @@ It grants no writable replay, additional fix budget or approval. Resolve a
 validated environment blocker before resuming; unsafe drift or contamination
 retains its existing stop. See the
 [execution recovery contract](../../pipelines/plan-execution/docs/SPEC.md#writable-result-recovery).
+Recovery-only `UNFINISHED` instead establishes a still-required execution repair
+or independent/combined polishing finding repair.
+At `finding_repair_required`, null resume authorizes one new repair against the
+verified preserved candidate. Unavailable uncharged budget requires the existing
+explicit `extra-fix-rounds` grant at `fix_limit_reached`. Neither action invents
+historical dispositions, refunds consumed attempts or replaces original gates.
+Polishing applies the same rule to a finding-resolution report in independent
+and combined modes: `resolution_output_invalid` means its one automatic
+read-only restatement was consumed, and resuming that checkpoint authorizes one
+further read-only restatement. See the
+[polishing recovery contract](../../pipelines/polishing/docs/SPEC.md#finding-resolution-result-recovery).
 
 ## Local application artifacts
 
@@ -324,10 +335,30 @@ pauses as `environment_blocked` before writable work. Repairing storage,
 isolation, or dependency availability permits retry of that saved request;
 changing selection or declarations requires a new run. Availability is checked
 again at every writable entry, even within one invocation. Agents cannot grant
-capabilities by reporting a need. An agent's sandbox limitation for an exactly
+capabilities by reporting a need. Reports name their `basis`: only
+needs of the assigned executor (or legacy saved reports) are admitted, while a
+restriction seen only by a read-only turn is kept as an unproved `read-only-turn`
+observation and leaves the ordinary check with Worker `FINALIZE`. An agent's
+sandbox limitation for an exactly
 delegated check is resolved only when runner inspection succeeds. Required checks
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
+
+When a diagnostic exists, the required-check capability pause publishes
+bounded comparison blockers with mismatch fields, check associations and omitted
+counts. It separately publishes any saved ownership facts that pass platform
+revalidation; a pause may have none. Mismatch details stay unknown for legacy
+pauses, returned preparation blockers and caught availability failures, while
+any such ownership facts remain visible (see
+[capability diagnostics](VALIDATION_AND_REVIEW.md#evidence-and-fingerprints)).
+Treat them as evidence for assessing the reported need, not as proof that the
+need is correct or as an explanation of its historical cause. Supported recovery first reconciles
+outstanding ownership through normal resume or stop reconciliation, then repairs
+availability and resumes the frozen request. If the selection or declarations
+must change, reconcile the existing run and preserve its unfinished work through
+supported recovery before starting a new run. Recovery keeps sandbox checks,
+frozen configuration, receipt bindings and consumed allowances, and grants no
+check credit, private-report retrieval or authority override.
 
 Preparation reservations remain owned work even before a process proof is attached.
 Interrupted registration, settlement or custody-log removal must reconcile before
@@ -412,7 +443,13 @@ with Critical findings creates no automatic issue and authorizes no repair.
 Invalid audit role results expose bounded field/constraint diagnostics in the
 shared CLI/MCP pause evidence. Resume targets the saved checkpoint with structured
 correction feedback, preserving consumed passes, pending findings and prior
-decisions; it never exposes rejected output or renews a budget. The
+decisions; it never exposes rejected output or renews a budget.
+`audit_report_rendering_changed` means the current runtime cannot reproduce the
+saved rendering of an unchanged report projection; `audit_report_temporary_conflict`
+means report temporary custody cannot be verified. Both retain the suspended
+checkpoint in durable state but project a null resume state and no actions, and
+null-action resume is rejected. Preserve `audit.md` and any remaining
+`.audit.md.tmp`, then start a new audit. The
 [audit specification](../../pipelines/audit/docs/SPEC.md#structured-report)
 owns diagnostic and compatibility details.
 
@@ -445,7 +482,8 @@ Accepted structured results have 2 MiB of serialized UTF-8 headroom, with finite
 larger state and recovery containers. Journals roll over into bounded segments
 while retaining the complete authoritative history and crash-recovery ordering;
 capacity exhaustion preserves the last accepted state. See the exact
-[storage and result budgets](../ARCHITECTURE.md#structured-result-headroom).
+[result budgets](../architecture/structured-results.md#structured-result-headroom)
+and [journal storage](../architecture/recovery/journal.md#write-ahead-publication-and-certified-replay).
 One leased recovery can repair an incomplete active tail and durably retire
 interrupted observation accounting using the verified repair result. It keeps
 the complete original history and publishes matching state and progress;
@@ -500,6 +538,14 @@ remains incomplete. Legacy runs have absent observations until new attempts
 occur. Observation publication is coalesced at native fallback and terminal
 boundaries and uses the same write-ahead recovery; it grants no retry or effect
 permission and stores no prompts, transcripts, or native session identifiers.
+Failed/interrupted attempts may additionally expose a nullable validated
+`ownershipDiagnostic` with a raising site, applicable supervisor branch,
+pre-cleanup flags and bounded inspection measurements. Missing legacy facts stay
+null. Correlated recovery causes and direct CLI/MCP failures expose the same
+redacted evidence. Stage/code/explanation and separate exit/signal facts retain
+their meaning; use existing supported status/resume/stop guidance. These facts
+improve future discrimination, not historical attribution or recovery authority.
+See the [owning contract](../ARCHITECTURE.md#bounded-ownership-failure-diagnostics).
 Runner results and MCP status/wait expose this bounded `observations` evidence;
 CLI status shows the latest attempt, and activity records concise start,
 fallback, and terminal summaries. Optional measurements distinguish supplied
@@ -518,9 +564,12 @@ The receipt exposes only a fingerprint and common supported access modes, never
 provider flags, credentials, native output, prompts, or session storage.
 
 Plan authoring writes its declared task artifacts. Plan execution and polishing
-may place runner-owned clarification artifacts below the configured repository
-artifact root only after Git proves the path is already ignored. The runner
-does not edit target ignore rules.
+freeze configuration-selected infrastructure ownership for their run transcripts.
+External placement grants only exact Runner transcript operations; repository-local
+paths must already be ignored and untracked. Legacy runs retain their exact
+repository-owned paths and pending authorizations. The runner never relocates
+artifacts on resume or changes ignore rules. The
+[clarification lifecycle](../ARCHITECTURE.md#clarification-lifecycle) owns these bindings.
 
 One execution lease protects a mutating run. Plan execution and polishing also
 hold a canonical-worktree lease so independently identified runs cannot mutate
@@ -572,6 +621,9 @@ partial workspace changes and task artifacts remain available in either case.
 CLI shorthand captures one status revision and key, while explicit CLI and MCP
 requests require both values for repeatable automation. Exact retries replay
 their durable receipt; stale requests are never refreshed implicitly.
+A settled pause rejects another pause but accepts cancellation with a new key
+at its current revision. Reconciliation retains its underlying checkpoint and
+blockers in terminal `CANCELED` without agent work or provider probes.
 
 The runner service supports `after-current-commit` for a selected execution
 step, including suspended steps; other pipelines and pre-step checkpoints reject

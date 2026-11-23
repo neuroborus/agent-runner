@@ -60,3 +60,47 @@ test("applies explicit pipeline migrations in order without mutating input", () 
       error.code === "ERR_PIPELINE_MIGRATION_FAILED",
   );
 });
+
+test("Runner validates frozen clarification ownership at the migration boundary", () => {
+  const pipeline = {
+    id: "test-pipeline",
+    stateVersion: 1,
+    workflow: { validateRun() {} },
+  };
+  const run = {
+    pipelineStateVersion: 1,
+    projectPath: "/workspace/project",
+    projectConfigurationProtection: {
+      infrastructureRoot: "/workspace/infrastructure",
+    },
+    pipelineState: {
+      repositoryBaseline: { projectPath: "/workspace" },
+    },
+  };
+  for (const clarificationRoot of [
+    null,
+    run.projectPath,
+    run.pipelineState.repositoryBaseline.projectPath,
+    run.projectConfigurationProtection.infrastructureRoot,
+  ]) {
+    const selected = {
+      ...run,
+      pipelineState: { ...run.pipelineState, clarificationRoot },
+    };
+    assert.equal(preparePipelineMigration(selected, pipeline), selected);
+  }
+  assert.throws(
+    () =>
+      preparePipelineMigration(
+        {
+          ...run,
+          pipelineState: {
+            ...run.pipelineState,
+            clarificationRoot: "/workspace/other",
+          },
+        },
+        pipeline,
+      ),
+    { code: "ERR_UNSAFE_CLARIFICATION_PATH" },
+  );
+});

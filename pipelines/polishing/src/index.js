@@ -1,4 +1,8 @@
 import {
+  CAPABILITY_PAUSE_EXPLANATION,
+  isCapabilityPause,
+} from "./capability-requirements.js";
+import {
   clearedCandidateAndTerminalGate,
   terminalConfirmationGatePassed,
 } from "./gate-evidence.js";
@@ -7,6 +11,7 @@ import {
   combinedReview,
   polishingPolicy,
 } from "./mode-policy.js";
+import { prepareResolutionRecovery } from "./resolution-recovery.js";
 import {
   createPolishingState,
   MAX_CLARIFICATION_ROUNDS,
@@ -16,16 +21,28 @@ import {
 } from "./workflow.js";
 import {
   assertRun as validateRun,
+  assertRestatementCatalogPause,
+  assertDirectReadOnlyCatalogPause,
+  assertReadOnlyGateCatalogPause,
+  assertValidationMigrationCatalogPause,
+  assertWritableGateCatalogPause,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   createFinalizationRecovery,
   finalizationFeedbackFindings,
+  finalizationDiagnostic,
   findingFingerprint,
   isFinalizationPolicy,
+  matchesResolutionAvailabilityRetirement,
+  matchesResolutionCatalogReservation,
+  matchesGateCatalogReservation,
+  matchesValidationMigrationCatalogReservation,
   MAX_DISPUTES_PER_FINDING,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
+  upgradeLegacyResolutionCorrection,
 } from "./workflow-contract.js";
 
 export {
@@ -51,6 +68,7 @@ export {
   NO_DELEGATION_INSTRUCTIONS,
   POLISH_INSTRUCTIONS,
   PRODUCT_DECISION_INSTRUCTIONS,
+  RESOLUTION_CORRECTION_INSTRUCTIONS,
   REVIEW_INSTRUCTIONS,
   REVIEW_CORRECTION_INSTRUCTIONS,
   STAGNATION_INSTRUCTIONS,
@@ -139,12 +157,14 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
   "output_exhausted",
   "bootstrap_disagreement",
+  "clarification_append_interrupted",
   "backend_unavailable",
   "confirmation_output_invalid",
   "environment_blocked",
   "finalization_cannot_pass",
   "finalization_evidence_rejected",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 const RETRYABLE_PREFLIGHT_PAUSE_REASONS = new Set([
@@ -176,6 +196,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   backend_unavailable: "The selected backend is temporarily unavailable.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
+  clarification_append_interrupted:
+    "A journaled clarification append was interrupted; resume verifies its exact bytes before publishing the input request.",
   clarification_answers_required:
     "Material clarification answers are required before polishing can continue.",
   clarification_limit_reached:
@@ -196,9 +218,15 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The bounded automatic terminal-confirmation correction remains invalid.",
   lazy_output_invalid:
     "The bounded automatic lazy checkpoint correction remains invalid.",
+  resolution_output_invalid:
+    "The bounded read-only finding-resolution report restatement remains invalid.",
+  finding_repair_required:
+    "Inspection found an unfinished repair. Resume authorizes one new repair invocation against the preserved candidate; it does not replay the retired effect.",
   review_output_invalid:
     "The bounded automatic candidate-review correction remains invalid.",
   fix_limit_reached: "Polishing reached its configured fix limit.",
+  handoff_whitespace_rejected:
+    "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
   internal_failure: "Polishing failed.",
   local_artifacts_not_ignored:
     "The configured repository-local artifact path is not ignored.",
@@ -206,6 +234,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   no_progress: "The correction loop reached a bounded no-progress condition.",
   proactive_clarification:
     "Optional proactive polishing clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before polishing can continue.",
   project_configuration_changed:
@@ -225,6 +255,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "bootstrap_inventory_capacity_exhausted",
   "confirmation_output_invalid",
@@ -233,6 +264,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "finalization_skill_invalid",
   "finalization_skill_missing",
   "lazy_output_invalid",
+  "resolution_output_invalid",
   "review_output_invalid",
 ]);
 
@@ -243,6 +275,11 @@ function publicCode(value) {
 }
 
 function publicResumeState(run) {
+  if (run.pause?.reason === "clarification_append_interrupted")
+    return (
+      run.pipelineState.pendingClarificationAppend?.checkpoint.workflowState ??
+      null
+    );
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     WORKFLOW_STATES.includes(run.pause.resumeState)
     ? run.pause.resumeState
@@ -250,6 +287,9 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (isCapabilityPause(pause)) return CAPABILITY_PAUSE_EXPLANATION;
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   if (
     pause.reason === "internal_failure" &&
     typeof pause.diagnosticClass === "string" &&
@@ -265,8 +305,41 @@ function publicExplanation(pause, fallback) {
     : fallback;
 }
 
-function publicEvidence(run) {
+function publicEvidence(
+  run,
+  { readOnlySnapshotChanges, capabilityBlockerEvidence },
+) {
   const pause = run.pause;
+  if (isCapabilityPause(pause))
+    return typeof capabilityBlockerEvidence === "function"
+      ? capabilityBlockerEvidence(pause)
+      : Object.freeze(["Capability mismatch details: unavailable."]);
+  if (
+    pause.reason === "internal_failure" &&
+    pause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+    pause.diagnostic?.role === "worker" &&
+    pause.diagnostic?.phase === "finalization" &&
+    pause.diagnostic?.contract === "finalization"
+  ) {
+    const { field, constraint } = finalizationDiagnostic(pause.diagnostic);
+    return Object.freeze([`finalization: ${field} (${constraint}).`]);
+  }
+  if (pause.reason === "handoff_whitespace_rejected") {
+    return Object.freeze([
+      pause.code === "ERR_POLISHING_HANDOFF_WHITESPACE"
+        ? "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged."
+        : "Index effect: none.",
+    ]);
+  }
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (pause.reason === "output_exhausted") {
     return Object.freeze([
       `Suspended role: ${pause.role}.`,
@@ -318,7 +391,10 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+// The root registry injects the Git-owned label normalizer and the trusted
+// capability blocker projector; a direct uncomposed call has neither and
+// reports those diagnoses as unavailable.
+function projectPause(run, capabilities = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -412,7 +488,7 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run),
+    evidence: publicEvidence(run, capabilities),
     resumeState: publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
@@ -443,6 +519,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -455,6 +535,16 @@ function validateResumeAction(run, action) {
   const state = run.pipelineState;
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
+  }
+  if (state.pendingClarificationAppend !== null) {
+    if (
+      action === null &&
+      run.pause?.reason === "clarification_append_interrupted"
+    )
+      return;
+    throw new Error(
+      "Pending append recovery does not accept this resume action.",
+    );
   }
   if (state.pendingEdit !== null) {
     if (action !== null) {
@@ -479,6 +569,44 @@ function validateResumeAction(run, action) {
     )
       return;
     throw new Error("Semantic finalization retry is not applicable.");
+  }
+  const correction = state.resolutionCorrection;
+  if (correction?.stage === "repair-required") {
+    const needsBudget =
+      !state.pendingCorrection &&
+      run.counters.fixRounds >=
+        state.settings.maxFixRounds + state.additionalFixRounds;
+    if (
+      action === null &&
+      run.pause?.reason === "finding_repair_required" &&
+      !needsBudget
+    )
+      return;
+    if (
+      run.pause?.reason !== "fix_limit_reached" ||
+      action?.type !== "extra-fix-rounds" ||
+      !needsBudget
+    )
+      throw new Error(
+        "Unfinished finding repair requires its explicit authorization or budget grant.",
+      );
+  }
+  if (
+    run.pause?.reason === "resolution_output_invalid" ||
+    (run.pause?.reason === "environment_blocked" &&
+      correction?.stage === "blocked")
+  ) {
+    if (
+      action === null &&
+      run.pause.resumeState === "RESOLVE_FINDINGS" &&
+      correction?.stage ===
+        (run.pause.reason === "environment_blocked"
+          ? "blocked"
+          : "exhausted") &&
+      Number.isSafeInteger(correction.additionalAttempts + 2)
+    )
+      return;
+    throw new Error("Finding-resolution restatement retry is not applicable.");
   }
   if (state.candidateMigrationPending && action === null) {
     return;
@@ -1113,9 +1241,77 @@ export function migratePolishingStateV17(run) {
   });
 }
 
+export function migratePolishingStateV19(run) {
+  // Shape-only: historical rejections and lost reports are never inferred.
+  return Object.freeze({
+    ...run.pipelineState,
+    resolutionCorrection: null,
+  });
+}
+
 export const polishingPipeline = Object.freeze({
   id: POLISHING_PIPELINE_ID,
-  stateVersion: 19,
+  assertCatalogTransition(
+    previous,
+    next,
+    _activity,
+    retryCode,
+    turnStart,
+    commitRejection,
+    readOnlyAttempt,
+    writableAttempt,
+  ) {
+    if (commitRejection !== undefined)
+      throw new Error("Polishing has no COMMIT catalog proof.");
+    const restatement = assertRestatementCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+      writableAttempt,
+    );
+    const writableGate = assertWritableGateCatalogPause(
+      previous,
+      next,
+      retryCode,
+    );
+    const readOnlyGate = assertReadOnlyGateCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    const migration = assertValidationMigrationCatalogPause(
+      previous,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    return (
+      restatement ||
+      writableGate ||
+      readOnlyGate ||
+      migration ||
+      assertDirectReadOnlyCatalogPause(
+        previous,
+        next,
+        retryCode,
+        turnStart,
+        readOnlyAttempt,
+      )
+    );
+  },
+  matchesAvailabilityRetirement: matchesResolutionAvailabilityRetirement,
+  readRestatementStart: (state) =>
+    state.resolutionCorrection?.restatementStartedAfter,
+  matchesCatalogReservation: (previous, next, binding) =>
+    matchesValidationMigrationCatalogReservation(previous, next, binding) ??
+    matchesResolutionCatalogReservation(previous, next, binding) ??
+    matchesGateCatalogReservation(previous, next, binding),
+  stateVersion: 25,
   migrations: Object.freeze({
     1: migratePolishingStateV1,
     2: migratePolishingStateV2,
@@ -1141,6 +1337,51 @@ export const polishingPipeline = Object.freeze({
     17: migratePolishingStateV17,
     // Preserve existing path/fallback decisions and consumed-effect evidence.
     18: (run) => Object.freeze({ ...run.pipelineState }),
+    19: migratePolishingStateV19,
+    // Basis-less saved reports keep the admission they were accepted under.
+    20: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    21: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
+    22: (run) => {
+      if (Object.hasOwn(run.pipelineState, "pendingClarificationAppend"))
+        throw new PolishingWorkflowError(
+          "Legacy state cannot own a clarification append.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        pendingClarificationAppend: null,
+      });
+    },
+    23: (run) => {
+      if (Object.hasOwn(run.pipelineState, "clarificationRoot"))
+        throw new PolishingWorkflowError(
+          "Legacy state cannot select clarification resources.",
+        );
+      // Preserve exact legacy repository ownership, including preflight-paused runs.
+      return Object.freeze({
+        ...run.pipelineState,
+        clarificationRoot:
+          run.pipelineState.repositoryBaseline?.projectPath ?? null,
+      });
+    },
+    // Shape upgrade only: retained checkpoints grant no new repair authority.
+    24: (run) => {
+      const resolutionCorrection = upgradeLegacyResolutionCorrection(
+        run.pipelineState,
+      );
+      if (resolutionCorrection === undefined)
+        throw new PolishingWorkflowError(
+          "Legacy state cannot own finding repair authority.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        resolutionCorrection,
+      });
+    },
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
@@ -1158,6 +1399,7 @@ export const polishingPipeline = Object.freeze({
     status: projectStatus,
   }),
   validateResumeAction,
+  prepareRecovery: prepareResolutionRecovery,
   workflow: Object.freeze({
     createState: createPolishingState,
     run: runPolishing,

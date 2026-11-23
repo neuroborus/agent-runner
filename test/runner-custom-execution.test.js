@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import { getPipeline } from "../src/index.js";
 import { createWorkspaceService } from "../src/workspace/index.js";
+import { PROVIDER_REGISTRY } from "../src/agents/index.js";
 import {
   createExecutionAdapter,
   createFixture,
@@ -11,6 +13,64 @@ import {
   PLAN,
   runnerFor,
 } from "./support/index.js";
+
+for (const backend of ["codex", "claude"]) {
+  test(`${backend} rejects a missing slashless custom output before preparation or writable work`, async (t) => {
+    const f = await fixture(t, "combined", {
+      missingOutputRoot: true,
+      outputDeclaration: "reports",
+      assertOutputReady: (request) =>
+        PROVIDER_REGISTRY.get(backend).assertWorkspaceReady(request),
+    });
+    await assert.rejects(f.run(), (error) => {
+      assert.match(error.message, /missing/u);
+      assert.match(error.message, /authorized fresh run/u);
+      return true;
+    });
+    assert.equal(
+      f.calls.some(({ request }) => request.access === "workspace-write"),
+      false,
+    );
+    assert.equal(f.currentRun.pipelineState.customResults, null);
+    await assert.rejects(lstat(join(f.projectPath, "reports")), {
+      code: "ENOENT",
+    });
+  });
+}
+
+test("a backend with exact-file creation accepts an absent slashless output without directory preparation", async (t) => {
+  const f = await fixture(t, "combined", {
+    outputDeclaration: "reports/summary.md",
+    assertOutputReady: ({ preparableOutputPaths }) => {
+      assert.deepEqual(preparableOutputPaths, []);
+    },
+  });
+  const { run } = await f.run();
+  assert.equal(
+    run.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(run.pause),
+  );
+  assert.deepEqual(run.pipelineState.customResults.preparedRoots, []);
+  assert.ok((await lstat(f.output)).isFile());
+  assert.ok(f.probes.some(({ access }) => access === "workspace-write"));
+});
+
+test("all custom directory parents must exist before any new root is prepared", async (t) => {
+  const f = await fixture(t, "combined", {
+    missingOutputRoot: true,
+    outputDeclarations: ["reports/", "missing/child/"],
+  });
+  await assert.rejects(f.run(), { code: "ERR_WORKSPACE_PATH" });
+  assert.equal(f.currentRun.pipelineState.customResults, null);
+  assert.equal(
+    f.calls.some(({ request }) => request.access === "workspace-write"),
+    false,
+  );
+  await assert.rejects(lstat(join(f.projectPath, "reports")), {
+    code: "ENOENT",
+  });
+});
 
 test("project commit selection overrides a runner custom default before execution plan discovery", async (t) => {
   const f = await createFixture(t);
@@ -109,6 +169,22 @@ for (const mode of ["independent", "lazy", "combined"]) {
     assert.ok(f.probes.every((probe) => probe.access !== "local-commit"));
     if (mode === "lazy")
       assert.ok(f.calls.every(({ role }) => role === "worker"));
+    if (mode === "combined") {
+      const writable = /never as reserved-check coverage/u;
+      const review = /Source observation or overlap alone is not a violation/u;
+      const markers = {
+        implement: writable,
+        "check-and-fix": writable,
+        "clean-confirm": review,
+        review,
+        confirm: review,
+      };
+      for (const { phase, request } of f.calls) {
+        if (!Object.hasOwn(markers, phase)) continue;
+        for (const prompt of [request.prompt, request.recoveryPrompt])
+          if (prompt !== undefined) assert.match(prompt, markers[phase]);
+      }
+    }
   });
 }
 
@@ -138,6 +214,15 @@ test("custom reconstruction retains earlier acceptance and retries only the inte
     JSON.stringify(resumed.run.pause),
   );
   assert.equal(f.calls.filter((call) => call.phase === "implement").length, 2);
+  const retried = f.calls
+    .filter((call) => call.step === 2 && call.phase === "confirm")
+    .at(-1);
+  for (const prompt of [retried.request.prompt, retried.request.recoveryPrompt])
+    if (prompt !== undefined)
+      assert.match(
+        prompt,
+        /Source observation or overlap alone is not a violation/u,
+      );
 });
 
 test("custom reconstruction rejects writable policy drift before another turn", async (t) => {
@@ -614,11 +699,13 @@ test("output preparation saves its verified baseline with the identity before in
   await assert.rejects(f.run(), (error) => error === failure);
   const state = f.currentRun.pipelineState;
   const prepared = state.customResults.preparation.prepared;
-  assert.deepEqual(
-    state.repositoryBaseline.entries.find(({ path }) => path === prepared.path)
-      .identity,
-    prepared.identity,
+  assert.equal(Object.hasOwn(state.repositoryBaseline, "entries"), false);
+  const record = state.repositoryBaseline.outputs.find(
+    ({ path }) => path === prepared.path,
   );
+  assert.equal(record.entry.kind, "directory");
+  assert.deepEqual(record.entry.identity, prepared.identity);
+  assert.equal(record.descendantCount, 0);
   assert.equal(
     f.calls.some(({ phase }) => phase === "implement"),
     false,
@@ -631,6 +718,128 @@ test("output preparation saves its verified baseline with the identity before in
   );
   assert.equal(run.pipelineState.customResults.accepted.length, 2);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
+});
+
+test("existing output preparation after an authorized clarification edit survives reconstruction", async (t) => {
+  let asked = false;
+  let interrupted = false;
+  const failure = new Error("Prepared identity response lost");
+  const f = await fixture(t, "combined", {
+    beforeTurn({ saved }) {
+      if (asked || saved.pipelineState.workflowState !== "CLARIFY") return;
+      asked = true;
+      return {
+        status: "QUESTIONS",
+        questions: [
+          {
+            question: "Which source governs conflicting evidence?",
+            whyItMatters: "It decides the summary basis.",
+          },
+        ],
+        reason: "",
+        stepAssessment: {
+          step: 1,
+          subject: "Analyze evidence",
+          disposition: "CURRENT",
+          evidence: [],
+        },
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      };
+    },
+    afterTransition(saved) {
+      if (
+        !interrupted &&
+        saved.pipelineState.customResults?.preparation?.prepared
+      ) {
+        interrupted = true;
+        throw failure;
+      }
+    },
+  });
+  const { run: waiting } = await f.run();
+  assert.equal(waiting.pause.reason, "clarification_answers_required");
+  const baseline = waiting.pipelineState.repositoryBaseline;
+  const path = waiting.pipelineState.clarificationPath;
+  await writeFile(path, `${await readFile(path, "utf8")}\nUse source.md.\n`);
+  await assert.rejects(f.run(), (error) => error === failure);
+  const state = f.currentRun.pipelineState;
+  assert.equal(state.customResults.preparation.intent.before.exists, true);
+  assert.notEqual(
+    state.repositoryBaseline.identityFingerprint,
+    baseline.identityFingerprint,
+  );
+  assert.deepEqual(state.repositoryBaseline.outputs, baseline.outputs);
+  const { run } = await f.run();
+  assert.equal(
+    run.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(run.pause),
+  );
+  assert.equal(run.pipelineState.customResults.accepted.length, 2);
+});
+
+test("a legacy full baseline above state capacity stops for a fresh custom run", async (t) => {
+  let oversized = false;
+  let interrupted = false;
+  const f = await fixture(t, "combined", {
+    syntheticEntries: () =>
+      oversized
+        ? Array.from({ length: 10_001 }, (_, index) => ({
+            path: join(f.projectPath, "reports", `generated-${index}.md`),
+            kind: "file",
+            mode: 0o644,
+            size: 0,
+            hash: "0".repeat(64),
+            identity: { device: "0", inode: String(index), mode: "33188" },
+            modifiedNs: "0",
+            changedNs: "0",
+          }))
+        : [],
+    beforeTurn({ saved }) {
+      if (
+        saved.pipelineState.currentStep !== 2 ||
+        saved.activeTurn.phase !== "implement"
+      )
+        return;
+      if (!interrupted) {
+        interrupted = true;
+        throw Object.assign(new Error("Provider temporarily unavailable"), {
+          recoverable: true,
+        });
+      }
+      oversized = true;
+    },
+  });
+  const { run: paused } = await f.run();
+  assert.equal(paused.pause.reason, "backend_unavailable");
+  const earlier = structuredClone(paused.pipelineState.customResults.accepted);
+  const compact = paused.pipelineState.repositoryBaseline;
+  f.currentRun = {
+    ...paused,
+    pipelineState: {
+      ...paused.pipelineState,
+      repositoryBaseline: {
+        ...(await f.workspace.snapshot({ allowedPaths: compact.allowedPaths })),
+        contentFingerprint: compact.contentFingerprint,
+      },
+    },
+  };
+  const { run } = await f.run();
+  assert.equal(run.pause.reason, "plan_revision_required");
+  assert.equal(run.pause.code, "ERR_CUSTOM_BASELINE_CAPACITY");
+  assert.match(run.pause.explanation, /10,000-entry state capacity/u);
+  assert.equal(
+    Object.hasOwn(run.pipelineState.repositoryBaseline, "entries"),
+    true,
+  );
+  assert.deepEqual(run.pipelineState.customResults.accepted, earlier);
+  const calls = f.calls.length;
+  assert.equal(f.calls.at(-1).phase, "implement");
+  await f.run();
+  assert.equal(f.calls.length, calls);
 });
 
 test("custom resume prepares missing outputs after ledger initialization was interrupted", async (t) => {
@@ -699,9 +908,22 @@ test("terminal confirmation cannot mutate outputs or accept changed content", as
     },
   });
   const stopped = await f.run();
-  assert.equal(stopped.run.pause.reason, "read_only_agent_mutated_repository");
+  assert.deepEqual(stopped.run.pause, {
+    reason: "read_only_agent_mutated_repository",
+    code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+  });
+  const projected = getPipeline("plan-execution").projections.pause(
+    stopped.run,
+  );
+  assert.deepEqual(projected.evidence, [
+    "Changed snapshot domains: unavailable.",
+  ]);
+  assert.deepEqual(projected.nextActions, [
+    { type: "start-new-run", requirement: "uncontaminated-worktree" },
+  ]);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
   assert.equal(f.currentRun.pipelineState.customResults.accepted.length, 1);
+  assert.equal(await readFile(f.output, "utf8"), "Unexpected replacement.\n");
 });
 
 test("custom trusted validation binds the workspace bytes while semantic gates bind the result", async (t) => {

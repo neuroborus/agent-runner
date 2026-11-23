@@ -1,11 +1,28 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { normalizeProviderObservation } from "../agents/index.js";
+import {
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
+  normalizeProviderObservation,
+} from "../agents/index.js";
+import { normalizeOwnershipDiagnostic } from "../platform/index.js";
 
 const MAX_ATTEMPTS = 32;
 const MAX_OBSERVATIONS = 9;
 const STATUSES = ["active", "completed", "failed", "interrupted"];
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
+const CATALOG_REJECTION_SCHEMA_VERSION = 28;
+const TURN_CATALOG_REJECTION = Object.freeze({
+  failureClass: MODEL_UNAVAILABLE_DIAGNOSTIC,
+  checkpoint: "turn",
+  outcome: "rejected",
+  effect: "none",
+  retry: "terminal",
+});
+const COMMIT_CATALOG_REJECTION = Object.freeze({
+  ...TURN_CATALOG_REJECTION,
+  checkpoint: "commit",
+  commitExecutor: "not_started",
+});
 const key = ({ attempt, turn }) => `${attempt}:${turn}`;
 const MEASUREMENT_FIELDS = [
   "promptBytes",
@@ -29,6 +46,40 @@ function exact(value, fields) {
 
 function invalid() {
   throw new TypeError("Run observations are invalid.");
+}
+
+const recordsCatalogRejection = (state, observations) =>
+  state.schemaVersion >= CATALOG_REJECTION_SCHEMA_VERSION &&
+  observations?.schemaVersion === 2;
+
+function isWritableRejection(value, status, checkpoint) {
+  return (
+    status === "failed" &&
+    checkpoint.split(":")[1] === "workspace-write" &&
+    isDeepStrictEqual(value, TURN_CATALOG_REJECTION)
+  );
+}
+
+function isReadOnlyRejection(
+  value,
+  status,
+  writableRejection,
+  commitRejection,
+) {
+  return (
+    status === "failed" &&
+    writableRejection === undefined &&
+    commitRejection === undefined &&
+    isDeepStrictEqual(value, TURN_CATALOG_REJECTION)
+  );
+}
+
+function isCommitRejection(value, status, checkpoint) {
+  return (
+    status === "failed" &&
+    checkpoint.startsWith("commit:") &&
+    isDeepStrictEqual(value, COMMIT_CATALOG_REJECTION)
+  );
 }
 
 function normalizeMeasurements(value) {
@@ -65,7 +116,9 @@ export function normalizeObservationState(state) {
   if (value === null) return null;
   if (
     !exact(value, ["schemaVersion", "omittedAttempts", "attempts"]) ||
-    value.schemaVersion !== 1 ||
+    ![1, ...(state.schemaVersion >= 27 ? [2] : [])].includes(
+      value.schemaVersion,
+    ) ||
     !count(value.omittedAttempts) ||
     !Array.isArray(value.attempts) ||
     value.attempts.length < 1 ||
@@ -83,10 +136,27 @@ export function normalizeObservationState(state) {
         "accounting",
         "incomplete",
         "observations",
+        ...(value.schemaVersion === 2 &&
+        attempt != null &&
+        Object.hasOwn(attempt, "ownershipDiagnostic")
+          ? ["ownershipDiagnostic"]
+          : []),
         ...(state.schemaVersion >= 19 &&
         attempt != null &&
         Object.hasOwn(attempt, "measurements")
           ? ["measurements"]
+          : []),
+        ...(attempt != null && Object.hasOwn(attempt, "writableRejection")
+          ? ["writableRejection"]
+          : []),
+        ...(attempt != null && Object.hasOwn(attempt, "writableRetryEligible")
+          ? ["writableRetryEligible"]
+          : []),
+        ...(attempt != null && Object.hasOwn(attempt, "readOnlyRejection")
+          ? ["readOnlyRejection"]
+          : []),
+        ...(attempt != null && Object.hasOwn(attempt, "commitRejection")
+          ? ["commitRejection"]
           : []),
       ]) ||
       !count(attempt.id) ||
@@ -100,11 +170,46 @@ export function normalizeObservationState(state) {
       (attempt.status === "active" && index !== value.attempts.length - 1) ||
       typeof attempt.incomplete !== "boolean" ||
       !Array.isArray(attempt.observations) ||
-      attempt.observations.length > MAX_OBSERVATIONS
+      attempt.observations.length > MAX_OBSERVATIONS ||
+      (Object.hasOwn(attempt, "writableRejection") &&
+        (!recordsCatalogRejection(state, value) ||
+          !isWritableRejection(
+            attempt.writableRejection,
+            attempt.status,
+            attempt.checkpoint,
+          ))) ||
+      (Object.hasOwn(attempt, "writableRetryEligible") &&
+        (attempt.writableRetryEligible !== true ||
+          !Object.hasOwn(attempt, "writableRejection"))) ||
+      (Object.hasOwn(attempt, "readOnlyRejection") &&
+        (!recordsCatalogRejection(state, value) ||
+          !isReadOnlyRejection(
+            attempt.readOnlyRejection,
+            attempt.status,
+            attempt.writableRejection,
+            attempt.commitRejection,
+          ))) ||
+      (Object.hasOwn(attempt, "commitRejection") &&
+        (!recordsCatalogRejection(state, value) ||
+          !isCommitRejection(
+            attempt.commitRejection,
+            attempt.status,
+            attempt.checkpoint,
+          )))
     )
       invalid();
     previousId = attempt.id;
     const observations = attempt.observations.map(normalizeProviderObservation);
+    const ownershipDiagnostic = normalizeOwnershipDiagnostic(
+      Object.hasOwn(attempt, "ownershipDiagnostic")
+        ? attempt.ownershipDiagnostic
+        : null,
+    );
+    if (
+      ownershipDiagnostic !== null &&
+      !["failed", "interrupted"].includes(attempt.status)
+    )
+      invalid();
     const measurements = Object.hasOwn(attempt, "measurements")
       ? normalizeMeasurements(attempt.measurements)
       : undefined;
@@ -119,7 +224,19 @@ export function normalizeObservationState(state) {
     return {
       ...attempt,
       observations,
+      ...(Object.hasOwn(attempt, "ownershipDiagnostic")
+        ? { ownershipDiagnostic }
+        : {}),
       ...(Object.hasOwn(attempt, "measurements") ? { measurements } : {}),
+      ...(Object.hasOwn(attempt, "writableRejection")
+        ? { writableRejection: { ...TURN_CATALOG_REJECTION } }
+        : {}),
+      ...(Object.hasOwn(attempt, "readOnlyRejection")
+        ? { readOnlyRejection: { ...TURN_CATALOG_REJECTION } }
+        : {}),
+      ...(Object.hasOwn(attempt, "commitRejection")
+        ? { commitRejection: { ...COMMIT_CATALOG_REJECTION } }
+        : {}),
     };
   });
   return { ...value, attempts };
@@ -169,6 +286,7 @@ export function beginObservationAttempt(state, identity, measurements) {
   const omitted = Math.max(0, attempts.length - MAX_ATTEMPTS);
   return {
     ...value,
+    schemaVersion: state.schemaVersion >= 27 ? 2 : 1,
     omittedAttempts: Math.min(
       Number.MAX_SAFE_INTEGER,
       value.omittedAttempts + omitted,
@@ -183,7 +301,15 @@ export function recordObservations(
   records,
   status,
   incomplete,
-  { resultBytes, structuredResultBytes } = {},
+  {
+    resultBytes,
+    structuredResultBytes,
+    ownershipDiagnostic,
+    writableRejection,
+    writableRetryEligible,
+    readOnlyRejection,
+    commitRejection,
+  } = {},
 ) {
   if (
     !exact(identity, ["id", "role", "checkpoint"]) ||
@@ -200,6 +326,30 @@ export function recordObservations(
       !count(structuredResultBytes)) ||
     (status !== "completed" &&
       (resultBytes != null || structuredResultBytes != null))
+  )
+    invalid();
+  const diagnostic = normalizeOwnershipDiagnostic(ownershipDiagnostic ?? null);
+  if (
+    diagnostic !== null &&
+    (state.schemaVersion < 27 ||
+      state.observations?.schemaVersion !== 2 ||
+      !["failed", "interrupted"].includes(status))
+  )
+    invalid();
+  if (
+    (writableRejection !== undefined &&
+      !isWritableRejection(writableRejection, status, identity.checkpoint)) ||
+    (writableRetryEligible !== undefined &&
+      (writableRetryEligible !== true || writableRejection === undefined)) ||
+    (readOnlyRejection !== undefined &&
+      !isReadOnlyRejection(
+        readOnlyRejection,
+        status,
+        writableRejection,
+        commitRejection,
+      )) ||
+    (commitRejection !== undefined &&
+      !isCommitRejection(commitRejection, status, identity.checkpoint))
   )
     invalid();
   const value = state.observations;
@@ -228,6 +378,17 @@ export function recordObservations(
     observations,
     incomplete: current.incomplete || incomplete,
   };
+  if (diagnostic !== null) next.ownershipDiagnostic = diagnostic;
+  // Older envelopes keep their closed attempt shape and therefore grant nothing.
+  if (recordsCatalogRejection(state, value)) {
+    if (writableRejection !== undefined)
+      next.writableRejection = { ...TURN_CATALOG_REJECTION };
+    if (writableRetryEligible === true) next.writableRetryEligible = true;
+    if (readOnlyRejection !== undefined)
+      next.readOnlyRejection = { ...TURN_CATALOG_REJECTION };
+    if (commitRejection !== undefined)
+      next.commitRejection = { ...COMMIT_CATALOG_REJECTION };
+  }
   if (current.measurements !== undefined)
     next.measurements = {
       ...current.measurements,
@@ -260,6 +421,7 @@ export function assertObservationContinuity(previous, current) {
   const prior = before?.attempts.at(-1);
   const next = after.attempts.at(-1);
   if (
+    before.schemaVersion !== after.schemaVersion ||
     prior?.status !== "active" ||
     before.omittedAttempts !== after.omittedAttempts ||
     !isDeepStrictEqual(
@@ -270,6 +432,11 @@ export function assertObservationContinuity(previous, current) {
       (field) => prior[field] !== next[field],
     ) ||
     (prior.incomplete && !next.incomplete) ||
+    (prior.ownershipDiagnostic !== undefined &&
+      !isDeepStrictEqual(
+        prior.ownershipDiagnostic,
+        next.ownershipDiagnostic,
+      )) ||
     !isDeepStrictEqual(
       prior.measurements,
       next.measurements === undefined
@@ -302,6 +469,9 @@ export function projectObservations(run) {
       status: attempt.status,
       accounting: attempt.accounting,
       incomplete: attempt.incomplete,
+      ownershipDiagnostic: normalizeOwnershipDiagnostic(
+        attempt.ownershipDiagnostic ?? null,
+      ),
       measurements:
         attempt.measurements === undefined
           ? null

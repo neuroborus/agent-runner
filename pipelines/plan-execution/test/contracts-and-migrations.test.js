@@ -37,6 +37,7 @@ import {
 } from "../src/custom-results.js";
 import {
   MAX_BOOTSTRAP_ITEMS,
+  assertRun,
   createPersistedFinalizationEvidence,
   normalizeBootstrapArbitration,
   normalizeBootstrapResult,
@@ -62,6 +63,7 @@ import {
   bootstrapReady,
   checkAndFix,
   clarificationReady,
+  clarificationQuestions,
   cleanConfirmation,
   createFixture,
   finalizationBlocked,
@@ -89,6 +91,7 @@ import {
   versionOneState,
   versionThirteenState,
 } from "./support/index.js";
+import { customExecutionFixture } from "../../../test/support/index.js";
 
 function writableResultContracts() {
   const { summary: _blockedSummary, ...blocked } = implementationBlocked();
@@ -1306,7 +1309,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 39);
+  assert.equal(planExecutionPipeline.stateVersion, 46);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -1904,6 +1907,12 @@ test("preserves version-4 consumed commit authority for verification", async (t)
   assert.equal(migrated.pendingCommit.status, "consumed");
   assert.equal(migrated.validationMigrationPending, true);
   assert.equal(migrated.finalizationResult.status, "PASS");
+  // Legacy entries stay agent-attributed and establish no Runner order.
+  assert.ok(migrated.finalizationResult.checks.length > 0);
+  for (const check of migrated.finalizationResult.checks) {
+    assert.equal(check.executor, "agent");
+    assert.equal(check.commandIdentity, null);
+  }
   assert.deepEqual(migrated.trustedValidation.commands, []);
   assert.doesNotThrow(() =>
     normalizePipelineState(
@@ -3122,4 +3131,221 @@ test("rejects inconsistent persisted workflow state", async (t) => {
       (error) => error.code === "ERR_INVALID_PLAN_EXECUTION_STATE",
     );
   });
+});
+
+test("custom repository baselines accept only the legacy full or closed compact shape", async (t) => {
+  const f = await customExecutionFixture(t, "combined");
+  const { run } = await f.run();
+  assert.equal(run.pipelineState.workflowState, "DONE");
+  const baseline = run.pipelineState.repositoryBaseline;
+  const [record] = baseline.outputs;
+  const withBaseline = (repositoryBaseline) => ({
+    ...run,
+    pipelineState: { ...run.pipelineState, repositoryBaseline },
+  });
+  const { remainderCount, remainderHash, outputs, ...legacy } = baseline;
+  const missing = {
+    path: record.path,
+    kind: "missing",
+    mode: null,
+    size: 0,
+    hash: null,
+  };
+  const file = {
+    path: record.path,
+    kind: "file",
+    mode: 0o644,
+    size: 0,
+    hash: "a".repeat(64),
+    identity: { device: "1", inode: "2", mode: "33188" },
+    modifiedNs: "-86400000000000",
+    changedNs: "1",
+  };
+  for (const valid of [
+    baseline,
+    { ...baseline, outputs: [{ ...record, entry: missing }] },
+    { ...baseline, outputs: [{ ...record, entry: file }] },
+    { ...legacy, entries: [], linkResolutions: [] },
+  ])
+    assert.doesNotThrow(() => assertRun(withBaseline(valid)));
+  for (const malformed of [
+    { ...baseline, unknown: true },
+    { ...baseline, inspectionPaths: [run.projectPath] },
+    { ...baseline, linkResolutions: [] },
+    { ...baseline, workspacePath: f.taskPath },
+    { ...baseline, outputPaths: [] },
+    { ...baseline, entryCount: -1 },
+    { ...baseline, remainderCount: 1.5 },
+    { ...baseline, remainderHash: "unbound" },
+    { ...baseline, outputs: [] },
+    { ...baseline, outputs: [{ ...record, unknown: true }] },
+    { ...baseline, outputs: [{ ...record, path: run.projectPath }] },
+    { ...baseline, outputs: [{ ...record, descendantsHash: null }] },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, unknown: true } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, path: f.output } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...missing, mode: 0o700 } }],
+    },
+    {
+      ...baseline,
+      outputs: [{ ...record, entry: { ...record.entry, identity: {} } }],
+    },
+    ...["--1", "1e3", "", 1].map((modifiedNs) => ({
+      ...baseline,
+      outputs: [{ ...record, entry: { ...file, modifiedNs } }],
+    })),
+    {
+      ...baseline,
+      outputs: [
+        {
+          ...record,
+          entry: { ...file, identity: { ...file.identity, inode: "-2" } },
+        },
+      ],
+    },
+  ])
+    assert.throws(() => assertRun(withBaseline(malformed)), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+});
+
+test("version 41 migration preserves custom baselines without rewriting state", () => {
+  const pipelineState = {
+    ...createPlanExecutionState(),
+    planKind: "custom",
+    repositoryBaseline: {
+      schemaVersion: 1,
+      entries: [],
+      linkResolutions: [],
+    },
+  };
+  const saved = structuredClone(pipelineState);
+  const migrated = planExecutionPipeline.migrations[41]({ pipelineState });
+  assert.deepEqual(migrated, saved);
+  assert.deepEqual(pipelineState, saved);
+  assert.ok(Object.isFrozen(migrated));
+});
+
+test("pending clarification append is closed, checkpoint-bound and grants no legacy authority", async (t) => {
+  const interruption = new Error("Saved append proof");
+  let saved;
+  const fixture = await createFixture(t, {
+    worker: [clarificationQuestions()],
+    onTransition(run) {
+      if (run.pipelineState.pendingClarificationAppend !== null) {
+        saved = structuredClone(run);
+        throw interruption;
+      }
+    },
+  });
+  await assert.rejects(fixture.run(), (cause) => cause === interruption);
+  assert.doesNotThrow(() => planExecutionPipeline.workflow.validateRun(saved));
+
+  for (const mutate of [
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.extra = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.questions[0].extra = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.questions = [];
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.number++;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.expectedHash =
+        hash("different");
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.resultHash =
+        run.hashes.executionClarifications;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.suspendedState =
+        "IMPLEMENT";
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.preserveLineage = true;
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.workReport = {};
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.infrastructureFingerprint =
+        hash("unsupported");
+    },
+    (run) => {
+      run.pipelineState.pendingClarificationAppend.checkpoint.fingerprint =
+        hash("changed");
+    },
+    (run) => {
+      run.pipelineState.workReports = [
+        { step: 1, phase: "IMPLEMENT", summary: "Intervening work." },
+      ];
+    },
+    (run) => {
+      run.counters.fixRounds++;
+    },
+    (run) => {
+      run.hashes.context = hash("changed context");
+    },
+    (run) => {
+      run.sessionLineage.children = [];
+    },
+  ]) {
+    const rejected = structuredClone(saved);
+    mutate(rejected);
+    assert.throws(() => planExecutionPipeline.workflow.validateRun(rejected), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  }
+  const { pendingClarificationAppend: _append, ...legacy } =
+    saved.pipelineState;
+  const migrated = planExecutionPipeline.migrations[42]({
+    ...saved,
+    pipelineState: legacy,
+  });
+  assert.deepEqual(migrated, { ...legacy, pendingClarificationAppend: null });
+  assert.doesNotThrow(() =>
+    planExecutionPipeline.workflow.validateRun({
+      ...saved,
+      pipelineState: migrated,
+    }),
+  );
+  assert.throws(() => planExecutionPipeline.migrations[42](saved));
+});
+
+test("legacy clarification ownership is explicit and preflight-paused state never selects current resources", () => {
+  const current = createPlanExecutionState();
+  const { clarificationRoot: _root, ...legacy } = current;
+  assert.throws(() => normalizePipelineState(legacy));
+  const migration = planExecutionPipeline.migrations[43];
+  const saved = structuredClone(legacy);
+  assert.deepEqual(migration({ pipelineState: legacy }), current);
+  assert.deepEqual(legacy, saved);
+  assert.throws(() => migration({ pipelineState: current }));
+  for (const clarificationRoot of [
+    "relative",
+    "/workspace/../other",
+    3,
+    undefined,
+  ])
+    assert.throws(() =>
+      normalizePipelineState({ ...current, clarificationRoot }),
+    );
+  assert.throws(() =>
+    createPlanExecutionState({
+      clarificationRoot: "/infrastructure",
+      artifactPath: "/elsewhere/LOCAL_ARTIFACTS",
+    }),
+  );
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
+import { ownershipDiagnosticFrom } from "./platform/index.js";
 import packageMetadata from "../package.json" with { type: "json" };
 import { migrateRunnerConfiguration } from "./config/index.js";
 import { createGuidanceService } from "./guidance/index.js";
@@ -11,12 +12,16 @@ import {
   DETACHED_STOP_CHECKPOINT_ENV,
   serveMcp,
 } from "./mcp/index.js";
-import { getPipeline, listPipelines } from "./pipeline-registry.js";
+import {
+  createRunStore,
+  getPipeline,
+  listPipelines,
+  resolveStopBoundary,
+} from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import { createRuntimeAdmission } from "./runtime/index.js";
 import { createUpdateService, isUpdateVersion } from "./update/index.js";
 import {
-  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
@@ -203,7 +208,7 @@ Options:
       --plan-kind          Select commit (default) or custom authoring/execution
       --criteria           Read user criteria from a local Markdown file
       --source             Declare a source path or reference (repeatable; no retrieval)
-      --output             Declare an intended output path (repeatable; no authoring writes)
+      --output             Declare an output (repeatable; trailing / prepares a directory at execution, no authoring writes)
       --clarify            Open the clarification editor before agent questions
       --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely
@@ -300,7 +305,7 @@ function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
 
-function pauseActionLine(runId, action) {
+function pauseActionLine(run, action) {
   if (action.type === "respond") {
     return `  Respond to pending input ${action.requestId} through MCP, or edit the clarification artifact and resume.`;
   }
@@ -312,7 +317,7 @@ function pauseActionLine(runId, action) {
       return "  Resolve the reported finalization blockers, restore a clean baseline, prepare a plan for the remaining work, and start a fresh plan-execution run.";
     }
     if (action.requirement === "resolved-finalization-guidance") {
-      return "  Repair the reported finalization guidance and start a fresh plan-execution run.";
+      return `  Repair the reported finalization guidance and start a fresh ${run.pipelineId} run.`;
     }
     if (action.requirement === "resolved-commit-readiness") {
       return "  Preserve the reviewed candidate and resolve readiness through separately authorized follow-up before starting a fresh run. This run cannot retry COMMIT.";
@@ -320,12 +325,12 @@ function pauseActionLine(runId, action) {
     return "  Abandon this run and start a fresh run from an uncontaminated worktree.";
   }
   if (action.action === null) {
-    return `  Retry with: agent-run resume --run ${runId}`;
+    return `  Retry with: agent-run resume --run ${run.runId}`;
   }
   if (action.action.type === "extra-fix-rounds") {
-    return `  Grant another fix round with: agent-run resume --run ${runId} --extra-fix-rounds ${action.action.amount}`;
+    return `  Grant another fix round with: agent-run resume --run ${run.runId} --extra-fix-rounds ${action.action.amount}`;
   }
-  return `  Override finding ${action.action.findingId} with: agent-run resume --run ${runId} --override-finding ${action.action.findingId}`;
+  return `  Override finding ${action.action.findingId} with: agent-run resume --run ${run.runId} --override-finding ${action.action.findingId}`;
 }
 
 function stopTimingLines(stop) {
@@ -389,6 +394,10 @@ function runSummary({ directoryPath, run }) {
       `Supplied context bytes: prompt ${known(measured?.promptBytes)}; reconstruction prompt ${known(measured?.recoveryPromptBytes)}; schema ${known(measured?.schemaBytes)}`,
       `Result bytes: output ${known(measured?.resultBytes)}; structured JSON ${known(measured?.structuredResultBytes)}; referenced file bytes/count unknown`,
     );
+    if (latest.ownershipDiagnostic !== null)
+      lines.push(
+        `Ownership diagnostic: ${JSON.stringify(latest.ownershipDiagnostic)}`,
+      );
     for (const value of latest.observations) {
       lines.push(
         `  Native attempt ${value.attempt} turn ${value.turn} (${value.kind}): ${value.outcome}; accounting ${value.accounting}; commands ${value.commandCompletions}; compactions ${value.compactions}; facts incomplete ${value.factsIncomplete}`,
@@ -424,7 +433,7 @@ function runSummary({ directoryPath, run }) {
     if (pause.nextActions.length > 0) {
       lines.push("Next actions:");
       for (const action of pause.nextActions) {
-        lines.push(pauseActionLine(run.runId, action));
+        lines.push(pauseActionLine(run, action));
       }
     }
   }
@@ -1025,7 +1034,12 @@ async function runCommand(
       return 0;
     }
     if (command === "guidance") {
-      const service = guidance ?? createCommandGuidance({ env: environment });
+      const service =
+        guidance ??
+        createCommandGuidance({
+          env: environment,
+          runStore: createCommandRunStore({ resolveStopBoundary }),
+        });
       const input = {
         projectPath: values.project,
         ...(values["project-config"] === undefined
@@ -1165,6 +1179,8 @@ async function runCommand(
     const details = recoveryStarted
       ? recoveryFailureDetails(recoveryStage, error)
       : null;
+    const ownershipDiagnostic =
+      details?.ownershipDiagnostic ?? ownershipDiagnosticFrom(error);
     if (
       details !== null &&
       (details.code !== null ||
@@ -1189,11 +1205,23 @@ async function runCommand(
         stderr.write(
           "Restart the Agent Runner MCP server and retry the same idempotency key.\n",
         );
+    } else if (ownershipDiagnostic !== null) {
+      const code =
+        typeof error.code === "string" && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "ERR_EXECUTION_PROCESS_UNVERIFIABLE";
+      stderr.write(
+        `Execution ownership could not be verified (${code}). Use status and supported recovery before retrying.\n`,
+      );
     } else {
       stderr.write(
         `${error instanceof Error ? error.message : String(error)}\n`,
       );
     }
+    if (ownershipDiagnostic !== null)
+      stderr.write(
+        `Ownership diagnostic: ${JSON.stringify(ownershipDiagnostic)}\n`,
+      );
     return error?.code === "ERR_RUNTIME_VERSION_SKEW"
       ? RUNTIME_VERSION_SKEW_EXIT_CODE
       : 1;

@@ -3,12 +3,12 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import {
-  inspectOwnedSessionProcesses,
+  CATALOG_VALIDATED_MODEL,
   OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminalAdapterDiagnostic,
-  terminateOwnedProcess,
 } from "../agents/index.js";
 import { createClarificationService } from "../clarifications/index.js";
 import {
@@ -23,20 +23,28 @@ import {
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import {
+  createRunStore,
   getPipeline as registeredPipeline,
   resolveStopBoundary,
 } from "../pipeline-registry.js";
+import {
+  inspectOwnedSessionProcesses,
+  terminateOwnedProcess,
+} from "../platform/index.js";
 import { createWorkspaceService } from "../workspace/index.js";
 import { createRuntimeAdmission } from "../runtime/index.js";
 import {
-  createRunStore,
   deepFreeze,
+  matchesObservedInactivityExpiry,
   projectObservations,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
 } from "../state/index.js";
-import { createTrustedValidationService } from "../trusted-validation/index.js";
+import {
+  createTrustedValidationService,
+  trustedValidationFailureEvidence,
+} from "../trusted-validation/index.js";
 
 import {
   assertNonEmptyString,
@@ -50,6 +58,7 @@ import {
   RunnerError,
 } from "./input.js";
 import { createDispositionPolicy } from "./dispositions.js";
+import { createModelCatalogRecovery } from "./model-catalog.js";
 import { createAuthenticationPolicy } from "./authentication.js";
 import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
@@ -76,6 +85,7 @@ import {
 } from "./stops.js";
 import {
   defaultAdapters,
+  assertWorkspaceReadiness,
   capabilityAuthorityFingerprint,
   probeRequiredRoles,
   roleAdapters,
@@ -585,7 +595,12 @@ export function createRunner(options = {}) {
     ) {
       throw new RunnerError(
         "Execution storage cleanup requires verified process retirement.",
-        { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
+        {
+          ownershipDiagnostic: createOwnershipDiagnostic(
+            "trusted-resource-custody",
+          ),
+          code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
+        },
       );
     }
     try {
@@ -632,6 +647,91 @@ export function createRunner(options = {}) {
     return runStore.loadRun(run.runId);
   }
 
+  async function assertClarificationResources(run, request) {
+    const selected = Object.hasOwn(run.pipelineState, "clarificationRoot");
+    if (!selected && run.workspace?.kind !== "directory") return;
+    if (selected) {
+      // An unselected legacy run uses the pipeline's verified preflight root.
+      const rootPath =
+        run.pipelineState.clarificationRoot ?? request.artifactRoot;
+      const transcriptPath = join(
+        rootPath,
+        run.pipelineState.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
+        "agent-runner",
+        run.runId,
+        "clarifications.md",
+      );
+      const overlaps = (left, right) => {
+        const name = relative(left, right);
+        return (
+          name === "" ||
+          (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+        );
+      };
+      const controlPaths = [];
+      for (const workspacePath of new Set([run.projectPath, rootPath]))
+        controlPaths.push(
+          ...(await workspace.inspectControls({
+            workspacePath,
+            paths: [transcriptPath],
+            stateRoot: runStore.rootPath,
+          })),
+        );
+      const protectedPaths = [
+        run.taskPath,
+        runStore.rootPath,
+        run.projectConfigurationProtection?.path,
+        ...(run.workspace?.policy?.outputPaths ?? []),
+        ...controlPaths,
+      ].filter(Boolean);
+      if (
+        request.artifactRoot !== rootPath ||
+        request.transcriptPath !== transcriptPath ||
+        protectedPaths.some(
+          (path) =>
+            overlaps(path, transcriptPath) || overlaps(transcriptPath, path),
+        )
+      )
+        throw new RunnerError(
+          "Clarification path overlaps protected resources.",
+          {
+            code: "ERR_UNSAFE_CLARIFICATION_PATH",
+          },
+        );
+    }
+    // Check the artifact's own enclosing worktree, including external resources.
+    let parent = request.artifactRoot;
+    if (selected) {
+      parent = dirname(request.transcriptPath);
+      while (parent !== request.artifactRoot) {
+        const inspected = await workspace.inspectPath({
+          projectPath: request.artifactRoot,
+          path: parent,
+        });
+        if (inspected.exists) break;
+        parent = dirname(parent);
+      }
+    }
+    const root = await workspace.exclusionPath({ workspacePath: parent });
+    const marker = await workspace.inspectPath({
+      projectPath: root,
+      path: join(root, ".git"),
+    });
+    if (marker.exists) {
+      const artifact = await git.inspectPath({
+        projectPath: root,
+        path: request.transcriptPath,
+      });
+      if (artifact.tracked || !artifact.ignored)
+        throw new RunnerError(
+          "Repository-local artifact path must be ignored and untracked.",
+          {
+            code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED",
+          },
+        );
+    }
+  }
+
   function runtimeFor(
     pipeline,
     lease,
@@ -657,6 +757,16 @@ export function createRunner(options = {}) {
     const outputExhaustion = createDispositionPolicy({
       providers,
       disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+    });
+    const modelCompletions = new Set(Object.keys(run.modelCompletionReceipts));
+    const catalogRetry = createModelCatalogRecovery({
+      run,
+      providers,
+      monitor,
+      async verify() {
+        await checkConfiguration();
+        await monitor.check();
+      },
     });
     const availability =
       monitor === undefined
@@ -841,8 +951,10 @@ export function createRunner(options = {}) {
           }),
       },
       outputExhaustion,
+      catalogRetry,
       availability,
       inactivity,
+      matchesObservedInactivityExpiry,
       adapters:
         monitor === undefined
           ? selectedAdapters
@@ -850,6 +962,11 @@ export function createRunner(options = {}) {
               Object.keys(selectedAdapters).map((role) => [
                 role,
                 {
+                  assertWorkspaceReady: async (options) => {
+                    await monitor.check();
+                    await checkConfiguration();
+                    return selectedAdapters[role].assertWorkspaceReady(options);
+                  },
                   probe: async (options) => {
                     await monitor.check();
                     return selectedAdapters[role].probe(options);
@@ -871,8 +988,9 @@ export function createRunner(options = {}) {
                         "Directory workflows cannot request Git effects.",
                         { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
                       );
+                    let response;
                     try {
-                      const response = await monitor.invoke(
+                      response = await monitor.invoke(
                         (value) =>
                           inactivity.invoke(
                             role,
@@ -889,8 +1007,6 @@ export function createRunner(options = {}) {
                             runStore.recordExecutionResource(lease, value),
                         },
                       );
-                      providerResponseRole = role;
-                      return response;
                     } catch (cause) {
                       if (
                         authentication.eligible(cause) ||
@@ -909,6 +1025,12 @@ export function createRunner(options = {}) {
                           throw cause;
                         }
                       }
+                      await catalogRetry.observeFailure(
+                        cause,
+                        role,
+                        request,
+                        current,
+                      );
                       throw cause;
                     } finally {
                       await checkConfiguration();
@@ -931,37 +1053,57 @@ export function createRunner(options = {}) {
                         });
                       }
                     }
+                    if (
+                      !modelCompletions.has(role) &&
+                      request.model !== undefined &&
+                      response?.[CATALOG_VALIDATED_MODEL] === request.model
+                    ) {
+                      try {
+                        await runStore.recordModelCompletion(
+                          lease,
+                          role,
+                          request,
+                        );
+                      } catch (cause) {
+                        // A lost acknowledgement may follow a complete event.
+                        // Unconfirmed publication leaves this turn for recovery.
+                        const current = await runStore
+                          .loadRun(run.runId)
+                          .catch(() => null);
+                        if (
+                          current === null ||
+                          !Object.hasOwn(current.modelCompletionReceipts, role)
+                        )
+                          throw new RunnerError(
+                            "Model completion receipt could not be confirmed. The active turn remains recoverable.",
+                            {
+                              code: "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
+                              cause,
+                            },
+                          );
+                      }
+                      modelCompletions.add(role);
+                    }
+                    providerResponseRole = role;
+                    return response;
                   },
                 },
               ]),
             ),
-      clarifications:
-        run.workspace?.kind !== "directory"
-          ? clarifications
-          : Object.freeze({
-              ...clarifications,
-              async ensureTranscript(request) {
-                const root = await workspace.exclusionPath({
-                  workspacePath: request.artifactRoot,
-                });
-                const marker = await workspace.inspectPath({
-                  projectPath: root,
-                  path: join(root, ".git"),
-                });
-                if (marker.exists) {
-                  const artifact = await git.inspectPath({
-                    projectPath: root,
-                    path: request.transcriptPath,
-                  });
-                  if (artifact.tracked || !artifact.ignored)
-                    throw new RunnerError(
-                      "Repository-local artifact path must be ignored and untracked.",
-                      { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
-                    );
-                }
-                return clarifications.ensureTranscript(request);
-              },
-            }),
+      clarifications: Object.freeze(
+        Object.fromEntries(
+          Object.entries(clarifications).map(([operation, invoke]) => [
+            operation,
+            async (request, ...args) => {
+              await monitor?.check();
+              // Stop reconciliation still verifies frozen inputs after drift.
+              if (operation !== "inspectTranscript") await checkConfiguration();
+              await assertClarificationResources(run, request);
+              return invoke(request, ...args);
+            },
+          ]),
+        ),
+      ),
       workspace: Object.freeze({
         kind: run.workspace?.kind ?? "git",
         policy: run.workspace?.policy ?? null,
@@ -970,6 +1112,8 @@ export function createRunner(options = {}) {
         inspectPath: (...args) => safety.inspectPath(...args),
         ...(run.workspace?.kind === "directory"
           ? {
+              baseline: (...args) => safety.baseline(...args),
+              outputBaseline: (...args) => safety.outputBaseline(...args),
               async reportArtifact(request, options) {
                 await monitor?.check();
                 await checkConfiguration();
@@ -1023,6 +1167,13 @@ export function createRunner(options = {}) {
                   );
                 const current = await runStore.loadRun(run.runId);
                 pipeline.assertOutputPreparation(current, intent);
+                await assertWorkspaceReadiness(
+                  pipeline,
+                  current.roles,
+                  providers,
+                  current.workspace?.policy ?? undefined,
+                  "ERR_PROVIDER_POLICY_CHANGED",
+                );
                 const prepared = await (monitor === undefined
                   ? safety.prepareOutputDirectory(intent)
                   : monitor.invoke(
@@ -1061,13 +1212,14 @@ export function createRunner(options = {}) {
                   await checkConfiguration();
                   return git.prepareCommit(value);
                 },
-                consumeCommit: async (...args) => {
+                consumeCommit: async (authorization, options) => {
+                  monitor.resetCommitRejection();
                   try {
                     await monitor.check();
                     await checkConfiguration();
-                    return await git.consumeCommit(...args);
+                    return await git.consumeCommit(authorization, options);
                   } catch (cause) {
-                    monitor.rejectBeforeCommit(cause);
+                    monitor.rejectBeforeCommit(authorization?.id, cause);
                     throw cause;
                   }
                 },
@@ -1076,6 +1228,7 @@ export function createRunner(options = {}) {
         monitor === undefined
           ? trustedValidation
           : {
+              failureEvidence: trustedValidationFailureEvidence,
               preflight: async (value) => {
                 await checkConfiguration();
                 await trustedValidation.preflight({
@@ -1194,18 +1347,12 @@ export function createRunner(options = {}) {
             stateRoot: runStore.rootPath,
           },
         ),
-      async startAgentTurn(activeTurn, { pipelineState } = {}) {
+      async startAgentTurn(
+        activeTurn,
+        { pipelineState, preparePipelineState, catalogCheckpoint } = {},
+      ) {
         try {
           await monitor?.check();
-          const current = await runStore.loadRun(run.runId);
-          pipeline.workflow.validateRun(
-            deepFreeze({
-              ...current,
-              ...(pipelineState === undefined ? {} : { pipelineState }),
-              activeTurn,
-              revision: current.revision + 1,
-            }),
-          );
           const activity = {
             actor: activeTurn?.role,
             phase: activeTurn?.phase,
@@ -1214,13 +1361,24 @@ export function createRunner(options = {}) {
           };
           const next = await runStore.startAgentTurn(lease, activeTurn, {
             activity,
-            ...(pipelineState === undefined ? {} : { pipelineState }),
+            catalogCheckpoint,
+            pipelineState,
+            preparePipelineState,
+            validate: pipeline.workflow.validateRun,
           });
+          monitor?.recordWritableNoEffect(null);
           await publish(activity, next);
           return next;
         } catch (cause) {
-          if (activeTurn?.phase === "commit")
-            monitor?.rejectBeforeCommit(cause);
+          if (
+            activeTurn?.phase === "commit" &&
+            cause?.effectStarted === false
+          ) {
+            const current = await runStore.loadRun(run.runId);
+            const pending = current.pipelineState.pendingCommit;
+            if (pending?.status === "consumed")
+              monitor?.rejectBeforeCommit(pending.authorization.id, cause);
+          }
           throw cause;
         }
       },
@@ -1297,17 +1455,26 @@ export function createRunner(options = {}) {
         await publish(settlementActivity, next);
         return next;
       },
-      async transition(patch, { activity, expectedRevision } = {}) {
+      async transition(
+        patch,
+        { activity, expectedRevision, retainProviderRecovery } = {},
+      ) {
         // Reconcile safe content and correction accounting atomically with the
         // response reset, so owner loss cannot turn a retry into a second fix.
-        const reconciled = await reconcileProviderResponse({
-          patch,
-          expectedRevision,
-        });
+        const reconciled = retainProviderRecovery
+          ? undefined
+          : await reconcileProviderResponse({ patch, expectedRevision });
+        if (retainProviderRecovery) providerResponseRole = null;
         if (reconciled !== undefined && activity == null) return reconciled;
         const next = await runStore.transitionRun(lease, patch, {
           activity,
           expectedRevision: reconciled?.revision ?? expectedRevision,
+          writableCatalogRejection: catalogRetry.writableRejectionFor(
+            patch.pause,
+          ),
+          commitCatalogRejection: catalogRetry.commitRejectionFor(
+            patch.pipelineState?.pendingCommit,
+          ),
         });
         await publish(activity, next);
         return next;
@@ -1417,21 +1584,6 @@ export function createRunner(options = {}) {
       run.executionResource == null
     ) {
       return pauseForProjectConfiguration(run, lease);
-    }
-    if (
-      stopPending(run) &&
-      pipeline.prepareRecovery !== undefined &&
-      runStore.loadRunHistory
-    ) {
-      const history = await runStore.loadRunHistory(run.runId, {
-        stream: true,
-      });
-      if (!isDeepStrictEqual(history.run, run)) {
-        throw new RunnerError("Run changed before recovery inspection.", {
-          code: "ERR_RUN_REVISION_CHANGED",
-        });
-      }
-      await pipeline.prepareRecovery(run, history);
     }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -1572,6 +1724,12 @@ export function createRunner(options = {}) {
           publish,
         });
       // The complete directory policy is now available to capability probes.
+      await assertWorkspaceReadiness(
+        pipeline,
+        run.roles,
+        providers,
+        run.workspace?.policy ?? undefined,
+      );
       selected = selectedRoleAdapters(pipeline, run, lease);
       baseRuntime = runtimeFor(pipeline, lease, run, selected);
       verifyProviderPolicies = true;
@@ -1667,6 +1825,7 @@ export function createRunner(options = {}) {
     }
     if (dispatch !== null)
       run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
+    let interruptedWritableNoEffect = false;
     if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
       const history = await runStore.loadRunHistory(run.runId, {
         stream: true,
@@ -1677,6 +1836,8 @@ export function createRunner(options = {}) {
         });
       }
       await pipeline.prepareRecovery(run, history);
+      interruptedWritableNoEffect =
+        history.hasWritableCatalogRejection === true;
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -1696,6 +1857,7 @@ export function createRunner(options = {}) {
         action,
         run,
         settings,
+        interruptedWritableNoEffect,
         runtime: runtimeFor(
           pipeline,
           lease,
@@ -1744,6 +1906,7 @@ export function createRunner(options = {}) {
         runtime: baseRuntime,
         publish,
         preEffectRejection: monitor.preEffectRejection,
+        writableNoEffectTurn: monitor.writableNoEffectTurn,
         configurationFailure,
       });
     }
@@ -1964,7 +2127,12 @@ export function createRunner(options = {}) {
             return onInspectionFailure(diagnosed);
           }
         }
-        return operation();
+        const root = run.pipelineState.clarificationRoot;
+        const name =
+          typeof root === "string" ? relative(ownership.projectPath, root) : "";
+        return isAbsolute(name) || name === ".." || name.startsWith(`..${sep}`)
+          ? withInfrastructureLease(run.runId, root, operation)
+          : operation();
       },
       executionLease,
     );
@@ -2479,6 +2647,7 @@ export function createRunner(options = {}) {
             projectConfiguration?.infrastructure.rootPath ?? projectPath,
           runId: createOptions.runId,
           artifactRoot: resolved.artifactRoot,
+          artifactPath: projectConfiguration?.artifactPath,
         },
         workspace,
       );
@@ -2520,6 +2689,7 @@ export function createRunner(options = {}) {
               projectConfiguration?.infrastructure.rootPath ?? projectPath,
             runId: createOptions.runId,
             artifactRoot: resolved.artifactRoot,
+            artifactPath: projectConfiguration?.artifactPath,
           },
           workspace,
         );
@@ -2620,6 +2790,11 @@ export function createRunner(options = {}) {
     }
     const pipelineState = pipeline.workflow.createState({
       artifactRoot: resolved.artifactRoot,
+      clarificationRoot:
+        projectConfiguration?.infrastructure.rootPath ?? projectPath,
+      artifactPath:
+        projectConfiguration?.artifactPath ??
+        resolve(projectPath, resolved.artifactRoot),
       proactiveClarification: normalized.proactiveClarification,
       settings: resolved.settings,
       ...(pipeline.setup
@@ -2993,6 +3168,8 @@ export function createRunner(options = {}) {
     const normalized = normalizeInputSubmission(input);
     const { run } = await status(normalized.runId);
     const answers = orderedInputAnswers(run, normalized);
+    await guardProjectConfiguration(run);
+    await assertClarificationResources(run, run.pipelineState.pendingEdit);
     const preview = await clarifications.previewEditAnswers(
       run.pipelineState.pendingEdit,
       answers,
@@ -3062,6 +3239,11 @@ export function createRunner(options = {}) {
           }
           let transcript;
           try {
+            await guardProjectConfiguration(run);
+            await assertClarificationResources(
+              run,
+              run.pipelineState.pendingEdit,
+            );
             transcript = await clarifications.writeEditAnswers(
               run.pipelineState.pendingEdit,
               answers,

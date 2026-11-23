@@ -63,7 +63,6 @@ export async function publishInfrastructureFile(
       temporary,
       recordTemporary,
       includeIdentity: true,
-      requireOwnedTemporary: true,
       assertAuthorized,
       assertCurrent(current) {
         assertSafe(

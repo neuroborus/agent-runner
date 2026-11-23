@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 
-import { assertSafe, location, same, within } from "./paths.js";
+import { hashRecords } from "./digest.js";
+import { assertSafe, compactPaths, location, same, within } from "./paths.js";
 
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -13,18 +14,136 @@ const missing = (path) => ({
   hash: null,
 });
 
-// Hash the complete ordered sequence without allocating another source-sized
-// serialized string. Projection never changes capture or traversal scope.
-function hashRecords(records) {
-  const digest = createHash("sha256");
-  digest.update("[");
-  let separator = "";
-  for (const record of records) {
-    digest.update(separator);
-    digest.update(JSON.stringify(record));
-    separator = ",";
+const isHash = (value) =>
+  typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+const PARTITION = ["remainderCount", "remainderHash", "outputs"];
+const OPTIONAL_SCOPE = [
+  "inspectionPaths",
+  "inspectionFilesOnly",
+  "excludePaths",
+];
+
+// Durable baselines retain snapshot scope and fingerprints, while one ordered
+// digest replaces per-entry arrays that grow with protected control trees.
+export function snapshotBaseline(snapshot) {
+  assertSafe(
+    snapshot?.schemaVersion === 1 &&
+      Array.isArray(snapshot.entries) &&
+      Array.isArray(snapshot.linkResolutions),
+    "A durable baseline requires a complete workspace snapshot.",
+  );
+  return {
+    schemaVersion: 1,
+    workspacePath: snapshot.workspacePath,
+    outputPaths: snapshot.outputPaths,
+    ...Object.fromEntries(
+      OPTIONAL_SCOPE.filter((field) => snapshot[field] !== undefined).map(
+        (field) => [field, snapshot[field]],
+      ),
+    ),
+    entryCount: snapshot.entries.length,
+    entriesHash: hashRecords(snapshot.entries),
+    contentFingerprint: snapshot.contentFingerprint,
+    identityFingerprint: snapshot.identityFingerprint,
+  };
+}
+
+// Writable baselines partition the same complete capture by declared output
+// root. Absent roots are derived from complete directory coverage only; the
+// projection never changes the captured entries or their fingerprints.
+export function outputBaseline(snapshot) {
+  assertSafe(
+    snapshot?.schemaVersion === 1 &&
+      snapshot.inspectionPaths === undefined &&
+      snapshot.excludePaths === undefined &&
+      Array.isArray(snapshot.entries) &&
+      Array.isArray(snapshot.linkResolutions) &&
+      Array.isArray(snapshot.outputPaths) &&
+      same(compactPaths(snapshot.outputPaths), snapshot.outputPaths),
+    "An output baseline requires a complete workspace snapshot.",
+  );
+  const source = new Map(snapshot.entries.map((entry) => [entry.path, entry]));
+  const roots = snapshot.outputPaths;
+  const descendants = roots.map(() => []);
+  const remainder = [];
+  for (const entry of snapshot.entries) {
+    const index = roots.findIndex((root) => within(root, entry.path));
+    if (index === -1) remainder.push(entry);
+    else if (entry.path !== roots[index]) descendants[index].push(entry);
   }
-  return digest.update("]").digest("hex");
+  const outputs = roots.map((path, index) => {
+    let entry = source.get(path);
+    if (entry === undefined) {
+      let ancestor = dirname(path);
+      while (
+        !source.has(ancestor) &&
+        ancestor !== snapshot.workspacePath &&
+        within(snapshot.workspacePath, ancestor)
+      )
+        ancestor = dirname(ancestor);
+      // File/link ancestors and uncaptured coverage are blockers, never absence.
+      assertSafe(
+        within(snapshot.workspacePath, ancestor) &&
+          source.get(ancestor)?.kind === "directory",
+        "Workspace snapshot does not prove the declared output absent.",
+      );
+      entry = missing(path);
+    }
+    return {
+      path,
+      entry,
+      descendantCount: descendants[index].length,
+      descendantsHash: hashRecords(descendants[index]),
+    };
+  });
+  return {
+    ...snapshotBaseline(snapshot),
+    remainderCount: remainder.length,
+    remainderHash: hashRecords(remainder),
+    outputs,
+  };
+}
+
+export const isCompactBaseline = (baseline) =>
+  baseline?.schemaVersion === 1 && !Object.hasOwn(baseline, "entries");
+
+// Compact equality is the complete entry equality without output allowances;
+// those would need the per-entry evidence the baseline deliberately omits.
+// Output partitions must be well formed but never grant output changes.
+export function assertBaselineUnchanged({ before, after, allowOutputs }) {
+  assertSafe(
+    allowOutputs === false &&
+      !Object.hasOwn(before, "linkResolutions") &&
+      isCount(before.entryCount) &&
+      [
+        before.entriesHash,
+        before.contentFingerprint,
+        before.identityFingerprint,
+      ].every(isHash) &&
+      Array.isArray(after.entries) &&
+      (PARTITION.every((field) => !Object.hasOwn(before, field)) ||
+        (isCount(before.remainderCount) &&
+          isHash(before.remainderHash) &&
+          Array.isArray(before.outputs) &&
+          same(
+            before.outputs.map((output) => output?.path),
+            before.outputPaths,
+          ) &&
+          before.outputs.every(
+            (output) =>
+              output.entry?.path === output.path &&
+              isCount(output.descendantCount) &&
+              isHash(output.descendantsHash),
+          ))),
+    "A valid compact workspace baseline is required.",
+  );
+  assertSafe(
+    after.entries.length === before.entryCount &&
+      hashRecords(after.entries) === before.entriesHash,
+    "Workspace content or identity changed outside authorized outputs.",
+    "ERR_WORKSPACE_DRIFT",
+  );
 }
 
 export function snapshotProof({

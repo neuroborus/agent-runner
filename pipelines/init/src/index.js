@@ -1,7 +1,13 @@
 import { join } from "node:path";
 
 import { assertInit, within } from "./proposal.js";
-import { assertInitRun, createInitState, INIT_MODES } from "./workflow.js";
+import {
+  assertInitRun,
+  createInitState,
+  INIT_MODES,
+  assertInitCatalogTransition,
+  matchesInitCatalogReservation,
+} from "./workflow.js";
 import { defaultExternalRoot } from "./inspection.js";
 import { runInit, inspectInitWorkspace } from "./lifecycle.js";
 import { initProjections, validateResumeAction } from "./projections.js";
@@ -76,6 +82,8 @@ export const initPipeline = Object.freeze({
   },
   projections: initProjections,
   validateResumeAction,
+  assertCatalogTransition: assertInitCatalogTransition,
+  matchesCatalogReservation: matchesInitCatalogReservation,
   description:
     "Prepare reviewed integrated or external infrastructure without committing.",
   roles: ROLES,

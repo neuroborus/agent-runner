@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createRunStore as createPipelineRunStore } from "../../src/index.js";
+import { stopSettlement } from "../../src/runner/stops.js";
+
 import {
   availabilityDelayMs,
   createRunStore,
@@ -22,7 +25,12 @@ const request = {
   contentFingerprint: FINGERPRINT,
 };
 
-async function fixture(t, maxDelayMs = 1_800_000) {
+async function fixture(
+  t,
+  maxDelayMs = 1_800_000,
+  pipelineId = "plan-execution",
+  openStore = createRunStore,
+) {
   const directory = await mkdtemp(join(tmpdir(), "availability-state-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const projectPath = join(directory, "project");
@@ -33,6 +41,12 @@ async function fixture(t, maxDelayMs = 1_800_000) {
   const options = {
     stateRoot: join(directory, "state"),
     clock: () => new Date(now),
+    resolveStopBoundary: () => ({
+      capability: "verified-commit-v1",
+      step: 1,
+      completedCommits: 0,
+      baselineHead: null,
+    }),
     onTransitionBoundary(boundary) {
       if (boundary === crashAt) {
         crashAt = undefined;
@@ -40,9 +54,9 @@ async function fixture(t, maxDelayMs = 1_800_000) {
       }
     },
   };
-  const store = createRunStore(options);
+  const store = openStore(options);
   const created = await store.createRun({
-    pipelineId: "plan-execution",
+    pipelineId,
     pipelineStateVersion: 1,
     projectPath,
     taskPath,
@@ -329,6 +343,276 @@ test("availability scheduling is durable at every journal publication boundary",
   }
 });
 
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  test(`${pipelineId} binds atomic availability backoff to its read-only restatement`, async (t) => {
+    const f = await fixture(t, undefined, pipelineId, createPipelineRunStore);
+    const planExecution = pipelineId === "plan-execution";
+    const field = planExecution ? "writableResult" : "resolutionCorrection";
+    const turn = {
+      role: "worker",
+      phase: planExecution ? "writable-result" : "resolve-findings",
+    };
+    const unauthorizedTurn = {
+      ...turn,
+      phase: planExecution ? "commit" : "resolve-findings",
+    };
+    const workflowState = planExecution ? "IMPLEMENT" : "RESOLVE_FINDINGS";
+    const repositoryBaseline = { contentFingerprint: FINGERPRINT };
+    const reservation = {
+      phase: workflowState,
+      step: 1,
+      access: "workspace-write",
+      stage: "correcting",
+      attempts: 1,
+      additionalAttempts: 0,
+      productDecision: null,
+      candidateFingerprint: FINGERPRINT,
+      candidate: repositoryBaseline,
+    };
+    const pipelineState = {
+      workflowState,
+      repositoryBaseline,
+      currentStep: 1,
+      pendingCommit: null,
+    };
+    const checkpoint = planExecution
+      ? "writable-result:read-only:commit:1"
+      : "resolve-findings:workspace-write:work";
+    function start(activeTurn, checkpointState, preparePipelineState) {
+      return f.store.startAgentTurn(f.lease, activeTurn, {
+        pipelineState: { ...pipelineState, [field]: checkpointState },
+        preparePipelineState,
+        activity: {
+          actor: activeTurn.role,
+          phase: activeTurn.phase,
+          kind: "turn-started",
+          message: "Started fixture turn.",
+        },
+      });
+    }
+    const startAttempt = (providerCheckpoint) =>
+      f.store.startObservationAttempt(f.lease, {
+        role: turn.role,
+        checkpoint: providerCheckpoint,
+      });
+    const failAttempt = (state) => {
+      const { id, role, checkpoint } = state.observations.attempts.at(-1);
+      return f.store.recordObservationBatch(
+        f.lease,
+        { id, role, checkpoint },
+        [],
+        { status: "failed" },
+      );
+    };
+    const unauthorized = await start(unauthorizedTurn, {
+      ...reservation,
+      stage: planExecution ? "correcting" : "invoking",
+      restatementStartedAfter: f.state.revision,
+    });
+    if (!planExecution) {
+      const restatement = {
+        ...reservation,
+        restatementStartedAfter: unauthorized.revision,
+      };
+      await assert.rejects(start(turn, restatement), {
+        code: "ERR_INVALID_AGENT_TURN",
+      });
+
+      const eventsPath = join(f.directoryPath, "events.jsonl");
+      const source = await readFile(eventsPath, "utf8");
+      const original = JSON.parse(source.trimEnd().split("\n").at(-1));
+      const duplicate = {
+        ...original,
+        revision: unauthorized.revision + 1,
+        state: {
+          ...unauthorized,
+          revision: unauthorized.revision + 1,
+          pipelineState: { ...pipelineState, [field]: restatement },
+        },
+      };
+      try {
+        await writeFile(eventsPath, `${source}${JSON.stringify(duplicate)}\n`);
+        await assert.rejects(
+          createPipelineRunStore(f.options).loadRun(f.state.runId),
+          { code: "ERR_INVALID_EVENT_LOG" },
+        );
+      } finally {
+        await writeFile(eventsPath, source);
+      }
+    }
+    const rejected = { code: "ERR_INVALID_RUN_STATE" };
+    const unauthorizedFailure = await failAttempt(
+      await startAttempt(checkpoint),
+    );
+    await assert.rejects(
+      f.store.scheduleAvailabilityRetry(
+        f.lease,
+        {
+          ...request,
+          checkpoint,
+          expectedRevision: unauthorizedFailure.revision,
+        },
+        { reconciledTurn: unauthorizedTurn },
+      ),
+      rejected,
+    );
+    const retired = await f.store.finishAgentTurn(f.lease, unauthorizedTurn);
+    const ready = planExecution
+      ? retired
+      : await f.store.scheduleAvailabilityRetry(f.lease, {
+          ...request,
+          checkpoint,
+          contentFingerprint: "b".repeat(64),
+          expectedRevision: retired.revision,
+        });
+    if (!planExecution) f.advance(ready.availabilityRetry.delayMs);
+    const stop = planExecution
+      ? await f.store.requestOperatorStop({
+          runId: f.state.runId,
+          kind: "pause_requested",
+          timing: "after-current-commit",
+          expectedRevision: ready.revision,
+          idempotencyKey: "deferred-restatement-pause",
+        })
+      : null;
+    const active = await start(turn, reservation, (proposed, revision) => ({
+      ...proposed,
+      [field]: { ...proposed[field], restatementStartedAfter: revision },
+    }));
+    assert.equal(
+      active.pipelineState[field].restatementStartedAfter,
+      stop?.revision ?? ready.revision,
+    );
+    const continuation = {
+      ...active.pipelineState,
+      [field]: {
+        ...active.pipelineState[field],
+        stage: planExecution ? "retry-ready" : "correcting",
+      },
+    };
+    const retirement = { reconciledTurn: turn, pipelineState: continuation };
+    const inputFor = (state) => ({
+      ...request,
+      checkpoint,
+      expectedRevision: state.revision,
+    });
+    await assert.rejects(
+      f.store.scheduleAvailabilityRetry(f.lease, inputFor(active), retirement),
+      rejected,
+    );
+    const unrelated = await failAttempt(await startAttempt(request.checkpoint));
+    await assert.rejects(
+      f.store.scheduleAvailabilityRetry(
+        f.lease,
+        inputFor(unrelated),
+        retirement,
+      ),
+      rejected,
+    );
+    const observed = await startAttempt(checkpoint);
+    await assert.rejects(
+      f.store.scheduleAvailabilityRetry(
+        f.lease,
+        inputFor(observed),
+        retirement,
+      ),
+      rejected,
+    );
+    const inspected = await failAttempt(observed);
+    const input = inputFor(inspected);
+    for (const change of [
+      { checkpoint: request.checkpoint },
+      { contentFingerprint: "b".repeat(64) },
+    ])
+      await assert.rejects(
+        f.store.scheduleAvailabilityRetry(
+          f.lease,
+          { ...input, ...change },
+          retirement,
+        ),
+        rejected,
+      );
+    f.crash("event-appended");
+    await assert.rejects(
+      f.store.scheduleAvailabilityRetry(f.lease, input, retirement),
+      /Interrupted/u,
+    );
+    const recovered = await createPipelineRunStore(f.options).loadRun(
+      f.state.runId,
+    );
+    assert.equal(recovered.activeTurn, null);
+    assert.deepEqual(recovered.pipelineState, continuation);
+    assert.equal(recovered.availabilityRetry.checkpoint, checkpoint);
+    assert.equal(recovered.availabilityRetry.attempt, planExecution ? 1 : 2);
+    assert.equal(
+      recovered.availabilityRetry.reconciledRevision,
+      inspected.revision,
+    );
+
+    const eventsPath = join(f.directoryPath, "events.jsonl");
+    const statePath = join(f.directoryPath, "state.json");
+    const [source, storedState] = await Promise.all([
+      readFile(eventsPath, "utf8"),
+      readFile(statePath, "utf8"),
+    ]);
+    const replayChanges = [
+      (events) => {
+        const state = events.at(-1).state;
+        state.availabilityRetry.contentFingerprint = "b".repeat(64);
+      },
+      (events) => {
+        for (const { state } of events.slice(observed.revision - 1))
+          state.observations.attempts.at(-1).checkpoint = request.checkpoint;
+      },
+      (events) => {
+        events[active.revision - 1].state.pipelineState[
+          field
+        ].restatementStartedAfter = unauthorized.revision;
+      },
+      (events) => {
+        const started = events[active.revision - 1];
+        started.activity.phase = unauthorizedTurn.phase;
+        for (const event of events.slice(active.revision - 1, -1)) {
+          event.state.activeTurn = unauthorizedTurn;
+          if (!planExecution)
+            event.state.pipelineState[field].stage = "invoking";
+        }
+      },
+    ];
+    try {
+      for (const change of replayChanges) {
+        const events = source
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        change(events);
+        await writeFile(
+          eventsPath,
+          events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+        );
+        await writeFile(statePath, JSON.stringify(events.at(-1).state));
+        await assert.rejects(
+          createPipelineRunStore(f.options).loadRun(f.state.runId),
+          { code: "ERR_INVALID_EVENT_LOG" },
+        );
+      }
+    } finally {
+      await writeFile(eventsPath, source);
+      await writeFile(statePath, storedState);
+      if (stop !== null) {
+        await f.store.settleCheckpoint(f.lease, (latest) =>
+          stopSettlement(latest, {
+            activeTurn: null,
+            pipelineState: latest.pipelineState,
+            pause: null,
+          }),
+        );
+      }
+      await f.lease.release();
+    }
+  });
+}
+
 test("legacy availability migration supplies only the default and no pending episode", async (t) => {
   const f = await fixture(t);
   await f.lease.release();
@@ -374,7 +658,7 @@ test("legacy availability migration supplies only the default and no pending epi
       },
     );
     assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-    assert.equal(RUNTIME_COMPATIBILITY_TOKEN, "1:26");
+    assert.equal(RUNTIME_COMPATIBILITY_TOKEN, "1:28");
     for (const field of [
       "roles",
       "counters",

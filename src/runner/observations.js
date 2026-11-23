@@ -1,8 +1,55 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { normalizeProviderObservation } from "../agents/index.js";
+import { ownershipDiagnosticFrom } from "../platform/index.js";
+import {
+  AgentBoundaryError,
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
+  normalizeFailureRecord,
+  normalizeProviderObservation,
+} from "../agents/index.js";
 import { observationActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
+
+// The attempt keeps the normalized rejection for its actual access, even
+// when a read-only restatement uses its original writable recovery checkpoint.
+function catalogRejectionFrom(cause, { access, session }) {
+  if (
+    !["local-commit", "workspace-write", "read-only"].includes(access) ||
+    (access === "read-only" && session?.mode === "fork") ||
+    !(cause instanceof AgentBoundaryError) ||
+    cause.failure?.failureClass !== MODEL_UNAVAILABLE_DIAGNOSTIC
+  )
+    return undefined;
+  let failure;
+  try {
+    failure = normalizeFailureRecord(cause.failure, [
+      MODEL_UNAVAILABLE_DIAGNOSTIC,
+    ]);
+  } catch {
+    return undefined;
+  }
+  if (
+    failure.outcome !== "rejected" ||
+    failure.effect !== "none" ||
+    failure.retry !== "terminal"
+  )
+    return undefined;
+  if (access === "local-commit") {
+    return failure.checkpoint === "commit" &&
+      failure.commitExecutor === "not_started" &&
+      Object.keys(failure).length === 6
+      ? { commitRejection: failure }
+      : undefined;
+  }
+  if (failure.checkpoint !== "turn" || Object.keys(failure).length !== 5)
+    return undefined;
+  return access === "workspace-write"
+    ? {
+        writableRejection: failure,
+        ...(session?.mode === "fork" ? {} : { writableRetryEligible: true }),
+      }
+    : { readOnlyRejection: failure };
+}
 
 // Adapters publish sealed native turns synchronously. Batch their bounded facts
 // at fallback and terminal boundaries rather than writing per notification.
@@ -15,6 +62,7 @@ export async function runObservedAttempt({
   operation,
   persist = (write) => write(),
   publish = async () => {},
+  isInterrupted = () => request.signal?.aborted === true,
 }) {
   const bytes = (value) =>
     typeof value === "string" ? Buffer.byteLength(value, "utf8") : null;
@@ -65,10 +113,17 @@ export async function runObservedAttempt({
     }
   }
   async function flush(status) {
+    const ownershipDiagnostic = ["failed", "interrupted"].includes(status)
+      ? ownershipDiagnosticFrom(failure)
+      : null;
+    const catalogRejection =
+      status === "failed" ? catalogRejectionFrom(failure, request) : undefined;
     const next = await persist(() =>
       runStore.recordObservationBatch(lease, identity, [...records.values()], {
         status,
         incomplete,
+        ...(ownershipDiagnostic === null ? {} : { ownershipDiagnostic }),
+        ...catalogRejection,
         ...(status === "completed"
           ? {
               resultBytes: bytes(response?.output),
@@ -107,7 +162,7 @@ export async function runObservedAttempt({
     closed = true;
     try {
       await flush(
-        request.signal?.aborted
+        isInterrupted(failure)
           ? "interrupted"
           : failure === undefined
             ? "completed"

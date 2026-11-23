@@ -169,7 +169,7 @@ function assertArtifactRoot(value, path) {
     /[\0\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
   ) {
     throw new ConfigurationError(
-      `${path} must be a normalized repository-relative directory.`,
+      `${path} must be a normalized infrastructure-relative directory.`,
     );
   }
 }

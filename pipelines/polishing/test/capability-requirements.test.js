@@ -3,12 +3,18 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createTrustedValidationService } from "../../../src/trusted-validation/index.js";
+import { createOwnershipDiagnostic } from "../../../src/platform/index.js";
+import {
+  createTrustedValidationService,
+  projectCapabilityBlockerEvidence,
+} from "../../../src/trusted-validation/index.js";
+import { inspectionRequirements } from "../src/capability-requirements.js";
 import {
   migratePolishingStateV13,
   migratePolishingStateV16,
+  polishingPipeline,
 } from "../src/index.js";
-import { BOOTSTRAP_SCHEMA } from "../src/schemas.js";
+import { BOOTSTRAP_SCHEMA, FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   normalizeBootstrapResult,
   normalizePipelineState,
@@ -42,6 +48,7 @@ const requirement = (target = command) => ({
     artifacts: [],
   },
   unsupported: [],
+  basis: "assigned-executor",
 });
 const emptyRequirement = (target = command) => ({
   command: target,
@@ -53,6 +60,7 @@ const emptyRequirement = (target = command) => ({
     artifacts: [],
   },
   unsupported: [],
+  basis: "assigned-executor",
 });
 const projectionRequirement = (target, commandIdentity = null) => ({
   ...emptyRequirement(target),
@@ -68,6 +76,7 @@ const blockedFor = (target) => ({
 });
 const blocked = () => blockedFor(command);
 const ready = { status: "READY", blockers: [] };
+
 const bootstrap = (mode, report = bootstrapReady("Worker")) => [
   clarificationReady(),
   report,
@@ -83,6 +92,34 @@ const writes = (fixture) =>
   Object.values(fixture.calls)
     .flat()
     .filter(({ access }) => access !== "read-only");
+const ordinaryChecks = [
+  { id: "C1", command },
+  { id: "C2", command: "npm run lint" },
+  { id: "C3", command: "npm run docs:check" },
+];
+const ordinaryFinalization = () => ({
+  ...finalizationPassed(),
+  requiredChecks: ordinaryChecks,
+  checks: ordinaryChecks.map(({ id, command: target }) => ({
+    checkId: id,
+    command: target,
+    status: "PASS",
+    evidence: ["Passed"],
+  })),
+});
+const cacheReport = (basis, target = ordinaryChecks[2].command) => ({
+  command: target,
+  commandIdentity: null,
+  capabilities: {
+    scratch: false,
+    cache: true,
+    sourceProjection: false,
+    artifacts: [],
+  },
+  unsupported: [],
+  basis,
+});
+const withoutBasis = ({ basis: _basis, ...report }) => report;
 function legacy(run) {
   const pipelineState = structuredClone(run.pipelineState);
   for (const role of ["worker", "reviewer"]) {
@@ -94,6 +131,106 @@ function legacy(run) {
   }
   return migratePolishingStateV13({ ...run, pipelineState });
 }
+
+test("trusted ownership diagnostics survive capability pause publication", async (t) => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  const evidence = [
+    "The runner could not prepare the frozen command capabilities.",
+    `Ownership diagnostic: ${JSON.stringify(diagnostic)}`,
+  ];
+  const fixture = await createFixture(t, {
+    onRequirementInspection: () => ({
+      status: "BLOCKED",
+      blockers: [{ command, reason: "unavailable", evidence }],
+    }),
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.equal(paused.pause.resumeState, "POLISH");
+  assert.deepEqual(paused.pause.evidence, [
+    "Required check capability blocker: unavailable",
+    ...evidence,
+  ]);
+  // Availability blockers have no mismatch details; ownership stays public.
+  assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
+  assert.deepEqual(
+    polishingPipeline.projections.pause(paused, {
+      capabilityBlockerEvidence: projectCapabilityBlockerEvidence,
+    }).evidence,
+    ["Capability mismatch details: unknown.", evidence[1]],
+  );
+  assert.equal(writes(fixture).length, 0);
+});
+
+test("trusted ownership diagnostics survive caught inspection, preflight and cleanup refusals", async (t) => {
+  for (const boundary of ["inspection", "preflight", "cleanup"]) {
+    const diagnostic = createOwnershipDiagnostic("trusted-resource-custody");
+    const failure = Object.assign(new Error("PRIVATE_NATIVE_OUTPUT"), {
+      code:
+        boundary === "cleanup"
+          ? "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE"
+          : "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
+      ownershipDiagnostic: diagnostic,
+      evidence: ["PRIVATE_NATIVE_OUTPUT"],
+    });
+    const snapshot = trustedValidationSnapshot();
+    const requiredChecks = [
+      ...finalizationPassed().requiredChecks,
+      { id: "C2", command: snapshot.commands[0].command },
+    ];
+    const finalization = {
+      ...finalizationPassed(),
+      requiredChecks,
+      checks: [
+        ...finalizationPassed().checks,
+        {
+          checkId: "C2",
+          command: snapshot.commands[0].command,
+          status: "NOT_RUN",
+          evidence: ["Reserved for runner"],
+        },
+      ],
+    };
+    const fixture = await createFixture(t, {
+      mode: "lazy",
+      trustedValidation: snapshot,
+      modeSettings: { trustedChecks: ["service-check"] },
+      worker: [
+        ...bootstrap("lazy", { ...bootstrapReady("Worker"), requiredChecks }),
+        ...finish("lazy", finalization),
+      ],
+      onRequirementInspection() {
+        if (boundary === "inspection") throw failure;
+        return ready;
+      },
+      onTrustedValidation() {
+        assert.equal(boundary, "cleanup");
+        throw failure;
+      },
+    });
+    if (boundary === "preflight")
+      fixture.runtime.trustedValidation.preflight = () => {
+        throw failure;
+      };
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "environment_blocked");
+    assert.ok(
+      paused.pause.evidence.includes(
+        `Ownership diagnostic: ${JSON.stringify(diagnostic)}`,
+      ),
+    );
+    assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_NATIVE_OUTPUT/u);
+    assert.equal(Object.hasOwn(paused.pause, "capabilityDiagnostic"), false);
+    assert.equal(paused.pipelineState.finalizationResult, null);
+    if (boundary === "cleanup") {
+      assert.equal(paused.pause.resumeState, "FINALIZE");
+      assert.equal(paused.pause.code, failure.code);
+      assert.equal(paused.pipelineState.reviewedFingerprint, null);
+    } else {
+      assert.equal(writes(fixture).length, 0);
+    }
+  }
+});
 
 test("polishing capability contracts reject empty needs, mismatched identities, and malformed reports", () => {
   const base = bootstrapReady("Worker");
@@ -131,7 +268,12 @@ test("polishing capability contracts reject empty needs, mismatched identities, 
       {
         ...base,
         environmentBlockers: [
-          { command, source: "host", evidence: ["Unavailable"] },
+          {
+            command,
+            source: "host",
+            evidence: ["Unavailable"],
+            basis: "assigned-executor",
+          },
         ],
       },
       "worker",
@@ -374,6 +516,7 @@ for (const mode of ["independent", "lazy", "combined"]) {
           command: target,
           source: "agent-sandbox",
           evidence: ["Agent isolation is unavailable"],
+          basis: "assigned-executor",
         },
       ],
     };
@@ -418,7 +561,9 @@ for (const mode of ["independent", "lazy", "combined"]) {
     });
     const paused = await fixture.run();
     assert.equal(paused.pause.reason, "environment_blocked");
-    assert.deepEqual(paused.pause.evidence, [`${target}: unavailable`]);
+    assert.deepEqual(paused.pause.evidence, [
+      "Required check capability blocker: unavailable",
+    ]);
     assert.equal(executions.length, 0);
     assert.equal(writes(fixture).length, 0);
     available = true;
@@ -523,7 +668,12 @@ test("arbitration cannot drop Reviewer-only requirements or grant frozen authori
       {
         ...bootstrapReady("Reviewer"),
         environmentBlockers: [
-          { command, source: "agent-sandbox", evidence: ["Not delegated"] },
+          {
+            command,
+            source: "agent-sandbox",
+            evidence: ["Not delegated"],
+            basis: "assigned-executor",
+          },
         ],
       },
     ],
@@ -854,4 +1004,276 @@ test("saved needs cannot expand selected frozen authority and diagnostics stay b
     JSON.stringify(await fixture.run()),
     /PRIVATE_DIAGNOSTIC/u,
   );
+});
+
+test("polishing reports require a closed basis that keeps every structural rule", () => {
+  const base = bootstrapReady("Worker");
+  const observed = { ...requirement(), basis: "read-only-turn" };
+  const blocker = {
+    command,
+    source: "agent-sandbox",
+    evidence: ["Unavailable"],
+    basis: "read-only-turn",
+  };
+  for (const reports of [
+    { capabilityRequirements: [withoutBasis(requirement())] },
+    { capabilityRequirements: [{ ...requirement(), basis: "reviewer-turn" }] },
+    { environmentBlockers: [withoutBasis(blocker)] },
+    { environmentBlockers: [{ ...blocker, basis: null }] },
+    {
+      capabilityRequirements: [
+        { ...emptyRequirement(), basis: "read-only-turn" },
+      ],
+    },
+    {
+      capabilityRequirements: [
+        { ...observed, command: "node outside-inventory" },
+      ],
+    },
+    {
+      capabilityRequirements: [
+        { ...observed, commandIdentity: "a".repeat(64) },
+      ],
+    },
+    { environmentBlockers: [{ ...blocker, evidence: [] }] },
+  ])
+    assert.throws(
+      () => normalizeBootstrapResult({ ...base, ...reports }, "worker"),
+      (cause) =>
+        cause.code === "ERR_INVALID_POLISHING_OUTPUT" &&
+        cause.diagnostic?.constraint === "exact-command-capability-reports",
+    );
+  const accepted = normalizeBootstrapResult(
+    {
+      ...base,
+      capabilityRequirements: [observed],
+      environmentBlockers: [blocker],
+    },
+    "worker",
+  );
+  assert.deepEqual(accepted.capabilityRequirements, [observed]);
+  assert.deepEqual(accepted.environmentBlockers, [blocker]);
+  for (const field of ["capabilityRequirements", "environmentBlockers"]) {
+    const items = BOOTSTRAP_SCHEMA.properties[field].items;
+    assert.ok(items.required.includes("basis"));
+    assert.deepEqual(items.properties.basis.enum, [
+      "assigned-executor",
+      "read-only-turn",
+    ]);
+  }
+
+  // Admission forwards assigned-executor and legacy rows, never the basis.
+  assert.deepEqual(
+    inspectionRequirements([
+      {
+        capabilityRequirements: [
+          cacheReport("read-only-turn"),
+          cacheReport("assigned-executor", command),
+          withoutBasis(cacheReport("assigned-executor")),
+        ],
+        environmentBlockers: [
+          blocker,
+          { ...blocker, command: "npm run lint", basis: "assigned-executor" },
+          withoutBasis({ ...blocker, command: "npm run docs:check" }),
+        ],
+      },
+    ]),
+    [
+      {
+        command,
+        commandIdentity: null,
+        unsupported: [],
+        capabilities: { cache: true },
+      },
+      {
+        command: "npm run docs:check",
+        commandIdentity: null,
+        unsupported: [],
+        capabilities: { cache: true },
+      },
+      { command: "npm run lint" },
+      { command: "npm run docs:check" },
+    ],
+  );
+});
+
+async function reviewerCacheFixture(t, basis, requests) {
+  const root = createTrustedValidationService();
+  return createFixture(t, {
+    mode: "combined",
+    worker: [
+      clarificationReady(),
+      { ...bootstrapReady("Worker"), requiredChecks: ordinaryChecks },
+      reconciliationResolved(),
+      ...finish("combined", ordinaryFinalization()),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        requiredChecks: ordinaryChecks,
+        capabilityRequirements: [cacheReport(basis)],
+      },
+    ],
+    onRequirementInspection(input) {
+      requests.push(structuredClone(input));
+      return root.inspectRequirements(input);
+    },
+  });
+}
+
+test("combined polishing keeps a read-only-turn observation without requiring it in Worker FINALIZE", async (t) => {
+  const requests = [];
+  const fixture = await reviewerCacheFixture(t, "read-only-turn", requests);
+  const done = await fixture.run();
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    done.pipelineState.workerValidation.capabilityRequirements,
+    [],
+  );
+  assert.deepEqual(
+    done.pipelineState.reviewerValidation.capabilityRequirements,
+    [cacheReport("read-only-turn")],
+  );
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(({ requirements }) => requirements.length === 0));
+  assert.deepEqual(
+    done.pipelineState.finalizationResult.checks.map(
+      ({ checkId, executor }) => [checkId, executor],
+    ),
+    ordinaryChecks.map(({ id }) => [id, "agent"]),
+  );
+  const finalization = fixture.calls.worker.filter(
+    ({ schema }) => schema === FINALIZATION_SCHEMA,
+  );
+  assert.equal(finalization.length, 1);
+  assert.equal(finalization[0].access, "workspace-write");
+});
+
+test("combined polishing blocks a genuine assigned-executor need before writable work", async (t) => {
+  const requests = [];
+  const fixture = await reviewerCacheFixture(t, "assigned-executor", requests);
+  const before = await fixture.runtime.git.snapshot({
+    projectPath: fixture.projectPath,
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "environment_blocked");
+  assert.match(paused.pause.evidence[0], /not-selected/u);
+  // The sparse inventory index is bound to its check ID, not command text.
+  assert.deepEqual(paused.pause.capabilityDiagnostic, {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 2,
+        reason: "not-selected",
+        missingCapabilities: [],
+        unmatchedArtifactDigests: [],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  });
+  assert.deepEqual(paused.pause.capabilityChecks, [
+    { checkIndex: 2, label: "C3" },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(paused.pause.evidence),
+    /npm run docs:check/u,
+  );
+  assert.deepEqual(requests[0].requirements, [
+    {
+      command: ordinaryChecks[2].command,
+      commandIdentity: null,
+      unsupported: [],
+      capabilities: { cache: true },
+    },
+  ]);
+  assert.equal(writes(fixture).length, 0);
+  const after = await fixture.runtime.git.snapshot({
+    projectPath: fixture.projectPath,
+  });
+  assert.equal(after.contentFingerprint, before.contentFingerprint);
+  assert.equal(after.indexFingerprint, before.indexFingerprint);
+});
+
+test("legacy validation migration does not admit a read-only-turn observation", async (t) => {
+  const root = createTrustedValidationService();
+  let migrating = false;
+  const requests = [];
+  const fixture = await createFixture(t, {
+    worker: [
+      ...bootstrap("independent"),
+      bootstrapReady("Migrating Worker"),
+      reconciliationResolved(),
+      ...finish("independent"),
+    ],
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      {
+        ...bootstrapReady("Migrating Reviewer"),
+        capabilityRequirements: [cacheReport("read-only-turn", command)],
+      },
+    ],
+    onRequirementInspection(input) {
+      if (!migrating) return blocked();
+      requests.push(structuredClone(input));
+      return root.inspectRequirements(input);
+    },
+  });
+  const paused = await fixture.run();
+  await fixture.persistPipelineState(legacy(paused));
+  migrating = true;
+  const done = await fixture.run();
+  assert.equal(done.pipelineState.workflowState, "DONE");
+  assert.deepEqual(
+    done.pipelineState.reviewerValidation.capabilityRequirements,
+    [cacheReport("read-only-turn", command)],
+  );
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(({ requirements }) => requirements.length === 0));
+});
+
+test("version-20 migration keeps saved reports and their admission unchanged", async (t) => {
+  const completed = await (await createFixture(t)).run();
+  const validation = {
+    ...completed.pipelineState.workerValidation,
+    capabilityRequirements: [
+      withoutBasis(cacheReport("assigned-executor", command)),
+    ],
+    environmentBlockers: [
+      { command, source: "agent-sandbox", evidence: ["Not delegated"] },
+    ],
+  };
+  const saved = { ...completed.pipelineState, workerValidation: validation };
+  const provisional = legacy(completed);
+  for (const state of [saved, provisional]) {
+    const bytes = JSON.stringify(state);
+    const migrated = polishingPipeline.migrations[20]({ pipelineState: state });
+    assert.equal(JSON.stringify(migrated), bytes);
+    assert.ok(Object.isFrozen(migrated));
+    assert.doesNotThrow(() => normalizePipelineState(migrated));
+  }
+  for (const role of ["worker", "reviewer"])
+    assert.equal(provisional[`${role}Validation`].capabilityRequirements, null);
+  const migrated = polishingPipeline.migrations[20]({ pipelineState: saved });
+  const request = inspectionRequirements([
+    saved.workerValidation,
+    saved.reviewerValidation,
+  ]);
+  assert.deepEqual(
+    inspectionRequirements([
+      migrated.workerValidation,
+      migrated.reviewerValidation,
+    ]),
+    request,
+  );
+  assert.deepEqual(request, [
+    {
+      command,
+      commandIdentity: null,
+      unsupported: [],
+      capabilities: { cache: true },
+    },
+    { command },
+  ]);
 });

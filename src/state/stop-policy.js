@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { validStopBoundary } from "./stop-contract.js";
 import { deepFreeze, RunStoreError } from "./validation.js";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 export function stopIsPending(state) {
   return (
     state.stopRequest != null && state.stopRequest.reconciledRevision === null
@@ -85,6 +86,7 @@ export function assertRunCanAdvance(
     throw new RunStoreError(
       "Owned execution must stop before advancing its checkpoint.",
       {
+        ownershipDiagnostic: createOwnershipDiagnostic("state-process-active"),
         code: "ERR_EXECUTION_PROCESS_ACTIVE",
       },
     );
@@ -117,6 +119,9 @@ export function assertRunCanReleaseOwnership(state) {
   }
   throw new RunStoreError(
     "Owned execution must stop before releasing ownership.",
-    { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+    {
+      ownershipDiagnostic: createOwnershipDiagnostic("state-process-active"),
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    },
   );
 }

@@ -123,7 +123,7 @@ rounds charge only actual question batches, and a one-shot edit authorization
 is persisted before waiting and consumed on accepted resume. Unexpected input
 or clarification changes block discovery; ordinary questions end at freeze.
 
-State version 8 retains the workspace baseline, frozen declarations and their
+State version 10 retains the workspace baseline, frozen declarations and their
 hash, clarification hash/rounds/pending edit, logical source-fork consumption
 and unrecorded fork context, structured report/fingerprint, versioned finding
 ledger, versioned pending batch, discovery/recheck histories and accepted-batch
@@ -140,6 +140,13 @@ writing state directly. The ordered version-2 migration adds an empty
 `sourceForkContexts` list for combined logical-owner fork consumption; it changes
 no existing history, roles, budgets, batch versions or approval. Combined had no
 invocable lifecycle in prior versions. Task/context hashes remain in the common envelope.
+The version-9 migration adds nullable `pendingClarificationAppend` only for
+legacy absence; a preexisting field is rejected rather than inferred or adopted.
+The closed question intent retains normalized questions, the next round,
+prior/result hashes and the CLARIFY checkpoint's logical context, snapshot and
+correction/output-recovery settlement fingerprint. It cannot coexist with an
+editor window, frozen declarations or an active turn. Legacy null grants no
+append authority, and audit adds no product-decision path.
 Report and pending-batch bindings pin the inspected content snapshot. Each
 history entry retains its ordinal, logical session context, outcome, report
 binding and candidate IDs. Actual opaque child identities/lineage use the
@@ -205,6 +212,13 @@ discovery, finding verification or report publication. Diagnosis grants no same-
 resumption, budget renewal, acceptance, source changes or isolation bypass.
 The baseline uses the common `repositoryBaseline` binding so successful recovery
 can retire its evidence against the same unchanged workspace.
+
+A qualifying explicit-model catalog miss pauses as `backend_unavailable`.
+The running discovery or recheck reservation is retained for an explicit resume
+at the same checkpoint, with the same budgets and source bindings. Owner loss
+after accepting the resume and before recording the turn start retains that
+reservation. Admission and journal replay reject a replacement or already
+settled pass, including a recheck for a different findings batch.
 
 `DISCOVER` reserves a numbered `running` pass durably before invocation.
 Reservations, interrupted launches, invalid outputs and incomplete passes all
@@ -318,6 +332,16 @@ freshness or allowances. Settings, bindings, histories, accepted receipts, pendi
 versions/dispositions and publication bytes remain unchanged. CLI/MCP expose the
 same redacted explanation of explicit fresh-context reconstruction. Common-envelope
 shape and generic adapter output-exhaustion normalization remain unchanged.
+
+Version 9 captures new baselines through the Runner's bounded directory
+baseline. It retains snapshot scope, both fingerprints, the frozen source
+selection and excluded artifact paths, and replaces per-entry evidence with an
+entry count and an ordered-entry digest, so protected control trees of any size
+stay within the unchanged state limits. Drift guards recompute the same complete
+filtered equality, including protected controls. The identity version-8
+migration keeps null and legacy full baselines with their exact comparison and
+changes no bindings, budgets or histories; a version-8 runtime refuses version-9
+state as version skew rather than misreading compact baselines.
 
 For an uncaptured legacy admission, the root leased migration rebinds only the
 preparation's state fingerprint after validating the original binding. Frozen
@@ -582,6 +606,12 @@ change audited sources, stage, commit, create issues, or retrieve references.
 
 ## Public completion and publication
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+
 Use `agent-run run audit --project <workspace> --task <task-dir>` or MCP
 `run_start` with `pipelineId: "audit"`. The descriptor exposes Auditor and finding
 Reviewer configuration, mode and finite budgets through pipeline metadata;
@@ -597,6 +627,28 @@ through the shared response boundary or an authorized external edit and resume;
 unchanged material answers retain the pending request without another model turn
 or question round. Closing clarification freezes its accepted transcript hash.
 
+Question append intent is persisted through the shared clarification service's
+`persistAppend` callback before transcript replacement. Recovery first verifies
+unchanged task/context inputs, workspace content/controls and checkpoint bindings;
+only the exact prior bytes or journaled `resultHash` may precede replay. It never
+adopts an observed hash or invokes the producing role again. Intent survives
+replacement, readback and publication interruption. After verified readback,
+one atomic transition publishes the resulting hash, once-only round accounting,
+cleared correction/output-recovery state, edit authorization and structured
+request while retiring intent. The editor opens only after that transition.
+Read/write interruptions project bounded `clarification_append_interrupted`
+diagnostics with null-action resume; unauthorized bytes and protected-input or
+workspace drift remain non-resumable. Operator-stop reconciliation verifies
+append proof and retains intent without appending, preparing/opening an editor
+or accepting an answer. Report publication remains independently owned.
+
+If the service returns a hash different from the durable intent's `resultHash`,
+persist `input_changed` before any publication or editor preparation. Retain
+the complete intent, prior hashes, checkpoint, accounting and unsettled work.
+This rejection survives reconstruction and verification-only stop settlement,
+even if later transcript bytes match the prior or result hash; neither match
+restores replay authority.
+
 Runner publishes `<task-dir>/audit.md` atomically after accepted structured report,
 ledger or disposition updates. An initial report is marked **In progress**.
 Only current ledger versions with exact accepted-batch receipts and confirm/correct
@@ -611,8 +663,9 @@ version-3 migration, preserving all earlier roles, history and budgets. Each
 publication binding carries source snapshot, projected report fingerprint, rendered
 content hash and completion flag. Persist the exact intent before writing; verify
 readback and unchanged frozen inputs/source before the receipt. Resume settles a
-pending publication before any further discovery. Exact desired bytes reconcile a
-lost acknowledgement without a provider turn. Unexpected report edits, unsafe
+pending publication before any further discovery. A lost acknowledgement
+reconciles without a provider turn only from the journaled `prepared` identity
+at `audit.md` with no remaining temporary. Unexpected report edits, unsafe
 paths, substituted ancestors or conflicting temporaries fail closed and remain
 preserved. Legacy bindings lacking declared report paths gain no new write authority.
 State version 5 adds the selected proactive-clarification boolean and its completion
@@ -620,17 +673,53 @@ flag. The version-4 migration defaults to no proactive request, preserving exist
 clarification progress, discovery history, roles, publication and both budgets.
 Legacy material edits without structured requests retain external edit/resume support.
 
+Before saving a new intent, the Runner compares the current binding with the last
+published one. Equal snapshot and report fingerprints and completion with a
+different rendered hash mean the current runtime cannot reproduce the saved
+rendering: the audit pauses as `audit_report_rendering_changed`
+(`ERR_AUDIT_REPORT_RENDERING_CHANGED`) before any artifact call or role turn,
+retaining the last receipt and report. Newly accepted projections and completion
+changes publish normally from the prior destination hash.
+
 The Runner anchors replacement to the bound real parent directory, journals the
 temporary's identity and `writing` phase before writing `.audit.md.tmp`, syncs its
-bytes, journals `prepared`, renames it atomically, syncs the parent and verifies bytes.
+bytes, journals `prepared`, renames it atomically, syncs the parent and verifies
+destination bytes, identity and continued temporary absence while the parent
+directory stays unchanged. A bounded read on the pinned parent serializes with
+entry mutations before the closing native sample of its isolated readback watch
+queue. The sample must find no notification and the Runner then revalidates the
+binding.
 Both paths must already be ignored and untracked when repository-local; the
 Runner never edits ignore rules. The publisher accepts only exact declared
-artifacts and bounded report text (32 MiB); agents cannot call it. Recovery may
-rewrite an incomplete `writing` temporary only after verifying its recorded file
-identity, single-link ownership and unchanged destination. Unowned partial files,
-substituted temporaries and changed prepared bytes remain preserved and block report
-publication, independently of immutable source drift. Source snapshots exclude only the declared
-artifacts; per-turn read-only guards still include every artifact.
+artifacts and bounded report text (32 MiB); agents cannot call it. It writes only
+from the expected destination hash and allocates exclusively only when neither the
+temporary nor its record exists. Recovery may rewrite an exact owned `writing`
+temporary in place or rename an exact owned `prepared` temporary whose bytes match
+the intent. Desired destination bytes that differ from the expected baseline are
+accepted only with the recorded `prepared` identity at the destination and no
+temporary; equal expected and desired hashes with neither temporary nor record
+give a verified no-write receipt. The publisher never removes a temporary.
+Partial or empty temporaries whose custody is missing or invalid, missing
+recorded custody, substituted temporaries, desired destination bytes off the
+baseline without the recorded `prepared` identity and changed prepared bytes
+remain preserved and pause as `audit_report_temporary_conflict`
+(`ERR_WORKSPACE_REPORT_TEMPORARY_CONFLICT`), including proven exclusive-create
+collisions, post-open disappearance and a readback notification for the
+temporary alone after parent and ancestor guards pass.
+Destinations matching neither hash, changed during readback or lost at a
+post-open path lookup remain `audit_report_changed` after drift checks.
+Unsafe paths, drift and unrelated I/O keep their own outcomes.
+Source snapshots exclude only the declared artifacts; per-turn
+read-only guards still include every artifact.
+
+A publication refusal saves the active workflow state as `resumeState`, or keeps
+the existing pause's saved checkpoint when the refusal occurs during resume, so
+durable state retains the suspended checkpoint. The rendering and custody pauses
+expose no continuation: projected `resumeState` is null, actions are empty and
+null-action resume is rejected with the specific reason. CLI and MCP explain that
+the saved rendering cannot be reproduced or that temporary custody cannot be
+verified, and direct the operator to preserve `audit.md` and any remaining
+`.audit.md.tmp` before a new audit.
 
 Complete publication requires the selected clean-discovery gate, no pending
 verification, and unchanged source, task, clarification and report bindings. Lazy

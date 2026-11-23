@@ -41,11 +41,12 @@ import {
 } from "@agent-runner/plan-execution";
 
 import {
+  createOwnershipDiagnostic,
   readProcessIdentity,
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 import { createStopMonitor } from "../../src/runner/stops.js";
 import { inspectTrustedRequirements } from "../../src/runner/trusted-requirements.js";
 import {
@@ -2448,6 +2449,346 @@ test("reused and streamed records keep dispatch redaction and each event's stop 
   );
 });
 
+test("retained, streamed and cold activity use each event's own capability diagnostic", async (t) => {
+  const { store, created, stateRoot } = await fixture(t);
+  const { runId } = created.state;
+  const blocked = {
+    reason: "environment_blocked",
+    code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+    resumeState: "IMPLEMENT",
+  };
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 0,
+        reason: "insufficient-authority",
+        missingCapabilities: [],
+        unmatchedArtifactDigests: [],
+        commandIdentityMismatch: true,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  };
+  for (const [kind, pause] of [
+    ["legacy", blocked],
+    ["typed", { ...blocked, capabilityDiagnostic: diagnostic }],
+    [
+      "retained",
+      {
+        reason: "operator_paused",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: { ...blocked, capabilityDiagnostic: diagnostic },
+          activeTurn: null,
+        },
+      },
+    ],
+    ["cleared", null],
+  ])
+    await store.transitionRun(
+      created.lease,
+      { pause },
+      {
+        activity: { actor: "runner", phase: "run", kind, message: "Paused." },
+      },
+    );
+  // A valid JSON spelling can differ from the value canonicalized on replay.
+  const eventPath = join(created.directoryPath, "events.jsonl");
+  const source = await readFile(eventPath, "utf8");
+  await writeFile(
+    eventPath,
+    source.replaceAll('"checkIndex":0', '"checkIndex":-0'),
+  );
+  const reader = createRunStore({ stateRoot });
+  const page = await reader.readPublicActivity(runId);
+  const decoded = eventDecodes(t);
+  assert.deepEqual(await reader.readPublicActivity(runId), page);
+  assert.deepEqual(decoded, []);
+  // Only events whose own pause is a capability pause carry the field.
+  assert.deepEqual(
+    page.activities.map((activity) => [
+      activity.kind,
+      activity.capabilityDiagnostic,
+    ]),
+    [
+      [page.activities[0].kind, undefined],
+      ["legacy", null],
+      ["typed", diagnostic],
+      ["retained", undefined],
+      ["cleared", undefined],
+    ],
+  );
+  const base = await reader.loadRun(runId);
+  await seedActivities({ created }, 1030, "Checkpoint recorded.", base);
+  await reader.loadRun(runId);
+  decoded.length = 0;
+  decoded.normalized.length = 0;
+  assert.deepEqual(
+    (await reader.readPublicActivity(runId, { limit: 5 })).activities,
+    page.activities,
+  );
+  assert.ok(decoded.includes(page.activities[2].revision));
+  assert.deepEqual(decoded.normalized, []);
+});
+
+test("CLI status and MCP status, wait and activity share the bounded capability blocker projection", async (t) => {
+  const { store, created, stateRoot } = await fixture(t, {
+    runInput: {
+      pipelineStateVersion: planExecutionPipeline.stateVersion,
+      roles: Object.fromEntries(
+        planExecutionPipeline.roles.map((role) => [role, { backend: "codex" }]),
+      ),
+      pipelineState: createPlanExecutionState(),
+    },
+  });
+  const { runId } = created.state;
+  const command =
+    "npm run check -- --token=PRIVATE_ARGUMENT https://private.example.invalid/archive";
+  const ownership = createOwnershipDiagnostic("launcher-setup");
+  const blocker = (checkIndex, reason, details = {}) => ({
+    checkIndex,
+    reason,
+    missingCapabilities: [],
+    unmatchedArtifactDigests: [],
+    commandIdentityMismatch: false,
+    omittedArtifactDigests: 0,
+    ...details,
+  });
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      blocker(3, "insufficient-authority", {
+        missingCapabilities: ["cache"],
+        unmatchedArtifactDigests: ["c".repeat(64)],
+        commandIdentityMismatch: true,
+      }),
+      blocker(5, "not-selected"),
+      blocker(7, "unsupported"),
+    ],
+    omittedBlockers: 0,
+  };
+  await store.transitionRun(
+    created.lease,
+    {
+      pipelineState: {
+        ...created.state.pipelineState,
+        workflowState: "WAITING_FOR_USER",
+      },
+      // Historical free text is never published for this pause.
+      pause: {
+        reason: "environment_blocked",
+        code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+        explanation: `PRIVATE_EXPLANATION ${command}`,
+        evidence: [
+          `${command}: insufficient-authority`,
+          "PRIVATE_EVIDENCE",
+          `Ownership diagnostic: ${JSON.stringify(ownership)}`,
+          'Ownership diagnostic: {"PRIVATE_ENVELOPE":true}',
+        ],
+        capabilityDiagnostic: diagnostic,
+        // Index 3 is bound at position 2; 5 is unsafe, 7 unbound, 4 extra.
+        capabilityChecks: [
+          { checkIndex: 5, label: "https://private.example.invalid/C5" },
+          { checkIndex: 4, label: "C4" },
+          { checkIndex: 3, label: "C2" },
+        ],
+      },
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "plan-execution",
+        kind: "paused",
+        message: "Plan execution paused: environment_blocked.",
+      },
+    },
+  );
+  const runner = createRunner({ runStore: createRunStore({ stateRoot }) });
+  const control = createMcpControlPlane({ runner, runStore: store });
+  const status = await control.runStatus({ runId });
+  const waited = await control.runWait({ runId, cursor: 0, timeoutMs: 0 });
+  const page = await control.runActivity({ runId, cursor: 0, limit: 100 });
+  let output = "";
+  assert.equal(
+    await main(["status", "--run", runId], {
+      runner,
+      stdout: { write: (chunk) => (output += chunk) },
+      stderr: { write: (chunk) => assert.fail(chunk) },
+    }),
+    0,
+  );
+  const evidence = [
+    `Check C2 at inventory index 3: insufficient-authority; missing capabilities cache; unmatched artifact digests ${"c".repeat(64)}; omitted artifact digests 0; command identity mismatch yes.`,
+    "Check unknown at inventory index 5: not-selected; missing capabilities none; unmatched artifact digests none; omitted artifact digests 0; command identity mismatch no.",
+    "Check unknown at inventory index 7: unsupported; missing capabilities none; unmatched artifact digests none; omitted artifact digests 0; command identity mismatch no.",
+    `Ownership diagnostic: ${JSON.stringify(ownership)}`,
+  ];
+  // Unknown labels leave the saved blocker in force.
+  assert.equal(status.status, "WAITING_FOR_USER");
+  assert.equal(status.pause.reason, "environment_blocked");
+  assert.equal(status.pause.code, "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE");
+  assert.match(status.pause.explanation, /^Required check capabilities/u);
+  assert.deepEqual(status.pause.evidence, evidence);
+  assert.deepEqual(waited.pause, status.pause);
+  const paused = page.activities.at(-1);
+  assert.deepEqual(paused.capabilityDiagnostic, diagnostic);
+  assert.deepEqual(paused.capabilityChecks, [
+    { checkIndex: 3, label: "C2" },
+    { checkIndex: 5, label: null },
+    { checkIndex: 7, label: null },
+  ]);
+  assert.deepEqual(paused.ownershipDiagnostics, [ownership]);
+  for (const line of [status.pause.explanation, ...evidence])
+    assert.ok(output.includes(line), line);
+  for (const value of [status, waited, page, output])
+    assert.doesNotMatch(
+      typeof value === "string" ? value : JSON.stringify(value),
+      /PRIVATE|private\.example|npm run/u,
+    );
+  // An extra binding for an index without a blocker is never published.
+  assert.doesNotMatch(JSON.stringify([status.pause, paused]), /C4/u);
+
+  // A later caught refusal has no mismatch details. Each event keeps its own
+  // revalidated ownership facts; a malformed envelope is never published.
+  const refusal = createOwnershipDiagnostic("trusted-resource-custody");
+  await store.transitionRun(
+    created.lease,
+    {
+      pause: {
+        reason: "environment_blocked",
+        code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+        explanation: "PRIVATE_EXPLANATION",
+        evidence: [
+          "PRIVATE_EVIDENCE",
+          `Ownership diagnostic: ${JSON.stringify({ ...refusal, extra: "PRIVATE_FIELD" })}`,
+          `Ownership diagnostic: ${JSON.stringify(refusal)}`,
+        ],
+      },
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "plan-execution",
+        kind: "paused",
+        message: "Plan execution paused: environment_blocked.",
+      },
+    },
+  );
+  const refused = await control.runStatus({ runId });
+  const history = await control.runActivity({ runId, cursor: 0, limit: 100 });
+  assert.deepEqual(refused.pause.evidence, [
+    "Capability mismatch details: unknown.",
+    `Ownership diagnostic: ${JSON.stringify(refusal)}`,
+  ]);
+  assert.deepEqual(
+    history.activities
+      .filter((activity) => activity.capabilityDiagnostic !== undefined)
+      .map(
+        ({ capabilityDiagnostic, capabilityChecks, ownershipDiagnostics }) => [
+          capabilityDiagnostic === null,
+          capabilityChecks.length,
+          ownershipDiagnostics,
+        ],
+      ),
+    [
+      [false, 3, [ownership]],
+      [true, 0, [refusal]],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify([refused, history]), /PRIVATE/u);
+
+  // One saved ID for two blocker indexes is ambiguous for both; a distinct ID
+  // stays bound and every blocker is preserved.
+  await store.transitionRun(
+    created.lease,
+    {
+      pause: {
+        reason: "environment_blocked",
+        code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+        explanation: "PRIVATE_EXPLANATION",
+        evidence: [],
+        capabilityDiagnostic: diagnostic,
+        capabilityChecks: [
+          { checkIndex: 3, label: "C2" },
+          { checkIndex: 5, label: "C2" },
+          { checkIndex: 7, label: "C4" },
+        ],
+      },
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "plan-execution",
+        kind: "paused",
+        message: "Plan execution paused: environment_blocked.",
+      },
+    },
+  );
+  const ambiguous = await control.runStatus({ runId });
+  assert.deepEqual(
+    ambiguous.pause.evidence.map((line) => line.split(":")[0]),
+    [
+      "Check unknown at inventory index 3",
+      "Check unknown at inventory index 5",
+      "Check C4 at inventory index 7",
+    ],
+  );
+  const latest = await control.runActivity({ runId, cursor: 0, limit: 100 });
+  assert.deepEqual(latest.activities.at(-1).capabilityChecks, [
+    { checkIndex: 3, label: null },
+    { checkIndex: 5, label: null },
+    { checkIndex: 7, label: "C4" },
+  ]);
+
+  // An ID repeated within one index still makes its other index ambiguous,
+  // while a row outside the diagnostic never suppresses a valid label.
+  await store.transitionRun(
+    created.lease,
+    {
+      pause: {
+        reason: "environment_blocked",
+        code: "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE",
+        explanation: "PRIVATE_EXPLANATION",
+        evidence: [],
+        capabilityDiagnostic: diagnostic,
+        capabilityChecks: [
+          { checkIndex: 3, label: "C2" },
+          { checkIndex: 3, label: "C3" },
+          { checkIndex: 5, label: "C2" },
+          { checkIndex: 4, label: "C4" },
+          { checkIndex: 7, label: "C4" },
+        ],
+      },
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "plan-execution",
+        kind: "paused",
+        message: "Plan execution paused: environment_blocked.",
+      },
+    },
+  );
+  const repeated = await control.runStatus({ runId });
+  assert.deepEqual(
+    repeated.pause.evidence.map((line) => line.split(":")[0]),
+    [
+      "Check unknown at inventory index 3",
+      "Check unknown at inventory index 5",
+      "Check C4 at inventory index 7",
+    ],
+  );
+  const final = await control.runActivity({ runId, cursor: 0, limit: 100 });
+  assert.deepEqual(final.activities.at(-1).capabilityChecks, [
+    { checkIndex: 3, label: null },
+    { checkIndex: 5, label: null },
+    { checkIndex: 7, label: "C4" },
+  ]);
+});
+
 const preparationSnapshot = createTrustedValidationSnapshot(
   {
     check: {
@@ -3890,8 +4231,11 @@ test("preparation custody: cold rollback cannot hide an unmerged custody log", a
     () => replacement.runIsLeased(f.current.runId),
     () => replacement.acquireRunLease(f.current.runId),
   ])
-    await assert.rejects(inspect(), {
-      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    await assert.rejects(inspect(), (cause) => {
+      assert.equal(cause.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+      assert.equal(cause.ownershipDiagnostic.site, "state-custody");
+      assert.equal(cause.ownershipDiagnostic.inspection, null);
+      return true;
     });
   assert.equal(await readFile(custodyPath, "utf8"), custody);
   assert.equal(await readFile(eventsPath, "utf8"), beforeEvents);

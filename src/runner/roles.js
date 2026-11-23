@@ -81,6 +81,43 @@ function supportedAccess(capabilities) {
   );
 }
 
+export async function assertWorkspaceReadiness(
+  pipeline,
+  roles,
+  providers,
+  workspacePolicy,
+  code = "ERR_UNSUPPORTED_BACKEND",
+  preparableOutputPaths,
+) {
+  if (workspacePolicy === undefined) return;
+  for (const [role, configuration] of Object.entries(roles)) {
+    if (
+      !roleAccess(pipeline, role, workspacePolicy).includes("workspace-write")
+    )
+      continue;
+    try {
+      await providers.get(configuration.backend)?.assertWorkspaceReady?.({
+        access: "workspace-write",
+        workspacePolicy,
+        ...(preparableOutputPaths === undefined
+          ? {}
+          : { preparableOutputPaths }),
+      });
+    } catch (cause) {
+      const failure = normalizeAdapterFailure(
+        configuration.backend,
+        cause,
+        providers,
+      );
+      throw new RunnerError(
+        `Backend cannot safely prepare ${pipeline.id}.${role}: ${configuration.backend}. ` +
+          `${failure.message} Use supported output roots or a supported backend in an authorized fresh run.`,
+        { code },
+      );
+    }
+  }
+}
+
 function normalizePolicyReceipt(capabilities) {
   const supported = supportedAccess(capabilities);
   const provided = capabilities.policyReceipt;
@@ -265,7 +302,13 @@ async function runAdapter(adapter, backend, request, providers, naming) {
           ? { commitExecutor: "not_started" }
           : {}),
       });
-      throw new AgentBoundaryError({ code: stopReason?.code }, record);
+      throw new AgentBoundaryError(
+        {
+          code: stopReason?.code,
+          ownershipDiagnostic: failure.ownershipDiagnostic,
+        },
+        record,
+      );
     }
     if (
       request.signal?.aborted &&
@@ -274,7 +317,13 @@ async function runAdapter(adapter, backend, request, providers, naming) {
       ) &&
       [cause, cause?.cause, cause?.cause?.cause].includes(stopReason)
     ) {
-      throw new AgentBoundaryError({ code: stopReason.code }, failure.failure);
+      throw new AgentBoundaryError(
+        {
+          code: stopReason.code,
+          ownershipDiagnostic: failure.ownershipDiagnostic,
+        },
+        failure.failure,
+      );
     }
     throw failure;
   }
@@ -454,6 +503,15 @@ function configuredAdapter(
   );
   const capabilitiesByAccess = new Map();
   const resolveCapabilities = async ({ access } = {}) => {
+    if (access === "workspace-write")
+      await assertWorkspaceReadiness(
+        pipeline,
+        { [role]: configuration },
+        providers,
+        run.workspace?.policy ?? undefined,
+        "ERR_PROVIDER_POLICY_CHANGED",
+        [],
+      );
     const selectedAccess =
       run.workspace?.policy && pipeline.initialRoleAccess
         ? access
@@ -495,6 +553,15 @@ function configuredAdapter(
   };
   return Object.freeze({
     probe: resolveCapabilities,
+    assertWorkspaceReady: ({ preparableOutputPaths }) =>
+      assertWorkspaceReadiness(
+        pipeline,
+        { [role]: configuration },
+        providers,
+        run.workspace?.policy ?? undefined,
+        "ERR_PROVIDER_POLICY_CHANGED",
+        preparableOutputPaths,
+      ),
     async canReadFiles(request) {
       await resolveCapabilities();
       return (
@@ -508,6 +575,14 @@ function configuredAdapter(
     },
     async run(request) {
       if (run.workspace?.policy) {
+        await assertWorkspaceReadiness(
+          pipeline,
+          { [role]: configuration },
+          providers,
+          run.workspace.policy,
+          "ERR_PROVIDER_POLICY_CHANGED",
+          request.access === "workspace-write" ? [] : undefined,
+        );
         await resolveCapabilities();
         if (pipeline.initialRoleAccess)
           await resolveCapabilities({ access: request.access });
@@ -595,6 +670,7 @@ export async function probeRequiredRoles(
   workspacePolicy,
   onProof,
 ) {
+  await assertWorkspaceReadiness(pipeline, roles, providers, workspacePolicy);
   const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const receipts = Object.fromEntries(
     Object.keys(roles).map((role) => [role, null]),

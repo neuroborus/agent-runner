@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createOwnershipDiagnostic } from "../src/platform/index.js";
 import { createAuditState } from "@agent-runner/audit";
 import packageMetadata from "../package.json" with { type: "json" };
 import {
@@ -293,7 +294,8 @@ test("guidance prints the complete shared rendering without constructing a pipel
       environment,
       createCommandRunner: () => assert.fail("must not construct a runner"),
       createCommandGuidance(options) {
-        assert.deepEqual(options, { env: environment });
+        assert.equal(options.env, environment);
+        assert.equal(typeof options.runStore.withGuidanceLease, "function");
         return {
           async read(input) {
             assert.deepEqual(input, {
@@ -860,9 +862,14 @@ test("status dispatches and renders concise persisted state", async () => {
 });
 
 test("status separates byte measurements from token evidence and excludes private state", async () => {
+  const diagnostic = createOwnershipDiagnostic("parent-session-signal", {
+    startRequested: true,
+    terminationRequested: true,
+    ownershipHandedOff: false,
+  });
   const result = commandResult();
   result.run.observations = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     omittedAttempts: 5,
     attempts: [
       {
@@ -870,6 +877,7 @@ test("status separates byte measurements from token evidence and excludes privat
         role: "worker",
         checkpoint: "implement:workspace-write:1",
         status: "failed",
+        ownershipDiagnostic: diagnostic,
         accounting: "incomplete",
         incomplete: false,
         observations: [
@@ -946,6 +954,11 @@ test("status separates byte measurements from token evidence and excludes privat
     stdout.read(),
     /private|nativeSessionId|arbitrary error/u,
   );
+  assert.ok(
+    stdout
+      .read()
+      .includes(`Ownership diagnostic: ${JSON.stringify(diagnostic)}`),
+  );
   assert.equal(stderr.read(), "");
 });
 
@@ -996,39 +1009,52 @@ test("renders bounded finalization correction activity without rejected content"
 });
 
 test("run reports a classified agent failure with only its bounded diagnosis", async () => {
-  const stdout = createSink();
-  const stderr = createSink();
   const marker = "PRIVATE_NATIVE_FRAME";
+  for (const [code, diagnosticClass] of [
+    ["ERR_CLAUDE_PROTOCOL", "protocol_assistant_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_user_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_stream_event_after_result"],
+    ["ERR_CLAUDE_PROTOCOL", "protocol_record_after_result"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_unclassified"],
+    ["ERR_CLAUDE_PERMISSION_DENIED", "permission_bash_required_check"],
+    [
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_reason_auto_mode_stop_no_verdict",
+    ],
+  ]) {
+    const stdout = createSink();
+    const stderr = createSink();
 
-  const exitCode = await main(
-    ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
-    {
-      stdout: stdout.stream,
-      stderr: stderr.stream,
-      runner: fakeRunner({
-        async run() {
-          throw normalizeAdapterFailure(
-            "claude",
-            new ClaudeAdapterError(marker, {
-              cause: new Error(marker),
-              code: "ERR_CLAUDE_PROTOCOL",
-              diagnosticClass: "protocol_record_after_result",
-            }),
-          );
-        },
-      }),
-    },
-  );
+    const exitCode = await main(
+      ["run", "polishing", "--project", "/tmp/project", "--task", "/tmp/task"],
+      {
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          async run() {
+            throw normalizeAdapterFailure(
+              "claude",
+              new ClaudeAdapterError(marker, {
+                cause: new Error(marker),
+                code,
+                diagnosticClass,
+              }),
+            );
+          },
+        }),
+      },
+    );
 
-  assert.equal(exitCode, 1);
-  assert.equal(
-    stderr.read(),
-    "Agent backend turn failed: ERR_CLAUDE_PROTOCOL (protocol_record_after_result).\n",
-  );
-  assert.doesNotMatch(
-    `${stdout.read()}${stderr.read()}`,
-    new RegExp(marker, "u"),
-  );
+    assert.equal(exitCode, 1);
+    assert.equal(
+      stderr.read(),
+      `Agent backend turn failed: ${code} (${diagnosticClass}).\n`,
+    );
+    assert.doesNotMatch(
+      `${stdout.read()}${stderr.read()}`,
+      new RegExp(marker, "u"),
+    );
+  }
 });
 
 for (const pipeline of ["plan-authoring", "plan-execution", "polishing"]) {
@@ -1399,7 +1425,14 @@ test("status explains a terminal forbidden-delegation diagnostic", async () => {
 });
 
 test("status renders input and fresh-run pause actions", async () => {
-  for (const { pause, state, expected, alsoExpected, notExpected } of [
+  for (const {
+    pipelineId,
+    pause,
+    state,
+    expected,
+    alsoExpected,
+    notExpected,
+  } of [
     {
       pause: {
         reason: "clarification_answers_required",
@@ -1421,9 +1454,11 @@ test("status renders input and fresh-run pause actions", async () => {
       pause: {
         reason: "read_only_agent_mutated_repository",
         code: "ERR_READ_ONLY_REPOSITORY_CHANGED",
+        snapshotChanges: ["head", "untracked-content"],
       },
       state: {},
       expected: /Abandon this run and start a fresh run/u,
+      alsoExpected: /Changed snapshot domains: head, untracked-content\./u,
     },
     {
       pause: {
@@ -1437,6 +1472,20 @@ test("status renders input and fresh-run pause actions", async () => {
       expected:
         /Repair the reported finalization guidance and start a fresh plan-execution run\./u,
       alsoExpected: /The frozen finalization guidance changed/u,
+    },
+    {
+      pipelineId: "polishing",
+      pause: {
+        reason: "finalization_skill_invalid",
+        code: "ERR_FINALIZATION_GUIDANCE_CHANGED",
+        explanation:
+          "The frozen finalization guidance changed. Start a new run.",
+        evidence: ["The selected repository skill no longer matches."],
+      },
+      state: {},
+      expected:
+        /Repair the reported finalization guidance and start a fresh polishing run\./u,
+      notExpected: /plan-execution run/u,
     },
     {
       pause: {
@@ -1469,7 +1518,7 @@ test("status renders input and fresh-run pause actions", async () => {
     },
   ]) {
     const stdout = createSink();
-    const result = commandResult({ state: "WAITING_FOR_USER" });
+    const result = commandResult({ pipelineId, state: "WAITING_FOR_USER" });
     result.run.pause = pause;
     Object.assign(result.run.pipelineState, state);
     assert.equal(
@@ -1883,4 +1932,42 @@ test("authoring maps explicit kind and repeated declarations to descriptor setti
     stderr.read(),
   );
   assert.deepEqual(input.settingOverrides, { planKind: "custom" });
+});
+
+test("CLI direct and recovery failures print the same validated ownership diagnostic", async () => {
+  const diagnostic = createOwnershipDiagnostic("recovery-namespace");
+  const failure = Object.assign(new Error("discarded private error"), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ownershipDiagnostic: diagnostic,
+  });
+  for (const command of ["status", "resume"]) {
+    const stderr = createSink();
+    assert.equal(
+      await main([command, "--run", RUN_ID], {
+        stdout: createSink().stream,
+        stderr: stderr.stream,
+        runner: fakeRunner({
+          status: async () => {
+            throw failure;
+          },
+          resume: async (_input, callbacks) => {
+            callbacks.onRecoveryStage("process-recovery");
+            throw failure;
+          },
+        }),
+      }),
+      1,
+    );
+    assert.ok(
+      stderr
+        .read()
+        .includes(`Ownership diagnostic: ${JSON.stringify(diagnostic)}`),
+    );
+    assert.doesNotMatch(stderr.read(), /discarded|private error/u);
+    if (command === "resume")
+      assert.match(
+        stderr.read(),
+        /Recovery failed at process-recovery \(ERR_EXECUTION_PROCESS_UNVERIFIABLE\)/u,
+      );
+  }
 });

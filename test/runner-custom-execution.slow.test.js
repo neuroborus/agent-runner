@@ -1,14 +1,39 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import test from "node:test";
+
+import { planExecutionPipeline } from "@agent-runner/plan-execution";
 import { customExecutionFixture } from "./support/index.js";
 
 test("durable custom authoring and execution settle reviewed steps across interrupted confirmation", async (t) => {
   let interrupt = true;
+  let preparationInterrupted = false;
+  let preparationCounters;
+  let preparationRecovered = false;
+  const lostPreparation = new Error("Prepared identity response lost");
   const f = await customExecutionFixture(t, "combined", {
     durable: true,
     author: true,
+    missingOutputRoot: true,
+    afterTransition(saved) {
+      if (
+        !preparationInterrupted &&
+        saved.pipelineState.customResults?.preparation?.prepared
+      ) {
+        preparationInterrupted = true;
+        throw lostPreparation;
+      }
+    },
     beforeTurn({ saved }) {
+      if (
+        preparationCounters &&
+        saved.pipelineState.currentStep === 1 &&
+        saved.activeTurn.phase === "implement"
+      ) {
+        assert.deepEqual(saved.counters, preparationCounters);
+        preparationRecovered = true;
+      }
       if (
         interrupt &&
         saved.pipelineState.currentStep === 2 &&
@@ -21,13 +46,32 @@ test("durable custom authoring and execution settle reviewed steps across interr
       }
     },
   });
-  const paused = await f.run();
+  await assert.rejects(f.run(), (error) => error === lostPreparation);
+  const interrupted = await f.store.loadRun(f.runId);
+  preparationCounters = structuredClone(interrupted.counters);
+  const prepared = interrupted.pipelineState.customResults.preparation.prepared;
+  assert.deepEqual(
+    interrupted.pipelineState.repositoryBaseline.outputs[0].entry.identity,
+    prepared.identity,
+  );
+  assert.equal(interrupted.pipelineState.customWritePolicy, null);
+  assert.equal(
+    f.calls.some(({ request }) => request.access === "workspace-write"),
+    false,
+  );
+  const paused = await f.run({ cold: true });
   assert.equal(paused.run.pause.reason, "backend_unavailable");
+  assert.equal(paused.run.pipelineState.customResults.preparation, null);
+  assert.deepEqual(paused.run.pipelineState.customResults.preparedRoots, [
+    prepared,
+  ]);
+  assert.deepEqual(paused.run.providerPolicies, interrupted.providerPolicies);
+  assert.equal(preparationRecovered, true);
   assert.equal(paused.run.pipelineState.customResults.accepted.length, 1);
   const writePolicy = paused.run.pipelineState.customWritePolicy;
   assert.deepEqual(writePolicy.supportedAccess, ["workspace-write"]);
   const receipt = paused.run.pipelineState.customResults.accepted[0].receipt;
-  const resumed = await f.run();
+  const resumed = await f.run({ cold: true });
   assert.equal(
     resumed.run.pipelineState.workflowState,
     "DONE",
@@ -39,6 +83,10 @@ test("durable custom authoring and execution settle reviewed steps across interr
   );
   assert.equal(resumed.run.pipelineState.customResults.accepted.length, 2);
   assert.deepEqual(resumed.run.pipelineState.customWritePolicy, writePolicy);
+  assert.deepEqual(resumed.run.pipelineState.customResults.preparedRoots, [
+    prepared,
+  ]);
+  assert.deepEqual(resumed.run.counters, paused.run.counters);
   assert.deepEqual(resumed.run.pipelineState.completedCommits, []);
   assert.equal(f.calls.filter(({ phase }) => phase === "implement").length, 2);
   assert.match(await readFile(f.output, "utf8"), /source.md/u);
@@ -48,4 +96,166 @@ test("durable custom authoring and execution settle reviewed steps across interr
       ({ request }) => request.workspacePolicy.kind === "directory",
     ),
   );
+});
+
+test("custom authoring and execution persist bounded baselines above the state array limit", async (t) => {
+  let interrupt = true;
+  let accepted = null;
+  const f = await customExecutionFixture(t, "combined", {
+    durable: true,
+    author: true,
+    missingOutputRoot: true,
+    outputStep: 1,
+    vendorFiles: 10_050,
+    beforeTurn({ saved }) {
+      if (saved.pipelineState.currentStep !== 2) return;
+      accepted ??= structuredClone(saved.pipelineState.repositoryBaseline);
+      if (interrupt && saved.activeTurn.phase === "confirm") {
+        interrupt = false;
+        throw Object.assign(new Error("Provider temporarily unavailable"), {
+          recoverable: true,
+        });
+      }
+    },
+  });
+  const authored = (await f.store.loadRun(f.authoringRunId)).pipelineState
+    .repositoryBaseline;
+  const paused = await f.run();
+  assert.equal(paused.run.pause.reason, "backend_unavailable");
+  const state = paused.run.pipelineState;
+  for (const baseline of [authored, state.repositoryBaseline, accepted]) {
+    assert.equal(Object.hasOwn(baseline, "entries"), false);
+    assert.equal(Object.hasOwn(baseline, "linkResolutions"), false);
+    assert.ok(baseline.entryCount > 10_050);
+  }
+  const [prepared] = state.customResults.preparedRoots;
+  const record = accepted.outputs.find(({ path }) => path === prepared.path);
+  assert.equal(record.entry.kind, "directory");
+  assert.deepEqual(record.entry.identity, prepared.identity);
+  assert.equal(record.descendantCount, 1);
+  assert.match(record.descendantsHash, /^[0-9a-f]{64}$/u);
+  const written = await readFile(f.output, "utf8");
+  assert.match(written, /source.md/u);
+  const earlier = structuredClone(state.customResults.accepted);
+  assert.equal(earlier.length, 1);
+  assert.deepEqual(earlier[0].result.outputPaths, [f.output]);
+  assert.deepEqual(
+    earlier[0].outputs.map(({ path }) => path),
+    [f.output],
+  );
+  assert.match(earlier[0].outputs[0].fingerprint, /^[0-9a-f]{64}$/u);
+
+  await writeFile(
+    join(f.projectPath, "vendor", "package-0", "module-0.js"),
+    "Changed.\n",
+  );
+  const calls = f.calls.length;
+  const { run } = await f.run();
+  assert.equal(run.pause.reason, "workspace_changed");
+  assert.equal(run.pause.code, "ERR_WORKSPACE_DRIFT");
+  assert.equal(f.calls.length, calls);
+  assert.deepEqual(run.pipelineState.customResults.accepted, earlier);
+  assert.equal(await readFile(f.output, "utf8"), written);
+});
+
+test("durable lazy custom execution keeps a precise candidate diagnostic through a cold null retry", async (t) => {
+  const sentinel = "sentinel-value";
+  let invalid = 0;
+  const step1 = [];
+  const f = await customExecutionFixture(t, "lazy", {
+    durable: true,
+    beforeTurn({ saved }) {
+      if (saved.pipelineState.currentStep === 1) step1.push(saved);
+      if (
+        invalid === 2 ||
+        saved.pipelineState.workflowState !== "CLEAN_CONFIRM" ||
+        saved.pipelineState.currentStep !== 1
+      )
+        return;
+      invalid += 1;
+      return {
+        status: "CLEAN",
+        findings: [
+          {
+            id: "R1",
+            file: "source.md",
+            problem: sentinel,
+            reason: "Reason.",
+            suggestedAction: "Fix it.",
+          },
+        ],
+        question: "",
+        options: [],
+        whyBlocked: "",
+        evidence: [],
+      };
+    },
+  });
+  const diagnostic = {
+    role: "worker",
+    phase: "clean-confirm",
+    contract: "lazy-clean-confirm",
+    field: "findings",
+    constraint: "empty-when-clean",
+  };
+  const batch = JSON.stringify([diagnostic], null, 2);
+  const cleanCalls = () =>
+    f.calls.filter(({ phase }) => phase === "clean-confirm");
+  const persisted = async () => {
+    const stateRoot = join(dirname(f.taskPath), "state");
+    const names = await readdir(stateRoot, { recursive: true });
+    const files = await Promise.all(
+      names.map((name) =>
+        readFile(join(stateRoot, name), "utf8").catch(() => ""),
+      ),
+    );
+    return files.join("\n");
+  };
+
+  const { run: paused } = await f.run();
+  const pending = paused.pipelineState.pendingLazyCorrection;
+  const projected = planExecutionPipeline.projections.pause(paused);
+
+  assert.equal(paused.pause.reason, "lazy_output_invalid");
+  assert.equal(paused.pause.resumeState, "CLEAN_CONFIRM");
+  assert.ok(cleanCalls()[1].request.prompt.includes(batch));
+  assert.deepEqual(pending.diagnostics, [diagnostic]);
+  assert.deepEqual(paused.pipelineState.lazyCorrections, [pending]);
+  assert.equal(pending.fixRoundCharged, false);
+  assert.deepEqual(projected.nextActions, [{ type: "resume", action: null }]);
+  assert.deepEqual(projected.evidence, [
+    "Worker field findings violated empty-when-clean.",
+  ]);
+  assert.equal(JSON.stringify(projected).includes(sentinel), false);
+  assert.deepEqual(
+    (await f.store.loadRun(f.runId)).pipelineState.pendingLazyCorrection,
+    pending,
+  );
+
+  const { run: completed } = await f.run();
+  const retry = cleanCalls()[2];
+  const retrying = step1.filter(
+    ({ activeTurn }) => activeTurn.phase === "clean-confirm",
+  )[2];
+  const after = step1[step1.indexOf(retrying) + 1];
+
+  assert.equal(
+    completed.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(completed.pause),
+  );
+  assert.equal(retry.step, 1);
+  assert.deepEqual(retrying.pipelineState.pendingLazyCorrection, pending);
+  assert.deepEqual(after.pipelineState.lazyCorrections, [pending]);
+  assert.equal(after.pipelineState.pendingLazyCorrection, null);
+  assert.equal(after.counters.fixRounds, paused.counters.fixRounds);
+  assert.equal(retry.request.access, "read-only");
+  assert.equal(retry.request.session, undefined);
+  assert.ok(retry.request.prompt.includes(batch));
+  assert.ok(
+    retry.request.prompt.includes(
+      `Inspected candidate fingerprint: ${pending.contentFingerprint}`,
+    ),
+  );
+  assert.equal((await persisted()).includes(sentinel), false);
 });

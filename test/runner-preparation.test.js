@@ -65,6 +65,36 @@ function until(event, operation) {
   ]);
 }
 
+// Isolated configuration keeps fixture repositories independent of the host.
+async function initializeGit(f) {
+  const env = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
+    ),
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    HOME: f.root,
+    XDG_CONFIG_HOME: f.root,
+  };
+  const git = (...args) =>
+    execute("git", ["-C", f.projectPath, ...args], { env });
+  await git("init", "--quiet");
+  const commit = () =>
+    git(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "-c",
+      "commit.gpgsign=false",
+      "commit",
+      "-qm",
+      "fixture",
+    );
+  return { env, git, commit };
+}
+
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "runner-preparation-"));
   const projectPath = join(root, "project");
@@ -135,6 +165,7 @@ async function fixture(t) {
       };
     },
   };
+  f.adapter = adapter;
   f.runner = (options = {}) =>
     createRunner({
       runStore: store,
@@ -734,19 +765,7 @@ test("Git source selection is visible and cancellable before membership or captu
 
 test("Git audit journals complete source selection before cancellable capture and rechecks it on reconstruction", async (t) => {
   const f = await fixture(t);
-  const env = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")),
-    ),
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_OPTIONAL_LOCKS: "0",
-    HOME: f.root,
-    XDG_CONFIG_HOME: f.root,
-  };
-  const git = (...args) =>
-    execute("git", ["-C", f.projectPath, ...args], { env });
-  await git("init", "--quiet");
+  const { env, git, commit } = await initializeGit(f);
   await mkdir(join(f.projectPath, "dependencies"));
   await writeFile(join(f.projectPath, ".gitignore"), "dependencies/\n");
   await writeFile(
@@ -757,17 +776,7 @@ test("Git audit journals complete source selection before cancellable capture an
     await writeFile(join(f.projectPath, path), "Original\n");
   await git("add", ".");
   await git("add", "-f", "dependencies/tracked.txt");
-  await git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "-c",
-    "commit.gpgsign=false",
-    "commit",
-    "-qm",
-    "fixture",
-  );
+  await commit();
   await writeFile(join(f.projectPath, "dirty.txt"), "Dirty worktree\n");
   await rm(join(f.projectPath, "deleted.txt"));
   await writeFile(join(f.projectPath, "new.txt"), "Untracked\n");
@@ -860,6 +869,137 @@ test("Git audit journals complete source selection before cancellable capture an
   }
 });
 
+// Regression: the first CLARIFY transition persisted every protected control
+// entry, so large Git control trees exceeded state limits on every continuation.
+test("acknowledged Git audit persists a bounded baseline through clarify and cold recovery", async (t) => {
+  const f = await fixture(t);
+  const { env, git, commit } = await initializeGit(f);
+  await git("add", ".");
+  await commit();
+  const service = createGitService({ env });
+  const gitBefore = await service.snapshot({ projectPath: f.projectPath });
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: { audit: { roles: { reviewer: { backend: "claude" } } } },
+    }),
+  );
+  const clarifying = Promise.withResolvers();
+  const gate = captureGate();
+  let holding = true;
+  const auditor = {
+    ...f.adapter,
+    async run(request) {
+      if (!holding)
+        return {
+          ...(await f.adapter.run(request)),
+          sessionId:
+            request.session?.mode === "continue"
+              ? request.session.id
+              : `auditor-${f.calls.length}`,
+        };
+      holding = false;
+      clarifying.resolve(request);
+      await gate.hold(request.signal);
+      throw new Error("Held clarification was released.");
+    },
+  };
+  const options = {
+    git: service,
+    adapters: { codex: auditor, claude: f.adapter },
+    loadConfiguration: async () => configuration,
+  };
+  const runner = f.runner(options);
+  let continuation;
+  const control = createMcpControlPlane({
+    runner,
+    runStore: f.store,
+    launchRun(runId, _action, launch) {
+      continuation = runner.resume({
+        runId,
+        dispatch: launch.dispatch,
+        expectedRuntimeCompatibility: launch.expectedRuntimeCompatibility,
+      });
+      continuation.then(
+        () => launch.onExit(0, null),
+        () => launch.onExit(1, null),
+      );
+    },
+  });
+  const { runId } = await control.runStart({
+    pipelineId: "audit",
+    projectPath: f.projectPath,
+    taskPath: f.taskPath,
+    mode: "independent",
+    sourceScope: "git",
+    proactiveClarification: false,
+    idempotencyKey: "start-git-audit",
+  });
+  try {
+    assert.equal(
+      (await until(clarifying.promise, continuation)).access,
+      "read-only",
+    );
+    const held = (await runner.status(runId)).run;
+    assert.equal(held.pipelineState.workflowState, "CLARIFY");
+    assert.equal(held.activeTurn.role, "auditor");
+    assert.deepEqual(
+      [held.roles.auditor.backend, held.roles.reviewer.backend],
+      ["codex", "claude"],
+    );
+    assert.deepEqual(Object.keys(held.providerPolicies).sort(), [
+      "auditor",
+      "reviewer",
+    ]);
+    const baseline = held.pipelineState.repositoryBaseline;
+    assert.ok(baseline.entryCount > 0);
+    for (const field of ["entries", "linkResolutions"])
+      assert.equal(Object.hasOwn(baseline, field), false);
+    assert.deepEqual(baseline.sourceSelection, held.workspace.sourceSelection);
+    await runner.requestOperatorStop({
+      runId,
+      kind: "pause_requested",
+      expectedRevision: held.revision,
+      idempotencyKey: "pause-clarify",
+    });
+    const paused = (await continuation).run;
+    assert.equal(paused.pause.reason, "operator_paused");
+    assert.deepEqual(paused.pipelineState.repositoryBaseline, baseline);
+    const replacement = f.runner({
+      ...options,
+      runStore: createRunStore({ stateRoot: f.stateRoot }),
+      loadConfiguration: () =>
+        assert.fail("Resume must not resolve current configuration."),
+    });
+    const completed = (await replacement.resume({ runId })).run;
+    assert.equal(completed.pipelineState.workflowState, "DONE");
+    assert.deepEqual(completed.pipelineState.repositoryBaseline, baseline);
+    assert.equal(completed.pipelineState.history.length, 1);
+    assert.equal(f.calls.length, 2);
+    assert.deepEqual(
+      completed.workspace.sourceSelection,
+      held.workspace.sourceSelection,
+    );
+    assert.equal(
+      (await service.selectSources({ projectPath: f.projectPath }))
+        .selectionFingerprint,
+      held.workspace.sourceSelection.fingerprint,
+    );
+    assert.deepEqual(
+      await service.snapshot({ projectPath: f.projectPath }),
+      gitBefore,
+    );
+    await writeFile(join(f.projectPath, "later.txt"), "Membership changed\n");
+    const blocked = (await replacement.resume({ runId })).run;
+    assert.equal(blocked.pause.reason, "workspace_changed");
+    assert.equal(f.calls.length, 2);
+  } finally {
+    gate.release();
+    await continuation?.catch(() => {});
+  }
+});
+
 test("legacy pending audit resumes whole-directory capture without changing frozen settings or budgets", async (t) => {
   const f = await fixture(t);
   const { run, directoryPath } = await f.runner().create(f.input);
@@ -873,6 +1013,7 @@ test("legacy pending audit resumes whole-directory capture without changing froz
       25;
   legacy.pipelineStateVersion = 6;
   delete legacy.pipelineState.outputRecovery;
+  delete legacy.pipelineState.pendingClarificationAppend;
   delete legacy.pipelineState.settings.sourceScope;
   delete legacy.pipelineState.settings.excludePaths;
   legacy.workspacePreparation.inputFingerprint =

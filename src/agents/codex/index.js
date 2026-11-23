@@ -1,6 +1,7 @@
 export {
   CODEX_BACKEND_ID,
   CODEX_FAILURE_CLASSES,
+  assertCodexWorkspaceReady,
   CodexAdapterError,
   classifyCodexFailure,
   createCodexAdapter,

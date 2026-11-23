@@ -1,3 +1,4 @@
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import { PROVIDER_REGISTRY } from "../agents/index.js";
 import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../pipeline-registry.js";
 import { normalizeRecoveryDispatch } from "../state/index.js";
@@ -33,10 +34,16 @@ const ANSWER_FIELDS = new Set(["questionId", "answer"]);
 const SOURCE_SESSION_FIELDS = new Set(["backend", "id", "profile"]);
 
 export class RunnerError extends Error {
-  constructor(message, { cause, code = "ERR_RUNNER" } = {}) {
+  constructor(
+    message,
+    { cause, code = "ERR_RUNNER", ownershipDiagnostic } = {},
+  ) {
     super(message, { cause });
     this.name = "RunnerError";
     this.code = code;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(
+      ownershipDiagnostic === undefined ? cause : { ownershipDiagnostic },
+    );
   }
 }
 

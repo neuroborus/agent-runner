@@ -17,6 +17,7 @@ import { createRunner } from "../src/runner/index.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { assertInactivityContinuity } from "../src/state/inactivity.js";
 import { normalizeRunState } from "../src/state/validation.js";
+import { availabilityFailure } from "./support/availability.js";
 
 function clock() {
   let now = 0,
@@ -716,6 +717,37 @@ test("expiry evidence can be journaled while execution is owned, without allowin
   assert.equal(await f.coordinator.retry(f.input), true);
 });
 
+test("a reconciled-turn retry requires an expiry after its marker over unchanged observed content", async (t) => {
+  const f = await fixture(t);
+  await f.coordinator.before(f.input);
+  const started = await f.start();
+  const original = f.repository.contentFingerprint;
+  f.repository.contentFingerprint = "b".repeat(64);
+  await expire(f, f.coordinator);
+  const { expiryRevision } = (await f.store.loadRun(f.run.runId))
+    .inactivityRecovery;
+  const expired = {
+    repository: { ...f.repository },
+    reconciledTurn: f.turn,
+    expiredAfter: started.revision,
+  };
+  for (const input of [
+    { ...expired, expiredAfter: expiryRevision },
+    { ...expired, expiredAfter: undefined },
+    {
+      ...expired,
+      repository: { ...f.repository, contentFingerprint: original },
+    },
+  ]) {
+    f.repository.contentFingerprint = input.repository.contentFingerprint;
+    await assert.rejects(f.coordinator.retry(input), {
+      code: "ERR_INACTIVITY_RECOVERY",
+    });
+  }
+  f.repository.contentFingerprint = "b".repeat(64);
+  assert.equal(await f.coordinator.retry(expired), true);
+});
+
 test("an interrupted expiry publication retains journal evidence before abort without authorizing an immediate retry", async (t) => {
   let interrupt = false;
   const f = await fixture(t, "codex", {
@@ -780,6 +812,32 @@ test("a provider safety failure keeps precedence over a raced inactivity abort",
   assert.equal(f.coordinator.eligible(safety), false);
 });
 
+test("a provider availability failure retains failed-attempt evidence when inactivity races settlement", async (t) => {
+  const f = await fixture(t);
+  await f.coordinator.before(f.input);
+  await f.start();
+  const entered = Promise.withResolvers();
+  const failure = availabilityFailure();
+  const attempt = f.coordinator.invoke(
+    "worker",
+    ({ signal }) =>
+      new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => reject(failure), { once: true });
+        entered.resolve();
+      }),
+    { access: "read-only" },
+  );
+  await entered.promise;
+  f.timers.advance(100);
+  await assert.rejects(attempt, (cause) => cause === failure);
+  const stored = await f.store.loadRun(f.run.runId);
+  assert.equal(stored.inactivityRecovery.status, "expired");
+  const observed = stored.observations.attempts.at(-1);
+  assert.equal(observed.status, "failed");
+  assert.equal(observed.checkpoint, f.input.checkpoint);
+  await f.finish();
+});
+
 test("reconstruction provenance and legacy markers cannot prove inactivity or replenish recovery", async (t) => {
   const f = await fixture(t);
   await f.coordinator.before(f.input);
@@ -812,6 +870,11 @@ test("reconstruction provenance and legacy markers cannot prove inactivity or re
     const legacy = structuredClone(run);
     legacy.schemaVersion = 19;
     legacy.runtimeCompatibility = { runnerVersion: 1, runStateVersion: 19 };
+    if (legacy.observations !== null) {
+      legacy.observations.schemaVersion = 1;
+      for (const attempt of legacy.observations.attempts)
+        delete attempt.ownershipDiagnostic;
+    }
     legacy.inactivityRecovery.status = status;
     delete legacy.inactivityRecovery.expiryRevision;
     const migrated = normalizeRunState(legacy, legacy.runId);

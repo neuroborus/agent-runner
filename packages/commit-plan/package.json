@@ -12,6 +12,7 @@
     "node": ">=24 <25"
   },
   "files": [
-    "src/**/*.js"
+    "src/**/*.js",
+    "contract.md"
   ]
 }

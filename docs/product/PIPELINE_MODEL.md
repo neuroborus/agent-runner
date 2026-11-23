@@ -41,6 +41,13 @@ not by adding separate review-fix commits. A completed earlier commit is durable
 history and is never rewritten automatically when later work encounters a
 problem.
 
+Custom output admission preserves canonical directory intent and checks backend
+feasibility before new preparation or writable work. Missing slashless outputs
+never imply directories. Frozen declarations/backend selection can be corrected
+only in an authorized fresh run; the [custom-plan contract](../../packages/custom-plan/README.md)
+owns syntax and limits. Authoring reports infeasibility without changing frozen
+selectors; prose grants no output kind or parent writes.
+
 Each step converges semantically before its terminal gate: independent mode
 uses candidate Reviewer passes, while lazy mode alternates Worker check/fix and
 read-only candidate confirmation. Combined mode requires primary convergence
@@ -186,6 +193,28 @@ only questions whose answers can materially change behavior, scope, or the
 planned implementation, and they must use repository evidence for questions it
 can answer. An empty clarification file and an authorized editor close without
 changes are valid inputs.
+
+Execution and polishing freeze the selected infrastructure owner for all
+clarification operations; legacy runs retain their exact repository-owned paths.
+Authoring, audit and init retain task-owned artifacts. The
+[clarification lifecycle](../ARCHITECTURE.md#clarification-lifecycle) owns path,
+confinement and migration details.
+
+Audit question rounds and supported question/product-decision appends in
+plan authoring, execution and polishing are journaled before transcript
+replacement. After interruption, recovery accepts only the prior bytes or exact
+journaled result under unchanged protected inputs and workspace controls. It
+publishes the verified hash, once-only accounting and editor request together,
+without repeating the producing role. Stop reconciliation verifies proof without
+appending or granting an editor window; unexpected edits remain blocking.
+In audit, plan authoring and execution, a service readback that disagrees with
+the journaled result durably blocks publication and editor authority. Recovery
+and verification-only stops retain the rejection, intent and unchanged
+accounting even if the transcript later returns to prior or expected bytes.
+Execution and polishing also bind append recovery to all infrastructure in
+retained finalization evidence, including ignored files, before replay and editor
+authority. Missing or changed files retain the original intent and block recovery.
+Existing init and coding settlement owners remain separate.
 
 The runner freezes the clarification artifact before work begins. Ordinary
 questions are prohibited after that point. `PRODUCT_DECISION_REQUIRED` is the

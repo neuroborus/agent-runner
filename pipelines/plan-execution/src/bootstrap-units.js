@@ -3,7 +3,9 @@ import { isDeepStrictEqual } from "node:util";
 import { planKindPolicy, stepLabel } from "./step-policy.js";
 import { matchesPlanPosition, validStepAssessment } from "./plan-position.js";
 import {
+  canonicalReports,
   freezeReport,
+  legacyEquivalent,
   validCapabilityReports,
 } from "./capability-requirements.js";
 import { validationEvidenceFingerprint as fingerprint } from "./validation-schedule.js";
@@ -169,13 +171,19 @@ export function createBootstrapScope({
   });
 }
 
+// Provider output supplies its saved inherited sources and stays strict; null
+// marks internal discovery that was already accepted and canonicalized.
 export function normalizeRepositoryDiscovery(
   payload,
   scope,
-  { deferredDiagnostics = false } = {},
+  { deferredDiagnostics = false, inherited = null } = {},
 ) {
   assertStructuredResultSize(payload);
   assert(exact(payload, DISCOVERY_FIELDS), "discovery", "exact-field-set");
+  const provider = inherited !== null;
+  const discovery = provider
+    ? canonicalReports(payload, [scope.previousValidation, ...inherited])
+    : payload;
   assert(
     validStepAssessment(payload.stepAssessment) &&
       matchesPlanPosition(payload.stepAssessment, scope.binding),
@@ -203,9 +211,9 @@ export function normalizeRepositoryDiscovery(
         ].every(
           (field) =>
             Array.isArray(previous[field]) &&
-            Array.isArray(payload[field]) &&
+            Array.isArray(discovery[field]) &&
             previous[field].every((item) =>
-              payload[field].some((next) => isDeepStrictEqual(item, next)),
+              discovery[field].some((next) => isDeepStrictEqual(item, next)),
             ),
         ),
       "discovery",
@@ -225,8 +233,11 @@ export function normalizeRepositoryDiscovery(
       "preserve-confirmed-amendment-requirements",
     );
   }
+  // A canonical inherited row differs from its strict provider copy only by basis.
   assert(
-    validCapabilityReports(payload, requiredChecks, scope.trustedCommands),
+    validCapabilityReports(payload, requiredChecks, scope.trustedCommands, {
+      legacy: !provider,
+    }),
     "capabilityRequirements",
     "exact-command-capability-reports",
   );
@@ -239,7 +250,7 @@ export function normalizeRepositoryDiscovery(
     "includes-runner-trusted-commands",
   );
   const result = finish({
-    ...payload,
+    ...discovery,
     summary: normalizeSummary(
       payload.summary,
       "repository discovery",
@@ -375,7 +386,7 @@ export function createBootstrapWork(scope, payload, limits, correctionAttempt) {
   });
 }
 
-function normalizeBatch(payload, scope, work, unit) {
+function normalizeBatch(payload, scope, work, unit, legacy = false) {
   assertStructuredResultSize(payload);
   assert(
     exact(payload, [
@@ -420,6 +431,7 @@ function normalizeBatch(payload, scope, work, unit) {
       payload,
       [...work.discovery.requiredChecks, ...missingChecks],
       scope.trustedCommands,
+      { legacy },
     ),
     "capabilityRequirements",
     "exact-command-capability-reports",
@@ -428,8 +440,10 @@ function normalizeBatch(payload, scope, work, unit) {
     reportFields.every((field) =>
       payload[field].every(
         (report) =>
-          !work.discovery[field].some((existing) =>
-            isDeepStrictEqual(existing, report),
+          !work.discovery[field].some(
+            (existing) =>
+              isDeepStrictEqual(existing, report) ||
+              legacyEquivalent(existing, report),
           ),
       ),
     ),
@@ -589,6 +603,7 @@ export function normalizeBootstrapWork(value, scope, correctionAttempt) {
       scope,
       value,
       value.units[index],
+      true,
     );
     assert(normalized.status === "READY", "accepted", "ready-coverage-only");
   }
@@ -603,6 +618,7 @@ export function normalizeBootstrapWork(value, scope, correctionAttempt) {
       scope,
       value,
       value.units[value.accepted.length],
+      true,
     );
     assert(
       correction.status === "CATALOG_CORRECTION_REQUIRED",
@@ -760,6 +776,7 @@ export function assembleBootstrapInventory(scope, value) {
     {
       trustedCommands: scope.trustedCommands,
       allowEmpty: scope.binding.planKind === "custom",
+      legacy: true,
     },
   );
 }

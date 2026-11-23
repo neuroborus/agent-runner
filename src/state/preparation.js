@@ -3,6 +3,7 @@ import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import { appendDurableLine, readStableText, removeFile } from "./files.js";
 import {
   observeJournalDirectory,
@@ -31,6 +32,7 @@ const digest = (value) =>
 function invalid() {
   throw new RunStoreError("Preparation custody requires reconciliation.", {
     code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    ownershipDiagnostic: createOwnershipDiagnostic("state-custody"),
   });
 }
 

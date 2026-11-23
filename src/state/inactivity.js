@@ -14,6 +14,7 @@ const FIELDS = [
   "contentFingerprint",
 ];
 const HASH = /^[a-f0-9]{64}$/u;
+const OBSERVED_EXPIRY_SCHEMA_VERSION = 28;
 
 export function normalizeProviderInactivityTimeoutMs(value) {
   if (
@@ -132,7 +133,60 @@ export function projectInactivityRecovery(run) {
   };
 }
 
-export function assertInactivityContinuity(previous, current, activity) {
+export function matchesObservedInactivityExpiry(
+  run,
+  startedAfter,
+  recovery = run.inactivityRecovery,
+) {
+  const attempt = run.observations?.attempts.at(-1);
+  // Observation IDs are their journal revisions. The attempt opens after
+  // turn start and before the expiry it can prove.
+  return (
+    recovery?.expiryRevision != null &&
+    Number.isSafeInteger(startedAfter) &&
+    attempt?.id > startedAfter + 1 &&
+    attempt.id < recovery.expiryRevision &&
+    attempt.role === recovery.role &&
+    attempt.checkpoint === recovery.checkpoint
+  );
+}
+
+function matchesCatalogReconstruction(previous, current, start, before, after) {
+  const turn = previous.activeTurn;
+  const attempt = previous.observations?.attempts.at(-1);
+  // The invocation that expired retired before the catalog retry started.
+  // The adapter can now retire its native work and request the remaining
+  // allowance while the journal keeps the same logical read-only turn.
+  return (
+    current.schemaVersion >= OBSERVED_EXPIRY_SCHEMA_VERSION &&
+    before.status === "expired" &&
+    before.attempt === 1 &&
+    before.expiryRevision !== null &&
+    turn?.role === after.role &&
+    start?.catalogCheckpoint?.startsWith(`${turn.phase}:read-only:`) === true &&
+    start.previousRevision >= before.expiryRevision &&
+    isDeepStrictEqual(start.pipelineState, previous.pipelineState) &&
+    isDeepStrictEqual(current, {
+      ...previous,
+      inactivityRecovery: after,
+      revision: current.revision,
+      updatedAt: current.updatedAt,
+    }) &&
+    after.contentFingerprint ===
+      previous.pipelineState.repositoryBaseline?.contentFingerprint &&
+    attempt?.status === "active" &&
+    attempt.id > start.previousRevision + 1 &&
+    attempt.role === after.role &&
+    attempt.checkpoint === after.checkpoint
+  );
+}
+
+export function assertInactivityContinuity(
+  previous,
+  current,
+  activity,
+  activeTurnStart,
+) {
   const before = previous.inactivityRecovery;
   const after = current.inactivityRecovery;
   if (isDeepStrictEqual(before, after)) return;
@@ -165,6 +219,14 @@ export function assertInactivityContinuity(previous, current, activity) {
       activity.kind !== "expired" ||
       current.activeTurn?.role !== after.role ||
       after.attempt !== (before?.attempt ?? 1) ||
+      (current.schemaVersion >= OBSERVED_EXPIRY_SCHEMA_VERSION &&
+        (!isDeepStrictEqual(previous.activeTurn, current.activeTurn) ||
+          previous.observations?.attempts.at(-1).status !== "active" ||
+          !matchesObservedInactivityExpiry(
+            previous,
+            activeTurnStart?.previousRevision,
+            after,
+          ))) ||
       after.expiryRevision !==
         (current.schemaVersion < 20 ? null : current.revision) ||
       after.reconstructionRevision !== (before?.reconstructionRevision ?? null)
@@ -178,7 +240,14 @@ export function assertInactivityContinuity(previous, current, activity) {
     after.expiryRevision !== (before?.expiryRevision ?? null) ||
     (before === null
       ? current.activeTurn?.role !== after.role
-      : current.activeTurn !== null)
+      : current.activeTurn !== null &&
+        !matchesCatalogReconstruction(
+          previous,
+          current,
+          activeTurnStart,
+          before,
+          after,
+        ))
   ) {
     throw new TypeError("Inactivity reconstruction is not reconciled.");
   }

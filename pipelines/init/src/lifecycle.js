@@ -307,6 +307,23 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     );
     return result.status !== "WAITING_FOR_USER" && state().pendingEdit === null;
   }
+  const inspectFrozenTranscript = () =>
+    inspectInitOperation("preparation", async () => {
+      const observed =
+        await runtime.clarifications.inspectTranscript(transcript);
+      assertInitInspection(
+        observed.hash === state().transcriptHash,
+        "workspace_changed",
+      );
+      return observed;
+    });
+  const catalogResumePending =
+    current.modelCatalogResume != null ||
+    (runtime.catalogRetry?.code !== undefined &&
+      current.pause?.code === runtime.catalogRetry.code);
+  const catalogTranscript = catalogResumePending
+    ? await inspectFrozenTranscript()
+    : null;
   if (state().pendingEdit !== null) {
     await inspectInitOperation("preparation", () =>
       runtime.clarifications.acceptEdit(state().pendingEdit, {
@@ -338,9 +355,11 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       );
     }
   }
-  const initial = await inspectInitOperation("preparation", () =>
-    runtime.clarifications.ensureTranscript(transcript),
-  );
+  const initial =
+    catalogTranscript ??
+    (await inspectInitOperation("preparation", () =>
+      runtime.clarifications.ensureTranscript(transcript),
+    ));
   if (state().transcriptHash === null) {
     const inputs = await inspectInitOperation("preparation", () =>
       runtime.readInputs({ taskPath: run.taskPath }),
@@ -384,15 +403,22 @@ export async function runInit({ run, runtime, operatorStop = false }) {
     const inputs = await inspectInitOperation("preparation", () =>
       runtime.readInputs({ taskPath: run.taskPath }),
     );
-    const clarification = await inspectInitOperation("preparation", () =>
-      runtime.clarifications.inspectTranscript(transcript),
-    );
+    const clarification = await inspectFrozenTranscript();
     const prompt = `${request.prompt}\n\n${JSON.stringify({
       task: inputs.task.content,
       context: inputs.context?.content ?? "",
       clarifications: clarification.content,
     })}`;
     const checkpoint = `init:${role}:${request.phase}:${state().revisionRounds}`;
+    const active = {
+      role,
+      phase: request.phase.toLowerCase().replaceAll("_", "-"),
+    };
+    const catalogCheckpoint = `${active.phase}:read-only:${state().revisionRounds}`;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      catalogCheckpoint,
+    );
     if (current.availabilityRetry != null && runtime.availability)
       current = await runtime.availability.before({
         role,
@@ -405,6 +431,7 @@ export async function runInit({ run, runtime, operatorStop = false }) {
           role,
           checkpoint,
           repository: before,
+          continueEpisode: catalogResume,
         });
     } catch (cause) {
       if (
@@ -432,15 +459,13 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       !reconstructing && previous
         ? { mode: "continue", id: previous.sessionId }
         : !reconstructing &&
+            !catalogResume &&
             source !== null &&
             !state().sourceForks.includes(key)
           ? { mode: "fork", id: source }
           : undefined;
-    const active = {
-      role,
-      phase: request.phase.toLowerCase().replaceAll("_", "-"),
-    };
     current = await runtime.startAgentTurn(active, {
+      ...(catalogResume ? { catalogCheckpoint } : {}),
       pipelineState: {
         ...state(),
         sourceForks:
@@ -494,6 +519,20 @@ export async function runInit({ run, runtime, operatorStop = false }) {
       await inspectInitOperation("post-turn", () =>
         runtime.workspace.assertUnchanged(before),
       );
+      if (runtime.catalogRetry?.eligible(cause)) {
+        await save(
+          { ...state(), workflowState: "WAITING_FOR_USER", pendingTurn: null },
+          {
+            activeTurn: null,
+            pause: {
+              reason: "provider_interrupted",
+              resumeState: state().workflowState,
+              ...runtime.catalogRetry.details(role, catalogCheckpoint),
+            },
+          },
+        );
+        return PAUSED_TURN;
+      }
       current = await runtime.finishAgentTurn(active, { repository: before });
       const policy = runtime.outputExhaustion?.eligible(cause)
         ? runtime.outputExhaustion

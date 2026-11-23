@@ -9,16 +9,25 @@ import test from "node:test";
 import {
   createClarificationService,
   createGitService,
+  createMcpControlPlane,
   createRunner,
   createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  getPipeline,
   parseRunnerConfiguration,
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
-import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
+import { inspectOwnedSessionProcesses } from "../src/platform/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import { createStateJournal } from "../src/state/journal.js";
+import { createTrustedValidationService } from "../src/trusted-validation/index.js";
+import {
+  appendReadFailure,
+  assertColdReadbackRejection,
+  clarificationAppendFixture,
+  transcriptHash,
+} from "./support/clarification-append.js";
 import {
   configurationLoader,
   createAdapter,
@@ -37,11 +46,333 @@ import {
   RUNNER_CONFIGURATION,
   SOURCE_SESSION,
 } from "./support/index.js";
+import {
+  modelCatalogMiss,
+  withModelCompletion,
+} from "./support/model-catalog.js";
 import { outputExhaustion } from "./support/output-exhaustion.js";
 import {
   APPLICABILITY_BATCH_SCHEMA,
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+test("catalog retries require a completed role and reject a new source fork", async (t) => {
+  for (const kind of [
+    "first-use",
+    "child-only",
+    "source-fork",
+    "review",
+    "implement",
+  ]) {
+    const sourceFork = kind === "source-fork";
+    const pipelineId = kind === "implement" ? "plan-execution" : "polishing";
+    const fixture = await operatorFixture(t, pipelineId);
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    let rejected;
+    let retry;
+    adapter.run = async (request) => {
+      const target =
+        kind === "implement"
+          ? request.access === "workspace-write"
+          : ["review", "source-fork"].includes(kind)
+            ? request.prompt.includes("semantic candidate")
+            : true;
+      if (target && rejected === undefined) {
+        rejected = request;
+        if (kind === "child-only")
+          await request.onSessionCreated("child-before-completion");
+        throw modelCatalogMiss(request);
+      }
+      if (target) retry ??= request;
+      return withModelCompletion(await runRole(request), request);
+    };
+    const adapters = { codex: adapter };
+    const store = createRunStore({ stateRoot: fixture.stateRoot });
+    const runner = runnerFor(fixture, adapters, { runStore: store });
+    const { run: created } = await runner.create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      roleOverrides: {
+        worker: { model: "worker-model" },
+        reviewer: { model: "reviewer-model" },
+      },
+      ...(sourceFork
+        ? { sourceSession: { backend: "codex", id: SOURCE_SESSION } }
+        : {}),
+    });
+    const retryable = ["review", "implement"].includes(kind);
+    if (retryable) {
+      await runner.resume({ runId: created.runId });
+    } else {
+      await assert.rejects(runner.resume({ runId: created.runId }), {
+        code: "ERR_CODEX_MODEL_UNAVAILABLE",
+      });
+    }
+    const paused = await store.loadRun(created.runId);
+    if (sourceFork) {
+      assert.equal(rejected.session.mode, "fork");
+      assert.ok(paused.modelCompletionReceipts.reviewer);
+    }
+    if (retryable) {
+      assert.equal(paused.pause.reason, "backend_unavailable");
+      assert.equal(
+        paused.pause.role,
+        kind === "implement" ? "worker" : "reviewer",
+      );
+      assert.equal(paused.activeTurn, null);
+      assert.equal(paused.availabilityRetry, null);
+      if (kind === "implement")
+        assert.equal(paused.pipelineState.writableResult.stage, "prepared");
+      const cold = runnerFor(fixture, adapters);
+      const done = (await cold.resume({ runId: paused.runId })).run;
+      assert.equal(done.pipelineState.workflowState, "DONE");
+      assert.equal(retry.access, rejected.access);
+      assert.equal(retry.model, rejected.model);
+      assert.notEqual(retry.session?.mode, "fork");
+      assert.equal(done.counters.fixRounds, 0);
+    } else {
+      assert.equal(paused.pipelineState.workflowState, "FAILED");
+      assert.equal(paused.pause.diagnosticClass, "model_unavailable");
+      if (!sourceFork) assert.deepEqual(paused.modelCompletionReceipts, {});
+      if (kind === "child-only")
+        assert.equal(paused.sessionLineage.children.length, 1);
+      assert.equal(retry, undefined);
+    }
+  }
+});
+
+for (const [pipelineId, kind] of [
+  ["plan-authoring", "questions"],
+  ["plan-execution", "product-decision"],
+]) {
+  test(`cold service-readback rejection ${pipelineId} ${kind} preserves the durable blocker`, async (t) => {
+    const f = await clarificationAppendFixture(t, pipelineId, { kind });
+    await assertColdReadbackRejection(t, f, kind);
+  });
+}
+
+for (const change of ["changed", "missing", "unchanged"]) {
+  test(`cold terminal decision append binds ${change} finalized-only infrastructure`, async (t) => {
+    const f = await operatorFixture(t, "plan-execution");
+    const guidePath = "LOCAL_ARTIFACTS/finalization.md";
+    const extraPath = "LOCAL_ARTIFACTS/finalized-check.js";
+    await mkdir(join(f.projectPath, "LOCAL_ARTIFACTS"));
+    await writeFile(
+      join(f.projectPath, guidePath),
+      "# Finalization\n\nInspect content.\n",
+    );
+    const adapter = createExecutionAdapter();
+    const runRole = adapter.run.bind(adapter);
+    const calls = [];
+    adapter.run = async (request) => {
+      calls.push(request);
+      assert.notEqual(request.access, "local-commit");
+      if (request.prompt.includes("Confirm the finalized changes")) {
+        assert.equal(request.access, "read-only");
+        return {
+          structured: {
+            status: "PRODUCT_DECISION_REQUIRED",
+            findings: [],
+            validationChange: "UNCHANGED",
+            finalizationFindingIds: [],
+            validationEvidence: [],
+            question: "Which public behavior should the review require?",
+            options: ["Behavior A", "Behavior B"],
+            whyBlocked: "The two public behaviors are incompatible.",
+            evidence: ["The validated inputs do not select a behavior."],
+          },
+          sessionId: request.session.id,
+        };
+      }
+      const output = await runRole(request);
+      if (
+        request.prompt.includes(
+          "Run the complete project finalization procedure",
+        )
+      ) {
+        await writeFile(join(f.projectPath, extraPath), "original check\n");
+        output.structured.skillPath = guidePath;
+        output.structured.validationInfrastructure = [guidePath, extraPath];
+      }
+      return output;
+    };
+    let editors = 0;
+    let appends = 0;
+    const open = (interrupt = false) => {
+      const store = createRunStore({ stateRoot: f.stateRoot });
+      const service = createClarificationService({ interactive: false });
+      return {
+        store,
+        runner: createRunner({
+          runStore: store,
+          adapters: { codex: adapter },
+          loadConfiguration: configurationLoader({
+            ...RUNNER_CONFIGURATION,
+            pipelines: { "plan-execution": { finalization: guidePath } },
+          }),
+          clarifications: {
+            ...service,
+            async appendProductDecision(options) {
+              appends++;
+              return service.appendProductDecision(
+                interrupt
+                  ? {
+                      ...options,
+                      async persistAppend(proof) {
+                        await options.persistAppend(proof);
+                        throw appendReadFailure();
+                      },
+                    }
+                  : options,
+              );
+            },
+            async prepareEdit(...args) {
+              assert.equal(
+                change,
+                "unchanged",
+                "Drift cannot authorize an editor",
+              );
+              editors++;
+              return service.prepareEdit(...args);
+            },
+          },
+        }),
+      };
+    };
+    const initial = open(true);
+    const runId = (
+      await initial.runner.create({
+        pipelineId: "plan-execution",
+        projectPath: f.projectPath,
+        taskPath: f.taskPath,
+      })
+    ).run.runId;
+    const interrupted = (await initial.runner.resume({ runId })).run;
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const intent = interrupted.pipelineState.pendingClarificationAppend;
+    assert.equal(intent.checkpoint.workflowState, "CONFIRM");
+    assert.equal(intent.checkpoint.suspendedState, "IMPLEMENT");
+    const finalization = interrupted.pipelineState.finalizationResult;
+    assert.ok(finalization.validationInfrastructure.includes(extraPath));
+    assert.ok(
+      !interrupted.pipelineState.validationInfrastructure.includes(extraPath),
+    );
+    assert.equal(
+      interrupted.pipelineState.finalizationGuidance.selection,
+      "file",
+    );
+    const transcriptPath = interrupted.pipelineState.clarificationPath;
+    const priorBytes = await readFile(transcriptPath, "utf8");
+    assert.equal(transcriptHash(priorBytes), intent.expectedHash);
+    const producingCalls = calls.length;
+    const git = createGitService();
+    const content = await git.contentFingerprint({
+      projectPath: f.projectPath,
+    });
+    if (change === "changed")
+      await writeFile(join(f.projectPath, extraPath), "changed check\n");
+    if (change === "missing") await rm(join(f.projectPath, extraPath));
+    assert.equal(
+      await git.contentFingerprint({ projectPath: f.projectPath }),
+      content,
+    );
+
+    // Cold journal proof: every reopen discards the store, service and Runner.
+    const cold = open();
+    assert.deepEqual(await cold.store.loadRun(runId), interrupted);
+    const recovered = (await cold.runner.resume({ runId })).run;
+    if (change === "unchanged") {
+      assert.equal(recovered.pause.reason, "product_decision_required");
+      assert.equal(recovered.pipelineState.pendingClarificationAppend, null);
+      assert.equal(recovered.counters.productDecisions, 1);
+      assert.equal(recovered.hashes.executionClarifications, intent.resultHash);
+      assert.equal(
+        recovered.pipelineState.pendingEdit.preEditorHash,
+        intent.resultHash,
+      );
+      assert.equal(
+        transcriptHash(await readFile(transcriptPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.equal(editors, 1);
+      const repeated = (await open().runner.resume({ runId })).run;
+      assert.equal(repeated.counters.productDecisions, 1);
+      assert.equal(
+        transcriptHash(await readFile(transcriptPath, "utf8")),
+        intent.resultHash,
+      );
+      assert.deepEqual(
+        repeated.pipelineState.workReports,
+        recovered.pipelineState.workReports,
+      );
+      assert.deepEqual(repeated.sessionLineage, recovered.sessionLineage);
+      const { events } = await cold.store.loadRunHistory(runId);
+      assert.equal(
+        events.filter(
+          ({ state }, index) =>
+            index > 0 &&
+            events[index - 1].state.pipelineState.pendingClarificationAppend !==
+              null &&
+            state.pipelineState.pendingClarificationAppend === null,
+        ).length,
+        1,
+      );
+      assert.equal(appends, 2);
+    } else {
+      assert.equal(recovered.pause.reason, "unsafe_git_state");
+      assert.equal(
+        recovered.pause.code,
+        "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+      );
+      for (let reconstruction = 0; reconstruction < 2; reconstruction++) {
+        const reopened = open();
+        const retained = await reopened.store.loadRun(runId);
+        assert.deepEqual(retained, recovered);
+        await assert.rejects(reopened.runner.resume({ runId }), {
+          code: "ERR_INAPPLICABLE_RESUME_ACTION",
+        });
+        assert.deepEqual(await reopened.store.loadRun(runId), recovered);
+        assert.deepEqual(
+          retained.pipelineState.pendingClarificationAppend,
+          intent,
+        );
+        assert.deepEqual(
+          retained.pipelineState.finalizationResult,
+          finalization,
+        );
+        assert.deepEqual(retained.counters, interrupted.counters);
+        assert.deepEqual(retained.hashes, interrupted.hashes);
+        assert.deepEqual(retained.sessionLineage, interrupted.sessionLineage);
+        assert.equal(retained.pipelineState.pendingEdit, null);
+      }
+      assert.equal(await readFile(transcriptPath, "utf8"), priorBytes);
+      assert.equal(editors, 0);
+      assert.equal(appends, 1);
+      const projection =
+        getPipeline("plan-execution").projections.pause(recovered);
+      const control = createMcpControlPlane({
+        runner: cold.runner,
+        runStore: cold.store,
+      });
+      assert.deepEqual((await control.runStatus({ runId })).pause, projection);
+      assert.deepEqual(
+        (await control.runWait({ runId, cursor: 0, timeoutMs: 0 })).pause,
+        projection,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(projection),
+        /finalized-check|[a-f0-9]{64}/u,
+      );
+    }
+    assert.equal(
+      calls.length,
+      producingCalls,
+      "Recovery must not repeat producing roles",
+    );
+  });
+}
 
 test("derived plan publication recovers after durable state and ignores manual completion or effect claims", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");
@@ -279,6 +610,11 @@ async function writeVersion22Preparation(directory, runId) {
   for (const event of events) {
     event.schemaVersion = event.state.schemaVersion = 22;
     event.state.runtimeCompatibility.runStateVersion = 22;
+    if (event.state.observations !== null) {
+      event.state.observations.schemaVersion = 1;
+      for (const attempt of event.state.observations.attempts)
+        delete attempt.ownershipDiagnostic;
+    }
     delete event.state.preservationRecords;
     delete event.state.workspace;
   }
@@ -1101,7 +1437,10 @@ Extend the requested behavior.
       runStore: replacement,
       inspectSessionProcesses(sessionId, token, options) {
         assert.equal(sessionId, executionPid);
-        assert.deepEqual(options, { includeSession: true });
+        const { onInspection, ...inspectionOptions } = options;
+        assert.deepEqual(inspectionOptions, { includeSession: true });
+        if (onInspection !== undefined)
+          assert.equal(typeof onInspection, "function");
         inspected = true;
         return inspectOwnedSessionProcesses(sessionId, token, {
           ...options,
@@ -1202,6 +1541,7 @@ test("migrates legacy authoring line targets under the lease without configurati
   for (const legacy of [state, ...events.map((event) => event.state)]) {
     legacy.pipelineStateVersion = 3;
     delete legacy.pipelineState.settings.preferredCommitLineLimit;
+    delete legacy.pipelineState.pendingClarificationAppend;
   }
   await writeFile(statePath, `${JSON.stringify(state)}\n`);
   await writeFile(
@@ -1759,6 +2099,316 @@ test("unavailable trusted capabilities persist early pauses and retry frozen req
       );
     });
   }
+});
+
+test("cold reconstruction retains event-local capability diagnostics without changing checkpoints", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    `${PLAN}\n\n## Commit 2: feat(test): add more behavior\n\nImplement more behavior.`,
+  );
+  const checkPath = "LOCAL_ARTIFACTS/fixture-check.js";
+  const check = { id: "C1", command: `node ${checkPath}` };
+  await mkdir(join(fixture.projectPath, "LOCAL_ARTIFACTS"));
+  await writeFile(
+    join(fixture.projectPath, checkPath),
+    "process.exitCode = 0;\n",
+  );
+  const configuration = {
+    ...RUNNER_CONFIGURATION,
+    trustedCommands: {
+      "fixture-check": {
+        command: check.command,
+        executable: process.execPath,
+        arguments: [checkPath],
+      },
+    },
+    pipelines: { "plan-execution": { trustedChecks: ["fixture-check"] } },
+  };
+  const durable = createRunStore({ stateRoot: fixture.stateRoot });
+  const interruption = new Error(
+    "Interrupted after preparing commit authority",
+  );
+  let interrupt = true;
+  let consumedCheckpoint;
+  // Interrupt once after durable commit preparation to retain pending effects.
+  const store = {
+    ...durable,
+    async transitionRun(...args) {
+      const next = await durable.transitionRun(...args);
+      if (next.pipelineState.pendingCommit?.status === "consumed")
+        consumedCheckpoint = next;
+      if (
+        interrupt &&
+        next.pipelineState.currentStep === 2 &&
+        next.pipelineState.pendingCommit?.status === "prepared"
+      ) {
+        interrupt = false;
+        throw interruption;
+      }
+      return next;
+    },
+  };
+  const delegate = createExecutionAdapter();
+  let implementations = 0;
+  const adapter = {
+    ...delegate,
+    async run(request) {
+      const result = await delegate.run(request);
+      if (request.schema === REPOSITORY_DISCOVERY_SCHEMA) {
+        result.structured.result.requiredChecks = [check];
+        result.structured.result.validationInfrastructure = [checkPath];
+      }
+      if (result.structured.checks !== undefined) {
+        result.structured.requiredChecks = [check];
+        result.structured.validationInfrastructure = [checkPath];
+        result.structured.checks = [
+          {
+            checkId: check.id,
+            command: check.command,
+            status: "NOT_RUN",
+            evidence: ["Reserved for the runner-trusted executor."],
+          },
+        ];
+      }
+      if (request.prompt.includes("Implement the changes described"))
+        await writeFile(
+          join(request.cwd, `part-${++implementations}.js`),
+          "export const part = true;\n",
+        );
+      return result;
+    },
+  };
+  const receipts = [];
+  let now = 0n;
+  const trusted = createTrustedValidationService({
+    monotonicNow: () => (now += 1_000_000n),
+    sandboxCommand: (command, { environment }) => ({ command, environment }),
+    async runCommand(command, { preparationOnly, onNoLaunch }) {
+      assert.equal(command.executable, process.execPath);
+      assert.deepEqual(command.arguments, [checkPath]);
+      if (preparationOnly) await onNoLaunch();
+      return {
+        status: "PASS",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        reason: "exit",
+      };
+    },
+  });
+  let runId;
+  const trustedValidation = {
+    ...trusted,
+    async execute(options) {
+      const receipt = await trusted.execute(options);
+      receipts.push(receipt);
+      return receipt;
+    },
+    // Refuse only the resumed COMMIT comparison, after the first commit,
+    // the second step's receipts and its prepared authority are durable.
+    async inspectRequirements(options) {
+      const { pipelineState } = await store.loadRun(runId);
+      if (pipelineState.pendingCommit?.status !== "prepared")
+        return trusted.inspectRequirements(options);
+      return {
+        status: "BLOCKED",
+        blockers: [
+          {
+            command: check.command,
+            reason: "insufficient-authority",
+          },
+        ],
+      };
+    },
+  };
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    { configuration, runStore: store, trustedValidation },
+  );
+  ({
+    run: { runId },
+  } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  }));
+  await assert.rejects(
+    runner.resume({ runId, action: null }),
+    (cause) => cause === interruption,
+  );
+  const paused = (await runner.resume({ runId, action: null })).run;
+  assert.equal(paused.pause.code, "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE");
+  assert.equal(paused.pause.resumeState, "COMMIT");
+  const { pendingCommit, completedCommits } = paused.pipelineState;
+  assert.equal(pendingCommit.status, "prepared");
+  assert.deepEqual(completedCommits, [
+    (
+      await executeFile("git", ["-C", fixture.projectPath, "rev-parse", "HEAD"])
+    ).stdout.trim(),
+  ]);
+  assert.equal(receipts.length, 2);
+  // Supply typed comparison evidence at the state boundary under test.
+  const diagnostic = {
+    schemaVersion: 1,
+    blockers: [
+      {
+        checkIndex: 0,
+        reason: "insufficient-authority",
+        missingCapabilities: ["cache"],
+        unmatchedArtifactDigests: ["b".repeat(64)],
+        commandIdentityMismatch: false,
+        omittedArtifactDigests: 0,
+      },
+    ],
+    omittedBlockers: 0,
+  };
+  const typed = {
+    ...paused.pause,
+    capabilityDiagnostic: diagnostic,
+    capabilityChecks: [{ checkIndex: 0, label: check.id }],
+  };
+  const lease = await durable.acquireRunLease(runId);
+  let saved;
+  try {
+    saved = await durable.transitionRun(
+      lease,
+      { pause: typed },
+      {
+        activity: {
+          actor: "runner",
+          phase: "plan-execution",
+          kind: "paused",
+          message: "Required check capabilities are unavailable.",
+        },
+      },
+    );
+  } finally {
+    await lease.release();
+  }
+
+  const cold = createRunStore({ stateRoot: fixture.stateRoot });
+  const unused = () => assert.fail("Cold reconstruction must stay passive.");
+  const { run } = await createRunner({
+    adapters: { codex: { probe: unused, run: unused } },
+    clarifications: createClarificationService({ interactive: false }),
+    trustedValidation: {
+      preflight: unused,
+      inspectRequirements: unused,
+      execute: unused,
+    },
+    runStore: cold,
+    loadConfiguration: unused,
+  }).status(runId);
+  assert.deepEqual(run, saved);
+  assert.deepEqual(run, {
+    ...paused,
+    revision: saved.revision,
+    updatedAt: saved.updatedAt,
+    pause: typed,
+  });
+  const { events } = await cold.loadRunHistory(runId);
+  assert.deepEqual(
+    events.map(({ state }) =>
+      Object.hasOwn(state.pause ?? {}, "capabilityDiagnostic"),
+    ),
+    events.map(({ revision }) => revision === saved.revision),
+  );
+  // Historical revisions keep their own receipts and effect records.
+  assert.deepEqual(
+    events.find(({ revision }) => revision === paused.revision).state
+      .pipelineState,
+    paused.pipelineState,
+  );
+  const consumed = events.find(
+    ({ revision }) => revision === consumedCheckpoint.revision,
+  ).state;
+  assert.deepEqual(consumed, consumedCheckpoint);
+  assert.equal(consumed.pipelineState.pendingCommit.status, "consumed");
+  for (const [step, { pipelineState }] of [consumed, run].entries()) {
+    const receipt = receipts[step];
+    const { finalizationResult, pendingCommit, trustedValidation } =
+      pipelineState;
+    assert.equal(pipelineState.currentStep, step + 1);
+    assert.equal(finalizationResult.step, step + 1);
+    assert.deepEqual(finalizationResult.checks, [
+      {
+        checkId: check.id,
+        command: check.command,
+        status: "PASS",
+        executor: "runner",
+        commandIdentity: trustedValidation.commands[0].identity,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        evidence: receipt.evidence,
+      },
+    ]);
+    assert.equal(
+      receipt.commandIdentity,
+      trustedValidation.commands[0].identity,
+    );
+    assert.deepEqual(finalizationResult.validationInfrastructure, [checkPath]);
+    assert.equal(
+      receipt.validationInfrastructureFingerprint,
+      pipelineState.validationInfrastructureFingerprint,
+    );
+    assert.equal(
+      receipt.commandFingerprint,
+      trustedValidation.commandFingerprint,
+    );
+    assert.equal(
+      receipt.configurationFingerprint,
+      trustedValidation.configurationFingerprint,
+    );
+    assert.deepEqual(
+      {
+        contentFingerprint: finalizationResult.fingerprint,
+        validationInfrastructureFingerprint:
+          finalizationResult.validationInfrastructureFingerprint,
+        commandFingerprint: finalizationResult.trustedCommandFingerprint,
+        configurationFingerprint:
+          finalizationResult.trustedConfigurationFingerprint,
+      },
+      {
+        contentFingerprint: receipt.contentFingerprint,
+        validationInfrastructureFingerprint:
+          receipt.validationInfrastructureFingerprint,
+        commandFingerprint: receipt.commandFingerprint,
+        configurationFingerprint: receipt.configurationFingerprint,
+      },
+    );
+    assert.equal(
+      receipt.contentFingerprint,
+      pendingCommit.authorization.expectedContentFingerprint,
+    );
+  }
+  const activities = [];
+  for (let afterRevision = 0; afterRevision < saved.revision;) {
+    const page = await cold.readPublicActivity(runId, { afterRevision });
+    activities.push(...page.activities);
+    afterRevision = page.cursor;
+  }
+  // Each activity projects only its own event's pause: the earlier real pause
+  // saved no diagnostic and stays unknown.
+  assert.equal(activities.at(-1).revision, saved.revision);
+  assert.deepEqual(
+    activities
+      .filter((activity) => Object.hasOwn(activity, "capabilityDiagnostic"))
+      .map(({ revision, capabilityDiagnostic, capabilityChecks }) => [
+        revision,
+        capabilityDiagnostic,
+        capabilityChecks,
+      ]),
+    [
+      [paused.revision, null, []],
+      [saved.revision, diagnostic, [{ checkIndex: 0, label: check.id }]],
+    ],
+  );
 });
 
 test("submits input previewed from a compatible legacy run", async (t) => {

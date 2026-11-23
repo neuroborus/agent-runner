@@ -1,6 +1,75 @@
 import { CORRECTION_STATES } from "./correction-feedback.js";
 import { recheckRole } from "./cycles.js";
-import { assertAudit, exact, sessionContextKey } from "./discovery-contract.js";
+import {
+  assertAudit,
+  exact,
+  same,
+  sessionContextKey,
+} from "./discovery-contract.js";
+
+export function matchesAuditCatalogReservation(previous, next, binding) {
+  const before = previous.pipelineState;
+  const after = next.pipelineState;
+  if (
+    (next.activeTurn !== null && after.workflowState !== binding.resumeState) ||
+    !same(after, { ...before, workflowState: after.workflowState })
+  )
+    return false;
+  if (binding.resumeState === CORRECTION_STATES.clarify)
+    return (
+      binding.role === "auditor" &&
+      binding.checkpoint ===
+        `clarify:read-only:${before.clarificationRounds}` &&
+      before.pendingEdit === null
+    );
+
+  const recheck = binding.resumeState === CORRECTION_STATES.recheck;
+  if (!recheck && binding.resumeState !== CORRECTION_STATES.discovery)
+    return false;
+  const historyField = recheck ? "recheckHistory" : "history";
+  const history = before[historyField];
+  const reservation = history?.at(-1);
+  const phase = recheck ? "recheck" : "discovery";
+  return (
+    reservation?.outcome === "running" &&
+    binding.checkpoint === `${phase}:read-only:${reservation.number}` &&
+    (!recheck || before.pendingBatch !== null) &&
+    binding.role === (recheck ? recheckRole(before) : "auditor")
+  );
+}
+
+// A first catalog pause must retire the invocation whose own failed attempt
+// recorded the no-effect read-only rejection at its observed checkpoint.
+export function assertAuditCatalogTransition(
+  previous,
+  next,
+  _activity,
+  retryCode,
+  turnStart,
+  commitRejection,
+  attempt,
+) {
+  assertAudit(commitRejection === undefined, "Audit has no COMMIT proof.");
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+  assertAudit(
+    previous.activeTurn?.role === pause.role &&
+      previous.activeTurn.phase === pause.checkpoint.split(":")[0] &&
+      attempt?.role === pause.role &&
+      attempt.checkpoint === `audit:${pause.checkpoint}` &&
+      (turnStart?.catalogCheckpoint === undefined ||
+        turnStart.catalogCheckpoint === pause.checkpoint) &&
+      matchesAuditCatalogReservation(previous, next, pause),
+    "Audit catalog pause has no failed-attempt proof.",
+  );
+  return true;
+}
 
 export function auditCheckpoint(run, phase) {
   const state = run.pipelineState;

@@ -7,7 +7,7 @@ import {
   readProcessIdentity,
   readProcessNamespace,
   spawnOwnedProcess,
-} from "../agents/index.js";
+} from "../platform/index.js";
 
 // Only previously registered identities are eligible for retirement inspection.
 export async function preparationProcessRetired(

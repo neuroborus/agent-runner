@@ -41,15 +41,45 @@ omitted. Its output roots must already exist as files or directories for exact
 bind mounts; preparation never creates them or grants their parents write access.
 New content can be created inside a declared output directory. Its native and
 restricted-host probes use ordinary directories without Git or commit preparation.
+
+Codex's named-profile route rejects existing regular-file output roots, including
+dotfiles, with `capability_existing_file_output`. The reported native 0.167.2
+file-grant setup failure establishes this route limitation, not a blanket
+unsupported version range. Configuration acceptance alone proves no enforced
+access. Directory outputs and read-only file declarations remain supported;
+file declarations are not rejected by custom-plan syntax or unrelated backends.
+The backend descriptor supplies an optional, function-validated
+`assertWorkspaceReady` capability. Runner applies it to active roles with
+eventual workspace-write access before admission probes and new output
+preparation, including custom execution's initially read-only Worker. It checks
+again before turns and explicit writable probes, outside cached capability
+approval. Codex also checks direct probes/requests before native work, storage
+allocation and thread/turn selection. Current shapes are always reexamined.
+Use supported directory outputs or an authorized fresh run with a supported
+backend; no parent grants, profile replacement or selection changes on resume
+are authorized. Read-only authoring/Reviewer roles and lazy inactive roles retain
+their access semantics. Recovery still retires owned processes and reconciles
+pending effects before admitting new writes. Readiness adds no durable shape,
+receipt, accepted-result, source/control or budget migration.
+
+Custom execution preserves trailing `/` from canonical declarations to identify
+preparable directories under existing parents. Missing slashless outputs require
+proved exact-file creation, unsupported by Codex's named-profile route and
+Claude's exact mounts. Every output is checked before new preparation; actual
+shapes and exact writable capabilities are checked again before provider work.
+Pending effects reconcile first. Prose supplies no output kind, and refusal
+grants no parent writes. The [custom-plan contract](../../packages/custom-plan/README.md)
+owns declaration syntax and fresh-run correction.
+
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. Custom authoring uses read-only directory
-turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+turns. Explicit custom execution uses the same confined output policy, proving exact writable access after any journaled directory preparation. The startup read-only receipt remains frozen; no commit access is requested. The [architecture contract](../architecture/providers/directory-policy.md#codex-capability-receipt)
 owns its exact fields and native mapping.
 
 Codex verifies the selected directory profile before choosing a thread. Its
 effective configuration may omit supported unset defaults or return them as
-`null`; only the explicit [architecture allowlist](../ARCHITECTURE.md#agent-context-recovery)
+`null`; only the explicit [architecture allowlist](../architecture/providers/codex-isolation.md#directory-permission-profiles)
 receives that equivalence. Unknown settings, non-null overrides and inheritance
 reject. Exact filesystem grants, protected reads, scope and denied network remain
 required. Model-free compatibility fixtures do not establish a successful live
@@ -170,11 +200,26 @@ Claude owns its tool HOME/config projections, launcher, and temporary
 scaffolding outside project/task trees. Native startup also uses the owned
 allocation so atomic `.claude/.cc-writes` initialization precedes tools without
 changing an audited source. The real workspace remains an explicit tool directory;
-file tools use absolute workspace paths and sandboxed Bash starts there. Missing
-optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
+file tools use absolute workspace paths and sandboxed Bash starts there.
+Launches return Claude to its private native startup directory after each
+command so per-command staging stays outside the workspace. They also disable
+background tasks in both the process environment and inline CLI settings,
+overriding conflicting caller and ordinary user/project settings without
+editing them. Native managed policy retains precedence; strict post-result
+protocol rejection remains the backstop. A long command may stop at the native
+Bash timeout instead of moving to the background. Required checks must finish
+successfully to qualify finalization; unfinished or timed-out work cannot pass.
+Runner-trusted checks retain their separate execution authority. The
+operator-owned native differential described in [testing](../TESTING.md)
+requires causal late effects and traffic with background execution enabled and
+completed foreground effects before the sole result with the repaired policy.
+It supplements the cwd proof and does not establish a historical failure cause.
+Missing optional paths never authorize cwd-relative placeholders. Existing project restrictions remain effective;
 provider authentication, profiles, and native sessions retain their own access.
-Both native and fallback policy receipts bind this lifecycle. A receipt from an
-older projection policy is incompatible rather than silently replaced.
+Both native and fallback policy receipts bind this complete lifecycle under
+`claude-isolation-v6` and `claude-command-boundary-v13`. Existing runs retain
+their immutable evidence and budgets. A receipt from an older policy is
+incompatible; adopting this policy requires a fresh run.
 
 Allocation is journaled before a turn launches. Normal teardown and owner-loss
 recovery require verified process retirement and identity-checked deletion.
@@ -300,7 +345,9 @@ It proves the single-boundary user, PID, mount, and network isolation contract,
 including private `/proc`, `/tmp`, and `/run`, a read-only host root, exact
 workspace authority, read-only Git metadata, IP plus abstract and pathname
 Unix-socket denial, credential and launcher-control removal, provider-proc
-secrecy, and outside-write denial. Exact
+secrecy, and outside-write denial. Under both policies Claude's shell keeps its
+TMPDIR, cwd receipt, and scratch writes in the turn's private temporary
+directory, while host `/tmp`, `/run`, and the launcher controls stay hidden. Exact
 launcher mechanics belong to the [architecture contract](../ARCHITECTURE.md).
 Native policy remains stricter. The fallback does not require host
 `CAP_SYS_ADMIN`, change host policy, or expose host procfs. A generic sandbox
@@ -322,9 +369,17 @@ tools. Provider command-denial patterns that reject safe compound inspection
 are omitted from that access policy; collaboration, editing, and web tools stay
 restricted, and the sandbox remains the authority for filesystem and Git
 mutation, process escape, socket access, credential exposure, and remote-write
-denial. Workspace-write turns retain their existing tool and denial policy. The
-private receipt fingerprint binds these effective access-specific settings and
-the installed CLI version without expanding the provider-neutral receipt.
+denial. Git workspace-write turns share this envelope and differ only by the
+Edit and Write tools and the launcher-granted workspace write, so ordinary Git
+inspection and content commands are admitted and the sandbox, not a
+Git-subcommand rule, refuses Git, outside-write, network and socket effects.
+Claude may still separately require native approval for sensitive Git
+commands. File-tool Git-metadata denials name
+each resolved absolute protected directory; a path that would broaden that
+rule fails before launch. Declared-directory turns keep their Git-subcommand
+denials. The private receipt fingerprint binds these effective access-specific
+settings and the installed CLI version without expanding the provider-neutral
+receipt.
 
 Codex model-issued commands derive from the provider process environment only
 through a strict shell policy. Automatic secret-name exclusions run before
@@ -401,6 +456,29 @@ current-turn auditing and source-fork isolation remain mandatory.
 
 ## Normalized failures and recovery
 
+A complete, well-formed Codex catalog lookup with drained output and a
+successful provider exit can return the redacted `model_unavailable` diagnostic
+for a missing explicit model. An initial pre-thread miss can pause for explicit
+checkpoint retry after the selected role has completed a turn using that frozen
+selection. Publication also requires the retiring invocation's own recorded
+no-effect rejection at its pipeline's mapped checkpoint.
+First use, a source fork, a malformed lookup, and a miss on native recovery do
+not authorize that retry.
+Resume uses the same model, profile and effort after repository and input checks.
+The catalog pause creates no automatic retry or fallback. A malformed response
+or incomplete catalog reports `model_catalog_invalid`; unsupported effort keeps
+its `effort_unsupported` diagnostic. Neither outcome authorizes a fresh
+COMMIT attempt after verification of the consumed authorization.
+See the [catalog recovery contract](../ARCHITECTURE.md#explicit-model-catalog-recovery).
+
+Both adapters and the shared failure boundary carry platform-validated nullable
+`ownershipDiagnostic` evidence without changing failure/effect/retry policy.
+No backend or pipeline derives a raising site from generic codes, native text
+or sessions. Malformed supplemental evidence stays unavailable; the original
+ownership refusal and retirement requirements remain authoritative. The
+[platform contract](../ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its fields, versions and durable/public projections.
+
 Init persists an otherwise unhandled normalized terminal adapter failure before
 execution ownership releases, using only a bounded code and optional registered
 class. Registry interpretation stays at the agent boundary. Read-only Runner callback
@@ -414,6 +492,84 @@ A terminal Claude protocol failure carries a registered `protocol_*` class only
 when its guard proved the violated predicate; unattributed origins stay
 unclassified. The class adds no retry, effect evidence, recovery or acceptance,
 and direct CLI failures print only the bounded code and class.
+Post-result assistant, user, and stream-event records are distinguished by
+`protocol_assistant_after_result`, `protocol_user_after_result`, and
+`protocol_stream_event_after_result`, without inspecting their payloads. Existing
+session guards and the first violated predicate determine rejection. The legacy
+`protocol_record_after_result` class remains valid for historical persistence
+and recovery but is no longer emitted. No raw native records or transcripts
+cross the public or durable boundary.
+
+A Claude `ERR_CLAUDE_PERMISSION_DENIED` failure names only the fact its guard
+established from structured native `permission_denials`:
+
+| Class                            | Established fact                                                                                                 |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `permission_tool_unexposed`      | A denied tool is not exposed by the Runner for the requested access.                                             |
+| `permission_bash_unclassified`   | An exposed Bash command is neither a recognized safe inspection nor an inventory command; its reason is unknown. |
+| `permission_unclassified`        | An entry is malformed, lacks a tool name, or is Bash without a command.                                          |
+| `permission_reason_<code>`       | Every non-safe Bash denial has the same uniquely matched closed native refusal reason `<code>`.                  |
+| `permission_bash_required_check` | An exposed Bash command is exactly equal to a command of the turn's Runner-persisted required-check inventory.   |
+| `permission_capability`          | Every entry is an exposed non-Bash tool or a positively recognized safe Bash inspection.                         |
+| `permission_forbidden_operation` | Legacy record only; no longer produced, still loads, stays terminal and is never reinterpreted.                  |
+
+A safe Bash inspection is a whole command exactly equal to one fixed read-only
+Git form: bounded `git status` options, `git rev-parse` repository queries,
+`git remote` with optional `-v`, `git diff --check`, `git diff --check HEAD`,
+`git diff --cached --check`, or `git diff --staged --check`. Tokens are
+separated by exactly one space, so tabs, newlines, repeated or trailing
+whitespace, quoting, other revisions, paths, output options, and compound
+commands remain unclassified Bash.
+
+The adapter examines every entry and reports the first present fact in the
+table order, independent of entry order, so no recoverable entry hides another.
+Only `permission_capability` is recoverable. No class claims a task-authority
+violation, a harmless command, or an integration defect, and a label grants no
+retry, approval, resume or acceptance.
+
+Polishing and plan-execution role requests carry their established persisted
+required-check commands for this diagnosis only. A denied Bash command outside
+the safe-inspection forms is labeled `permission_bash_required_check` only on
+whole-string equality with one of them, without trimming, parsing, prefix or
+substring matching; quoting, whitespace, wrapper and compound variants stay
+unclassified Bash. The class identifies only that inventory match: it claims no
+harmlessness, authorization, policy fault, executed effect or historical
+command, stays terminal, and is hidden by any unexposed, unclassified Bash, or
+malformed entry in the same batch. An older `permission_bash_unclassified`
+record keeps its terminal meaning and is not read as a denial of a command
+outside the inventory.
+
+Claude may also emit a best-effort `system/permission_denied` event with a
+closed `decision_reason_code`: `classifier_transcript_too_long`,
+`outside_reads_blocked`, `memory_paused`, `auto_mode_no_check_in_session`,
+`auto_mode_stop_no_check_in_session`, `auto_mode_stop_no_result_for_calls`, or
+`auto_mode_stop_no_verdict`. The authoritative `permission_denials` batch can
+take a reason only when every entry has a valid `tool_use_id` that no other
+entry repeats. Each non-safe Bash denial then needs exactly one pre-result
+event in the same session with its id, its tool name, no subagent id, and a
+recognized code; the match is re-checked after the stream ends, so a later
+protocol violation, identity uncertainty, result-session mismatch, or
+continuation or fork-lineage mismatch discards it. When every such denial has
+the same code, the batch is `permission_reason_<code>`; any missing, unknown,
+duplicate, conflicting, mixed, or unbound evidence keeps the operation class.
+In table order the reason class replaces unclassified Bash and ranks above the
+required-check label, but never hides an unexposed or malformed entry. It names
+only the native reason: it identifies no operation and claims no legitimacy,
+policy fault, executed effect, or historical command, stays terminal, and grants
+no retry, approval, or backend change. Native free-text reasons are never read
+or retained. Records that predate reason classes are not read as having no
+reason.
+
+The corrected workspace policy keeps this classification order. A non-safe
+Bash denial whose command exactly equals a persisted required-check inventory
+command stays `permission_bash_required_check` when no recognized native reason
+is bound. A non-safe Bash denial outside that inventory and without a uniquely
+bound recognized native reason stays `permission_bash_unclassified`; a
+permission-rule decision that Claude reports without a closed code is one
+example. When every non-safe Bash denial in a batch has the same uniquely bound
+recognized code, the batch takes `permission_reason_<code>`, and the table
+precedence still decides mixed batches. Older records keep their meaning, and
+no historical refusal is attributed to the superseded workspace policy.
 
 Provider requests may carry runner-owned abort and process-registration
 callbacks. The adapter keeps these out of prompts and provider configuration.
@@ -536,9 +692,12 @@ Unavailable admission retains the candidate under the execution-owned
 environment pause; native text reads do not prove binary reconstruction access.
 
 Normalized `authentication_required` failures enter the shared durable
-reauthentication pause only after the runner proves the repository is safe;
-they never enter availability backoff and retire any active episode they
-supersede. Authentication evidence without that disposition, unsafe permissions,
+reauthentication pause only after the runner proves the repository is safe.
+The pause retires any superseded availability episode. A coding-pipeline result
+restatement preserves its consumed read-only attempt and spent inactivity
+allowances through authentication. Output exhaustion also retains the
+availability episode.
+Authentication evidence without that disposition, unsafe permissions,
 forbidden collaboration, isolation failure, invalid contracts, and ambiguous
 writable outcomes fail closed. Allowlisted
 backend, capability, configuration, usage, provider, and source-session
@@ -606,9 +765,8 @@ descriptor-owned bounded evidence contract.
 The runner consumes that disposition through one shared policy. Every pipeline
 persists the same fixed redacted `authentication_required` pause at the failed
 logical checkpoint after read-only or writable reconciliation. It performs no
-automatic retry or availability delay and retires a superseded availability
-episode before pausing. The operator restores authentication and resumes with
-the null action. Public CLI/MCP state exposes no native
+automatic retry or availability delay. The operator restores authentication and
+resumes with the null action. Public CLI/MCP state exposes no native
 message, URL, request identifier, payload, credential material, or
 provider-specific diagnostic. Source-fork requests retry the source only with
 normalized no-effect proof; possible-effect evidence persists the logical
@@ -671,7 +829,7 @@ identifier, or arbitrary provider message enters these diagnostics.
 They change no workflow, progress, retry, or configuration. Observation
 settlement cannot replace an established ownership, isolation, or effect failure
 or extend a running inactivity deadline.
-The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
+The [runtime contract](../architecture/providers/observations.md#observation-contract-and-native-mapping)
 owns snapshot scopes, inclusion rules, bounds, and provider mappings. The
 inspected Codex public protocol exposes no numeric generation-budget control;
 model output ceilings do not establish the effective Codex service limit.

@@ -163,6 +163,54 @@ test("diagnosis retains only finite constraints and permits only transient uncha
     );
 });
 
+test("init catalog recovery rejects changed clarification before resuming or dispatching", async () => {
+  const code = "ERR_MODEL_CATALOG_RETRY";
+  const binding = {
+    role: "planner",
+    checkpoint: "clarify:read-only:0",
+    resumeState: "CLARIFY",
+  };
+  for (const accepted of [false, true]) {
+    const original = run();
+    const saved = {
+      ...original,
+      taskPath: "/work/task",
+      pause: accepted
+        ? null
+        : { reason: "provider_interrupted", code, ...binding },
+      modelCatalogResume: accepted ? binding : null,
+      pipelineState: {
+        ...original.pipelineState,
+        workflowState: accepted ? "CLARIFY" : "WAITING_FOR_USER",
+        transcriptHash: "a".repeat(64),
+      },
+    };
+    await assert.rejects(
+      initPipeline.workflow.run({
+        run: saved,
+        runtime: {
+          catalogRetry: { code },
+          clarifications: {
+            async inspectTranscript({ transcriptPath }) {
+              assert.equal(transcriptPath, "/work/task/clarifications.md");
+              return { hash: "b".repeat(64) };
+            },
+          },
+        },
+      }),
+      (cause) => {
+        const patch = initPipeline.inspectionFailure(saved, cause, null);
+        assert.equal(patch?.pause.resumeState, "CLARIFY");
+        assert.deepEqual(patch.pause.inspectionFailure, {
+          phase: "preparation",
+          constraint: "workspace_changed",
+        });
+        return true;
+      },
+    );
+  }
+});
+
 test("only trusted bounded-file constraints classify deterministic read rejection", async () => {
   for (const code of [
     "ERR_INVALID_CLARIFICATION",

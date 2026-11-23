@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
 
 import { largeFinalizationResult } from "../support/index.js";
@@ -35,6 +36,7 @@ import {
 import {
   AgentBoundaryError,
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  CATALOG_VALIDATED_MODEL,
   OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   isAdapterDiagnosticClass,
@@ -44,6 +46,33 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+
+const AMBIENT_GIT_IDENTITY = Object.freeze({
+  EMAIL: "ambient@example.test",
+  GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+  GIT_AUTHOR_NAME: "Ambient Author",
+  GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+  GIT_COMMITTER_NAME: "Ambient Committer",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_GLOBAL: "/ambient/global.gitconfig",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'",
+  GIT_CONFIG_VALUE_0: "Counted User",
+  HOME: "/ambient/home",
+  XDG_CONFIG_HOME: "/ambient/config",
+});
+
+function assertIsolatedGitIdentity(env) {
+  for (const name of Object.keys(AMBIENT_GIT_IDENTITY)) {
+    if (name !== "HOME" && name !== "XDG_CONFIG_HOME") {
+      assert.equal(env[name], undefined, name);
+    }
+  }
+  assert.equal(env.HOME, AMBIENT_GIT_IDENTITY.HOME);
+  assert.equal(env.XDG_CONFIG_HOME, AMBIENT_GIT_IDENTITY.XDG_CONFIG_HOME);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+}
+
 const SESSION_NAMING = Object.freeze({
   runId: "11111111-1111-4111-8111-111111111111",
   project: "sample",
@@ -238,13 +267,15 @@ function isolatedConfiguration(shellEnvironment = {}) {
 function createFixture({
   clientAttribution,
   closeError = false,
-  closeOutputError = false,
+  closeOutput,
+  closeStatus = [0, null],
   env,
   directoryPermissions,
   executeHandle,
   handle,
   help = HELP,
   ownedCompletionFailure,
+  ownedOutcome,
   retainedOwnedContainment = false,
   spawnError = false,
   storageCleanupError = false,
@@ -261,7 +292,9 @@ function createFixture({
 
   async function workspaceStorageFactory() {
     if (storagePreparationError) {
-      throw new Error("test workspace storage preparation failure");
+      throw storagePreparationError instanceof Error
+        ? storagePreparationError
+        : new Error("test workspace storage preparation failure");
     }
     const index = workspaceStorages.length;
     const rootPath = `/tmp/agent-runner-codex-workspace-test-${index}`;
@@ -282,7 +315,9 @@ function createFixture({
       async cleanup() {
         record.cleanupCalls += 1;
         if (storageCleanupError) {
-          throw new Error("test workspace storage cleanup failure");
+          throw storageCleanupError instanceof Error
+            ? storageCleanupError
+            : new Error("test workspace storage cleanup failure");
         }
       },
     });
@@ -328,21 +363,31 @@ function createFixture({
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const messages = [];
+    const ownedExit =
+      ownedOutcome === undefined ? undefined : Promise.withResolvers();
+    const { promise: retirement, resolve: retire } = Promise.withResolvers();
     let closed = false;
 
     function close() {
       if (closed) {
-        return;
+        return retirement;
       }
       closed = true;
-      stdout.end();
-      stderr.end();
-      if (closeOutputError) {
-        queueMicrotask(() => {
-          stdout.emit("error", new Error("test close output failure"));
-        });
+      stdout.once("close", () => {
+        child.emit("close", ...closeStatus);
+        ownedExit?.resolve({ outcome: ownedOutcome });
+        retire();
+      });
+      if (closeOutput === "error") {
+        stdout.destroy(new Error("test close output failure"));
+      } else if (closeOutput === "truncated") {
+        stdout.destroy();
+      } else {
+        stdout.end();
+        stdout.resume();
       }
-      queueMicrotask(() => child.emit("close", 0, null));
+      stderr.end();
+      return retirement;
     }
 
     function send(message) {
@@ -448,6 +493,14 @@ function createFixture({
         close();
         return;
       }
+      if (Buffer.isBuffer(response)) {
+        stdout.write(response);
+        return;
+      }
+      if (response?.envelope !== undefined) {
+        send({ id: message.id, ...response.envelope });
+        return;
+      }
       if (response?.error !== undefined) {
         send({ id: message.id, error: response.error });
         return;
@@ -484,7 +537,12 @@ function createFixture({
       final(callback) {
         onClose?.(send, (source) => stdout.write(source));
         callback();
-        if (!retainedOwnedContainment && !unresponsive) close();
+        if (
+          !retainedOwnedContainment &&
+          !unresponsive &&
+          closeOutput !== "on-kill"
+        )
+          close();
       },
     });
     if (closeError) {
@@ -499,7 +557,15 @@ function createFixture({
       if (!unresponsive) close();
       return !unresponsive;
     };
-    if (ownedCompletionFailure !== undefined) {
+    if (ownedExit !== undefined) {
+      child.ownedCompletion = Promise.resolve()
+        .then(() => options.onProcess(987_654))
+        .then(() => ownedExit.promise)
+        .then(async (completion) => {
+          await options.onProcess(null);
+          return completion;
+        });
+    } else if (ownedCompletionFailure !== undefined) {
       const completionState = {
         observed: false,
         observedBeforeRejection: false,
@@ -764,8 +830,7 @@ test("Codex stops if its transport closes while the naming diagnosis is recorded
         onSessionCreated: async () => {},
         onSessionNaming: async (value) => {
           diagnoses.push(value);
-          fixture.processes[0].close();
-          await Promise.resolve();
+          await fixture.processes[0].close();
         },
         onFreshSession: () =>
           assert.fail("Closing transport cannot replay naming"),
@@ -930,6 +995,34 @@ test("accepts one exact finalization read and rejects broader declarations befor
   assert.equal(fixture.processes.length, 0);
   await fixture.adapter.run(request({ readPaths: [path] }));
   assert.equal(fixture.processes.length, 1);
+});
+
+test("accepts a bounded required-check inventory without using it", async () => {
+  const fixture = createFixture();
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `${String(index).padStart(3, "0")}${"x".repeat(3_997)}`,
+  );
+  for (const requiredCheckCommands of [
+    [...inventory, "extra"],
+    "npm test",
+    [""],
+    ["a\0b"],
+    ["x".repeat(4_001)],
+    [1],
+    [, "npm test"],
+  ])
+    await assert.rejects(
+      fixture.adapter.run(request({ requiredCheckCommands })),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  assert.equal(fixture.processes.length, 0);
+  await fixture.adapter.run(request({ requiredCheckCommands: inventory }));
+  assert.equal(fixture.processes.length, 1);
+  assert.doesNotMatch(
+    JSON.stringify([fixture.executeCalls, fixture.processes]),
+    /x{3997}/u,
+  );
 });
 
 test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
@@ -1456,6 +1549,345 @@ test("validates explicit Codex effort capabilities without model work", async ()
       ),
       false,
     );
+  }
+});
+
+test("only a complete valid Codex catalog miss proves that the turn did not start", async () => {
+  const duplicateFields = {
+    "duplicate-cursor": String.raw`"data":[],"nextCursor":"continue","next\u0043ursor":null`,
+    "duplicate-models":
+      '"data":[{"id":"private-selection"}],"data":[],"nextCursor":null',
+    "duplicate-model-id":
+      '"data":[{"id":"private-selection","id":"other-model"}],"nextCursor":null',
+  };
+  const malformedFinalEntries = {
+    "nul-model-id": { id: "bad\0id" },
+    "unpaired-surrogate-id": { id: "malformed-model\uD800" },
+    "unpaired-surrogate-alias": {
+      id: "other-model",
+      model: "malformed-model\uDC00",
+    },
+  };
+  for (const kind of [
+    "complete",
+    "capped",
+    "malformed",
+    "missing-cursor",
+    "invalid-utf8",
+    "unpaired-surrogate-cursor",
+    "malformed-shutdown",
+    "duplicate-response",
+    ...Object.keys(duplicateFields),
+    ...Object.keys(malformedFinalEntries),
+  ]) {
+    let pages = 0;
+    const fixture = createFixture({
+      onClose(_send, sendRaw) {
+        if (kind === "malformed-shutdown") sendRaw("private native output\n");
+      },
+      handle({ message }) {
+        if (message.method !== "model/list") return;
+        pages++;
+        if (pages === 2 && kind === "duplicate-response") {
+          return Buffer.from(
+            `{"id":${message.id},"result":{"data":[],"nextCursor":null}}\n` +
+              `{"id":${message.id},"result":{"data":[{"id":"private-selection"}],"nextCursor":null}}\n`,
+          );
+        }
+        if (pages === 2 && Object.hasOwn(duplicateFields, kind)) {
+          return Buffer.from(
+            `{"id":${message.id},"result":{${duplicateFields[kind]}}}\n`,
+          );
+        }
+        if (kind === "invalid-utf8" && pages === 2) {
+          const frame = Buffer.from(
+            `${JSON.stringify({
+              id: message.id,
+              result: { data: [{ id: "malformed-model?" }], nextCursor: null },
+            })}\n`,
+          );
+          frame[frame.indexOf("?")] = 0xff;
+          return frame;
+        }
+        const entry = (pages === 2
+          ? malformedFinalEntries[kind]
+          : undefined) ?? {
+          id: "other-model-\u{1F680}",
+          description: 'Text with a quoted JSON fragment such as "data": [].',
+        };
+        const cursor =
+          kind === "unpaired-surrogate-cursor"
+            ? "page-\uD800"
+            : `page-${pages}`;
+        return {
+          result: {
+            data: kind === "malformed" ? [null] : [entry],
+            ...(kind === "missing-cursor"
+              ? {}
+              : {
+                  nextCursor: kind === "capped" || pages === 1 ? cursor : null,
+                }),
+          },
+        };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(request({ model: "private-selection" })),
+      (cause) => {
+        const error = normalizeAdapterFailure("codex", cause);
+        assert.equal(error.failure.checkpoint, "turn");
+        assert.equal(error.failure.retry, "terminal");
+        assert.equal(
+          error.diagnosticClass,
+          kind === "complete" ? "model_unavailable" : "model_catalog_invalid",
+          kind,
+        );
+        assert.equal(
+          error.failure.effect,
+          kind === "complete" ? "none" : "possible",
+        );
+        assert.doesNotMatch(
+          cause.message + error.message,
+          /private-selection|malformed-model|private native output/u,
+        );
+        return true;
+      },
+    );
+    assert.equal(
+      pages,
+      {
+        complete: 2,
+        capped: 32,
+        malformed: 1,
+        "missing-cursor": 1,
+        "unpaired-surrogate-cursor": 1,
+      }[kind] ?? 2,
+    );
+    assert.equal(fixture.processes.length, 1);
+    assert.ok(
+      fixture.processes[0].messages.every(
+        ({ method }) => !method.startsWith("thread/"),
+      ),
+    );
+  }
+});
+
+test("invalid Codex model selection preserves pre-executor COMMIT proof without availability eligibility", async () => {
+  for (const kind of [
+    "missing-result",
+    "malformed-error",
+    "conflicting-result",
+    "missing-id",
+    "null-id",
+    "unmatched-id",
+    "result-with-null-method",
+    "result-with-request-method",
+    "error-with-request-method",
+    "malformed",
+    "capped",
+    "effort",
+  ]) {
+    let pages = 0;
+    const controller = new AbortController();
+    const fixture = createFixture({
+      onClose() {
+        if (kind === "capped") controller.abort();
+      },
+      handle({ message, processIndex }) {
+        // Close if the malformed response gets mistaken for a server request.
+        if (message.error?.code === -32601) return { close: true };
+        if (message.method !== "model/list") return;
+        pages++;
+        if (kind === "missing-result") return { envelope: {} };
+        if (kind === "malformed-error") return { error: "private payload" };
+        if (kind === "conflicting-result")
+          return {
+            envelope: {
+              result: { data: [], nextCursor: null },
+              error: { code: -32603, message: "private payload" },
+            },
+          };
+        if (kind.endsWith("-id")) {
+          const server = fixture.processes[processIndex];
+          const id = {
+            "missing-id": undefined,
+            "null-id": null,
+            "unmatched-id": message.id + 1,
+          }[kind];
+          server.send({ id, result: { data: [], nextCursor: null } });
+          server.close();
+          return { pending: true };
+        }
+        if (kind.startsWith("result-with-"))
+          return {
+            envelope: {
+              method:
+                kind === "result-with-null-method" ? null : "server/request",
+              result: { data: [], nextCursor: null },
+            },
+          };
+        if (kind === "error-with-request-method")
+          return {
+            envelope: {
+              method: "server/request",
+              error: { code: -32603, message: "private payload" },
+            },
+          };
+        return {
+          result: {
+            data:
+              kind === "malformed"
+                ? [null]
+                : kind === "effort"
+                  ? [
+                      {
+                        id: "gpt-test",
+                        supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+                      },
+                    ]
+                  : [],
+            nextCursor: kind === "capped" ? `page-${pages}` : null,
+          },
+        };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "local-commit",
+          signal: controller.signal,
+          model: "gpt-test",
+          effort: "high",
+          authorizationId: "commit-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "fix(test): reject invalid model selection",
+          },
+        }),
+      ),
+      (cause) => {
+        const error = normalizeAdapterFailure("codex", cause);
+        const failureClass =
+          kind === "effort" ? "effort_unsupported" : "model_catalog_invalid";
+        assert.deepEqual(
+          error.failure,
+          {
+            failureClass,
+            checkpoint: "commit",
+            outcome: "rejected",
+            effect: "none",
+            retry: "terminal",
+            commitExecutor: "not_started",
+          },
+          kind,
+        );
+        assert.doesNotMatch(cause.message + error.message, /private payload/u);
+        return true;
+      },
+    );
+    assert.equal(pages, kind === "capped" ? 32 : 1);
+    assert.equal(controller.signal.aborted, kind === "capped");
+    assert.ok(
+      fixture.processes[0].messages.every(
+        ({ method }) => !method.startsWith("thread/"),
+      ),
+    );
+    assert.ok(fixture.executeCalls.every(({ file }) => file !== "git"));
+  }
+});
+
+test("Codex catalog absence during native recovery leaves possible effects", async () => {
+  const model = "gpt-test-\u{1F680}\uFFFD";
+  let queries = 0;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "model/list")
+        return {
+          result: {
+            data: ++queries === 2 ? [] : [{ id: model }],
+            nextCursor: null,
+          },
+        };
+      if (message.method === "thread/resume")
+        return { error: { code: -32000, message: "missing" } };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        model,
+        session: { mode: "continue", id: "source" },
+      }),
+    ),
+    (error) =>
+      error.failure.failureClass === "model_unavailable" &&
+      error.failure.checkpoint === "turn" &&
+      error.failure.effect === "possible",
+  );
+  assert.equal(queries, 2);
+  const result = await fixture.adapter.run(request({ model }));
+  assert.equal(result[CATALOG_VALIDATED_MODEL], model);
+  assert.doesNotMatch(JSON.stringify(result), /catalog-validated/u);
+});
+
+test("a repeated catalog response during shutdown prevents model attestation", async () => {
+  let catalogRequestId;
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "model/list") catalogRequestId = message.id;
+    },
+    onClose(send) {
+      send({ id: catalogRequestId, result: { data: [], nextCursor: null } });
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ model: "gpt-test" })),
+    hasDiagnostic("ERR_CODEX_PROTOCOL", "model_catalog_invalid"),
+  );
+  assert.ok(
+    fixture.processes[0].messages.some(({ method }) => method === "turn/start"),
+  );
+});
+
+test("unexpected messages during shutdown invalidate a provisional catalog miss", async (t) => {
+  const result = { data: [{ id: "gpt-test" }], nextCursor: null };
+  for (const [name, response] of [
+    ["unknown ID", { id: 99, result }],
+    ["missing ID", { result }],
+    [
+      "reroute without a selected thread",
+      {
+        method: "model/rerouted",
+        params: {
+          threadId: "unknown-thread",
+          turnId: "unknown-turn",
+          fromModel: "gpt-test",
+          toModel: "gpt-other",
+          reason: "test",
+        },
+      },
+    ],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "model/list")
+            return { result: { data: [], nextCursor: null } };
+        },
+        onClose(send) {
+          send(response);
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(request({ model: "gpt-test" })),
+        hasDiagnostic("ERR_CODEX_PROTOCOL", "model_catalog_invalid"),
+      );
+      assert.ok(
+        fixture.processes[0].messages.every(
+          ({ method }) => !method.startsWith("thread/"),
+        ),
+      );
+    });
   }
 });
 
@@ -2880,17 +3312,92 @@ test("proves declared directory access without Git, commit readiness, or writabl
   assert.equal(old.processes.length, 0);
 });
 
+test("rejects existing file output roots before native work, including cached proofs", async (t) => {
+  for (const name of ["result.md", ".result"]) {
+    const directory = await directoryWorkspace(t, { outputName: name });
+    const fixture = createFixture({ version: "0.167.2" });
+    const options = {
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    };
+    // A valid directory proof cannot approve a later file substitution.
+    assert.equal((await fixture.adapter.probe(options)).workspaceWrite, true);
+    await rm(directory.output, { recursive: true });
+    await writeFile(directory.output, "Preserve this exact file.\n");
+    directory.workspacePolicy.outputPaths.unshift(
+      join(directory.cwd, "missing"),
+    );
+    const cold = createFixture({ version: "0.167.2" });
+    const diagnostic = hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_existing_file_output",
+    );
+    for (const adapter of [fixture.adapter, cold.adapter]) {
+      await assert.rejects(adapter.probe(options), diagnostic);
+      await assert.rejects(
+        adapter.run(
+          request({
+            ...options,
+            cwd: directory.cwd,
+            session: { mode: "continue", id: "saved-child" },
+          }),
+        ),
+        diagnostic,
+      );
+    }
+    assert.equal(cold.executeCalls.length, 0);
+    for (const adapterFixture of [fixture, cold]) {
+      assert.equal(adapterFixture.processes.length, 0);
+      assert.equal(adapterFixture.workspaceStorages.length, 0);
+    }
+    assert.equal(
+      await readFile(directory.output, "utf8"),
+      "Preserve this exact file.\n",
+    );
+    assert.equal(
+      (await cold.adapter.probe({ ...options, access: "read-only" })).readOnly,
+      true,
+    );
+    await assert.rejects(lstat(join(directory.cwd, "missing")), {
+      code: "ENOENT",
+    });
+    const readOnly = createFixture({
+      version: "0.167.2",
+      directoryPermissions: () => directory.permissions("read-only"),
+    });
+    await readOnly.adapter.run(
+      request({
+        ...options,
+        access: "read-only",
+        cwd: directory.cwd,
+      }),
+    );
+    assert.equal(readOnly.processes.length, 1);
+  }
+});
+
 test("preserves directory policy receipts across authorized output, artifact and state creation", async (t) => {
   const directory = await directoryWorkspace(t);
   directory.workspacePolicy.artifactPaths.push(directory.input);
   await rm(directory.output, { recursive: true });
   const fixture = createFixture({ version: "0.164.0" });
   const options = {
-    access: "workspace-write",
+    access: "read-only",
     workspacePolicy: directory.workspacePolicy,
   };
   const before = await fixture.adapter.probe(options);
+  await assert.rejects(
+    fixture.adapter.probe({ ...options, access: "workspace-write" }),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_missing_output",
+    ),
+  );
   await mkdir(directory.output);
+  const writable = await fixture.adapter.probe({
+    ...options,
+    access: "workspace-write",
+  });
   await writeFile(join(directory.output, "report.md"), "Accepted result\n");
   await mkdir(directory.workspacePolicy.stateRoot);
   await mkdir(directory.workspacePolicy.artifactPaths[0]);
@@ -2900,6 +3407,11 @@ test("preserves directory policy receipts across authorized output, artifact and
   );
   const after = await fixture.adapter.probe(options);
   assert.deepEqual(after.policyReceipt, before.policyReceipt);
+  assert.deepEqual(
+    (await fixture.adapter.probe({ ...options, access: "workspace-write" }))
+      .policyReceipt,
+    writable.policyReceipt,
+  );
 
   const replacement = join(directory.cwd, "replacement.md");
   await writeFile(replacement, "Replaced input\n");
@@ -3655,12 +4167,67 @@ test("fails closed on unsafe workspace storage preparation and cleanup", async (
         )(error),
       );
       assert.equal(error.message, "Codex workspace storage is unsafe.");
-      assert.equal(error.cause, undefined);
+      assert.equal(
+        error.cause.message,
+        "test workspace storage cleanup failure",
+      );
       return true;
     },
   );
   assert.equal(cleanupFailure.processes.length, 1);
   assert.equal(cleanupFailure.workspaceStorages[0].cleanupCalls, 1);
+});
+
+test("workspace storage refusals preserve validated ownership diagnostics and failure policy", async () => {
+  const diagnostic = createOwnershipDiagnostic("adapter-resource-custody");
+  for (const phase of ["Preparation", "Cleanup"]) {
+    for (const ownershipDiagnostic of [
+      diagnostic,
+      undefined,
+      { ...diagnostic, private: "discarded" },
+    ]) {
+      const cause = Object.assign(new Error("private storage failure"), {
+        ownershipDiagnostic,
+      });
+      const fixture = createFixture({ [`storage${phase}Error`]: cause });
+      await assert.rejects(
+        fixture.adapter.run(request({ access: "workspace-write" })),
+        (error) => {
+          assert.ok(
+            hasDiagnostic(
+              "ERR_CODEX_ISOLATION",
+              "isolation_shell_environment",
+            )(error),
+          );
+          assert.equal(error.cause, cause);
+          const expected =
+            ownershipDiagnostic === diagnostic ? diagnostic : null;
+          assert.deepEqual(error.ownershipDiagnostic, expected);
+          const normalized = normalizeAdapterFailure("codex", error);
+          assert.deepEqual(normalized.ownershipDiagnostic, expected);
+          const baseline = normalizeAdapterFailure(
+            "codex",
+            new CodexAdapterError("Codex workspace storage is unsafe.", {
+              code: "ERR_CODEX_ISOLATION",
+              diagnosticClass: "isolation_shell_environment",
+            }),
+          );
+          assert.deepEqual(normalized.failure, baseline.failure);
+          assert.equal(normalized.effectStarted, baseline.effectStarted);
+          assert.equal(normalized.recoverable, baseline.recoverable);
+          assert.doesNotMatch(JSON.stringify(normalized), /private|discarded/u);
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, phase === "Preparation" ? 0 : 1);
+      assert.equal(
+        fixture.workspaceStorages.length,
+        phase === "Preparation" ? 0 : 1,
+      );
+      if (phase === "Cleanup")
+        assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    }
+  }
 });
 
 test("rejects an incorrect workspace shell-environment projection", async () => {
@@ -3687,6 +4254,94 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
 });
 
 test("rejects substitution of an explicit model", async (t) => {
+  const reroute = (threadId, turnId) => ({
+    method: "model/rerouted",
+    params: {
+      threadId,
+      turnId,
+      fromModel: "gpt-test",
+      toModel: "gpt-other",
+      reason: "test",
+    },
+  });
+  const commitOptions = {
+    access: "local-commit",
+    authorizationId: "authorization-1",
+    commit: {
+      expectedHead: EXPECTED_HEAD,
+      message: "feat(test): create commit",
+    },
+    onObservation() {},
+    onCommitExecution() {
+      assert.fail("The commit executor must remain unstarted.");
+    },
+  };
+  for (const [method, options] of [
+    ["thread/start", commitOptions],
+    ["thread/resume", { session: { id: "source", mode: "continue" } }],
+    ["thread/fork", { session: { id: "source", mode: "fork" } }],
+  ]) {
+    await t.test(`conflicting model in ${method}`, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === method) {
+            const thread =
+              method === "thread/fork"
+                ? { id: "child", forkedFromId: "source" }
+                : { id: message.params.threadId ?? "new-thread" };
+            return { result: { model: "private-substitute", thread } };
+          }
+          if (message.method === "turn/start" && options.commit !== undefined) {
+            const turnId = "readiness-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: completedTurn(
+                message.params.threadId,
+                turnId,
+                '{"ready":true}',
+              ),
+            };
+          }
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(request({ model: "gpt-test", ...options })),
+        (error) => {
+          assert.equal(error.code, "ERR_CODEX_MODEL_REROUTED");
+          assert.doesNotMatch(error.message, /private-substitute/u);
+          if (options.access === "local-commit") {
+            assert.equal(error.failure.commitExecutor, "not_started");
+          }
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, 1);
+      assert.ok(
+        fixture.processes[0].messages.every(
+          ({ method }) => method !== "turn/start",
+        ),
+      );
+    });
+  }
+
+  await t.test("accepts the catalog ID for a requested alias", async () => {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "model/list")
+          return {
+            result: {
+              data: [{ id: "gpt-test", model: "gpt-alias" }],
+              nextCursor: null,
+            },
+          };
+        if (message.method === "thread/start")
+          return { result: { model: "gpt-test", thread: { id: "new" } } };
+      },
+    });
+    const result = await fixture.adapter.run(request({ model: "gpt-alias" }));
+    assert.equal(result[CATALOG_VALIDATED_MODEL], "gpt-alias");
+  });
+
   for (const [name, status, nativeMessage] of [
     ["completed", "completed"],
     ["client rejection", "failed", httpClientErrorMessage()],
@@ -3704,16 +4359,7 @@ test("rejects substitution of an explicit model", async (t) => {
             return {
               result: { turn: { id: turnId } },
               notification: [
-                {
-                  method: "model/rerouted",
-                  params: {
-                    threadId: message.params.threadId,
-                    turnId,
-                    fromModel: "gpt-test",
-                    toModel: "gpt-other",
-                    reason: "test",
-                  },
-                },
+                reroute(message.params.threadId, turnId),
                 status === "completed"
                   ? completedTurn(message.params.threadId, turnId)
                   : failedTurn(message.params.threadId, turnId, {
@@ -3735,6 +4381,449 @@ test("rejects substitution of an explicit model", async (t) => {
       );
       assert.equal(fixture.processes.length, 1);
       assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    });
+  }
+
+  for (const arrivesDuringCompaction of [false, true]) {
+    const timing = arrivesDuringCompaction ? "during" : "before";
+    await t.test(
+      `reroute ${timing} compaction blocks the recovery turn`,
+      async () => {
+        const turnId = "full-context";
+        const fixture = createFixture({
+          handle({ message, messages }) {
+            const threadId = message.params.threadId;
+            if (
+              message.method === "turn/start" &&
+              !messages.some(({ method }) => method === "thread/compact/start")
+            ) {
+              return {
+                result: { turn: { id: turnId } },
+                notification: [
+                  ...(!arrivesDuringCompaction
+                    ? [reroute(threadId, turnId)]
+                    : []),
+                  failedTurn(threadId, turnId, {
+                    codexErrorInfo: "contextWindowExceeded",
+                  }),
+                ],
+              };
+            }
+            if (message.method === "thread/compact/start") {
+              return {
+                result: {},
+                notification: [
+                  ...(arrivesDuringCompaction
+                    ? [reroute(threadId, turnId)]
+                    : []),
+                  completedTurn(threadId, "compaction", "Compacted.", [
+                    { type: "contextCompaction" },
+                  ]),
+                ],
+              };
+            }
+          },
+        });
+
+        await assert.rejects(
+          fixture.adapter.run(
+            request({ access: "workspace-write", model: "gpt-test" }),
+          ),
+          hasCode("ERR_CODEX_MODEL_REROUTED"),
+        );
+        assert.equal(fixture.processes.length, 1);
+        assert.deepEqual(
+          fixture.processes[0].messages
+            .map(({ method }) => method)
+            .filter((method) =>
+              ["turn/start", "thread/compact/start"].includes(method),
+            ),
+          arrivesDuringCompaction
+            ? ["turn/start", "thread/compact/start"]
+            : ["turn/start"],
+        );
+      },
+    );
+  }
+
+  for (const [name, options, malformedEnvelope] of [
+    ["shutdown without observations", {}],
+    ["shutdown with observations", { onObservation() {} }],
+    ["shutdown with an ambiguous notification", {}, "duplicate-method"],
+    ["shutdown before commit execution", commitOptions],
+    ["reroute with a request ID", {}, "request-id"],
+    ["reroute with a request ID before commit", commitOptions, "request-id"],
+  ]) {
+    await t.test(name, async () => {
+      const turnId = "rerouted-turn";
+      let threadId;
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method === "turn/start") {
+            threadId = message.params.threadId;
+            return {
+              result: { turn: { id: turnId } },
+              notification: [
+                ...(malformedEnvelope === "request-id"
+                  ? [{ ...reroute(threadId, turnId), id: null }]
+                  : []),
+                completedTurn(threadId, turnId, '{"ready":true}'),
+              ],
+            };
+          }
+        },
+        onClose(send, sendRaw) {
+          if (malformedEnvelope === "request-id") return;
+          const notification = reroute(threadId, turnId);
+          if (malformedEnvelope === "duplicate-method") {
+            sendRaw(
+              `{"method":"model/rerouted","method":"other/event","params":${JSON.stringify(notification.params)}}\n`,
+            );
+          } else {
+            send(notification);
+          }
+        },
+      });
+
+      await assert.rejects(
+        fixture.adapter.run(request({ model: "gpt-test", ...options })),
+        (error) => {
+          assert.equal(
+            error.code,
+            malformedEnvelope === undefined
+              ? "ERR_CODEX_MODEL_REROUTED"
+              : "ERR_CODEX_PROTOCOL",
+          );
+          if (options.access === "local-commit") {
+            assert.equal(error.failure.commitExecutor, "not_started");
+          }
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+
+  for (const [name, expectedCode, options = {}] of [
+    ["reroute after a recoverable turn failure", "ERR_CODEX_MODEL_REROUTED"],
+    [
+      "duplicate method after a recoverable turn failure",
+      "ERR_CODEX_PROTOCOL",
+      { frame: "duplicate-method" },
+    ],
+    [
+      "invalid JSON after a recoverable turn failure",
+      "ERR_CODEX_PROTOCOL",
+      { frame: "invalid-json" },
+    ],
+    [
+      "reroute after a provider availability failure",
+      "ERR_CODEX_TURN_FAILED",
+      { isOverloaded: true },
+    ],
+    [
+      "invalid reroute after a provider availability failure",
+      "ERR_CODEX_TURN_FAILED",
+      { isOverloaded: true, frame: "request-id" },
+    ],
+    [
+      "reroute during an operator stop",
+      "ERR_CODEX_TURN_FAILED",
+      { stop: true },
+    ],
+    [
+      "invalid reroute during an operator stop",
+      "ERR_CODEX_TURN_FAILED",
+      { stop: true, frame: "request-id" },
+    ],
+  ]) {
+    await t.test(`shutdown ${name}`, async () => {
+      const turnId = "failed-turn";
+      const controller = new AbortController();
+      let threadId;
+      const fixture = createFixture({
+        handle({ message, processIndex }) {
+          if (processIndex === 0 && message.method === "turn/start") {
+            threadId = message.params.threadId;
+            return {
+              result: { turn: { id: turnId } },
+              notification: failedTurn(threadId, turnId, {
+                codexErrorInfo: options.isOverloaded
+                  ? "serverOverloaded"
+                  : "other",
+                message: "test provider failure",
+              }),
+            };
+          }
+        },
+        onClose(send, sendRaw) {
+          if (threadId !== undefined) {
+            const notification = reroute(threadId, turnId);
+            if (options.frame === "duplicate-method") {
+              sendRaw(
+                `{"method":"model/rerouted","method":"other/event","params":${JSON.stringify(notification.params)}}\n`,
+              );
+            } else if (options.frame === "request-id") {
+              send({ ...notification, id: null });
+            } else {
+              if (options.frame === "invalid-json") sendRaw("{\n");
+              send(notification);
+            }
+            threadId = undefined;
+          }
+          if (options.stop) controller.abort();
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({ model: "gpt-test", signal: controller.signal }),
+        ),
+        (error) => {
+          assert.equal(error.code, expectedCode);
+          assert.equal(
+            error.failure.availabilityReason,
+            options.isOverloaded ? "temporarily_overloaded" : undefined,
+          );
+          return true;
+        },
+      );
+      assert.equal(fixture.processes.length, 1);
+    });
+  }
+});
+
+test("requires a drained output stream to settle an explicit model", async () => {
+  for (const [closeOutput, options] of [
+    ["error", {}],
+    ["error", { onObservation() {} }],
+    [
+      "error",
+      {
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+        onObservation() {},
+        onCommitExecution() {
+          assert.fail("The commit executor must remain unstarted.");
+        },
+      },
+    ],
+    ["truncated", {}],
+  ]) {
+    const fixture = createFixture({
+      closeOutput,
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          const turnId = "completed-turn";
+          return {
+            result: { turn: { id: turnId } },
+            notification: completedTurn(
+              message.params.threadId,
+              turnId,
+              '{"ready":true}',
+            ),
+          };
+        }
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(request({ model: "gpt-test", ...options })),
+      (error) => {
+        assert.equal(error.code, "ERR_CODEX_PROCESS_EXITED");
+        if (options.access === "local-commit") {
+          assert.equal(error.failure.commitExecutor, "not_started");
+        }
+        return true;
+      },
+    );
+    assert.equal(fixture.processes.length, 1);
+  }
+});
+
+test("an exit before the next catalog page keeps the lookup terminal", async () => {
+  for (const access of ["read-only", "local-commit"]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method !== "model/list") return;
+        if (message.params.cursor === null)
+          return { result: { data: [{ id: "other" }], nextCursor: "page-2" } };
+        return { close: true };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          model: "gpt-test",
+          access,
+          ...(access === "local-commit"
+            ? {
+                authorizationId: "authorization-1",
+                commit: {
+                  expectedHead: EXPECTED_HEAD,
+                  message: "feat(test): create commit",
+                },
+                onCommitExecution() {
+                  assert.fail("The commit executor must remain unstarted.");
+                },
+              }
+            : {}),
+        }),
+      ),
+      (error) => {
+        assert.equal(error.code, "ERR_CODEX_PROTOCOL");
+        assert.equal(error.failure.failureClass, "model_catalog_invalid");
+        if (access === "local-commit")
+          assert.equal(error.failure.commitExecutor, "not_started");
+        return true;
+      },
+    );
+    assert.ok(
+      fixture.processes[0].messages.every(
+        ({ method }) => !method.startsWith("thread/"),
+      ),
+    );
+  }
+});
+
+test("an interrupted output drain keeps a provisional COMMIT miss terminal", async () => {
+  const fixture = createFixture({
+    closeOutput: "error",
+    handle({ message }) {
+      if (message.method === "model/list")
+        return { result: { data: [], nextCursor: null } };
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        model: "gpt-test",
+        access: "local-commit",
+        authorizationId: "authorization-1",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+        onCommitExecution() {
+          assert.fail("The commit executor must remain unstarted.");
+        },
+      }),
+    ),
+    (error) => {
+      assert.equal(error.code, "ERR_CODEX_PROTOCOL");
+      assert.equal(error.failure.failureClass, "model_catalog_invalid");
+      assert.equal(error.failure.commitExecutor, "not_started");
+      return true;
+    },
+  );
+});
+
+test("forced shutdown cannot establish an explicit model completion from EOF", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { promise: closing, resolve: markClosing } = Promise.withResolvers();
+  const fixture = createFixture({
+    closeOutput: "on-kill",
+    onClose: markClosing,
+  });
+  t.after(() => fixture.processes.forEach(({ close }) => close()));
+  const outcome = assert.rejects(
+    fixture.adapter.run(request({ model: "gpt-test" })),
+    hasCode("ERR_CODEX_PROCESS_EXITED"),
+  );
+  await closing;
+  t.mock.timers.tick(1_000);
+  await outcome;
+  assert.equal(fixture.processes[0].killCalls(), 1);
+});
+
+test("explicit model settlement requires a successful provider exit", async (t) => {
+  const killed = { type: "close", exitCode: null, signal: "SIGKILL" };
+  const clean = { type: "close", exitCode: 0, signal: null };
+  for (const [name, ownedOutcome, closeStatus, expected] of [
+    ["supervised miss", killed, [0, null], "miss"],
+    ["supervised commit miss", killed, [0, null], "commit-miss"],
+    ["direct miss exit with nonzero code", undefined, [1, null], "miss"],
+    ["supervised completion", killed, [0, null], "completion"],
+    ["supervised recoverable turn failure", killed, [0, null], "recovery"],
+    ["supervised commit", killed, [0, null], "commit"],
+    ["direct exit with nonzero code", undefined, [1, null], "completion"],
+    ["direct exit by signal", undefined, [null, "SIGKILL"], "completion"],
+    ["clean provider with nonzero launcher exit", clean, [1, null], "success"],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        closeStatus,
+        ownedOutcome,
+        handle({ message, processIndex }) {
+          if (expected.endsWith("miss") && message.method === "model/list") {
+            return { result: { data: [], nextCursor: null } };
+          }
+          if (
+            expected === "recovery" &&
+            processIndex === 0 &&
+            message.method === "turn/start"
+          ) {
+            const turnId = "failed-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: failedTurn(message.params.threadId, turnId, {
+                codexErrorInfo: "other",
+                message: "test provider failure",
+              }),
+            };
+          }
+          if (expected === "commit" && message.method === "turn/start") {
+            const turnId = "commit-turn";
+            return {
+              result: { turn: { id: turnId } },
+              notification: completedTurn(
+                message.params.threadId,
+                turnId,
+                '{"ready":true}',
+              ),
+            };
+          }
+        },
+      });
+      const options = { model: "gpt-test" };
+      if (ownedOutcome !== undefined) options.onProcess = async () => {};
+      if (expected.startsWith("commit")) {
+        Object.assign(options, {
+          access: "local-commit",
+          authorizationId: "authorization-1",
+          commit: {
+            expectedHead: EXPECTED_HEAD,
+            message: "feat(test): create commit",
+          },
+          onCommitExecution() {
+            assert.fail("The commit executor must remain unstarted.");
+          },
+        });
+      }
+      const result = fixture.adapter.run(request(options));
+      if (expected === "success") {
+        assert.equal((await result)[CATALOG_VALIDATED_MODEL], "gpt-test");
+        return;
+      }
+      await assert.rejects(result, (cause) => {
+        const error = normalizeAdapterFailure("codex", cause);
+        // An unsettled miss stays terminal instead of a generic exit.
+        if (expected.endsWith("miss")) {
+          assert.equal(error.code, "ERR_CODEX_PROTOCOL");
+          assert.equal(error.failure.failureClass, "model_catalog_invalid");
+        } else {
+          assert.equal(error.code, "ERR_CODEX_PROCESS_EXITED");
+          assert.notEqual(error.failure?.failureClass, "model_unavailable");
+        }
+        if (expected.startsWith("commit")) {
+          assert.equal(error.failure.commitExecutor, "not_started");
+          assert.equal(error.failure.effect, "none");
+        }
+        return true;
+      });
+      assert.equal(fixture.processes.length, 1);
     });
   }
 });
@@ -3852,31 +4941,57 @@ test("retries transient MCP discovery before forking a source", async () => {
 });
 
 test("reports persistent MCP discovery failure as recoverable", async () => {
-  let discoveryCalls = 0;
-  const fixture = createFixture({
-    executeHandle({ argumentsList }) {
-      if (argumentsList.includes("mcp")) {
-        discoveryCalls += 1;
-        throw new Error("MCP discovery timed out");
-      }
-      return undefined;
-    },
-  });
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
+  for (const ownershipDiagnostic of [
+    diagnostic,
+    undefined,
+    { ...diagnostic, private: "discarded" },
+  ]) {
+    let discoveryCalls = 0;
+    const fixture = createFixture({
+      executeHandle({ argumentsList }) {
+        if (argumentsList.includes("mcp")) {
+          discoveryCalls += 1;
+          throw Object.assign(new Error("private launcher failure"), {
+            code: "EAGAIN",
+            ownershipDiagnostic,
+          });
+        }
+        return undefined;
+      },
+    });
 
-  await assert.rejects(
-    fixture.adapter.run(request({ access: "workspace-write" })),
-    (error) => {
-      assert.ok(error instanceof CodexAdapterError);
-      assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
-      assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
-      assert.equal(error.method, "mcp/list");
-      assert.equal(error.recoverable, true);
-      return true;
-    },
-  );
-  assert.equal(discoveryCalls, 2);
-  assert.equal(fixture.processes.length, 0);
-  assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+    await assert.rejects(
+      fixture.adapter.run(request({ access: "workspace-write" })),
+      (error) => {
+        assert.ok(error instanceof CodexAdapterError);
+        assert.equal(error.code, "ERR_CODEX_UNAVAILABLE");
+        assert.equal(error.diagnosticClass, "isolation_mcp_discovery");
+        assert.equal(error.method, "mcp/list");
+        assert.equal(error.recoverable, true);
+        const normalized = normalizeAdapterFailure("codex", error);
+        assert.deepEqual(
+          normalized.ownershipDiagnostic,
+          ownershipDiagnostic === diagnostic ? diagnostic : null,
+        );
+        const baseline = normalizeAdapterFailure(
+          "codex",
+          new CodexAdapterError(error.message, {
+            code: "ERR_CODEX_UNAVAILABLE",
+            diagnosticClass: "isolation_mcp_discovery",
+            recoverable: true,
+          }),
+        );
+        assert.deepEqual(normalized.failure, baseline.failure);
+        assert.equal(normalized.effectStarted, baseline.effectStarted);
+        assert.doesNotMatch(JSON.stringify(normalized), /private|discarded/u);
+        return true;
+      },
+    );
+    assert.equal(discoveryCalls, 2);
+    assert.equal(fixture.processes.length, 0);
+    assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  }
 });
 
 test("preserves session recovery after transient MCP discovery", async () => {
@@ -4349,7 +5464,7 @@ test("normalizes cleanup failures after a successful turn", async () => {
 });
 
 test("ignores output failures after protocol shutdown", async () => {
-  const fixture = createFixture({ closeOutputError: true });
+  const fixture = createFixture({ closeOutput: "error" });
 
   await assert.doesNotReject(fixture.adapter.run(request()));
 });
@@ -4376,6 +5491,7 @@ test("rejects unexpected continuation lineage without a fresh fallback", async (
 test("creates an authorized commit through a networkless sandbox", async () => {
   const subject = "feat(branch): document push behavior";
   const fixture = createFixture({
+    env: { ...process.env, ...AMBIENT_GIT_IDENTITY },
     handle({ message }) {
       if (message.method === "turn/start") {
         return {
@@ -4463,6 +5579,8 @@ test("creates an authorized commit through a networkless sandbox", async () => {
     sandboxCalls[1].argumentsList.join(" "),
     /network=\{enabled=false\}/u,
   );
+  assertIsolatedGitIdentity(gitCall.options.env);
+  assertIsolatedGitIdentity(sandboxCalls[1].options.env);
 });
 
 test("allows disclosed read-only Git inspection during local-commit readiness", async () => {

@@ -52,6 +52,7 @@ function isOwnershipFailure(cause) {
     [
       "ERR_EXECUTION_PROCESS_ACTIVE",
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+      "ERR_EXECUTION_RECEIPT_UNPUBLISHED",
       "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
     ].includes(cause?.code)
   );
@@ -119,10 +120,32 @@ export async function runAuditDiscovery({
     );
     return current;
   }
-  async function inspectInputs() {
+  async function inspectInputs({ allowPendingAppend = false } = {}) {
     const inputs = await runtime.readInputs({ taskPath: run.taskPath });
-    const clarification =
-      await runtime.clarifications.inspectTranscript(transcript);
+    let clarification;
+    try {
+      clarification =
+        await runtime.clarifications.inspectTranscript(transcript);
+    } catch (cause) {
+      if (state().pendingClarificationAppend === null) throw cause;
+      if (cause?.code === "ERR_CLARIFICATION_READ") {
+        await pause("clarification_append_interrupted", "CLARIFY", {
+          code: cause.code,
+        });
+        return null;
+      }
+      if (
+        [
+          "ERR_CLARIFICATION_NOT_FOUND",
+          "ERR_UNSAFE_CLARIFICATION_PATH",
+          "ERR_INVALID_CLARIFICATION",
+        ].includes(cause?.code)
+      ) {
+        await pause("input_changed", "CLARIFY");
+        return null;
+      }
+      throw cause;
+    }
     const hashes = {
       task: inputs.task.hash,
       context: inputs.context?.hash ?? null,
@@ -130,7 +153,16 @@ export async function runAuditDiscovery({
     };
     if (
       current.hashes.task !== undefined &&
-      Object.keys(hashes).some((key) => current.hashes[key] !== hashes[key])
+      Object.keys(hashes).some(
+        (key) =>
+          current.hashes[key] !== hashes[key] &&
+          !(
+            key === "clarifications" &&
+            allowPendingAppend &&
+            state().pendingClarificationAppend !== null &&
+            hashes[key] === state().pendingClarificationAppend.resultHash
+          ),
+      )
     ) {
       await pause("input_changed");
       return null;
@@ -223,6 +255,125 @@ export async function runAuditDiscovery({
     });
     return result.status !== "WAITING_FOR_USER" && state().pendingEdit === null;
   }
+  async function appendQuestions(questions) {
+    // The same guards precede initial mutation and cold replay. A stop only
+    // inspects this proof; it cannot consume intent or create an edit window.
+    try {
+      await runtime.workspace.assertUnchanged(state().repositoryBaseline);
+    } catch {
+      await pause("workspace_changed", "CLARIFY");
+      return false;
+    }
+    if ((await inspectInputs({ allowPendingAppend: true })) === null)
+      return false;
+    const pending = state().pendingClarificationAppend;
+    const intent = pending ?? {
+      kind: "questions",
+      questions,
+      round: state().clarificationRounds + 1,
+      expectedHash: current.hashes.clarifications,
+      checkpoint: {
+        workflowState: "CLARIFY",
+        contextKey: sessionContextKey(current, "clarify"),
+        snapshotFingerprint: state().repositoryBaseline.contentFingerprint,
+        settlementFingerprint: fingerprint({
+          correctionFeedback: state().correctionFeedback,
+          outputRecovery: state().outputRecovery,
+        }),
+      },
+    };
+    try {
+      const appended = await runtime.clarifications.appendQuestionRound({
+        ...transcript,
+        expectedHash: intent.expectedHash,
+        ...(pending === null ? {} : { resultHash: intent.resultHash }),
+        round: intent.round,
+        questions: intent.questions,
+        persistAppend: async ({ expectedHash, hash }) => {
+          assertAudit(
+            expectedHash === intent.expectedHash,
+            "Audit append prior hash changed.",
+          );
+          if (pending !== null) {
+            assertAudit(
+              hash === pending.resultHash,
+              "Audit append result hash changed.",
+            );
+            return;
+          }
+          await save({
+            ...state(),
+            pendingClarificationAppend: { ...intent, resultHash: hash },
+          });
+        },
+      });
+      if (appended.hash !== state().pendingClarificationAppend?.resultHash) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
+      try {
+        await runtime.workspace.assertUnchanged(state().repositoryBaseline);
+      } catch {
+        await pause("workspace_changed", "CLARIFY");
+        return false;
+      }
+      const readback = await inspectInputs({ allowPendingAppend: true });
+      if (readback === null) return false;
+      if (readback.clarification.hash !== appended.hash) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
+      return await requestEdit(
+        "clarification-answers",
+        "clarification_answers_required",
+        {
+          expectedHash: appended.hash,
+          round: intent.round,
+          settled: {
+            correctionFeedback: null,
+            outputRecovery: null,
+            pendingClarificationAppend: null,
+          },
+          inputRequest: {
+            kind: "clarification",
+            questions: intent.questions.map((question, index) => ({
+              id: `q${index + 1}`,
+              question: question.question,
+              options: [],
+              rationale: question.whyItMatters,
+            })),
+            rationale: "Answer every material clarification question.",
+          },
+        },
+      );
+    } catch (cause) {
+      if (
+        (cause?.code === "ERR_CLARIFICATIONS_CHANGED" &&
+          state().pendingEdit === null) ||
+        (state().pendingClarificationAppend !== null &&
+          [
+            "ERR_CLARIFICATION_NOT_FOUND",
+            "ERR_UNSAFE_CLARIFICATION_PATH",
+            "ERR_INVALID_CLARIFICATION",
+          ].includes(cause?.code))
+      ) {
+        await pause("input_changed", "CLARIFY");
+        return false;
+      }
+      if (
+        state().pendingClarificationAppend !== null &&
+        ["ERR_CLARIFICATION_READ", "ERR_CLARIFICATION_WRITE"].includes(
+          cause?.code,
+        )
+      ) {
+        await pause("clarification_append_interrupted", "CLARIFY", {
+          code: cause.code,
+        });
+        return false;
+      }
+      throw cause;
+    }
+  }
   const retry = Symbol("retry");
   async function turn(phase, evidence) {
     for (;;) {
@@ -248,14 +399,21 @@ export async function runAuditDiscovery({
     try {
       await runtime.workspace.assertUnchanged(state().repositoryBaseline);
     } catch {
-      await finishReserved("interrupted");
+      if (current.modelCatalogResume == null) {
+        await finishReserved("interrupted");
+      }
       return { failure: "workspace_changed" };
     }
     const lazy = state().settings.mode === "lazy";
     const combined = state().settings.mode === "combined";
     const { contextKey: key, number } = auditCheckpoint(current, phase);
     const checkpoint = `audit:${phase}:read-only:${number}`;
+    const catalogCheckpoint = `${phase}:read-only:${number}`;
     const repository = state().repositoryBaseline;
+    const catalogResume = runtime.catalogRetry?.claimResume(
+      role,
+      catalogCheckpoint,
+    );
     try {
       if (
         current.availabilityRetry != null &&
@@ -272,6 +430,7 @@ export async function runAuditDiscovery({
           role,
           checkpoint,
           repository,
+          continueEpisode: catalogResume,
         });
       }
     } catch (cause) {
@@ -292,6 +451,7 @@ export async function runAuditDiscovery({
       !reconstructing && previous
         ? { mode: "continue", id: previous.sessionId }
         : !reconstructing &&
+            !catalogResume &&
             recovery === null &&
             state().sourceForkRecovery !== key &&
             source !== null &&
@@ -301,6 +461,7 @@ export async function runAuditDiscovery({
           : undefined;
     const activeTurn = { role, phase };
     current = await runtime.startAgentTurn(activeTurn, {
+      ...(catalogResume ? { catalogCheckpoint } : {}),
       pipelineState: {
         ...state(),
         sourceForkConsumed:
@@ -410,6 +571,20 @@ export async function runAuditDiscovery({
       return { paused: true };
     }
     if (agentError !== undefined) {
+      if (runtime.catalogRetry?.eligible(agentError)) {
+        await save(
+          { ...state(), workflowState: "WAITING_FOR_USER" },
+          {
+            activeTurn: null,
+            pause: {
+              reason: "backend_unavailable",
+              resumeState,
+              ...runtime.catalogRetry.details(role, catalogCheckpoint),
+            },
+          },
+        );
+        return { paused: true };
+      }
       const exhausted = runtime.outputExhaustion?.eligible(agentError) === true;
       const authentication =
         runtime.authentication?.eligible(agentError) === true;
@@ -582,6 +757,15 @@ export async function runAuditDiscovery({
 
   if (["FAILED", "CANCELED"].includes(state().workflowState)) return current;
 
+  if (
+    state().pendingClarificationAppend !== null &&
+    [
+      "input_changed",
+      "workspace_changed",
+      "project_configuration_changed",
+    ].includes(current.pause?.reason)
+  )
+    return current;
   if (operatorStop) {
     if (state().repositoryBaseline !== null) {
       try {
@@ -589,9 +773,13 @@ export async function runAuditDiscovery({
       } catch {
         return pause("workspace_changed");
       }
-      if (state().pendingEdit === null) await inspectInputs();
+      if (state().pendingEdit === null)
+        await inspectInputs({ allowPendingAppend: true });
     }
     return current;
+  }
+  if (state().pendingClarificationAppend !== null) {
+    if (!(await appendQuestions())) return current;
   }
   if (state().pendingEdit !== null) {
     // An edit window authorizes only the transcript, never changed task inputs or sources.
@@ -640,7 +828,7 @@ export async function runAuditDiscovery({
     await save(
       {
         ...state(),
-        repositoryBaseline: await runtime.workspace.snapshot({
+        repositoryBaseline: await runtime.workspace.baseline({
           allowedPaths: [
             transcript.transcriptPath,
             ...reportPaths(run.taskPath),
@@ -665,6 +853,7 @@ export async function runAuditDiscovery({
   if ((await inspectInputs()) === null) return current;
   const recovering =
     state().outputRecovery !== null ||
+    current.modelCatalogResume != null ||
     current.inactivityRecovery != null ||
     current.availabilityRetry != null ||
     [
@@ -753,35 +942,7 @@ export async function runAuditDiscovery({
     }
     if (state().clarificationRounds >= MAX_CLARIFICATION_ROUNDS)
       return pause("clarification_limit_reached", "CLARIFY", {}, settled);
-    const round = state().clarificationRounds + 1;
-    const appended = await runtime.clarifications.appendQuestionRound({
-      ...transcript,
-      expectedHash: current.hashes.clarifications,
-      round,
-      questions: output.questions,
-    });
-    if (
-      !(await requestEdit(
-        "clarification-answers",
-        "clarification_answers_required",
-        {
-          expectedHash: appended.hash,
-          round,
-          settled,
-          inputRequest: {
-            kind: "clarification",
-            questions: output.questions.map((question, index) => ({
-              id: `q${index + 1}`,
-              question: question.question,
-              options: [],
-              rationale: question.whyItMatters,
-            })),
-            rationale: "Answer every material clarification question.",
-          },
-        },
-      ))
-    )
-      return current;
+    if (!(await appendQuestions(output.questions))) return current;
   }
 
   while (["DISCOVER", "VERIFY_FINDINGS"].includes(state().workflowState)) {

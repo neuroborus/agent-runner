@@ -343,6 +343,14 @@ test("configured custom authoring freezes declarations and publishes only its pl
     ),
   );
   assert.deepEqual(run.workspace.policy.sourcePaths, [f.source]);
+  const baseline = run.pipelineState.repositoryBaseline;
+  assert.equal(Object.hasOwn(baseline, "entries"), false);
+  assert.equal(Object.hasOwn(baseline, "linkResolutions"), false);
+  assert.ok(baseline.entryCount > 0);
+  assert.deepEqual(baseline.allowedPaths, [
+    join(f.taskPath, "clarifications.md"),
+    join(f.taskPath, "plan.md"),
+  ]);
   assert.equal(await readFile(join(f.taskPath, "plan.md"), "utf8"), plan);
   await assert.rejects(readFile(join(f.projectPath, outputPaths[0])), {
     code: "ENOENT",

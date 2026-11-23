@@ -9,8 +9,10 @@ import {
 } from "../../../test/support/output-exhaustion.js";
 import {
   ClaudeAdapterError,
+  CodexAdapterError,
   normalizeAdapterFailure,
 } from "../../../src/agents/index.js";
+import { isolateGitEnvironment } from "../../../src/git/index.js";
 import {
   attachAuthentication,
   authenticationFailure,
@@ -192,14 +194,13 @@ Implement the second behavior.`;
 test("accepts a verified commit after an interrupted adapter result", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        request.commit.message,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        ["-C", request.cwd, "commit", "-qm", request.commit.message],
+        { env },
+      );
       const error = new Error("Commit result was lost.");
       error.code = "ERR_FAKE_LOCAL_COMMIT_INTERRUPTED";
       error.ambiguous = true;
@@ -221,14 +222,13 @@ test("accepts a verified commit after an interrupted adapter result", async (t) 
 test("accounts for a verified commit before retaining configuration drift", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        request.commit.message,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        ["-C", request.cwd, "commit", "-qm", request.commit.message],
+        { env },
+      );
       const error = new Error("Project configuration changed after commit.");
       error.code = "ERR_PROJECT_CONFIGURATION_CHANGED";
       throw error;
@@ -569,6 +569,70 @@ test("readiness refusals preserve the candidate without offering blind COMMIT re
   }
 });
 
+test("terminal model selection failures verify consumed COMMIT without offering a fresh authorization", async (t) => {
+  for (const [code, diagnosticClass] of [
+    ["ERR_CODEX_PROTOCOL", "model_catalog_invalid"],
+    ["ERR_UNSUPPORTED_EFFORT", "effort_unsupported"],
+  ]) {
+    let verifications = 0;
+    const fixture = await createFixture(t, {
+      onCommitVerify() {
+        verifications++;
+        if (verifications === 1) {
+          throw Object.assign(new Error("Verification was interrupted."), {
+            code: "ERR_FAKE_COMMIT_VERIFICATION",
+          });
+        }
+      },
+      onRoleRun(_role, request) {
+        if (request.access === "local-commit") {
+          throw normalizeAdapterFailure(
+            "codex",
+            new CodexAdapterError("PRIVATE_CATALOG_RESPONSE", {
+              code,
+              diagnosticClass,
+              effectStarted: false,
+            }),
+          );
+        }
+      },
+    });
+    const interrupted = await fixture.run();
+    assert.equal(interrupted.pipelineState.pendingCommit.status, "consumed");
+    assert.doesNotThrow(() =>
+      planExecutionPipeline.validateResumeAction(interrupted, null),
+    );
+    fixture.persistPipelineState(structuredClone(interrupted.pipelineState));
+
+    const paused = await fixture.run();
+    assert.equal(paused.pipelineState.pendingCommit, null);
+    assert.equal(paused.pause.reason, "commit_failed");
+    assert.equal(paused.pause.diagnosticClass, diagnosticClass);
+    assert.equal(
+      paused.pipelineState.reviewedFingerprint,
+      interrupted.pipelineState.reviewedFingerprint,
+    );
+    const projection = planExecutionPipeline.projections.pause(paused);
+    assert.equal(projection.resumeState, null);
+    assert.deepEqual(projection.nextActions, []);
+    assert.deepEqual(projection.evidence, [
+      `Adapter diagnostic: ${diagnosticClass}.`,
+    ]);
+    assert.throws(
+      () => planExecutionPipeline.validateResumeAction(paused, null),
+      /separately authorized follow-up/u,
+    );
+    assert.equal((await fixture.run()).pause.reason, "commit_failed");
+    assert.equal(verifications, 2);
+    assert.equal(
+      fixture.calls.worker.filter(({ access }) => access === "local-commit")
+        .length,
+      1,
+    );
+    assert.doesNotMatch(JSON.stringify(paused), /PRIVATE_CATALOG_RESPONSE/u);
+  }
+});
+
 test("re-authorizes after a proven pre-effect Codex overload rejection", async (t) => {
   let backendUnavailable = true;
   const fixture = await createFixture(t, {
@@ -658,6 +722,215 @@ test("does not renew an unmarked provider rejection", async (t) => {
       .length,
     1,
   );
+});
+
+test("retains staged partial effects across interrupted and reconstructed verification without replay", async (t) => {
+  let interrupt = true;
+  let verifications = 0;
+  const fixture = await createFixture(t, {
+    async onCommitRun(_request, repository) {
+      await repository.stageAll();
+      throw Object.assign(new Error("Staged executor failed."), {
+        code: "ERR_FAKE_STAGED_FAILURE",
+      });
+    },
+    onCommitVerify() {
+      verifications++;
+      if (interrupt) {
+        interrupt = false;
+        throw Object.assign(new Error("Verification interrupted."), {
+          code: "ERR_FAKE_COMMIT_VERIFICATION",
+        });
+      }
+    },
+  });
+  const interrupted = await fixture.run();
+  const original = JSON.parse(JSON.stringify(interrupted.pipelineState));
+  assert.equal(interrupted.pause.code, "ERR_FAKE_COMMIT_VERIFICATION");
+  assert.equal(original.pendingCommit.status, "consumed");
+  assert.equal(original.pendingCommit.preEffectRejection, null);
+  const calls = fixture.calls.worker.length;
+  const probes = { ...fixture.probeCalls };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt === 1) interrupt = true;
+    fixture.persistPipelineState(
+      JSON.parse(JSON.stringify(fixture.currentRun.pipelineState)),
+    );
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "commit_failed");
+    assert.equal(
+      paused.pause.code,
+      attempt === 1 ? "ERR_FAKE_COMMIT_VERIFICATION" : "ERR_COMMIT_NOT_CREATED",
+    );
+    assert.deepEqual(paused.pause.changes, ["index"]);
+    assert.deepEqual(
+      paused.pipelineState.pendingCommit,
+      original.pendingCommit,
+    );
+    assert.deepEqual(
+      paused.pipelineState.repositoryBaseline,
+      original.repositoryBaseline,
+    );
+    assert.deepEqual(paused.pipelineState.completedCommits, []);
+    assert.equal(paused.pipelineState.currentStep, 1);
+    assert.equal(fixture.calls.worker.length, calls);
+    assert.deepEqual(fixture.probeCalls, probes);
+  }
+  assert.equal(verifications, 4);
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+  assert.equal(
+    fixture.transitions.some(
+      ({ options }) => options?.activity?.kind === "authorization-retired",
+    ),
+    false,
+  );
+});
+
+test("observed staging contradicts pre-executor proof and cannot retire authorization", async (t) => {
+  const fixture = await createFixture(t, {
+    async onRoleRun(_role, request, _count, repository) {
+      if (request.access === "local-commit") {
+        await repository.stageAll();
+        throw authenticationFailure({ commit: true });
+      }
+    },
+  });
+  attachAuthentication(fixture);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_contract_violated");
+  assert.equal(paused.pause.code, "ERR_COMMIT_CONTRACT_VIOLATED");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+  assert.equal(
+    paused.pipelineState.pendingCommit.preEffectRejection.authentication
+      .commitExecutor,
+    "not_started",
+  );
+  assert.deepEqual(paused.pipelineState.completedCommits, []);
+  const resumed = await fixture.run();
+  assert.deepEqual(
+    resumed.pipelineState.pendingCommit,
+    paused.pipelineState.pendingCommit,
+  );
+  assert.equal(resumed.pause.reason, "commit_contract_violated");
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("real staged executor failure remains verification-only across resume", async (t) => {
+  const fixture = await createRealGitFixture(t, {
+    async onCommitRun(request) {
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      throw Object.assign(new Error("Post-staging failure."), {
+        code: "ERR_FAKE_STAGED_FAILURE",
+      });
+    },
+  });
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  const pending = JSON.parse(
+    JSON.stringify(paused.pipelineState.pendingCommit),
+  );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resumed = await fixture.run();
+    assert.equal(resumed.pause.reason, "commit_failed");
+    assert.deepEqual(resumed.pause.changes, ["index"]);
+    assert.deepEqual(resumed.pipelineState.pendingCommit, pending);
+    assert.deepEqual(resumed.pipelineState.completedCommits, []);
+    assert.equal(
+      (
+        await executeFile("git", [
+          "-C",
+          fixture.projectPath,
+          "rev-parse",
+          "HEAD",
+        ])
+      ).stdout.trim(),
+      pending.authorization.expectedHead,
+    );
+  }
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("staged output exhaustion without pre-executor proof keeps the commit-failed disposition", async (t) => {
+  const fixture = await createFixture(t, {
+    async onCommitRun(_request, repository) {
+      await repository.stageAll();
+      throw outputExhaustion({ commit: true, proof: false });
+    },
+  });
+  attachOutputExhaustion(fixture);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "commit_failed");
+  assert.deepEqual(paused.pause.changes, ["index"]);
+  assert.equal(paused.pipelineState.pendingCommit.preEffectRejection, null);
+  const resumed = await fixture.run();
+  assert.equal(resumed.pause.reason, "commit_failed");
+  assert.deepEqual(
+    resumed.pipelineState.pendingCommit,
+    paused.pipelineState.pendingCommit,
+  );
+  assert.equal(
+    fixture.calls.worker.filter(({ access }) => access === "local-commit")
+      .length,
+    1,
+  );
+});
+
+test("rejects unsafe unchanged-HEAD effects rather than renewing a pre-effect refusal", async (t) => {
+  for (const effect of [
+    "stage",
+    "changeRefs",
+    "changeIdentity",
+    "changeRemote",
+    "content",
+  ]) {
+    await t.test(effect, async (t) => {
+      const fixture = await createFixture(t, {
+        async onRoleRun(_role, request, _count, repository) {
+          if (request.access === "local-commit") {
+            if (effect === "content")
+              await writeFile(
+                join(request.cwd, "source.js"),
+                "changed again\n",
+              );
+            else repository[effect]();
+            throw Object.assign(new Error("Pre-effect refusal."), {
+              code: "ERR_FAKE_LOCAL_COMMIT_POLICY",
+              effectStarted: false,
+            });
+          }
+        },
+      });
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "commit_contract_violated");
+      assert.equal(paused.pipelineState.pendingCommit.status, "consumed");
+      assert.deepEqual(paused.pipelineState.completedCommits, []);
+      const resumed = await fixture.run();
+      assert.deepEqual(
+        resumed.pipelineState.pendingCommit,
+        paused.pipelineState.pendingCommit,
+      );
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        1,
+      );
+    });
+  }
 });
 
 test("resumes commit verification without replaying the Worker", async (t) => {
@@ -754,7 +1027,7 @@ test("verifies a consumed version-5 authorization before validation migration", 
   );
 });
 
-test("prepared commit authority survives an unavailable capability and resumes once", async (t) => {
+async function preparedCommitFixture(t) {
   const trustedValidation = trustedValidationSnapshot();
   const finalization = finalizationWithTrustedCheck(trustedValidation);
   const requiredChecks = finalization.requiredChecks;
@@ -797,6 +1070,11 @@ test("prepared commit authority survives an unavailable capability and resumes o
   );
   const prepared = fixture.currentRun.pipelineState.pendingCommit;
   assert.equal(prepared.status, "prepared");
+  return { fixture, settings, prepared };
+}
+
+test("prepared commit authority survives an unavailable capability and resumes once", async (t) => {
+  const { fixture, settings, prepared } = await preparedCommitFixture(t);
   const calls = Object.values(fixture.calls).flat().length;
   for (const code of [
     "ERR_TRUSTED_VALIDATION_CAPABILITY_UNAVAILABLE",
@@ -821,6 +1099,25 @@ test("prepared commit authority survives an unavailable capability and resumes o
     );
   }
   fixture.runtime.trustedValidation.preflight = async () => {};
+  const { inspectRequirements } = fixture.runtime.trustedValidation;
+  fixture.runtime.trustedValidation.inspectRequirements = async () => ({
+    status: "BLOCKED",
+    blockers: [{ command: "Required checks", reason: "unavailable" }],
+  });
+  const blocked = await fixture.run(settings);
+  assert.equal(blocked.pause.reason, "environment_blocked");
+  assert.equal(blocked.pause.code, "ERR_REQUIRED_CHECK_CAPABILITY_UNAVAILABLE");
+  assert.equal(blocked.pause.resumeState, "COMMIT");
+  assert.deepEqual(blocked.pipelineState.pendingCommit, prepared);
+  assert.deepEqual(blocked.pipelineState.completedCommits, []);
+  assert.equal(Object.values(fixture.calls).flat().length, calls);
+  assert.throws(() =>
+    planExecutionPipeline.workflow.validateRun({
+      ...blocked,
+      pause: { ...blocked.pause, code: "ERR_UNRELATED_FAILURE" },
+    }),
+  );
+  fixture.runtime.trustedValidation.inspectRequirements = inspectRequirements;
   const completed = await fixture.run(settings);
   assert.equal(completed.pipelineState.workflowState, "DONE");
   assert.equal(completed.pipelineState.completedCommits.length, 1);
@@ -829,6 +1126,43 @@ test("prepared commit authority survives an unavailable capability and resumes o
       .length,
     1,
   );
+});
+
+test("repository drift retires unconsumed commit authority", async (t) => {
+  for (const [name, drift, reason, code] of [
+    [
+      "refs drift",
+      (repository) => repository.changeRefs(),
+      "unsafe_git_state",
+      "ERR_READ_ONLY_REPOSITORY_CHANGED",
+    ],
+    [
+      "external HEAD change",
+      (repository) => repository.commit("fix(test): advance external history"),
+      "plan_revision_required",
+      "ERR_STALE_EXECUTION_PLAN",
+    ],
+  ]) {
+    await t.test(name, async (t) => {
+      const { fixture, settings } = await preparedCommitFixture(t);
+      const calls = Object.values(fixture.calls).flat().length;
+      await drift(fixture.repository);
+      const paused = await fixture.run(settings);
+      assert.equal(paused.pipelineState.workflowState, "WAITING_FOR_USER");
+      assert.equal(paused.pause.reason, reason);
+      assert.equal(paused.pause.code, code);
+      assert.equal(paused.pipelineState.pendingCommit, null);
+      assert.deepEqual(paused.pipelineState.completedCommits, []);
+      assert.equal(Object.values(fixture.calls).flat().length, calls);
+      assert.equal(
+        fixture.calls.worker.some(({ access }) => access === "local-commit"),
+        false,
+      );
+      assert.doesNotThrow(() =>
+        planExecutionPipeline.workflow.validateRun(paused),
+      );
+    });
+  }
 });
 
 test("interrupted safety pauses do not inspect capabilities before recovery is authorized", async (t) => {
@@ -914,14 +1248,19 @@ test("never replays a consumed authorization when no commit was created", async 
 test("pauses without rewriting a commit that violates its authorization", async (t) => {
   const fixture = await createRealGitFixture(t, {
     async onCommitRun(request) {
-      await executeFile("git", ["-C", request.cwd, "add", "-A"]);
-      await executeFile("git", [
-        "-C",
-        request.cwd,
-        "commit",
-        "-qm",
-        `${request.commit.message}\n\nCo-authored-by: Other <other@example.com>`,
-      ]);
+      const env = isolateGitEnvironment(process.env);
+      await executeFile("git", ["-C", request.cwd, "add", "-A"], { env });
+      await executeFile(
+        "git",
+        [
+          "-C",
+          request.cwd,
+          "commit",
+          "-qm",
+          `${request.commit.message}\n\nCo-authored-by: Other <other@example.com>`,
+        ],
+        { env },
+      );
     },
   });
 

@@ -6,7 +6,16 @@ import { assertInactivityContinuity } from "./inactivity.js";
 import { assertObservationContinuity } from "./observations.js";
 import { assertPreservationContinuity } from "./preservation-contract.js";
 import { assertWorkspacePreparationContinuity } from "./workspace-preparation.js";
-import { assertAvailabilityContinuity } from "./availability.js";
+import {
+  assertCatalogPauseRetirement,
+  assertModelCompletionContinuity,
+  readOnlyCatalogAttempt,
+  writableCatalogAttempt,
+} from "./model-completion.js";
+import {
+  assertAvailabilityContinuity,
+  isRestatementReplacingActiveTurn,
+} from "./availability.js";
 import {
   observeJournalDirectory,
   journalFileUnchanged,
@@ -45,6 +54,9 @@ const EVENT_FIELDS = new Set([
   "recordedAt",
   "state",
   "activity",
+  "catalogCheckpoint",
+  "writableCatalogRejection",
+  "commitCatalogRejection",
 ]);
 const IMMUTABLE_STATE_FIELDS = [
   "runId",
@@ -74,6 +86,8 @@ const TRANSITION_STATE_FIELDS = [
   "hashes",
   "pause",
   "providerPolicies",
+  "modelCompletionReceipts",
+  "modelCatalogResume",
   "activeTurn",
   "executionProcess",
   "executionResource",
@@ -151,6 +165,8 @@ function normalizeEvent(value, runId, lineNumber) {
         23,
         24,
         25,
+        26,
+        27,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -194,6 +210,15 @@ function normalizeEvent(value, runId, lineNumber) {
       recordedAt: value.recordedAt,
       state,
       activity: normalizePublicActivity(value.activity),
+      ...(Object.hasOwn(value, "catalogCheckpoint")
+        ? { catalogCheckpoint: value.catalogCheckpoint }
+        : {}),
+      ...(Object.hasOwn(value, "writableCatalogRejection")
+        ? { writableCatalogRejection: value.writableCatalogRejection }
+        : {}),
+      ...(Object.hasOwn(value, "commitCatalogRejection")
+        ? { commitCatalogRejection: value.commitCatalogRejection }
+        : {}),
     };
   } catch (cause) {
     if (cause?.code === "ERR_RUNTIME_VERSION_SKEW") {
@@ -216,6 +241,11 @@ function assertInitialEvent(event) {
     event.state.inactivityRecovery !== null ||
     event.state.availabilityRetry !== null ||
     event.state.observations !== null ||
+    Object.keys(event.state.modelCompletionReceipts).length > 0 ||
+    event.state.modelCatalogResume !== null ||
+    event.catalogCheckpoint !== undefined ||
+    event.writableCatalogRejection !== undefined ||
+    event.commitCatalogRejection !== undefined ||
     event.state.preparation != null ||
     event.state.preservationRecords?.length > 0
   ) {
@@ -233,12 +263,75 @@ function assertEventContinuity(
   event,
   stopProof,
   resolveStopBoundary,
+  matchesCatalogReservation,
+  assertCatalogTransition,
+  matchesAvailabilityRetirement,
+  readRestatementStart,
+  activeTurnStart,
 ) {
   const previousState = previous.state;
   const state = event.state;
+  if (
+    isRestatementReplacingActiveTurn(
+      previousState,
+      state,
+      event.activity,
+      readRestatementStart,
+    )
+  )
+    throw new RunStoreError("Restatement replaced an unretired agent turn.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
   try {
-    assertAvailabilityContinuity(previousState, state);
-    assertInactivityContinuity(previousState, state, event.activity);
+    assertModelCompletionContinuity(
+      previousState,
+      state,
+      event,
+      matchesCatalogReservation,
+      activeTurnStart,
+    );
+    const readOnlyAttempt = readOnlyCatalogAttempt(
+      previousState,
+      activeTurnStart,
+    );
+    const operatorPause = state.pause?.reason === "operator_paused";
+    const stopRetirement =
+      operatorPause &&
+      event.activity?.phase === "stop" &&
+      event.activity.kind === "reconciled" &&
+      state.stopRequest?.reconciledRevision === state.revision;
+    const writableAttempt = writableCatalogAttempt(
+      previousState,
+      activeTurnStart,
+    );
+    const verifiedCatalogPause = assertCatalogTransition?.(
+      previousState,
+      state,
+      event.activity,
+      activeTurnStart,
+      event.commitCatalogRejection,
+      operatorPause &&
+        (!stopRetirement ||
+          readOnlyAttempt?.id !==
+            stopProof?.checkpoint.readOnlyRejectionAttemptId)
+        ? null
+        : readOnlyAttempt,
+      writableAttempt?.writableRetryEligible === true ? writableAttempt : null,
+    );
+    assertCatalogPauseRetirement(previousState, state, verifiedCatalogPause);
+    assertAvailabilityContinuity(
+      previousState,
+      state,
+      event.activity,
+      matchesAvailabilityRetirement,
+      activeTurnStart,
+    );
+    assertInactivityContinuity(
+      previousState,
+      state,
+      event.activity,
+      activeTurnStart,
+    );
     assertObservationContinuity(previousState, state);
     assertPreservationContinuity(previousState, state, event.activity);
   } catch {
@@ -432,6 +525,11 @@ function assertStopContinuity(
           revision: previous.revision,
           workflowState: previous.pipelineState.workflowState,
           activeTurn: previous.activeTurn,
+          readOnlyRejectionAttemptId:
+            previous.observations?.attempts.at(-1)?.readOnlyRejection ===
+            undefined
+              ? null
+              : previous.observations.attempts.at(-1).id,
         }
       : proof?.checkpoint;
   const accepted =
@@ -561,7 +659,7 @@ async function readJournalFilenames(runDirectory) {
 async function* readEvents(
   runDirectory,
   runId,
-  resolveStopBoundary,
+  assertContinuity,
   metadata = {},
   checkpoint = null,
   proof = checkpoint,
@@ -585,6 +683,7 @@ async function* readEvents(
     throw new CheckpointInvalid();
   let previous = checkpoint?.lastEvent ?? null;
   let stopProof = checkpoint?.stopProof ?? null;
+  let activeTurnStart = checkpoint?.activeTurnStart ?? null;
   let versionBarrier = checkpoint?.versionBarrier ?? false;
   metadata.previousEvent = checkpoint?.previousEvent ?? null;
   const bindings = [];
@@ -641,7 +740,7 @@ async function* readEvents(
       });
     }
     // Parse and validate one snapshot at a time. Only this finite segment's
-    // source, the adjacent states, and the active stop proof survive a yield.
+    // source, adjacent states, and active ownership proofs survive a yield.
     for (let start = 0; start < completeEnd;) {
       const end = source.indexOf("\n", start);
       const revision = (previous?.revision ?? 0) + 1;
@@ -664,12 +763,35 @@ async function* readEvents(
       }
       if (previous === null) assertInitialEvent(event);
       else
-        stopProof = assertEventContinuity(
+        stopProof = assertContinuity(
           previous,
           event,
           stopProof,
-          resolveStopBoundary,
+          activeTurnStart,
         );
+      if (
+        previous !== null &&
+        event.state.activeTurn !== null &&
+        event.activity?.kind === "turn-started"
+      ) {
+        const { role, phase } = event.state.activeTurn;
+        activeTurnStart =
+          event.activity.actor === role && event.activity.phase === phase
+            ? {
+                previousRevision: event.revision - 1,
+                catalogCheckpoint: event.catalogCheckpoint,
+                // Only a start after retirement can prove a restatement.
+                pipelineState:
+                  previous.state.activeTurn === null
+                    ? event.state.pipelineState
+                    : null,
+              }
+            : null;
+      } else if (
+        !isDeepStrictEqual(previous?.state.activeTurn, event.state.activeTurn)
+      ) {
+        activeTurnStart = null;
+      }
       if (index === 0 && event.schemaVersion >= 21) versionBarrier = true;
       metadata.previousEvent = previous;
       previous = event;
@@ -697,6 +819,7 @@ async function* readEvents(
       segmentCount: filenames.length,
       versionBarrier,
       stopProof,
+      activeTurnStart,
     });
   }
   // Directory timestamps include choosing/ready claims and derived files.
@@ -819,11 +942,11 @@ async function* streamSnapshotProjection(
 
 // Replays a validated snapshot's exact prefix. Later append-only publications
 // cannot change its meaning; inconsistent or replaced history grants no proof.
-async function* replaySnapshot(runDirectory, snapshot, resolveStopBoundary) {
+async function* replaySnapshot(runDirectory, snapshot, assertContinuity) {
   for await (const event of readEvents(
     runDirectory,
     snapshot.state.runId,
-    resolveStopBoundary,
+    assertContinuity,
   )) {
     if (event.revision === snapshot.state.revision) {
       if (!isDeepStrictEqual(event.state, snapshot.state)) {
@@ -866,7 +989,7 @@ async function readStoredState(runDirectory, runId) {
 async function loadSnapshot(
   runDirectory,
   runId,
-  resolveStopBoundary,
+  assertContinuity,
   checkpoint = null,
   proof = checkpoint,
   captureAppend = false,
@@ -895,7 +1018,7 @@ async function loadSnapshot(
   for await (const event of readEvents(
     runDirectory,
     runId,
-    resolveStopBoundary,
+    assertContinuity,
     eventLog,
     checkpoint,
     proof,
@@ -959,7 +1082,23 @@ async function writeState(runDirectory, state) {
 export function createStateJournal({
   onTransitionBoundary,
   resolveStopBoundary,
+  matchesCatalogReservation = null,
+  assertCatalogTransition = null,
+  matchesAvailabilityRetirement = null,
+  readRestatementStart = null,
 }) {
+  const assertContinuity = (previous, event, stopProof, activeTurnStart) =>
+    assertEventContinuity(
+      previous,
+      event,
+      stopProof,
+      resolveStopBoundary,
+      matchesCatalogReservation,
+      assertCatalogTransition,
+      matchesAvailabilityRetirement,
+      readRestatementStart,
+      activeTurnStart,
+    );
   // Owned by this store instance, never a cache of historical state sequences.
   const checkpoints = new Map();
   let checkpointBytes = 0;
@@ -998,13 +1137,13 @@ export function createStateJournal({
         snapshot = await loadSnapshot(
           directory,
           runId,
-          resolveStopBoundary,
+          assertContinuity,
           checkpoint,
         );
       } catch (cause) {
         if (!(cause instanceof CheckpointInvalid)) throw cause;
         forget(directory);
-        snapshot = await loadSnapshot(directory, runId, resolveStopBoundary);
+        snapshot = await loadSnapshot(directory, runId, assertContinuity);
       }
       remember(directory, snapshot);
       return snapshot;
@@ -1031,7 +1170,7 @@ export function createStateJournal({
       certified = await loadSnapshot(
         directory,
         snapshot.state.runId,
-        resolveStopBoundary,
+        assertContinuity,
         null,
         proof,
       );
@@ -1150,7 +1289,7 @@ export function createStateJournal({
       extended = await loadSnapshot(
         directory,
         snapshot.state.runId,
-        resolveStopBoundary,
+        assertContinuity,
         // An uncertified capture requires complete semantic validation; it
         // cannot skip prior states like an already certified checkpoint.
         snapshot.certificate ? snapshot : null,
@@ -1205,7 +1344,17 @@ export function createStateJournal({
     await verifyPrefix(directory, snapshot);
   }
 
-  async function appendTransition(runDirectory, state, snapshot, activity) {
+  async function appendTransition(
+    runDirectory,
+    state,
+    snapshot,
+    activity,
+    {
+      catalogCheckpoint,
+      writableCatalogRejection,
+      commitCatalogRejection,
+    } = {},
+  ) {
     snapshot = await removePartialEventTail(runDirectory, snapshot);
 
     const event = {
@@ -1215,13 +1364,20 @@ export function createStateJournal({
       recordedAt: state.updatedAt,
       state,
       activity,
+      ...(catalogCheckpoint === undefined ? {} : { catalogCheckpoint }),
+      ...(writableCatalogRejection === undefined
+        ? {}
+        : { writableCatalogRejection }),
+      ...(commitCatalogRejection === undefined
+        ? {}
+        : { commitCatalogRejection }),
     };
     if (snapshot.lastEvent != null)
-      assertEventContinuity(
+      assertContinuity(
         snapshot.lastEvent,
         event,
         snapshot.stopProof,
-        resolveStopBoundary,
+        snapshot.activeTurnStart,
       );
     const serializedEvent = JSON.stringify(event);
     const eventBytes = Buffer.byteLength(serializedEvent) + 1;
@@ -1258,7 +1414,7 @@ export function createStateJournal({
       await loadSnapshot(
         runDirectory,
         state.runId,
-        resolveStopBoundary,
+        assertContinuity,
         snapshot.lastEvent == null ? null : snapshot,
       ),
     );
@@ -1275,7 +1431,7 @@ export function createStateJournal({
       const verified = await loadSnapshot(
         runDirectory,
         state.runId,
-        resolveStopBoundary,
+        assertContinuity,
         published,
       );
       if (
@@ -1319,11 +1475,17 @@ export function createStateJournal({
         certificate,
         state: { runId: certificate.runId, revision: certificate.lastRevision },
       }),
-    appendTransition: async (directory, state, snapshot, activity) => {
+    appendTransition: async (
+      directory,
+      state,
+      snapshot,
+      activity,
+      evidence,
+    ) => {
       try {
         if (snapshot.lastEvent != null)
           snapshot = await certifiedSnapshot(directory, snapshot);
-        await appendTransition(directory, state, snapshot, activity);
+        await appendTransition(directory, state, snapshot, activity, evidence);
       } catch (cause) {
         // Only prepublication checkpoints can survive successful publication;
         // failed callbacks must not leave evidence populated by nested reads.
@@ -1337,7 +1499,7 @@ export function createStateJournal({
     loadSnapshot: loadCheckpoint,
     extendSnapshot,
     replaySnapshot: (directory, snapshot) =>
-      replaySnapshot(directory, snapshot, resolveStopBoundary),
+      replaySnapshot(directory, snapshot, assertContinuity),
     publicActivities,
     recover: async (directory, snapshot) => {
       try {

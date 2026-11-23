@@ -29,6 +29,7 @@ import { inspectFinalizationFile } from "../../../../src/config/index.js";
 import { createClarificationService } from "../../../../src/clarifications/index.js";
 import { createGitService } from "../../../../src/git/index.js";
 import { createRunStore } from "../../../../src/state/index.js";
+import { trustedValidationFailureEvidence } from "../../../../src/trusted-validation/index.js";
 import {
   createPolishingState,
   migratePolishingStateV1,
@@ -47,6 +48,8 @@ import {
   migratePolishingStateV14,
   migratePolishingStateV16,
   migratePolishingStateV17,
+  migratePolishingStateV19,
+  polishingPipeline,
   runPolishing,
 } from "../../src/index.js";
 import {
@@ -56,6 +59,7 @@ import {
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import { assertRun, MAX_BOOTSTRAP_ITEMS } from "../../src/workflow-contract.js";
@@ -280,13 +284,76 @@ function migrateVersionOneState(state) {
   const versionFourteen = migratePolishingStateV13({
     pipelineState: versionThirteen,
   });
-  return migratePolishingStateV17({
-    pipelineState: migratePolishingStateV16({
-      pipelineState: migratePolishingStateV14({
-        pipelineState: versionFourteen,
+  return migratePolishingStateV19({
+    pipelineState: migratePolishingStateV17({
+      pipelineState: migratePolishingStateV16({
+        pipelineState: migratePolishingStateV14({
+          pipelineState: versionFourteen,
+        }),
       }),
     }),
   });
+}
+
+function matchesSchemaSubset(schema, value) {
+  const objectValue =
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (schema.type === "string" && typeof value !== "string") {
+    return false;
+  }
+  if (schema.type === "array" && !Array.isArray(value)) {
+    return false;
+  }
+  if (schema.type === "object" && !objectValue) {
+    return false;
+  }
+  if (schema.enum !== undefined && !schema.enum.includes(value)) {
+    return false;
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (
+      (schema.minLength !== undefined && length < schema.minLength) ||
+      (schema.maxLength !== undefined && length > schema.maxLength) ||
+      (schema.pattern !== undefined &&
+        !new RegExp(schema.pattern, "u").test(value))
+    ) {
+      return false;
+    }
+  }
+  if (Array.isArray(value)) {
+    if (
+      (schema.minItems !== undefined && value.length < schema.minItems) ||
+      (schema.maxItems !== undefined && value.length > schema.maxItems) ||
+      (schema.items !== undefined &&
+        value.some((item) => !matchesSchemaSubset(schema.items, item)))
+    ) {
+      return false;
+    }
+  }
+  if (objectValue) {
+    if (
+      schema.required?.some((field) => !Object.hasOwn(value, field)) ||
+      (schema.additionalProperties === false &&
+        Object.keys(value).some(
+          (field) => !Object.hasOwn(schema.properties, field),
+        )) ||
+      Object.entries(schema.properties ?? {}).some(
+        ([field, propertySchema]) =>
+          Object.hasOwn(value, field) &&
+          !matchesSchemaSubset(propertySchema, value[field]),
+      )
+    ) {
+      return false;
+    }
+  }
+  if (
+    schema.anyOf !== undefined &&
+    !schema.anyOf.some((branch) => matchesSchemaSubset(branch, value))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function hash(value) {
@@ -298,25 +365,44 @@ function trustedValidationSnapshot(
   command = "npm run test:service",
   capabilities = {},
 ) {
-  const vector = {
-    alias,
-    command,
-    executable: "npm",
-    arguments: ["run", "test:service"],
-    capabilities,
-  };
-  const identity = hash(JSON.stringify(vector));
-  const commands = [{ ...vector, identity }];
-  const schemaVersion = capabilities.sourceProjection === true ? 4 : 3;
+  // An array first argument lists complete vectors in configuration order.
+  const vectors = Array.isArray(alias)
+    ? alias.map((vector) => ({
+        alias: vector.alias,
+        command: vector.command,
+        executable: vector.executable,
+        arguments: vector.arguments,
+        capabilities: vector.capabilities ?? {},
+      }))
+    : [
+        {
+          alias,
+          command,
+          executable: "npm",
+          arguments: ["run", "test:service"],
+          capabilities,
+        },
+      ];
+  const commands = vectors.map((vector) => ({
+    ...vector,
+    identity: hash(JSON.stringify(vector)),
+  }));
+  const schemaVersion = vectors.some(
+    ({ capabilities: value }) => value.sourceProjection === true,
+  )
+    ? 4
+    : 3;
   return Object.freeze({
     schemaVersion,
     timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
-    commandFingerprint: hash(JSON.stringify([identity])),
+    commandFingerprint: hash(
+      JSON.stringify(commands.map(({ identity }) => identity)),
+    ),
     configurationFingerprint: hash(
       JSON.stringify({
         schemaVersion,
-        commands: [vector],
+        commands: vectors,
         timeoutMs: 3_600_000,
       }),
     ),
@@ -852,6 +938,7 @@ async function createFixture(
     interactive = false,
     mode = "independent",
     modeSettings = {},
+    onContentHygiene,
     onEdit,
     onRoleRun,
     onTrustedValidation,
@@ -988,9 +1075,14 @@ async function createFixture(
   let deferredFinalization = null;
   const deferredConfirmation = { worker: null, reviewer: null };
   const isFinalizationResult = (result) =>
-    ["PASS", "FAIL", "SKILL_MISSING", "SKILL_INVALID", "BLOCKED"].includes(
-      result?.status,
-    ) && Object.hasOwn(result, "requiredChecks");
+    [
+      "PASS",
+      "FAIL",
+      "SKILL_MISSING",
+      "SKILL_INVALID",
+      "BLOCKED",
+      "VALIDATION_POLICY_BLOCKED",
+    ].includes(result?.status) && Object.hasOwn(result, "requiredChecks");
   const isTerminalReview = (result) =>
     Object.hasOwn(result ?? {}, "validationChange");
   function candidateResult(result, acceptedStatus) {
@@ -1023,9 +1115,11 @@ async function createFixture(
           await onRoleRun?.(role, request, calls[role].length, { projectPath });
           if (
             role === "worker" &&
-            [CHECK_AND_FIX_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-              request.schema,
-            ) &&
+            [
+              CHECK_AND_FIX_SCHEMA,
+              FINDING_RESOLUTION_SCHEMA,
+              FINDING_RECOVERY_SCHEMA,
+            ].includes(request.schema) &&
             isFinalizationResult(queues.worker[0])
           ) {
             deferredFinalization = queues.worker.shift();
@@ -1034,9 +1128,13 @@ async function createFixture(
           if (
             role === "worker" &&
             request.schema === CHECK_AND_FIX_SCHEMA &&
-            !["CHANGED", "UNCHANGED", "BLOCKED", "INVALID"].includes(
-              queues.worker[0]?.status,
-            )
+            ![
+              "CHANGED",
+              "UNCHANGED",
+              "BLOCKED",
+              "VALIDATION_POLICY_BLOCKED",
+              "INVALID",
+            ].includes(queues.worker[0]?.status)
           ) {
             structured = checkAndFix();
           } else if (
@@ -1119,7 +1217,7 @@ async function createFixture(
     store = createRunStore({ stateRoot });
     const created = await store.createRun({
       pipelineId: "polishing",
-      pipelineStateVersion: 19,
+      pipelineStateVersion: polishingPipeline.stateVersion,
       projectPath,
       taskPath,
       roles,
@@ -1142,7 +1240,7 @@ async function createFixture(
       revision: 1,
       runId: "run-1",
       pipelineId: "polishing",
-      pipelineStateVersion: 19,
+      pipelineStateVersion: polishingPipeline.stateVersion,
       projectPath,
       taskPath,
       roles,
@@ -1225,6 +1323,21 @@ async function createFixture(
           allowedPaths,
         })
       ).contentFingerprint;
+    },
+    async inspectContentHygiene(options) {
+      const current = await memorySnapshot({
+        allowedPaths: options.expectedSnapshot.allowedPaths,
+      });
+      if (
+        current.contentFingerprint !== options.contentFingerprint ||
+        current.indexFingerprint !== options.expectedSnapshot.indexFingerprint
+      ) {
+        throw memoryGitError(
+          "Repository controls or content changed before hygiene inspection.",
+          "ERR_POLISHING_HANDOFF_CONTAMINATED",
+        );
+      }
+      return (await onContentHygiene?.(options)) ?? { status: "clean" };
     },
     async inspectPath({ path }) {
       const requestedPath = resolve(projectPath, path);
@@ -1419,6 +1532,7 @@ async function createFixture(
     clarifications,
     git,
     trustedValidation: {
+      failureEvidence: trustedValidationFailureEvidence,
       async preflight() {},
       async inspectRequirements(options) {
         return (
@@ -1458,7 +1572,7 @@ async function createFixture(
         currentRun = await store.transitionRun(lease, patch, options);
         return currentRun;
       };
-      runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+      runtime.startAgentTurn = async (activeTurn, options = {}) => {
         currentRun = await store.startAgentTurn(lease, activeTurn, {
           activity: {
             actor: activeTurn.role,
@@ -1466,7 +1580,7 @@ async function createFixture(
             kind: "turn-started",
             message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
           },
-          ...(pipelineState === undefined ? {} : { pipelineState }),
+          ...options,
         });
         return currentRun;
       };
@@ -1491,7 +1605,15 @@ async function createFixture(
       };
       return currentRun;
     };
-    runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+    runtime.startAgentTurn = async (
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) => {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? currentRun.pipelineState,
+          currentRun.revision,
+        ) ?? pipelineState;
       currentRun = {
         ...currentRun,
         ...(pipelineState === undefined ? {} : { pipelineState }),
@@ -1537,7 +1659,7 @@ async function createFixture(
     return currentRun;
   }
 
-  async function recover() {
+  async function recover(prepare) {
     if (stateStore === "memory") {
       assertRun(currentRun);
       installStoreRuntime();
@@ -1547,12 +1669,14 @@ async function createFixture(
     const reopened = createRunStore({ stateRoot });
     lease = await reopened.acquireRunLease(currentRun.runId);
     currentRun = await reopened.recoverRun(lease);
+    if (prepare !== undefined)
+      currentRun = await prepare(reopened, lease, currentRun);
     runtime.transition = async (patch, options) => {
       transitions.push({ patch, options });
       currentRun = await reopened.transitionRun(lease, patch, options);
       return currentRun;
     };
-    runtime.startAgentTurn = async (activeTurn, { pipelineState } = {}) => {
+    runtime.startAgentTurn = async (activeTurn, options = {}) => {
       currentRun = await reopened.startAgentTurn(lease, activeTurn, {
         activity: {
           actor: activeTurn.role,
@@ -1560,7 +1684,7 @@ async function createFixture(
           kind: "turn-started",
           message: `${activeTurn.role} ${activeTurn.phase} turn started.`,
         },
-        ...(pipelineState === undefined ? {} : { pipelineState }),
+        ...options,
       });
       return currentRun;
     };
@@ -1663,6 +1787,7 @@ export {
   findingArbitration,
   hash,
   invalidProductionFinalization,
+  matchesSchemaSubset,
   migrateVersionOneState,
   polishingBlocked,
   polishingCompleted,

@@ -1,25 +1,40 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { customExecutionFixture } from "../../../test/support/index.js";
 import {
+  attachAuthentication,
+  authenticationFailure,
+} from "../../../test/support/authentication.js";
+import {
   attachAvailability,
   availabilityFailure,
 } from "../../../test/support/availability.js";
+import { modelCatalogMiss } from "../../../test/support/model-catalog.js";
 import {
   attachOutputExhaustion,
   outputExhaustion,
 } from "../../../test/support/output-exhaustion.js";
 import { createClarificationService } from "../../../src/clarifications/index.js";
 import { planExecutionPipeline, runPlanExecution } from "../src/index.js";
-import { writableResultDiagnostic } from "../src/writable-result.js";
+import {
+  assertWritableResult,
+  writableResultDiagnostic,
+} from "../src/writable-result.js";
+import {
+  normalizeImplementationResult,
+  normalizeResolutionResult,
+} from "../src/workflow-contract.js";
 import {
   IMPLEMENTATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
 } from "../src/schemas.js";
 import {
+  bootstrapReady,
+  clarificationReady,
   createFixture,
   implementationCompleted,
   finalizationPassed,
@@ -27,10 +42,12 @@ import {
   resolution,
   reviewFindings,
   reviewApproved,
+  reconciliationResolved,
   checkAndFix,
   cleanConfirmation,
   implementationBlocked,
   implementationProductDecision,
+  matchesSchemaSubset,
   SOURCE_SESSION,
   stagnation,
 } from "./support/index.js";
@@ -40,7 +57,322 @@ const malformed = () => ({
   reason: "PRIVATE_REJECTED_VALUE",
 });
 const resultCalls = (fixture, schema = IMPLEMENTATION_SCHEMA) =>
-  fixture.calls.worker.filter((request) => request.schema === schema);
+  fixture.calls.worker.filter(
+    (request) =>
+      request.schema === schema ||
+      (schema === FINDING_RESOLUTION_SCHEMA &&
+        request.schema === FINDING_RECOVERY_SCHEMA),
+  );
+
+const unfinished = (id = "R1") => ({
+  status: "UNFINISHED",
+  decisions: [],
+  reason: "The original repair remains necessary.",
+  question: "",
+  options: [],
+  whyBlocked: "",
+  evidence: [`The preserved candidate still contains blocker ${id}.`],
+});
+
+test("unfinished recovery is strict and unavailable to ordinary Worker turns", () => {
+  const value = unfinished();
+  const normalize = (payload) =>
+    normalizeResolutionResult(payload, [{ id: "R1" }], new Set(), {
+      recoveryOnly: true,
+    });
+  assert.equal(
+    matchesSchemaSubset(FINDING_RECOVERY_SCHEMA, { result: value }),
+    true,
+  );
+  assert.doesNotThrow(() => normalize(value));
+  assert.equal(
+    matchesSchemaSubset(FINDING_RESOLUTION_SCHEMA, { result: value }),
+    false,
+  );
+  assert.throws(() =>
+    normalizeResolutionResult(value, [{ id: "R1" }], new Set()),
+  );
+  assert.throws(() =>
+    normalizeImplementationResult({
+      ...implementationCompleted(),
+      status: "UNFINISHED",
+    }),
+  );
+  for (const change of [
+    { decisions: resolution({ id: "R1", decision: "FIX" }).decisions },
+    { evidence: [] },
+    { reason: "" },
+    { question: "New question" },
+  ]) {
+    assert.equal(
+      matchesSchemaSubset(FINDING_RECOVERY_SCHEMA, {
+        result: { ...value, ...change },
+      }),
+      false,
+    );
+    assert.throws(() => normalize({ ...value, ...change }), {
+      code: "ERR_INVALID_PLAN_EXECUTION_OUTPUT",
+    });
+  }
+});
+
+test("legacy blocked recovery inspects unfinished work before explicitly authorizing one repair", async (t) => {
+  let writes = 0;
+  const bad = {
+    ...resolution({ id: "R1", decision: "FIX" }),
+    reason: "invalid",
+  };
+  const fixture = await createFixture(t, {
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    workWorker: [
+      implementationCompleted(),
+      bad,
+      {
+        ...unfinished(),
+        status: "BLOCKED",
+        reason: "Required inspection evidence is unavailable.",
+      },
+      unfinished(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema === FINDING_RESOLUTION_SCHEMA &&
+        request.access === "workspace-write"
+      ) {
+        await writeFile(
+          join(request.cwd, "repair.txt"),
+          ++writes === 1 ? "unfinished\n" : "repaired\n",
+        );
+        if (writes === 2)
+          throw Object.assign(new Error("Provider prerequisite unavailable"), {
+            recoverable: true,
+          });
+      }
+    },
+  });
+  const blocked = await fixture.run({ maxFixRoundsPerStep: 1 });
+  assert.equal(blocked.pause.reason, "environment_blocked");
+  assert.equal(blocked.pipelineState.writableResult.stage, "blocked");
+  const legacy = structuredClone(blocked.pipelineState);
+  legacy.writableResult.schemaVersion = 1;
+  delete legacy.writableResult.repair;
+  const migrated = planExecutionPipeline.migrations[44]({
+    pipelineState: legacy,
+  });
+  assert.deepEqual(migrated, blocked.pipelineState);
+  fixture.persistPipelineState(migrated);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  assert.equal(paused.activeTurn, null);
+  assert.equal(paused.pipelineState.writableResult.stage, "repair-required");
+  assert.equal(paused.pipelineState.writableResult.blockers[0].id, "R1");
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "unfinished\n",
+  );
+  assert.equal(paused.counters.fixRounds, 1);
+  assert.equal(paused.pipelineState.writableResult.attempts, 2);
+  assert.equal(paused.pipelineState.writableResult.additionalAttempts, 1);
+  assert.deepEqual(
+    planExecutionPipeline.projections.pause(paused).nextActions,
+    [{ type: "resume", action: null }],
+  );
+  for (const mutate of [
+    (run) => {
+      run.pipelineState.writableResult.repair = null;
+    },
+    (run) => {
+      run.pipelineState.writableResult.attempts--;
+    },
+    (run) => {
+      run.pipelineState.workReports.at(-1).recovery.previous =
+        run.pipelineState.writableResult.repair;
+    },
+    (run) => {
+      run.activeTurn = { role: "worker", phase: "resolve-findings" };
+    },
+  ]) {
+    const rejected = structuredClone(paused);
+    mutate(rejected);
+    assert.throws(() => planExecutionPipeline.workflow.validateRun(rejected), {
+      code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+    });
+  }
+  const unavailable = await fixture.run();
+  assert.equal(unavailable.pause.reason, "backend_unavailable");
+  assert.equal(unavailable.pipelineState.writableResult.stage, "ready");
+  assert.equal(unavailable.pipelineState.writableResult.attempts, 2);
+  // The new invocation cannot replenish the already consumed inspection allowance.
+  const exhausted = await fixture.run();
+  assert.equal(exhausted.pause.reason, "writable_output_invalid");
+  assert.equal(writes, 2);
+  const done = await fixture.run();
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(writes, 2);
+  assert.equal(done.counters.fixRounds, 1);
+  assert.equal(
+    await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+    "repaired\n",
+  );
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    [
+      "workspace-write",
+      "read-only",
+      "read-only",
+      "workspace-write",
+      "read-only",
+    ],
+  );
+  const reservation = fixture.transitions.find(
+    ({ patch }) =>
+      patch?.pipelineState.writableResult?.stage === "prepared" &&
+      patch.pipelineState.writableResult.repair !== null,
+  );
+  assert.equal(reservation.patch.pipelineState.writableResult.attempts, 2);
+  assert.equal(
+    reservation.patch.pipelineState.writableResult.additionalAttempts,
+    1,
+  );
+  const renewed = structuredClone(reservation.patch.pipelineState);
+  renewed.writableResult.additionalAttempts++;
+  assert.throws(() => assertWritableResult(renewed), {
+    code: "ERR_INVALID_PLAN_EXECUTION_STATE",
+  });
+  assert.ok(
+    done.pipelineState.workReports.some(
+      ({ status }) => status === "UNFINISHED",
+    ),
+  );
+  assert.equal(done.pipelineState.completedCommits.length, 1);
+  assert.equal(fixture.calls.reviewer.length, 4); // Bootstrap, original review, renewed review, terminal confirmation.
+});
+
+test("a catalog miss during continued repair offers only a new read-only allowance", async (t) => {
+  const miss = modelCatalogMiss();
+  let writes = 0;
+  const fixture = await createFixture(t, {
+    workWorker: [
+      implementationCompleted(),
+      { ...resolution({ id: "R1", decision: "FIX" }), reason: "invalid" },
+      unfinished(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema !== FINDING_RESOLUTION_SCHEMA ||
+        request.access !== "workspace-write"
+      )
+        return;
+      if (++writes === 2) throw miss;
+      await writeFile(join(request.cwd, "repair.txt"), "unfinished\n");
+    },
+  });
+  fixture.runtime.catalogRetry = {
+    code: "ERR_MODEL_CATALOG_RETRY",
+    eligible: (cause) => cause === miss,
+    hasWritableNoEffect: ({ phase }) => phase === "resolve-findings",
+    hasPossibleEffect: () => false,
+    resuming: () => false,
+    claimResume: () => false,
+    details: (role, checkpoint) => ({
+      code: "ERR_MODEL_CATALOG_RETRY",
+      role,
+      checkpoint,
+    }),
+  };
+
+  const repair = await fixture.run();
+  assert.equal(repair.pause.reason, "finding_repair_required");
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "writable_output_invalid");
+  assert.equal(paused.activeTurn, null);
+  const checkpoint = paused.pipelineState.writableResult;
+  assert.equal(checkpoint.stage, "exhausted");
+  assert.deepEqual(
+    checkpoint.blockers,
+    repair.pipelineState.writableResult.blockers,
+  );
+  assert.equal(checkpoint.attempts, 1);
+  assert.equal(checkpoint.additionalAttempts, 0);
+  assert.deepEqual(paused.counters, repair.counters);
+
+  const { nextActions } = planExecutionPipeline.projections.pause(paused);
+  assert.deepEqual(nextActions, [{ type: "resume", action: null }]);
+  const resumed = await runPlanExecution({
+    run: structuredClone(paused),
+    action: nextActions[0].action,
+    runtime: fixture.runtime,
+    settings: paused.pipelineState.settings,
+  });
+  assert.equal(resumed.pipelineState.workflowState, "DONE");
+  assert.equal(resumed.counters.fixRounds, paused.counters.fixRounds);
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    ["workspace-write", "read-only", "workspace-write", "read-only"],
+  );
+});
+
+test("an uncharged unfinished repair needs the existing explicit fix-budget grant", async (t) => {
+  const fixture = await createFixture(t, {
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    workWorker: [
+      implementationCompleted(),
+      resolution({ id: "R1", decision: "FIX" }),
+      resolution(),
+      unfinished("R2"),
+      resolution({ id: "R2", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    workReviewer: [
+      reviewFindings("R1"),
+      reviewFindings("R2"),
+      reviewApproved(),
+    ],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema === FINDING_RESOLUTION_SCHEMA &&
+        request.access === "workspace-write"
+      )
+        await writeFile(join(request.cwd, "repair.txt"), "repair\n");
+    },
+  });
+  const paused = await fixture.run({ maxFixRoundsPerStep: 1 });
+  assert.equal(paused.pause.reason, "fix_limit_reached");
+  assert.equal(paused.pipelineState.writableResult.stage, "repair-required");
+  assert.equal(paused.pipelineState.writableResult.budgetExhausted, true);
+  assert.equal(paused.pipelineState.pendingCorrection, false);
+  const actions = planExecutionPipeline.projections.pause(paused).nextActions;
+  assert.deepEqual(actions, [
+    { type: "resume", action: { type: "extra-fix-rounds", amount: 1 } },
+  ]);
+  assert.throws(() => planExecutionPipeline.validateResumeAction(paused, null));
+  const done = await fixture.run({}, { type: "extra-fix-rounds", amount: 1 });
+  assert.equal(
+    done.pipelineState.workflowState,
+    "DONE",
+    JSON.stringify(done.pause),
+  );
+  assert.equal(done.counters.fixRounds, 2);
+  assert.deepEqual(
+    resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
+    ["workspace-write", "read-only", "read-only", "workspace-write"],
+  );
+  assert.equal(
+    done.pipelineState.workReports.find(({ status }) => status === "UNFINISHED")
+      .recovery.budgetExhausted,
+    true,
+  );
+});
 
 for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
   test(`${phase} registration failure reuses the unstarted reservation without a result correction`, async (t) => {
@@ -121,7 +453,14 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
           ? [reviewApproved()]
           : [reviewFindings("R1"), reviewApproved()],
       async onRoleRun(_role, request) {
-        if (request.schema !== schema) return;
+        if (
+          request.schema !== schema &&
+          !(
+            schema === FINDING_RESOLUTION_SCHEMA &&
+            request.schema === FINDING_RECOVERY_SCHEMA
+          )
+        )
+          return;
         if (!interrupted) {
           interrupted = true;
           throw Object.assign(new Error("Legacy provider unavailable"), {
@@ -391,6 +730,8 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
     const invalid = { ...valid, reason: "PRIVATE_REJECTED_VALUE" };
     let exhausted = false;
     let publicationInterrupted = false;
+    let resumeInterrupted = false;
+    let retryCheckpoint;
     const fixture = await createFixture(t, {
       workWorker: [
         ...(phase === "IMPLEMENT" ? [] : [implementationCompleted()]),
@@ -403,7 +744,14 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
           ? [reviewApproved()]
           : [reviewFindings("R1"), reviewApproved()],
       async onRoleRun(_role, request) {
-        if (request.schema !== schema) return;
+        if (
+          request.schema !== schema &&
+          !(
+            schema === FINDING_RESOLUTION_SCHEMA &&
+            request.schema === FINDING_RECOVERY_SCHEMA
+          )
+        )
+          return;
         if (request.access === "workspace-write")
           await writeFile(
             join(request.cwd, "candidate.txt"),
@@ -412,6 +760,8 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         else if (!exhausted) {
           exhausted = true;
           throw outputExhaustion();
+        } else {
+          retryCheckpoint = fixture.currentRun.pipelineState.writableResult;
         }
       },
       onTransition(run) {
@@ -422,6 +772,19 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         ) {
           publicationInterrupted = true;
           throw new Error("Exhaustion publication response interrupted");
+        }
+        if (
+          phase === "RESOLVE_FINDINGS" &&
+          run.pipelineState.writableResult?.stage === "retry-ready" &&
+          !resumeInterrupted
+        ) {
+          resumeInterrupted = true;
+          throw Object.assign(
+            new Error("Resume publication response interrupted"),
+            {
+              code: "ERR_RUN_REVISION_CHANGED",
+            },
+          );
         }
       },
     });
@@ -474,18 +837,21 @@ for (const phase of ["IMPLEMENT", "RESOLVE_FINDINGS"]) {
         { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
       );
     }
-    const calls = fixture.calls.worker.length;
-    const fingerprint = saved.pipelineState.writableResult.candidateFingerprint;
-    const paused = await fixture.run();
-    assert.equal(paused.pause.reason, "writable_output_invalid");
-    assert.equal(paused.pipelineState.writableResult.attempts, 1);
-    assert.equal(paused.pipelineState.writableResult.additionalAttempts, 0);
-    assert.equal(
-      paused.pipelineState.writableResult.candidateFingerprint,
-      fingerprint,
-    );
-    assert.equal(fixture.calls.worker.length, calls);
+    if (phase === "RESOLVE_FINDINGS") {
+      await assert.rejects(
+        fixture.run(),
+        /Resume publication response interrupted/u,
+      );
+      assert.equal(retryCheckpoint, undefined);
+      assert.equal(fixture.currentRun.activeTurn, null);
+    }
     const done = await fixture.run();
+    assert.equal(retryCheckpoint.attempts, 1);
+    assert.equal(retryCheckpoint.additionalAttempts, 0);
+    assert.equal(
+      retryCheckpoint.candidateFingerprint,
+      saved.pipelineState.writableResult.candidateFingerprint,
+    );
     assert.equal(done.pipelineState.workflowState, "DONE");
     assert.equal(done.counters.fixRounds, phase === "IMPLEMENT" ? 0 : 1);
     assert.equal(done.pipelineState.completedCommits.length, 1);
@@ -597,6 +963,128 @@ test("availability recovery within restatement retains its one consumed output a
     ),
   );
 });
+
+const SCOPE_ARTIFACT = "LOCAL_ARTIFACTS/check.json";
+const scopeFailures = {
+  availability: availabilityFailure,
+  catalog: modelCatalogMiss,
+  authentication: authenticationFailure,
+  "output exhaustion": outputExhaustion,
+};
+
+async function createScopeFixture(t, failure, { changeDuringAttempt }) {
+  const cause = scopeFailures[failure]();
+  const infrastructure = [
+    ...bootstrapReady("Worker").validationInfrastructure,
+    SCOPE_ARTIFACT,
+  ];
+  let failed = false;
+  const fixture = await createFixture(t, {
+    async prepareProject(projectPath) {
+      await mkdir(join(projectPath, "LOCAL_ARTIFACTS"));
+      await writeFile(join(projectPath, SCOPE_ARTIFACT), "{}\n");
+    },
+    worker: [
+      clarificationReady(),
+      {
+        ...bootstrapReady("Worker"),
+        validationInfrastructure: infrastructure,
+      },
+      reconciliationResolved(),
+    ],
+    reviewer: [
+      {
+        ...bootstrapReady("Reviewer"),
+        validationInfrastructure: infrastructure,
+      },
+    ],
+    workWorker: [malformed(), implementationCompleted()],
+    async onRoleRun(_role, request) {
+      if (
+        request.schema !== IMPLEMENTATION_SCHEMA ||
+        request.access !== "read-only" ||
+        failed
+      )
+        return;
+      failed = true;
+      if (changeDuringAttempt) await changeScopeArtifact(request.cwd);
+      throw cause;
+    },
+  });
+  const availability = attachAvailability(fixture);
+  attachAuthentication(fixture);
+  attachOutputExhaustion(fixture);
+  fixture.runtime.catalogRetry = {
+    code: "ERR_MODEL_CATALOG_RETRY",
+    eligible: (candidate) => candidate === cause && failure === "catalog",
+    hasWritableNoEffect: () => false,
+    hasPossibleEffect: () => false,
+    resuming: () => false,
+    claimResume: () => false,
+    details: (role, checkpoint) => ({
+      code: "ERR_MODEL_CATALOG_RETRY",
+      role,
+      checkpoint,
+    }),
+  };
+  return { availability, fixture };
+}
+
+function changeScopeArtifact(projectPath) {
+  return writeFile(join(projectPath, SCOPE_ARTIFACT), '{"changed":true}\n');
+}
+
+function assertScopeDriftPause(fixture, paused) {
+  assert.equal(paused.pause.reason, "unsafe_git_state");
+  assert.equal(
+    paused.pause.code,
+    "ERR_REVIEW_VALIDATION_INFRASTRUCTURE_CHANGED",
+  );
+  assert.equal(paused.activeTurn, null);
+  const reservation = paused.pipelineState.writableResult;
+  assert.equal(reservation.stage, "correcting");
+  assert.equal(reservation.attempts, 1);
+  assert.equal(reservation.additionalAttempts, 0);
+  assert.equal(paused.counters.fixRounds, 0);
+  assert.deepEqual(
+    resultCalls(fixture).map(({ access }) => access),
+    ["workspace-write", "read-only"],
+  );
+  assert.equal(
+    fixture.transitions.some(
+      ({ patch }) =>
+        patch?.pipelineState?.writableResult?.stage === "retry-ready",
+    ),
+    false,
+  );
+}
+
+for (const failure of Object.keys(scopeFailures)) {
+  test(`restatement ${failure} recovery rechecks its validation scope before publishing a continuation`, async (t) => {
+    const { availability, fixture } = await createScopeFixture(t, failure, {
+      changeDuringAttempt: true,
+    });
+    assertScopeDriftPause(fixture, await fixture.run());
+    assert.equal(availability.delays.length, 0);
+  });
+}
+
+for (const failure of ["authentication", "output exhaustion"]) {
+  test(`explicit resume after restatement ${failure} rechecks its validation scope`, async (t) => {
+    const { fixture } = await createScopeFixture(t, failure, {
+      changeDuringAttempt: false,
+    });
+    const paused = await fixture.run();
+    assert.equal(
+      paused.pause.reason,
+      failure === "authentication"
+        ? "authentication_required"
+        : "output_exhausted",
+    );
+    await changeScopeArtifact(fixture.projectPath);
+    assertScopeDriftPause(fixture, await fixture.run());
+  });
+}
 
 test("frozen input and native-policy changes stop correction before invoking it", async (t) => {
   const fixture = await createFixture(t, {
@@ -811,17 +1299,56 @@ test("custom recovery retains earlier receipts and validates criterion evidence 
   assert.deepEqual(done.pipelineState.completedCommits, []);
 });
 
+test("custom unfinished recovery requests a null result and preserves accepted receipts", async (t) => {
+  const fixture = await customExecutionFixture(t, "independent", {
+    beforeTurn({ saved, request }) {
+      if (saved.pipelineState.currentStep !== 2) return;
+      if (saved.activeTurn.phase === "review") {
+        const {
+          validationChange,
+          finalizationFindingIds,
+          validationEvidence,
+          ...report
+        } = reviewFindings("R1");
+        return report;
+      }
+      if (saved.activeTurn.phase === "resolve-findings")
+        return {
+          ...resolution(),
+          customResult: saved.pipelineState.customCandidate,
+        };
+      if (saved.activeTurn.phase === "writable-result") {
+        assert.match(
+          request.prompt,
+          /Return customResult: null only for [^.]*UNFINISHED/u,
+        );
+        return { ...unfinished(), customResult: null };
+      }
+    },
+  });
+  const paused = (await fixture.run()).run;
+  assert.equal(paused.pause.reason, "finding_repair_required");
+  assert.equal(paused.pipelineState.customResults.accepted.length, 1);
+  assert.equal(paused.pipelineState.writableResult.blockers[0].id, "R1");
+});
+
 test("malformed resolution retains original blockers and charges its mutation once", async (t) => {
   const badResolution = {
     ...resolution({ id: "R1", decision: "FIX" }),
     evidence: ["PRIVATE_REJECTED_VALUE"],
   };
+  const disposition = resolution({ id: "R1", decision: "FIX" });
+  disposition.decisions[0].reason =
+    "Retain the historical early execution without validation credit.";
+  disposition.decisions[0].evidence = [
+    "All later checks remain assigned to FINALIZE.",
+  ];
   const fixture = await createFixture(t, {
     workReviewer: [reviewFindings("R1"), reviewApproved()],
     workWorker: [
       implementationCompleted(),
       badResolution,
-      resolution({ id: "R1", decision: "FIX" }),
+      disposition,
       finalizationPassed(),
     ],
     async onRoleRun(_role, request) {
@@ -835,6 +1362,17 @@ test("malformed resolution retains original blockers and charges its mutation on
   const done = await fixture.run();
   assert.equal(done.pipelineState.workflowState, "DONE");
   assert.equal(done.counters.fixRounds, 1);
+  assert.deepEqual(
+    done.pipelineState.workReports.find(
+      ({ phase }) => phase === "RESOLVE_FINDINGS",
+    ).decisions,
+    disposition.decisions,
+  );
+  const terminal = fixture.calls.reviewer.at(-1);
+  assert.ok(terminal.recoveryPrompt.includes(disposition.decisions[0].reason));
+  assert.ok(
+    terminal.recoveryPrompt.includes(disposition.decisions[0].evidence[0]),
+  );
   assert.deepEqual(
     resultCalls(fixture, FINDING_RESOLUTION_SCHEMA).map(({ access }) => access),
     ["workspace-write", "read-only"],

@@ -14,6 +14,7 @@ The mandatory checks below remain required when no general authoring helper is a
 
 - Establish the requested skill, destination, intended behavior, and authorized changes from the task and applicable instructions.
 - For updates, read the whole existing skill tree and relevant callers; retain a baseline for comparison before editing.
+- Apply [instruction-authoring](../instruction-authoring/SKILL.md) to the skill's content: necessary, owned, discoverable rules with preserved meaning.
 - Preserve entry paths, required reading routes, rules, examples, code fences, and permission boundaries unless the user authorizes a substantive change.
 - Preserve supported frontmatter, UI metadata, dependencies, and existing explicit-only invocation policy; use normal implicit discovery for new skills unless requested otherwise.
 - Authoring instructions does not authorize executing their described workflows or external actions. Keep evaluations within existing authorization and use isolated local artifacts.

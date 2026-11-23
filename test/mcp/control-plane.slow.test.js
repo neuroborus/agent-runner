@@ -40,9 +40,117 @@ import {
 import {
   inspectOwnedSessionProcesses,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 
 import { resolveStopBoundary } from "../../src/pipeline-registry.js";
+import {
+  appendReadFailure,
+  clarificationAppendFixture,
+  createAdapter,
+  operatorFixture,
+  runnerFor,
+} from "../support/index.js";
+
+for (const change of ["transcript", "task", "controls"]) {
+  test(`cold clarification append rejects changed ${change} before mutation with matching CLI/MCP projections`, async (t) => {
+    const f = await clarificationAppendFixture(t, "plan-execution", {
+      mode: "lazy",
+    });
+    const service = createClarificationService({ interactive: false });
+    const initial = f.open({
+      clarifications: {
+        ...service,
+        appendQuestionRound(options) {
+          return service.appendQuestionRound({
+            ...options,
+            async persistAppend(proof) {
+              await options.persistAppend(proof);
+              throw appendReadFailure();
+            },
+          });
+        },
+      },
+    });
+    const runId = (await initial.runner.create(f.input)).run.runId;
+    const interrupted = (await initial.runner.resume({ runId })).run;
+    assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+    const path =
+      change === "transcript"
+        ? interrupted.pipelineState.clarificationPath
+        : change === "task"
+          ? join(f.taskPath, "task.md")
+          : join(f.projectPath, ".git", "config");
+    const prior = await readFile(path, "utf8");
+    await writeFile(
+      path,
+      prior +
+        (change === "controls"
+          ? '\n[remote "origin"]\n\turl = https://example.invalid/changed.git\n'
+          : "\nUnexpected third-party text.\n"),
+    );
+    const bytes = await f.transcript(interrupted);
+    const cold = f.open({
+      clarifications: {
+        ...service,
+        appendQuestionRound() {
+          assert.fail(
+            "Protected bindings must be checked before append replay",
+          );
+        },
+        prepareEdit() {
+          assert.fail("Rejected proof cannot authorize an editor");
+        },
+        openEditor() {
+          assert.fail("Rejected proof cannot open an editor");
+        },
+      },
+    });
+    const rejected = (await cold.runner.resume({ runId })).run;
+    assert.equal(rejected.pipelineState.workflowState, "WAITING_FOR_USER");
+    assert.deepEqual(
+      rejected.pipelineState.pendingClarificationAppend,
+      interrupted.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(rejected.pipelineState.pendingEdit, null);
+    assert.equal(rejected.counters.clarificationRounds, 0);
+    assert.equal(await f.transcript(rejected), bytes);
+    assert.equal(f.calls.length, 1);
+    const control = createMcpControlPlane({
+      runner: cold.runner,
+      runStore: cold.store,
+    });
+    const status = await control.runStatus({ runId });
+    const waited = await control.runWait({ runId, cursor: 0, timeoutMs: 0 });
+    assert.deepEqual(waited.pause, status.pause);
+    assert.equal(status.pendingInput, null);
+    assert.equal(status.pause.resumeState, null);
+    assert.ok(
+      status.pause.nextActions.every(
+        ({ type }) => type !== "resume" && type !== "respond",
+      ),
+    );
+    let output = "";
+    assert.equal(
+      await main(["status", "--run", runId], {
+        runner: cold.runner,
+        stdout: {
+          write(chunk) {
+            output += chunk;
+          },
+        },
+        stderr: {
+          write(message) {
+            assert.fail(message);
+          },
+        },
+      }),
+      0,
+    );
+    assert.ok(output.includes(status.pause.explanation));
+    assert.doesNotMatch(JSON.stringify(status), /Unexpected third-party text/u);
+    assert.doesNotMatch(output, /Unexpected third-party text/u);
+  });
+}
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_RUN_ID = "22222222-2222-4222-8222-222222222222";
@@ -153,6 +261,7 @@ await writeFile(${JSON.stringify(diagnosticPath)}, JSON.stringify({ diagnostic, 
     stage: "execution-lease",
     code: "ERR_RUN_LEASED",
     explanation: "Execution ownership could not be acquired.",
+    ownershipDiagnostic: null,
   };
   const control = createMcpControlPlane({
     runner: storedRunner(store, paths),
@@ -1469,6 +1578,77 @@ test("persists stop receipts and projects pending stops without replacing a live
   );
 });
 
+test("MCP cancels a settled pause through validated detached reconciliation", async (t) => {
+  const fixture = await operatorFixture(t, "plan-authoring");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const adapter = createAdapter();
+  const runner = runnerFor(fixture, { codex: adapter }, { runStore: store });
+  const { run } = await runner.create({
+    pipelineId: "plan-authoring",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  const launches = [];
+  const control = createMcpControlPlane({
+    runner,
+    runStore: store,
+    async launchRun(runId, action, options) {
+      launches.push(options.stopCheckpointRevision);
+      // The in-process child receives the same input as a detached CLI resume.
+      await runner.resume({
+        runId,
+        action,
+        dispatch: options.dispatch,
+        stopCheckpointRevision: options.stopCheckpointRevision,
+        expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+      });
+      options.onExit(0, null);
+    },
+  });
+  const pauseInput = {
+    runId: run.runId,
+    expectedRevision: run.revision,
+    idempotencyKey: "pause-key",
+  };
+  const pause = await control.runPause(pauseInput);
+  const paused = await store.loadRun(run.runId);
+  assert.equal(paused.pause.reason, "operator_paused");
+  assert.notEqual(paused.stopRequest.reconciledRevision, null);
+  const cancelInput = {
+    runId: run.runId,
+    expectedRevision: paused.revision,
+    idempotencyKey: "cancel-key",
+  };
+  await assert.rejects(
+    control.runCancel({
+      ...cancelInput,
+      expectedRevision: pause.expectedRevision,
+      idempotencyKey: "stale-cancel",
+    }),
+    { code: "ERR_STALE_RUN_REVISION" },
+  );
+
+  const cancel = await control.runCancel(cancelInput);
+  assert.equal(cancel.revision, paused.revision + 1);
+  const canceled = await store.loadRun(run.runId);
+  assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+  assert.equal(canceled.pause.reason, "operator_canceled");
+  assert.deepEqual(canceled.pause.operatorResume, paused.pause.operatorResume);
+  assert.deepEqual(launches, [pause.expectedRevision, paused.revision]);
+  assert.equal(adapter.calls.length, 0);
+  assert.deepEqual(await control.runPause(pauseInput), pause);
+  assert.deepEqual(await control.runCancel(cancelInput), cancel);
+  assert.equal(launches.length, 2);
+  await assert.rejects(
+    control.runPause({
+      ...pauseInput,
+      expectedRevision: canceled.revision,
+      idempotencyKey: "late-pause",
+    }),
+    { code: "ERR_RUN_TERMINAL" },
+  );
+});
+
 test("MCP deferred timing preserves replay, supersession, waits, and historical settlement", async (t) => {
   const paths = await workspace(t, "agent-runner-mcp-deferred-");
   const store = createRunStore({
@@ -2214,6 +2394,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
   });
   const launchCounts = new Map();
   const children = [];
+  let firstLosingChild;
   let firstStartCount = 0;
 
   function launchRun(runId, _action, options) {
@@ -2270,6 +2451,7 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
       }
     })();
     children.push(child);
+    if (runId === SECOND_RUN_ID && attempt === 1) firstLosingChild = child;
   }
 
   const commonInput = {
@@ -2326,6 +2508,8 @@ test("retries a simultaneous detached start that loses worktree ownership", asyn
   });
   assert.equal(launchCounts.get(RUN_ID), 1);
 
+  // A control-plane rejection can arrive before the child has tested the lease.
+  await firstLosingChild;
   releaseWinner.resolve();
   await Promise.all(children.slice(0, 2));
 

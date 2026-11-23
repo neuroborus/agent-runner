@@ -1,3 +1,6 @@
+import { createGuidanceService as createGuidance } from "./guidance/index.js";
+import { createRunStore, resolveStopBoundary } from "./pipeline-registry.js";
+
 export { main } from "./cli.js";
 export { EditorError, openConfiguredEditor } from "./editor.js";
 export {
@@ -18,11 +21,7 @@ export {
   resolvePipelineConfiguration,
 } from "./config/index.js";
 export { createGitService, GitSafetyError } from "./git/index.js";
-export {
-  createGuidanceService,
-  GuidanceError,
-  MAX_GUIDANCE_BYTES,
-} from "./guidance/index.js";
+export { GuidanceError, MAX_GUIDANCE_BYTES } from "./guidance/index.js";
 export {
   createDetachedLauncher,
   createMcpControlPlane,
@@ -35,6 +34,7 @@ export {
 } from "./mcp/index.js";
 export {
   createDetachedRuntimeCompatibilityToken,
+  createRunStore,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   getPipeline,
   listPipelines,
@@ -45,7 +45,6 @@ export {
   RunnerError,
 } from "./runner/index.js";
 export {
-  createRunStore,
   resolveStateRoot,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
@@ -63,3 +62,10 @@ export {
   createWorkspaceService,
   WorkspaceSafetyError,
 } from "./workspace/index.js";
+
+export function createGuidanceService({
+  runStore = createRunStore({ resolveStopBoundary }),
+  ...options
+} = {}) {
+  return createGuidance({ ...options, runStore });
+}

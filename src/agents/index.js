@@ -1,3 +1,4 @@
+import { ownershipDiagnosticFrom } from "../platform/index.js";
 import {
   ADAPTER_FAILURE_CLASS,
   deriveEffectStarted,
@@ -29,6 +30,7 @@ export class AgentBoundaryError extends Error {
     super(boundaryMessage(code, failure.failureClass));
     this.name = "AgentBoundaryError";
     this.failure = failure;
+    this.ownershipDiagnostic = ownershipDiagnosticFrom(cause);
     if (code !== undefined) this.code = code;
     this.ambiguous = failure.outcome === "ambiguous";
     this.recoverable = failure.retry === "transient";
@@ -111,16 +113,20 @@ export {
   ADAPTER_FAILURE_CLASS,
   AUTHENTICATION_REQUIRED_DISPOSITION,
   AVAILABILITY_REASONS,
+  CATALOG_VALIDATED_MODEL,
   clientAttributionFingerprint,
   createCapabilityProof,
   DEFAULT_CLIENT_ATTRIBUTION,
   deriveEffectStarted,
   deriveLaunchRecovery,
   EFFECT_EVIDENCE,
+  EFFORT_DIAGNOSTIC_CLASS,
   FAILURE_DISPOSITIONS,
   LAUNCH_CHECKPOINTS,
   LAUNCH_OUTCOMES,
   LAUNCH_RECOVERY_CHECKPOINTS,
+  MODEL_CATALOG_INVALID_DIAGNOSTIC,
+  MODEL_UNAVAILABLE_DIAGNOSTIC,
   normalizeClientAttribution,
   normalizeSessionNamingContext,
   normalizeSessionNamingDiagnostic,
@@ -130,17 +136,6 @@ export {
   RETRY_ELIGIBILITY,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "./adapter-contract.js";
-export {
-  assertOwnedProcessLauncherProtected,
-  inspectOwnedSessionProcesses,
-  resolveOwnedProcessLauncher,
-  spawnOwnedProcess,
-  terminateOwnedProcess,
-} from "./owned-process.js";
-export {
-  readProcessIdentity,
-  readProcessNamespace,
-} from "./process-containment.js";
 export {
   createProviderRegistry,
   PROVIDER_REGISTRY,

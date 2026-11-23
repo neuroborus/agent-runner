@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { constants as osConstants, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,17 +12,18 @@ import { runInNewContext } from "node:vm";
 
 import {
   assertOwnedProcessLauncherProtected,
+  createOwnershipDiagnostic,
   inspectOwnedSessionProcesses,
   readProcessIdentity,
   resolveOwnedProcessLauncher,
   spawnOwnedProcess,
   terminateOwnedProcess,
-} from "../../src/agents/index.js";
+} from "../../src/platform/index.js";
 
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
 const BOOT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const OWNED_PROCESS_MODULE = fileURLToPath(
-  new URL("../../src/agents/index.js", import.meta.url),
+  new URL("../../src/platform/index.js", import.meta.url),
 );
 
 function hostSessionLauncher(cwd, { ownershipMode }) {
@@ -1148,6 +1149,9 @@ test("watchdog cleanup requires the supervisor's retained ownership before clear
       });
       const context = {
         Buffer,
+        osConstants,
+        createOwnershipDiagnostic: (site, options) =>
+          createOwnershipDiagnostic(site, structuredClone(options)),
         createHash,
         randomUUID: () => ownerToken,
         spawn: () => child,
@@ -1177,7 +1181,7 @@ test("watchdog cleanup requires the supervisor's retained ownership before clear
       // Exercise the actual parent with injected effects, alongside the actual
       // embedded supervisor. No processes, signals or timers reach the host.
       const source = readFileSync(
-        new URL("../../src/agents/owned-process.js", import.meta.url),
+        new URL("../../src/platform/linux-owned-process.js", import.meta.url),
         "utf8",
       )
         .replace(/^import[\s\S]*?;\n/gmu, "")
@@ -1244,6 +1248,19 @@ test("watchdog cleanup requires the supervisor's retained ownership before clear
       if (survives) {
         assert.deepEqual(registrations, [44]);
         assert.equal(result.error?.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+        assert.equal(
+          result.error.ownershipDiagnostic.site,
+          "parent-missing-descendant-proof",
+        );
+        assert.equal(result.error.ownershipDiagnostic.startRequested, true);
+        assert.equal(
+          result.error.ownershipDiagnostic.terminationRequested,
+          true,
+        );
+        assert.equal(
+          result.error.ownershipDiagnostic.ownershipHandedOff,
+          transfer,
+        );
       } else {
         assert.deepEqual(registrations, [44, null]);
         assert.equal(result.value?.descendantsStopped, true);
@@ -2030,7 +2047,9 @@ test("recovery clears a dead session only after proving descendants absent", asy
     {
       inspectSessionProcesses(sessionId, _token, options) {
         assert.equal(sessionId, ownerPid);
-        assert.deepEqual(options, {
+        const { onInspection, ...inspectionOptions } = options;
+        assert.equal(typeof onInspection, "function");
+        assert.deepEqual(inspectionOptions, {
           includeSession: true,
         });
         return [];
@@ -2065,14 +2084,35 @@ test("recovery retains a dead session owner while descendants remain", async () 
         inspectSessionProcesses(sessionId, token, options) {
           assert.equal(sessionId, ownerPid);
           assert.equal(token, ownerToken);
-          assert.deepEqual(options, {
+          const { onInspection, ...inspectionOptions } = options;
+          assert.equal(typeof onInspection, "function");
+          assert.deepEqual(inspectionOptions, {
             includeSession: true,
+          });
+          onInspection({
+            work: 17,
+            elapsedMs: 9,
+            maxWork: 65_536,
+            maxElapsedMs: 250,
+            maxAttempts: 3,
           });
           return [123_456];
         },
       },
     ),
-    { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+    (cause) => {
+      assert.equal(cause.code, "ERR_EXECUTION_PROCESS_ACTIVE");
+      assert.equal(cause.ownershipDiagnostic.site, "recovery-active");
+      assert.equal(cause.ownershipDiagnostic.startRequested, null);
+      assert.deepEqual(cause.ownershipDiagnostic.inspection, {
+        work: 17,
+        elapsedMs: 9,
+        maxWork: 65_536,
+        maxElapsedMs: 250,
+        maxAttempts: 3,
+      });
+      return true;
+    },
   );
 });
 
@@ -2230,4 +2270,393 @@ test("bounds inspection work and elapsed time across ancestry and process churn"
     null,
     "a disappearing final process cannot hide budget exhaustion",
   );
+});
+
+test("embedded diagnostics distinguish failing supervisor branches and preserve budget samples through teardown", () => {
+  for (const branch of [
+    "finish-inspection-deadline",
+    "terminate-signal",
+    "terminate-check",
+  ]) {
+    let elapsed = 0;
+    const messages = [],
+      timers = [];
+    const context = embeddedSession("a".repeat(64), {
+      now: () => elapsed,
+      getuid: () => 1000,
+      list: () => {
+        elapsed += 317;
+        return [];
+      },
+      read: () => assert.fail("post-list budget must refuse before a read"),
+      setTimeout: (callback) => {
+        timers.push(callback);
+        return { unref() {}, ref() {} };
+      },
+      process: {
+        connected: true,
+        send: (message) => messages.push(structuredClone(message)),
+        exit: () => assert.fail("uncertain descendants cannot retire"),
+      },
+    });
+    if (branch === "finish-inspection-deadline") {
+      context.Date = { now: () => 0 };
+      runInNewContext("finish()", context);
+      context.Date = { now: () => 1_000 };
+      timers.shift()();
+    } else if (branch === "terminate-signal") {
+      runInNewContext("target = { pid: 55, kill() {} }; terminate()", context);
+    } else {
+      // Initial signal inspection succeeds; the existing termination check is
+      // the failing inspection. No extra discovery or timers are introduced.
+      context.require("node:fs").readdirSync = () => [];
+      runInNewContext(
+        "target = { pid: 55, kill() {} }; signalDescendants = () => true; terminate('SIGKILL', true)",
+        context,
+      );
+      timers.shift()();
+    }
+    const failure = messages.find(({ type }) => type === "containment-failure");
+    assert.equal(failure.branch, branch);
+    assert.deepEqual(failure.inspection, {
+      work: 1,
+      elapsedMs: 317,
+      maxWork: 65_536,
+      maxElapsedMs: 250,
+      maxAttempts: 3,
+    });
+    const retained = structuredClone(failure.inspection);
+    elapsed += 10_000;
+    runInNewContext("ownedMembers()", context);
+    assert.deepEqual(failure.inspection, retained);
+  }
+});
+
+// Actual parent code with injected process/IPC effects. This is simulated
+// transport evidence, separate from operator Source/Installed native acceptance.
+function diagnosticParent({
+  inspect = () => [],
+  identityAvailable = true,
+  deadlineNs,
+  monotonicNow,
+} = {}) {
+  const started = Promise.withResolvers();
+  const registrations = [];
+  const signals = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 44,
+    connected: true,
+    exitCode: null,
+    signalCode: null,
+    kill(signal) {
+      signals.push(signal);
+      child.signalCode = signal;
+      child.emit("close");
+      return true;
+    },
+    send(message, complete) {
+      if (message.type === "start") started.resolve(message);
+      complete();
+    },
+  });
+  const context = {
+    Buffer,
+    osConstants,
+    createHash,
+    randomUUID: () => "a".repeat(64),
+    createOwnershipDiagnostic: (site, options) =>
+      createOwnershipDiagnostic(site, structuredClone(options)),
+    spawn: () => child,
+    readProcessChildren: async () => [],
+    readProcessIdentity: async () =>
+      identityAvailable ? { bootId: BOOT_ID, startTicks: "44" } : null,
+    readProcessNamespace: async () => "pid:[1]",
+    setTimeout: () => ({ unref() {} }),
+    clearTimeout() {},
+    process: {
+      pid: 9,
+      execPath: process.execPath,
+      cwd: () => process.cwd(),
+      hrtime: process.hrtime,
+      kill() {},
+    },
+  };
+  const source = readFileSync(
+    new URL("../../src/platform/linux-owned-process.js", import.meta.url),
+    "utf8",
+  )
+    .replace(/^import[\s\S]*?;\n/gmu, "")
+    .replace(/^export /gmu, "");
+  runInNewContext(`${source}\nglobalThis.launch = spawnOwnedProcess;`, context);
+  context.launch("unused", [], {
+    deadlineNs,
+    monotonicNow,
+    inspectSessionProcesses: inspect,
+    onProcess: async (pid) => {
+      registrations.push(pid);
+    },
+    resolveLauncher: () => ({
+      file: "unused",
+      arguments: [],
+      isolatedNamespace: false,
+    }),
+  });
+  child.emit("message", { type: "ready" });
+  return { child, started: started.promise, registrations, signals };
+}
+
+test("parent accepts supervisor expiry when a requested start reaches its deadline before target spawn", async () => {
+  const f = diagnosticParent({
+    deadlineNs: "10",
+    monotonicNow: () => 0n,
+    inspect: () =>
+      assert.fail("pre-spawn expiry requires no session inspection"),
+  });
+  const start = await f.started;
+  assert.equal(f.child.ownedPayloadRequested, true);
+  assert.deepEqual(f.registrations, [44]);
+  let now = 0n;
+  let targetStarts = 0;
+  const handlers = new Map();
+  const messages = [];
+  const exits = [];
+  embeddedSession(start.ownerToken, {
+    spawn() {
+      targetStarts++;
+      return new EventEmitter();
+    },
+    process: {
+      argv: [
+        "node",
+        "session",
+        "1000",
+        "unused",
+        "[]",
+        "0",
+        start.ownerToken,
+        "10",
+      ],
+      hrtime: { bigint: () => now },
+      connected: true,
+      on: (event, handler) => handlers.set(event, handler),
+      send(message, complete) {
+        messages.push(structuredClone(message));
+        f.child.emit("message", message);
+        complete?.();
+      },
+      exit: (code) => exits.push(code),
+    },
+  });
+  // Delay delivery, not the parent request. Equality expires the absolute
+  // deadline in the actual supervisor handler without any target effect.
+  now = 10n;
+  handlers.get("message")(start);
+  assert.equal(targetStarts, 0);
+  assert.deepEqual(messages, [
+    { type: "ready" },
+    { type: "preparation-expired" },
+  ]);
+  assert.deepEqual(exits, [124]);
+  assert.equal(f.child.ownedPreparationExpired, true);
+  assert.deepEqual(f.signals, []);
+  assert.deepEqual(
+    f.registrations,
+    [44],
+    "expiry alone cannot release custody before close",
+  );
+  f.child.emit("close");
+  const result = structuredClone(await f.child.ownedCompletion);
+  assert.deepEqual(result, {
+    outcome: { type: "close", exitCode: null, signal: null },
+    descendantsStopped: false,
+    descendantsActive: false,
+    inspectionComplete: true,
+  });
+  assert.deepEqual(
+    f.registrations,
+    [44, null],
+    "verified close retires and deregisters the supervisor",
+  );
+});
+
+test("parent diagnostics preserve the relayed failing sample and pre-cleanup flags while refusing malformed evidence", async () => {
+  const sample = {
+    work: 24,
+    elapsedMs: 318,
+    maxWork: 65_536,
+    maxElapsedMs: 250,
+    maxAttempts: 3,
+  };
+  for (const supplemental of [
+    { branch: "finish-inspection-deadline", inspection: sample },
+    { branch: "terminate-check", inspection: { ...sample, raw: "discarded" } },
+    { branch: "terminate-check", inspection: { ...sample, maxWork: 1 } },
+    { branch: "finish-retirement-deadline", inspection: sample },
+    {},
+  ]) {
+    let inspections = 0;
+    const f = diagnosticParent({
+      inspect: (_pid, _token, options) => {
+        inspections++;
+        options.onInspection?.({ ...sample, work: 1, elapsedMs: 2 });
+        return [];
+      },
+    });
+    await f.started;
+    f.child.emit("message", {
+      type: "containment-failure",
+      code: "unverifiable",
+      observedProcesses: [],
+      ...supplemental,
+    });
+    const failure = await f.child.ownedCompletion.catch((error) => error);
+    assert.equal(failure.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+    if (
+      !supplemental.branch ||
+      supplemental.branch === "finish-retirement-deadline"
+    ) {
+      assert.equal(failure.ownershipDiagnostic, null);
+    } else {
+      assert.equal(
+        failure.ownershipDiagnostic.site,
+        "parent-containment-relay",
+      );
+      assert.equal(failure.ownershipDiagnostic.branch, supplemental.branch);
+      assert.equal(failure.ownershipDiagnostic.startRequested, true);
+      assert.equal(failure.ownershipDiagnostic.terminationRequested, false);
+      assert.equal(failure.ownershipDiagnostic.ownershipHandedOff, false);
+      assert.deepEqual(
+        failure.ownershipDiagnostic.inspection,
+        supplemental.inspection.raw ||
+          supplemental.inspection.maxWork !== 65_536
+          ? null
+          : sample,
+      );
+    }
+    assert.deepEqual(f.registrations, [44, null]);
+    assert.equal(
+      inspections,
+      2,
+      "only the existing signal and completion inspections run",
+    );
+  }
+});
+
+test("parent raising sites reject malformed outcomes without weakening retirement and retain injected-consumer compatibility", async () => {
+  for (const [site, message] of [
+    [
+      "parent-invalid-observations",
+      { type: "ownership-handoff", observedProcesses: [[44, null]] },
+    ],
+    [
+      "parent-outcome-incomplete",
+      {
+        type: "outcome",
+        outcome: { type: "close", exitCode: 0, signal: null },
+        descendantsStopped: false,
+        descendantsActive: false,
+        inspectionComplete: false,
+      },
+    ],
+    [
+      "parent-invalid-frame",
+      {
+        type: "outcome",
+        outcome: { type: "close", exitCode: 0, signal: null },
+        descendantsStopped: false,
+        descendantsActive: "false",
+        inspectionComplete: true,
+      },
+    ],
+    [
+      "parent-invalid-frame",
+      {
+        type: "outcome",
+        outcome: { type: "close", exitCode: null, signal: ["SIGTERM"] },
+        descendantsStopped: false,
+        descendantsActive: false,
+        inspectionComplete: true,
+      },
+    ],
+    [
+      "parent-invalid-frame",
+      {
+        type: "outcome",
+        outcome: {
+          type: "close",
+          exitCode: null,
+          signal: { toString: null, valueOf: null },
+        },
+        descendantsStopped: false,
+        descendantsActive: false,
+        inspectionComplete: true,
+      },
+    ],
+    ["parent-invalid-frame", { type: "preparation-expired", unexpected: true }],
+    ["parent-missing-descendant-proof", null],
+  ]) {
+    const f = diagnosticParent();
+    await f.started;
+    if (message) f.child.emit("message", message);
+    f.child.emit("close");
+    const failure = await f.child.ownedCompletion.catch((error) => error);
+    assert.equal(failure.code, "ERR_EXECUTION_PROCESS_UNVERIFIABLE");
+    assert.equal(failure.ownershipDiagnostic.site, site);
+    assert.deepEqual(
+      f.registrations,
+      [44],
+      "no malformed or missing proof releases custody",
+    );
+  }
+  for (const site of [
+    "parent-session-signal",
+    "parent-completion-inspection",
+  ]) {
+    const f = diagnosticParent({ inspect: () => null });
+    await f.started;
+    if (site === "parent-completion-inspection")
+      f.child.emit("message", {
+        type: "ownership-handoff",
+        observedProcesses: [],
+      });
+    else f.child.connected = false;
+    f.child.kill("SIGKILL");
+    f.child.emit("close");
+    const failure = await f.child.ownedCompletion.catch((error) => error);
+    assert.equal(failure.ownershipDiagnostic.site, site);
+    assert.equal(
+      failure.ownershipDiagnostic.inspection,
+      null,
+      "legacy injected inspectors need no new return shape",
+    );
+    assert.deepEqual(f.registrations, [44]);
+  }
+  const registration = diagnosticParent({ identityAvailable: false });
+  const failure = await registration.child.ownedCompletion.catch(
+    (error) => error,
+  );
+  assert.equal(failure.ownershipDiagnostic.site, "registration");
+  assert.equal(failure.ownershipDiagnostic.startRequested, false);
+  assert.equal(failure.ownershipDiagnostic.terminationRequested, false);
+  assert.deepEqual(registration.registrations, []);
+  const completed = diagnosticParent();
+  await completed.started;
+  const outcome = {
+    type: "outcome",
+    outcome: { type: "close", exitCode: 0, signal: null },
+    descendantsStopped: false,
+    descendantsActive: false,
+    inspectionComplete: true,
+  };
+  completed.child.emit("message", {
+    ...outcome,
+    inspection: { raw: "discarded" },
+  });
+  completed.child.emit("close");
+  assert.deepEqual(
+    structuredClone(await completed.child.ownedCompletion),
+    outcome,
+    "supplemental samples cross the boundary only through validated diagnostics",
+  );
+  assert.deepEqual(completed.registrations, [44, null]);
 });

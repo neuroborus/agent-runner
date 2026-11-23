@@ -6,7 +6,16 @@ import {
   PLAN_KIND_SETTING,
   resolveExecutionWorkspace,
 } from "./step-policy.js";
-import { writableResultDiagnostic } from "./writable-result.js";
+import {
+  assertCatalogImplementationTransition,
+  assertRestatementCatalogPause,
+  assertRestatementScopeContinuity,
+  matchesWritableAvailabilityRetirement,
+  matchesWritableCatalogReservation,
+  prepareWritableResultRecovery,
+  upgradeLegacyWritableResult,
+  writableResultDiagnostic,
+} from "./writable-result.js";
 import { assertCustomOutputPreparation } from "./custom-results.js";
 import {
   COMMIT_SIZE_DEFAULTS,
@@ -14,6 +23,10 @@ import {
   createCommitSizeAssessment,
 } from "./commit-size-assessment.js";
 import { assertExecutionRun as validateRun } from "./bootstrap-progress.js";
+import {
+  CAPABILITY_PAUSE_EXPLANATION,
+  isCapabilityPause,
+} from "./capability-requirements.js";
 import {
   deriveValidationSchedule,
   scheduledChecks,
@@ -27,12 +40,24 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import {
+  assertReadOnlyGateCatalogPause,
+  assertValidationMigrationCatalogPause,
+  assertWritableGateCatalogPause,
   candidateCheckpoint,
   executionPolicy,
   combinedReview,
+  isValidationMigrationArbiterCheckpoint,
+  matchesGateCatalogReservation,
+  matchesNarrativeCatalogAttempt,
+  matchesValidationMigrationCatalogReservation,
+  roleProducingPhase,
 } from "./mode-policy.js";
 import {
+  assertCatalogCommitTransition,
   classifyStopCheckpoint,
+  isCatalogCommitRejection,
+  isNonRetryableCommitRejection,
+  matchesCommitCatalogReservation,
   resolveStopBoundary,
 } from "./commit-checkpoint.js";
 import {
@@ -50,20 +75,23 @@ import {
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
+  appendCheckpointFingerprint,
   createFinalizationRecovery,
+  commitModelSelectionConstraint,
   commitReadinessConstraint,
   finalizationFeedbackFindings,
   findingFingerprint,
   isFinalizationPolicy,
   isOutputDiagnostic,
+  matchesRefinementOutputCheckpoint,
   resolveActiveRoles,
   sha256,
+  snapshotChangeEvidence,
 } from "./workflow-contract.js";
 
 export {
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
@@ -207,6 +235,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The Arbiter could not resolve the current blocking dispute.",
   writable_output_invalid:
     "The writable result remains invalid. Resume this same checkpoint to authorize one additional read-only result restatement; candidate work and existing blockers are preserved.",
+  finding_repair_required:
+    "Read-only recovery found unfinished finding repairs. Resume authorizes one new repair invocation against the preserved candidate; blockers, uncertainty, consumed attempts and budgets remain in force.",
   output_exhausted:
     "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
@@ -216,6 +246,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "Independent bootstrap summaries remain unresolved. Retry reconciliation after clarifying the repository evidence; combined mode cannot arbitrate bootstrap.",
   bootstrap_inventory_capacity_exhausted:
     "A complete bootstrap validation inventory exceeds the supported bounded capacity.",
+  clarification_append_interrupted:
+    "Clarification append publication was interrupted. Resume verifies the saved intent before continuing without another role turn.",
   clarification_answers_required:
     "Material clarification answers are required before execution can continue.",
   clarification_limit_reached:
@@ -251,6 +283,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The validated plan must be revised and execution must restart in a fresh run.",
   proactive_clarification:
     "Optional proactive execution clarification input is pending.",
+  validation_policy_blocked:
+    "Proven historical validation noncompliance leaves a task requirement unsatisfiable under frozen authority.",
   product_decision_required:
     "A material product decision is required before execution can continue.",
   project_configuration_changed:
@@ -272,6 +306,7 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "The repository is not at a state that can be reconciled safely.",
 });
 const PUBLIC_DETAIL_REASONS = new Set([
+  "validation_policy_blocked",
   "environment_blocked",
   "confirmation_output_invalid",
   "bootstrap_inventory_capacity_exhausted",
@@ -295,10 +330,15 @@ function publicCode(value) {
 }
 
 function publicResumeState(run) {
+  if (run.pause?.reason === "clarification_append_interrupted")
+    return (
+      run.pipelineState.pendingClarificationAppend?.checkpoint.workflowState ??
+      null
+    );
   if (
     run.pause?.reason === "commit_failed" &&
     run.pipelineState.pendingCommit === null &&
-    commitReadinessConstraint(run.pause.diagnosticClass) !== null
+    isNonRetryableCommitRejection(run.pause)
   )
     return null;
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
@@ -308,7 +348,17 @@ function publicResumeState(run) {
 }
 
 function publicExplanation(pause, fallback) {
+  if (isCapabilityPause(pause)) return CAPABILITY_PAUSE_EXPLANATION;
+  if (pause.reason === "validation_policy_blocked")
+    return `${pause.checkpoint}: ${pause.explanation} Preserve the disclosure and safe work. The operator must assess a separately authorized task-compatible disposition or cancel; retry, finding override and a new run cannot waive the cited policy.`;
   const readinessConstraint = commitReadinessConstraint(pause.diagnosticClass);
+  const modelSelectionConstraint = commitModelSelectionConstraint(
+    pause.diagnosticClass,
+  );
+  if (pause.reason === "commit_failed" && isCatalogCommitRejection(pause))
+    return "A model catalog miss was recorded during COMMIT. Any retained authorization is verification-only unless a pre-executor proof was journaled.";
+  if (pause.reason === "commit_failed" && modelSelectionConstraint !== null)
+    return `${modelSelectionConstraint} The reviewed candidate is preserved for separately authorized follow-up.`;
   if (pause.reason === "commit_failed" && readinessConstraint !== null) {
     return `${readinessConstraint} The reviewed candidate is preserved. COMMIT has no readiness-output correction; separately authorized follow-up is required.`;
   }
@@ -354,10 +404,28 @@ function publicFinalizationIssueIds(run) {
   return Object.freeze(ids);
 }
 
-function publicEvidence(pause, finalizationIssueIds) {
+function publicEvidence(
+  pause,
+  finalizationIssueIds,
+  { readOnlySnapshotChanges, capabilityBlockerEvidence },
+) {
+  if (isCapabilityPause(pause))
+    return typeof capabilityBlockerEvidence === "function"
+      ? capabilityBlockerEvidence(pause)
+      : Object.freeze(["Capability mismatch details: unavailable."]);
+  if (pause.reason === "read_only_agent_mutated_repository") {
+    return Object.freeze([
+      snapshotChangeEvidence(
+        typeof readOnlySnapshotChanges === "function"
+          ? readOnlySnapshotChanges(pause.snapshotChanges)
+          : null,
+      ),
+    ]);
+  }
   if (
     pause.reason === "commit_failed" &&
-    commitReadinessConstraint(pause.diagnosticClass) !== null
+    (commitReadinessConstraint(pause.diagnosticClass) !== null ||
+      commitModelSelectionConstraint(pause.diagnosticClass) !== null)
   ) {
     return Object.freeze([`Adapter diagnostic: ${pause.diagnosticClass}.`]);
   }
@@ -430,7 +498,21 @@ function publicFindings(state) {
   ];
 }
 
-function projectPause(run) {
+function hasUnboundMigrationArbiterRetry(run) {
+  const pause = run.pause?.operatorResume?.pause ?? run.pause;
+  const binding =
+    run.modelCatalogResume ??
+    (pause?.code === "ERR_MODEL_CATALOG_RETRY" ? pause : null);
+  return (
+    isValidationMigrationArbiterCheckpoint(binding) &&
+    run.pipelineState.validationMigrationDisagreement == null
+  );
+}
+
+// The root registry injects the Git-owned label normalizer and the trusted
+// capability blocker projector; a direct uncomposed call has neither and
+// reports those diagnoses as unavailable.
+function projectPause(run, capabilities = {}) {
   if (["operator_paused", "operator_canceled"].includes(run.pause?.reason)) {
     const retained = run.pause.operatorResume?.pause;
     const explanation = PUBLIC_PAUSE_EXPLANATIONS[run.pause.reason];
@@ -454,15 +536,24 @@ function projectPause(run) {
   if (run.pause === null) {
     return null;
   }
+  const unboundMigrationArbiterRetry = hasUnboundMigrationArbiterRetry(run);
   const finalizationIssueIds = publicFinalizationIssueIds(run);
   const knownReason = Object.hasOwn(
     PUBLIC_PAUSE_EXPLANATIONS,
     run.pause.reason,
   );
   const reason = knownReason ? run.pause.reason : "unknown_pause";
-  const explanation = knownReason
-    ? PUBLIC_PAUSE_EXPLANATIONS[reason]
-    : "No public diagnostic is available for this pause.";
+  const explanation = unboundMigrationArbiterRetry
+    ? "The saved Arbiter retry has no validation migration disagreement. Start a new run."
+    : run.pipelineState.writableResult?.stage === "repair-required" &&
+        reason === "fix_limit_reached"
+      ? "Unfinished finding repair requires an explicit extra-fix-rounds grant before a new writable invocation. The preserved candidate, original blockers and consumed accounting remain bound."
+      : run.pipelineState.writableResult?.stage === "blocked" &&
+          reason === "environment_blocked"
+        ? "Resolve the result-recovery prerequisite before resuming. Resume inspects the preserved result read-only; it does not authorize a new repair."
+        : knownReason
+          ? PUBLIC_PAUSE_EXPLANATIONS[reason]
+          : "No public diagnostic is available for this pause.";
   const nextActions = [];
   if (canRecoverLegacyConfirmation(run)) {
     return Object.freeze({
@@ -561,8 +652,8 @@ function projectPause(run) {
     reason,
     code: knownReason ? publicCode(run.pause.code) : null,
     explanation: publicExplanation(run.pause, explanation),
-    evidence: publicEvidence(run.pause, finalizationIssueIds),
-    resumeState: publicResumeState(run),
+    evidence: publicEvidence(run.pause, finalizationIssueIds, capabilities),
+    resumeState: unboundMigrationArbiterRetry ? null : publicResumeState(run),
     nextActions: Object.freeze(nextActions),
   });
 }
@@ -601,6 +692,10 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
+  if (run.pause?.reason === "validation_policy_blocked")
+    throw new Error(
+      "A validation-policy stop has no retry or override under frozen authority.",
+    );
   if (run.pause?.reason === "project_configuration_changed") {
     throw new Error("A run with changed project configuration cannot resume.");
   }
@@ -610,7 +705,17 @@ function validateResumeAction(run, action) {
     action === null
   )
     return;
+  if (hasUnboundMigrationArbiterRetry(run))
+    throw new Error(
+      "The validation migration Arbiter checkpoint is unavailable.",
+    );
   if (action === null && canRecoverLegacyConfirmation(run)) return;
+  if (
+    action === null &&
+    run.pause?.reason === "clarification_append_interrupted" &&
+    run.pipelineState.pendingClarificationAppend !== null
+  )
+    return;
   if (
     action === null &&
     run.pause?.reason === "writable_output_invalid" &&
@@ -625,14 +730,25 @@ function validateResumeAction(run, action) {
   if (
     run.pause?.reason === "commit_failed" &&
     state.pendingCommit === null &&
-    commitReadinessConstraint(run.pause.diagnosticClass) !== null
+    isNonRetryableCommitRejection(run.pause)
   ) {
     throw new Error(
-      "Commit readiness rejection requires separately authorized follow-up.",
+      "Commit rejection requires separately authorized follow-up.",
     );
   }
   if (state.workflowState !== "WAITING_FOR_USER") {
     throw new Error("Only a persisted paused run can be resumed.");
+  }
+  if (state.writableResult?.stage === "repair-required") {
+    if (action === null && run.pause?.reason === "finding_repair_required")
+      return;
+    if (
+      action?.type !== "extra-fix-rounds" ||
+      run.pause?.reason !== "fix_limit_reached"
+    )
+      throw new Error(
+        "Unfinished repair requires its explicit continuation or fix-budget grant.",
+      );
   }
   if (
     state.writableResult?.stage === "blocked" &&
@@ -1590,12 +1706,267 @@ export function migratePlanExecutionStateV38(run) {
   });
 }
 
+function rebindClarificationAppend(run, migrated) {
+  const append = run.pipelineState.pendingClarificationAppend;
+  if (append != null) {
+    const { checkpoint } = append;
+    if (
+      checkpoint == null ||
+      checkpoint.fingerprint !==
+        appendCheckpointFingerprint(run, checkpoint.workflowState)
+    )
+      throw new PlanExecutionWorkflowError(
+        "Legacy clarification append checkpoint changed.",
+      );
+    migrated.pendingClarificationAppend = {
+      ...append,
+      checkpoint: {
+        ...checkpoint,
+        fingerprint: appendCheckpointFingerprint(
+          { ...run, pipelineState: migrated },
+          checkpoint.workflowState,
+        ),
+      },
+    };
+  }
+  return Object.freeze(migrated);
+}
+
+function migratePlanExecutionStateV45(run) {
+  const current = run.pipelineState;
+  if (Object.hasOwn(current, "validationMigrationDisagreement"))
+    throw new PlanExecutionWorkflowError(
+      "Legacy state cannot own a validation migration disagreement.",
+    );
+  return rebindClarificationAppend(run, {
+    ...current,
+    validationMigrationDisagreement: null,
+  });
+}
+
+// Compare catalog reservations in the same representation during migration.
+function catalogTransitionPredecessor(previous, next) {
+  if (
+    previous.pipelineStateVersion < 43 ||
+    next.pipelineStateVersion > 46 ||
+    (next.pipelineStateVersion < 46 &&
+      previous.pipelineState.pendingClarificationAppend == null)
+  )
+    return previous;
+  let current = previous;
+  while (current.pipelineStateVersion < next.pipelineStateVersion) {
+    const version = current.pipelineStateVersion;
+    current = {
+      ...current,
+      pipelineState: planExecutionPipeline.migrations[version](current),
+      pipelineStateVersion: version + 1,
+    };
+  }
+  return current;
+}
+
+function assertReadOnlyCatalogPause(
+  previous,
+  next,
+  retryCode,
+  turnStart,
+  attempt,
+) {
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+
+  const match = /^([a-z-]+):read-only:(?:(plan-context):)?(.+)$/u.exec(
+    pause.checkpoint,
+  );
+  if (match === null) return;
+  const [, phase, narrative, purpose] = match;
+  const before = previous.pipelineState;
+  const refinement = [
+    "commit-size",
+    "effective-plan",
+    "revision-validation",
+  ].includes(phase);
+  const policy = executionPolicy(before.settings);
+  const allowed = refinement
+    ? matchesRefinementOutputCheckpoint(before, {
+        ...pause,
+        checkpoint: `${phase}:read-only:${purpose}`,
+      })
+    : (purpose === "bootstrap" &&
+        before.workflowState === "BOOTSTRAP" &&
+        (pause.role === "worker" ||
+          (pause.role === "reviewer" && policy.independentBootstrap))) ||
+      (purpose === "arbitration" &&
+        pause.role === "arbiter" &&
+        (before.workflowState === "BOOTSTRAP"
+          ? policy.bootstrapArbitration && before.bootstrapDisagreement != null
+          : before.workflowState === "RESOLVE_FINDINGS" &&
+            policy.arbitration)) ||
+      (!narrative &&
+        before.workflowState === "RESOLVE_FINDINGS" &&
+        pause.role === "reviewer" &&
+        policy.independentReview &&
+        before.pendingDisputes?.length > 0 &&
+        purpose === `commit:${before.currentStep}`) ||
+      (!narrative &&
+        before.workflowState === "FINALIZE" &&
+        pause.role === "worker" &&
+        before.pendingFinalizationCorrection != null &&
+        purpose === `finalization-correction:${before.currentStep}`) ||
+      (pause.role === "worker" &&
+        ((purpose === "compatibility" && before.compatibilityCheckRequired) ||
+          (purpose === "clarification" && before.workflowState === "CLARIFY")));
+  const matchesAttempt = narrative
+    ? matchesNarrativeCatalogAttempt(
+        previous,
+        pause,
+        turnStart,
+        attempt,
+        phase,
+        `plan-context:read-only:${purpose}`,
+      )
+    : previous.activeTurn?.phase === phase &&
+      attempt?.role === pause.role &&
+      attempt.checkpoint === pause.checkpoint &&
+      (turnStart?.catalogCheckpoint === undefined ||
+        turnStart.catalogCheckpoint === pause.checkpoint);
+  if (
+    !allowed ||
+    phase !== roleProducingPhase(before, purpose) ||
+    !matchesAttempt ||
+    !isDeepStrictEqual(next.pipelineState, {
+      ...before,
+      workflowState: next.pipelineState.workflowState,
+    }) ||
+    !isDeepStrictEqual(previous.counters, next.counters)
+  )
+    throw new Error(
+      "Catalog pause has no matching read-only plan-execution invocation.",
+    );
+  return true;
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   assertOutputPreparation: assertCustomOutputPreparation,
   classifyStopCheckpoint,
+  assertCatalogTransition(
+    previous,
+    next,
+    activity,
+    retryCode,
+    turnStart,
+    commitRejection,
+    readOnlyAttempt,
+    writableAttempt,
+  ) {
+    const before = catalogTransitionPredecessor(previous, next);
+    assertRestatementScopeContinuity(before, next);
+    if (
+      before !== previous &&
+      next.pipelineState.validationMigrationDisagreement !==
+        before.pipelineState.validationMigrationDisagreement
+    )
+      throw new Error(
+        "State migration cannot create a validation migration disagreement.",
+      );
+    if (before !== previous) {
+      const append = before.pipelineState.pendingClarificationAppend;
+      if (
+        !isDeepStrictEqual(
+          append,
+          next.pipelineState.pendingClarificationAppend,
+        )
+      )
+        throw new Error(
+          "State migration changed the clarification append intent.",
+        );
+      if (
+        append != null &&
+        append.checkpoint.fingerprint !==
+          appendCheckpointFingerprint(next, append.checkpoint.workflowState)
+      )
+        throw new Error(
+          "State migration changed the clarification append checkpoint.",
+        );
+    }
+    const commit = assertCatalogCommitTransition(
+      before,
+      next,
+      activity,
+      retryCode,
+      turnStart,
+      commitRejection,
+    );
+    const implementation = assertCatalogImplementationTransition(
+      before,
+      next,
+      activity,
+      retryCode,
+    );
+    const restatement = assertRestatementCatalogPause(
+      before,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+      writableAttempt,
+    );
+    const writableGate = assertWritableGateCatalogPause(
+      before,
+      next,
+      retryCode,
+    );
+    const readOnlyGate = assertReadOnlyGateCatalogPause(
+      before,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    const migration = assertValidationMigrationCatalogPause(
+      before,
+      next,
+      retryCode,
+      turnStart,
+      readOnlyAttempt,
+    );
+    return (
+      commit ||
+      implementation ||
+      restatement ||
+      writableGate ||
+      readOnlyGate ||
+      migration ||
+      assertReadOnlyCatalogPause(
+        before,
+        next,
+        retryCode,
+        turnStart,
+        readOnlyAttempt,
+      )
+    );
+  },
+  matchesAvailabilityRetirement: matchesWritableAvailabilityRetirement,
+  readRestatementStart: (state) =>
+    state.writableResult?.restatementStartedAfter,
+  matchesCatalogReservation(previous, next, binding) {
+    const before = catalogTransitionPredecessor(previous, next);
+    return (
+      matchesCommitCatalogReservation(before, next, binding) ??
+      matchesWritableCatalogReservation(before, next, binding) ??
+      matchesGateCatalogReservation(before, next, binding) ??
+      matchesValidationMigrationCatalogReservation(previous, next, binding)
+    );
+  },
   resolveStopBoundary,
-  stateVersion: 39,
+  stateVersion: 46,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1660,6 +2031,50 @@ export const planExecutionPipeline = Object.freeze({
     // Do not infer a lost result or manufacture replay authority for old runs.
     37: (run) => Object.freeze({ ...run.pipelineState, writableResult: null }),
     38: migratePlanExecutionStateV38,
+    // Basis-less saved reports, catalogs and pending corrections keep the
+    // admission and bindings they were accepted under.
+    39: (run) => Object.freeze({ ...run.pipelineState }),
+    // Legacy records retain their facts and allowances; infer no policy-stop evidence.
+    40: (run) =>
+      Object.freeze({
+        ...run.pipelineState,
+        workReports: run.pipelineState.workReports ?? Object.freeze([]),
+      }),
+    // Legacy full baselines keep their exact comparison; new custom runs
+    // persist a compact baseline that a version-41 runtime must refuse as skew.
+    41: (run) => Object.freeze({ ...run.pipelineState }),
+    42: (run) => {
+      if (Object.hasOwn(run.pipelineState, "pendingClarificationAppend"))
+        throw new PlanExecutionWorkflowError(
+          "Legacy state cannot own a clarification append.",
+        );
+      return Object.freeze({
+        ...run.pipelineState,
+        pendingClarificationAppend: null,
+      });
+    },
+    43: (run) => {
+      if (Object.hasOwn(run.pipelineState, "clarificationRoot"))
+        throw new PlanExecutionWorkflowError(
+          "Legacy state cannot select clarification resources.",
+        );
+      // Preserve exact legacy repository ownership, including preflight-paused runs.
+      return rebindClarificationAppend(run, {
+        ...run.pipelineState,
+        clarificationRoot:
+          run.pipelineState.repositoryBaseline?.projectPath ?? null,
+      });
+    },
+    // Retain historical checkpoints and allowances; migration grants no repair.
+    44: (run) => {
+      return rebindClarificationAppend(run, {
+        ...run.pipelineState,
+        writableResult: upgradeLegacyWritableResult(
+          run.pipelineState.writableResult,
+        ),
+      });
+    },
+    45: migratePlanExecutionStateV45,
   }),
   roles: ROLES,
   roleAccess: planKindPolicy("commit").roleAccess,
@@ -1703,6 +2118,7 @@ export const planExecutionPipeline = Object.freeze({
     };
     await prepareLegacyConfirmationRecovery(run, history, migrate);
     await prepareImplementationRecovery(run, history, migrate);
+    await prepareWritableResultRecovery(run, history);
   },
   workflow: Object.freeze({
     createState: createPlanExecutionState,

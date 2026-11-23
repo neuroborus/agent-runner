@@ -20,6 +20,9 @@ import {
   serializeCustomPlan,
 } from "@agent-runner/custom-plan";
 
+import { createClarificationService as realClarificationService } from "../../../src/clarifications/index.js";
+import { restoredAppendReadback } from "../../../test/support/clarification-readback.js";
+
 import {
   attachOutputExhaustion,
   outputExhaustion,
@@ -317,12 +320,22 @@ function createClarificationService({
 
   async function append(options, section) {
     const snapshot = await inspectTranscript(options);
+    if (
+      options.resultHash !== undefined &&
+      snapshot.hash === options.resultHash
+    )
+      return snapshot;
     assertExpectedHash(snapshot, options.expectedHash);
     const separator = snapshot.content.length === 0 ? "" : "\n\n";
-    await writeFile(
-      options.transcriptPath,
-      `${snapshot.content}${separator}${section}\n`,
-    );
+    const content = `${snapshot.content}${separator}${section}\n`;
+    const resultHash = hash(content);
+    if (options.resultHash !== undefined)
+      assert.equal(options.resultHash, resultHash);
+    await options.persistAppend?.({
+      expectedHash: snapshot.hash,
+      hash: resultHash,
+    });
+    await writeFile(options.transcriptPath, content);
     return inspectTranscript(options);
   }
 
@@ -403,6 +416,7 @@ async function createFixture(
   {
     arbiter = [],
     clarificationIgnored = true,
+    criteriaPath = null,
     emptyClarification = false,
     interactive = false,
     mode = "independent",
@@ -431,6 +445,11 @@ async function createFixture(
     join(taskPath, "task.md"),
     "Implement the requested behavior.\n",
   );
+  if (criteriaPath !== null)
+    await writeFile(
+      join(projectPath, criteriaPath),
+      "Inspect the agreed behavior.\n",
+    );
   await writeFile(
     join(projectPath, ".gitignore"),
     clarificationIgnored ? "/task/clarifications.md\n" : "",
@@ -514,6 +533,7 @@ async function createFixture(
       settings: {
         ...PLAN_DEFAULTS,
         planKind,
+        criteriaPath,
         maxRevisionRounds: 15,
         mode,
         preferredCommitLineLimit: 900,
@@ -584,6 +604,10 @@ async function createFixture(
           throw cause;
         }
       }
+      const criteriaContent =
+        criteriaPath === null
+          ? null
+          : await readFile(join(projectPath, criteriaPath), "utf8");
       return {
         task: {
           path: join(taskPath, "task.md"),
@@ -591,6 +615,16 @@ async function createFixture(
           hash: hash(taskContent),
         },
         context,
+        ...(criteriaPath === null
+          ? {}
+          : {
+              declaredInputsHash: hash(criteriaContent),
+              criteria: {
+                path: join(projectPath, criteriaPath),
+                content: criteriaContent,
+                hash: hash(criteriaContent),
+              },
+            }),
       };
     },
     async transition(patch, options) {
@@ -646,6 +680,10 @@ async function createFixture(
 
   if (planKind === "custom") {
     const gitSafety = runtime.git;
+    const ignoredPaths = (allowedPaths) => [
+      "task/clarifications.md",
+      ...allowedPaths.map((path) => relative(projectPath, path)),
+    ];
     runtime.workspace = {
       kind: "directory",
       async snapshot(options) {
@@ -655,7 +693,33 @@ async function createFixture(
           entries: [],
         };
       },
-      assertUnchanged: (snapshot) => gitSafety.assertUnchanged(snapshot),
+      async baseline({ allowedPaths = [] } = {}) {
+        const fingerprint = await repositoryFingerprint(
+          projectPath,
+          ignoredPaths(allowedPaths),
+        );
+        const baseline = {
+          schemaVersion: 1,
+          workspacePath: projectPath,
+          outputPaths: [],
+          entryCount: 0,
+          entriesHash: fingerprint,
+          contentFingerprint: fingerprint,
+          identityFingerprint: fingerprint,
+          allowedPaths,
+          projectPath,
+        };
+        return (await onPreflight?.(baseline)) ?? baseline;
+      },
+      assertUnchanged: (baseline) =>
+        gitSafety.assertUnchanged(
+          Object.hasOwn(baseline, "entries")
+            ? baseline
+            : {
+                fingerprint: baseline.entriesHash,
+                ignoredPaths: ignoredPaths(baseline.allowedPaths),
+              },
+        ),
     };
     runtime.git = new Proxy(
       {},
@@ -674,6 +738,7 @@ async function createFixture(
       settings: {
         ...PLAN_DEFAULTS,
         planKind,
+        criteriaPath,
         maxRevisionRounds: 15,
         mode,
         preferredCommitLineLimit: 900,
@@ -694,6 +759,9 @@ async function createFixture(
     planPath,
     projectPath,
     run,
+    restore(saved) {
+      currentRun = JSON.parse(JSON.stringify(saved));
+    },
     taskPath,
     transitions,
   };
@@ -785,7 +853,7 @@ test("writes one validated plan through independent source-session forks", async
 });
 
 test("selects lazy Planner-only mode and migrates legacy runs to independent", async (t) => {
-  assert.equal(planAuthoringPipeline.stateVersion, 7);
+  assert.equal(planAuthoringPipeline.stateVersion, 9);
   const currentState = createPlanAuthoringState();
   const legacyAuthenticationState = { ...currentState };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
@@ -1767,6 +1835,509 @@ test("atomically replaces an unanswered edit authorization", async (t) => {
   assert.equal(secondWaiting.pipelineState.pendingEdit.id, "edit-3");
   assert.equal(secondWaiting.pause.authorizationId, "edit-3");
   assert.equal(fixture.calls.planner.length, 1);
+});
+
+async function interruptedClarification(
+  t,
+  {
+    boundary = "replacement",
+    kind = "questions",
+    mode = "independent",
+    planKind = "commit",
+    arbitrated = false,
+    criteriaPath = null,
+  } = {},
+) {
+  const fixture = await createFixture(t, {
+    mode,
+    planKind,
+    criteriaPath,
+    planner: arbitrated
+      ? [ready(), draft(), draft(REVISED_PLAN), draft(PLAN)]
+      : kind === "questions"
+        ? [
+            {
+              ...questions(),
+              ...(planKind === "custom" ? { criteria: [] } : {}),
+            },
+          ]
+        : [ready(), productDecision()],
+    reviewer: arbitrated
+      ? [findings("scope-a"), findings("scope-b"), findings("scope-c")]
+      : [],
+    arbiter: arbitrated ? [arbitrationProductDecision()] : [],
+  });
+  const service = realClarificationService({ env: {}, interactive: false });
+  const transition = fixture.runtime.transition;
+  const method =
+    kind === "questions" ? "appendQuestionRound" : "appendProductDecision";
+  fixture.runtime.clarifications = {
+    ...service,
+    [method]: async (request) => {
+      const snapshot = await service[method](request);
+      if (boundary === "replacement")
+        throw new Error("Lost replacement receipt");
+      return snapshot;
+    },
+  };
+  fixture.runtime.transition = async (patch, options) => {
+    const intent = patch.pipelineState.pendingClarificationAppend !== null;
+    const edit = patch.pipelineState.pendingEdit !== null;
+    if (
+      (boundary === "failed-intent" && intent) ||
+      (boundary === "before-publication" && edit)
+    )
+      throw new Error("Lost publication before transition");
+    const saved = await transition(patch, options);
+    if (
+      (boundary === "intent" && intent) ||
+      (boundary === "publication" && edit)
+    )
+      throw new Error("Lost publication receipt");
+    return saved;
+  };
+  await assert.rejects(fixture.run({ stagnationWindowRounds: 2 }), /Lost /u);
+  fixture.runtime.transition = transition;
+  fixture.runtime.clarifications = realClarificationService({
+    env: {},
+    interactive: false,
+  });
+  fixture.restore(fixture.currentRun);
+  return fixture;
+}
+
+test("journaled authoring appends reconstruct exact requests once without another role turn", async (t) => {
+  for (const selection of [
+    { boundary: "intent", kind: "questions", mode: "independent" },
+    { boundary: "replacement", kind: "questions", mode: "lazy" },
+    {
+      boundary: "before-publication",
+      kind: "product-decision",
+      mode: "combined",
+    },
+    { boundary: "publication", kind: "product-decision", mode: "independent" },
+    { boundary: "replacement", kind: "questions", planKind: "custom" },
+  ]) {
+    await t.test(JSON.stringify(selection), async (t) => {
+      const f = await interruptedClarification(t, selection);
+      const saved = structuredClone(f.currentRun);
+      const counter =
+        selection.kind === "questions"
+          ? "clarificationRounds"
+          : "productDecisions";
+      const pending = saved.pipelineState.pendingClarificationAppend;
+      const before = await readFile(f.clarificationPath, "utf8");
+      if (selection.boundary !== "publication") {
+        assert.equal(saved.counters[counter], 0);
+        assert.equal(saved.pipelineState.pendingEdit, null);
+        assert.equal(pending.expectedHash, saved.hashes.clarifications);
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const result = await f.run();
+        assert.equal(result.pipelineState.pendingClarificationAppend, null);
+        assert.equal(result.counters[counter], 1);
+        assert.equal(
+          result.hashes.clarifications,
+          result.pipelineState.pendingEdit.preEditorHash,
+        );
+        assert.deepEqual(result.sessionLineage, saved.sessionLineage);
+        assert.deepEqual(
+          result.pipelineState.settings,
+          saved.pipelineState.settings,
+        );
+        assert.equal(result.pause.inputRequest.questions.length, 1);
+        assert.equal(
+          f.calls.planner.length,
+          selection.kind === "questions" ? 1 : 2,
+        );
+        assert.equal(f.calls.reviewer.length + f.calls.arbiter.length, 0);
+        f.restore(result);
+      }
+      const after = await readFile(f.clarificationPath, "utf8");
+      if (selection.boundary !== "intent") assert.equal(after, before);
+      assert.equal(
+        after.split(
+          selection.kind === "questions"
+            ? "## Round 1"
+            : "## Product Decision 1",
+        ).length,
+        2,
+      );
+    });
+  }
+});
+
+test("authoring service-readback rejection survives workflow reconstruction and verification-only stops", async (t) => {
+  const f = await createFixture(t, { planner: [ready(), productDecision()] });
+  const service = realClarificationService({ env: {}, interactive: false });
+  let proof;
+  let producing;
+  f.runtime.clarifications = {
+    ...service,
+    appendProductDecision: restoredAppendReadback(
+      t,
+      service,
+      "appendProductDecision",
+      (bytes) => {
+        proof = bytes;
+        producing = structuredClone(f.currentRun);
+      },
+    ),
+    prepareEdit() {
+      assert.fail("Rejected readback cannot authorize an editor");
+    },
+    openEditor() {
+      assert.fail("Rejected readback cannot open an editor");
+    },
+  };
+  const blocked = await f.run();
+  assert.deepEqual(blocked.pause, { reason: "clarifications_changed" });
+  assert.deepEqual(blocked.pipelineState, {
+    ...producing.pipelineState,
+    workflowState: "WAITING_FOR_USER",
+  });
+  assert.deepEqual(blocked.counters, producing.counters);
+  assert.deepEqual(blocked.hashes, producing.hashes);
+  assert.equal(blocked.counters.productDecisions, 0);
+  assert.equal(blocked.pipelineState.pendingEdit, null);
+  assert.throws(() =>
+    planAuthoringPipeline.validateResumeAction(blocked, null),
+  );
+  for (const bytes of [proof.priorBytes, proof.resultBytes]) {
+    await writeFile(proof.transcriptPath, bytes);
+    f.restore(blocked);
+    f.runtime.clarifications = {
+      ...realClarificationService({ env: {}, interactive: false }),
+      appendProductDecision() {
+        assert.fail("Rejected append cannot replay");
+      },
+      prepareEdit() {
+        assert.fail("Rejected append cannot authorize an editor");
+      },
+      openEditor() {
+        assert.fail("Rejected append cannot open an editor");
+      },
+    };
+    assert.deepEqual(await f.run(), blocked);
+    assert.deepEqual(
+      await runPlanAuthoring({
+        run: JSON.parse(JSON.stringify(blocked)),
+        runtime: f.runtime,
+        operatorStop: true,
+      }),
+      blocked,
+    );
+    assert.deepEqual(await readFile(proof.transcriptPath), bytes);
+  }
+  assert.equal(f.calls.planner.length, 2);
+  assert.equal(f.calls.reviewer.length + f.calls.arbiter.length, 0);
+});
+
+test("failed authoring append intent publication leaves transcript untouched", async (t) => {
+  const f = await interruptedClarification(t, { boundary: "failed-intent" });
+  assert.equal(f.currentRun.pipelineState.pendingClarificationAppend, null);
+  assert.equal(
+    hash(await readFile(f.clarificationPath)),
+    f.currentRun.hashes.clarifications,
+  );
+  assert.equal(f.currentRun.counters.clarificationRounds, 0);
+});
+
+test("authoring append recovery rejects third-party bytes and changed protected bindings before replay", async (t) => {
+  for (const changed of [
+    "transcript",
+    "task",
+    "source",
+    "criteria",
+    "declarations",
+  ]) {
+    await t.test(changed, async (t) => {
+      const f = await interruptedClarification(t, {
+        boundary: "intent",
+        criteriaPath: changed === "criteria" ? "criteria.md" : null,
+      });
+      const intent = structuredClone(
+        f.currentRun.pipelineState.pendingClarificationAppend,
+      );
+      if (changed === "declarations") {
+        const readInputs = f.runtime.readInputs;
+        f.runtime.readInputs = async () => ({
+          ...(await readInputs()),
+          declaredInputsHash: hash("changed"),
+        });
+      } else
+        await writeFile(
+          changed === "transcript"
+            ? f.clarificationPath
+            : changed === "task"
+              ? join(f.taskPath, "task.md")
+              : join(
+                  f.projectPath,
+                  changed === "criteria" ? "criteria.md" : "source.txt",
+                ),
+          "Unexpected content.\n",
+        );
+      let effects = 0;
+      f.runtime.clarifications = {
+        ...f.runtime.clarifications,
+        appendQuestionRound: async () => {
+          effects += 1;
+          throw new Error("Unexpected replay");
+        },
+        prepareEdit: async () => {
+          effects += 1;
+          throw new Error("Unexpected editor authorization");
+        },
+      };
+      const result = await f.run();
+      assert.ok(
+        [
+          "clarifications_changed",
+          "input_changed",
+          "read_only_mutation",
+        ].includes(result.pause.reason),
+      );
+      assert.deepEqual(result.pipelineState.pendingClarificationAppend, intent);
+      assert.equal(result.pipelineState.pendingEdit, null);
+      assert.equal(result.counters.clarificationRounds, 0);
+      assert.throws(() =>
+        planAuthoringPipeline.validateResumeAction(result, null),
+      );
+      const blocked = structuredClone(result);
+      f.runtime.clarifications.inspectTranscript = async () => {
+        throw Object.assign(new Error("Unreadable"), {
+          code: "ERR_CLARIFICATION_READ",
+        });
+      };
+      const stopped = await runPlanAuthoring({
+        run: blocked,
+        runtime: f.runtime,
+        operatorStop: true,
+      });
+      assert.deepEqual(stopped, blocked);
+      assert.equal(effects, 0);
+    });
+  }
+});
+
+test("authoring operator-stop reconciliation inspects append proof without settlement or editor effects", async (t) => {
+  for (const boundary of ["intent", "replacement"]) {
+    const f = await interruptedClarification(t, { boundary });
+    const saved = structuredClone(f.currentRun);
+    f.runtime.clarifications = {
+      ...f.runtime.clarifications,
+      appendQuestionRound: async () => assert.fail("Stop cannot append"),
+      prepareEdit: async () => assert.fail("Stop cannot authorize an editor"),
+      acceptEdit: async () => assert.fail("Stop cannot accept an answer"),
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1)
+      assert.deepEqual(
+        await runPlanAuthoring({
+          run: saved,
+          runtime: f.runtime,
+          operatorStop: true,
+        }),
+        saved,
+      );
+    assert.equal(f.calls.planner.length, 1);
+  }
+});
+
+test("authoring append I/O failures preserve resumable intent and expose bounded diagnostics", async (t) => {
+  const f = await interruptedClarification(t, { boundary: "intent" });
+  const saved = structuredClone(f.currentRun);
+  for (const [method, code] of [
+    ["inspectTranscript", "ERR_CLARIFICATION_READ"],
+    ["appendQuestionRound", "ERR_CLARIFICATION_WRITE"],
+    ["prepareEdit", "ERR_CLARIFICATION_READ"],
+  ]) {
+    f.runtime.clarifications = {
+      ...realClarificationService({ env: {}, interactive: false }),
+      [method]: async () => {
+        throw Object.assign(new Error("Private I/O detail"), { code });
+      },
+    };
+    const result = await f.run();
+    assert.equal(result.pause.reason, "clarification_append_interrupted");
+    assert.deepEqual(
+      result.pipelineState.pendingClarificationAppend,
+      saved.pipelineState.pendingClarificationAppend,
+    );
+    assert.equal(result.counters.clarificationRounds, 0);
+    const projection = planAuthoringPipeline.projections.pause(result);
+    assert.deepEqual(projection.nextActions, [
+      { type: "resume", action: null },
+    ]);
+    assert.doesNotMatch(JSON.stringify(projection), /Private I\/O detail/u);
+    f.restore(result);
+  }
+  f.runtime.clarifications = realClarificationService({
+    env: {},
+    interactive: false,
+  });
+  assert.equal((await f.run()).counters.clarificationRounds, 1);
+  assert.equal(f.calls.planner.length, 1);
+});
+
+test("unsafe authoring transcript proof remains blocking at inspection, replacement and editor publication", async (t) => {
+  for (const [method, code] of [
+    ["inspectTranscript", "ERR_INVALID_CLARIFICATION"],
+    ["appendQuestionRound", "ERR_UNSAFE_CLARIFICATION_PATH"],
+    ["prepareEdit", "ERR_CLARIFICATION_NOT_FOUND"],
+    ["prepareEdit", "ERR_CLARIFICATIONS_CHANGED"],
+  ]) {
+    const f = await interruptedClarification(t, { boundary: "intent" });
+    const intent = structuredClone(
+      f.currentRun.pipelineState.pendingClarificationAppend,
+    );
+    f.runtime.clarifications = {
+      ...f.runtime.clarifications,
+      [method]: async () => {
+        throw Object.assign(new Error("Unsafe transcript"), { code });
+      },
+    };
+    const result = await f.run();
+    assert.equal(result.pause.reason, "clarifications_changed");
+    assert.deepEqual(result.pipelineState.pendingClarificationAppend, intent);
+    assert.equal(result.pipelineState.pendingEdit, null);
+    assert.equal(result.counters.clarificationRounds, 0);
+    assert.throws(() =>
+      planAuthoringPipeline.validateResumeAction(result, null),
+    );
+    assert.equal(f.calls.planner.length, 1);
+  }
+});
+
+test("recovered Arbiter product decisions preserve cumulative accounting and retire prior review evidence", async (t) => {
+  const f = await interruptedClarification(t, {
+    kind: "product-decision",
+    arbitrated: true,
+  });
+  const saved = structuredClone(f.currentRun);
+  assert.equal(saved.pipelineState.arbitrationUsed, false);
+  assert.equal(
+    saved.pipelineState.pendingClarificationAppend.checkpoint.arbitrationUsed,
+    true,
+  );
+  const result = await f.run();
+  assert.equal(result.pipelineState.arbitrationUsed, true);
+  assert.equal(result.pipelineState.blockedSinceArbitration, 0);
+  assert.deepEqual(result.pipelineState.correctionHistory, []);
+  assert.equal(
+    result.pipelineState.lastCountedRevision,
+    saved.counters.revisionRounds,
+  );
+  for (const field of [
+    "draft",
+    "draftFingerprint",
+    "canonicalPlan",
+    "cleanConfirmationFingerprint",
+  ])
+    assert.equal(result.pipelineState[field], null);
+  assert.deepEqual(result.pipelineState.findings, []);
+  assert.equal(result.pipelineState.reviewApproved, false);
+  assert.equal(result.counters.revisionRounds, saved.counters.revisionRounds);
+  assert.equal(
+    result.counters.correctionRounds,
+    saved.counters.correctionRounds,
+  );
+  assert.equal(result.counters.productDecisions, 1);
+  assert.equal(f.calls.arbiter.length, 1);
+});
+
+test("authoring append contracts reject malformed and stale intent; version eight migration grants no authority", async (t) => {
+  const f = await interruptedClarification(t, { boundary: "intent" });
+  const saved = structuredClone(f.currentRun);
+  for (const mutate of [
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.extra = true;
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.number += 1;
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.resultHash = "invalid";
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.resultHash = [hash("other")];
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.expectedHash = hash("other");
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.questions[0].question =
+        " Unnormalized question";
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.questions[0].extra = true;
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.checkpoint.workflowState =
+        "DRAFT";
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.checkpoint.fingerprint =
+        hash("other");
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.checkpoint.arbitrationUsed = true;
+    },
+    (r) => {
+      r.sessionLineage.children = [];
+    },
+    (r) => {
+      delete r.activeTurn;
+    },
+    (r) => {
+      r.counters.revisionRounds += 1;
+    },
+    (r) => {
+      r.pipelineState.pendingEdit = {};
+    },
+  ]) {
+    const invalid = structuredClone(saved);
+    mutate(invalid);
+    assert.throws(() => planAuthoringPipeline.workflow.validateRun(invalid));
+  }
+  const legacy = structuredClone(saved);
+  delete legacy.pipelineState.pendingClarificationAppend;
+  assert.throws(() => planAuthoringPipeline.workflow.validateRun(legacy));
+  const migrated = planAuthoringPipeline.migrations[8](legacy);
+  assert.deepEqual(migrated, {
+    ...legacy.pipelineState,
+    pendingClarificationAppend: null,
+  });
+  assert.throws(() => planAuthoringPipeline.migrations[8](saved));
+  assert.doesNotThrow(() =>
+    planAuthoringPipeline.workflow.validateRun({
+      ...legacy,
+      pipelineState: migrated,
+    }),
+  );
+  const decision = await interruptedClarification(t, {
+    kind: "product-decision",
+    boundary: "intent",
+  });
+  for (const mutate of [
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.decision.extra = true;
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.decision.question =
+        " Unnormalized decision";
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.decision.options =
+        Array(17).fill("Choice");
+    },
+    (r) => {
+      r.pipelineState.pendingClarificationAppend.checkpoint.arbitrationUsed = true;
+    },
+  ]) {
+    const invalid = structuredClone(decision.currentRun);
+    mutate(invalid);
+    assert.throws(() => planAuthoringPipeline.workflow.validateRun(invalid));
+  }
 });
 
 test("rejects a persisted edit authorization outside the task", async (t) => {
@@ -3547,6 +4118,119 @@ test("legacy authoring gains only explicit commit defaults and no custom authori
     }).settings,
     null,
   );
+});
+
+test("custom authoring persists a closed compact baseline and rejects malformed evidence", async (t) => {
+  const fixture = await createFixture(t, {
+    planKind: "custom",
+    planner: [{ ...ready(), criteria: CUSTOM_CRITERIA }, draft(CUSTOM_PLAN)],
+  });
+  const result = await fixture.run();
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  const baseline = result.pipelineState.repositoryBaseline;
+  assert.equal(Object.hasOwn(baseline, "entries"), false);
+  assert.deepEqual(baseline.allowedPaths, [
+    fixture.clarificationPath,
+    fixture.planPath,
+  ]);
+  const validate = (repositoryBaseline) =>
+    planAuthoringPipeline.workflow.validateRun({
+      ...result,
+      pipelineState: { ...result.pipelineState, repositoryBaseline },
+    });
+  validate(baseline);
+  const missingFingerprint = { ...baseline };
+  delete missingFingerprint.contentFingerprint;
+  for (const invalid of [
+    { ...baseline, unexpected: true },
+    { ...baseline, linkResolutions: [] },
+    { ...baseline, inspectionPaths: [fixture.projectPath] },
+    { ...baseline, excludePaths: [] },
+    { ...baseline, schemaVersion: 2 },
+    { ...baseline, workspacePath: fixture.taskPath },
+    { ...baseline, projectPath: fixture.taskPath },
+    { ...baseline, outputPaths: [join(fixture.projectPath, "reports")] },
+    { ...baseline, entryCount: -1 },
+    { ...baseline, entryCount: 1.5 },
+    { ...baseline, entriesHash: "0".repeat(63) },
+    { ...baseline, identityFingerprint: [baseline.identityFingerprint] },
+    missingFingerprint,
+    { ...baseline, allowedPaths: [...baseline.allowedPaths].reverse() },
+    { ...baseline, allowedPaths: [fixture.clarificationPath] },
+  ])
+    assert.throws(
+      () => validate(invalid),
+      /Plan-authoring directory baseline is invalid/u,
+    );
+});
+
+test("custom authoring resumes a legacy full baseline through its unchanged guards", async (t) => {
+  for (const drift of [false, true]) {
+    await t.test(drift ? "drift" : "unchanged", async (t) => {
+      let interrupt = true;
+      const fixture = await createFixture(t, {
+        planKind: "custom",
+        planner: [
+          { ...ready(), criteria: CUSTOM_CRITERIA },
+          draft(CUSTOM_PLAN),
+        ],
+        onPreflight: ({ allowedPaths }) =>
+          fixture.runtime.workspace.snapshot({ allowedPaths }),
+        onRoleRun(role) {
+          if (role === "reviewer" && interrupt) {
+            interrupt = false;
+            const error = new Error("Provider interrupted.");
+            error.recoverable = true;
+            throw error;
+          }
+        },
+      });
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "backend_unavailable");
+      const legacy = paused.pipelineState.repositoryBaseline;
+      assert.ok(Array.isArray(legacy.entries));
+      planAuthoringPipeline.workflow.validateRun(paused);
+      Object.assign(fixture.currentRun, {
+        activeTurn: { role: "reviewer", phase: "review" },
+        pause: null,
+        pipelineState: { ...paused.pipelineState, workflowState: "REVIEW" },
+      });
+      if (drift)
+        await writeFile(join(fixture.projectPath, "unexpected.txt"), "drift\n");
+
+      const resumed = await fixture.run();
+      assert.deepEqual(resumed.pipelineState.repositoryBaseline, legacy);
+      if (drift) {
+        assert.equal(resumed.pause.reason, "read_only_mutation");
+        assert.equal(fixture.calls.reviewer.length, 1);
+      } else {
+        assert.equal(resumed.pipelineState.workflowState, "DONE");
+        assert.equal(await readFile(fixture.planPath, "utf8"), CUSTOM_PLAN);
+      }
+    });
+  }
+});
+
+test("version seven migration preserves state and legacy baselines", () => {
+  const state = {
+    ...createPlanAuthoringState({
+      settings: { ...PLAN_DEFAULTS, planKind: "custom" },
+    }),
+    preflightComplete: true,
+    repositoryBaseline: {
+      schemaVersion: 1,
+      workspacePath: "/workspace",
+      entries: [],
+    },
+  };
+  const before = structuredClone(state);
+  const migrated = planAuthoringPipeline.migrations[7]({
+    pipelineState: state,
+  });
+  assert.deepEqual(migrated, before);
+  assert.notEqual(migrated, state);
+  assert.ok(Object.isFrozen(migrated));
+  assert.deepEqual(state, before);
 });
 
 test("the selected authoring kind rejects the other artifact format without coercion", async (t) => {

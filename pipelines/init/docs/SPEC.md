@@ -281,8 +281,11 @@ and the existing no-replace primitive; its identity is persisted before publicat
 Lease ownership is rechecked after that persistence and before publication.
 File replacement reuses confined directory descriptors, exclusive temporary
 creation, journaled temporary identity, synced bytes, atomic rename and verified
-readback. Unknown temporaries, same-byte inode substitutions, ancestor changes
-and intervening edits are rejected and preserved. Temporary paths remain stable
+readback. The shared publisher requires journaled custody for every temporary,
+never removes one, and verifies destination identity and temporary absence at
+readback. Unknown temporaries, missing recorded custody, same-byte inode
+substitutions, ancestor changes and intervening edits are rejected and
+preserved; Init's separate destination-identity check remains. Temporary paths remain stable
 for each exact destination, avoiding new ignore entries on ordinary reruns.
 Each resource receives a
 verified identity/hash receipt before the next effect. Reload binds the original
@@ -443,6 +446,12 @@ reservations and counters are not migrated or fabricated.
 
 ## Terminal provider failures
 
+The common Runner attempt/recovery surfaces retain nullable platform-validated
+`ownershipDiagnostic` evidence independently of native sessions. The shared
+[ownership diagnostic contract](../../../docs/ARCHITECTURE.md#bounded-ownership-failure-diagnostics)
+owns its vocabulary, persistence compatibility and CLI/MCP projections. This
+pipeline adds no diagnostic policy, retry, checkpoint or effect authority.
+
 After unchanged-workspace verification and physical turn/resource retirement,
 an unhandled boundary-normalized terminal adapter failure persists `FAILED`
 before execution ownership is released. Only the matching reserved read-only
@@ -550,7 +559,9 @@ Completed setup is verification-only. Failure or cancellation preserves resource
 and publication records; setup never stages, commits or launches another pipeline.
 Operator pause/cancellation validates the preserved suspended checkpoint,
 including a reserved proposal turn or pending clarification editor. Resume of a
-pause restores that checkpoint; cancellation is terminal. Root safety blockers
+pause restores that checkpoint; cancellation is terminal. A settled pause also
+accepts a pending fresh cancellation at its current revision, which reconciliation
+wraps once around the restored checkpoint. Root safety blockers
 retain reserved read-only bindings without granting continuation through drift.
 
 CLI status and MCP status/wait expose placement, exact reusable selector,
@@ -569,3 +580,13 @@ after Runner publication. Pre-turn reconstruction exhaustion persists a resumabl
 `provider_interrupted` pause at the original checkpoint. Owner loss and explicit
 resume retain attempt 2 consumption, source-fork reservations and revision
 accounting; they never renew an automatic reconstruction allowance.
+
+A qualifying explicit-model catalog miss uses the same `provider_interrupted`
+pause. Admission and journal replay preserve the frozen role selection and
+settings, proposal evidence and spent revisions through the read-only turn
+start. Init can reconstruct the pending reservation from those saved facts
+without renewing the provider recovery allowances. Runner verifies
+the saved clarification hash before accepting the resume and before dispatching
+the read-only turn, including when recovery starts after resume acceptance.
+Temporary inspection unavailability preserves that retry binding through the
+inspection pause. Confirmed input drift blocks the retry.

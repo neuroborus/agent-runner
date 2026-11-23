@@ -87,6 +87,7 @@ function policyFixture(outputs, { mode = "independent", source = null } = {}) {
     },
     workspace: {
       snapshot: async () => ({ contentFingerprint: HASH }),
+      baseline: async () => ({ contentFingerprint: HASH }),
       assertUnchanged: async (snapshot) =>
         assert.equal(snapshot.contentFingerprint, HASH),
     },
@@ -595,7 +596,7 @@ test("persistent text limits retain the aggregate two-MiB audit-result allowance
   assert.deepEqual(result.pipelineState.report.limitations, report.limitations);
 });
 
-test("audit discovery composes confined clarification edits and persisted session contexts", async (t) => {
+test("ordinary-directory audit recovers journaled questions before confined edits without session replay", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "runner-audit-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const projectPath = join(root, "project");
@@ -707,7 +708,45 @@ test("audit discovery composes confined clarification edits and persisted sessio
     },
   };
 
+  const append = runtime.clarifications.appendQuestionRound;
+  runtime.clarifications = {
+    ...runtime.clarifications,
+    appendQuestionRound: async (request) => {
+      const result = await append(request);
+      assert.equal(
+        result.hash,
+        current.pipelineState.pendingClarificationAppend.resultHash,
+      );
+      throw Object.assign(new Error("Lost append readback"), {
+        code: "ERR_CLARIFICATION_READ",
+      });
+    },
+  };
+  const interrupted = await runAuditDiscovery({ run: current, runtime });
+  assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+  assert.equal(interrupted.pipelineState.pendingEdit, null);
+  assert.equal(interrupted.pipelineState.clarificationRounds, 0);
+  const appendedBytes = await readFile(
+    join(taskPath, "clarifications.md"),
+    "utf8",
+  );
+  current = JSON.parse(JSON.stringify(interrupted));
+  runtime.clarifications = createClarificationService({ interactive: false });
+  for (let index = 0; index < 2; index += 1) {
+    const stopped = await runAuditDiscovery({
+      run: current,
+      runtime,
+      operatorStop: true,
+    });
+    assert.deepEqual(stopped, interrupted);
+  }
   const waiting = await runAuditDiscovery({ run: current, runtime });
+  assert.equal(turns, 1);
+  assert.equal(
+    await readFile(join(taskPath, "clarifications.md"), "utf8"),
+    appendedBytes,
+  );
+  assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
   assert.equal(waiting.pause.reason, "clarification_answers_required");
   assert.ok(waiting.pipelineState.pendingEdit);
   await writeFile(
@@ -716,6 +755,10 @@ test("audit discovery composes confined clarification edits and persisted sessio
   );
   const result = await runAuditDiscovery({ run: waiting, runtime });
   assert.equal(result.pipelineState.workflowState, "DISCOVERY_CLEAN");
+  assert.equal(
+    Object.hasOwn(result.pipelineState.repositoryBaseline, "entries"),
+    false,
+  );
   assert.equal(result.pipelineState.clarificationRounds, 1);
   assert.equal(result.pipelineState.pendingEdit, null);
   assert.equal(result.sessionLineage.children.length, 2);
@@ -725,8 +768,115 @@ test("audit discovery composes confined clarification edits and persisted sessio
     "Original source\n",
   );
 
+  // Version-8 runs may retain a legacy full baseline with its exact comparison.
+  // Its filtered entries are unchanged since capture; fingerprints stay bound.
+  const { allowedPaths, contentFingerprint, identityFingerprint } =
+    result.pipelineState.repositoryBaseline;
+  const legacyState = {
+    ...result.pipelineState,
+    repositoryBaseline: {
+      ...(await runtime.workspace.snapshot({ allowedPaths })),
+      contentFingerprint,
+      identityFingerprint,
+    },
+  };
+  const legacy = {
+    ...result,
+    pipelineState: auditPipeline.migrations[8]({ pipelineState: legacyState }),
+  };
+  assert.deepEqual(legacy.pipelineState, legacyState);
+  await runtime.workspace.assertUnchanged(legacyState.repositoryBaseline);
+
   await writeFile(join(projectPath, "source.txt"), "Intervening source edit\n");
-  const drifted = await runAuditDiscovery({ run: result, runtime });
-  assert.equal(drifted.pause.reason, "workspace_changed");
+  for (const run of [result, legacy]) {
+    const drifted = await runAuditDiscovery({ run, runtime });
+    assert.equal(drifted.pause.reason, "workspace_changed");
+  }
   assert.equal(turns, 3);
+});
+
+test("compact directory baselines exempt only their declared artifacts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "runner-audit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const taskPath = join(projectPath, "task");
+  await mkdir(taskPath, { recursive: true });
+  await writeFile(join(projectPath, "source.txt"), "Original source\n");
+  await writeFile(join(taskPath, "task.md"), "Audit the complete workspace.\n");
+  const workspace = createWorkspaceService();
+  const binding = await bindWorkspace({
+    selection: auditPipeline.resolveWorkspace({ projectPath, taskPath }),
+    projectPath,
+    taskPath,
+    taskInputs: auditPipeline.taskInputs,
+    configurationPath: null,
+    stateRoot: join(root, "state"),
+    workspace,
+  });
+  const safety = directorySafety(binding, workspace);
+  const allowedPaths = binding.policy.artifactPaths;
+  const exempt = await safety.baseline({ allowedPaths });
+  const strict = await safety.baseline();
+  assert.equal(Object.hasOwn(exempt, "entries"), false);
+  assert.deepEqual(exempt.allowedPaths, allowedPaths);
+  assert.equal(exempt.projectPath, projectPath);
+  await assert.rejects(
+    safety.baseline({ allowedPaths: [join(projectPath, "source.txt")] }),
+    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+  );
+
+  for (const path of allowedPaths) await writeFile(path, "Artifact\n");
+  await safety.assertUnchanged(exempt);
+  await assert.rejects(safety.assertUnchanged(strict), {
+    code: "ERR_WORKSPACE_DRIFT",
+  });
+  await writeFile(join(projectPath, "source.txt"), "Changed source\n");
+  await assert.rejects(safety.assertUnchanged(exempt), {
+    code: "ERR_WORKSPACE_DRIFT",
+  });
+});
+
+test("directory output baselines project one filtered inspection", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "runner-audit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectPath = join(root, "project");
+  const taskPath = join(projectPath, "task");
+  await mkdir(taskPath, { recursive: true });
+  await writeFile(join(projectPath, "source.txt"), "Original source\n");
+  await writeFile(join(taskPath, "task.md"), "Audit the complete workspace.\n");
+  const workspace = createWorkspaceService();
+  const binding = await bindWorkspace({
+    selection: auditPipeline.resolveWorkspace({ projectPath, taskPath }),
+    projectPath,
+    taskPath,
+    taskInputs: auditPipeline.taskInputs,
+    configurationPath: null,
+    stateRoot: join(root, "state"),
+    workspace,
+  });
+  let inspections = 0;
+  const safety = directorySafety(binding, {
+    ...workspace,
+    snapshot: (...args) => (inspections++, workspace.snapshot(...args)),
+  });
+  const allowedPaths = binding.policy.artifactPaths;
+  for (const path of allowedPaths) await writeFile(path, "Artifact\n");
+  const { snapshot, baseline } = await safety.outputBaseline({ allowedPaths });
+  assert.equal(inspections, 1);
+  assert.deepEqual(snapshot, await safety.snapshot({ allowedPaths }));
+  assert.equal(
+    snapshot.entries.some(({ path }) => allowedPaths.includes(path)),
+    false,
+  );
+  assert.deepEqual(baseline, {
+    ...workspace.outputBaseline(snapshot),
+    allowedPaths,
+    projectPath,
+  });
+  assert.equal(Object.hasOwn(baseline, "entries"), false);
+  await safety.assertUnchanged(baseline);
+  await assert.rejects(
+    safety.outputBaseline({ allowedPaths: [join(projectPath, "source.txt")] }),
+    { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+  );
 });

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   writeFile,
@@ -24,6 +25,7 @@ import { runPlanExecution } from "@agent-runner/plan-execution";
 import { directorySafety } from "../../src/runner/workspace.js";
 import { createTrustedValidationSnapshot } from "../../src/trusted-validation/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
+import { PROVIDER_REGISTRY } from "../../src/agents/index.js";
 import { executeFile } from "./runner.js";
 
 const empty = { question: "", options: [], whyBlocked: "", evidence: [] };
@@ -46,7 +48,14 @@ export async function customExecutionFixture(
     contained = false,
     finalization = "auto",
     missingOutputRoot = false,
+    outputDeclaration: selectedOutputDeclaration,
+    outputDeclarations: selectedOutputDeclarations,
+    assertOutputReady = (request) =>
+      PROVIDER_REGISTRY.get("codex").assertWorkspaceReady(request),
+    outputStep = 2,
+    vendorFiles = 0,
     afterOutputPreparation,
+    syntheticEntries = () => [],
     writablePolicy = () => "fixture",
   } = {},
 ) {
@@ -58,6 +67,10 @@ export async function customExecutionFixture(
     : join(root, "workspace");
   const taskPath = join(root, "task");
   const output = join(projectPath, "reports", "summary.md");
+  // A missing output root is declared as a directory for authoring and execution.
+  const outputDeclaration =
+    selectedOutputDeclaration ?? (missingOutputRoot ? "reports/" : "reports");
+  const outputDeclarations = selectedOutputDeclarations ?? [outputDeclaration];
   await mkdir(missingOutputRoot ? projectPath : join(projectPath, "reports"), {
     recursive: true,
   });
@@ -86,6 +99,22 @@ export async function customExecutionFixture(
     );
   }
   await writeFile(join(projectPath, "source.md"), "Supplied evidence.\n");
+  if (vendorFiles > 0) {
+    // One ordinary dependency-like tree plus a small control file, written
+    // before creation and shared by every inspection of the run.
+    await mkdir(join(projectPath, ".agents"));
+    await writeFile(join(projectPath, ".agents", "notes.md"), "Notes.\n");
+    const packages = Array.from({ length: 50 }, (_, index) =>
+      join(projectPath, "vendor", `package-${index}`),
+    );
+    await Promise.all(
+      packages.map(async (directory, index) => {
+        await mkdir(directory, { recursive: true });
+        for (let file = index; file < vendorFiles; file += packages.length)
+          await writeFile(join(directory, `module-${file}.js`), "");
+      }),
+    );
+  }
   await writeFile(
     join(taskPath, "task.md"),
     `Analyze the evidence, then write a summary. Agreed result criterion: ${criteria[0].condition}\n`,
@@ -94,7 +123,7 @@ export async function customExecutionFixture(
     kind: "custom",
     criteria,
     inputs: ["source.md", "https://example.invalid/reference"],
-    outputs: [missingOutputRoot ? "reports/" : "reports"],
+    outputs: outputDeclarations,
     steps: [1, 2].map((number) => ({
       number,
       title: number === 1 ? "Analyze evidence" : "Write summary",
@@ -112,6 +141,7 @@ export async function customExecutionFixture(
   const probes = [];
   const trustedCalls = [];
   let runId;
+  let authoringRunId = null;
   let memoryRun;
   const result = (step) => ({
     analysis:
@@ -124,7 +154,7 @@ export async function customExecutionFixture(
         ],
       },
     ],
-    outputPaths: step === 1 ? [] : [output],
+    outputPaths: step === outputStep ? [output] : [],
   });
   const adapter = {
     async probe(options) {
@@ -257,7 +287,7 @@ export async function customExecutionFixture(
           ...empty,
         };
       else if (state.workflowState === "IMPLEMENT") {
-        if (step === 2)
+        if (step === outputStep)
           await writeFile(
             output,
             "Conclusion: supplied evidence (source.md). Remote evidence unavailable.\n",
@@ -323,7 +353,7 @@ export async function customExecutionFixture(
       };
     },
   };
-  const runner = createRunner({
+  const runnerOptions = {
     adapters: { codex: adapter },
     runStore: store,
     git: new Proxy(
@@ -349,14 +379,27 @@ export async function customExecutionFixture(
                 "source.md",
                 "https://example.invalid/reference",
               ],
-              outputPaths: ["reports"],
+              outputPaths: outputDeclarations,
             },
           },
         }),
       ),
-  });
+  };
+  const openRunner = (runStore) => createRunner({ ...runnerOptions, runStore });
+  const runner = openRunner(
+    durable && afterTransition
+      ? {
+          ...store,
+          async transitionRun(...args) {
+            const saved = await store.transitionRun(...args);
+            await afterTransition(saved);
+            return saved;
+          },
+        }
+      : store,
+  );
   if (author) {
-    runId = (
+    runId = authoringRunId = (
       await runner.create({
         pipelineId: "plan-authoring",
         projectPath,
@@ -378,78 +421,94 @@ export async function customExecutionFixture(
     taskPath,
   });
   runId = created.run.runId;
-  const safety = directorySafety(
-    created.run.workspace,
-    createWorkspaceService(),
-  );
+  const workspaceService = createWorkspaceService();
+  const safety = directorySafety(created.run.workspace, workspaceService);
   const digest = (value) =>
     createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  // Mirror real capture: every entry under the workspace, with artifacts
+  // filtered from entries but retained in the identity fingerprint.
+  async function capture(path, entries = []) {
+    let stat;
+    try {
+      stat = await lstat(path, { bigint: true });
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return entries;
+    }
+    const entry = {
+      path,
+      kind: stat.isDirectory() ? "directory" : "file",
+      mode: Number(stat.mode & 0o777n),
+      size: stat.isDirectory() ? 0 : Number(stat.size),
+      hash: stat.isDirectory() ? null : digest(await readFile(path, "utf8")),
+      identity: {
+        device: String(stat.dev),
+        inode: String(stat.ino),
+        mode: String(stat.mode),
+      },
+      ...(stat.isDirectory()
+        ? {}
+        : {
+            modifiedNs: String(stat.mtimeNs),
+            changedNs: String(stat.ctimeNs),
+          }),
+    };
+    entries.push(entry);
+    if (stat.isDirectory())
+      for (const name of await readdir(path))
+        await capture(join(path, name), entries);
+    return entries;
+  }
+  async function snapshot({ allowedPaths = [] } = {}) {
+    const entries = [
+      ...(await capture(projectPath)),
+      ...syntheticEntries(),
+    ].sort((left, right) =>
+      left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+    );
+    return {
+      schemaVersion: 1,
+      projectPath,
+      workspacePath: projectPath,
+      outputPaths: created.run.workspace.policy.outputPaths,
+      allowedPaths,
+      entries: entries.filter(
+        ({ path }) =>
+          !allowedPaths.some(
+            (root) => path === root || path.startsWith(`${root}/`),
+          ),
+      ),
+      linkResolutions: [],
+      contentFingerprint: digest(
+        entries.map(({ path, kind, mode, size, hash }) => ({
+          path,
+          kind,
+          mode,
+          size,
+          hash,
+        })),
+      ),
+      identityFingerprint: digest(entries),
+    };
+  }
   const lightweight = {
-    async snapshot({ allowedPaths = [] } = {}) {
-      const entries = [];
-      if (missingOutputRoot) {
-        const path = join(projectPath, "reports");
-        try {
-          const stat = await lstat(path);
-          entries.push({
-            path,
-            kind: "directory",
-            mode: stat.mode & 0o777,
-            size: 0,
-            hash: null,
-            identity: {
-              device: String(stat.dev),
-              inode: String(stat.ino),
-              mode: String(stat.mode),
-            },
-          });
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-          entries.push({
-            path,
-            kind: "missing",
-            mode: null,
-            size: 0,
-            hash: null,
-          });
-        }
-      }
-      for (const path of [
-        join(projectPath, "source.md"),
-        output,
-        ...(selectedGuidance ? [selectedGuidance] : []),
-      ]) {
-        try {
-          entries.push({
-            path,
-            kind: "file",
-            mode: "33188",
-            size: 0,
-            hash: digest(await readFile(path, "utf8")),
-          });
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-        }
-      }
+    snapshot,
+    async outputBaseline({ allowedPaths = [] } = {}) {
+      const inspected = await snapshot({ allowedPaths });
       return {
-        schemaVersion: 1,
-        projectPath,
-        workspacePath: projectPath,
-        outputPaths: [join(projectPath, "reports")],
-        allowedPaths,
-        entries,
-        contentFingerprint: digest(entries),
-        identityFingerprint: digest(entries),
+        snapshot: inspected,
+        baseline: {
+          ...workspaceService.outputBaseline(inspected),
+          allowedPaths,
+          projectPath,
+        },
       };
     },
     async assertUnchanged(before) {
-      if (
-        JSON.stringify((await this.snapshot()).entries) !==
-        JSON.stringify(before.entries)
-      )
-        throw Object.assign(new Error("Workspace changed"), {
-          code: "ERR_WORKSPACE_DRIFT",
-        });
+      workspaceService.assertUnchanged({
+        before,
+        after: await snapshot({ allowedPaths: before.allowedPaths ?? [] }),
+      });
     },
     inspectPath: safety.inspectPath,
     async inspectOutputDirectory(path) {
@@ -507,6 +566,12 @@ export async function customExecutionFixture(
       Object.keys(created.run.roles).map((role) => [
         role,
         {
+          assertWorkspaceReady: ({ preparableOutputPaths }) =>
+            assertOutputReady({
+              access: "workspace-write",
+              workspacePolicy: created.run.workspace.policy,
+              preparableOutputPaths,
+            }),
           probe: async (options) =>
             options?.access
               ? adapter.probe(options)
@@ -574,8 +639,20 @@ export async function customExecutionFixture(
       return Object.fromEntries(entries);
     },
     transition,
-    startAgentTurn: (activeTurn, patch = {}) =>
-      transition({ ...patch, activeTurn }),
+    startAgentTurn: (
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) => {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? memoryRun.pipelineState,
+          memoryRun.revision,
+        ) ?? pipelineState;
+      return transition({
+        ...(pipelineState === undefined ? {} : { pipelineState }),
+        activeTurn,
+      });
+    },
     finishAgentTurn: () => transition({ activeTurn: null }),
     recordChildSession: (child) =>
       transition({
@@ -605,6 +682,7 @@ export async function customExecutionFixture(
     runner,
     store,
     runId,
+    authoringRunId,
     calls,
     probes,
     trustedCalls,
@@ -614,11 +692,20 @@ export async function customExecutionFixture(
     taskPath,
     plan,
     result,
+    workspace: lightweight,
     get currentRun() {
       return memoryRun;
     },
-    run: async () => {
-      if (durable) return runner.resume({ runId });
+    set currentRun(value) {
+      memoryRun = value;
+    },
+    run: async ({ cold = false } = {}) => {
+      if (durable) {
+        const selectedRunner = cold
+          ? openRunner(createRunStore({ stateRoot: join(root, "state") }))
+          : runner;
+        return selectedRunner.resume({ runId });
+      }
       memoryRun = await runPlanExecution({ run: memoryRun, runtime });
       return { run: memoryRun };
     },

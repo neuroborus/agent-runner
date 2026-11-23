@@ -11,6 +11,7 @@ import {
   createRunStore,
   parseRunnerConfiguration,
 } from "../../../../src/index.js";
+import { isolateGitEnvironment } from "../../../../src/git/index.js";
 import { planExecutionPipeline } from "../../src/index.js";
 import {
   REPOSITORY_DISCOVERY_SCHEMA,
@@ -137,8 +138,13 @@ export async function createLegacyRecoveryFixture(
         /Current planned commit:\n## Commit (\d+):/u.exec(request.prompt)?.[1],
       );
       if (request.access === "local-commit") {
-        await git("add", "-A");
-        await git("commit", "-qm", request.commit.message);
+        const options = { env: isolateGitEnvironment(process.env) };
+        await executeFile("git", ["-C", projectPath, "add", "-A"], options);
+        await executeFile(
+          "git",
+          ["-C", projectPath, "commit", "-qm", request.commit.message],
+          options,
+        );
         return {
           output: "committed",
           sessionId: request.session?.id ?? randomUUID(),

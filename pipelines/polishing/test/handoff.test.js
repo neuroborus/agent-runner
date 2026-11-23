@@ -4,23 +4,208 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createGitService } from "../../../src/git/index.js";
+import { getPipeline } from "../../../src/index.js";
+import { polishingPipeline } from "../src/index.js";
 import { CHECK_AND_FIX_SCHEMA } from "../src/schemas.js";
+import { runPolishing } from "../src/workflow.js";
+import { RUNNER_HYGIENE_ISSUE_COMMAND } from "../src/workflow-contract.js";
 import {
   SOURCE_SESSION,
   bootstrapReady,
+  candidateApproved,
   candidateClean,
   checkAndFix,
   clarificationReady,
   cleanConfirmation,
+  createFixture,
   createRealGitFixture,
   finalizationPassed,
   polishingCompleted,
   reconciliationResolved,
   reconsideration,
   resolution,
+  reviewApproved,
   reviewFindings,
   runGit,
 } from "./support/index.js";
+
+const POLISH_PROMPT = /Polish the existing local/u;
+
+async function cachedNames(projectPath) {
+  return (await runGit(projectPath, "diff", "--cached", "--name-only")).stdout;
+}
+
+test("runner gates new-file whitespace before any index write and stages the repair once", async (t) => {
+  let resolved = false;
+  const fixture = await createRealGitFixture(t, {
+    worker: [
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+      polishingCompleted(),
+      finalizationPassed(),
+      resolution("FIX", "F1"),
+      finalizationPassed(),
+    ],
+    reviewer: [
+      bootstrapReady("Reviewer"),
+      candidateApproved(),
+      candidateApproved(),
+      reviewApproved(),
+    ],
+    async onRoleRun(role, request, _turn, { projectPath }) {
+      if (role === "worker" && POLISH_PROMPT.test(request.prompt))
+        await writeFile(join(projectPath, "spaced.txt"), "value  \n");
+      if (
+        role === "worker" &&
+        /Resolve every current blocker/u.test(request.prompt)
+      ) {
+        resolved = true;
+        assert.equal(await cachedNames(projectPath), "");
+        const { issues } = fixture.currentRun.pipelineState.finalizationResult;
+        assert.deepEqual(
+          issues.map(({ command, evidence }) => [command, evidence]),
+          [
+            [
+              RUNNER_HYGIENE_ISSUE_COMMAND,
+              ["New file has whitespace errors: spaced.txt"],
+            ],
+          ],
+        );
+        await writeFile(join(projectPath, "spaced.txt"), "value\n");
+      }
+    },
+  });
+  const staged = [];
+  const git = fixture.runtime.git;
+  fixture.runtime.git = {
+    ...git,
+    stagePolishingHandoff(options) {
+      staged.push(options.finalizedFingerprint);
+      return git.stagePolishingHandoff(options);
+    },
+  };
+
+  const result = await fixture.run();
+
+  assert.equal(resolved, true);
+  assert.equal(result.pipelineState.workflowState, "DONE");
+  assert.deepEqual(staged, [result.pipelineState.finalizedFingerprint]);
+  assert.match(await cachedNames(fixture.projectPath), /^spaced\.txt$/mu);
+  await runGit(fixture.projectPath, "diff", "--cached", "--check");
+});
+
+function handoffRejection(code) {
+  return Object.assign(new Error("Handoff whitespace."), { code });
+}
+
+function assertTerminalWhitespace(fixture, result, code, evidence) {
+  const handoff = fixture.transitions.findLast(
+    ({ patch }) => patch.pipelineState?.workflowState === "HANDOFF",
+  ).patch.pipelineState;
+  assert.deepEqual(result.pipelineState, {
+    ...handoff,
+    workflowState: "FAILED",
+  });
+  assert.deepEqual(result.pause, {
+    reason: "handoff_whitespace_rejected",
+    code,
+  });
+  assert.doesNotThrow(() => polishingPipeline.workflow.validateRun(result));
+  assert.deepEqual(getPipeline("polishing").projections.pause(result), {
+    reason: "handoff_whitespace_rejected",
+    code,
+    explanation:
+      "Finalized content failed Runner handoff whitespace hygiene; this run cannot resume. Repair the whitespace and start a new polishing run.",
+    evidence: [evidence],
+    resumeState: null,
+    nextActions: [],
+  });
+  assert.throws(() => polishingPipeline.validateResumeAction(result, null));
+}
+
+test("an untouched handoff whitespace rejection is terminal without index effects", async (t) => {
+  const code = "ERR_POLISHING_HANDOFF_UNSTAGED_WHITESPACE";
+  const fixture = await createFixture(t);
+  const git = fixture.runtime.git;
+  let stageCalls = 0;
+  git.stagePolishingHandoff = async () => {
+    stageCalls += 1;
+    throw handoffRejection(code);
+  };
+
+  const result = await fixture.run();
+
+  assertTerminalWhitespace(fixture, result, code, "Index effect: none.");
+  assert.equal(stageCalls, 1);
+  assert.equal(
+    (await git.snapshot({ projectPath: fixture.projectPath })).indexFingerprint,
+    result.pipelineState.repositoryBaseline.indexFingerprint,
+  );
+  const calls = Object.values(fixture.calls).flat().length;
+  assert.equal((await fixture.run()).pipelineState.workflowState, "FAILED");
+  assert.equal(Object.values(fixture.calls).flat().length, calls);
+  assert.equal(stageCalls, 1);
+});
+
+for (const operatorStop of [false, true]) {
+  test(`${operatorStop ? "operator stop" : "resumed"} HANDOFF retains complete staging that fails late hygiene`, async (t) => {
+    const code = "ERR_POLISHING_HANDOFF_WHITESPACE";
+    const fixture = await createFixture(t);
+    const interruption = new Error("Interrupted after HANDOFF persistence.");
+    const transition = fixture.runtime.transition;
+    let halted = false;
+    fixture.runtime.transition = async (patch, options) => {
+      if (halted) throw interruption;
+      const run = await transition(patch, options);
+      halted = patch.pipelineState?.workflowState === "HANDOFF";
+      if (halted) throw interruption;
+      return run;
+    };
+    await assert.rejects(fixture.run(), (cause) => cause === interruption);
+    fixture.runtime.transition = transition;
+    // Complete Runner staging that fails the late staged check.
+    const git = fixture.runtime.git;
+    git.inspectPolishingHandoff = async () => {
+      throw handoffRejection(code);
+    };
+    git.stagePolishingHandoff = () => assert.fail("Recovery must not stage.");
+
+    const result = operatorStop
+      ? await runPolishing({
+          run: fixture.currentRun,
+          runtime: fixture.runtime,
+          operatorStop: true,
+        })
+      : await fixture.run();
+
+    assertTerminalWhitespace(
+      fixture,
+      result,
+      code,
+      "Index effect: Runner staging of the reviewed content is retained; nothing was reset or unstaged.",
+    );
+  });
+}
+
+test("handoff contamination keeps the internal failure disposition", async (t) => {
+  const fixture = await createFixture(t);
+  fixture.runtime.git.inspectPolishingHandoff = async () => {
+    throw Object.assign(new Error("Contaminated handoff."), {
+      code: "ERR_POLISHING_HANDOFF_CONTAMINATED",
+    });
+  };
+
+  await assert.rejects(fixture.run(), {
+    code: "ERR_POLISHING_HANDOFF_CONTAMINATED",
+  });
+
+  assert.equal(fixture.currentRun.pipelineState.workflowState, "FAILED");
+  assert.deepEqual(fixture.currentRun.pause, {
+    reason: "internal_failure",
+    code: "ERR_POLISHING_HANDOFF_CONTAMINATED",
+  });
+});
 
 for (const testCase of [
   {

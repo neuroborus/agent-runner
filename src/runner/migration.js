@@ -50,6 +50,16 @@ export function preparePipelineMigration(run, pipeline) {
   }
   try {
     pipeline.workflow.validateRun(migrated);
+    const root = migrated.pipelineState.clarificationRoot;
+    if (
+      root != null &&
+      root !== migrated.projectPath &&
+      root !== migrated.pipelineState.repositoryBaseline?.projectPath &&
+      root !== migrated.projectConfigurationProtection?.infrastructureRoot
+    )
+      throw new RunnerError("Clarification confinement owner is invalid.", {
+        code: "ERR_UNSAFE_CLARIFICATION_PATH",
+      });
   } catch (cause) {
     if (migrated.pipelineStateVersion === originalVersion) {
       throw cause;

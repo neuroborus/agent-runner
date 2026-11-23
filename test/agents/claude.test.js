@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { execFile as executeFileCallback, spawnSync } from "node:child_process";
+import {
+  execFile as executeFileCallback,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { EventEmitter } from "node:events";
+import { closeSync, constants, openSync, readFileSync } from "node:fs";
 import {
   access,
   chmod,
+  copyFile,
   link,
   mkdir,
   mkdtemp,
@@ -27,11 +33,13 @@ import {
   parse,
   relative,
   resolve,
+  sep,
 } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
+import { createOwnershipDiagnostic } from "../../src/platform/index.js";
 import { createWorkspaceService } from "../../src/workspace/index.js";
 import { largeFinalizationResult } from "../support/index.js";
 
@@ -42,8 +50,16 @@ import {
   recoverClaudeStorage,
   CLAUDE_STORAGE_IDENTITY,
 } from "../../src/agents/claude/index.js";
-import { claudeManagedBubblewrapOverride } from "../../src/agents/claude/command-launcher.js";
+import {
+  claudeManagedBubblewrapOverride,
+  createClaudeCommandLauncher,
+} from "../../src/agents/claude/command-launcher.js";
 import { probeClaudeIsolationPolicies } from "../../src/agents/claude/native-sandbox.js";
+import { prepareDirectoryPolicy } from "../../src/agents/claude/directory-policy.js";
+import {
+  CLAUDE_PERMISSION_REASON_CODES as CLAUDE_REASON_CODES,
+  createClaudeStream,
+} from "../../src/agents/claude/stream.js";
 import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
@@ -62,6 +78,33 @@ import {
 
 const PROJECT_PATH = process.cwd();
 const EXPECTED_HEAD = "a".repeat(40);
+
+const AMBIENT_GIT_IDENTITY = Object.freeze({
+  EMAIL: "ambient@example.test",
+  GIT_AUTHOR_EMAIL: "ambient-author@example.test",
+  GIT_AUTHOR_NAME: "Ambient Author",
+  GIT_COMMITTER_EMAIL: "ambient-committer@example.test",
+  GIT_COMMITTER_NAME: "Ambient Committer",
+  GIT_CONFIG_COUNT: "1",
+  GIT_CONFIG_GLOBAL: "/ambient/global.gitconfig",
+  GIT_CONFIG_KEY_0: "user.name",
+  GIT_CONFIG_PARAMETERS: "'user.name'='Parameter User'",
+  GIT_CONFIG_VALUE_0: "Counted User",
+  HOME: "/ambient/home",
+  XDG_CONFIG_HOME: "/ambient/config",
+});
+
+function assertIsolatedGitIdentity(env) {
+  for (const name of Object.keys(AMBIENT_GIT_IDENTITY)) {
+    if (name !== "HOME" && name !== "XDG_CONFIG_HOME") {
+      assert.equal(env[name], undefined, name);
+    }
+  }
+  assert.equal(env.HOME, AMBIENT_GIT_IDENTITY.HOME);
+  assert.equal(env.XDG_CONFIG_HOME, AMBIENT_GIT_IDENTITY.XDG_CONFIG_HOME);
+  assert.equal(env.GIT_TERMINAL_PROMPT, "0");
+}
+
 const SOURCE_SESSION = "11111111-1111-4111-8111-111111111111";
 const CHILD_SESSION = "22222222-2222-4222-8222-222222222222";
 const FRESH_SESSION = "33333333-3333-4333-8333-333333333333";
@@ -104,15 +147,16 @@ const STRICT_SCHEMA = Object.freeze({
 });
 
 const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
-const COMMON_DENY_POLICY = [
-  "Agent",
-  "Task",
-  "WebFetch",
-  "WebSearch",
-  "Edit(/.git)",
-  "Edit(/.git/**)",
+const COMMON_DENY_POLICY = ["Agent", "Task", "WebFetch", "WebSearch"];
+const PROTECTED_DIRECTORY_EDIT_DENIALS = [
+  "Edit(//<protected-directory>)",
+  "Edit(//<protected-directory>/**)",
 ];
-const WORKSPACE_DENY_POLICY = [
+const PROJECT_EDIT_DENIALS = [
+  `Edit(/${PROJECT_PATH}/.git)`,
+  `Edit(/${PROJECT_PATH}/.git/**)`,
+];
+const DIRECTORY_DENY_POLICY = [
   ...COMMON_DENY_POLICY,
   "Bash(git add *)",
   "Bash(git branch *)",
@@ -293,14 +337,22 @@ function isolationProbeScripts(argumentsList) {
 function assertReadOnlyInspectionProbe(script) {
   assert.match(
     script,
-    /git log -1 --format=%H[\s\S]+git cat-file -e[\s\S]+git branch -a[\s\S]+ls/u,
+    /git status --short[\s\S]+git branch --show-current[\s\S]+git branch -a[\s\S]+git remote -v[\s\S]+git tag --list[\s\S]+git log -1 --format=%H[\s\S]+git cat-file -e[\s\S]+git diff --check HEAD[\s\S]+ls/u,
   );
   assert.match(script, /GIT_CONFIG_GLOBAL: "\/dev\/null"/u);
   assert.match(script, /GIT_CONFIG_NOSYSTEM: "1"/u);
   assert.match(script, /GIT_TERMINAL_PROMPT: "0"/u);
   assert.match(script, /workspace-command-probe/u);
-  assert.match(script, /"branch", "sandbox-command-probe"/u);
-  assert.match(script, /"push", outsideDirectory/u);
+  for (const mutation of [
+    /"add", "inspection\.txt"/u,
+    /"branch", "sandbox-command-probe"/u,
+    /"tag", "sandbox-command-probe"/u,
+    /"remote", "add", "sandbox-command-probe", outsideDirectory/u,
+    /"config", "user\.name"/u,
+    /"user\.email=[^"]+",\s+"commit",\s+"--allow-empty"/u,
+    /"push", outsideDirectory/u,
+  ])
+    assert.match(script, mutation);
 }
 
 function isProbeRepositorySetup({ file, argumentsList }) {
@@ -334,9 +386,11 @@ function fallbackAccess(argumentsList) {
   );
 }
 
-async function createFallbackProject(t) {
+async function createFallbackProject(t, parentPath = tmpdir()) {
   // The launcher validates real paths; do not depend on this checkout's Git layout.
-  const projectPath = await mkdtemp(join(tmpdir(), "claude-fallback-project-"));
+  const projectPath = await mkdtemp(
+    join(parentPath, "claude-fallback-project-"),
+  );
   t.after(() => rm(projectPath, { force: true, recursive: true }));
   await Promise.all([
     mkdir(join(projectPath, ".git")),
@@ -355,6 +409,7 @@ function claudeBubblewrapArguments({
   emptyMaskPath,
   payload,
   projectPath = PROJECT_PATH,
+  temporaryPath,
 }) {
   const argumentsList = [
     "--new-session",
@@ -365,6 +420,10 @@ function claudeBubblewrapArguments({
     "--ro-bind",
     "/",
     "/",
+    // Claude self-binds the temporary directory its shell exports.
+    ...(temporaryPath === undefined
+      ? []
+      : ["--bind", temporaryPath, temporaryPath]),
   ];
   if (access === "workspace-write") {
     argumentsList.push(
@@ -411,13 +470,14 @@ function claudeBubblewrapArguments({
   return argumentsList;
 }
 
-async function createFakeBubblewrap(t) {
+async function createFakeBubblewrap(t, beforeRemove = () => {}) {
   const directory = await mkdtemp(
     join(tmpdir(), "agent-runner-fake-claude-bwrap-"),
   );
   const logPath = join(directory, "arguments.jsonl");
   const filterLogPath = join(directory, "filters.jsonl");
   const helperLogPath = join(directory, "helper.jsonl");
+  const bindLogPath = join(directory, "binds.jsonl");
   await Promise.all([
     writeFile(
       join(directory, "claude"),
@@ -439,6 +499,21 @@ async function createFakeBubblewrap(t) {
         `process.env.AGENT_RUNNER_CLAUDE_PROBE_CREDENTIAL !== undefined) ` +
         `process.exit(12);\n` +
         `const args = process.argv.slice(2);\n` +
+        // Record every non-standard socket received and, like bubblewrap,
+        // write the child-pid record to the info descriptor and close it.
+        `if (process.env.AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS) {\n` +
+        `  const { closeSync, readdirSync, readlinkSync } = require("node:fs");\n` +
+        `  const sockets = readdirSync("/proc/self/fd").filter((fd) => {\n` +
+        `    try { return Number(fd) > 2 && readlinkSync("/proc/self/fd/" + fd).startsWith("socket:"); } catch { return false; }\n` +
+        `  });\n` +
+        `  const info = args.includes("--info-fd") ? args[args.indexOf("--info-fd") + 1] : null;\n` +
+        `  appendFileSync(process.env.AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS, JSON.stringify({ info, sockets }) + "\\n");\n` +
+        `  if (info !== null) {\n` +
+        `    writeSync(Number(info), '{\\n    "child-pid": ' + process.pid + "\\n}\\n");\n` +
+        `    closeSync(Number(info));\n` +
+        `    if (process.env.AGENT_RUNNER_FAKE_BWRAP_HOLD === "1") Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n` +
+        `  }\n` +
+        `}\n` +
         `if (process.env.AGENT_RUNNER_FAKE_BWRAP_MATERIALIZE) {\n` +
         `  for (let i = 0; i < args.indexOf("--"); i++) {\n` +
         `    if (args[i] !== "--ro-bind" || args[i+1] === args[i+2]) continue;\n` +
@@ -455,6 +530,14 @@ async function createFakeBubblewrap(t) {
         `const seccompIndex = args.indexOf("--seccomp");\n` +
         `if (seccompIndex === -1 || args[seccompIndex + 1] !== "3" || ` +
         `args.indexOf("--seccomp", seccompIndex + 1) !== -1) process.exit(13);\n` +
+        `for (let i = 0; i < args.indexOf("--"); i++) {\n` +
+        `  if (args[i] !== "--bind-fd") continue;\n` +
+        `  const outside = process.env.AGENT_RUNNER_FAKE_BWRAP_SUBSTITUTE;\n` +
+        `  if (outside) { require("node:fs").renameSync(args[i+2], args[i+2] + "-validated"); ` +
+        `require("node:fs").symlinkSync(outside, args[i+2]); }\n` +
+        `  const { dev, ino } = fstatSync(Number(args[i+1]));\n` +
+        `  appendFileSync(${JSON.stringify(bindLogPath)}, JSON.stringify({ dev, ino }) + "\\n");\n` +
+        `}\n` +
         `const filter = readFileSync(3);\n` +
         `const metadata = fstatSync(3);\n` +
         `let writeError;\n` +
@@ -488,8 +571,11 @@ async function createFakeBubblewrap(t) {
     ),
     writeFile(join(directory, "package.json"), '{"type":"commonjs"}\n'),
   ]);
-  t.after(() => rm(directory, { force: true, recursive: true }));
-  return { directory, filterLogPath, helperLogPath, logPath };
+  t.after(async () => {
+    beforeRemove();
+    await rm(directory, { force: true, recursive: true });
+  });
+  return { bindLogPath, directory, filterLogPath, helperLogPath, logPath };
 }
 
 async function resolveTestExecutable(binary, path = process.env.PATH) {
@@ -504,6 +590,67 @@ async function resolveTestExecutable(binary, path = process.env.PATH) {
     }
   }
   return undefined;
+}
+
+// Real-process regressions need a supported architecture and a bubblewrap
+// that accepts the direct seccomp filter.
+async function directSeccompBubblewrap() {
+  const bubblewrapBinary = await resolveTestExecutable("bwrap");
+  if (
+    bubblewrapBinary === undefined ||
+    !Object.hasOwn(EXPECTED_SECCOMP_INSTRUCTIONS, process.arch)
+  )
+    return undefined;
+  const capabilityDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-bwrap-seccomp-"),
+  );
+  let capabilityResult;
+  try {
+    const filterPath = join(capabilityDirectory, "filter.bpf");
+    await writeFile(filterPath, expectedSeccompFilter(process.arch), {
+      mode: 0o400,
+    });
+    const descriptor = await open(filterPath, constants.O_RDONLY);
+    try {
+      await rm(filterPath);
+      capabilityResult = spawnSync(
+        bubblewrapBinary,
+        [
+          "--new-session",
+          "--die-with-parent",
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--as-pid-1",
+          "--cap-drop",
+          "ALL",
+          "--proc",
+          "/proc",
+          "--seccomp",
+          "3",
+          "--",
+          "/bin/true",
+        ],
+        {
+          env: process.env,
+          stdio: ["ignore", "ignore", "ignore", descriptor.fd],
+          timeout: 10_000,
+        },
+      );
+    } finally {
+      await descriptor.close();
+    }
+  } finally {
+    await rm(capabilityDirectory, { force: true, recursive: true });
+  }
+  return capabilityResult.error === undefined && capabilityResult.status === 0
+    ? bubblewrapBinary
+    : undefined;
 }
 
 async function commandLauncherEvidence(path) {
@@ -547,11 +694,12 @@ function policyFingerprint(
           disableBypassPermissionsMode: "disable",
           permissionMode: "auto",
           permissions: {
-            deny: readOnly ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
+            deny: COMMON_DENY_POLICY,
+            protectedDirectoryDeny: PROTECTED_DIRECTORY_EDIT_DENIALS,
           },
           sandbox: {
             allowUnsandboxedCommands: false,
-            autoAllowBashIfSandboxed: readOnly,
+            autoAllowBashIfSandboxed: true,
             credentials: { denyDiscoveredEnvironment: true },
             enabled: true,
             enableWeakerNestedSandbox: isolationPolicy === "runner-boundary",
@@ -1445,7 +1593,36 @@ async function scopedDirectoryWorkspace(t) {
   return { ...directory, selectedFile, excluded, unselected };
 }
 
-function directoryCommandArguments(directory, access, native) {
+test("missing exact output mounts fail before native work and existing files keep exact mounts", async (t) => {
+  const directory = await directoryWorkspace(t);
+  await rm(directory.output, { recursive: true });
+  const fixture = createFixture();
+  const options = {
+    access: "workspace-write",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  await assert.rejects(fixture.adapter.probe(options), (error) => {
+    assert.equal(error.diagnosticClass, "output_root_missing");
+    assert.match(error.message, /authorized fresh run/u);
+    return true;
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ ...options, cwd: directory.cwd })),
+    hasDiagnostic("ERR_UNSUPPORTED_CLAUDE_CAPABILITY", "output_root_missing"),
+  );
+  assert.deepEqual(fixture.calls, []);
+  await writeFile(directory.output, "Exact file\n");
+  const boundary = await prepareDirectoryPolicy(options, ClaudeAdapterError);
+  const mounts = await boundary.bindMounts();
+  assert.deepEqual(mounts.writablePaths, [directory.output]);
+  assert.equal(mounts.writablePaths.includes(dirname(directory.output)), false);
+  assert.ok(mounts.bindings.some(({ path }) => path === directory.output));
+  assert.equal(await readFile(directory.output, "utf8"), "Exact file\n");
+});
+
+// Claude prepares a declared directory read-only for every access: the
+// workspace appears only as the exact reservation, never as a write grant.
+function directoryCommandArguments(directory, native) {
   return [
     "--new-session",
     "--die-with-parent",
@@ -1455,9 +1632,6 @@ function directoryCommandArguments(directory, access, native) {
     "--ro-bind",
     "/",
     "/",
-    ...(access === "workspace-write"
-      ? ["--bind", directory.cwd, directory.cwd]
-      : []),
     "--ro-bind",
     directory.cwd,
     directory.cwd,
@@ -1789,6 +1963,8 @@ test("projects native and fallback directory commands onto declared outputs only
         env: {
           ...process.env,
           ANTHROPIC_API_KEY: "provider-token",
+          CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
           AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
           AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
           PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
@@ -1805,11 +1981,18 @@ test("projects native and fallback directory commands onto declared outputs only
             const settings = JSON.parse(
               option(call.argumentsList, "--settings"),
             );
+            for (const name of [
+              "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+              "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+            ]) {
+              assert.equal(call.options.env[name], "1");
+              assert.equal(settings.env[name], "1");
+            }
             assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
             assert.ok(
               settings.sandbox.filesystem.denyWrite.includes(directory.source),
             );
-            const args = directoryCommandArguments(directory, access, native);
+            const args = directoryCommandArguments(directory, native);
             // Claude's own temporary bind stays inside the private allocation.
             const privateWrite = join(call.options.env.TMPDIR, "claude-temp");
             privateWrites.push(privateWrite);
@@ -1826,6 +2009,8 @@ test("projects native and fallback directory commands onto declared outputs only
                 encoding: "utf8",
                 timeout: 10_000,
               });
+            // Write access comes from the declared outputs at the reservation,
+            // never from a whole-workspace grant.
             await runLauncher(args);
             for (const forbidden of [
               directory.input,
@@ -1845,6 +2030,16 @@ test("projects native and fallback directory commands onto declared outputs only
               await assert.rejects(runLauncher(forged), { code: 125 });
             }
             if (access === "workspace-write") {
+              // A missing reservation, even replaced by a whole-workspace
+              // grant, is refused before bubblewrap starts.
+              const log = await readFile(fake.logPath, "utf8");
+              const reservation = args.indexOf(directory.cwd) - 1;
+              for (const unreserved of [
+                args.toSpliced(reservation, 3),
+                args.toSpliced(reservation, 1, "--bind"),
+              ])
+                await assert.rejects(runLauncher(unreserved), { code: 125 });
+              assert.equal(await readFile(fake.logPath, "utf8"), log);
               const held = join(directory.root, "original-output");
               await rename(directory.output, held);
               await mkdir(directory.output);
@@ -2022,11 +2217,7 @@ test("isolates native initialization before directory commands and retains it un
             directory.source,
           ])
             assert.ok(settings.sandbox.filesystem.denyWrite.includes(path));
-          const args = directoryCommandArguments(
-            directory,
-            "read-only",
-            native,
-          );
+          const args = directoryCommandArguments(directory, native);
           if (native) {
             const mask = args.indexOf("/dev/null") - 1;
             args.splice(mask, 3);
@@ -2186,11 +2377,7 @@ test("rejects unsafe directory outputs during storage allocation and launcher ad
           try {
             await executeFile(
               call.commandLauncherPath,
-              directoryCommandArguments(
-                directory,
-                "workspace-write",
-                nativeSandbox === true,
-              ),
+              directoryCommandArguments(directory, nativeSandbox === true),
               { env: call.options.env, timeout: 10_000 },
             );
           } catch (cause) {
@@ -2254,7 +2441,7 @@ test("accepts missing nested directory artifact and state exclusions without cre
       await assert.rejects(stat(missing), { code: "ENOENT" });
   }
   const reservedState = join(
-    await realpath(tmpdir()),
+    await realpath("/tmp"),
     `agent-runner-claude-${process.getuid()}`,
     "absent-exclusion",
     "state",
@@ -2633,10 +2820,6 @@ test("fails closed on invalid directory declarations and unsupported isolation",
     { ...directory.workspacePolicy, excludePaths: ["input.md"] },
     { ...directory.workspacePolicy, excludePaths: ["out"] },
     { ...directory.workspacePolicy, excludePaths: [".claude"] },
-    {
-      ...directory.workspacePolicy,
-      outputPaths: [join(directory.cwd, "absent")],
-    },
   ])
     await assert.rejects(
       fixture.adapter.run(
@@ -2958,6 +3141,8 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
     session_id: CHILD_SESSION,
   });
   const final = JSON.stringify(result());
+  const postResult = (type) =>
+    JSON.stringify({ type, session_id: FRESH_SESSION });
   const blockStarts = [
     { type: "message_start", message: { id: "message", role: "assistant" } },
     ...Array.from({ length: 1025 }, (_, index) => ({
@@ -2989,9 +3174,20 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       "session_mismatch",
     ],
     [
-      "trailing",
-      `${final}\n${JSON.stringify({ type: "assistant", session_id: FRESH_SESSION, message: {} })}\n`,
-      "record_after_result",
+      "trailing-assistant",
+      `${final}\n${postResult("assistant")}\n`,
+      "assistant_after_result",
+    ],
+    ["trailing-user", `${final}\n${postResult("user")}\n`, "user_after_result"],
+    [
+      "trailing-stream-event",
+      `${final}\n${postResult("stream_event")}\n`,
+      "stream_event_after_result",
+    ],
+    [
+      "first-violation-wins",
+      `${final}\n${postResult("assistant")}\n${final}\n`,
+      "assistant_after_result",
     ],
     [
       "mismatched",
@@ -3047,52 +3243,160 @@ test("rejects malformed, duplicate, mismatched, missing, and oversized Claude st
       });
       assert.equal(turnCalls(fixture).length, 1);
     });
-  await t.test("local-commit readiness", async () => {
-    let commitExecutions = 0;
-    const fixture = createFixture({
-      handle({ call }) {
-        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
-          return;
-        call.options.onStdout(`${final}\n${final}\n`);
-        return { stdout: "", stderr: "" };
-      },
+  for (const [name, trailing, diagnosticClass] of [
+    ["duplicate", final, "protocol_result_duplicate"],
+    ["post-result", postResult("assistant"), "protocol_assistant_after_result"],
+  ])
+    await t.test(`local-commit readiness ${name}`, async () => {
+      let commitExecutions = 0;
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          call.options.onStdout(
+            `${JSON.stringify(result({ structured: { ready: true } }))}\n${trailing}\n`,
+          );
+          return { stdout: "", stderr: "" };
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            access: "local-commit",
+            authorizationId: "authorization-1",
+            commit: {
+              expectedHead: EXPECTED_HEAD,
+              message: "feat(test): create commit",
+            },
+            onCommitExecution() {
+              commitExecutions += 1;
+            },
+          }),
+        ),
+        (error) => {
+          assert.ok(
+            hasDiagnostic("ERR_CLAUDE_PROTOCOL", diagnosticClass)(error),
+          );
+          assert.equal(error.effectStarted, false);
+          assert.deepEqual(error.failure, {
+            failureClass: diagnosticClass,
+            checkpoint: "commit",
+            outcome: "rejected",
+            effect: "none",
+            retry: "terminal",
+            commitExecutor: "not_started",
+          });
+          return true;
+        },
+      );
+      assert.equal(turnCalls(fixture).length, 1);
+      assert.equal(commitExecutions, 0);
+      assert.equal(localCommitSandboxCalls(fixture).length, 1); // Capability probe only.
     });
-    await assert.rejects(
-      fixture.adapter.run(
-        request({
-          access: "local-commit",
-          authorizationId: "authorization-1",
-          commit: {
-            expectedHead: EXPECTED_HEAD,
-            message: "feat(test): create commit",
-          },
-          onCommitExecution() {
-            commitExecutions += 1;
-          },
+});
+
+test("Claude post-result families cannot supply progress or command evidence", () => {
+  const marker = "PRIVATE_POST_RESULT_PAYLOAD";
+  for (const [type, diagnosticClass, fields] of [
+    [
+      "assistant",
+      "protocol_assistant_after_result",
+      {
+        message: {
+          id: "late-message",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "late-command",
+              name: "Bash",
+              input: { command: marker },
+            },
+          ],
+        },
+      },
+    ],
+    [
+      "user",
+      "protocol_user_after_result",
+      {
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "command", content: marker },
+          ],
+        },
+      },
+    ],
+    [
+      "stream_event",
+      "protocol_stream_event_after_result",
+      {
+        event: {
+          type: "message_start",
+          message: { id: marker, role: "assistant" },
+        },
+      },
+    ],
+  ]) {
+    const progress = [];
+    const observations = [];
+    const stream = createClaudeStream(
+      (event) => progress.push(event),
+      (diagnosticClass) =>
+        new ClaudeAdapterError("Invalid stream.", {
+          code: "ERR_CLAUDE_PROTOCOL",
+          diagnosticClass,
         }),
-      ),
-      (error) => {
-        assert.ok(
-          hasDiagnostic(
-            "ERR_CLAUDE_PROTOCOL",
-            "protocol_result_duplicate",
-          )(error),
-        );
-        assert.equal(error.effectStarted, false);
-        assert.deepEqual(error.failure, {
-          failureClass: "protocol_result_duplicate",
-          checkpoint: "commit",
-          outcome: "rejected",
-          effect: "none",
-          retry: "terminal",
-          commitExecutor: "not_started",
-        });
-        return true;
+      {
+        result() {
+          observations.push("result");
+        },
+        command() {
+          observations.push("command");
+        },
       },
     );
-    assert.equal(turnCalls(fixture).length, 1);
-    assert.equal(commitExecutions, 0);
-  });
+    const send = (record) =>
+      stream.write(
+        `${JSON.stringify({ session_id: FRESH_SESSION, ...record })}\n`,
+      );
+    send({ type: "system", subtype: "init" });
+    send({
+      type: "assistant",
+      message: {
+        id: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "command",
+            name: "Bash",
+            input: { command: "true" },
+          },
+        ],
+      },
+    });
+    send(result());
+    const before = [...progress];
+    send({ type, ...fields });
+    // Later duplicate and malformed records cannot replace the first violation.
+    send(result());
+    stream.write("bad-json\n");
+    stream.finish();
+    assert.throws(
+      stream.assertValid,
+      hasDiagnostic("ERR_CLAUDE_PROTOCOL", diagnosticClass),
+    );
+    assert.equal(stream.sessionId, undefined);
+    assert.deepEqual(progress, before);
+    assert.deepEqual(observations, ["result"]);
+    stream.retire();
+    assert.doesNotMatch(
+      JSON.stringify({ progress, observations }),
+      new RegExp(marker, "u"),
+    );
+  }
 });
 
 test("classifies Claude results that contradict a failed process exit", async (t) => {
@@ -3255,7 +3559,7 @@ test("Claude streaming preserves permission precedence and retires unfinished co
     fixture.adapter.run(request({ onProgress: (event) => events.push(event) })),
     hasDiagnostic(
       "ERR_CLAUDE_PERMISSION_DENIED",
-      "permission_forbidden_operation",
+      "permission_bash_unclassified",
     ),
   );
   assert.equal(turnCalls(fixture).length, 1);
@@ -3612,7 +3916,7 @@ test("constructs and probes enforceable Claude capabilities", async () => {
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-isolation-v4",
+      "claude-isolation-v6",
       {
         "read-only": "native",
         "workspace-write": "native",
@@ -3888,10 +4192,12 @@ test("keeps native-turn and local-commit isolation proofs independent", async ()
 test("isolates fallback commands without blocking Claude transport", async (t) => {
   const projectPath = await createFallbackProject(t);
   const fakeBubblewrap = await createFakeBubblewrap(t);
-  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
-  await chmod(emptyMaskPath, 0o700);
-  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
   const providerPath = `${fakeBubblewrap.directory}${delimiter}${process.env.PATH ?? ""}`;
+  const outsideDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-claude-outside-"),
+  );
+  t.after(() => rm(outsideDirectory, { force: true, recursive: true }));
+  let temporaryIdentity;
   const fixture = createFixture({
     architecture: "x64",
     env: {
@@ -3912,6 +4218,17 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       const access = ["read-only", "workspace-write", "local-commit"][
         turnIndex
       ];
+      // Claude creates its empty-directory masks in the turn's private TMPDIR.
+      const emptyMaskPath = await mkdtemp(
+        join(call.options.env.TMPDIR, "claude-empty-"),
+      );
+      await chmod(emptyMaskPath, 0o700);
+      let temporaryPath;
+      if (turnIndex === 0) {
+        temporaryPath = join(call.options.env.TMPDIR, "claude-fixture");
+        await mkdir(temporaryPath, { mode: 0o700 });
+        temporaryIdentity = await stat(temporaryPath);
+      }
       await executeFile(
         managedSettings.sandbox.bwrapPath,
         claudeBubblewrapArguments({
@@ -3919,10 +4236,16 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
           access,
           emptyMaskPath,
           payload: `model-command ${turnIndex}`,
+          temporaryPath,
         }),
         {
           encoding: "utf8",
-          env: { ...call.options.env, PATH: "" },
+          // The fake binder substitutes the path after launcher validation.
+          env: {
+            ...call.options.env,
+            PATH: "",
+            AGENT_RUNNER_FAKE_BWRAP_SUBSTITUTE: outsideDirectory,
+          },
           timeout: 10_000,
         },
       );
@@ -3952,7 +4275,7 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
   assert.equal(
     capabilities.policyReceipt.fingerprint,
     policyFingerprint(
-      "claude-command-boundary-v10",
+      "claude-command-boundary-v13",
       {
         "read-only": "runner-boundary",
         "workspace-write": "runner-boundary",
@@ -4303,11 +4626,9 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       index === 1,
     );
     assert.equal(
-      includesSequence(boundaryArguments, [
-        "--ro-bind",
-        emptyMaskPath,
-        `${projectPath}/.claude`,
-      ]),
+      boundaryArguments.some((argument) =>
+        parse(argument).base.startsWith("claude-empty-"),
+      ),
       false,
     );
     assert.equal(
@@ -4327,12 +4648,56 @@ test("isolates fallback commands without blocking Claude transport", async (t) =
       ]),
       false,
     );
+    // Only the existing owner-only temporary self-bind survives the private
+    // tmpfs mounts; the remaining allocation stays hidden.
+    const storage = dirname(dirname(call.commandLauncherPath));
+    const temporaryPath = join(storage, "tmp", "claude-fixture");
+    const retained = ["--bind-fd", "4", temporaryPath];
+    assert.equal(includesSequence(boundaryArguments, retained), index === 0);
+    if (index === 0) {
+      const position = boundaryArguments.indexOf(temporaryPath) - 1;
+      for (const root of ["/tmp", "/run"])
+        assert.ok(
+          boundaryArguments.findIndex(
+            (argument, i) =>
+              argument === "--tmpfs" && boundaryArguments[i + 1] === root,
+          ) < position,
+        );
+      const home = join(storage, "launcher", "home");
+      assert.ok(includesSequence(boundaryArguments, ["--ro-bind", home, home]));
+      assert.ok(
+        includesSequence(boundaryArguments, ["--tmpfs", join(home, "tmp")]),
+      );
+      assert.deepEqual(
+        boundaryArguments.flatMap((argument, i) =>
+          ["--bind", "--ro-bind"].includes(argument) &&
+          boundaryArguments[i + 1].startsWith(storage + sep)
+            ? [boundaryArguments.slice(i, i + 3)]
+            : [],
+        ),
+        [["--ro-bind", home, home]],
+      );
+    }
     assert.deepEqual(boundaryArguments.slice(commandIndex + 1), [
       "/bin/sh",
       "-c",
       `model-command ${index}`,
     ]);
   }
+  // Substituting the validated path cannot redirect the descriptor bind.
+  const outsideIdentity = await stat(outsideDirectory);
+  const [bound, ...extraBinds] = (
+    await readFile(fakeBubblewrap.bindLogPath, "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(extraBinds, []);
+  assert.deepEqual(bound, {
+    dev: temporaryIdentity.dev,
+    ino: temporaryIdentity.ino,
+  });
+  assert.notEqual(bound.ino, outsideIdentity.ino);
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.sandbox.enableWeakerNestedSandbox, true);
   assert.equal(settings.sandbox.failIfUnavailable, true);
@@ -4377,7 +4742,7 @@ test("serializes every supported fallback seccomp instruction", async (t) => {
     assert.equal(
       capabilities.policyReceipt.fingerprint,
       policyFingerprint(
-        "claude-command-boundary-v10",
+        "claude-command-boundary-v13",
         {
           "read-only": "runner-boundary",
           "workspace-write": "runner-boundary",
@@ -4462,15 +4827,32 @@ test("fails closed when bubblewrap rejects direct seccomp setup", async (t) => {
 });
 
 test("rejects unauthenticated and invalid fallback arguments before execution", async (t) => {
-  const projectPath = await createFallbackProject(t);
+  // Keep the enclosing mask distinct from permitted system mounts such as /tmp.
+  const projectRoot = await mkdtemp(join(tmpdir(), "claude-fallback-root-"));
+  t.after(() => rm(projectRoot, { force: true, recursive: true }));
+  const projectPath = await createFallbackProject(t, projectRoot);
   const fakeBubblewrap = await createFakeBubblewrap(t);
-  const emptyMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
-  await chmod(emptyMaskPath, 0o700);
+  // Owner-only and empty, but outside every turn's private TMPDIR.
+  const ambientMaskPath = await mkdtemp(join(tmpdir(), "claude-empty-"));
+  await chmod(ambientMaskPath, 0o700);
   const markerDirectory = await mkdtemp(
     join(tmpdir(), "agent-runner-claude-rejected-command-"),
   );
-  t.after(() => rm(emptyMaskPath, { force: true, recursive: true }));
+  const outsideDirectory = await mkdtemp(
+    join(tmpdir(), "agent-runner-claude-outside-"),
+  );
+  t.after(() => rm(ambientMaskPath, { force: true, recursive: true }));
   t.after(() => rm(markerDirectory, { force: true, recursive: true }));
+  t.after(() => rm(outsideDirectory, { force: true, recursive: true }));
+  // Claude self-binds its temporary directory after the read-only root.
+  const temporaryBind = (argumentsList, path) =>
+    argumentsList.splice(
+      argumentsList.indexOf("--ro-bind") + 3,
+      0,
+      "--bind",
+      path,
+      path,
+    );
   const cases = [
     {
       name: "unauthenticated",
@@ -4631,9 +5013,16 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
     {
       access: "workspace-write",
       name: "directory-mask-on-file",
-      transform({ argumentsList }) {
+      transform({ argumentsList, emptyMaskPath }) {
         const sourceIndex = argumentsList.indexOf(emptyMaskPath);
         argumentsList[sourceIndex + 1] = `${projectPath}/package.json`;
+      },
+    },
+    {
+      access: "workspace-write",
+      name: "ambient-empty-mask",
+      transform({ argumentsList, emptyMaskPath }) {
+        argumentsList[argumentsList.indexOf(emptyMaskPath)] = ambientMaskPath;
       },
     },
     {
@@ -4689,6 +5078,22 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         argumentsList.push("unsupported");
       },
     },
+    {
+      name: "substituted-temporary-bind",
+      async transform({ argumentsList, environment }) {
+        const path = join(environment.TMPDIR, "claude-substituted");
+        await symlink(outsideDirectory, path);
+        temporaryBind(argumentsList, path);
+      },
+    },
+    {
+      name: "non-directory-temporary-bind",
+      async transform({ argumentsList, environment }) {
+        const path = join(environment.TMPDIR, "claude-file");
+        await writeFile(path, "", { mode: 0o600 });
+        temporaryBind(argumentsList, path);
+      },
+    },
   ];
   let caseIndex = 0;
   const fixture = createFixture({
@@ -4707,6 +5112,10 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
       const managedSettings = JSON.parse(
         option(call.argumentsList, "--managed-settings"),
       );
+      const emptyMaskPath = await mkdtemp(
+        join(call.options.env.TMPDIR, "claude-empty-"),
+      );
+      await chmod(emptyMaskPath, 0o700);
       const argumentsList = claudeBubblewrapArguments({
         projectPath,
         access: current.access ?? "read-only",
@@ -4717,7 +5126,7 @@ test("rejects unauthenticated and invalid fallback arguments before execution", 
         ...call.options.env,
         AGENT_RUNNER_FAKE_BWRAP_EXECUTE_PAYLOAD: "1",
       };
-      current.transform({ argumentsList, environment });
+      await current.transform({ argumentsList, environment, emptyMaskPath });
       await executeFile(managedSettings.sandbox.bwrapPath, argumentsList, {
         encoding: "utf8",
         env: environment,
@@ -4865,11 +5274,69 @@ test("preserves resource ownership when cleanup acknowledgement fails", async ()
   assert.equal(resource, null);
 });
 
+test("forces foreground lifecycle controls across Claude policies and access modes", async () => {
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const env = {
+      ...process.env,
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0",
+    };
+    const fixture = createFixture({ env, nativeSandbox });
+    await fixture.adapter.probe();
+    const probes = [...fixture.calls];
+    assert.ok(probes.some(isIsolationProbe));
+    for (const { options } of probes) {
+      assert.equal(options.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, "1");
+      assert.equal(options.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
+      assert.equal(options.timeout, 10_000);
+    }
+    for (const access of ["read-only", "workspace-write", "local-commit"]) {
+      await fixture.adapter.run(
+        request({
+          access,
+          ...(access === "local-commit"
+            ? {
+                authorizationId: "foreground-commit",
+                commit: {
+                  expectedHead: EXPECTED_HEAD,
+                  message: "fix(test): retain foreground lifecycle",
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+    const turns = turnCalls(fixture);
+    assert.equal(turns.length, 3);
+    for (const { argumentsList, options } of turns) {
+      const settings = JSON.parse(option(argumentsList, "--settings"));
+      for (const name of [
+        "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+      ]) {
+        assert.equal(options.env[name], "1");
+        assert.equal(settings.env[name], "1");
+        assert.equal(env[name], "0");
+      }
+      assert.equal(options.timeout, undefined);
+      assert.equal(option(argumentsList, "--add-dir"), PROJECT_PATH);
+      assert.notEqual(options.cwd, PROJECT_PATH);
+      assert.equal(settings.sandbox.enabled, true);
+      assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+      assert.equal(
+        settings.sandbox.enableWeakerNestedSandbox,
+        nativeSandbox !== true,
+      );
+    }
+  }
+});
+
 test("runs autonomous read-only turns with isolated tools and an explicit model", async () => {
   const fixture = createFixture({
     env: {
       ...process.env,
       ANTHROPIC_API_KEY: "provider-token",
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: "0",
       CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
       CLAUDE_ENV_FILE: "/tmp/agent-env.sh",
       DISABLE_AUTO_COMPACT: "1",
@@ -4916,6 +5383,7 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
   assert.ok(!turn.argumentsList.includes("--fallback-model"));
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
   assert.equal(settings.disableBypassPermissionsMode, "disable");
+  assert.equal(settings.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
   assert.deepEqual(settings.fallbackModel, []);
   assert.deepEqual(settings.attribution, {
     commit: "",
@@ -4940,7 +5408,10 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
     ),
     { mode: "deny", name: "ANTHROPIC_API_KEY" },
   );
-  assert.deepEqual(settings.permissions.deny, COMMON_DENY_POLICY);
+  assert.deepEqual(settings.permissions.deny, [
+    ...COMMON_DENY_POLICY,
+    ...PROJECT_EDIT_DENIALS,
+  ]);
   assert.ok(
     settings.permissions.deny.every((entry) => !entry.startsWith("Bash(")),
   );
@@ -4954,6 +5425,7 @@ test("runs autonomous read-only turns with isolated tools and an explicit model"
   assert.equal(turn.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, undefined);
   assert.equal(turn.options.env.DISABLE_AUTO_COMPACT, undefined);
   assert.equal(turn.options.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS, "1");
+  assert.equal(turn.options.env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR, "1");
   assert.equal(turn.options.env.CLAUDE_CODE_AUTO_CONNECT_IDE, "false");
   assert.equal(turn.options.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "0");
   assert.equal(turn.options.env.CLAUDE_ENV_FILE, undefined);
@@ -5047,7 +5519,7 @@ test("rejects invalid Claude profiles and context sizes", async () => {
   assert.equal(fixture.calls.length, 0);
 });
 
-test("keeps autonomous workspace policy unchanged", async () => {
+test("authorizes workspace-write Bash only through the enforced sandbox", async () => {
   const fixture = createFixture();
 
   await fixture.adapter.run(request({ access: "workspace-write" }));
@@ -5058,13 +5530,83 @@ test("keeps autonomous workspace policy unchanged", async () => {
     option(turn.argumentsList, "--tools"),
     "Bash,Read,Edit,Write,Glob,Grep",
   );
+  assert.ok(
+    turn.argumentsList.every(
+      (argument) =>
+        !argument.startsWith("--") || !argument.includes("dangerously"),
+    ),
+  );
   const settings = JSON.parse(option(turn.argumentsList, "--settings"));
-  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, false);
+  assert.equal(settings.disableBypassPermissionsMode, "disable");
+  assert.deepEqual(settings.autoMode, { classifyAllShell: true });
+  assert.equal(settings.sandbox.autoAllowBashIfSandboxed, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.deepEqual(settings.sandbox.excludedCommands, []);
+  assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
+  assert.equal(settings.sandbox.network.strictAllowlist, true);
   assert.ok(settings.sandbox.filesystem.denyWrite.includes(PROJECT_PATH));
   assert.ok(
     settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
   );
-  assert.deepEqual(settings.permissions.deny, WORKSPACE_DENY_POLICY);
+  assert.equal(
+    JSON.parse(option(turn.argumentsList, "--managed-settings")).sandbox
+      .bwrapPath,
+    turn.commandLauncherPath,
+  );
+  // Root-relative rules would bind the native startup directory instead.
+  assert.deepEqual(settings.permissions.deny, [
+    ...COMMON_DENY_POLICY,
+    ...PROJECT_EDIT_DENIALS,
+  ]);
+});
+
+test("keeps Git-subcommand denials for directory workspace-write turns", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture();
+
+  await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    }),
+  );
+
+  const turn = turnCalls(fixture)[0];
+  const settings = JSON.parse(option(turn.argumentsList, "--settings"));
+  const protectedPaths = settings.sandbox.filesystem.denyWrite.filter(
+    (path) => path !== directory.cwd && path !== turn.options.cwd,
+  );
+  assert.ok(protectedPaths.includes(directory.input));
+  assert.deepEqual(settings.permissions.deny, [
+    ...DIRECTORY_DENY_POLICY,
+    ...protectedPaths.flatMap((path) => [
+      `Edit(/${path})`,
+      `Edit(/${path}/**)`,
+    ]),
+  ]);
+});
+
+test("rejects a protected Git path that would broaden its file-tool rule", async (t) => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-claude-rule-")),
+  );
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const common = join(root, "common(1)");
+  await mkdir(common);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "git" && call.argumentsList.includes("rev-parse"))
+        return { stdout: `${PROJECT_PATH}/.git\n${common}\n`, stderr: "" };
+    },
+  });
+
+  await assert.rejects(
+    fixture.adapter.run(request({ access: "workspace-write" })),
+    hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(turnCalls(fixture).length, 0);
 });
 
 test("passes option-like prompts through stdin", async () => {
@@ -5186,6 +5728,587 @@ test("validates requests, strict schemas, and structured results", async () => {
   );
 });
 
+test("classifies Claude permission denials only by facts established at the guard", async (t) => {
+  const unknownBash = {
+    tool_name: "Bash",
+    tool_input: {
+      command: "touch generated.txt",
+      description: "PRIVATE_DENIAL",
+    },
+  };
+  const safeBash = {
+    tool_name: "Bash",
+    tool_input: { command: "git status --short" },
+  };
+  const unexposed = {
+    tool_name: "WebFetch",
+    tool_input: { url: "https://private-denial.invalid" },
+  };
+  const exposed = {
+    tool_name: "Edit",
+    tool_input: { file_path: "generated.txt" },
+  };
+  const bash = (command) => ({ tool_name: "Bash", tool_input: { command } });
+  const headCheck = bash("git diff --check HEAD");
+  const nearMatches = [
+    "git status\n--short",
+    "git diff --check HEAD~1",
+    "git diff --check HEAD -- docs",
+    "git diff --check HEAD --output=out.txt",
+    "git diff --check 'HEAD'",
+    "git diff --check  HEAD",
+    "git diff --check\tHEAD",
+    "git diff --check HEAD ",
+    "git diff --check HEAD; true",
+    "git diff --check HEAD && true",
+    "git diff --check HEAD\ntrue",
+  ];
+  const requiredCommand = "npm run synthetic-docs-check";
+  const requiredCheck = bash(requiredCommand);
+  const inventory = [requiredCommand, "git status --short"];
+  const requiredNearMatches = [
+    "npm run  synthetic-docs-check",
+    " npm run synthetic-docs-check",
+    "npm run synthetic-docs-check ",
+    "npm run 'synthetic-docs-check'",
+    "env npm run synthetic-docs-check",
+    "npm run synthetic-docs-check && true",
+    "npm run synthetic-docs-check\ntrue",
+  ];
+  for (const [name, denials, diagnosticClass, access, requiredChecks] of [
+    ["HEAD-relative content check", [headCheck], "permission_capability"],
+    ...nearMatches.map((command) => [
+      `near match ${JSON.stringify(command)}`,
+      [bash(command)],
+      "permission_bash_unclassified",
+    ]),
+    [
+      "HEAD-relative content check and unknown Bash",
+      [headCheck, unknownBash],
+      "permission_bash_unclassified",
+    ],
+    ["ordinary write", [unknownBash], "permission_bash_unclassified"],
+    ["unexposed tool", [unexposed], "permission_tool_unexposed"],
+    [
+      "safe inspection and unknown Bash",
+      [safeBash, unknownBash],
+      "permission_bash_unclassified",
+    ],
+    [
+      "unknown Bash then unexposed tool",
+      [unknownBash, unexposed],
+      "permission_tool_unexposed",
+    ],
+    [
+      "unexposed tool then unknown Bash",
+      [unexposed, unknownBash],
+      "permission_tool_unexposed",
+    ],
+    [
+      "exposed tool and malformed entry",
+      [exposed, "PRIVATE_DENIAL"],
+      "permission_unclassified",
+    ],
+    [
+      "exposed tool and missing command",
+      [exposed, { tool_name: "Bash", tool_input: { note: "PRIVATE_DENIAL" } }],
+      "permission_unclassified",
+    ],
+    [
+      "local-commit readiness",
+      [unknownBash],
+      "permission_bash_unclassified",
+      "local-commit",
+    ],
+    [
+      "exact required check",
+      [requiredCheck],
+      "permission_bash_required_check",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check without inventory",
+      [requiredCheck],
+      "permission_bash_unclassified",
+    ],
+    ...requiredNearMatches.map((command) => [
+      `required-check near match ${JSON.stringify(command)}`,
+      [bash(command)],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ]),
+    [
+      "required check then unknown Bash",
+      [requiredCheck, unknownBash],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "unknown Bash then required check",
+      [unknownBash, requiredCheck],
+      "permission_bash_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and unexposed tool",
+      [requiredCheck, unexposed],
+      "permission_tool_unexposed",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and malformed entry",
+      [requiredCheck, "PRIVATE_DENIAL"],
+      "permission_unclassified",
+      undefined,
+      inventory,
+    ],
+    [
+      "required check and safe inspection",
+      [safeBash, requiredCheck],
+      "permission_bash_required_check",
+      undefined,
+      inventory,
+    ],
+    [
+      "inventory-equal safe inspection",
+      [safeBash],
+      "permission_capability",
+      undefined,
+      inventory,
+    ],
+    [
+      "local-commit readiness with required check",
+      [requiredCheck],
+      "permission_bash_required_check",
+      "local-commit",
+      inventory,
+    ],
+  ])
+    for (const failed of [false, true])
+      await t.test(`${name} (${failed ? "failed" : "completed"})`, async () => {
+        let commitExecutions = 0;
+        const payload = result({ error: failed, permission_denials: denials });
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (failed) throw processFailure(payload);
+            return { stdout: JSON.stringify(payload), stderr: "" };
+          },
+        });
+        const commit = access === "local-commit";
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access: access ?? "workspace-write",
+              ...(requiredChecks === undefined
+                ? {}
+                : { requiredCheckCommands: requiredChecks }),
+              ...(commit
+                ? {
+                    authorizationId: "authorization-1",
+                    commit: {
+                      expectedHead: EXPECTED_HEAD,
+                      message: "feat(test): create commit",
+                    },
+                    onCommitExecution() {
+                      commitExecutions += 1;
+                    },
+                  }
+                : {}),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic(
+                "ERR_CLAUDE_PERMISSION_DENIED",
+                diagnosticClass,
+              )(error),
+            );
+            const recoverable = diagnosticClass === "permission_capability";
+            assert.equal(error.recoverable, recoverable);
+            assert.deepEqual(error.failure, {
+              failureClass: diagnosticClass,
+              checkpoint: commit ? "commit" : "turn",
+              outcome: "rejected",
+              effect: commit ? "none" : "possible",
+              retry: recoverable ? "transient" : "terminal",
+              ...(commit ? { commitExecutor: "not_started" } : {}),
+            });
+            const normalized = normalizeAdapterFailure("claude", error);
+            assert.equal(normalized.diagnosticClass, diagnosticClass);
+            assert.equal(normalized.recoverable, recoverable);
+            assert.doesNotMatch(
+              `${error.message}${JSON.stringify(normalized)}`,
+              /touch|generated|PRIVATE_DENIAL|private-denial|WebFetch|\bgit\b|out\.txt|npm|synthetic/u,
+            );
+            return true;
+          },
+        );
+        assert.doesNotMatch(
+          JSON.stringify(fixture.calls),
+          /synthetic-docs-check/u,
+        );
+        assert.equal(turnCalls(fixture).length, 1);
+        assert.equal(commitExecutions, 0);
+        assert.ok(fixture.calls.every((call) => call.file !== "touch"));
+      });
+});
+
+test("accepts a bounded required-check inventory unchanged", async () => {
+  const inventory = Array.from(
+    { length: 512 },
+    (_, index) => `${String(index).padStart(3, "0")}${"x".repeat(3_997)}`,
+  );
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      const denial = {
+        tool_name: "Bash",
+        tool_input: { command: inventory.at(-1) },
+      };
+      return {
+        stdout: JSON.stringify(result({ permission_denials: [denial] })),
+        stderr: "",
+      };
+    },
+  });
+  for (const requiredCheckCommands of [
+    [...inventory, "extra"],
+    "npm test",
+    [""],
+    ["a\0b"],
+    ["x".repeat(4_001)],
+    [1],
+    [, "npm test"],
+  ])
+    await assert.rejects(
+      fixture.adapter.run(request({ requiredCheckCommands })),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+  assert.equal(turnCalls(fixture).length, 0);
+  await assert.rejects(
+    fixture.adapter.run(request({ requiredCheckCommands: inventory })),
+    hasDiagnostic(
+      "ERR_CLAUDE_PERMISSION_DENIED",
+      "permission_bash_required_check",
+    ),
+  );
+  assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("classifies Claude permission denials by uniquely matched native reasons", async (t) => {
+  const bash = (command, id) => ({
+    tool_name: "Bash",
+    tool_use_id: id,
+    tool_input: { command },
+  });
+  const unknown = bash("touch generated.txt", "call-1");
+  const other = bash("touch other.txt", "call-2");
+  const requiredCommand = "npm run synthetic-docs-check";
+  const required = bash(requiredCommand, "call-3");
+  const reason = (fields = {}) => ({
+    type: "system",
+    subtype: "permission_denied",
+    session_id: FRESH_SESSION,
+    tool_name: "Bash",
+    tool_use_id: "call-1",
+    decision_reason_type: "classifier",
+    decision_reason_code: "memory_paused",
+    decision_reason: "PRIVATE_REASON",
+    message: "PRIVATE_MESSAGE",
+    uuid: "private-uuid",
+    ...fields,
+  });
+  const init = (sessionId = FRESH_SESSION) => ({
+    type: "system",
+    subtype: "init",
+    session_id: sessionId,
+  });
+  const fallback = "permission_bash_unclassified";
+  for (const [name, records, denials, diagnosticClass, options = {}] of [
+    ...CLAUDE_REASON_CODES.map((code) => [
+      `matched ${code}`,
+      [reason({ decision_reason_code: code })],
+      [unknown],
+      `permission_reason_${code}`,
+    ]),
+    ["missing event", [], [unknown], fallback],
+    ["mismatched id", [reason({ tool_use_id: "call-9" })], [unknown], fallback],
+    ["mismatched tool", [reason({ tool_name: "Read" })], [unknown], fallback],
+    [
+      "another session",
+      [reason({ session_id: CHILD_SESSION })],
+      [unknown],
+      fallback,
+    ],
+    ["after result", [], [unknown], fallback, { after: [reason()] }],
+    ["subagent event", [reason({ agent_id: "agent-1" })], [unknown], fallback],
+    ["duplicate event", [reason(), reason()], [unknown], fallback],
+    [
+      "conflicting events",
+      [reason(), reason({ decision_reason_code: "outside_reads_blocked" })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "absent code",
+      [reason({ decision_reason_code: undefined })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "unrecognized code",
+      [reason({ decision_reason_code: "synthetic_code" })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "non-string code",
+      [reason({ decision_reason_code: 1 })],
+      [unknown],
+      fallback,
+    ],
+    [
+      "mixed codes",
+      [
+        reason(),
+        reason({
+          tool_use_id: "call-2",
+          decision_reason_code: "outside_reads_blocked",
+        }),
+      ],
+      [unknown, other],
+      fallback,
+    ],
+    [
+      "uniform codes",
+      [reason(), reason({ tool_use_id: "call-2" })],
+      [unknown, other],
+      "permission_reason_memory_paused",
+    ],
+    [
+      "overflow",
+      [
+        reason(),
+        ...Array.from({ length: 16_384 }, (_, index) =>
+          reason({ tool_use_id: `overflow-${index}` }),
+        ),
+      ],
+      [unknown],
+      fallback,
+    ],
+    [
+      "later result-session mismatch",
+      [reason()],
+      [unknown],
+      fallback,
+      { resultSession: CHILD_SESSION },
+    ],
+    [
+      "conflicting initialization",
+      [reason(), init(CHILD_SESSION)],
+      [unknown],
+      fallback,
+    ],
+    ["protocol corruption", [reason(), "bad-json"], [unknown], fallback],
+    [
+      "mismatched continuation",
+      [reason()],
+      [unknown],
+      fallback,
+      { session: { id: SOURCE_SESSION, mode: "continue" } },
+    ],
+    [
+      "mismatched fork lineage",
+      [reason()],
+      [unknown],
+      fallback,
+      { session: { id: FRESH_SESSION, mode: "fork" } },
+    ],
+    [
+      "shared id, first command matched",
+      [reason()],
+      [unknown, bash("touch other.txt", "call-1")],
+      fallback,
+    ],
+    [
+      "shared id, second command matched",
+      [reason()],
+      [bash("touch other.txt", "call-1"), unknown],
+      fallback,
+    ],
+    [
+      "id shared with another tool",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_use_id: "call-1", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "missing id",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "invalid id",
+      [reason()],
+      [unknown, { tool_name: "Edit", tool_use_id: "", tool_input: {} }],
+      fallback,
+    ],
+    [
+      "unexposed tool",
+      [reason()],
+      [
+        unknown,
+        { tool_name: "WebFetch", tool_use_id: "call-2", tool_input: {} },
+      ],
+      "permission_tool_unexposed",
+    ],
+    [
+      "malformed entry",
+      [reason()],
+      [unknown, { tool_use_id: "call-2" }],
+      "permission_unclassified",
+    ],
+    [
+      "required check with the same reason",
+      [reason(), reason({ tool_use_id: "call-3" })],
+      [unknown, required],
+      "permission_reason_memory_paused",
+      { requiredCheckCommands: [requiredCommand] },
+    ],
+    [
+      "required check without a reason",
+      [reason({ tool_use_id: "call-3", decision_reason_code: undefined })],
+      [required],
+      "permission_bash_required_check",
+      { requiredCheckCommands: [requiredCommand] },
+    ],
+    [
+      "safe inspection beside a reason",
+      [reason()],
+      [bash("git status --short", "call-2"), unknown],
+      "permission_reason_memory_paused",
+    ],
+  ])
+    for (const failed of [false, true])
+      await t.test(`${name} (${failed ? "failed" : "completed"})`, async () => {
+        const events = [];
+        const payload = result({
+          error: failed,
+          permission_denials: denials,
+          ...(options.resultSession === undefined
+            ? {}
+            : { sessionId: options.resultSession }),
+        });
+        const stdout = [init(), ...records, payload, ...(options.after ?? [])]
+          .map((record) =>
+            typeof record === "string" ? record : JSON.stringify(record),
+          )
+          .join("\n");
+        const fixture = createFixture({
+          handle({ call }) {
+            if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+              return;
+            if (failed)
+              throw Object.assign(new Error("process failed"), {
+                stdout,
+                stderr: "",
+              });
+            return { stdout, stderr: "" };
+          },
+        });
+        await assert.rejects(
+          fixture.adapter.run(
+            request({
+              access: "workspace-write",
+              onProgress: (event) => events.push(event),
+              onObservation: (event) => events.push(event),
+              ...(options.session === undefined
+                ? {}
+                : { session: options.session }),
+              ...(options.requiredCheckCommands === undefined
+                ? {}
+                : { requiredCheckCommands: options.requiredCheckCommands }),
+            }),
+          ),
+          (error) => {
+            assert.ok(
+              hasDiagnostic(
+                "ERR_CLAUDE_PERMISSION_DENIED",
+                diagnosticClass,
+              )(error),
+            );
+            assert.equal(error.recoverable, false);
+            assert.deepEqual(error.failure, {
+              failureClass: diagnosticClass,
+              checkpoint: "turn",
+              outcome: "rejected",
+              effect: "possible",
+              retry: "terminal",
+            });
+            const normalized = normalizeAdapterFailure("claude", error);
+            assert.equal(normalized.diagnosticClass, diagnosticClass);
+            assert.equal(normalized.recoverable, false);
+            assert.doesNotMatch(
+              `${error.message}${JSON.stringify(normalized)}${JSON.stringify(events)}`,
+              /PRIVATE_|private-uuid|touch|generated|synthetic|call-|agent-1/u,
+            );
+            return true;
+          },
+        );
+        assert.equal(turnCalls(fixture).length, 1);
+      });
+});
+
+test("binds a cached Claude permission reason only to the finished stream", () => {
+  const stream = createClaudeStream(
+    undefined,
+    () => new Error("protocol"),
+    undefined,
+    undefined,
+  );
+  stream.write(
+    [
+      { type: "system", subtype: "init", session_id: FRESH_SESSION },
+      {
+        type: "system",
+        subtype: "permission_denied",
+        session_id: FRESH_SESSION,
+        tool_name: "Bash",
+        tool_use_id: "call-1",
+        decision_reason_code: "memory_paused",
+      },
+      result({ permission_denials: [] }),
+    ]
+      .map((record) => `${JSON.stringify(record)}\n`)
+      .join(""),
+  );
+  assert.ok(Object.isFrozen(stream));
+  assert.equal(
+    stream.permissionReason(FRESH_SESSION, "call-1", "Bash"),
+    undefined,
+  );
+  stream.finish();
+  assert.equal(
+    stream.permissionReason(FRESH_SESSION, "call-1", "Bash"),
+    "memory_paused",
+  );
+  for (const [sessionId, id, tool] of [
+    [CHILD_SESSION, "call-1", "Bash"],
+    [FRESH_SESSION, "call-2", "Bash"],
+    [FRESH_SESSION, "call-1", "Read"],
+    [FRESH_SESSION, "call-1", undefined],
+  ])
+    assert.equal(stream.permissionReason(sessionId, id, tool), undefined);
+});
+
 test("rejects permission fallback and explicit model rerouting", async (t) => {
   const denied = createFixture({
     handle({ call }) {
@@ -5282,7 +6405,7 @@ test("rejects permission fallback and explicit model rerouting", async (t) => {
         assert.ok(
           hasDiagnostic(
             "ERR_CLAUDE_PERMISSION_DENIED",
-            "permission_forbidden_operation",
+            "permission_bash_unclassified",
           )(error),
         );
         assert.equal(error.recoverable, false);
@@ -5719,28 +6842,62 @@ test("maps native structured-output exhaustion to the shared failure class", asy
 });
 
 test("retries only harmless unclassified read-only process failures", async () => {
+  const diagnostic = createOwnershipDiagnostic("launcher-setup");
   for (const [access, recoverable, diagnosticClass] of [
     ["read-only", true, "read_only_process_failed"],
     ["workspace-write", false, "writable_process_ambiguous"],
   ]) {
-    const fixture = createFixture({
-      handle({ call }) {
-        if (call.file === "claude" && call.argumentsList.includes("-p")) {
-          throw processFailure(undefined, "provider-native secret text");
-        }
-        return undefined;
-      },
-    });
+    for (const [ownershipDiagnostic, signal] of [
+      [undefined, undefined],
+      [diagnostic, undefined],
+      [diagnostic, "SIGTERM"],
+      [{ ...diagnostic, private: "discarded" }, undefined],
+    ]) {
+      const fixture = createFixture({
+        handle({ call }) {
+          if (call.file === "claude" && call.argumentsList.includes("-p")) {
+            throw Object.assign(
+              processFailure(undefined, "provider-native secret text"),
+              { code: "EAGAIN", ownershipDiagnostic, signal },
+            );
+          }
+          return undefined;
+        },
+      });
 
-    await assert.rejects(fixture.adapter.run(request({ access })), (error) => {
-      assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
-      assert.equal(error.diagnosticClass, diagnosticClass);
-      assert.equal(error.recoverable, recoverable);
-      assert.equal(error.ambiguous, access === "workspace-write");
-      assert.doesNotMatch(error.message, /provider-native/u);
-      assert.equal(error.cause, undefined);
-      return true;
-    });
+      await assert.rejects(
+        fixture.adapter.run(request({ access })),
+        (error) => {
+          assert.ok(hasCode("ERR_CLAUDE_PROCESS_INTERRUPTED")(error));
+          assert.equal(error.diagnosticClass, diagnosticClass);
+          assert.equal(error.recoverable, recoverable);
+          assert.equal(error.ambiguous, access === "workspace-write");
+          assert.doesNotMatch(error.message, /provider-native/u);
+          assert.equal(error.cause, undefined);
+          const normalized = normalizeAdapterFailure("claude", error);
+          assert.deepEqual(
+            normalized.ownershipDiagnostic,
+            ownershipDiagnostic === diagnostic ? diagnostic : null,
+          );
+          const baseline = normalizeAdapterFailure(
+            "claude",
+            new ClaudeAdapterError(error.message, {
+              code: "ERR_CLAUDE_PROCESS_INTERRUPTED",
+              diagnosticClass,
+              recoverable,
+              ambiguous: access === "workspace-write",
+            }),
+          );
+          assert.deepEqual(normalized.failure, baseline.failure);
+          assert.equal(normalized.effectStarted, baseline.effectStarted);
+          assert.doesNotMatch(
+            JSON.stringify(normalized),
+            /provider-native|private|discarded/u,
+          );
+          return true;
+        },
+      );
+    }
   }
 });
 
@@ -6191,6 +7348,7 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   const fixture = createFixture({
     env: {
       ...process.env,
+      ...AMBIENT_GIT_IDENTITY,
       ANTHROPIC_API_KEY: "provider-token",
       HTTP_PROXY: "http://proxy.invalid",
       LD_PRELOAD: "/tmp/agent.so",
@@ -6230,7 +7388,7 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.deepEqual(
     JSON.parse(option(readinessTurn.argumentsList, "--settings")).permissions
       .deny,
-    COMMON_DENY_POLICY,
+    [...COMMON_DENY_POLICY, ...PROJECT_EDIT_DENIALS],
   );
   const bubblewrapCalls = localCommitSandboxCalls(fixture);
   assert.equal(bubblewrapCalls.length, 2);
@@ -6256,6 +7414,8 @@ test("creates one exact authorized commit in a networkless sandbox", async () =>
   assert.equal(commitCall.options.env.LD_PRELOAD, undefined);
   assert.equal(commitCall.options.env.NODE_OPTIONS, undefined);
   assert.equal(commitCall.options.env.SSH_AUTH_SOCK, undefined);
+  assertIsolatedGitIdentity(metadata.options.env);
+  assertIsolatedGitIdentity(commitCall.options.env);
 });
 
 test("classifies readiness refusals before admitting local commit effects", async () => {
@@ -6564,63 +7724,9 @@ test(
   "runs read-only inspection and denies mutations through direct bubblewrap seccomp",
   { skip: process.platform !== "linux" },
   async (t) => {
-    const bubblewrapBinary = await resolveTestExecutable("bwrap");
-    if (
-      bubblewrapBinary === undefined ||
-      !Object.hasOwn(EXPECTED_SECCOMP_INSTRUCTIONS, process.arch)
-    ) {
-      t.skip("A supported architecture and bubblewrap are required.");
-      return;
-    }
-    const capabilityDirectory = await mkdtemp(
-      join(tmpdir(), "agent-runner-bwrap-seccomp-"),
-    );
-    let capabilityResult;
-    try {
-      const filterPath = join(capabilityDirectory, "filter.bpf");
-      await writeFile(filterPath, expectedSeccompFilter(process.arch), {
-        mode: 0o400,
-      });
-      const descriptor = await open(filterPath, constants.O_RDONLY);
-      try {
-        await rm(filterPath);
-        capabilityResult = spawnSync(
-          bubblewrapBinary,
-          [
-            "--new-session",
-            "--die-with-parent",
-            "--unshare-net",
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--unshare-pid",
-            "--unshare-user",
-            "--as-pid-1",
-            "--cap-drop",
-            "ALL",
-            "--proc",
-            "/proc",
-            "--seccomp",
-            "3",
-            "--",
-            "/bin/true",
-          ],
-          {
-            env: process.env,
-            stdio: ["ignore", "ignore", "ignore", descriptor.fd],
-            timeout: 10_000,
-          },
-        );
-      } finally {
-        await descriptor.close();
-      }
-    } finally {
-      await rm(capabilityDirectory, { force: true, recursive: true });
-    }
-    if (capabilityResult.error !== undefined || capabilityResult.status !== 0) {
-      t.skip("The direct bubblewrap seccomp capability is unavailable.");
+    const bubblewrapBinary = await directSeccompBubblewrap();
+    if (bubblewrapBinary === undefined) {
+      t.skip("Bubblewrap with direct seccomp support is required.");
       return;
     }
 
@@ -6653,8 +7759,9 @@ test(
       }
       if (isRunnerBoundaryProbe(call)) {
         fallbackProbeCount += 1;
-        // Real syscalls confirm read-only denial and writable source changes
-        // beside a pinned nested control.
+        // Real syscalls confirm compound Git inspection and Git mutation
+        // denial under both accesses, read-only denial, and writable source
+        // changes beside a pinned nested control.
         if (realProbeCount < 2) {
           realProbeCount += 1;
           return executeFile(file, argumentsList, options);
@@ -6681,6 +7788,728 @@ test(
     assert.equal(capabilities.workspaceWrite, true);
     assert.equal(fallbackProbeCount, 3);
     assert.equal(realProbeCount, 2);
+  },
+);
+
+test(
+  "keeps Claude's literal temporary directory and cwd receipt under both policies",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    const bubblewrapBinary = await directSeccompBubblewrap();
+    if (bubblewrapBinary === undefined) {
+      t.skip("Bubblewrap with direct seccomp support is required.");
+      return;
+    }
+    const projectPath = await realpath(
+      await mkdtemp(join(tmpdir(), "agent-runner-claude-receipt-project-")),
+    );
+    t.after(() => rm(projectPath, { force: true, recursive: true }));
+    await mkdir(join(projectPath, ".git"));
+    await writeFile(join(projectPath, "content.txt"), "Unchanged.\n");
+    for (const isolationPolicy of ["native", "runner-boundary"]) {
+      const directory = await realpath(
+        await mkdtemp(join(tmpdir(), "agent-runner-claude-receipt-")),
+      );
+      t.after(() => rm(directory, { force: true, recursive: true }));
+      const providerCwd = join(directory, "native");
+      const temporaryPath = join(directory, "tmp", "claude-fixture");
+      const receiptPath = join(temporaryPath, "cwd-fixture");
+      await mkdir(temporaryPath, { mode: 0o700, recursive: true });
+      await mkdir(providerCwd, { mode: 0o700 });
+      const launcher = await createClaudeCommandLauncher({
+        access: "read-only",
+        bubblewrapBinary,
+        cwd: projectPath,
+        providerCwd,
+        directory,
+        environment: process.env,
+        gitDirectories: [join(projectPath, ".git")],
+        isolationPolicy,
+        unsetEnvironmentNames: [],
+      });
+      // Claude's shell exports its selected path and writes the cwd receipt
+      // there, rather than using the injected environment TMPDIR.
+      const hiddenLauncher =
+        isolationPolicy === "runner-boundary"
+          ? `test ! -e ${shellArgument(launcher.path)} || exit 24; `
+          : "";
+      const payload =
+        `export TMPDIR=${shellArgument(temporaryPath)}; ` +
+        `test -d "$TMPDIR" || exit 23; ${hiddenLauncher}` +
+        `pwd -P >| ${shellArgument(receiptPath)}`;
+      const gitDirectory = join(projectPath, ".git");
+      const outcome = spawnSync(
+        launcher.path,
+        [
+          "--new-session",
+          "--die-with-parent",
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--tmpfs",
+          "/tmp",
+          "--bind",
+          temporaryPath,
+          temporaryPath,
+          "--ro-bind",
+          projectPath,
+          projectPath,
+          "--ro-bind",
+          gitDirectory,
+          gitDirectory,
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--bind",
+          "/proc",
+          "/proc",
+          "--",
+          launcher.shell,
+          "-c",
+          payload,
+        ],
+        {
+          encoding: "utf8",
+          env: launcher.environment({
+            ...process.env,
+            TMPDIR: join(directory, "tmp"),
+            PWD: providerCwd,
+          }),
+          timeout: 10_000,
+        },
+      );
+      try {
+        assert.equal(outcome.error, undefined);
+        assert.equal(outcome.status, 0, isolationPolicy);
+        assert.equal(await readFile(receiptPath, "utf8"), `${projectPath}\n`);
+        assert.equal(
+          await readFile(join(projectPath, "content.txt"), "utf8"),
+          "Unchanged.\n",
+        );
+      } finally {
+        await launcher.remove();
+      }
+    }
+  },
+);
+
+// Linux sets this process flag irrevocably before an exiting process closes
+// its descriptors, and keeps it while the process remains a zombie.
+const PROCESS_EXITING = 0x4;
+
+// Reads a process's start time and whether it is exiting, or nothing once it
+// has been reaped.
+function processStatus(pid) {
+  let stat;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (cause) {
+    if (cause?.code === "ENOENT" || cause?.code === "ESRCH") return undefined;
+    throw cause;
+  }
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return {
+    exiting: (Number(fields[6]) & PROCESS_EXITING) !== 0,
+    start: fields[19],
+  };
+}
+
+async function sandboxDeadline(promise, description) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(description)), 10_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function retireSandboxProcesses(owned) {
+  // Kill every verified owner before awaiting shared stderr: a leaked socket
+  // must not prevent retirement of another process that still holds it.
+  for (const { pid, start } of owned) {
+    if (start !== undefined && processStatus(pid)?.start === start) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (cause) {
+        if (cause?.code !== "ESRCH") throw cause;
+      }
+    }
+  }
+  for (const owner of owned) {
+    await sandboxDeadline(owner.errorEnd, "Sandbox stderr did not close.");
+    const current = processStatus(owner.pid);
+    assert.ok(
+      current === undefined ||
+        (owner.start !== undefined && current.start !== owner.start) ||
+        current.exiting,
+    );
+    owned.delete(owner);
+  }
+}
+
+// Runs in a separate authenticated producer, so the supervising test's live
+// control channel cannot acquire producer provenance by sharing its ancestry.
+function sandboxProducer(path, argumentsList, { info, extra, hold, relay }) {
+  const child = spawn(path, argumentsList, {
+    env: process.env,
+    stdio: [
+      "ignore",
+      "ignore",
+      2,
+      "ignore",
+      "ignore",
+      relay ? 5 : "pipe",
+      relay ? 3 : (info ?? "pipe"),
+      ...extra,
+    ],
+  });
+  process.send({
+    type: "launcher",
+    pid: child.pid,
+    start: processStatus(child.pid)?.start,
+  });
+  const streamEnd = (stream) =>
+    stream === null
+      ? Promise.resolve()
+      : new Promise((done) => {
+          stream.once("end", done);
+          stream.resume();
+        });
+  for (const stream of child.stdio.slice(7)) stream?.resume();
+  let record = "";
+  let childPid;
+  child.stdio[6]?.on("data", (chunk) => {
+    const known = childPid !== undefined;
+    record += chunk;
+    childPid = Number(/"child-pid":\s*(\d+)\D/u.exec(record)?.[1]);
+    if (Number.isNaN(childPid)) childPid = undefined;
+    else if (hold && !known) {
+      // Registration precedes the kill; stderr is shared with bubblewrap and
+      // the supervisor awaits its end after retiring this recorded identity.
+      process.send(
+        { type: "held", pid: childPid, start: processStatus(childPid)?.start },
+        () => child.kill("SIGKILL"),
+      );
+    }
+  });
+  const exit = new Promise((done, reject) => {
+    child.once("error", reject);
+    child.once("exit", (status, signal) => done({ status, signal }));
+  });
+  Promise.all([
+    streamEnd(child.stdio[5]).then(() => {
+      if (childPid === undefined) return false;
+      const current = processStatus(childPid);
+      return current !== undefined && !current.exiting;
+    }),
+    streamEnd(child.stdio[6]),
+    exit,
+  ])
+    .then(([bubblewrapOutlivedEnd, , result]) => {
+      process.send(
+        { type: "result", ...result, bubblewrapOutlivedEnd, childPid, record },
+        () => process.disconnect(),
+      );
+    })
+    .catch(() => process.exit(1));
+}
+
+function sandboxProducerSource() {
+  return `
+      const { spawn } = require("node:child_process");
+      const { readFileSync } = require("node:fs");
+      const PROCESS_EXITING = ${PROCESS_EXITING};
+      ${processStatus.toString()}
+      (${sandboxProducer.toString()})(...JSON.parse(process.argv.at(-1)));
+    `;
+}
+
+async function runSandboxProducer(
+  path,
+  argumentsList,
+  {
+    env,
+    info,
+    extra = [],
+    onHeld,
+    relay = false,
+    script,
+    evalArgument,
+    binary = process.execPath,
+    owned,
+  },
+) {
+  const processes = [];
+  try {
+    return await sandboxDeadline(
+      new Promise((resolve, reject) => {
+        const child = spawn(
+          binary,
+          [
+            ...(script !== undefined
+              ? [script]
+              : evalArgument !== undefined
+                ? [`--eval=${sandboxProducerSource()}`, evalArgument]
+                : ["-e", sandboxProducerSource()]),
+            JSON.stringify([
+              path,
+              argumentsList,
+              {
+                info: typeof info === "number" ? 7 : info,
+                extra,
+                hold: onHeld !== undefined,
+                relay,
+              },
+            ]),
+          ],
+          {
+            env,
+            stdio: [
+              "ignore",
+              "ignore",
+              "pipe",
+              "ipc",
+              "ignore",
+              relay ? "pipe" : "ignore",
+              "ignore",
+              typeof info === "number" ? info : "ignore",
+            ],
+          },
+        );
+        child.once("error", reject);
+        const errorEnd = new Promise((done) => {
+          child.stderr.once("end", done);
+          child.stderr.resume();
+        });
+        const track = (record) => {
+          const owner = { ...record, errorEnd };
+          processes.push(owner);
+          owned.add(owner);
+        };
+        track({ pid: child.pid, start: processStatus(child.pid)?.start });
+        child.stdio[5]?.resume();
+        let result;
+        let controlRecord = "";
+        child.on("message", (message) => {
+          if (message.type === "launcher") track(message);
+          else if (message.type === "held") onHeld({ ...message, errorEnd });
+          else if (message.type === "result") result = message;
+          else controlRecord += JSON.stringify(message);
+        });
+        // Exit can precede the final IPC delivery. Await that channel's closure,
+        // but not stderr: a deliberately held bubblewrap still owns stderr until
+        // the supervisor receives this result and retires it.
+        Promise.all([
+          new Promise((done) =>
+            child.once("exit", (status, signal) => done({ status, signal })),
+          ),
+          new Promise((done) => child.once("disconnect", done)),
+        ]).then(([exit]) => {
+          if (
+            exit.status !== 0 ||
+            exit.signal !== null ||
+            result === undefined
+          ) {
+            reject(new Error("Sandbox producer did not retire normally."));
+          } else {
+            resolve({ ...result, record: result.record + controlRecord });
+          }
+        }, reject);
+      }),
+      "Sandbox producer did not complete before its deadline.",
+    );
+  } finally {
+    for (const owner of processes) {
+      const current = processStatus(owner.pid);
+      if (
+        current === undefined ||
+        (owner.start !== undefined && current.start !== owner.start) ||
+        current.exiting
+      ) {
+        owned.delete(owner);
+      }
+    }
+  }
+}
+
+test("bounds stalled sandbox producer and cleanup waits without releasing live owners", async () => {
+  const child = new EventEmitter();
+  child.pid = 101;
+  child.stderr = new EventEmitter();
+  child.stderr.resume = () => {};
+  child.stdio = [];
+  const states = new Map(
+    [101, 102, 103].map((pid) => [pid, { start: String(pid), exiting: false }]),
+  );
+  const timers = new Set();
+  const signaled = [];
+  const owned = new Set();
+  const helpers = runInNewContext(
+    `
+        ${sandboxDeadline.toString()}
+        ${retireSandboxProcesses.toString()}
+        ${runSandboxProducer.toString()}
+        ({ runSandboxProducer, retireSandboxProcesses });
+      `,
+    {
+      assert,
+      process: {
+        execPath: process.execPath,
+        kill(pid, signal) {
+          assert.equal(signal, "SIGKILL");
+          signaled.push(pid);
+          states.get(pid).exiting = true;
+          if ([...states.values()].every(({ exiting }) => exiting)) {
+            child.stderr.emit("end");
+          }
+        },
+      },
+      processStatus: (pid) => states.get(pid),
+      sandboxProducerSource: () => "",
+      spawn: () => child,
+      setTimeout(callback) {
+        timers.add(callback);
+        return callback;
+      },
+      clearTimeout: (callback) => timers.delete(callback),
+    },
+  );
+  const pending = helpers.runSandboxProducer("launcher", [], {
+    env: {},
+    owned,
+    onHeld: (owner) => owned.add(owner),
+  });
+  child.emit("message", { type: "launcher", pid: 102, start: "102" });
+  child.emit("message", { type: "held", pid: 103, start: "103" });
+  assert.equal(owned.size, 3);
+  states.get(102).exiting = true;
+  // A leaked sync socket prevents the producer result after launcher exit.
+  assert.equal(timers.size, 1);
+  [...timers][0]();
+  await assert.rejects(pending, /Sandbox producer did not complete/u);
+  assert.equal(owned.size, 2);
+  const retirement = helpers.retireSandboxProcesses(owned);
+  assert.deepEqual(signaled, [101, 103]);
+  await retirement;
+  assert.equal(owned.size, 0);
+  assert.equal(timers.size, 0);
+
+  // Unproven EOF is also bounded, and retains the owner/fixture guard.
+  owned.add({ pid: 103, start: "103", errorEnd: new Promise(() => {}) });
+  const uncertain = helpers.retireSandboxProcesses(owned);
+  assert.equal(timers.size, 1);
+  [...timers][0]();
+  await assert.rejects(uncertain, /Sandbox stderr did not close/u);
+  assert.equal(owned.size, 1);
+  assert.equal(timers.size, 0);
+});
+
+test(
+  "passes only Claude's sandbox info descriptor to bubblewrap under both policies",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    // Track the producer and launcher as well as a held bubblewrap. A deadline
+    // can interrupt any of their waits; fixtures require verified retirement.
+    const held = new Set();
+    const retireHeld = () => retireSandboxProcesses(held);
+    const runProducer = (path, argumentsList, options) =>
+      runSandboxProducer(path, argumentsList, { ...options, owned: held });
+    const assertRetired = () =>
+      assert.equal(
+        held.size,
+        0,
+        "Unverified retirement; IPC fixtures retained.",
+      );
+    // An unrelated live control channel, which a producer could relay as its
+    // info descriptor while the launcher itself has no control channel.
+    const control = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)"],
+      {
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      },
+    );
+    const controlEnd = new Promise((done) => {
+      control.once("exit", done);
+      control.once("error", done);
+    });
+    t.after(async () => {
+      try {
+        await retireHeld();
+      } finally {
+        control.kill("SIGKILL");
+        await sandboxDeadline(controlEnd, "Control process did not retire.");
+      }
+    });
+    const fake = await createFakeBubblewrap(t, assertRetired);
+    const foreignInterpreter = join(fake.directory, "foreign-node");
+    await copyFile(
+      process.execPath,
+      foreignInterpreter,
+      constants.COPYFILE_FICLONE,
+    );
+    await chmod(foreignInterpreter, 0o700);
+    const descriptorLog = join(fake.directory, "descriptors.jsonl");
+    const projectPath = await realpath(
+      await mkdtemp(join(tmpdir(), "agent-runner-claude-ipc-project-")),
+    );
+    t.after(async () => {
+      assertRetired();
+      await rm(projectPath, { force: true, recursive: true });
+    });
+    const gitDirectory = join(projectPath, ".git");
+    await mkdir(gitDirectory);
+    const file = openSync(join(fake.directory, "package.json"), "r");
+    t.after(() => closeSync(file));
+    const records = async (path) =>
+      (await readFile(path, "utf8").catch(() => ""))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    const ipc = ["--sync-fd", "5", "--info-fd", "6"];
+    for (const isolationPolicy of ["native", "runner-boundary"]) {
+      const directory = await realpath(
+        await mkdtemp(join(tmpdir(), "agent-runner-claude-ipc-")),
+      );
+      t.after(async () => {
+        assertRetired();
+        await rm(directory, { force: true, recursive: true });
+      });
+      const providerCwd = join(directory, "native");
+      const temporaryPath = join(directory, "tmp", "claude-fixture");
+      await mkdir(temporaryPath, { mode: 0o700, recursive: true });
+      await mkdir(providerCwd, { mode: 0o700 });
+      const launcherOptions = {
+        access: "read-only",
+        bubblewrapBinary: join(fake.directory, "bwrap"),
+        cwd: projectPath,
+        providerCwd,
+        directory,
+        environment: process.env,
+        producerBinary: process.execPath,
+        gitDirectories: [gitDirectory],
+        isolationPolicy,
+        unsetEnvironmentNames: [],
+      };
+      const launcher = await createClaudeCommandLauncher(launcherOptions);
+      try {
+        const env = launcher.environment({
+          PATH: process.env.PATH,
+          AGENT_RUNNER_FAKE_BWRAP_DESCRIPTORS: descriptorLog,
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          ...(isolationPolicy === "native"
+            ? { AGENT_RUNNER_FAKE_BWRAP_NATIVE: "1" }
+            : {}),
+        });
+        // Claude's producer order puts both descriptors after the session flags.
+        const program = (descriptors) => [
+          "--new-session",
+          "--die-with-parent",
+          ...descriptors,
+          "--unshare-net",
+          "--ro-bind",
+          "/",
+          "/",
+          "--tmpfs",
+          "/tmp",
+          "--bind",
+          temporaryPath,
+          temporaryPath,
+          "--ro-bind",
+          projectPath,
+          projectPath,
+          "--ro-bind",
+          gitDirectory,
+          gitDirectory,
+          "--dev",
+          "/dev",
+          "--unshare-pid",
+          "--unshare-user",
+          "--bind",
+          "/proc",
+          "/proc",
+          "--",
+          launcher.shell,
+          "-c",
+          "true",
+        ];
+
+        // The info descriptor follows the filter and the retained bind
+        // descriptor; the end descriptor stays open until bubblewrap has exited.
+        const transferred = isolationPolicy === "native" ? "3" : "5";
+        const accepted = await runProducer(launcher.path, program(ipc), {
+          env,
+        });
+        assert.deepEqual(
+          [accepted.status, accepted.signal],
+          [0, null],
+          isolationPolicy,
+        );
+        assert.equal(
+          accepted.record,
+          `{\n    "child-pid": ${accepted.childPid}\n}\n`,
+        );
+        assert.equal(accepted.bubblewrapOutlivedEnd, false);
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: transferred,
+          sockets: [transferred],
+        });
+        const args = (await records(fake.logPath)).at(-1);
+        assert.equal(args.includes("--sync-fd"), false);
+        assert.ok(includesSequence(args, ["--info-fd", transferred]));
+        if (isolationPolicy === "runner-boundary") {
+          assert.ok(includesSequence(args, ["--seccomp", "3"]));
+          assert.ok(includesSequence(args, ["--bind-fd", "4", temporaryPath]));
+        }
+
+        // Aborting the launcher releases the end descriptor even while
+        // bubblewrap still runs, since bubblewrap never received it.
+        const interrupted = await runProducer(launcher.path, program(ipc), {
+          env: { ...env, AGENT_RUNNER_FAKE_BWRAP_HOLD: "1" },
+          onHeld: (bubblewrap) => held.add(bubblewrap),
+        });
+        assert.equal(held.size, 1);
+        assert.equal(interrupted.signal, "SIGKILL");
+        assert.equal(interrupted.bubblewrapOutlivedEnd, true);
+        await retireHeld();
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: transferred,
+          sockets: [transferred],
+        });
+
+        // Older producers omit both options; no descriptor is then forwarded.
+        const legacy = await runProducer(launcher.path, program([]), {
+          env,
+        });
+        assert.deepEqual([legacy.status, legacy.record], [0, ""]);
+        assert.deepEqual((await records(descriptorLog)).at(-1), {
+          info: null,
+          sockets: [],
+        });
+
+        // Forged, standard, malformed, shared, repeated, unpaired, unsupported
+        // and file descriptors are refused before bubblewrap starts, as is a
+        // pair beside a control channel or another inherited socket, or one
+        // naming the launcher's or a relayed unrelated control channel, whose
+        // peer the producer does not hold; the producer still sees its
+        // descriptors end.
+        const started = (await records(descriptorLog)).length;
+        for (const [descriptors, info, extra = []] of [
+          [["--info-fd", "900"]],
+          [["--info-fd", "2"]],
+          [["--info-fd", "06"]],
+          [["--sync-fd", "5", "--info-fd", "5"]],
+          [["--sync-fd", "6", "--info-fd", "5"]],
+          [["--info-fd", "6", "--info-fd", "6"]],
+          [["--sync-fd", "5"], "ignore"],
+          [["--json-status-fd", "6"]],
+          [["--info-fd", "6"], file],
+          [ipc, "ipc"],
+          [ipc, control.channel.fd],
+          [ipc, undefined, ["ipc"]],
+          [ipc, undefined, ["pipe"]],
+        ]) {
+          const refused = await runProducer(
+            launcher.path,
+            program(descriptors),
+            { env, info, extra },
+          );
+          assert.deepEqual(
+            [refused.status, refused.record],
+            [125, ""],
+            [...descriptors, info, ...extra].join(" "),
+          );
+        }
+        // Both peers belong to the enclosing supervisor, whose IPC control
+        // endpoint is relayed beside its sync socket through the authenticated
+        // producer. Shape, census and a common ancestor alone accept this.
+        const relayed = await runProducer(launcher.path, program(ipc), {
+          env,
+          relay: true,
+        });
+        assert.deepEqual([relayed.status, relayed.record], [125, ""]);
+        // A process with the right private proof still cannot impersonate the
+        // configured CLI (including a configured shebang script).
+        const otherDirectory = await mkdtemp(
+          join(tmpdir(), "agent-runner-claude-producer-"),
+        );
+        t.after(async () => {
+          assertRetired();
+          await rm(otherDirectory, { force: true, recursive: true });
+        });
+        const otherTemporary = join(otherDirectory, "tmp", "claude-fixture");
+        await mkdir(otherTemporary, { recursive: true, mode: 0o700 });
+        const producerScript = join(otherDirectory, "producer.cjs");
+        const interpreter =
+          isolationPolicy === "native"
+            ? process.execPath
+            : `/usr/bin/env ${process.execPath}`;
+        await writeFile(
+          producerScript,
+          `#!${interpreter}\n${sandboxProducerSource()}`,
+          { mode: 0o700 },
+        );
+        const other = await createClaudeCommandLauncher({
+          ...launcherOptions,
+          directory: otherDirectory,
+          producerBinary: producerScript,
+        });
+        try {
+          const otherProgram = program(ipc).map((value) =>
+            value === temporaryPath
+              ? otherTemporary
+              : value === launcher.shell
+                ? other.shell
+                : value,
+          );
+          const otherEnvironment = other.environment(env);
+          for (const evalArgument of [undefined, producerScript]) {
+            const refused = await runProducer(other.path, otherProgram, {
+              env: otherEnvironment,
+              evalArgument,
+            });
+            assert.deepEqual([refused.status, refused.record], [125, ""]);
+          }
+          // The correct script in argv[1] cannot authenticate a different
+          // executable, even when it runs that script and holds both peers.
+          const impersonated = await runProducer(other.path, otherProgram, {
+            env: otherEnvironment,
+            script: producerScript,
+            binary: foreignInterpreter,
+          });
+          assert.deepEqual(
+            [impersonated.status, impersonated.record],
+            [125, ""],
+          );
+          assert.equal((await records(descriptorLog)).length, started);
+          // The same pinned script is accepted when it actually runs as the
+          // interpreter's script, rather than appearing as an eval argument.
+          const scripted = await runProducer(other.path, otherProgram, {
+            env: otherEnvironment,
+            script: producerScript,
+          });
+          assert.deepEqual([scripted.status, scripted.signal], [0, null]);
+          assert.equal(
+            scripted.record,
+            `{\n    "child-pid": ${scripted.childPid}\n}\n`,
+          );
+        } finally {
+          await retireHeld();
+          await other.remove();
+        }
+      } finally {
+        await retireHeld();
+        await launcher.remove();
+      }
+    }
   },
 );
 
@@ -6767,10 +8596,10 @@ test("expanded pipeline inventory schemas preserve strict Claude preflight and s
       assert.equal(settings.sandbox.enableWeakerNestedSandbox, false);
       assert.notEqual(settings.sandbox.network.allowAllUnixSockets, true);
       assert.deepEqual(settings.sandbox.network.deniedDomains, ["*"]);
-      assert.deepEqual(
-        settings.permissions.deny,
-        access === "read-only" ? COMMON_DENY_POLICY : WORKSPACE_DENY_POLICY,
-      );
+      assert.deepEqual(settings.permissions.deny, [
+        ...COMMON_DENY_POLICY,
+        ...PROJECT_EDIT_DENIALS,
+      ]);
       assert.ok(
         settings.sandbox.filesystem.denyWrite.includes(`${PROJECT_PATH}/.git`),
       );
@@ -6862,6 +8691,14 @@ test("keeps missing HOME/config scaffolding outside every project view", async (
             return;
           assert.equal(resource.phase, "allocated");
           assert.equal(resource.commandIdentity, CLAUDE_STORAGE_IDENTITY);
+          // A nested ambient TMPDIR must not lengthen the provider TMPDIR.
+          assert.equal(
+            resource.root.path,
+            join(
+              await realpath("/tmp"),
+              `agent-runner-claude-${process.getuid()}`,
+            ),
+          );
           resourcePath = join(resource.root.path, resource.id);
           assert.ok(!resourcePath.startsWith(directory + "/"));
           assert.equal(call.options.env.HOME, providerHome);
@@ -6870,7 +8707,7 @@ test("keeps missing HOME/config scaffolding outside every project view", async (
             join(providerHome, "missing-config"),
           );
           assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-only");
-          assert.ok(call.options.env.TMPDIR.startsWith(resourcePath + "/"));
+          assert.equal(call.options.env.TMPDIR, join(resourcePath, "tmp"));
           const args = claudeBubblewrapArguments({
             access: accessMode,
             payload: "inspect",
@@ -7475,7 +9312,7 @@ test("retains storage until process retirement and rejects replacement during ow
 test("reports setup failure before launch with bounded not-started evidence", async () => {
   const fixture = createFixture();
   await assert.rejects(
-    fixture.adapter.run(request({ storageForbiddenPaths: [tmpdir()] })),
+    fixture.adapter.run(request({ storageForbiddenPaths: ["/tmp"] })),
     (cause) => {
       const failure = normalizeAdapterFailure("claude", cause);
       assert.equal(failure.code, "ERR_AGENT_ENVIRONMENT_PREPARATION");

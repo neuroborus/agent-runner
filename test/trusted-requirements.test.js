@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createTrustedValidationService,
   createTrustedValidationSnapshot,
+  normalizeCapabilityMismatchDiagnostic,
 } from "../src/trusted-validation/index.js";
 import { sandboxTrustedCommand } from "../src/trusted-validation/execution.js";
 import { inspectTrustedRequirements } from "../src/runner/trusted-requirements.js";
@@ -17,6 +18,16 @@ const artifact = {
   url: "https://downloads.example.com/tool",
   sha256: "a".repeat(64),
 };
+const digest = (value) => value.toString(16).padStart(64, "0");
+const mismatch = (details = {}) => ({
+  checkIndex: 0,
+  reason: "insufficient-authority",
+  missingCapabilities: [],
+  unmatchedArtifactDigests: [],
+  commandIdentityMismatch: false,
+  omittedArtifactDigests: 0,
+  ...details,
+});
 const passed = {
   status: "PASS",
   exitCode: 0,
@@ -214,6 +225,255 @@ test("artifact requests match both the canonical URL and digest before preparati
   assert.deepEqual(f.calls, []);
 });
 
+test("comparison derives typed mismatches at sparse inventory indices before preparation", async (t) => {
+  const f = await fixture(t, { artifacts: [artifact] });
+  const other = "node other-check";
+  const otherUrl = "https://downloads.example.com/other";
+  for (const [requirements, blockers] of [
+    [
+      [
+        { command, capabilities: { sourceProjection: true, scratch: true } },
+        { command, capabilities: { cache: true } },
+      ],
+      [
+        mismatch({
+          checkIndex: 1,
+          missingCapabilities: ["scratch", "cache", "sourceProjection"],
+        }),
+      ],
+    ],
+    [
+      [
+        { command, capabilities: { artifacts: [artifact] } },
+        {
+          command,
+          capabilities: {
+            artifacts: [{ ...artifact, sha256: "b".repeat(64) }],
+          },
+        },
+      ],
+      [mismatch({ checkIndex: 1, unmatchedArtifactDigests: ["b".repeat(64)] })],
+    ],
+    [
+      [
+        { command, capabilities: { artifacts: [artifact] } },
+        {
+          command,
+          capabilities: { artifacts: [{ ...artifact, url: otherUrl }] },
+        },
+      ],
+      [
+        mismatch({
+          checkIndex: 1,
+          unmatchedArtifactDigests: [artifact.sha256],
+        }),
+      ],
+    ],
+    [
+      [{ command, commandIdentity: "c".repeat(64) }],
+      [mismatch({ checkIndex: 1, commandIdentityMismatch: true })],
+    ],
+    [
+      [
+        { command: other },
+        { command, unsupported: ["network"], capabilities: { scratch: true } },
+      ],
+      [
+        { ...mismatch(), reason: "not-selected" },
+        { ...mismatch({ checkIndex: 1 }), reason: "unsupported" },
+      ],
+    ],
+  ]) {
+    const result = await f.service.inspectRequirements({
+      ...f.input,
+      inventory: [other, command],
+      requirements,
+    });
+    assert.equal(result.status, "BLOCKED");
+    assert.deepEqual(result.diagnostic, {
+      schemaVersion: 1,
+      blockers,
+      omittedBlockers: 0,
+    });
+    const text = JSON.stringify(result.diagnostic);
+    assert.ok(!/example\.com|node |network/u.test(text));
+  }
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.records, []);
+});
+
+test("diagnostic digests are deduplicated after exact pair comparison and bounded", async (t) => {
+  const f = await fixture(t, { artifacts: [artifact] });
+  const report = (path, offset) => ({
+    command,
+    capabilities: {
+      artifacts: Array.from({ length: 32 }, (_, index) => ({
+        url: `https://downloads.example.com/${path}-${index}`,
+        sha256: digest(offset + 31 - index),
+      })),
+    },
+  });
+  const result = await f.service.inspectRequirements({
+    ...f.input,
+    requirements: [
+      report("tool", 32),
+      report("tool", 0),
+      report("mirror", 0),
+      { command, capabilities: { artifacts: [artifact] } },
+    ],
+  });
+  assert.deepEqual(result.diagnostic.blockers, [
+    mismatch({
+      unmatchedArtifactDigests: Array.from({ length: 32 }, (_, index) =>
+        digest(index),
+      ),
+      omittedArtifactDigests: 32,
+    }),
+  ]);
+  assert.deepEqual(f.calls, []);
+});
+
+test("capability mismatch diagnostics reject noncanonical or private shapes", () => {
+  const valid = {
+    schemaVersion: 1,
+    blockers: [mismatch({ commandIdentityMismatch: true })],
+    omittedBlockers: 0,
+  };
+  assert.deepEqual(normalizeCapabilityMismatchDiagnostic(valid), valid);
+  const full = Array.from({ length: 16 }, (_, checkIndex) =>
+    mismatch({ checkIndex, missingCapabilities: ["cache"] }),
+  );
+  const many = Array.from({ length: 32 }, (_, index) => digest(index));
+  for (const value of [
+    { ...valid, blockers: full, omittedBlockers: 496 },
+    {
+      ...valid,
+      blockers: [
+        mismatch({
+          unmatchedArtifactDigests: many,
+          omittedArtifactDigests: 32736,
+        }),
+      ],
+    },
+  ])
+    assert.deepEqual(normalizeCapabilityMismatchDiagnostic(value), value);
+  const secret = "https://private.example.com/token";
+  const iterated = ["cache"];
+  iterated[Symbol.iterator] = function* () {
+    yield secret;
+  };
+  const copied = normalizeCapabilityMismatchDiagnostic({
+    ...valid,
+    blockers: [mismatch({ missingCapabilities: iterated })],
+  });
+  assert.deepEqual(copied.blockers[0].missingCapabilities, ["cache"]);
+  const hidden = {
+    ...mismatch({ commandIdentityMismatch: true }),
+    url: secret,
+  };
+  Object.defineProperty(hidden, "omittedArtifactDigests", {
+    enumerable: false,
+  });
+  const saturated = mismatch({
+    unmatchedArtifactDigests: many,
+    omittedArtifactDigests: 32736,
+  });
+  for (const value of [
+    null,
+    { ...valid, url: secret },
+    { ...valid, schemaVersion: 2 },
+    { ...valid, blockers: [] },
+    { ...valid, blockers: [...full, mismatch({ checkIndex: 16 })] },
+    { ...valid, omittedBlockers: 1 },
+    { ...valid, omittedBlockers: -1 },
+    { ...valid, blockers: full, omittedBlockers: 497 },
+    { ...valid, blockers: [mismatch({ command: secret })] },
+    { ...valid, blockers: [mismatch(), mismatch()] },
+    {
+      ...valid,
+      blockers: [mismatch({ checkIndex: 2 }), mismatch({ checkIndex: 1 })],
+    },
+    { ...valid, blockers: [mismatch({ checkIndex: 512 })] },
+    { ...valid, blockers: [mismatch({ checkIndex: 1.5 })] },
+    { ...valid, blockers: [{ ...valid.blockers[0], reason: "unavailable" }] },
+    {
+      ...valid,
+      blockers: [mismatch({ missingCapabilities: ["cache", "scratch"] })],
+    },
+    {
+      ...valid,
+      blockers: [mismatch({ missingCapabilities: ["cache", "cache"] })],
+    },
+    { ...valid, blockers: [mismatch({ missingCapabilities: [secret] })] },
+    {
+      ...valid,
+      blockers: [mismatch({ unmatchedArtifactDigests: ["A".repeat(64)] })],
+    },
+    { ...valid, blockers: [mismatch({ unmatchedArtifactDigests: [secret] })] },
+    {
+      ...valid,
+      blockers: [
+        mismatch({ unmatchedArtifactDigests: [digest(2), digest(1)] }),
+      ],
+    },
+    {
+      ...valid,
+      blockers: [
+        mismatch({ unmatchedArtifactDigests: [digest(1), digest(1)] }),
+      ],
+    },
+    {
+      ...valid,
+      blockers: [mismatch({ unmatchedArtifactDigests: [...many, digest(99)] })],
+    },
+    {
+      ...valid,
+      blockers: [
+        mismatch({
+          unmatchedArtifactDigests: [digest(1)],
+          omittedArtifactDigests: 1,
+        }),
+      ],
+    },
+    {
+      ...valid,
+      blockers: [
+        mismatch({
+          unmatchedArtifactDigests: many,
+          omittedArtifactDigests: 32737,
+        }),
+      ],
+    },
+    { ...valid, blockers: new Array(1) },
+    { ...valid, blockers: [mismatch({ missingCapabilities: new Array(1) })] },
+    { ...valid, blockers: [hidden] },
+    {
+      ...valid,
+      blockers: [saturated, { ...saturated, checkIndex: 1 }],
+    },
+    { ...valid, blockers: [mismatch({ commandIdentityMismatch: "true" })] },
+    { ...valid, blockers: [mismatch()] },
+    {
+      ...valid,
+      blockers: [
+        {
+          ...mismatch({ commandIdentityMismatch: true }),
+          reason: "unsupported",
+        },
+      ],
+    },
+  ]) {
+    assert.throws(
+      () => normalizeCapabilityMismatchDiagnostic(value),
+      (error) =>
+        error.code === "ERR_INVALID_CAPABILITY_DIAGNOSTIC" &&
+        !JSON.stringify({ message: error.message, ...error }).includes(
+          "private",
+        ),
+    );
+  }
+});
+
 test("frozen declarations remain requirements without reports; preparation is not check evidence", async (t) => {
   const f = await fixture(t, { scratch: true, cache: true });
   const original = JSON.stringify(f.input.snapshot);
@@ -289,6 +549,7 @@ test("availability is rechecked after storage and isolation repair", async (t) =
   });
   const result = await f.service.inspectRequirements(f.input);
   assert.equal(result.blockers[0].reason, "unavailable");
+  assert.equal(result.diagnostic, null);
   assert.deepEqual(await readdir(f.storageRoot), []);
   f.setResult(passed);
   assert.equal((await f.service.inspectRequirements(f.input)).status, "READY");
@@ -570,4 +831,9 @@ test("inspection accepts the complete two-role requirement and blocker union", a
   assert.equal(result.status, "BLOCKED");
   assert.equal(result.blockers.length, 512);
   assert.ok(result.blockers.every(({ reason }) => reason === "not-selected"));
+  assert.deepEqual(
+    result.diagnostic.blockers.map(({ checkIndex }) => checkIndex),
+    Array.from({ length: 16 }, (_, index) => index),
+  );
+  assert.equal(result.diagnostic.omittedBlockers, 496);
 });

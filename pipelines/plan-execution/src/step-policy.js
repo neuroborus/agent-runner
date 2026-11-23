@@ -81,7 +81,7 @@ const CUSTOM = Object.freeze({
     arbiter: READ_ONLY,
   }),
   runtimeMethods: Object.freeze([]),
-  workspaceMethods: INSPECTION_METHODS,
+  workspaceMethods: Object.freeze([...INSPECTION_METHODS, "outputBaseline"]),
   terminalState: "ACCEPT",
   stepContext(source, step) {
     const plan = parseCustomPlan(source);
@@ -108,11 +108,17 @@ ${JSON.stringify({ inputs: plan.inputs, outputs: plan.outputs })}`;
     // Analysis needs no artificial diff. This is not an acceptance checkpoint.
     return true;
   },
-  async inspectWorkspace({ git: safety, projectPath, artifactRoot, runId }) {
+  async inspectWorkspace({
+    git: safety,
+    projectPath,
+    artifactRoot,
+    clarificationRoot = null,
+    runId,
+  }) {
     // The root supplies its already bound directory capability in this slot.
     // Plan declarations must never construct or broaden its permissions.
     const clarificationPath = executionClarificationPath(
-      projectPath,
+      clarificationRoot ?? projectPath,
       artifactRoot,
       runId,
     );
@@ -154,6 +160,7 @@ export async function resolveExecutionWorkspace({
   infrastructureRoot = projectPath,
   runId,
   artifactRoot = "LOCAL_ARTIFACTS",
+  artifactPath = resolve(infrastructureRoot, artifactRoot),
   readTaskInput,
   preliminary = false,
 }) {
@@ -175,7 +182,7 @@ export async function resolveExecutionWorkspace({
         ? [resolve(infrastructureRoot, settings.finalization)]
         : [],
     artifactPaths: runId
-      ? [executionClarificationPath(projectPath, artifactRoot, runId)]
+      ? [join(artifactPath, "agent-runner", runId, "clarifications.md")]
       : [],
   };
 }

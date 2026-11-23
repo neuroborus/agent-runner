@@ -552,6 +552,110 @@ export function initConfirmationReservation(state) {
   };
 }
 
+function reserveInitTurn(state) {
+  const sequence = state.sequence + 1;
+  return {
+    ...state,
+    sequence,
+    pendingTurn: {
+      id: sequence,
+      phase: state.workflowState,
+      role: state.workflowState === "REVIEW" ? "reviewer" : "planner",
+      binding: turnBinding(state),
+    },
+  };
+}
+
+// A first catalog pause must retire the invocation whose own failed attempt
+// recorded the no-effect read-only rejection at its observed checkpoint.
+export function assertInitCatalogTransition(
+  previous,
+  next,
+  _activity,
+  retryCode,
+  turnStart,
+  commitRejection,
+  attempt,
+) {
+  assertInit(commitRejection === undefined, "Init has no COMMIT proof.");
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  const prior = previous.pause?.operatorResume?.pause ?? previous.pause;
+  if (
+    pause?.code !== retryCode ||
+    previous.modelCatalogResume != null ||
+    prior?.code === retryCode
+  )
+    return;
+  const before = previous.pipelineState;
+  const reservation =
+    before.workflowState === "PROPOSAL_ACCEPTED"
+      ? initConfirmationReservation(before)
+      : before.pendingTurn;
+  const phase = reservation?.phase.toLowerCase().replaceAll("_", "-");
+  const rounds = before.revisionRounds;
+  const observed = `init:${pause.role}:${reservation?.phase}:${rounds}`;
+  assertInit(
+    reservation?.role === pause.role &&
+      pause.checkpoint === `${phase}:read-only:${rounds}` &&
+      previous.activeTurn?.role === pause.role &&
+      previous.activeTurn.phase === phase &&
+      attempt?.role === pause.role &&
+      attempt.checkpoint === observed &&
+      (turnStart?.catalogCheckpoint === undefined ||
+        turnStart.catalogCheckpoint === pause.checkpoint) &&
+      isDeepStrictEqual(previous.counters, next.counters) &&
+      isDeepStrictEqual(next.pipelineState, {
+        ...before,
+        workflowState: next.pipelineState.workflowState,
+        pendingTurn: null,
+      }),
+    "Init catalog pause has no failed-attempt proof.",
+  );
+  return true;
+}
+
+export function matchesInitCatalogReservation(previous, next, binding) {
+  const { workflowState } = next.pipelineState;
+  if (!isDeepStrictEqual(previous.counters, next.counters)) return false;
+
+  const retained = { ...previous.pipelineState, workflowState };
+  if (next.activeTurn !== null) {
+    const reservation =
+      workflowState === "PROPOSAL_ACCEPTED"
+        ? initConfirmationReservation(retained)
+        : retained.pendingTurn;
+    const phase = reservation?.phase.toLowerCase().replaceAll("_", "-");
+    return (
+      workflowState === binding.resumeState &&
+      reservation?.role === binding.role &&
+      binding.checkpoint === `${phase}:read-only:${retained.revisionRounds}` &&
+      isDeepStrictEqual(next.pipelineState, retained)
+    );
+  }
+  if (isDeepStrictEqual(next.pipelineState, retained)) return true;
+
+  const pause = next.pause?.operatorResume?.pause ?? next.pause;
+  if (
+    pause?.reason === "init_inspection_failed" &&
+    pause.inspectionFailure?.constraint === "inspection_unavailable"
+  )
+    return isDeepStrictEqual(next.pipelineState, {
+      ...retained,
+      pendingTurn: null,
+    });
+
+  // Catalog pauses retire the pending turn. Rebuild only its deterministic
+  // reservation on the saved facts before starting the replacement turn.
+  return (
+    retained.pendingTurn === null &&
+    next.pause === null &&
+    workflowState === binding.resumeState &&
+    workflowState !== "PROPOSAL_ACCEPTED" &&
+    next.pipelineState.pendingTurn?.role === binding.role &&
+    isDeepStrictEqual(next.pipelineState, reserveInitTurn(retained))
+  );
+}
+
 // Retire only this logical result; retain prior proposal/approvals and all
 // consumed accounting. The lifecycle persists this with its invalid-result pause.
 export function rejectInitResult(state, request, rejection) {
@@ -611,21 +715,13 @@ export function prepareInitTurn(state, inspection, transcriptHash) {
       "workspace_changed",
     );
   selectInitPlacement(inspection, state.clarificationSelection);
-  const next = structuredClone({
+  let next = structuredClone({
     ...state,
     inspection,
     transcriptHash,
     reinspectionRequired: false,
   });
-  if (next.pendingTurn === null) {
-    next.sequence += 1;
-    next.pendingTurn = {
-      id: next.sequence,
-      phase: next.workflowState,
-      role: next.workflowState === "REVIEW" ? "reviewer" : "planner",
-      binding: turnBinding(next),
-    };
-  }
+  if (next.pendingTurn === null) next = reserveInitTurn(next);
   return {
     state: next,
     request: {
@@ -962,6 +1058,21 @@ export function requestInitDecision(state, decision) {
   return next;
 }
 
+// A settled pause retains its checkpoint until a fresh cancellation of exactly
+// that quiescent state is reconciled; cancellation itself must be reconciled.
+function operatorStopRequestValid(request, canceled) {
+  if (request == null) return false;
+  if (request.reconciledRevision !== null)
+    return request.kind === (canceled ? "cancel_requested" : "pause_requested");
+  return (
+    !canceled &&
+    request.kind === "cancel_requested" &&
+    request.checkpoint.revision < request.acceptedRevision &&
+    request.checkpoint.workflowState === "WAITING_FOR_USER" &&
+    request.checkpoint.activeTurn === null
+  );
+}
+
 export function assertInitRun(run) {
   assertInit(
     run.pipelineId === "init",
@@ -981,9 +1092,7 @@ export function assertInitRun(run) {
           (canceled ? "CANCELED" : "WAITING_FOR_USER") &&
         run.activeTurn === null &&
         run.pause.resumeAction === null &&
-        run.stopRequest?.reconciledRevision != null &&
-        run.stopRequest.kind ===
-          (canceled ? "cancel_requested" : "pause_requested"),
+        operatorStopRequestValid(run.stopRequest, canceled),
       "Init operator stop requires a reconciled suspended checkpoint.",
     );
     run = {

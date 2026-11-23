@@ -404,7 +404,7 @@ export function assertRevisionValidation(state) {
         },
         role,
         authority.steps.length,
-        { trustedCommands: state.trustedValidation.commands },
+        { trustedCommands: state.trustedValidation.commands, legacy: true },
       );
       if (!isDeepStrictEqual(receipt.inventory, inventoryOf(normalized)))
         fail();

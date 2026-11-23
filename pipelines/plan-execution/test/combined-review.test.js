@@ -232,6 +232,52 @@ test("combined primary exhaustion cannot be overridden or arbitrated", async (t)
   );
 });
 
+for (const correcting of [false, true]) {
+  test(`combined unchanged BLOCKED ${correcting ? "clears pending output correction atomically" : "retains its candidate without charging a repair"}`, async (t) => {
+    const blocked = {
+      ...checkAndFix(),
+      status: "BLOCKED",
+      summary: "",
+      reason: "The external resource is unavailable.",
+      evidence: ["The synthetic resource is offline."],
+    };
+    const fixture = await createFixture(t, {
+      mode: "combined",
+      workWorker: [
+        implementationCompleted(),
+        ...(correcting ? [{ ...checkAndFix(), unexpected: true }] : []),
+        blocked,
+      ],
+    });
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "environment_blocked");
+    assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+    assert.equal(paused.pipelineState.pendingLazyCorrection, null);
+    assert.equal(paused.pipelineState.availabilityCorrectionCharged, false);
+    assert.equal(paused.counters.fixRounds, 0);
+    assert.equal(paused.counters.correctionRounds, 0);
+    const report = paused.pipelineState.workReports.at(-1);
+    assert.equal(report.status, "BLOCKED");
+    assert.equal(report.reason, blocked.reason);
+    const publicationIndex = fixture.transitions.findIndex(
+      ({ patch }) => patch?.pause?.reason === "environment_blocked",
+    );
+    assert.deepEqual(
+      fixture.transitions[publicationIndex].patch.pipelineState.workReports.at(
+        -1,
+      ),
+      report,
+    );
+    if (correcting) {
+      const preceding = fixture.transitions
+        .slice(0, publicationIndex)
+        .findLast(({ patch }) => patch?.pipelineState).patch.pipelineState;
+      assert.notEqual(preceding.pendingLazyCorrection, null);
+      assert.equal(paused.pipelineState.lazyCorrections.length, 1);
+    }
+  });
+}
+
 for (const schema of [
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,

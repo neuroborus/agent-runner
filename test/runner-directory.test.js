@@ -7,6 +7,7 @@ import {
   mkdtemp,
   lstat,
   readFile,
+  readdir,
   readlink,
   rename,
   rm,
@@ -91,7 +92,14 @@ async function fixture(t, { contained = false, storeOptions = {} } = {}) {
   const store = createRunStore({ stateRoot, ...storeOptions });
   function runner(
     workflow,
-    { selection, loadConfiguration, assertOutputPreparation, ...options } = {},
+    {
+      selection,
+      loadConfiguration,
+      assertOutputPreparation,
+      initialRoleAccess,
+      roleAccess = { planner: ["read-only", "workspace-write"] },
+      ...options
+    } = {},
   ) {
     const pipeline = {
       ...planAuthoringPipeline,
@@ -107,7 +115,8 @@ async function fixture(t, { contained = false, storeOptions = {} } = {}) {
       resolveWorkspace: selection,
       assertOutputPreparation,
       resolveTaskInputs: undefined,
-      roleAccess: { planner: ["read-only", "workspace-write"] },
+      roleAccess,
+      initialRoleAccess,
       projections: { status: () => ({}), pause: () => null },
       validateResumeAction() {},
       workflow: {
@@ -175,6 +184,174 @@ async function turn(runtime, run, access, phase) {
   });
   await runtime.finishAgentTurn({ role: "planner", phase });
 }
+
+test("readiness rejects mixed file outputs before initial read-only probes or preparation", async (t) => {
+  for (const name of ["result.txt", ".result"]) {
+    const f = await fixture(t);
+    const output = join(f.projectPath, name);
+    await writeFile(output, "Original\n");
+    const selection = () => ({
+      kind: "directory",
+      lease: "exclusive",
+      inputPaths: ["input.txt"],
+      outputPaths: ["missing", name],
+    });
+    const runner = f.runner(() => assert.fail("No workflow may start."), {
+      selection,
+      initialRoleAccess: () => ["read-only"],
+    });
+    await assert.rejects(runner.create(f.input), (cause) => {
+      assert.equal(cause.code, "ERR_UNSUPPORTED_BACKEND");
+      assert.match(cause.message, /capability_existing_file_output/u);
+      assert.match(cause.message, /authorized fresh run/u);
+      assert.ok(!cause.message.includes(output));
+      return true;
+    });
+    assert.equal(f.probes.length, 0);
+    assert.equal(f.calls.length, 0);
+    await assert.rejects(lstat(join(f.projectPath, "missing")), {
+      code: "ENOENT",
+    });
+    assert.equal(await readFile(output, "utf8"), "Original\n");
+    // Intended file outputs do not grant writes to an authoring-only role.
+    const readonly = f.runner(async ({ run }) => run, {
+      selection,
+      roleAccess: { planner: ["read-only"] },
+    });
+    const { run } = await readonly.create(f.input);
+    assert.deepEqual(Object.keys(run.roles), ["planner"]);
+    assert.equal(f.probes.length, 1);
+  }
+});
+
+test("readiness rejects nonliteral output roots before preparation or provider work", async (t) => {
+  for (const backend of ["codex", "claude"]) {
+    const f = await fixture(t);
+    const outputs = ["reports", "reports[1]"];
+    const runner = f.runner(() => assert.fail("No workflow may start."), {
+      selection: () => ({
+        kind: "directory",
+        lease: "exclusive",
+        inputPaths: ["input.txt"],
+        outputPaths: outputs,
+      }),
+      initialRoleAccess: () => ["read-only"],
+      adapters: { [backend]: f.adapter },
+      loadConfiguration: async () =>
+        parseRunnerConfiguration(
+          JSON.stringify({
+            schemaVersion: 1,
+            defaultBackend: backend,
+            pipelines: { "plan-authoring": { mode: "lazy" } },
+          }),
+        ),
+    });
+    await assert.rejects(runner.create(f.input), (cause) => {
+      assert.equal(cause.code, "ERR_UNSUPPORTED_BACKEND");
+      assert.match(cause.message, /isolation_workspace_policy/u);
+      return true;
+    });
+    assert.equal(f.probes.length, 0);
+    assert.equal(f.calls.length, 0);
+    for (const output of outputs)
+      await assert.rejects(lstat(join(f.projectPath, output)), {
+        code: "ENOENT",
+      });
+  }
+});
+
+test("paused directory runs recheck current output shapes before a cached writable turn", async (t) => {
+  const f = await fixture(t);
+  const path = join(f.projectPath, "out");
+  await mkdir(path);
+  const runner = f.runner(
+    async ({ run, runtime, operatorStop }) => {
+      if (operatorStop) return run;
+      await runtime.adapters.planner.probe({ access: "workspace-write" });
+      // Substitution after the cached probe must not reach the fake native adapter.
+      await rm(path, { recursive: true });
+      await writeFile(path, "Retain output\n");
+      await turn(runtime, run, "workspace-write", "implement");
+      assert.fail("Unsupported output cannot reach implementation.");
+    },
+    { initialRoleAccess: () => ["read-only"] },
+  );
+  const { run } = await runner.create(f.input);
+  await f.store.requestOperatorStop({
+    runId: run.runId,
+    kind: "pause_requested",
+    expectedRevision: run.revision,
+    idempotencyKey: "pause-before-write",
+  });
+  const paused = (await runner.resume({ runId: run.runId })).run;
+  assert.equal(paused.pause.reason, "operator_paused");
+  await assert.rejects(runner.resume({ runId: run.runId }), {
+    code: "ERR_PROVIDER_POLICY_CHANGED",
+  });
+  const saved = await f.store.loadRun(run.runId);
+  assert.deepEqual(saved.workspace, paused.workspace);
+  assert.deepEqual(saved.providerPolicies, paused.providerPolicies);
+  assert.deepEqual(saved.roles, paused.roles);
+  assert.equal(f.calls.length, 0);
+  assert.equal(await readFile(path, "utf8"), "Retain output\n");
+});
+
+test("output readiness rechecks all roots before allocating a missing directory", async (t) => {
+  const f = await fixture(t);
+  const path = join(f.projectPath, "out");
+  let runId;
+  const runner = f.runner(
+    async ({ run, runtime }) => {
+      runId = run.runId;
+      await assert.rejects(
+        runtime.adapters.planner.assertWorkspaceReady({
+          preparableOutputPaths: [path],
+        }),
+        /capability_missing_output/u,
+      );
+      // Initially absent declarations passed admission. A file arriving at the
+      // other output must prevent preparation of even the safe directory root.
+      await writeFile(join(f.projectPath, "result.txt"), "Retain output\n");
+      const intent = await runtime.workspace.inspectOutputDirectory(path);
+      await runtime.transition({
+        pipelineState: {
+          ...run.pipelineState,
+          outputIntent: intent,
+          fixRounds: 7,
+        },
+      });
+      await runtime.workspace.prepareOutputDirectory(intent);
+      assert.fail("No preparation is authorized for unsupported output roots.");
+    },
+    {
+      selection: () => ({
+        kind: "directory",
+        lease: "exclusive",
+        inputPaths: ["input.txt"],
+        outputPaths: ["out", "result.txt"],
+      }),
+      assertOutputPreparation(run, intent) {
+        assert.deepEqual(run.pipelineState.outputIntent, intent);
+      },
+    },
+  );
+  await assert.rejects(runner.run(f.input), {
+    code: "ERR_PROVIDER_POLICY_CHANGED",
+  });
+  const saved = await f.store.loadRun(runId);
+  assert.equal(saved.executionProcess, null);
+  assert.equal(saved.executionResource, null);
+  assert.equal(saved.pipelineState.fixRounds, 7);
+  await assert.rejects(lstat(path), { code: "ENOENT" });
+  await assert.rejects(lstat(saved.pipelineState.outputIntent.staging.path), {
+    code: "ENOENT",
+  });
+  assert.equal(f.calls.length, 0);
+  assert.equal(
+    await readFile(join(f.projectPath, "input.txt"), "utf8"),
+    "frozen input\n",
+  );
+});
 
 test("directory creation rejects unsafe task inputs before reading or probing", async (t) => {
   for (const kind of ["symlink", "directory", "special", "missing"]) {
@@ -341,6 +518,7 @@ test("near-limit directory declarations preserve compact storage exclusions at t
 
 test("directory lifecycle reconstructs interrupted output work without Git or configuration reload", async (t) => {
   const f = await fixture(t);
+  await mkdir(join(f.projectPath, "out"));
   const output = join(f.projectPath, "out", "report.txt");
   f.adapter.run = async (request) => {
     f.calls.push(request);
@@ -349,7 +527,6 @@ test("directory lifecycle reconstructs interrupted output work without Git or co
       join(f.projectPath, "out"),
     ]);
     if (request.access === "workspace-write") {
-      await mkdir(join(f.projectPath, "out"));
       await writeFile(output, "accepted partial result\n");
     }
     return { structured: {}, sessionId: "opaque-child" };
@@ -528,6 +705,7 @@ test("directory provider turns reject read-only and undeclared mutations includi
   for (const access of ["read-only", "workspace-write"]) {
     await t.test(access, async (t) => {
       const f = await fixture(t);
+      await mkdir(join(f.projectPath, "out"));
       f.adapter.run = async () => {
         await writeFile(join(f.projectPath, "unrelated.txt"), "unauthorized\n");
         throw new Error("provider failed");
@@ -824,32 +1002,60 @@ test("directory outputs cannot enter nested worktrees with a different exclusion
   }
 });
 
-test("directory stop reconciliation preserves the checkpoint and resumes without Git", async (t) => {
-  const f = await fixture(t);
-  let reconciliations = 0;
-  const runner = f.runner(async ({ run, runtime, operatorStop }) => {
-    if (operatorStop) {
-      reconciliations += 1;
-      return run;
-    }
-    return runtime.transition({
-      pipelineState: { ...run.pipelineState, workflowState: "COMPLETED" },
+test("directory stop reconciliation preserves the checkpoint and resumes or cancels without Git", async (t) => {
+  for (const cancel of [false, true]) {
+    const f = await fixture(t);
+    const reconciled = [];
+    const runner = f.runner(async ({ run, runtime, operatorStop }) => {
+      if (operatorStop) {
+        reconciled.push(run.pipelineState.workflowState);
+        return run;
+      }
+      return runtime.transition({
+        pipelineState: { ...run.pipelineState, workflowState: "COMPLETED" },
+      });
     });
-  });
-  const { run } = await runner.create(f.input);
-  await f.store.requestOperatorStop({
-    runId: run.runId,
-    kind: "pause_requested",
-    expectedRevision: run.revision,
-    idempotencyKey: "pause-directory",
-  });
-  const paused = (await runner.resume({ runId: run.runId })).run;
-  assert.equal(paused.pause.reason, "operator_paused");
-  assert.equal(reconciliations, 1);
-  assert.equal(
-    (await runner.resume({ runId: run.runId })).run.pipelineState.workflowState,
-    "COMPLETED",
-  );
+    const { run } = await runner.create(f.input);
+    await f.store.requestOperatorStop({
+      runId: run.runId,
+      kind: "pause_requested",
+      expectedRevision: run.revision,
+      idempotencyKey: "pause-directory",
+    });
+    const paused = (await runner.resume({ runId: run.runId })).run;
+    assert.equal(paused.pause.reason, "operator_paused");
+    assert.deepEqual(reconciled, ["CLARIFY"]);
+    if (!cancel) {
+      assert.equal(
+        (await runner.resume({ runId: run.runId })).run.pipelineState
+          .workflowState,
+        "COMPLETED",
+      );
+      continue;
+    }
+    const probes = f.probes.length;
+    await f.store.requestOperatorStop({
+      runId: run.runId,
+      kind: "cancel_requested",
+      expectedRevision: paused.revision,
+      idempotencyKey: "cancel-directory",
+    });
+    const canceled = (await runner.resume({ runId: run.runId })).run;
+    assert.equal(canceled.pipelineState.workflowState, "CANCELED");
+    assert.deepEqual(
+      canceled.pause.operatorResume,
+      paused.pause.operatorResume,
+    );
+    assert.deepEqual(canceled.workspace, paused.workspace);
+    assert.deepEqual(reconciled, ["CLARIFY", "CLARIFY"]);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.probes.length, probes);
+    assert.deepEqual(await readdir(f.projectPath), ["input.txt"]);
+    assert.equal(
+      await readFile(join(f.projectPath, "input.txt"), "utf8"),
+      "frozen input\n",
+    );
+  }
 });
 
 test("a stop accepted during output preflight prevents allocation and publication", async (t) => {
@@ -1301,6 +1507,7 @@ test("initial directory execution retains process-only ownership for same-instan
       processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
     },
   });
+  await mkdir(join(f.projectPath, "out"));
   const namespaceId = await readlink("/proc/self/ns/pid");
   const failure = Object.assign(new Error("Fixture process ownership lost."), {
     code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
@@ -1429,6 +1636,7 @@ test("directory inspection failure retains process-only ownership for same-insta
 
 test("live directory storage cleanup retains Runner ownership for same-instance recovery", async (t) => {
   const f = await fixture(t);
+  await mkdir(join(f.projectPath, "out"));
   const metadata = join(f.root, "metadata");
   const pointer = join(f.projectPath, ".git");
   await mkdir(metadata);

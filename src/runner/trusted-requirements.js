@@ -1,3 +1,4 @@
+import { createOwnershipDiagnostic } from "../platform/index.js";
 import { RunnerError } from "./input.js";
 
 // Preparation is an owned runner effect. Pipeline requests cannot replace the
@@ -27,6 +28,9 @@ export async function inspectTrustedRequirements(
     throw new RunnerError(
       "Capability inspection requires settled resource ownership.",
       {
+        ownershipDiagnostic: createOwnershipDiagnostic(
+          "trusted-resource-custody",
+        ),
         code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE",
       },
     );

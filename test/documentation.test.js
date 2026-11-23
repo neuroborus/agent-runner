@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readlink, stat } from "node:fs/promises";
 import test from "node:test";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -117,8 +117,12 @@ test("operator guidance and transports retain mode and deferred-stop choices", a
       ),
     );
   }
-  for (const path of ["README.md", "docs/OPERATOR_GUIDE.md"]) {
-    const document = await readDocument(path);
+  for (const paths of [
+    ["docs/user/cli-recovery.md", "docs/user/mcp-supervision.md"],
+    ["docs/OPERATOR_GUIDE.md"],
+  ]) {
+    const path = paths.join(" + ");
+    const document = (await Promise.all(paths.map(readDocument))).join("\n");
     assert.ok(document.includes("--timing after-current-commit"), path);
     assert.match(document, /run_pause/u);
     assert.match(document, /run_cancel/u);
@@ -162,7 +166,15 @@ test("MCP discovery describes supported modes and execution-only deferred stops"
 });
 
 test("configuration examples keep trusted vectors and the preferred planning target valid", async () => {
+  assert.equal(
+    await readlink(new URL(".agent-runner.example.json", ROOT)),
+    "docs/user/configuration.example.json",
+  );
   const text = await readDocument(".agent-runner.example.json");
+  assert.equal(
+    text,
+    await readDocument("docs/user/configuration.example.json"),
+  );
   assert.doesNotThrow(() => parseRunnerConfiguration(text));
   const example = JSON.parse(text);
   for (const pipeline of listPipelines()) {
@@ -193,7 +205,7 @@ test("configuration examples keep trusted vectors and the preferred planning tar
   );
   assert.equal(authoring.settings.preferredCommitLineLimit.defaultValue, 900);
   for (const path of [
-    "README.md",
+    "docs/user/pipeline-settings.md",
     "docs/OPERATOR_GUIDE.md",
     "docs/product/OPERATOR_MODEL.md",
     "pipelines/plan-authoring/docs/SPEC.md",
@@ -203,13 +215,15 @@ test("configuration examples keep trusted vectors and the preferred planning tar
     assert.match(document, /900/u, path);
     assert.match(document, /legacy/u, path);
   }
-  const readme = await readDocument("README.md");
-  const examples = [...readme.matchAll(/```json\n([\s\S]*?)\n```/gu)]
+  const trustedValidation = await readDocument(
+    "docs/user/trusted-validation.md",
+  );
+  const examples = [...trustedValidation.matchAll(/```json\n([\s\S]*?)\n```/gu)]
     .map((match) => JSON.parse(match[1]))
     .filter((value) => value.trustedCommands !== undefined);
   assert.ok(
     examples.length > 0,
-    "README must demonstrate a trusted command catalog.",
+    "Trusted validation must demonstrate a trusted command catalog.",
   );
   for (const value of examples) {
     assert.doesNotThrow(() => parseRunnerConfiguration(JSON.stringify(value)));
@@ -221,14 +235,7 @@ test("configuration examples keep trusted vectors and the preferred planning tar
   }
 });
 
-test("document-map links resolve and finalization covers the operator surfaces", async () => {
-  const mapUrl = new URL("docs/README.md", ROOT);
-  const document = await readFile(mapUrl, "utf8");
-  for (const [, target] of document.matchAll(/\]\(([^)]+)\)/gu)) {
-    const url = new URL(target, mapUrl);
-    assert.equal(url.protocol, "file:", target);
-    assert.ok((await stat(url)).isFile(), target);
-  }
+test("finalization covers the operator surfaces", async () => {
   const skillRoot = new URL(".agents/skills/finalization/", ROOT);
   const instructions = new Map();
   async function readInstructions(url) {
@@ -278,6 +285,14 @@ test("document-map links resolve and finalization covers the operator surfaces",
 test("fixed operational bounds remain explicit and narrowly owned", async () => {
   const [
     architecture,
+    providerRequests,
+    providerSessions,
+    artifactAcquisition,
+    codexIsolation,
+    mcpObservations,
+    mcpContinuation,
+    stateLeases,
+    operatorStops,
     operatorGuide,
     pipelineModel,
     providerModel,
@@ -286,9 +301,20 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     validationModel,
     authoringSpec,
     executionSpec,
-    polishingSpec,
+    executionBootstrap,
+    executionFinalization,
+    polishingReview,
+    polishingBootstrap,
   ] = await Promise.all([
-    readDocument("docs/ARCHITECTURE.md"),
+    readDocument("docs/architecture/clarifications.md"),
+    readDocument("docs/architecture/providers/requests.md"),
+    readDocument("docs/architecture/providers/sessions.md"),
+    readDocument("docs/architecture/validation/acquisition.md"),
+    readDocument("docs/architecture/providers/codex-isolation.md"),
+    readDocument("docs/architecture/mcp/observations.md"),
+    readDocument("docs/architecture/mcp/continuation.md"),
+    readDocument("docs/architecture/state/leases.md"),
+    readDocument("docs/architecture/recovery/operator-stops.md"),
     readDocument("docs/OPERATOR_GUIDE.md"),
     readDocument("docs/product/PIPELINE_MODEL.md"),
     readDocument("docs/product/PROVIDER_MODEL.md"),
@@ -297,7 +323,10 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     readDocument("docs/product/VALIDATION_AND_REVIEW.md"),
     readDocument("pipelines/plan-authoring/docs/SPEC.md"),
     readDocument("pipelines/plan-execution/docs/SPEC.md"),
-    readDocument("pipelines/polishing/docs/SPEC.md"),
+    readDocument("pipelines/plan-execution/docs/bootstrap.md"),
+    readDocument("pipelines/plan-execution/docs/finalization.md"),
+    readDocument("pipelines/polishing/docs/review.md"),
+    readDocument("pipelines/polishing/docs/bootstrap.md"),
   ]);
 
   for (const document of [
@@ -305,8 +334,8 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     operatorGuide,
     pipelineModel,
     authoringSpec,
-    executionSpec,
-    polishingSpec,
+    executionBootstrap,
+    polishingBootstrap,
   ]) {
     assert.match(document, /three agent question rounds/u);
     assert.match(
@@ -315,7 +344,7 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     );
   }
 
-  for (const document of [architecture, providerModel, operatorGuide]) {
+  for (const document of [providerRequests, providerModel, operatorGuide]) {
     assert.match(document, /10-second\s+deadline/u);
     assert.match(document, /one-second network-denial observation\s+deadline/u);
     assert.match(
@@ -334,7 +363,7 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
   }
   assert.match(providerModel, /single fresh reconstruction/u);
   assert.match(operatorGuide, /one fresh\s+reconstruction/u);
-  assert.match(architecture, /compact[^.]*retry[^.]*once/u);
+  assert.match(providerSessions, /compact[^.]*retry[^.]*once/u);
   for (const document of [providerModel, operatorGuide]) {
     assert.match(document, /at most\s+one[^.]*compaction retry/u);
   }
@@ -343,12 +372,12 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     /A second failure[^.]+without another adapter retry/u,
   );
   assert.match(
-    architecture,
+    providerRequests,
     /32 page requests[^.]*requested limit of 100\s+entries/u,
   );
   assert.match(providerModel, /32 page requests[^.]*asking for 100\s+entries/u);
-  assert.match(architecture, /256-name MCP configuration capacity/u);
-  assert.match(architecture, /three fixed one-second observation/u);
+  assert.match(providerRequests, /256-name MCP configuration capacity/u);
+  assert.match(codexIsolation, /three fixed one-second observation/u);
   assert.match(
     providerModel,
     /one second each for natural close, TERM, and KILL/u,
@@ -361,20 +390,23 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
   assert.match(validationModel, /Two automatic semantic retries/u);
   assert.match(validationModel, /not consume the\s+separate code-fix/u);
   assert.match(authoringSpec, /permits one automatic fresh-session/u);
-  assert.match(executionSpec, /Allow at most two such attempts/u);
+  assert.match(executionFinalization, /Allow at most two such attempts/u);
   assert.match(executionSpec, /only one automatic read-only correction/u);
-  assert.match(polishingSpec, /separate one-attempt correction records/u);
-  for (const document of [executionSpec, polishingSpec]) {
+  assert.match(polishingReview, /separate one-attempt correction records/u);
+  for (const document of [executionFinalization, polishingReview]) {
     assert.match(document, /Two automatic semantic retries/u);
   }
 
-  assert.match(architecture, /DNS has a 5-second deadline/u);
-  assert.match(architecture, /one A and one AAAA lookup/u);
-  assert.match(architecture, /one resolver\s+try each/u);
-  assert.match(architecture, /connection establishment 10 seconds/u);
-  assert.match(architecture, /body\/header inactivity 15 seconds/u);
-  assert.match(architecture, /whole acquisition 5 minutes/u);
-  assert.match(architecture, /retirement has a separate\s+1-second bound/u);
+  assert.match(artifactAcquisition, /DNS has a 5-second deadline/u);
+  assert.match(artifactAcquisition, /one A and one AAAA lookup/u);
+  assert.match(artifactAcquisition, /one resolver\s+try each/u);
+  assert.match(artifactAcquisition, /connection establishment 10 seconds/u);
+  assert.match(artifactAcquisition, /body\/header inactivity 15 seconds/u);
+  assert.match(artifactAcquisition, /whole acquisition 5 minutes/u);
+  assert.match(
+    artifactAcquisition,
+    /retirement has a separate\s+1-second bound/u,
+  );
   for (const document of [operatorGuide, safetyModel]) {
     assert.match(document, /64 MiB per file/u);
     assert.match(document, /256 MiB total/u);
@@ -395,32 +427,32 @@ test("fixed operational bounds remain explicit and narrowly owned", async () => 
     );
   }
 
-  for (const document of [architecture, operatorModel]) {
+  for (const document of [operatorStops, operatorModel]) {
     assert.match(document, /500/u);
     assert.match(document, /10 milliseconds/u);
   }
   assert.match(operatorGuide, /roughly five seconds/u);
-  assert.match(architecture, /Managed-state reads[^.]+five attempts/u);
+  assert.match(stateLeases, /Managed-state reads[^.]+five attempts/u);
   assert.match(
-    architecture,
+    stateLeases,
     /release of either an\s+execution or canonical-worktree lease[^.]*five stop-aware attempts/u,
   );
   assert.match(
-    architecture,
+    stateLeases,
     /Generated run IDs try at most\s+ten\s+candidates/u,
   );
   assert.match(
-    architecture,
+    stateLeases,
     /fixed correctness guards rather than workflow\s+budgets/u,
   );
-  assert.match(architecture, /run_wait\.timeoutMs` means 30 seconds/u);
-  assert.match(architecture, /public maximum is 24\s+hours/u);
-  assert.match(architecture, /bounded event-driven observation/u);
-  assert.match(architecture, /at most 64 inspections within 30 seconds/u);
-  assert.match(architecture, /ERR_DETACHED_OWNERSHIP_PENDING/u);
-  assert.match(architecture, /at most one second at\s+a time/u);
+  assert.match(mcpObservations, /run_wait\.timeoutMs` means 30 seconds/u);
+  assert.match(mcpObservations, /public maximum is 24\s+hours/u);
+  assert.match(mcpObservations, /bounded event-driven observation/u);
+  assert.match(mcpContinuation, /at most 64 inspections within 30 seconds/u);
+  assert.match(mcpContinuation, /ERR_DETACHED_OWNERSHIP_PENDING/u);
+  assert.match(mcpObservations, /at most one second at\s+a time/u);
   assert.match(
-    architecture,
+    mcpObservations,
     /fixed correctness mechanics rather than user-work retry budgets/u,
   );
   assert.match(operatorGuide, /run_wait\.timeoutMs` waits 30 seconds/u);

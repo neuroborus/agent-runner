@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { inactivityActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
 import { runObservedAttempt } from "./observations.js";
@@ -107,6 +109,7 @@ export function createInactivityCoordinator({
   timers,
 }) {
   let checkpoint;
+  let catalogRetryRepository;
   let responseRole;
   let pending = initialRun?.inactivityRecovery != null;
   let manualRetry = initialRun?.pause != null;
@@ -148,8 +151,14 @@ export function createInactivityCoordinator({
     },
     eligible: (cause) =>
       cause?.code === "ERR_PROVIDER_INACTIVE" && cause.recoverable === true,
-    async before({ role, checkpoint: selected, repository }) {
+    async before({
+      role,
+      checkpoint: selected,
+      repository,
+      continueEpisode = false,
+    }) {
       checkpoint = selected;
+      catalogRetryRepository = undefined;
       let run = await runStore.loadRun(runId);
       const recovery = run.inactivityRecovery;
       pending = recovery !== null;
@@ -171,6 +180,21 @@ export function createInactivityCoordinator({
             code: "ERR_INACTIVITY_RECOVERY",
           });
         run = await runStore.finishAgentTurn(lease, run.activeTurn);
+      }
+      // The owning checkpoint proved a continuation of a consumed attempt.
+      // Keep its exact episode and any already-spent reconstruction.
+      if (continueEpisode) {
+        if (
+          run.modelCatalogResume?.role === role &&
+          recovery.status === "expired" &&
+          recovery.attempt === 1 &&
+          recovery.expiryRevision !== null &&
+          repository.contentFingerprint ===
+            run.pipelineState.repositoryBaseline?.contentFingerprint
+        )
+          catalogRetryRepository = repository;
+        manualRetry = false;
+        return run;
       }
       // Backoff can continue after a new availability failure, but a stale
       // episode cannot replenish a reconstruction lost with its owner.
@@ -200,24 +224,30 @@ export function createInactivityCoordinator({
         "reconstructing",
       );
     },
-    async retry({ repository }) {
+    // A reconciled turn binds the journaled expiry to its own invocation
+    // marker and the unchanged content it observed.
+    async retry({ repository, reconciledTurn = null, expiredAfter }) {
       await monitor.check();
       await git.assertUnchanged(repository);
       const run = await runStore.loadRun(runId);
+      const recovery = run.inactivityRecovery;
       if (
         run.preparation != null ||
         run.executionProcess !== null ||
         run.executionResource !== null ||
-        run.activeTurn !== null
+        !isDeepStrictEqual(run.activeTurn, reconciledTurn) ||
+        (reconciledTurn !== null &&
+          (recovery?.role !== reconciledTurn.role ||
+            recovery.checkpoint !== checkpoint ||
+            recovery.status !== "expired" ||
+            !(recovery.expiryRevision > expiredAfter) ||
+            recovery.contentFingerprint !== repository.contentFingerprint))
       )
         throw new RunnerError(
-          "Inactivity recovery requires retired ownership.",
+          "Inactivity recovery requires a reconciled turn and retired provider ownership.",
           { code: "ERR_INACTIVITY_RECOVERY" },
         );
-      return (
-        run.inactivityRecovery?.attempt === 1 &&
-        run.inactivityRecovery.expiryRevision != null
-      );
+      return recovery?.attempt === 1 && recovery.expiryRevision != null;
     },
     async invoke(role, operation, request) {
       const run = await runStore.loadRun(runId);
@@ -232,6 +262,11 @@ export function createInactivityCoordinator({
           : AbortSignal.any([request.signal, controller.signal]);
       let expired = false;
       let attempt = run.inactivityRecovery?.attempt ?? 1;
+      const hasRetainedRecovery = run.inactivityRecovery !== null;
+      const retryRepository = hasRetainedRecovery
+        ? catalogRetryRepository
+        : undefined;
+      catalogRetryRepository = undefined;
       let reservation;
       let persistenceFailure;
       const watchdog = createInactivityWatchdog({
@@ -273,6 +308,42 @@ export function createInactivityCoordinator({
       request.signal?.addEventListener("abort", stop, { once: true });
       let response;
       let failure;
+      const isDeadlineFailure = (cause) =>
+        cause === undefined ||
+        cause === signal.reason ||
+        (signal.aborted && cause?.code === signal.reason?.code);
+      async function reserveReconstruction() {
+        if (attempt === 2 || expired || signal.aborted) return false;
+        if (hasRetainedRecovery) {
+          if (request.access !== "read-only" || retryRepository === undefined)
+            return false;
+          await monitor.check();
+          await git.assertUnchanged(retryRepository);
+          if (attempt === 2 || expired || signal.aborted) return false;
+        }
+        attempt = 2;
+        reservation = (async () => {
+          const repository =
+            retryRepository ??
+            (await git.snapshot({
+              projectPath: run.projectPath,
+              allowedPaths: [],
+            }));
+          await record(
+            {
+              role,
+              checkpoint,
+              attempt,
+              status: "reconstructing",
+              configurationFingerprint: run.providerInactivityFingerprint,
+              contentFingerprint: repository.contentFingerprint,
+            },
+            "reconstructing",
+          );
+        })();
+        await reservation;
+        return !expired && !signal.aborted;
+      }
       const observedOperation = (value) =>
         runObservedAttempt({
           runStore,
@@ -286,6 +357,10 @@ export function createInactivityCoordinator({
               ? watchdog.suspend(() => monitor.persist(write))
               : monitor.persist(write),
           publish,
+          // Match the failure precedence below when settling attempt evidence.
+          isInterrupted: (cause) =>
+            request.signal?.aborted === true ||
+            (signal.aborted && isDeadlineFailure(cause)),
           operation: async (attemptRequest) => {
             try {
               return await operation(attemptRequest);
@@ -301,29 +376,7 @@ export function createInactivityCoordinator({
           ...request,
           signal,
           onProgress: watchdog.progress,
-          onFreshSession: async () => {
-            if (attempt === 2 || expired || signal.aborted) return false;
-            attempt = 2;
-            reservation = (async () => {
-              const observed = await git.snapshot({
-                projectPath: run.projectPath,
-                allowedPaths: [],
-              });
-              await record(
-                {
-                  role,
-                  checkpoint,
-                  attempt,
-                  status: "reconstructing",
-                  configurationFingerprint: run.providerInactivityFingerprint,
-                  contentFingerprint: observed.contentFingerprint,
-                },
-                "reconstructing",
-              );
-            })();
-            await reservation;
-            return !expired && !signal.aborted;
-          },
+          onFreshSession: reserveReconstruction,
           onCommitExecution: async () => {
             await watchdog.close();
             signal.throwIfAborted();
@@ -349,10 +402,7 @@ export function createInactivityCoordinator({
         request.signal?.removeEventListener("abort", stop);
       }
       if (request.signal?.aborted) throw failure ?? request.signal.reason;
-      const deadlineFailure =
-        failure === undefined ||
-        failure === signal.reason ||
-        (signal.aborted && failure?.code === signal.reason?.code);
+      const deadlineFailure = isDeadlineFailure(failure);
       if (persistenceFailure !== undefined && deadlineFailure)
         throw persistenceFailure;
       if (expired && deadlineFailure) {

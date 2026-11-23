@@ -17,6 +17,11 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { inspectFinalizationFile } from "../../../../src/config/index.js";
+import { trustedValidationFailureEvidence } from "../../../../src/trusted-validation/index.js";
+import {
+  createGitService,
+  isolateGitEnvironment,
+} from "../../../../src/git/index.js";
 
 import { assertExecutionRun as assertRun } from "../../src/bootstrap-progress.js";
 import {
@@ -59,6 +64,7 @@ import {
   FINALIZATION_SCHEMA,
   IMPLEMENTATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
+  FINDING_RECOVERY_SCHEMA,
   REVIEW_SCHEMA,
 } from "../../src/schemas.js";
 import {
@@ -322,25 +328,44 @@ function trustedValidationSnapshot(
   command = "npm run test:service",
   capabilities = {},
 ) {
-  const vector = {
-    alias,
-    command,
-    executable: "npm",
-    arguments: ["run", "test:service"],
-    capabilities,
-  };
-  const identity = hash(JSON.stringify(vector));
-  const commands = [{ ...vector, identity }];
-  const schemaVersion = capabilities.sourceProjection === true ? 4 : 3;
+  // An array first argument lists complete vectors in configuration order.
+  const vectors = Array.isArray(alias)
+    ? alias.map((vector) => ({
+        alias: vector.alias,
+        command: vector.command,
+        executable: vector.executable,
+        arguments: vector.arguments,
+        capabilities: vector.capabilities ?? {},
+      }))
+    : [
+        {
+          alias,
+          command,
+          executable: "npm",
+          arguments: ["run", "test:service"],
+          capabilities,
+        },
+      ];
+  const commands = vectors.map((vector) => ({
+    ...vector,
+    identity: hash(JSON.stringify(vector)),
+  }));
+  const schemaVersion = vectors.some(
+    ({ capabilities: value }) => value.sourceProjection === true,
+  )
+    ? 4
+    : 3;
   return Object.freeze({
     schemaVersion,
     timeoutMs: 3_600_000,
     commands: Object.freeze(commands.map(Object.freeze)),
-    commandFingerprint: hash(JSON.stringify([identity])),
+    commandFingerprint: hash(
+      JSON.stringify(commands.map(({ identity }) => identity)),
+    ),
     configurationFingerprint: hash(
       JSON.stringify({
         schemaVersion,
-        commands: [vector],
+        commands: vectors,
         timeoutMs: 3_600_000,
       }),
     ),
@@ -1339,7 +1364,9 @@ async function createFixture(
     indexFingerprint: hash("fixture-index"),
     refsFingerprint: hash("fixture-refs"),
     remoteConfigurationFingerprint: hash("fixture-remotes"),
+    stagedContentFingerprint: null,
   };
+  const realCommitAuthorizations = new Map();
 
   async function commitMemoryRepository(subject) {
     const parent = memoryRepository.head;
@@ -1368,6 +1395,16 @@ async function createFixture(
     },
     stage(value = "changed-index") {
       memoryRepository.indexFingerprint = hash(value);
+      memoryRepository.stagedContentFingerprint = null;
+    },
+    async stageAll() {
+      memoryRepository.stagedContentFingerprint = await repositoryFingerprint(
+        projectPath,
+        [artifactRoot],
+      );
+      memoryRepository.indexFingerprint = hash(
+        `staged:${memoryRepository.stagedContentFingerprint}`,
+      );
     },
   });
 
@@ -1541,14 +1578,15 @@ async function createFixture(
             await request.onCommitExecution?.();
             if (onCommitRun === undefined) {
               if (repository === "git") {
-                await executeFile("git", ["-C", projectPath, "add", "-A"]);
-                await executeFile("git", [
-                  "-C",
-                  projectPath,
-                  "commit",
-                  "-qm",
-                  request.commit.message,
-                ]);
+                const env = isolateGitEnvironment(process.env);
+                await executeFile("git", ["-C", projectPath, "add", "-A"], {
+                  env,
+                });
+                await executeFile(
+                  "git",
+                  ["-C", projectPath, "commit", "-qm", request.commit.message],
+                  { env },
+                );
               } else {
                 await commitMemoryRepository(request.commit.message);
               }
@@ -1665,9 +1703,11 @@ async function createFixture(
             output: "structured",
             structured:
               WRAPPED_BOOTSTRAP_SCHEMAS.has(request.schema) ||
-              [IMPLEMENTATION_SCHEMA, FINDING_RESOLUTION_SCHEMA].includes(
-                request.schema,
-              )
+              [
+                IMPLEMENTATION_SCHEMA,
+                FINDING_RESOLUTION_SCHEMA,
+                FINDING_RECOVERY_SCHEMA,
+              ].includes(request.schema)
                 ? { result: candidateStructured }
                 : candidateStructured,
             sessionId:
@@ -1815,6 +1855,7 @@ async function createFixture(
     adapters,
     clarifications,
     trustedValidation: {
+      failureEvidence: trustedValidationFailureEvidence,
       async preflight() {},
       async inspectRequirements(options) {
         return (
@@ -1929,6 +1970,17 @@ async function createFixture(
           error.code = "ERR_COMMIT_GATE_CHANGED";
           throw error;
         }
+        if (repository === "git") {
+          const service = createGitService();
+          realCommitAuthorizations.set(
+            authorization.id,
+            await service.prepareCommit({
+              expectedSnapshot: await service.snapshot({ projectPath }),
+              subject,
+              persistPendingCommit: async () => {},
+            }),
+          );
+        }
         await persistPendingCommit(authorization);
         return authorization;
       },
@@ -1948,8 +2000,45 @@ async function createFixture(
         await onCommitVerify?.(authorization);
         const snapshot = await gitSnapshot();
         if (snapshot.head === authorization.expectedHead) {
+          if (repository === "git") {
+            // Use the real read-only verifier rather than simulating staging
+            // completeness with the fixture's simplified snapshot hashes.
+            await createGitService().verifyCommit(
+              realCommitAuthorizations.get(authorization.id),
+            );
+            assert.fail("Unchanged HEAD cannot verify a commit.");
+          }
+          const changes = [
+            ["branch", "expectedBranch", "branch"],
+            ["refsFingerprint", "expectedRefsFingerprint", "refs"],
+            [
+              "remoteConfigurationFingerprint",
+              "expectedRemoteConfigurationFingerprint",
+              "remote-configuration",
+            ],
+            ["identityFingerprint", "expectedIdentityFingerprint", "identity"],
+            ["contentFingerprint", "expectedContentFingerprint", "content"],
+          ]
+            .filter(
+              ([field, expected]) =>
+                snapshot[field] !== authorization[expected],
+            )
+            .map(([, , change]) => change);
+          const staged =
+            snapshot.indexFingerprint !==
+            authorization.expectedIndexFingerprint;
+          if (
+            staged &&
+            memoryRepository.stagedContentFingerprint !==
+              authorization.expectedContentFingerprint
+          )
+            changes.push("index");
           const error = new Error("Authorized commit was not created.");
-          error.code = "ERR_COMMIT_NOT_CREATED";
+          error.code =
+            changes.length === 0
+              ? "ERR_COMMIT_NOT_CREATED"
+              : "ERR_COMMIT_CONTRACT_VIOLATED";
+          error.changes = changes.length === 0 && staged ? ["index"] : changes;
           throw error;
         }
         const [parent, message] =
@@ -2081,6 +2170,8 @@ async function createFixture(
         if (snapshot.fingerprint !== current.fingerprint) {
           const error = new Error("Read-only repository changed.");
           error.code = "ERR_READ_ONLY_REPOSITORY_CHANGED";
+          // The fake has one combined fingerprint; name a fixed domain.
+          error.changes = ["tracked-content"];
           throw error;
         }
       },
@@ -2146,7 +2237,15 @@ async function createFixture(
     async settleVerifiedCommit(patch, options) {
       return this.transition(patch, options);
     },
-    async startAgentTurn(activeTurn, { pipelineState } = {}) {
+    async startAgentTurn(
+      activeTurn,
+      { pipelineState, preparePipelineState } = {},
+    ) {
+      pipelineState =
+        preparePipelineState?.(
+          pipelineState ?? currentRun.pipelineState,
+          currentRun.revision,
+        ) ?? pipelineState;
       currentRun = {
         ...currentRun,
         ...(pipelineState === undefined ? {} : { pipelineState }),

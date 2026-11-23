@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMcpControlPlane } from "../../src/index.js";
+import {
+  createClarificationService,
+  createMcpControlPlane,
+} from "../../src/index.js";
+import { CodexAdapterError } from "../../src/agents/index.js";
+import {
+  appendReadFailure,
+  clarificationAppendFixture,
+  createExecutionAdapter,
+  transcriptHash,
+} from "../support/index.js";
 import {
   createBackend,
   fixture,
@@ -68,6 +78,122 @@ function detached(runner) {
     },
   };
 }
+
+test("cold clarification append MCP reconstructs and answers one polishing product decision", async (t) => {
+  const cleanups = [];
+  let pipelineProcess;
+  t.after(async () => {
+    try {
+      await pipelineProcess?.settle();
+    } finally {
+      for (const cleanup of cleanups) await cleanup();
+    }
+  });
+  const f = await clarificationAppendFixture(
+    { after: (cleanup) => cleanups.push(cleanup) },
+    "polishing",
+    { kind: "product-decision", mode: "independent" },
+  );
+  const service = createClarificationService({ interactive: false });
+  const initial = f.open({
+    clarifications: {
+      ...service,
+      appendProductDecision(options) {
+        return service.appendProductDecision({
+          ...options,
+          async persistAppend(proof) {
+            await options.persistAppend(proof);
+            throw appendReadFailure();
+          },
+        });
+      },
+    },
+  });
+  const runId = (await initial.runner.create(f.input)).run.runId;
+  const interrupted = (await initial.runner.resume({ runId })).run;
+  assert.equal(interrupted.pause.reason, "clarification_append_interrupted");
+  const intent = interrupted.pipelineState.pendingClarificationAppend;
+  const cold = f.open();
+  pipelineProcess = detached(cold.runner);
+  const control = createMcpControlPlane({
+    runner: cold.runner,
+    runStore: cold.store,
+    launchRun: pipelineProcess.launchRun,
+  });
+  const resume = {
+    runId,
+    expectedRevision: interrupted.revision,
+    action: null,
+    idempotencyKey: "recover-product-decision",
+  };
+  await control.runResume(resume);
+  await pipelineProcess.settle();
+  const status = await control.runStatus({ runId });
+  assert.equal(status.pendingInput.kind, "product-decision");
+  assert.equal(status.pendingInput.questions.length, 1);
+  assert.equal(
+    status.pendingInput.questions[0].question,
+    intent.decision.question,
+  );
+  const waiting = await cold.store.loadRun(runId);
+  assert.equal(waiting.counters.productDecisions, 1);
+  assert.equal(waiting.pipelineState.resolutionCorrection, null);
+  assert.equal(waiting.pipelineState.pendingClarificationAppend, null);
+  assert.equal(transcriptHash(await f.transcript(waiting)), intent.resultHash);
+  assert.equal(f.calls.length, 2);
+
+  // Submission and dispatch are real. A controlled unavailable backend stops
+  // the next checkpoint after the answer, without another append-producing reply.
+  let launches = 0;
+  const respond = () => {
+    const reopened = f.open({
+      adapters: {
+        codex: {
+          ...createExecutionAdapter(),
+          run() {
+            throw new CodexAdapterError("Controlled backend unavailability.", {
+              code: "ERR_CODEX_UNAVAILABLE",
+              recoverable: true,
+            });
+          },
+        },
+      },
+    });
+    return createMcpControlPlane({
+      runner: reopened.runner,
+      runStore: reopened.store,
+      async launchRun(id, action, options) {
+        launches++;
+        await reopened.runner.resume({
+          runId: id,
+          action,
+          dispatch: options.dispatch,
+          expectedRuntimeCompatibility: options.expectedRuntimeCompatibility,
+        });
+      },
+    });
+  };
+  const answer = {
+    runId,
+    expectedRevision: status.revision,
+    requestId: status.pendingInput.id,
+    answers: [
+      { questionId: status.pendingInput.questions[0].id, answer: "Behavior A" },
+    ],
+    idempotencyKey: "answer-product-decision",
+  };
+  const receipt = await respond().runRespond(answer);
+  const answeredBytes = await f.transcript(waiting);
+  assert.match(answeredBytes, /Behavior A/u);
+  assert.deepEqual(await respond().runRespond(answer), receipt);
+  assert.equal(await f.transcript(waiting), answeredBytes);
+  assert.equal(launches, 1);
+  assert.equal(f.calls.length, 2);
+  const submitted = await f.open().store.loadRun(runId);
+  assert.equal(submitted.counters.productDecisions, 1);
+  assert.equal(submitted.pipelineState.pendingEdit, null);
+  assert.equal(submitted.pause.reason, "backend_unavailable");
+});
 
 test("continues one detached MCP execution after client replacement", async (t) => {
   const paths = await fixture(t, {

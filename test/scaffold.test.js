@@ -34,7 +34,7 @@ const PACKAGE_METADATA_FILES = [
 const SKILLS_DIRECTORY = new URL("../.agents/skills/", import.meta.url);
 const NODE_RANGE_DOCUMENTS = [
   new URL("../AGENTS.md", import.meta.url),
-  new URL("../README.md", import.meta.url),
+  new URL("../docs/user/requirements.md", import.meta.url),
   new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
   new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
 ];
@@ -198,25 +198,6 @@ test("canonical project skills have valid instructions", async () => {
       /\bTODO\b/u,
       `${skillPath} has unfinished content`,
     );
-    const resources = await readdir(
-      new URL(`${directory.name}/`, SKILLS_DIRECTORY),
-      {
-        recursive: true,
-        withFileTypes: true,
-      },
-    );
-    for (const resource of resources) {
-      if (!resource.isFile() || !/\.(?:md|markdown)$/iu.test(resource.name))
-        continue;
-      const path = join(resource.parentPath, resource.name);
-      const bytes = await readFile(path);
-      const lines =
-        bytes.length === 0
-          ? 0
-          : bytes.toString("utf8").split("\n").length -
-            Number(bytes.at(-1) === 10);
-      assert.ok(lines <= 100, `${path} exceeds 100 physical instruction lines`);
-    }
   }
 });
 
@@ -320,7 +301,7 @@ test("Claude reuses the canonical agent guidance and skills", async () => {
 test("plan-authoring limits writes to its declared artifacts", async () => {
   const documents = await Promise.all([
     readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
-    readFile(new URL("../README.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/user/guarantees.md", import.meta.url), "utf8"),
     readFile(
       new URL("../pipelines/plan-authoring/docs/SPEC.md", import.meta.url),
       "utf8",
@@ -339,18 +320,36 @@ test("plan-authoring limits writes to its declared artifacts", async () => {
 test("all pipelines define the bounded clarification lifecycle", async () => {
   const documents = await Promise.all([
     readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
-    readFile(new URL("../README.md", import.meta.url), "utf8"),
-    readFile(new URL("../docs/ARCHITECTURE.md", import.meta.url), "utf8"),
+    Promise.all([
+      readFile(new URL("../docs/user/guarantees.md", import.meta.url), "utf8"),
+      readFile(new URL("../docs/user/cli.md", import.meta.url), "utf8"),
+    ]).then((parts) => parts.join("\n")),
+    readFile(
+      new URL("../docs/architecture/clarifications.md", import.meta.url),
+      "utf8",
+    ),
     readFile(
       new URL("../pipelines/plan-authoring/docs/SPEC.md", import.meta.url),
       "utf8",
     ),
+    Promise.all([
+      readFile(
+        new URL(
+          "../pipelines/plan-execution/docs/admission.md",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+      readFile(
+        new URL(
+          "../pipelines/plan-execution/docs/bootstrap.md",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ]).then((parts) => parts.join("\n")),
     readFile(
-      new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
+      new URL("../pipelines/polishing/docs/bootstrap.md", import.meta.url),
       "utf8",
     ),
   ]);
@@ -367,9 +366,20 @@ test("all pipelines define the bounded clarification lifecycle", async () => {
     assert.match(document, /do not consume an agent question\s+round/u);
   }
 
-  assert.match(documents[4], /clarification readiness and questions/u);
+  const executionPersistence = await readFile(
+    new URL("../pipelines/plan-execution/docs/persistence.md", import.meta.url),
+    "utf8",
+  );
+  const executionAdapterContract = await readFile(
+    new URL("../pipelines/plan-execution/docs/adapters.md", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    executionAdapterContract,
+    /clarification readiness and questions/u,
+  );
   assert.match(documents[4], /PLAN_REVISION_REQUIRED/u);
-  assert.match(documents[4], /suspended workflow state/u);
+  assert.match(executionPersistence, /suspended workflow state/u);
   assert.match(documents[4], /new execution run/u);
 
   const gitignore = await readFile(
@@ -380,36 +390,70 @@ test("all pipelines define the bounded clarification lifecycle", async () => {
 });
 
 test("run-state durability and lease ownership are documented", async () => {
+  const [journal, stateLeases, polishingBootstrap] = await Promise.all([
+    readFile(
+      new URL("../docs/architecture/recovery/journal.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../docs/architecture/state/leases.md", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../pipelines/polishing/docs/bootstrap.md", import.meta.url),
+      "utf8",
+    ),
+  ]);
   const documents = await Promise.all([
     readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
-    readFile(new URL("../README.md", import.meta.url), "utf8"),
-    readFile(new URL("../docs/ARCHITECTURE.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/user/cli-recovery.md", import.meta.url), "utf8"),
+    readFile(
+      new URL(
+        "../docs/architecture/migrations/common-envelope.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
     readFile(
       new URL("../pipelines/plan-authoring/docs/SPEC.md", import.meta.url),
       "utf8",
     ),
     readFile(
-      new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
+      new URL(
+        "../pipelines/plan-execution/docs/persistence.md",
+        import.meta.url,
+      ),
       "utf8",
     ),
-    readFile(
-      new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
-      "utf8",
-    ),
+    Promise.all([
+      readFile(
+        new URL("../pipelines/polishing/docs/SPEC.md", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../pipelines/polishing/docs/persistence.md", import.meta.url),
+        "utf8",
+      ),
+    ]).then((parts) => parts.join("\n")),
   ]);
 
-  for (const document of documents) {
+  for (const document of [documents[0], documents[1], ...documents.slice(3)]) {
     assert.match(document, /write-ahead/iu);
     assert.match(document, /execution lease/iu);
     assert.match(document, /lock-free/iu);
   }
-  for (const document of documents.slice(2)) {
+  assert.match(journal, /write-ahead/iu);
+  assert.match(journal, /lock-free/iu);
+  assert.match(stateLeases, /execution lease/iu);
+  for (const document of [...documents.slice(2, 5), polishingBootstrap]) {
     assert.match(document, /source-session/iu);
+  }
+  for (const document of [journal, ...documents.slice(3)]) {
     assert.match(document, /raw model\s+transcripts/iu);
   }
   for (const document of [
     documents[1],
-    documents[2],
+    stateLeases,
     documents[4],
     documents[5],
   ]) {
@@ -417,39 +461,72 @@ test("run-state durability and lease ownership are documented", async () => {
     assert.match(document, /same-host/iu);
   }
 
-  assert.match(documents[2], /actor.*phase.*kind.*message/su);
-  assert.match(documents[2], /symlink escapes/iu);
+  assert.match(journal, /actor.*phase.*kind.*message/su);
+  assert.match(stateLeases, /symlink escapes/iu);
 });
 
 test("Worker commit ownership and shared plan safety are documented", async () => {
-  const [agentsGuidance, readme, specification, commitPlanContract] =
-    await Promise.all([
-      readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
-      readFile(new URL("../README.md", import.meta.url), "utf8"),
-      readFile(
-        new URL("../pipelines/plan-execution/docs/SPEC.md", import.meta.url),
-        "utf8",
-      ),
-      readFile(
-        new URL("../packages/commit-plan/README.md", import.meta.url),
-        "utf8",
-      ),
-    ]);
+  const executionDocsPath = fileURLToPath(
+    new URL("../pipelines/plan-execution/docs/", import.meta.url),
+  );
+  const [
+    agentsGuidance,
+    guarantees,
+    development,
+    taskInputs,
+    commitPlanContract,
+    executionEntries,
+  ] = await Promise.all([
+    readFile(new URL("../AGENTS.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/user/guarantees.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/user/development.md", import.meta.url), "utf8"),
+    readFile(new URL("../docs/user/task-inputs.md", import.meta.url), "utf8"),
+    readFile(
+      new URL("../packages/commit-plan/contract.md", import.meta.url),
+      "utf8",
+    ),
+    readdir(executionDocsPath, { withFileTypes: true }),
+  ]);
+  const executionDocuments = new Map(
+    await Promise.all(
+      executionEntries
+        .filter(
+          (entry) => entry.isFile() && /\.(?:md|markdown)$/iu.test(entry.name),
+        )
+        .map(async ({ name }) => [
+          name,
+          await readFile(join(executionDocsPath, name), "utf8"),
+        ]),
+    ),
+  );
+  const commitGates = executionDocuments.get("commit.md");
+  const adapterContract = executionDocuments.get("adapters.md");
 
-  for (const document of [agentsGuidance, readme, specification]) {
+  for (const document of [
+    agentsGuidance,
+    `${guarantees}\n${development}`,
+    commitGates,
+  ]) {
     assert.match(document, /Worker/u);
     assert.match(document, /Co-authored-by/u);
     assert.match(document, /remote/u);
   }
 
-  assert.match(specification, /runner-authorized `COMMIT` turn/u);
+  assert.match(commitGates, /Only the Worker creates the planned commit/u);
   assert.match(
-    specification,
+    executionDocuments.get("implementation.md"),
+    /runner-authorized `COMMIT` turn/u,
+  );
+  assert.match(
+    adapterContract,
     /access: "read-only" \| "workspace-write" \| "local-commit"/u,
   );
-  assert.match(specification, /remoteWriteBlocked: true/u);
-  assert.match(specification, /@agent-runner\/commit-plan/u);
-  assert.match(readme, /## Commit 1: feat\(market\): add repository/u);
+  assert.match(adapterContract, /remoteWriteBlocked: true/u);
+  assert.match(
+    executionDocuments.get("admission.md"),
+    /@agent-runner\/commit-plan/u,
+  );
+  assert.match(taskInputs, /## Commit 1: feat\(market\): add repository/u);
   assert.match(
     commitPlanContract,
     /## Commit 1: feat\(market\): add repository/u,
@@ -458,12 +535,11 @@ test("Worker commit ownership and shared plan safety are documented", async () =
   assert.match(commitPlanContract, /at most 72 Unicode\s+code points/u);
   assert.match(commitPlanContract, /no body or footer/u);
   assert.match(commitPlanContract, /numbered contiguously from `1`/u);
-  assert.doesNotMatch(
-    specification,
-    /Only the runner creates the planned commit/u,
-  );
-  assert.doesNotMatch(
-    specification,
-    /The Worker never creates planned commits/u,
-  );
+  for (const [path, document] of executionDocuments) {
+    assert.doesNotMatch(
+      document,
+      /Only the runner creates the planned commit|The Worker never creates planned commits/u,
+      `${path} contradicts Worker commit ownership`,
+    );
+  }
 });

@@ -15,6 +15,7 @@ export async function inspectCommitWorkspace({
   git,
   projectPath,
   artifactRoot,
+  clarificationRoot = null,
   runId,
   pause,
 }) {
@@ -56,20 +57,25 @@ export async function inspectCommitWorkspace({
     );
   }
   const clarificationPath = join(
-    repositoryPath,
+    clarificationRoot ?? repositoryPath,
     artifactRoot,
     "agent-runner",
     runId,
     "clarifications.md",
   );
+  const local = relative(repositoryPath, clarificationPath);
+  const allowedPaths =
+    !isAbsolute(local) && local !== ".." && !local.startsWith(`..${sep}`)
+      ? [clarificationPath]
+      : [];
   let preflight;
   try {
     preflight = await git.preflight({
-      allowedPaths: [clarificationPath],
+      allowedPaths,
       projectPath: repositoryPath,
       requireClean: true,
       requireIdentity: true,
-      requiredIgnoredPaths: [clarificationPath],
+      requiredIgnoredPaths: allowedPaths,
     });
   } catch (cause) {
     if (cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED") {

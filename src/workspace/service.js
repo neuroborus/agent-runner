@@ -18,7 +18,14 @@ import { CONTROL_NAMES, discoverControls } from "./controls.js";
 import { exclusions, inspectScope } from "./scope.js";
 import { traversalCheckpoints } from "./traversal.js";
 import { capture, fingerprints, readTextFile } from "./snapshot.js";
-import { snapshotProof, assertSnapshotProof } from "./proof.js";
+import {
+  assertBaselineUnchanged,
+  assertSnapshotProof,
+  isCompactBaseline,
+  outputBaseline,
+  snapshotBaseline,
+  snapshotProof,
+} from "./proof.js";
 import { reportArtifact } from "./artifact.js";
 import {
   inspectInfrastructure,
@@ -476,6 +483,8 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
       "Workspace snapshots do not share the same scope.",
       "ERR_WORKSPACE_DRIFT",
     );
+    if (isCompactBaseline(before))
+      return assertBaselineUnchanged({ before, after, allowOutputs });
     const priorPaths = new Set(before.entries.map((entry) => entry.path));
     const filter = (snapshot) =>
       snapshot.entries.filter(
@@ -503,6 +512,8 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     exclusionPath,
     snapshot,
     snapshotInputs,
+    snapshotBaseline: (value) => freeze(snapshotBaseline(value)),
+    outputBaseline: (value) => freeze(outputBaseline(value)),
     snapshotProof: (request) => freeze(snapshotProof(request)),
     assertSnapshotProof,
     assertUnchanged,

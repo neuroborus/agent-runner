@@ -7,6 +7,7 @@ export {
   normalizeAvailabilityPolicy,
   projectAvailabilityRetry,
 } from "./availability.js";
+export { MODEL_CATALOG_RETRY_CODE } from "./model-completion.js";
 export {
   normalizeLaunchRecovery,
   projectLaunchRecovery,
@@ -33,5 +34,6 @@ export {
   normalizeProviderInactivityTimeoutMs,
   providerInactivityFingerprint,
   inactivityActivity,
+  matchesObservedInactivityExpiry,
   projectInactivityRecovery,
 } from "./inactivity.js";

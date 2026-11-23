@@ -2,12 +2,17 @@ import { join } from "node:path";
 
 import {
   AUDIT_MODES,
+  assertAudit,
   createAuditState,
   MAX_DISCOVERY_PASSES,
   MAX_FINDING_RECHECK_PASSES,
   validDiscoveryBudget,
 } from "./discovery-contract.js";
-import { migrateOutputRecovery } from "./output-recovery.js";
+import {
+  assertAuditCatalogTransition,
+  matchesAuditCatalogReservation,
+  migrateOutputRecovery,
+} from "./output-recovery.js";
 import { assertAuditRun } from "./verification-contract.js";
 import { reportPaths, REPORT_FILENAME } from "./publication-contract.js";
 import { runAudit } from "./publication.js";
@@ -39,7 +44,7 @@ const LAZY_ROLES = Object.freeze(["auditor"]);
 
 export const auditPipeline = Object.freeze({
   id: "audit",
-  stateVersion: 8,
+  stateVersion: 10,
   migrations: Object.freeze({
     1: ({ pipelineState }) => ({
       ...pipelineState,
@@ -73,6 +78,16 @@ export const auditPipeline = Object.freeze({
     // including the input fingerprint of any pending preparation.
     6: ({ pipelineState }) => ({ ...pipelineState }),
     7: migrateOutputRecovery,
+    // Legacy full baselines keep their exact comparison; new runs persist a
+    // compact baseline that a version-8 runtime must refuse as skew.
+    8: ({ pipelineState }) => ({ ...pipelineState }),
+    9: ({ pipelineState }) => {
+      assertAudit(
+        !Object.hasOwn(pipelineState, "pendingClarificationAppend"),
+        "Legacy audit already contains clarification append intent.",
+      );
+      return { ...pipelineState, pendingClarificationAppend: null };
+    },
   }),
   roles: ROLES,
   resolveActiveRoles: (settings) =>
@@ -151,6 +166,8 @@ export const auditPipeline = Object.freeze({
     "Audit a Git or ordinary workspace read-only and publish a reviewed audit.md.",
   projections: auditProjections,
   validateResumeAction,
+  assertCatalogTransition: assertAuditCatalogTransition,
+  matchesCatalogReservation: matchesAuditCatalogReservation,
   workflow: Object.freeze({
     nonResumableStates: Object.freeze(["FAILED"]),
     createState: createAuditState,
